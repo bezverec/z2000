@@ -7,6 +7,15 @@ pub const BitplaneError = error{
     TrailingData,
 };
 
+const scan_lanes = 4;
+const ScanVector = @Vector(scan_lanes, i32);
+
+const BlockScan = struct {
+    active_rect: subband.Rect,
+    non_zero_count: u32,
+    max_mag: u32,
+};
+
 pub const EncodedBlock = struct {
     active_rect: subband.Rect,
     bitplanes: u8,
@@ -116,27 +125,9 @@ pub fn encodeBlockPassesScratch(
     const last_col = rect.x + rect.width - 1;
     if (last_col >= stride or last_row >= plane.len / stride) return BitplaneError.InvalidBlock;
 
-    var active_min_x = rect.width;
-    var active_min_y = rect.height;
-    var active_max_x: usize = 0;
-    var active_max_y: usize = 0;
-    var non_zero_count: u32 = 0;
-    var y: usize = 0;
-    while (y < rect.height) : (y += 1) {
-        const row = (rect.y + y) * stride;
-        var x: usize = 0;
-        while (x < rect.width) : (x += 1) {
-            if (plane[row + rect.x + x] != 0) {
-                active_min_x = @min(active_min_x, x);
-                active_min_y = @min(active_min_y, y);
-                active_max_x = @max(active_max_x, x);
-                active_max_y = @max(active_max_y, y);
-                non_zero_count += 1;
-            }
-        }
-    }
+    const scan = scanBlock(plane, stride, rect);
 
-    if (non_zero_count == 0) {
+    if (scan.non_zero_count == 0) {
         return .{
             .active_rect = .{ .x = rect.x, .y = rect.y, .width = 0, .height = 0 },
             .bitplanes = 0,
@@ -147,28 +138,12 @@ pub fn encodeBlockPassesScratch(
         };
     }
 
-    const active_rect = subband.Rect{
-        .x = rect.x + active_min_x,
-        .y = rect.y + active_min_y,
-        .width = active_max_x - active_min_x + 1,
-        .height = active_max_y - active_min_y + 1,
-    };
-
-    var max_mag: u32 = 0;
-    y = 0;
-    while (y < active_rect.height) : (y += 1) {
-        const row = (active_rect.y + y) * stride;
-        var x: usize = 0;
-        while (x < active_rect.width) : (x += 1) {
-            max_mag = @max(max_mag, magnitude(plane[row + active_rect.x + x]));
-        }
-    }
-
-    const bitplanes = bitPlaneCount(max_mag);
+    const active_rect = scan.active_rect;
+    const bitplanes = bitPlaneCount(scan.max_mag);
     var significance = &scratch.significance;
     var refinement = &scratch.refinement;
 
-    y = 0;
+    var y: usize = 0;
     while (y < active_rect.height) : (y += 1) {
         const row = (active_rect.y + y) * stride;
         var x: usize = 0;
@@ -205,11 +180,91 @@ pub fn encodeBlockPassesScratch(
     return .{
         .active_rect = active_rect,
         .bitplanes = bitplanes,
-        .non_zero_count = non_zero_count,
+        .non_zero_count = scan.non_zero_count,
         .significance_bytes = significance_bytes,
         .refinement_bytes = refinement_bytes,
         .cleanup_bytes = &.{},
     };
+}
+
+fn scanBlock(plane: []const i32, stride: usize, rect: subband.Rect) BlockScan {
+    var active_min_x = rect.width;
+    var active_min_y = rect.height;
+    var active_max_x: usize = 0;
+    var active_max_y: usize = 0;
+    var non_zero_count: u32 = 0;
+    var max_mag: u32 = 0;
+
+    var y: usize = 0;
+    while (y < rect.height) : (y += 1) {
+        const row_start = (rect.y + y) * stride + rect.x;
+        var x: usize = 0;
+        while (x + scan_lanes <= rect.width) : (x += scan_lanes) {
+            const chunk = scanChunk(plane[row_start + x ..][0..scan_lanes]);
+            max_mag = @max(max_mag, chunk.max_mag);
+            if (chunk.mask == 0) continue;
+
+            active_min_y = @min(active_min_y, y);
+            active_max_y = @max(active_max_y, y);
+            inline for (0..scan_lanes) |lane| {
+                if ((chunk.mask & (@as(u8, 1) << lane)) != 0) {
+                    const col = x + lane;
+                    active_min_x = @min(active_min_x, col);
+                    active_max_x = @max(active_max_x, col);
+                    non_zero_count += 1;
+                }
+            }
+        }
+
+        while (x < rect.width) : (x += 1) {
+            const coeff = plane[row_start + x];
+            const mag = magnitude(coeff);
+            max_mag = @max(max_mag, mag);
+            if (mag != 0) {
+                active_min_x = @min(active_min_x, x);
+                active_min_y = @min(active_min_y, y);
+                active_max_x = @max(active_max_x, x);
+                active_max_y = @max(active_max_y, y);
+                non_zero_count += 1;
+            }
+        }
+    }
+
+    const active_rect = if (non_zero_count == 0)
+        subband.Rect{ .x = rect.x, .y = rect.y, .width = 0, .height = 0 }
+    else
+        subband.Rect{
+            .x = rect.x + active_min_x,
+            .y = rect.y + active_min_y,
+            .width = active_max_x - active_min_x + 1,
+            .height = active_max_y - active_min_y + 1,
+        };
+
+    return .{
+        .active_rect = active_rect,
+        .non_zero_count = non_zero_count,
+        .max_mag = max_mag,
+    };
+}
+
+const ScanChunk = struct {
+    mask: u8,
+    max_mag: u32,
+};
+
+fn scanChunk(values: *const [scan_lanes]i32) ScanChunk {
+    const coeffs: ScanVector = values.*;
+    const zero: ScanVector = @splat(0);
+    const abs_values = @select(i32, coeffs < zero, -coeffs, coeffs);
+    const max_mag = @as(u32, @intCast(@reduce(.Max, abs_values)));
+    const non_zero = coeffs != zero;
+
+    var mask: u8 = 0;
+    const lanes: [scan_lanes]bool = non_zero;
+    inline for (0..scan_lanes) |lane| {
+        if (lanes[lane]) mask |= @as(u8, 1) << lane;
+    }
+    return .{ .mask = mask, .max_mag = max_mag };
 }
 
 pub fn encodeBlock(

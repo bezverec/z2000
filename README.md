@@ -199,7 +199,7 @@ temporary generic coder.
 
 Latest local profile comparison on the same 2048x2048 RGB TIFF:
 
-- Archival profile encode: `z2000` 260.1 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
+- Archival profile encode: `z2000` 254.1 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
 - Archival profile decode: `z2000` 294.0 ms, Grok 84.0 ms, OpenJPEG 449.9 ms.
 - Archival output size: `z2000` 9.4 MB, Grok 6.3 MB, OpenJPEG 6.3 MB.
 - Access profile 1:8 encode: Grok 192.9 ms, OpenJPEG 484.5 ms, both about
@@ -216,6 +216,12 @@ borrows raw entropy streams instead of copying them before immediately writing
 them into the codestream. This mostly reduces allocator churn in the hottest
 block payload path; larger wins still require a better pass coder and
 parallelism.
+
+The first retained SIMD pass is in the bitplane block scanner. It scans
+contiguous coefficient rows in 4-wide integer vectors to combine non-zero
+detection and max-magnitude discovery in one pass before writing significance
+and refinement streams. RCT SIMD was tested but not kept because the current
+interleaved RGB input makes deinterleave overhead dominate that small phase.
 
 The integer 5/3 DWT now transforms horizontal rows in place and keeps the line
 buffer only for strided vertical columns. This removes a full row copy in each

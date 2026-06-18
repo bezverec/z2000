@@ -28,11 +28,11 @@ pub fn forwardRct(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes 
     const pixels = try std.math.mul(usize, rgb.width, rgb.height);
     if (rgb.samples.len != pixels * 3) return ColorError.InvalidImage;
 
-    var y = try allocator.alloc(i32, pixels);
+    const y = try allocator.alloc(i32, pixels);
     errdefer allocator.free(y);
-    var cb = try allocator.alloc(i32, pixels);
+    const cb = try allocator.alloc(i32, pixels);
     errdefer allocator.free(cb);
-    var cr = try allocator.alloc(i32, pixels);
+    const cr = try allocator.alloc(i32, pixels);
     errdefer allocator.free(cr);
 
     for (0..pixels) |i| {
