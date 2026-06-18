@@ -41,12 +41,75 @@ pub const EncodedBlockPasses = struct {
     }
 };
 
+pub const EncodedBlockPassView = struct {
+    active_rect: subband.Rect,
+    bitplanes: u8,
+    non_zero_count: u32,
+    significance_bytes: []const u8,
+    refinement_bytes: []const u8,
+    cleanup_bytes: []const u8,
+};
+
+pub const BlockScratch = struct {
+    allocator: std.mem.Allocator,
+    significance: BitWriter,
+    refinement: BitWriter,
+
+    pub fn init(allocator: std.mem.Allocator) BlockScratch {
+        return .{
+            .allocator = allocator,
+            .significance = BitWriter.init(allocator),
+            .refinement = BitWriter.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *BlockScratch) void {
+        self.significance.deinit();
+        self.refinement.deinit();
+        self.* = undefined;
+    }
+
+    fn reset(self: *BlockScratch) void {
+        self.significance.reset();
+        self.refinement.reset();
+    }
+};
+
 pub fn encodeBlockPasses(
     allocator: std.mem.Allocator,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
 ) !EncodedBlockPasses {
+    var scratch = BlockScratch.init(allocator);
+    defer scratch.deinit();
+
+    const view = try encodeBlockPassesScratch(&scratch, plane, stride, rect);
+    const significance_bytes = try allocator.dupe(u8, view.significance_bytes);
+    errdefer allocator.free(significance_bytes);
+    const refinement_bytes = try allocator.dupe(u8, view.refinement_bytes);
+    errdefer allocator.free(refinement_bytes);
+    const cleanup_bytes = try allocator.dupe(u8, view.cleanup_bytes);
+    errdefer allocator.free(cleanup_bytes);
+
+    return .{
+        .active_rect = view.active_rect,
+        .bitplanes = view.bitplanes,
+        .non_zero_count = view.non_zero_count,
+        .significance_bytes = significance_bytes,
+        .refinement_bytes = refinement_bytes,
+        .cleanup_bytes = cleanup_bytes,
+    };
+}
+
+pub fn encodeBlockPassesScratch(
+    scratch: *BlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+) !EncodedBlockPassView {
+    scratch.reset();
+
     if (stride == 0 or rect.width == 0 or rect.height == 0) return BitplaneError.InvalidBlock;
     if (rect.y >= plane.len / stride or rect.x >= stride) return BitplaneError.InvalidBlock;
     const last_row = rect.y + rect.height - 1;
@@ -78,9 +141,9 @@ pub fn encodeBlockPasses(
             .active_rect = .{ .x = rect.x, .y = rect.y, .width = 0, .height = 0 },
             .bitplanes = 0,
             .non_zero_count = 0,
-            .significance_bytes = try allocator.alloc(u8, 0),
-            .refinement_bytes = try allocator.alloc(u8, 0),
-            .cleanup_bytes = try allocator.alloc(u8, 0),
+            .significance_bytes = &.{},
+            .refinement_bytes = &.{},
+            .cleanup_bytes = &.{},
         };
     }
 
@@ -102,10 +165,8 @@ pub fn encodeBlockPasses(
     }
 
     const bitplanes = bitPlaneCount(max_mag);
-    var significance = BitWriter.init(allocator);
-    errdefer significance.deinit();
-    var refinement = BitWriter.init(allocator);
-    errdefer refinement.deinit();
+    var significance = &scratch.significance;
+    var refinement = &scratch.refinement;
 
     y = 0;
     while (y < active_rect.height) : (y += 1) {
@@ -138,12 +199,8 @@ pub fn encodeBlockPasses(
         }
     }
 
-    const significance_bytes = try significance.finish();
-    errdefer allocator.free(significance_bytes);
-    const refinement_bytes = try refinement.finish();
-    errdefer allocator.free(refinement_bytes);
-    const cleanup_bytes = try allocator.alloc(u8, 0);
-    errdefer allocator.free(cleanup_bytes);
+    const significance_bytes = try significance.finishView();
+    const refinement_bytes = try refinement.finishView();
 
     return .{
         .active_rect = active_rect,
@@ -151,7 +208,7 @@ pub fn encodeBlockPasses(
         .non_zero_count = non_zero_count,
         .significance_bytes = significance_bytes,
         .refinement_bytes = refinement_bytes,
-        .cleanup_bytes = cleanup_bytes,
+        .cleanup_bytes = &.{},
     };
 }
 
@@ -364,6 +421,12 @@ const BitWriter = struct {
         self.* = undefined;
     }
 
+    fn reset(self: *BitWriter) void {
+        self.bytes.clearRetainingCapacity();
+        self.current = 0;
+        self.used = 0;
+    }
+
     fn writeBit(self: *BitWriter, bit: bool) !void {
         if (bit) {
             self.current |= @as(u8, 1) << @as(u3, @intCast(7 - self.used));
@@ -389,6 +452,15 @@ const BitWriter = struct {
             self.used = 0;
         }
         return self.bytes.toOwnedSlice(self.allocator);
+    }
+
+    fn finishView(self: *BitWriter) ![]const u8 {
+        if (self.used != 0) {
+            try self.bytes.append(self.allocator, self.current);
+            self.current = 0;
+            self.used = 0;
+        }
+        return self.bytes.items;
     }
 };
 

@@ -24,6 +24,18 @@ pub const Encoded = struct {
     }
 };
 
+pub const EncodedView = struct {
+    method: Method,
+    raw_len: u32,
+    bytes: []const u8,
+    owned_bytes: ?[]u8 = null,
+
+    pub fn deinit(self: *EncodedView, allocator: std.mem.Allocator) void {
+        if (self.owned_bytes) |bytes| allocator.free(bytes);
+        self.* = undefined;
+    }
+};
+
 pub fn encodeWithMethod(allocator: std.mem.Allocator, method: Method, input: []const u8) !Encoded {
     return switch (method) {
         .raw => .{
@@ -38,9 +50,17 @@ pub fn encodeWithMethod(allocator: std.mem.Allocator, method: Method, input: []c
 }
 
 pub fn encodeAuto(allocator: std.mem.Allocator, input: []const u8) !Encoded {
-    const raw = try allocator.dupe(u8, input);
-    errdefer allocator.free(raw);
+    var view = try encodeAutoBorrowingRaw(allocator, input);
+    defer view.deinit(allocator);
 
+    return .{
+        .method = view.method,
+        .raw_len = view.raw_len,
+        .bytes = try allocator.dupe(u8, view.bytes),
+    };
+}
+
+pub fn encodeAutoBorrowingRaw(allocator: std.mem.Allocator, input: []const u8) !EncodedView {
     var rle = try encodeRle(allocator, input);
     errdefer rle.deinit(allocator);
     var maybe_bit_rle: ?Encoded = if (shouldTryBitRle(input))
@@ -50,20 +70,28 @@ pub fn encodeAuto(allocator: std.mem.Allocator, input: []const u8) !Encoded {
     errdefer if (maybe_bit_rle) |*bit_rle| bit_rle.deinit(allocator);
 
     if (maybe_bit_rle) |*bit_rle| {
-        if (bit_rle.bytes.len < raw.len and bit_rle.bytes.len <= rle.bytes.len) {
-            allocator.free(raw);
+        if (bit_rle.bytes.len < input.len and bit_rle.bytes.len <= rle.bytes.len) {
             rle.deinit(allocator);
-            const result = bit_rle.*;
+            const result = EncodedView{
+                .method = bit_rle.method,
+                .raw_len = bit_rle.raw_len,
+                .bytes = bit_rle.bytes,
+                .owned_bytes = bit_rle.bytes,
+            };
             maybe_bit_rle = null;
             return result;
         }
     }
 
-    if (rle.bytes.len < raw.len) {
-        allocator.free(raw);
+    if (rle.bytes.len < input.len) {
         if (maybe_bit_rle) |*bit_rle| bit_rle.deinit(allocator);
         maybe_bit_rle = null;
-        return rle;
+        return .{
+            .method = rle.method,
+            .raw_len = rle.raw_len,
+            .bytes = rle.bytes,
+            .owned_bytes = rle.bytes,
+        };
     }
 
     if (maybe_bit_rle) |*bit_rle| bit_rle.deinit(allocator);
@@ -71,7 +99,8 @@ pub fn encodeAuto(allocator: std.mem.Allocator, input: []const u8) !Encoded {
     return .{
         .method = .raw,
         .raw_len = @as(u32, @intCast(input.len)),
-        .bytes = raw,
+        .bytes = input,
+        .owned_bytes = null,
     };
 }
 

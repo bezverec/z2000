@@ -199,7 +199,7 @@ temporary generic coder.
 
 Latest local profile comparison on the same 2048x2048 RGB TIFF:
 
-- Archival profile encode: `z2000` 280.5 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
+- Archival profile encode: `z2000` 273.3 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
 - Archival profile decode: `z2000` 324.9 ms, Grok 84.0 ms, OpenJPEG 449.9 ms.
 - Archival output size: `z2000` 9.4 MB, Grok 6.3 MB, OpenJPEG 6.3 MB.
 - Access profile 1:8 encode: Grok 192.9 ms, OpenJPEG 484.5 ms, both about
@@ -210,6 +210,12 @@ The first `--timings` run on that archival encode showed the useful direction:
 roughly 95% of wall time is inside codestream generation, with block payload
 generation and DWT dominating. TIFF read, JP2 wrapping, and disk write were
 small single-digit percentages on the synthetic smoke file.
+
+The first memory-side pass keeps per-component bitplane scratch buffers and
+borrows raw entropy streams instead of copying them before immediately writing
+them into the codestream. This mostly reduces allocator churn in the hottest
+block payload path; larger wins still require a better pass coder and
+parallelism.
 
 Optimization read from those numbers:
 

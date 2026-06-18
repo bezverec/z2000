@@ -372,6 +372,19 @@ test "entropy auto codec uses bit runs for sparse binary streams" {
     try std.testing.expectEqualSlices(u8, input[0..], decoded);
 }
 
+test "entropy auto borrowed raw avoids copying incompressible streams" {
+    const allocator = std.testing.allocator;
+    const input = [_]u8{ 0x13, 0x57, 0x9b, 0xdf, 0x24, 0x68, 0xac, 0xf0 };
+
+    var encoded = try entropy.encodeAutoBorrowingRaw(allocator, input[0..]);
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectEqual(entropy.Method.raw, encoded.method);
+    try std.testing.expectEqual(@as(u32, input.len), encoded.raw_len);
+    try std.testing.expect(encoded.owned_bytes == null);
+    try std.testing.expectEqualSlices(u8, input[0..], encoded.bytes);
+}
+
 test "arithmetic entropy codec roundtrips biased stream" {
     const allocator = std.testing.allocator;
     var input = [_]u8{0} ** 128;

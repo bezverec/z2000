@@ -689,12 +689,14 @@ fn appendComponentPayload(
         try appendRect(allocator, out, band.rect);
     }
 
+    var scratch = bitplane.BlockScratch.init(allocator);
+    defer scratch.deinit();
+
     for (blocks) |block| {
         try appendU16Be(allocator, out, @as(u16, @intCast(block.band_index)));
         try appendRect(allocator, out, block.rect);
 
-        var encoded = try bitplane.encodeBlockPasses(allocator, plane, stride, block.rect);
-        defer encoded.deinit(allocator);
+        const encoded = try bitplane.encodeBlockPassesScratch(&scratch, plane, stride, block.rect);
 
         try appendRect(allocator, out, encoded.active_rect);
         try out.append(allocator, encoded.bitplanes);
@@ -841,7 +843,7 @@ fn appendEntropyStream(
     out: *std.ArrayList(u8),
     bytes: []const u8,
 ) !void {
-    var encoded = try entropy.encodeAuto(allocator, bytes);
+    var encoded = try entropy.encodeAutoBorrowingRaw(allocator, bytes);
     defer encoded.deinit(allocator);
 
     try out.append(allocator, @intFromEnum(encoded.method));
