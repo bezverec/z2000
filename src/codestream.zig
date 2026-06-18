@@ -122,6 +122,14 @@ pub const LosslessOptions = struct {
     }
 };
 
+pub const EncodeTimings = struct {
+    total_ns: u64 = 0,
+    color_transform_ns: u64 = 0,
+    wavelet_ns: u64 = 0,
+    payload_ns: u64 = 0,
+    marker_ns: u64 = 0,
+};
+
 pub fn encodeLosslessSkeleton(
     allocator: std.mem.Allocator,
     rgb: image.RgbImage,
@@ -135,6 +143,27 @@ pub fn encodeLosslessWithOptions(
     rgb: image.RgbImage,
     options: LosslessOptions,
 ) ![]u8 {
+    return encodeLosslessWithOptionsMeasured(allocator, rgb, options, null);
+}
+
+pub fn encodeLosslessWithOptionsProfiled(
+    allocator: std.mem.Allocator,
+    rgb: image.RgbImage,
+    options: LosslessOptions,
+    timings: *EncodeTimings,
+) ![]u8 {
+    timings.* = .{};
+    return encodeLosslessWithOptionsMeasured(allocator, rgb, options, timings);
+}
+
+fn encodeLosslessWithOptionsMeasured(
+    allocator: std.mem.Allocator,
+    rgb: image.RgbImage,
+    options: LosslessOptions,
+    timings: ?*EncodeTimings,
+) ![]u8 {
+    const total_start = monotonicNs();
+
     if (rgb.width > std.math.maxInt(u32) or rgb.height > std.math.maxInt(u32)) {
         return CodestreamError.ImageTooLarge;
     }
@@ -145,9 +174,12 @@ pub fn encodeLosslessWithOptions(
     try validateTilePartDivisions(options.tile_part_divisions);
     if (options.layers == 0) return CodestreamError.InvalidCodestream;
 
+    const color_start = monotonicNs();
     var planes = try color.forwardRct(allocator, rgb);
     defer planes.deinit();
+    if (timings) |t| t.color_transform_ns = elapsedNs(color_start);
 
+    const wavelet_start = monotonicNs();
     const levels = try wavelet_int.forward53(
         allocator,
         planes.y,
@@ -157,14 +189,18 @@ pub fn encodeLosslessWithOptions(
     );
     _ = try wavelet_int.forward53(allocator, planes.cb, rgb.width, rgb.height, levels);
     _ = try wavelet_int.forward53(allocator, planes.cr, rgb.width, rgb.height, levels);
+    if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
 
     var tile_payload: std.ArrayList(u8) = .empty;
     defer tile_payload.deinit(allocator);
+    const payload_start = monotonicNs();
     try appendTemporaryPayload(allocator, &tile_payload, planes, levels, options);
+    if (timings) |t| t.payload_ns = elapsedNs(payload_start);
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
+    const marker_start = monotonicNs();
     try appendMarker(allocator, &out, .soc);
     try appendSiz(allocator, &out, rgb, options);
     try appendCod(allocator, &out, levels, options);
@@ -175,6 +211,10 @@ pub fn encodeLosslessWithOptions(
     try appendMarker(allocator, &out, .sod);
     try out.appendSlice(allocator, tile_payload.items);
     try appendMarker(allocator, &out, .eoc);
+    if (timings) |t| {
+        t.marker_ns = elapsedNs(marker_start);
+        t.total_ns = elapsedNs(total_start);
+    }
 
     return out.toOwnedSlice(allocator);
 }
@@ -653,7 +693,7 @@ fn appendComponentPayload(
         try appendU16Be(allocator, out, @as(u16, @intCast(block.band_index)));
         try appendRect(allocator, out, block.rect);
 
-        var encoded = try bitplane.encodeBlock(allocator, plane, stride, block.rect);
+        var encoded = try bitplane.encodeBlockPasses(allocator, plane, stride, block.rect);
         defer encoded.deinit(allocator);
 
         try appendRect(allocator, out, encoded.active_rect);
@@ -693,6 +733,18 @@ fn readU32Be(bytes: []const u8, offset: usize) u32 {
         (@as(u32, bytes[offset + 1]) << 16) |
         (@as(u32, bytes[offset + 2]) << 8) |
         bytes[offset + 3];
+}
+
+fn elapsedNs(start: u64) u64 {
+    const now = monotonicNs();
+    return if (now >= start) now - start else 0;
+}
+
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    const rc = std.c.clock_gettime(.MONOTONIC, &ts);
+    if (rc != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
 const Cursor = struct {

@@ -25,12 +25,28 @@ pub const EncodedBlock = struct {
     }
 };
 
-pub fn encodeBlock(
+pub const EncodedBlockPasses = struct {
+    active_rect: subband.Rect,
+    bitplanes: u8,
+    non_zero_count: u32,
+    significance_bytes: []u8,
+    refinement_bytes: []u8,
+    cleanup_bytes: []u8,
+
+    pub fn deinit(self: *EncodedBlockPasses, allocator: std.mem.Allocator) void {
+        allocator.free(self.significance_bytes);
+        allocator.free(self.refinement_bytes);
+        allocator.free(self.cleanup_bytes);
+        self.* = undefined;
+    }
+};
+
+pub fn encodeBlockPasses(
     allocator: std.mem.Allocator,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
-) !EncodedBlock {
+) !EncodedBlockPasses {
     if (stride == 0 or rect.width == 0 or rect.height == 0) return BitplaneError.InvalidBlock;
     if (rect.y >= plane.len / stride or rect.x >= stride) return BitplaneError.InvalidBlock;
     const last_row = rect.y + rect.height - 1;
@@ -65,7 +81,6 @@ pub fn encodeBlock(
             .significance_bytes = try allocator.alloc(u8, 0),
             .refinement_bytes = try allocator.alloc(u8, 0),
             .cleanup_bytes = try allocator.alloc(u8, 0),
-            .bytes = try allocator.alloc(u8, 0),
         };
     }
 
@@ -130,15 +145,6 @@ pub fn encodeBlock(
     const cleanup_bytes = try allocator.alloc(u8, 0);
     errdefer allocator.free(cleanup_bytes);
 
-    var combined: std.ArrayList(u8) = .empty;
-    errdefer combined.deinit(allocator);
-    try appendU32Be(allocator, &combined, @as(u32, @intCast(significance_bytes.len)));
-    try combined.appendSlice(allocator, significance_bytes);
-    try appendU32Be(allocator, &combined, @as(u32, @intCast(refinement_bytes.len)));
-    try combined.appendSlice(allocator, refinement_bytes);
-    try appendU32Be(allocator, &combined, @as(u32, @intCast(cleanup_bytes.len)));
-    try combined.appendSlice(allocator, cleanup_bytes);
-
     return .{
         .active_rect = active_rect,
         .bitplanes = bitplanes,
@@ -146,6 +152,34 @@ pub fn encodeBlock(
         .significance_bytes = significance_bytes,
         .refinement_bytes = refinement_bytes,
         .cleanup_bytes = cleanup_bytes,
+    };
+}
+
+pub fn encodeBlock(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+) !EncodedBlock {
+    var passes = try encodeBlockPasses(allocator, plane, stride, rect);
+    errdefer passes.deinit(allocator);
+
+    var combined: std.ArrayList(u8) = .empty;
+    errdefer combined.deinit(allocator);
+    try appendU32Be(allocator, &combined, @as(u32, @intCast(passes.significance_bytes.len)));
+    try combined.appendSlice(allocator, passes.significance_bytes);
+    try appendU32Be(allocator, &combined, @as(u32, @intCast(passes.refinement_bytes.len)));
+    try combined.appendSlice(allocator, passes.refinement_bytes);
+    try appendU32Be(allocator, &combined, @as(u32, @intCast(passes.cleanup_bytes.len)));
+    try combined.appendSlice(allocator, passes.cleanup_bytes);
+
+    return .{
+        .active_rect = passes.active_rect,
+        .bitplanes = passes.bitplanes,
+        .non_zero_count = passes.non_zero_count,
+        .significance_bytes = passes.significance_bytes,
+        .refinement_bytes = passes.refinement_bytes,
+        .cleanup_bytes = passes.cleanup_bytes,
         .bytes = try combined.toOwnedSlice(allocator),
     };
 }

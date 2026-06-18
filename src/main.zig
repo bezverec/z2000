@@ -138,6 +138,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
     }
 
     var options = codestream.LosslessOptions{};
+    var show_timings = false;
     var index: usize = 2;
     while (index < args.len) {
         if (std.mem.eql(u8, args[index], "--levels")) {
@@ -194,6 +195,8 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             index += 1;
             if (index >= args.len or args[index].len != 1) return error.InvalidValue;
             options.tile_part_divisions = args[index][0];
+        } else if (std.mem.eql(u8, args[index], "--timings")) {
+            show_timings = true;
         } else if (std.mem.eql(u8, args[index], "--rates") or std.mem.eql(u8, args[index], "--rate")) {
             return codestream.CodestreamError.UnsupportedPayload;
         } else {
@@ -202,16 +205,34 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         index += 1;
     }
 
+    var command_timings = TiffToJp2Timings{};
+    const read_start = monotonicNs();
     var rgb = try tiff.readRgb(io, allocator, args[0]);
     defer rgb.deinit();
+    command_timings.tiff_read_ns = elapsedNs(read_start);
 
-    const j2k = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    var encode_timings = codestream.EncodeTimings{};
+    const encode_start = monotonicNs();
+    const j2k = if (show_timings)
+        try codestream.encodeLosslessWithOptionsProfiled(allocator, rgb, options, &encode_timings)
+    else
+        try codestream.encodeLosslessWithOptions(allocator, rgb, options);
     defer allocator.free(j2k);
+    command_timings.codestream_ns = elapsedNs(encode_start);
 
+    const wrap_start = monotonicNs();
     const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, j2k);
     defer allocator.free(wrapped);
+    command_timings.jp2_wrap_ns = elapsedNs(wrap_start);
 
+    const write_start = monotonicNs();
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = wrapped });
+    command_timings.write_ns = elapsedNs(write_start);
+    command_timings.total_ns = command_timings.tiff_read_ns +
+        command_timings.codestream_ns +
+        command_timings.jp2_wrap_ns +
+        command_timings.write_ns;
+
     std.debug.print(
         "wrote JP2 marker skeleton {s} -> {s} ({}x{}, {} bits/channel, levels {}, tile {}x{}, block {}x{}, progression {s}, layers {}, tile-parts {s}, TLM {}); packet coder is next\n",
         .{
@@ -231,6 +252,9 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             options.tlm,
         },
     );
+    if (show_timings) {
+        printTiffToJp2Timings(command_timings, encode_timings);
+    }
 }
 
 fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -407,6 +431,56 @@ fn totalComponentStats(stats: codestream.TemporaryStats) codestream.ComponentSta
     return total;
 }
 
+const TiffToJp2Timings = struct {
+    total_ns: u64 = 0,
+    tiff_read_ns: u64 = 0,
+    codestream_ns: u64 = 0,
+    jp2_wrap_ns: u64 = 0,
+    write_ns: u64 = 0,
+};
+
+fn printTiffToJp2Timings(command: TiffToJp2Timings, encode: codestream.EncodeTimings) void {
+    const total = command.total_ns;
+    std.debug.print("timings:\n", .{});
+    printTiming("total", total, total);
+    printTiming("TIFF read", command.tiff_read_ns, total);
+    printTiming("codestream", command.codestream_ns, total);
+    printTiming("  RCT", encode.color_transform_ns, total);
+    printTiming("  DWT 5/3", encode.wavelet_ns, total);
+    printTiming("  block payload", encode.payload_ns, total);
+    printTiming("  markers/write SOD", encode.marker_ns, total);
+    printTiming("JP2 wrap", command.jp2_wrap_ns, total);
+    printTiming("disk write", command.write_ns, total);
+}
+
+fn printTiming(label: []const u8, ns: u64, total_ns: u64) void {
+    std.debug.print(
+        "  {s:<18} {d:>9.3} ms {d:>6.2}%\n",
+        .{ label, nsToMs(ns), percentOf(ns, total_ns) },
+    );
+}
+
+fn nsToMs(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+}
+
+fn percentOf(ns: u64, total_ns: u64) f64 {
+    if (total_ns == 0) return 0.0;
+    return 100.0 * @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(total_ns));
+}
+
+fn elapsedNs(start: u64) u64 {
+    const now = monotonicNs();
+    return if (now >= start) now - start else 0;
+}
+
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    const rc = std.c.clock_gettime(.MONOTONIC, &ts);
+    if (rc != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
 fn parseWavelet(value: []const u8) !wavelet.Wavelet {
     if (std.mem.eql(u8, value, "5-3") or std.mem.eql(u8, value, "53")) {
         return .reversible_5_3;
@@ -493,7 +567,7 @@ fn usage() void {
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--precincts LIST] [--tlm|--no-tlm]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--precincts LIST] [--tlm|--no-tlm] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2>
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif>

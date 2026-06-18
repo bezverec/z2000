@@ -60,7 +60,7 @@ zig build run -- tiff-info input.tif
 zig build run -- tiff-to-jp2 input.tif output.jp2 \
   [--levels 5|--resolutions 6] [--tile 4096,4096] [--progression RPCL] \
   [--precincts "[256,256],[256,256],[128,128]"] [--block 64] [--layers 1] \
-  [--tlm|--no-tlm]
+  [--tlm|--no-tlm] [--timings]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif
@@ -89,6 +89,10 @@ lines we are targeting:
 - `--layers N` maps to `Clayers=N`.
 - `--tile-parts R` maps to Kakadu `ORGtparts=R` and Grok `-u R`; the current
   temporary payload records resolution-ordered tile-part intent.
+- `--timings` prints a phase breakdown for TIFF read, RCT, DWT, block payload
+  generation, JP2 wrapping, and disk write. This is the first pass at deciding
+  whether the next optimization should target SIMD compute, scratch-buffer
+  reuse/cache locality, or IO.
 
 Archival-style scaffold:
 
@@ -132,6 +136,16 @@ With OpenJPEG `opj_compress`, Grok `grk_compress`, and `hyperfine` installed:
 ```sh
 sh tools/bench_smoke.sh
 sh tools/bench_profiles.sh
+```
+
+For a single local phase breakdown, add `--timings` to `tiff-to-jp2`, for
+example:
+
+```sh
+./zig-out/bin/z2000 tiff-to-jp2 bench-rgb-2048.tif bench-ours-profile.jp2 \
+  --tile 4096,4096 --progression RPCL --resolutions 6 \
+  --precincts "[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]" \
+  --block 64 --layers 1 --tile-parts R --bypass --sop --eph --tlm --timings
 ```
 
 Current local baseline on a synthetic uncompressed RGB TIFF 2048x2048 after
@@ -185,12 +199,17 @@ temporary generic coder.
 
 Latest local profile comparison on the same 2048x2048 RGB TIFF:
 
-- Archival profile encode: `z2000` 289.5 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
+- Archival profile encode: `z2000` 280.5 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
 - Archival profile decode: `z2000` 324.9 ms, Grok 84.0 ms, OpenJPEG 449.9 ms.
 - Archival output size: `z2000` 9.4 MB, Grok 6.3 MB, OpenJPEG 6.3 MB.
 - Access profile 1:8 encode: Grok 192.9 ms, OpenJPEG 484.5 ms, both about
   1.5 MB. The local Grok decoder crashed on this access file, while OpenJPEG
   decoded it, so no Grok access decode number is recorded yet.
+
+The first `--timings` run on that archival encode showed the useful direction:
+roughly 95% of wall time is inside codestream generation, with block payload
+generation and DWT dominating. TIFF read, JP2 wrapping, and disk write were
+small single-digit percentages on the synthetic smoke file.
 
 Optimization read from those numbers:
 

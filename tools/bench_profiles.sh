@@ -12,6 +12,10 @@ zig build -Doptimize=ReleaseFast >/dev/null
 PRECINCTS='[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]'
 RATES='362,256,181,128,90,64,45,32,22,16,11,8'
 
+./zig-out/bin/z2000 tiff-to-jp2 "$INPUT" bench-ours-profile-timings.jp2 \
+  --tile 4096,4096 --progression RPCL --resolutions 6 --precincts "$PRECINCTS" \
+  --block 64 --layers 1 --tile-parts R --bypass --sop --eph --tlm --timings >/dev/null
+
 hyperfine --warmup 2 --runs 6 \
   "./zig-out/bin/z2000 tiff-to-jp2 $INPUT bench-ours-profile.jp2 --tile 4096,4096 --progression RPCL --resolutions 6 --precincts \"$PRECINCTS\" --block 64 --layers 1 --tile-parts R --bypass --sop --eph --tlm" \
   "grk_compress -i $INPUT -o bench-grok-profile.jp2 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -X -M 1 -S -E -u R" \

@@ -270,6 +270,38 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expectEqual(bytes.len - 2, sot_index + psot);
 }
 
+test "profiled lossless codestream matches normal encoder" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        10, 20, 30,
+        40, 50, 60,
+        70, 80, 90,
+        100, 110, 120,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const normal = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(normal);
+
+    var timings = codestream.EncodeTimings{};
+    const profiled = try codestream.encodeLosslessWithOptionsProfiled(allocator, rgb, .{ .levels = 2 }, &timings);
+    defer allocator.free(profiled);
+
+    try std.testing.expectEqualSlices(u8, normal, profiled);
+    try std.testing.expect(timings.total_ns >= timings.color_transform_ns);
+    try std.testing.expect(timings.total_ns >= timings.wavelet_ns);
+    try std.testing.expect(timings.total_ns >= timings.payload_ns);
+    try std.testing.expect(timings.total_ns >= timings.marker_ns);
+}
+
 test "subband partition produces LL and high-pass bands" {
     const allocator = std.testing.allocator;
     const bands = try subband.makeBands(allocator, 5, 4, 2);
