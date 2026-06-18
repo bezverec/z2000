@@ -1,0 +1,13 @@
+.DS_Store
+.zig-cache/
+zig-out/
+
+# Generated smoke/benchmark inputs and outputs.
+bench-*
+roundtrip-*
+sample-rgb.*
+sample.roundtrip.pgm
+sample.z2000
+
+# Keep tiny source examples trackable if they are added intentionally.
+!sample.pgm
