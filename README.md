@@ -35,6 +35,16 @@ zig build
 zig build test
 ```
 
+SIMD lane selection is centralized in `src/simd.zig`. Native ARM targets use a
+NEON-width 4xi32 policy, x86_64 AVX2 builds use 8xi32, and x86_64 AVX-512F
+builds use 16xi32 for portable `@Vector` kernels such as the bitplane block
+scanner. Cross-compile checks used during development:
+
+```sh
+zig build -Dtarget=x86_64-macos -Dcpu=haswell -Doptimize=ReleaseFast
+zig build -Dtarget=x86_64-macos -Dcpu=skylake_avx512 -Doptimize=ReleaseFast
+```
+
 ## Encode
 
 ```sh

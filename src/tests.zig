@@ -6,6 +6,7 @@ const codestream = @import("codestream.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const jp2 = @import("jp2.zig");
+const simd = @import("simd.zig");
 const subband = @import("subband.zig");
 const tiff = @import("tiff.zig");
 const wavelet = @import("wavelet.zig");
@@ -37,6 +38,12 @@ test "5/3 wavelet roundtrips integer-like samples" {
     for (data, original) |actual, expected| {
         try std.testing.expectApproxEqAbs(expected, actual, 0.001);
     }
+}
+
+test "SIMD lane policy is a supported power-of-two width" {
+    try std.testing.expect(simd.i32_lanes == 4 or simd.i32_lanes == 8 or simd.i32_lanes == 16);
+    try std.testing.expect((simd.i32_lanes & (simd.i32_lanes - 1)) == 0);
+    try std.testing.expect(simd.family.len > 0);
 }
 
 test "9/7 wavelet roundtrips within floating point tolerance" {

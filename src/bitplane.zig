@@ -1,4 +1,5 @@
 const std = @import("std");
+const simd = @import("simd.zig");
 const subband = @import("subband.zig");
 
 pub const BitplaneError = error{
@@ -7,7 +8,7 @@ pub const BitplaneError = error{
     TrailingData,
 };
 
-const scan_lanes = 4;
+const scan_lanes = simd.i32_lanes;
 const ScanVector = @Vector(scan_lanes, i32);
 
 const BlockScan = struct {
@@ -207,7 +208,7 @@ fn scanBlock(plane: []const i32, stride: usize, rect: subband.Rect) BlockScan {
             active_min_y = @min(active_min_y, y);
             active_max_y = @max(active_max_y, y);
             inline for (0..scan_lanes) |lane| {
-                if ((chunk.mask & (@as(u8, 1) << lane)) != 0) {
+                if ((chunk.mask & (@as(u32, 1) << @as(u5, @intCast(lane)))) != 0) {
                     const col = x + lane;
                     active_min_x = @min(active_min_x, col);
                     active_max_x = @max(active_max_x, col);
@@ -248,7 +249,7 @@ fn scanBlock(plane: []const i32, stride: usize, rect: subband.Rect) BlockScan {
 }
 
 const ScanChunk = struct {
-    mask: u8,
+    mask: u32,
     max_mag: u32,
 };
 
@@ -259,10 +260,10 @@ fn scanChunk(values: *const [scan_lanes]i32) ScanChunk {
     const max_mag = @as(u32, @intCast(@reduce(.Max, abs_values)));
     const non_zero = coeffs != zero;
 
-    var mask: u8 = 0;
+    var mask: u32 = 0;
     const lanes: [scan_lanes]bool = non_zero;
     inline for (0..scan_lanes) |lane| {
-        if (lanes[lane]) mask |= @as(u8, 1) << lane;
+        if (lanes[lane]) mask |= @as(u32, 1) << @as(u5, @intCast(lane));
     }
     return .{ .mask = mask, .max_mag = max_mag };
 }
