@@ -180,15 +180,17 @@ fn encodeLosslessWithOptionsMeasured(
     if (timings) |t| t.color_transform_ns = elapsedNs(color_start);
 
     const wavelet_start = monotonicNs();
-    const levels = try wavelet_int.forward53(
-        allocator,
+    var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(rgb.width, rgb.height));
+    defer wavelet_workspace.deinit();
+    const levels = try wavelet_int.forward53WithWorkspace(
+        &wavelet_workspace,
         planes.y,
         rgb.width,
         rgb.height,
         options.levels,
     );
-    _ = try wavelet_int.forward53(allocator, planes.cb, rgb.width, rgb.height, levels);
-    _ = try wavelet_int.forward53(allocator, planes.cr, rgb.width, rgb.height, levels);
+    _ = try wavelet_int.forward53WithWorkspace(&wavelet_workspace, planes.cb, rgb.width, rgb.height, levels);
+    _ = try wavelet_int.forward53WithWorkspace(&wavelet_workspace, planes.cr, rgb.width, rgb.height, levels);
     if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
 
     var tile_payload: std.ArrayList(u8) = .empty;
@@ -250,9 +252,11 @@ pub fn decodeLosslessTemporary(
     try readComponentPayload(&cursor, cr, width, 2);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
-    try wavelet_int.inverse53(allocator, y, width, height, levels);
-    try wavelet_int.inverse53(allocator, cb, width, height, levels);
-    try wavelet_int.inverse53(allocator, cr, width, height, levels);
+    var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+    defer wavelet_workspace.deinit();
+    try wavelet_int.inverse53WithWorkspace(&wavelet_workspace, y, width, height, levels);
+    try wavelet_int.inverse53WithWorkspace(&wavelet_workspace, cb, width, height, levels);
+    try wavelet_int.inverse53WithWorkspace(&wavelet_workspace, cr, width, height, levels);
 
     var planes = color.RctPlanes{
         .allocator = allocator,

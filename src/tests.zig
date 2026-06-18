@@ -45,8 +45,8 @@ test "9/7 wavelet roundtrips within floating point tolerance" {
     const height = 3;
 
     var data = [_]f32{
-        3.5, 5.0, 8.5, 13.0, 21.0, 34.0,
-        1.0, 4.0, 9.0, 16.0, 25.0, 36.0,
+        3.5, 5.0, 8.5,  13.0, 21.0, 34.0,
+        1.0, 4.0, 9.0,  16.0, 25.0, 36.0,
         2.0, 6.0, 12.0, 20.0, 30.0, 42.0,
     };
     const original = data;
@@ -69,8 +69,8 @@ test "9/7 wavelet roundtrips within floating point tolerance" {
 test "codec encodes and decodes a small grayscale image" {
     const allocator = std.testing.allocator;
     const pixels = try allocator.dupe(u8, &[_]u8{
-        0, 16, 32, 48,
-        64, 80, 96, 112,
+        0,   16,  32,  48,
+        64,  80,  96,  112,
         128, 144, 160, 176,
         192, 208, 224, 255,
     });
@@ -186,10 +186,10 @@ test "RCT transform matches JPEG2000 reversible equations" {
 test "RCT transform roundtrips a small RGB image" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
-        0, 0, 0,
+        0,   0,   0,
         255, 255, 255,
-        128, 64, 32,
-        7, 200, 121,
+        128, 64,  32,
+        7,   200, 121,
     });
     defer allocator.free(samples);
 
@@ -218,10 +218,10 @@ test "integer 5/3 DWT roundtrips signed component plane" {
     const width = 5;
     const height = 4;
     var data = [_]i32{
-        -5, 4, 13, 22, 31,
-        40, -49, 58, 67, 76,
-        85, 94, -103, 112, 121,
-        130, 139, 148, -157, 166,
+        -5,  4,   13,   22,   31,
+        40,  -49, 58,   67,   76,
+        85,  94,  -103, 112,  121,
+        130, 139, 148,  -157, 166,
     };
     const original = data;
 
@@ -231,12 +231,35 @@ test "integer 5/3 DWT roundtrips signed component plane" {
     try std.testing.expectEqualSlices(i32, original[0..], data[0..]);
 }
 
+test "integer 5/3 DWT workspace roundtrips signed component plane" {
+    const allocator = std.testing.allocator;
+    const width = 6;
+    const height = 5;
+
+    var data = [_]i32{
+        5,   4,   3,   2,   1,   0,
+        -1,  -2,  -3,  -4,  -5,  -6,
+        7,   11,  13,  17,  19,  23,
+        -29, 31,  -37, 41,  -43, 47,
+        53,  -59, 61,  -67, 71,  -73,
+    };
+    const original = data;
+
+    var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+    defer workspace.deinit();
+
+    const levels = try wavelet_int.forward53WithWorkspace(&workspace, data[0..], width, height, 4);
+    try wavelet_int.inverse53WithWorkspace(&workspace, data[0..], width, height, levels);
+
+    try std.testing.expectEqualSlices(i32, original[0..], data[0..]);
+}
+
 test "lossless codestream skeleton contains JPEG2000 markers" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
-        10, 20, 30,
-        40, 50, 60,
-        70, 80, 90,
+        10,  20,  30,
+        40,  50,  60,
+        70,  80,  90,
         100, 110, 120,
     });
     defer allocator.free(samples);
@@ -273,9 +296,9 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
 test "profiled lossless codestream matches normal encoder" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
-        10, 20, 30,
-        40, 50, 60,
-        70, 80, 90,
+        10,  20,  30,
+        40,  50,  60,
+        70,  80,  90,
         100, 110, 120,
     });
     defer allocator.free(samples);
@@ -323,10 +346,10 @@ test "subband partition produces LL and high-pass bands" {
 test "raw bitplane block writer emits compact block data" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{
-        0, 0, 0, 0,
+        0, 0,  0, 0,
         0, -3, 0, 0,
-        0, 0, 5, 0,
-        0, 0, 0, 0,
+        0, 0,  5, 0,
+        0, 0,  0, 0,
     };
 
     var encoded = try bitplane.encodeBlock(allocator, plane[0..], 4, .{
@@ -405,10 +428,10 @@ test "arithmetic entropy codec roundtrips biased stream" {
 test "raw bitplane block writer roundtrips a block" {
     const allocator = std.testing.allocator;
     const original = [_]i32{
-        0, -7, 0, 5,
-        1, 0, -2, 0,
-        0, 0, 0, 0,
-        9, -12, 0, 4,
+        0, -7,  0,  5,
+        1, 0,   -2, 0,
+        0, 0,   0,  0,
+        9, -12, 0,  4,
     };
     var decoded = [_]i32{0} ** original.len;
 
@@ -435,11 +458,11 @@ test "raw bitplane block writer roundtrips a block" {
 test "temporary lossless codestream roundtrips RGB samples" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
-        0, 0, 0,
-        255, 0, 0,
-        0, 255, 0,
-        0, 0, 255,
-        30, 60, 90,
+        0,   0,   0,
+        255, 0,   0,
+        0,   255, 0,
+        0,   0,   255,
+        30,  60,  90,
         120, 150, 180,
     });
     defer allocator.free(samples);
@@ -467,13 +490,13 @@ test "temporary lossless codestream roundtrips RGB samples" {
 test "temporary codestream analyzer reports block and stream stats" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
-        0, 0, 0,
-        32, 16, 8,
-        64, 32, 16,
-        96, 48, 24,
-        128, 64, 32,
-        160, 80, 40,
-        192, 96, 48,
+        0,   0,   0,
+        32,  16,  8,
+        64,  32,  16,
+        96,  48,  24,
+        128, 64,  32,
+        160, 80,  40,
+        192, 96,  48,
         224, 112, 56,
     });
     defer allocator.free(samples);

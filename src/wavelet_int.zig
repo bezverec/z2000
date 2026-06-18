@@ -10,6 +10,37 @@ const LevelShape = struct {
     height: usize,
 };
 
+pub const Workspace = struct {
+    allocator: std.mem.Allocator,
+    line: []i32,
+    scratch: []i32,
+
+    pub fn init(allocator: std.mem.Allocator, max_dim: usize) !Workspace {
+        if (max_dim == 0) return TransformError.InvalidDimensions;
+        const line = try allocator.alloc(i32, max_dim);
+        errdefer allocator.free(line);
+        const scratch = try allocator.alloc(i32, max_dim);
+        errdefer allocator.free(scratch);
+        return .{
+            .allocator = allocator,
+            .line = line,
+            .scratch = scratch,
+        };
+    }
+
+    pub fn deinit(self: *Workspace) void {
+        self.allocator.free(self.line);
+        self.allocator.free(self.scratch);
+        self.* = undefined;
+    }
+
+    fn require(self: Workspace, max_dim: usize) !void {
+        if (self.line.len < max_dim or self.scratch.len < max_dim) {
+            return TransformError.InvalidDimensions;
+        }
+    }
+};
+
 pub fn forward53(
     allocator: std.mem.Allocator,
     data: []i32,
@@ -22,10 +53,27 @@ pub fn forward53(
     }
 
     const max_dim = @max(width, height);
-    var line = try allocator.alloc(i32, max_dim);
-    defer allocator.free(line);
-    var scratch = try allocator.alloc(i32, max_dim);
-    defer allocator.free(scratch);
+    var workspace = try Workspace.init(allocator, max_dim);
+    defer workspace.deinit();
+
+    return forward53WithWorkspace(&workspace, data, width, height, requested_levels);
+}
+
+pub fn forward53WithWorkspace(
+    workspace: *Workspace,
+    data: []i32,
+    width: usize,
+    height: usize,
+    requested_levels: u8,
+) !u8 {
+    if (width == 0 or height == 0 or data.len != width * height) {
+        return TransformError.InvalidDimensions;
+    }
+
+    const max_dim = @max(width, height);
+    try workspace.require(max_dim);
+    const line = workspace.line;
+    const scratch = workspace.scratch;
 
     var cur_width = width;
     var cur_height = height;
@@ -59,6 +107,24 @@ pub fn inverse53(
         return TransformError.InvalidDimensions;
     }
 
+    const max_dim = @max(width, height);
+    var workspace = try Workspace.init(allocator, max_dim);
+    defer workspace.deinit();
+
+    try inverse53WithWorkspace(&workspace, data, width, height, levels);
+}
+
+pub fn inverse53WithWorkspace(
+    workspace: *Workspace,
+    data: []i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+) !void {
+    if (width == 0 or height == 0 or data.len != width * height) {
+        return TransformError.InvalidDimensions;
+    }
+
     var shapes: [32]LevelShape = undefined;
     if (levels > shapes.len) return TransformError.TooManyLevels;
 
@@ -72,10 +138,9 @@ pub fn inverse53(
     }
 
     const max_dim = @max(width, height);
-    var line = try allocator.alloc(i32, max_dim);
-    defer allocator.free(line);
-    var scratch = try allocator.alloc(i32, max_dim);
-    defer allocator.free(scratch);
+    try workspace.require(max_dim);
+    const line = workspace.line;
+    const scratch = workspace.scratch;
 
     var level = actual_levels;
     while (level > 0) {
