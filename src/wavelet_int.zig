@@ -32,9 +32,7 @@ pub fn forward53(
     var done: u8 = 0;
     while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
         for (0..cur_height) |row| {
-            for (0..cur_width) |col| line[col] = data[row * width + col];
-            forward53Line(line[0..cur_width], scratch[0..cur_width]);
-            for (0..cur_width) |col| data[row * width + col] = line[col];
+            forward53Line(rowSlice(data, width, row, cur_width), scratch[0..cur_width]);
         }
 
         for (0..cur_width) |col| {
@@ -91,11 +89,14 @@ pub fn inverse53(
         }
 
         for (0..shape.height) |row| {
-            for (0..shape.width) |col| line[col] = data[row * width + col];
-            inverse53Line(line[0..shape.width], scratch[0..shape.width]);
-            for (0..shape.width) |col| data[row * width + col] = line[col];
+            inverse53Line(rowSlice(data, width, row, shape.width), scratch[0..shape.width]);
         }
     }
+}
+
+fn rowSlice(data: []i32, stride: usize, row: usize, len: usize) []i32 {
+    const start = row * stride;
+    return data[start .. start + len];
 }
 
 fn forward53Line(data: []i32, scratch: []i32) void {

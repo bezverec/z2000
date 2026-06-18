@@ -199,8 +199,8 @@ temporary generic coder.
 
 Latest local profile comparison on the same 2048x2048 RGB TIFF:
 
-- Archival profile encode: `z2000` 273.3 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
-- Archival profile decode: `z2000` 324.9 ms, Grok 84.0 ms, OpenJPEG 449.9 ms.
+- Archival profile encode: `z2000` 265.3 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
+- Archival profile decode: `z2000` 291.4 ms, Grok 84.0 ms, OpenJPEG 449.9 ms.
 - Archival output size: `z2000` 9.4 MB, Grok 6.3 MB, OpenJPEG 6.3 MB.
 - Access profile 1:8 encode: Grok 192.9 ms, OpenJPEG 484.5 ms, both about
   1.5 MB. The local Grok decoder crashed on this access file, while OpenJPEG
@@ -216,6 +216,10 @@ borrows raw entropy streams instead of copying them before immediately writing
 them into the codestream. This mostly reduces allocator churn in the hottest
 block payload path; larger wins still require a better pass coder and
 parallelism.
+
+The integer 5/3 DWT now transforms horizontal rows in place and keeps the line
+buffer only for strided vertical columns. This removes a full row copy in each
+horizontal pass on encode and decode.
 
 Optimization read from those numbers:
 
