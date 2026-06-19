@@ -610,6 +610,43 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 19]);
 }
 
+test "code-block style options are reflected in COD marker" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast(i % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 3) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 5) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 64,
+        .block_height = 64,
+        .bypass = true,
+        .reset_context = true,
+        .terminate_all = true,
+        .vertical_causal = true,
+        .predictable_termination = true,
+        .segmentation_symbols = true,
+    });
+    defer allocator.free(bytes);
+
+    const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
+    try std.testing.expectEqual(@as(u8, 0x3f), bytes[cod + 12]);
+}
+
 fn appendIfdEntryLe(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),

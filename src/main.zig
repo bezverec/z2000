@@ -187,6 +187,26 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             options.bypass = true;
         } else if (std.mem.eql(u8, args[index], "--no-bypass")) {
             options.bypass = false;
+        } else if (std.mem.eql(u8, args[index], "--reset-context")) {
+            options.reset_context = true;
+        } else if (std.mem.eql(u8, args[index], "--no-reset-context")) {
+            options.reset_context = false;
+        } else if (std.mem.eql(u8, args[index], "--terminate-all")) {
+            options.terminate_all = true;
+        } else if (std.mem.eql(u8, args[index], "--no-terminate-all")) {
+            options.terminate_all = false;
+        } else if (std.mem.eql(u8, args[index], "--vertical-causal")) {
+            options.vertical_causal = true;
+        } else if (std.mem.eql(u8, args[index], "--no-vertical-causal")) {
+            options.vertical_causal = false;
+        } else if (std.mem.eql(u8, args[index], "--predictable-termination")) {
+            options.predictable_termination = true;
+        } else if (std.mem.eql(u8, args[index], "--no-predictable-termination")) {
+            options.predictable_termination = false;
+        } else if (std.mem.eql(u8, args[index], "--segmentation-symbols")) {
+            options.segmentation_symbols = true;
+        } else if (std.mem.eql(u8, args[index], "--no-segmentation-symbols")) {
+            options.segmentation_symbols = false;
         } else if (std.mem.eql(u8, args[index], "--tlm")) {
             options.tlm = true;
         } else if (std.mem.eql(u8, args[index], "--no-tlm")) {
@@ -567,7 +587,7 @@ fn usage() void {
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--precincts LIST] [--tlm|--no-tlm] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--precincts LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2>
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif>

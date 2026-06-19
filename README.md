@@ -93,8 +93,13 @@ lines we are targeting:
 - `--precincts "[256,256],[256,256],[128,128]"` maps to Grok `-c` and Kakadu
   `Cprecincts`.
 - `--block 64` maps to Grok `-b 64,64` and Kakadu `Cblk={64,64}`.
-- `--bypass`, `--sop`, and `--eph` map to `Cmodes={BYPASS}`, `Cuse_sop=yes`,
-  and `Cuse_eph=yes` at marker/config level.
+- `--bypass`, `--reset-context`, `--terminate-all`, `--vertical-causal`,
+  `--predictable-termination`, and `--segmentation-symbols` map to JPEG2000
+  Part 1 code-block style bits in COD `SPcod`. They correspond to Kakadu-style
+  `Cmodes` choices such as BYPASS, RESET, RESTART/TERMALL, CAUSAL, ERTERM, and
+  SEGMARK at marker/config level.
+- `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
+  `Cuse_eph=yes` at marker/config level.
 - `--tlm` writes a TLM marker segment for the current single tile-part length.
 - `--layers N` maps to `Clayers=N`.
 - `--tile-parts R` maps to Kakadu `ORGtparts=R` and Grok `-u R`; the current
@@ -122,13 +127,14 @@ zig build run -- tiff-to-jp2 example.tif example.jp2 \
   --block 64 --layers 12 --tile-parts R --bypass --no-sop --no-eph
 ```
 
-These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`TLM`)
-and temporary payload metadata. `--tile-parts R` is recorded as a
+These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`QCD`/
+`TLM`) and temporary payload metadata. `--tile-parts R` is recorded as a
 resolution-ordered tile-part plan in temporary payload version `BP1`. Real RPCL
 packet ordering, precinct packetization, SOP/EPH marker emission inside
-packets, physical multi-tile-part division by resolution, quality layers, and
-rate control still require the ISO packet writer. Lossy `--rate/--rates`
-requests fail closed for now instead of silently producing a lossless file.
+packets, physical multi-tile-part division by resolution, quality layers,
+EBCOT pass behavior for each code-block style bit, and rate control still
+require the ISO packet writer. Lossy `--rate/--rates` requests fail closed for
+now instead of silently producing a lossless file.
 
 ## Performance and Safety Direction
 

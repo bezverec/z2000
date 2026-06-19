@@ -110,6 +110,11 @@ pub const LosslessOptions = struct {
     precincts: [33]PrecinctSize = defaultPrecincts(),
     precinct_count: u8 = 3,
     bypass: bool = true,
+    reset_context: bool = false,
+    terminate_all: bool = false,
+    vertical_causal: bool = false,
+    predictable_termination: bool = false,
+    segmentation_symbols: bool = false,
     sop: bool = true,
     eph: bool = true,
     tlm: bool = true,
@@ -900,7 +905,7 @@ fn isValidBlockEdge(value: u16) bool {
 }
 
 fn isValidPrecinctEdge(value: u16) bool {
-    return value >= 2 and value <= 32768 and value & (value - 1) == 0;
+    return value >= 1 and value <= 32768 and value & (value - 1) == 0;
 }
 
 fn codeBlockExponent(value: u16) u8 {
@@ -929,5 +934,12 @@ fn codingStyleFlags(options: LosslessOptions) u8 {
 }
 
 fn codeBlockStyle(options: LosslessOptions) u8 {
-    return if (options.bypass) 0x01 else 0x00;
+    var style: u8 = 0;
+    if (options.bypass) style |= 0x01;
+    if (options.reset_context) style |= 0x02;
+    if (options.terminate_all) style |= 0x04;
+    if (options.vertical_causal) style |= 0x08;
+    if (options.predictable_termination) style |= 0x10;
+    if (options.segmentation_symbols) style |= 0x20;
+    return style;
 }
