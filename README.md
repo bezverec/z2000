@@ -71,6 +71,7 @@ zig build run -- decode output.z2000 reconstructed.pgm
 
 ```sh
 zig build run -- tiff-info input.tif
+zig build run -- dng-info input.dng
 zig build run -- tiff-to-jp2 input.tif output.jp2 \
   [--levels 5|--resolutions 6] [--tile 4096,4096] [--progression RPCL] \
   [--precincts "[256,256],[256,256],[128,128]"] [--block 64] [--layers 1] \
@@ -85,6 +86,11 @@ Current TIFF support is deliberately narrow: TIFF 6.0 header + first IFD,
 uncompressed RGB, chunky/interleaved samples, 8 or 16 bits per channel, strip
 storage. Unsupported compression, planar layout, palette color, CMYK, tiled
 TIFF, floating samples, and multipage handling fail closed.
+
+`dng-info` uses the generic TIFF/IFD metadata layer to inspect DNG-style files
+without decoding RAW CFA data. It reports DNG version tags, camera strings, CFA
+metadata, the primary IFD, and SubIFD image summaries. This is the safe staging
+ground for a later narrow `dng-to-jp2` RGB/preview path.
 
 ## Profile Mapping
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const codec = @import("codec.zig");
 const codestream = @import("codestream.zig");
+const dng = @import("formats/dng.zig");
 const image = @import("image.zig");
 const jp2 = @import("jp2.zig");
 const tiff = @import("tiff.zig");
@@ -31,6 +32,8 @@ pub fn main(init: std.process.Init) !void {
         try decodeCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "tiff-info")) {
         try tiffInfoCommand(io, allocator, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "dng-info")) {
+        try dngInfoCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "tiff-to-jp2")) {
         try tiffToJp2Command(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "jp2-info")) {
@@ -129,6 +132,58 @@ fn tiffInfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
         "TIFF RGB: {s}: {}x{}, {} bits/channel, {} samples\n",
         .{ args[0], rgb.width, rgb.height, rgb.bit_depth, rgb.samples.len },
     );
+}
+
+fn dngInfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len != 1) {
+        usage();
+        return error.InvalidCommand;
+    }
+
+    const max_file_size = 1024 * 1024 * 1024;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        args[0],
+        allocator,
+        .limited(max_file_size),
+    );
+    defer allocator.free(bytes);
+
+    const info = try dng.parseInfo(bytes);
+    std.debug.print("DNG/TIFF: {s}: endian {s}, IFDs {}\n", .{ args[0], info.endian.label(), info.ifd_count });
+    if (info.dng_version) |version| {
+        std.debug.print("  DNG version {}.{}.{}.{}\n", .{ version.bytes[0], version.bytes[1], version.bytes[2], version.bytes[3] });
+    }
+    if (info.dng_backward_version) |version| {
+        std.debug.print("  DNG backward version {}.{}.{}.{}\n", .{ version.bytes[0], version.bytes[1], version.bytes[2], version.bytes[3] });
+    }
+    if (info.make) |make| std.debug.print("  make {s}\n", .{make});
+    if (info.model) |model| std.debug.print("  model {s}\n", .{model});
+    if (info.unique_camera_model) |camera| std.debug.print("  unique camera {s}\n", .{camera});
+    if (info.cfa_repeat) |repeat| std.debug.print("  CFA repeat {}x{}\n", .{ repeat[0], repeat[1] });
+    if (info.cfa_pattern) |pattern| {
+        std.debug.print("  CFA pattern", .{});
+        for (pattern[0..info.cfa_pattern_count]) |value| std.debug.print(" {}", .{value});
+        std.debug.print("\n", .{});
+    }
+    for (info.ifds[0..info.ifd_count], 0..) |ifd, index| {
+        std.debug.print(
+            "  IFD {}{s}: offset {}, {}x{}, bits {}, samples {}, compression {}, photometric {}, sample-format {}, subIFDs {}\n",
+            .{
+                index,
+                if (ifd.is_subifd) " sub" else "",
+                ifd.offset,
+                ifd.width orelse 0,
+                ifd.height orelse 0,
+                ifd.bits_per_sample orelse 0,
+                ifd.samples_per_pixel orelse 0,
+                ifd.compression orelse 0,
+                ifd.photometric orelse 0,
+                ifd.sample_format orelse 1,
+                ifd.subifd_count,
+            },
+        );
+    }
 }
 
 fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -711,6 +766,7 @@ fn usage() void {
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
+        \\  z2000 dng-info <input.dng>
         \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2>

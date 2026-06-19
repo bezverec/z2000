@@ -3,6 +3,7 @@ const bitplane = @import("bitplane.zig");
 const color = @import("color.zig");
 const codec = @import("codec.zig");
 const codestream = @import("codestream.zig");
+const dng = @import("formats/dng.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const jp2 = @import("jp2.zig");
@@ -209,6 +210,73 @@ test "TIFF parser reads uncompressed RGB strip" {
     try std.testing.expectEqual(@as(usize, 1), rgb.height);
     try std.testing.expectEqual(@as(u8, 8), rgb.bit_depth);
     try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, rgb.samples);
+}
+
+test "DNG info parser reads primary IFD metadata and SubIFD summaries" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    const ifd0_offset: u32 = 8;
+    const ifd0_entries: u16 = 15;
+    const ifd0_end: u32 = ifd0_offset + 2 + @as(u32, ifd0_entries) * 12 + 4;
+    const make_offset = ifd0_end;
+    const model_offset = make_offset + 6;
+    const unique_offset = model_offset + 6;
+    const subifd_offset = unique_offset + 10;
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, ifd0_offset);
+
+    try appendU16Le(allocator, &bytes, ifd0_entries);
+    try appendIfdEntryLe(allocator, &bytes, 254, 4, 1, 0);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 1, 16);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 32803);
+    try appendIfdEntryLe(allocator, &bytes, 271, 2, 6, make_offset);
+    try appendIfdEntryLe(allocator, &bytes, 272, 2, 6, model_offset);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 330, 4, 1, subifd_offset);
+    try appendIfdEntryLe(allocator, &bytes, 33421, 3, 2, 2 | (@as(u32, 2) << 16));
+    try appendIfdEntryLe(allocator, &bytes, 33422, 1, 4, 0 | (@as(u32, 1) << 8) | (@as(u32, 1) << 16) | (@as(u32, 2) << 24));
+    try appendIfdEntryLe(allocator, &bytes, 50706, 1, 4, 1 | (@as(u32, 4) << 8));
+    try appendIfdEntryLe(allocator, &bytes, 50707, 1, 4, 1 | (@as(u32, 1) << 8));
+    try appendIfdEntryLe(allocator, &bytes, 50708, 2, 10, unique_offset);
+    try appendU32Le(allocator, &bytes, 0);
+    try bytes.appendSlice(allocator, "Codex\x00");
+    try bytes.appendSlice(allocator, "Z2000\x00");
+    try bytes.appendSlice(allocator, "Synthetic\x00");
+    try std.testing.expectEqual(@as(usize, subifd_offset), bytes.items.len);
+
+    try appendU16Le(allocator, &bytes, 8);
+    try appendIfdEntryLe(allocator, &bytes, 254, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 640);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 480);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, subifd_offset + 2 + 8 * 12 + 4);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 339, 3, 1, 1);
+    try appendU32Le(allocator, &bytes, 0);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+
+    const info = try dng.parseInfo(bytes.items);
+    try std.testing.expectEqualStrings("Codex", info.make.?);
+    try std.testing.expectEqualStrings("Z2000", info.model.?);
+    try std.testing.expectEqualStrings("Synthetic", info.unique_camera_model.?);
+    try std.testing.expectEqual(@as(usize, 2), info.ifd_count);
+    try std.testing.expectEqual(@as(u8, 1), info.dng_version.?.bytes[0]);
+    try std.testing.expectEqual(@as(u8, 4), info.dng_version.?.bytes[1]);
+    try std.testing.expectEqual(@as(u16, 2), info.cfa_repeat.?[0]);
+    try std.testing.expectEqual(@as(u8, 2), info.cfa_pattern.?[3]);
+    try std.testing.expectEqual(@as(u32, 640), info.ifds[1].width.?);
+    try std.testing.expectEqual(@as(u16, 3), info.ifds[1].samples_per_pixel.?);
+    try std.testing.expect(info.ifds[1].is_subifd);
 }
 
 test "JP2 wrapper records RGB image header" {
