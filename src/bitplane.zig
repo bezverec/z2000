@@ -10,6 +10,8 @@ pub const BitplaneError = error{
 
 const scan_lanes = simd.i32_lanes;
 const ScanVector = @Vector(scan_lanes, i32);
+const ScanMaskVector = @Vector(scan_lanes, u32);
+const scan_lane_masks = makeScanLaneMasks();
 
 const BlockScan = struct {
     active_rect: subband.Rect,
@@ -161,10 +163,11 @@ pub fn encodeBlockPassesScratch(
             const coeff = plane[row + active_rect.x + x];
             const mag = magnitude(coeff);
             const is_significant = mag != 0;
-            significance.writeBitAssumeCapacity(is_significant);
             if (is_significant) {
-                significance.writeBitAssumeCapacity(coeff < 0);
+                significance.writePresentAndSignAssumeCapacity(coeff < 0);
                 scratch.magnitudes.appendAssumeCapacity(mag);
+            } else {
+                significance.writeBitAssumeCapacity(false);
             }
         }
     }
@@ -260,13 +263,16 @@ fn scanChunk(values: *const [scan_lanes]i32) ScanChunk {
     const abs_values = @select(i32, coeffs < zero, -coeffs, coeffs);
     const max_mag = @as(u32, @intCast(@reduce(.Max, abs_values)));
     const non_zero = coeffs != zero;
-
-    var mask: u32 = 0;
-    const lanes: [scan_lanes]bool = non_zero;
-    inline for (0..scan_lanes) |lane| {
-        if (lanes[lane]) mask |= @as(u32, 1) << @as(u5, @intCast(lane));
-    }
+    const mask = @reduce(.Or, @select(u32, non_zero, scan_lane_masks, @as(ScanMaskVector, @splat(0))));
     return .{ .mask = mask, .max_mag = max_mag };
+}
+
+fn makeScanLaneMasks() ScanMaskVector {
+    var masks: [scan_lanes]u32 = undefined;
+    inline for (0..scan_lanes) |lane| {
+        masks[lane] = @as(u32, 1) << @as(u5, @intCast(lane));
+    }
+    return masks;
 }
 
 pub fn encodeBlock(
@@ -510,6 +516,27 @@ const BitWriter = struct {
             self.current = 0;
             self.used = 0;
         }
+    }
+
+    fn writePresentAndSignAssumeCapacity(self: *BitWriter, negative: bool) void {
+        if (self.used <= 6) {
+            self.current |= @as(u8, 1) << @as(u3, @intCast(7 - self.used));
+            if (negative) {
+                self.current |= @as(u8, 1) << @as(u3, @intCast(6 - self.used));
+            }
+            self.used += 2;
+            if (self.used == 8) {
+                self.bytes.appendAssumeCapacity(self.current);
+                self.current = 0;
+                self.used = 0;
+            }
+            return;
+        }
+
+        self.current |= 1;
+        self.bytes.appendAssumeCapacity(self.current);
+        self.current = if (negative) 0x80 else 0;
+        self.used = 1;
     }
 
     fn writeMagnitudeBitsAssumeCapacity(self: *BitWriter, magnitudes: []const u32, bit_index: u5) void {
