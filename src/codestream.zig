@@ -27,6 +27,7 @@ const Marker = enum(u16) {
 
 const temporary_magic_v0 = "ZJ2K-CBLK-BP0";
 const temporary_magic_v1 = "ZJ2K-CBLK-BP1";
+const temporary_magic_v2 = "ZJ2K-CBLK-BP2";
 
 pub const PassKind = enum(u8) {
     significance = 0,
@@ -71,6 +72,8 @@ pub const TemporaryStats = struct {
     block_width: u16,
     block_height: u16,
     tile_part_divisions: ?u8,
+    tile_part_plan_count: u8,
+    tile_part_plan: [33]u8,
     payload_bytes: usize,
     codestream_bytes: usize,
     components: [3]ComponentStats,
@@ -340,6 +343,8 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
         .block_width = header.block_width,
         .block_height = header.block_height,
         .tile_part_divisions = header.tile_part_divisions,
+        .tile_part_plan_count = header.tile_part_plan_count,
+        .tile_part_plan = header.tile_part_plan,
         .payload_bytes = payload.len,
         .codestream_bytes = bytes.len,
         .components = [_]ComponentStats{.{}} ** 3,
@@ -533,6 +538,8 @@ const TemporaryHeader = struct {
     block_width: u16,
     block_height: u16,
     tile_part_divisions: ?u8,
+    tile_part_plan_count: u8,
+    tile_part_plan: [33]u8,
 };
 
 fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
@@ -541,6 +548,8 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         0
     else if (std.mem.eql(u8, magic, temporary_magic_v1))
         1
+    else if (std.mem.eql(u8, magic, temporary_magic_v2))
+        2
     else
         return CodestreamError.UnsupportedPayload;
 
@@ -551,6 +560,7 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
     const block_width = try cursor.readU16();
     const block_height = try cursor.readU16();
     const tile_part_divisions = if (version >= 1) try readTilePartDivisions(cursor) else null;
+    const tile_part_plan = if (version >= 2) try readTilePartPlan(cursor) else emptyTilePartPlan();
 
     return .{
         .width = width,
@@ -560,12 +570,40 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         .block_width = block_width,
         .block_height = block_height,
         .tile_part_divisions = tile_part_divisions,
+        .tile_part_plan_count = tile_part_plan.count,
+        .tile_part_plan = tile_part_plan.entries,
     };
 }
 
 fn readTilePartDivisions(cursor: *Cursor) !?u8 {
     const value = try cursor.readU8();
     return if (value == 0) null else value;
+}
+
+const TilePartPlan = struct {
+    count: u8,
+    entries: [33]u8,
+};
+
+fn emptyTilePartPlan() TilePartPlan {
+    return .{
+        .count = 0,
+        .entries = [_]u8{0} ** 33,
+    };
+}
+
+fn readTilePartPlan(cursor: *Cursor) !TilePartPlan {
+    var plan = emptyTilePartPlan();
+    const count = try cursor.readU8();
+    if (count > plan.entries.len) return CodestreamError.InvalidCodestream;
+    plan.count = count;
+
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        plan.entries[index] = try cursor.readU8();
+    }
+
+    return plan;
 }
 
 fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_component: u8) !void {
@@ -704,7 +742,7 @@ fn appendTemporaryPayload(
     levels: u8,
     options: LosslessOptions,
 ) !void {
-    try out.appendSlice(allocator, temporary_magic_v1);
+    try out.appendSlice(allocator, temporary_magic_v2);
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.width)));
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.height)));
     try out.append(allocator, planes.bit_depth);
@@ -712,6 +750,7 @@ fn appendTemporaryPayload(
     try appendU16Be(allocator, out, options.block_width);
     try appendU16Be(allocator, out, options.block_height);
     try out.append(allocator, options.tile_part_divisions orelse 0);
+    try appendTilePartPlan(allocator, out, levels, options);
 
     const bands = try subband.makeBands(allocator, planes.width, planes.height, levels);
     defer allocator.free(bands);
@@ -721,6 +760,25 @@ fn appendTemporaryPayload(
     try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks);
     try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks);
     try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks);
+}
+
+fn appendTilePartPlan(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    levels: u8,
+    options: LosslessOptions,
+) !void {
+    if (options.tile_part_divisions != 'R') {
+        try out.append(allocator, 0);
+        return;
+    }
+
+    const resolution_count = try std.math.add(u8, levels, 1);
+    try out.append(allocator, resolution_count);
+    var resolution: u8 = 0;
+    while (resolution < resolution_count) : (resolution += 1) {
+        try out.append(allocator, resolution);
+    }
 }
 
 fn appendMarker(allocator: std.mem.Allocator, out: *std.ArrayList(u8), marker: Marker) !void {

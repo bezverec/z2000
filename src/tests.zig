@@ -291,7 +291,7 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sod")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eoc")));
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP2") != null);
 
     const sot_index = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     const psot = try codestream.firstSotPsot(bytes);
@@ -531,6 +531,9 @@ test "temporary codestream analyzer reports block and stream stats" {
     try std.testing.expectEqual(@as(u16, 32), stats.block_width);
     try std.testing.expectEqual(@as(u16, 32), stats.block_height);
     try std.testing.expectEqual(@as(?u8, 'R'), stats.tile_part_divisions);
+    try std.testing.expectEqual(@as(u8, 2), stats.tile_part_plan_count);
+    try std.testing.expectEqual(@as(u8, 0), stats.tile_part_plan[0]);
+    try std.testing.expectEqual(@as(u8, 1), stats.tile_part_plan[1]);
     try std.testing.expect(stats.payload_bytes < stats.codestream_bytes);
     try std.testing.expect(stats.components[0].blocks > 0);
     try std.testing.expect(stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.significance)].streams > 0);
@@ -538,6 +541,72 @@ test "temporary codestream analyzer reports block and stream stats" {
         @as(u64, 0),
         stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.cleanup)].raw_bytes,
     );
+}
+
+test "temporary payload records resolution ordered tile-part plan" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast(i % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 3) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 7) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+        .block_width = 32,
+        .block_height = 32,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(bytes);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(?u8, 'R'), stats.tile_part_divisions);
+    try std.testing.expectEqual(@as(u8, 4), stats.tile_part_plan_count);
+    try std.testing.expectEqual(@as(u8, 0), stats.tile_part_plan[0]);
+    try std.testing.expectEqual(@as(u8, 1), stats.tile_part_plan[1]);
+    try std.testing.expectEqual(@as(u8, 2), stats.tile_part_plan[2]);
+    try std.testing.expectEqual(@as(u8, 3), stats.tile_part_plan[3]);
+}
+
+test "temporary payload omits tile-part plan when tile parts are disabled" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 64,
+        .block_height = 64,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(bytes);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(?u8, null), stats.tile_part_divisions);
+    try std.testing.expectEqual(@as(u8, 0), stats.tile_part_plan_count);
 }
 
 test "lossless options are reflected in SIZ and COD marker skeleton" {

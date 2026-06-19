@@ -374,7 +374,7 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
 
 fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void {
     std.debug.print(
-        "JP2 temporary payload stats: {s}: {}x{}, {} bits/channel, levels {}, block {}x{}, tile-parts {s}\n",
+        "JP2 temporary payload stats: {s}: {}x{}, {} bits/channel, levels {}, block {}x{}, tile-parts {s}",
         .{
             path,
             stats.width,
@@ -386,6 +386,15 @@ fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void 
             tilePartDivisionLabel(stats.tile_part_divisions),
         },
     );
+    if (stats.tile_part_plan_count > 0) {
+        std.debug.print(", plan ", .{});
+        var index: usize = 0;
+        while (index < stats.tile_part_plan_count) : (index += 1) {
+            if (index > 0) std.debug.print(",", .{});
+            std.debug.print("R{}", .{stats.tile_part_plan[index]});
+        }
+    }
+    std.debug.print("\n", .{});
     std.debug.print(
         "  codestream {} bytes, temporary payload {} bytes\n",
         .{ stats.codestream_bytes, stats.payload_bytes },

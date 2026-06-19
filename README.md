@@ -139,7 +139,7 @@ zig build run -- tiff-to-jp2 example.tif example.jp2 \
 
 These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`QCD`/
 `TLM`) and temporary payload metadata. `--tile-parts R` is recorded as a
-resolution-ordered tile-part plan in temporary payload version `BP1`. Real RPCL
+resolution-ordered tile-part plan in temporary payload version `BP2`. Real RPCL
 packet ordering, precinct packetization, SOP/EPH marker emission inside
 packets, physical multi-tile-part division by resolution, quality layers,
 EBCOT pass behavior for each code-block style bit, and rate control still
