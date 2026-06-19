@@ -170,14 +170,14 @@ fn forward53Line(data: []i32, scratch: []i32) void {
     var i: usize = 1;
     while (i < data.len) : (i += 2) {
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] -= @divFloor(data[i - 1] + right, 2);
+        data[i] -= floorHalf(data[i - 1] + right);
     }
 
     i = 0;
     while (i < data.len) : (i += 2) {
         const left = if (i > 0) data[i - 1] else data[1];
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] += @divFloor(left + right + 2, 4);
+        data[i] += floorQuarterBiased(left + right);
     }
 
     packEvenOdd(data, scratch);
@@ -191,14 +191,22 @@ fn inverse53Line(data: []i32, scratch: []i32) void {
     while (i < data.len) : (i += 2) {
         const left = if (i > 0) data[i - 1] else data[1];
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] -= @divFloor(left + right + 2, 4);
+        data[i] -= floorQuarterBiased(left + right);
     }
 
     i = 1;
     while (i < data.len) : (i += 2) {
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] += @divFloor(data[i - 1] + right, 2);
+        data[i] += floorHalf(data[i - 1] + right);
     }
+}
+
+fn floorHalf(value: i32) i32 {
+    return value >> 1;
+}
+
+fn floorQuarterBiased(value: i32) i32 {
+    return (value + 2) >> 2;
 }
 
 fn packEvenOdd(data: []i32, scratch: []i32) void {

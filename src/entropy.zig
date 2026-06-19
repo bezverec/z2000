@@ -36,6 +36,22 @@ pub const EncodedView = struct {
     }
 };
 
+pub const Scratch = struct {
+    allocator: std.mem.Allocator,
+    rle: std.ArrayList(u8) = .empty,
+    bit_rle: std.ArrayList(u8) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) Scratch {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Scratch) void {
+        self.rle.deinit(self.allocator);
+        self.bit_rle.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
 pub fn encodeWithMethod(allocator: std.mem.Allocator, method: Method, input: []const u8) !Encoded {
     return switch (method) {
         .raw => .{
@@ -61,41 +77,40 @@ pub fn encodeAuto(allocator: std.mem.Allocator, input: []const u8) !Encoded {
 }
 
 pub fn encodeAutoBorrowingRaw(allocator: std.mem.Allocator, input: []const u8) !EncodedView {
-    var rle = try encodeRle(allocator, input);
-    errdefer rle.deinit(allocator);
-    var maybe_bit_rle: ?Encoded = if (shouldTryBitRle(input))
-        try encodeBitRle(allocator, input)
+    var scratch = Scratch.init(allocator);
+    defer scratch.deinit();
+
+    const view = try encodeAutoBorrowingRawScratch(&scratch, input);
+    if (view.method == .raw) {
+        return view;
+    }
+
+    const owned = try allocator.dupe(u8, view.bytes);
+    return .{
+        .method = view.method,
+        .raw_len = view.raw_len,
+        .bytes = owned,
+        .owned_bytes = owned,
+    };
+}
+
+pub fn encodeAutoBorrowingRawScratch(scratch: *Scratch, input: []const u8) !EncodedView {
+    const rle = try encodeRleInto(scratch, input);
+    const bit_rle = if (shouldTryBitRle(input))
+        try encodeBitRleInto(scratch, input)
     else
         null;
-    errdefer if (maybe_bit_rle) |*bit_rle| bit_rle.deinit(allocator);
 
-    if (maybe_bit_rle) |*bit_rle| {
-        if (bit_rle.bytes.len < input.len and bit_rle.bytes.len <= rle.bytes.len) {
-            rle.deinit(allocator);
-            const result = EncodedView{
-                .method = bit_rle.method,
-                .raw_len = bit_rle.raw_len,
-                .bytes = bit_rle.bytes,
-                .owned_bytes = bit_rle.bytes,
-            };
-            maybe_bit_rle = null;
-            return result;
+    if (bit_rle) |view| {
+        if (view.bytes.len < input.len and view.bytes.len <= rle.bytes.len) {
+            return view;
         }
     }
 
     if (rle.bytes.len < input.len) {
-        if (maybe_bit_rle) |*bit_rle| bit_rle.deinit(allocator);
-        maybe_bit_rle = null;
-        return .{
-            .method = rle.method,
-            .raw_len = rle.raw_len,
-            .bytes = rle.bytes,
-            .owned_bytes = rle.bytes,
-        };
+        return rle;
     }
 
-    if (maybe_bit_rle) |*bit_rle| bit_rle.deinit(allocator);
-    rle.deinit(allocator);
     return .{
         .method = .raw,
         .raw_len = @as(u32, @intCast(input.len)),
@@ -134,21 +149,31 @@ fn decodeRaw(allocator: std.mem.Allocator, raw_len: u32, encoded: []const u8) ![
 }
 
 fn encodeRle(allocator: std.mem.Allocator, input: []const u8) !Encoded {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
+    var scratch = Scratch.init(allocator);
+    defer scratch.deinit();
 
+    const view = try encodeRleInto(&scratch, input);
+    return .{
+        .method = view.method,
+        .raw_len = view.raw_len,
+        .bytes = try allocator.dupe(u8, view.bytes),
+    };
+}
+
+fn encodeRleInto(scratch: *Scratch, input: []const u8) !EncodedView {
+    scratch.rle.clearRetainingCapacity();
     var literal_start: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
         const run_len = repeatedRun(input, i);
         if (run_len >= 4) {
-            try flushLiteral(allocator, &out, input[literal_start..i]);
+            try flushLiteral(scratch.allocator, &scratch.rle, input[literal_start..i]);
             var remaining = run_len;
             while (remaining > 0) {
                 const chunk = @min(remaining, 255);
-                try out.append(allocator, 1);
-                try out.append(allocator, @as(u8, @intCast(chunk)));
-                try out.append(allocator, input[i]);
+                try scratch.rle.append(scratch.allocator, 1);
+                try scratch.rle.append(scratch.allocator, @as(u8, @intCast(chunk)));
+                try scratch.rle.append(scratch.allocator, input[i]);
                 remaining -= chunk;
             }
             i += run_len;
@@ -158,11 +183,11 @@ fn encodeRle(allocator: std.mem.Allocator, input: []const u8) !Encoded {
         }
     }
 
-    try flushLiteral(allocator, &out, input[literal_start..]);
+    try flushLiteral(scratch.allocator, &scratch.rle, input[literal_start..]);
     return .{
         .method = .rle,
         .raw_len = @as(u32, @intCast(input.len)),
-        .bytes = try out.toOwnedSlice(allocator),
+        .bytes = scratch.rle.items,
     };
 }
 
@@ -200,14 +225,24 @@ fn decodeRle(allocator: std.mem.Allocator, raw_len: u32, encoded: []const u8) ![
 }
 
 fn encodeBitRle(allocator: std.mem.Allocator, input: []const u8) !Encoded {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
+    var scratch = Scratch.init(allocator);
+    defer scratch.deinit();
 
+    const view = try encodeBitRleInto(&scratch, input);
+    return .{
+        .method = view.method,
+        .raw_len = view.raw_len,
+        .bytes = try allocator.dupe(u8, view.bytes),
+    };
+}
+
+fn encodeBitRleInto(scratch: *Scratch, input: []const u8) !EncodedView {
+    scratch.bit_rle.clearRetainingCapacity();
     if (input.len == 0) {
         return .{
             .method = .bit_rle,
             .raw_len = 0,
-            .bytes = try out.toOwnedSlice(allocator),
+            .bytes = scratch.bit_rle.items,
         };
     }
 
@@ -220,17 +255,17 @@ fn encodeBitRle(allocator: std.mem.Allocator, input: []const u8) !Encoded {
         if (bit == current and run_len < 127) {
             run_len += 1;
         } else {
-            try appendBitRun(allocator, &out, current, run_len);
+            try appendBitRun(scratch.allocator, &scratch.bit_rle, current, run_len);
             current = bit;
             run_len = 1;
         }
     }
-    try appendBitRun(allocator, &out, current, run_len);
+    try appendBitRun(scratch.allocator, &scratch.bit_rle, current, run_len);
 
     return .{
         .method = .bit_rle,
         .raw_len = @as(u32, @intCast(input.len)),
-        .bytes = try out.toOwnedSlice(allocator),
+        .bytes = scratch.bit_rle.items,
     };
 }
 

@@ -806,6 +806,8 @@ fn appendComponentPayload(
 
     var scratch = bitplane.BlockScratch.init(allocator);
     defer scratch.deinit();
+    var entropy_scratch = entropy.Scratch.init(allocator);
+    defer entropy_scratch.deinit();
 
     for (blocks) |block| {
         try appendU16Be(allocator, out, @as(u16, @intCast(block.band_index)));
@@ -816,9 +818,9 @@ fn appendComponentPayload(
         try appendRect(allocator, out, encoded.active_rect);
         try out.append(allocator, encoded.bitplanes);
         try appendU32Be(allocator, out, encoded.non_zero_count);
-        try appendEntropyStream(allocator, out, encoded.significance_bytes);
-        try appendEntropyStream(allocator, out, encoded.refinement_bytes);
-        try appendEntropyStream(allocator, out, encoded.cleanup_bytes);
+        try appendEntropyStream(allocator, out, &entropy_scratch, encoded.significance_bytes);
+        try appendEntropyStream(allocator, out, &entropy_scratch, encoded.refinement_bytes);
+        try appendEntropyStream(allocator, out, &entropy_scratch, encoded.cleanup_bytes);
     }
 }
 
@@ -956,10 +958,10 @@ fn readEntropyStreamInfo(cursor: *Cursor) !EntropyStreamInfo {
 fn appendEntropyStream(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
+    scratch: *entropy.Scratch,
     bytes: []const u8,
 ) !void {
-    var encoded = try entropy.encodeAutoBorrowingRaw(allocator, bytes);
-    defer encoded.deinit(allocator);
+    const encoded = try entropy.encodeAutoBorrowingRawScratch(scratch, bytes);
 
     try out.append(allocator, @intFromEnum(encoded.method));
     try appendU32Be(allocator, out, encoded.raw_len);

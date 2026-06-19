@@ -143,6 +143,11 @@ pub fn encodeBlockPassesScratch(
     const bitplanes = bitPlaneCount(scan.max_mag);
     var significance = &scratch.significance;
     var refinement = &scratch.refinement;
+    const active_area = try std.math.mul(usize, active_rect.width, active_rect.height);
+    const significance_bits = try std.math.add(usize, active_area, scan.non_zero_count);
+    const refinement_bits = try std.math.mul(usize, scan.non_zero_count, bitplanes);
+    try significance.ensureUnusedBits(significance_bits);
+    try refinement.ensureUnusedBits(refinement_bits);
 
     var y: usize = 0;
     while (y < active_rect.height) : (y += 1) {
@@ -152,9 +157,9 @@ pub fn encodeBlockPassesScratch(
             const coeff = plane[row + active_rect.x + x];
             const mag = magnitude(coeff);
             const is_significant = mag != 0;
-            try significance.writeBit(is_significant);
+            significance.writeBitAssumeCapacity(is_significant);
             if (is_significant) {
-                try significance.writeBit(coeff < 0);
+                significance.writeBitAssumeCapacity(coeff < 0);
             }
         }
     }
@@ -169,7 +174,7 @@ pub fn encodeBlockPassesScratch(
             while (x < active_rect.width) : (x += 1) {
                 const mag = magnitude(plane[row + active_rect.x + x]);
                 if (mag != 0) {
-                    try refinement.writeBit(((mag >> @as(u5, @intCast(bitplane_index))) & 1) != 0);
+                    refinement.writeBitAssumeCapacity(((mag >> @as(u5, @intCast(bitplane_index))) & 1) != 0);
                 }
             }
         }
@@ -490,6 +495,22 @@ const BitWriter = struct {
         self.used += 1;
         if (self.used == 8) {
             try self.bytes.append(self.allocator, self.current);
+            self.current = 0;
+            self.used = 0;
+        }
+    }
+
+    fn ensureUnusedBits(self: *BitWriter, bit_count: usize) !void {
+        try self.bytes.ensureUnusedCapacity(self.allocator, (bit_count + 7) / 8);
+    }
+
+    fn writeBitAssumeCapacity(self: *BitWriter, bit: bool) void {
+        if (bit) {
+            self.current |= @as(u8, 1) << @as(u3, @intCast(7 - self.used));
+        }
+        self.used += 1;
+        if (self.used == 8) {
+            self.bytes.appendAssumeCapacity(self.current);
             self.current = 0;
             self.used = 0;
         }
