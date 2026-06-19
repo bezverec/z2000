@@ -674,6 +674,40 @@ test "bitplane refinement packing roundtrips full vector groups" {
     try std.testing.expectEqualSlices(i32, original[0..], decoded[0..]);
 }
 
+test "bitplane significance writer preserves unaligned zero SIMD groups" {
+    const allocator = std.testing.allocator;
+    const original = [_]i32{
+        1, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 1,
+    };
+    var decoded = [_]i32{0} ** original.len;
+
+    var encoded = try bitplane.encodeBlock(allocator, original[0..], 12, .{
+        .x = 0,
+        .y = 0,
+        .width = 12,
+        .height = 1,
+    });
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u8, 1), encoded.bitplanes);
+    try std.testing.expectEqual(@as(u32, 2), encoded.non_zero_count);
+    try std.testing.expectEqualSlices(u8, &.{ 0x80, 0x08 }, encoded.significance_bytes);
+    try std.testing.expectEqualSlices(u8, &.{0xc0}, encoded.refinement_bytes);
+
+    try bitplane.decodeBlock(
+        decoded[0..],
+        12,
+        encoded.active_rect,
+        encoded.bitplanes,
+        encoded.non_zero_count,
+        encoded.bytes,
+    );
+
+    try std.testing.expectEqualSlices(i32, original[0..], decoded[0..]);
+}
+
 test "temporary lossless codestream roundtrips RGB samples" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{

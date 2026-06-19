@@ -169,6 +169,25 @@ pub fn encodeBlockPassesScratch(
     while (y < active_rect.height) : (y += 1) {
         const row = (active_rect.y + y) * stride;
         var x: usize = 0;
+        while (x + scan_lanes <= active_rect.width) : (x += scan_lanes) {
+            const values = plane[row + active_rect.x + x ..][0..scan_lanes];
+            const chunk = scanChunk(values);
+            if (chunk.mask == 0) {
+                significance.writeZeroBitsAssumeCapacity(scan_lanes);
+                continue;
+            }
+
+            inline for (0..scan_lanes) |lane| {
+                if ((chunk.mask & (@as(u32, 1) << @as(u5, @intCast(lane)))) != 0) {
+                    const coeff = values[lane];
+                    significance.writePresentAndSignAssumeCapacity(coeff < 0);
+                    scratch.magnitudes.appendAssumeCapacity(magnitude(coeff));
+                } else {
+                    significance.writeBitAssumeCapacity(false);
+                }
+            }
+        }
+
         while (x < active_rect.width) : (x += 1) {
             const coeff = plane[row + active_rect.x + x];
             const mag = magnitude(coeff);
@@ -523,6 +542,21 @@ const BitWriter = struct {
             self.bytes.appendAssumeCapacity(self.current);
             self.current = 0;
             self.used = 0;
+        }
+    }
+
+    fn writeZeroBitsAssumeCapacity(self: *BitWriter, count: usize) void {
+        var remaining = count;
+        while (remaining > 0 and self.used != 0) : (remaining -= 1) {
+            self.writeBitAssumeCapacity(false);
+        }
+
+        while (remaining >= 8) : (remaining -= 8) {
+            self.bytes.appendAssumeCapacity(0);
+        }
+
+        if (remaining > 0) {
+            self.used = @intCast(remaining);
         }
     }
 
