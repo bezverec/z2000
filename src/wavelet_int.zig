@@ -1,4 +1,5 @@
 const std = @import("std");
+const simd = @import("simd.zig");
 
 pub const TransformError = error{
     InvalidDimensions,
@@ -10,6 +11,10 @@ const LevelShape = struct {
     height: usize,
 };
 
+const vertical_lanes = simd.i32_lanes;
+const VerticalVector = @Vector(vertical_lanes, i32);
+const ShiftVector = @Vector(vertical_lanes, u5);
+
 pub const Workspace = struct {
     allocator: std.mem.Allocator,
     line: []i32,
@@ -19,7 +24,8 @@ pub const Workspace = struct {
         if (max_dim == 0) return TransformError.InvalidDimensions;
         const line = try allocator.alloc(i32, max_dim);
         errdefer allocator.free(line);
-        const scratch = try allocator.alloc(i32, max_dim);
+        const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
+        const scratch = try allocator.alloc(i32, scratch_len);
         errdefer allocator.free(scratch);
         return .{
             .allocator = allocator,
@@ -35,7 +41,8 @@ pub const Workspace = struct {
     }
 
     fn require(self: Workspace, max_dim: usize) !void {
-        if (self.line.len < max_dim or self.scratch.len < max_dim) {
+        const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
+        if (self.line.len < max_dim or self.scratch.len < scratch_len) {
             return TransformError.InvalidDimensions;
         }
     }
@@ -72,7 +79,6 @@ pub fn forward53WithWorkspace(
 
     const max_dim = @max(width, height);
     try workspace.require(max_dim);
-    const line = workspace.line;
     const scratch = workspace.scratch;
 
     var cur_width = width;
@@ -83,11 +89,7 @@ pub fn forward53WithWorkspace(
             forward53Line(rowSlice(data, width, row, cur_width), scratch[0..cur_width]);
         }
 
-        for (0..cur_width) |col| {
-            for (0..cur_height) |row| line[row] = data[row * width + col];
-            forward53Line(line[0..cur_height], scratch[0..cur_height]);
-            for (0..cur_height) |row| data[row * width + col] = line[row];
-        }
+        forward53Columns(data, width, cur_width, cur_height, scratch);
 
         cur_width = lowCount(cur_width);
         cur_height = lowCount(cur_height);
@@ -183,6 +185,96 @@ fn forward53Line(data: []i32, scratch: []i32) void {
     packEvenOdd(data, scratch);
 }
 
+fn forward53Columns(data: []i32, stride: usize, width: usize, height: usize, scratch: []i32) void {
+    if (height < 2) return;
+
+    var col: usize = 0;
+    while (col + vertical_lanes <= width) : (col += vertical_lanes) {
+        forward53ColumnVector(data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+    }
+    while (col < width) : (col += 1) {
+        forward53ColumnScalar(data, stride, col, height, scratch[0..height]);
+    }
+}
+
+fn forward53ColumnVector(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
+    var row: usize = 1;
+    while (row < height) : (row += 2) {
+        const right = if (row + 1 < height)
+            loadVector(data, stride, row + 1, col)
+        else
+            loadVector(data, stride, row - 1, col);
+        const updated = loadVector(data, stride, row, col) -
+            floorHalfVector(loadVector(data, stride, row - 1, col) + right);
+        storeVector(data, stride, row, col, updated);
+    }
+
+    row = 0;
+    while (row < height) : (row += 2) {
+        const left = if (row > 0)
+            loadVector(data, stride, row - 1, col)
+        else
+            loadVector(data, stride, 1, col);
+        const right = if (row + 1 < height)
+            loadVector(data, stride, row + 1, col)
+        else
+            loadVector(data, stride, row - 1, col);
+        const updated = loadVector(data, stride, row, col) + floorQuarterBiasedVector(left + right);
+        storeVector(data, stride, row, col, updated);
+    }
+
+    var out: usize = 0;
+    row = 0;
+    while (row < height) : (row += 2) {
+        storeScratchVector(scratch, out, loadVector(data, stride, row, col));
+        out += 1;
+    }
+
+    row = 1;
+    while (row < height) : (row += 2) {
+        storeScratchVector(scratch, out, loadVector(data, stride, row, col));
+        out += 1;
+    }
+
+    row = 0;
+    while (row < height) : (row += 1) {
+        storeVector(data, stride, row, col, loadScratchVector(scratch, row));
+    }
+}
+
+fn forward53ColumnScalar(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
+    var row: usize = 1;
+    while (row < height) : (row += 2) {
+        const right = if (row + 1 < height) data[(row + 1) * stride + col] else data[(row - 1) * stride + col];
+        data[row * stride + col] -= floorHalf(data[(row - 1) * stride + col] + right);
+    }
+
+    row = 0;
+    while (row < height) : (row += 2) {
+        const left = if (row > 0) data[(row - 1) * stride + col] else data[stride + col];
+        const right = if (row + 1 < height) data[(row + 1) * stride + col] else data[(row - 1) * stride + col];
+        data[row * stride + col] += floorQuarterBiased(left + right);
+    }
+
+    var out: usize = 0;
+    row = 0;
+    while (row < height) : (row += 2) {
+        scratch[out] = data[row * stride + col];
+        out += 1;
+    }
+
+    row = 1;
+    while (row < height) : (row += 2) {
+        scratch[out] = data[row * stride + col];
+        out += 1;
+    }
+
+    row = 0;
+    while (row < height) : (row += 1) {
+        data[row * stride + col] = scratch[row];
+    }
+}
+
 fn inverse53Line(data: []i32, scratch: []i32) void {
     if (data.len < 2) return;
     unpackEvenOdd(data, scratch);
@@ -207,6 +299,30 @@ fn floorHalf(value: i32) i32 {
 
 fn floorQuarterBiased(value: i32) i32 {
     return (value + 2) >> 2;
+}
+
+fn floorHalfVector(value: VerticalVector) VerticalVector {
+    return value >> @as(ShiftVector, @splat(1));
+}
+
+fn floorQuarterBiasedVector(value: VerticalVector) VerticalVector {
+    return (value + @as(VerticalVector, @splat(2))) >> @as(ShiftVector, @splat(2));
+}
+
+fn loadVector(data: []const i32, stride: usize, row: usize, col: usize) VerticalVector {
+    return data[row * stride + col ..][0..vertical_lanes].*;
+}
+
+fn storeVector(data: []i32, stride: usize, row: usize, col: usize, value: VerticalVector) void {
+    data[row * stride + col ..][0..vertical_lanes].* = value;
+}
+
+fn loadScratchVector(scratch: []const i32, row: usize) VerticalVector {
+    return scratch[row * vertical_lanes ..][0..vertical_lanes].*;
+}
+
+fn storeScratchVector(scratch: []i32, row: usize, value: VerticalVector) void {
+    scratch[row * vertical_lanes ..][0..vertical_lanes].* = value;
 }
 
 fn packEvenOdd(data: []i32, scratch: []i32) void {
