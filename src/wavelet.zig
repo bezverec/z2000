@@ -29,7 +29,7 @@ const dwt97_gamma: f32 = 0.882911075530934;
 const dwt97_delta: f32 = 0.443506852043971;
 const dwt97_k: f32 = 1.1496043988602418;
 const dwt97_inv_k: f32 = 1.0 / dwt97_k;
-const ScalePairVector = @Vector(simd.f32_pair_lanes, f32);
+const F32PairVector = @Vector(simd.f32_pair_lanes, f32);
 
 pub fn forward2D(
     allocator: std.mem.Allocator,
@@ -200,10 +200,10 @@ fn inverse97(data: []f32, scratch: []f32) void {
 
 fn scaleEvenOdd(data: []f32, even_scale: f32, odd_scale: f32) void {
     // Adjacent even/odd samples map cleanly to 3DNow-style f32x2 scaling.
-    const scales: ScalePairVector = .{ even_scale, odd_scale };
+    const scales: F32PairVector = .{ even_scale, odd_scale };
     var i: usize = 0;
     while (i + simd.f32_pair_lanes <= data.len) : (i += simd.f32_pair_lanes) {
-        const pair: ScalePairVector = data[i..][0..simd.f32_pair_lanes].*;
+        const pair: F32PairVector = data[i..][0..simd.f32_pair_lanes].*;
         data[i..][0..simd.f32_pair_lanes].* = @as([simd.f32_pair_lanes]f32, pair * scales);
     }
     if (i < data.len) {
@@ -212,7 +212,19 @@ fn scaleEvenOdd(data: []f32, even_scale: f32, odd_scale: f32) void {
 }
 
 fn liftOdd(data: []f32, coefficient: f32) void {
+    const coeff: F32PairVector = @splat(coefficient);
     var i: usize = 1;
+    while (i + 2 < data.len) : (i += 4) {
+        const target: F32PairVector = .{ data[i], data[i + 2] };
+        const left: F32PairVector = .{ data[i - 1], data[i + 1] };
+        const right: F32PairVector = .{
+            data[i + 1],
+            data[if (i + 3 < data.len) i + 3 else i + 1],
+        };
+        const updated = target + coeff * (left + right);
+        data[i] = updated[0];
+        data[i + 2] = updated[1];
+    }
     while (i < data.len) : (i += 2) {
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
         data[i] += coefficient * (data[i - 1] + right);
@@ -220,7 +232,22 @@ fn liftOdd(data: []f32, coefficient: f32) void {
 }
 
 fn liftEven(data: []f32, coefficient: f32) void {
+    const coeff: F32PairVector = @splat(coefficient);
     var i: usize = 0;
+    while (i + 2 < data.len) : (i += 4) {
+        const target: F32PairVector = .{ data[i], data[i + 2] };
+        const left: F32PairVector = .{
+            if (i > 0) data[i - 1] else data[1],
+            data[i + 1],
+        };
+        const right: F32PairVector = .{
+            data[i + 1],
+            data[if (i + 3 < data.len) i + 3 else i + 1],
+        };
+        const updated = target + coeff * (left + right);
+        data[i] = updated[0];
+        data[i + 2] = updated[1];
+    }
     while (i < data.len) : (i += 2) {
         const left = if (i > 0) data[i - 1] else data[1];
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
