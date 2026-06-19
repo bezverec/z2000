@@ -273,22 +273,7 @@ fn forwardComponents53(
         };
     }
 
-    const active_threads: usize = @intCast(componentThreadCount(options));
-    const spawn_count = active_threads - 1;
-    var threads: [2]std.Thread = undefined;
-    var spawned: usize = 0;
-    while (spawned < spawn_count) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, dwtWorker, .{&jobs[spawned]}) catch |err| {
-            for (threads[0..spawned]) |thread| thread.join();
-            return err;
-        };
-    }
-    var component = spawned;
-    while (component < jobs.len) : (component += 1) {
-        dwtWorker(&jobs[component]);
-    }
-    for (threads[0..spawned]) |thread| thread.join();
-    for (jobs) |job| try job.result;
+    try runComponentJobs(DwtJob, &jobs, componentThreadCount(options), dwtWorker);
     return levels;
 }
 
@@ -303,6 +288,32 @@ fn dwtWorker(job: *DwtJob) void {
         return;
     };
     job.result = {};
+}
+
+fn runComponentJobs(
+    comptime Job: type,
+    jobs: *[3]Job,
+    thread_count: u8,
+    comptime worker: fn (*Job) void,
+) !void {
+    const active_threads: usize = @intCast(@min(thread_count, 3));
+    const spawn_count = active_threads - 1;
+    var threads: [2]std.Thread = undefined;
+    var spawned: usize = 0;
+    while (spawned < spawn_count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, worker, .{&jobs[spawned]}) catch |err| {
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+
+    var component = spawned;
+    while (component < jobs.len) : (component += 1) {
+        worker(&jobs[component]);
+    }
+
+    for (threads[0..spawned]) |thread| thread.join();
+    for (jobs) |job| try job.result;
 }
 
 fn actualDwtLevels(width: usize, height: usize, requested_levels: u8) u8 {
@@ -1303,22 +1314,7 @@ fn appendComponentPayloadsParallel(
     };
     defer for (&jobs) |*job| job.deinit();
 
-    const active_threads: usize = @intCast(componentThreadCount(options));
-    const spawn_count = active_threads - 1;
-    var threads: [2]std.Thread = undefined;
-    var spawned: usize = 0;
-    while (spawned < spawn_count) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, componentPayloadWorker, .{&jobs[spawned]}) catch |err| {
-            for (threads[0..spawned]) |thread| thread.join();
-            return err;
-        };
-    }
-    var component = spawned;
-    while (component < jobs.len) : (component += 1) {
-        componentPayloadWorker(&jobs[component]);
-    }
-    for (threads[0..spawned]) |thread| thread.join();
-    for (jobs) |job| try job.result;
+    try runComponentJobs(ComponentPayloadJob, &jobs, componentThreadCount(options), componentPayloadWorker);
     for (jobs) |job| try out.appendSlice(allocator, job.bytes);
 }
 
