@@ -88,6 +88,43 @@ test "T2 packet header bitstream inserts marker-safe stuff bits after 0xff" {
     try std.testing.expectEqual(out.items.len, reader.bytesConsumed());
 }
 
+test "T2 tag-tree encoder and decoder preserve threshold decisions" {
+    const allocator = std.testing.allocator;
+    const leaf_values = [_]u32{
+        0, 2,
+        1, 3,
+    };
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+    var encoder = try t2.TagTreeEncoder.init(allocator, 2, 2, leaf_values[0..]);
+    defer encoder.deinit();
+
+    try encoder.encode(0, 0, 1, &writer);
+    try encoder.encode(1, 0, 1, &writer);
+    try encoder.encode(0, 1, 2, &writer);
+    try encoder.encode(1, 1, 3, &writer);
+    try writer.finish();
+
+    var reader = t2.PacketHeaderReader.init(bytes.items);
+    var decoder = try t2.TagTreeDecoder.init(allocator, 2, 2);
+    defer decoder.deinit();
+
+    try std.testing.expect(try decoder.decode(0, 0, 1, &reader));
+    try std.testing.expect(!try decoder.decode(1, 0, 1, &reader));
+    try std.testing.expect(try decoder.decode(0, 1, 2, &reader));
+    try std.testing.expect(!try decoder.decode(1, 1, 3, &reader));
+    try reader.byteAlign();
+    try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
+}
+
+test "T2 zero bit-plane count bridges T1 block bitplane metadata" {
+    try std.testing.expectEqual(@as(u8, 5), try t2.zeroBitPlaneCount(8, 3));
+    try std.testing.expectEqual(@as(u8, 0), try t2.zeroBitPlaneCount(8, 8));
+    try std.testing.expectError(t2.PacketHeaderError.InvalidTagTree, t2.zeroBitPlaneCount(3, 4));
+}
+
 test "9/7 wavelet roundtrips within floating point tolerance" {
     const allocator = std.testing.allocator;
     const width = 6;

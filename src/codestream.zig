@@ -1240,6 +1240,7 @@ fn appendTemporaryPacketPayloads(
         const present = t2.readPacketPresenceHeader(bytes, &packet_cursor, packet_end) catch |err| switch (err) {
             t2.PacketHeaderError.TruncatedHeader => return CodestreamError.TruncatedData,
             t2.PacketHeaderError.InvalidMarkerStuffing => return CodestreamError.InvalidCodestream,
+            t2.PacketHeaderError.InvalidTagTree => return CodestreamError.InvalidCodestream,
         };
         const header = if (present) temporary_packet_header_non_empty else temporary_packet_header_empty;
         const header_body_start = packet_cursor;
