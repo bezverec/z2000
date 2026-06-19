@@ -22,6 +22,8 @@ const Marker = enum(u16) {
     tlm = 0xff55,
     qcd = 0xff5c,
     sot = 0xff90,
+    sop = 0xff91,
+    eph = 0xff92,
     sod = 0xff93,
     eoc = 0xffd9,
 };
@@ -263,11 +265,29 @@ fn encodeLosslessWithOptionsMeasured(
     try appendSiz(allocator, &out, rgb, options);
     try appendCod(allocator, &out, levels, options);
     try appendQcd(allocator, &out, levels, options);
-    const psot = try std.math.add(u32, 14, @as(u32, @intCast(tile_payload.items.len)));
-    if (options.tlm) try appendTlm(allocator, &out, psot);
-    try appendSot(allocator, &out, psot);
-    try appendMarker(allocator, &out, .sod);
-    try out.appendSlice(allocator, tile_payload.items);
+    const tile_parts = tilePartCountForOptions(levels, options);
+    var psots: [33]u32 = undefined;
+    var tile_part_index: usize = 0;
+    while (tile_part_index < tile_parts) : (tile_part_index += 1) {
+        const chunk = payloadChunk(tile_payload.items, tile_part_index, tile_parts);
+        const packet_markers = packetMarkerBytes(options);
+        psots[tile_part_index] = try std.math.add(u32, 14, @as(u32, @intCast(packet_markers + chunk.len)));
+    }
+
+    if (options.tlm) try appendTlm(allocator, &out, psots[0..tile_parts]);
+    var packet_sequence: u16 = 0;
+    tile_part_index = 0;
+    while (tile_part_index < tile_parts) : (tile_part_index += 1) {
+        const chunk = payloadChunk(tile_payload.items, tile_part_index, tile_parts);
+        try appendSot(allocator, &out, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
+        try appendMarker(allocator, &out, .sod);
+        if (options.sop) {
+            try appendSop(allocator, &out, packet_sequence);
+            packet_sequence +%= 1;
+        }
+        if (options.eph) try appendMarker(allocator, &out, .eph);
+        try out.appendSlice(allocator, chunk);
+    }
     try appendMarker(allocator, &out, .eoc);
     if (timings) |t| {
         t.marker_ns = elapsedNs(marker_start);
@@ -281,7 +301,8 @@ pub fn decodeLosslessTemporary(
     allocator: std.mem.Allocator,
     bytes: []const u8,
 ) !image.RgbImage {
-    const payload = try temporaryPayload(bytes);
+    const payload = try temporaryPayload(allocator, bytes);
+    defer allocator.free(payload);
     var cursor = Cursor.initWithAllocator(allocator, payload);
 
     const header = try readTemporaryHeader(&cursor);
@@ -329,8 +350,10 @@ pub fn decodeLosslessTemporary(
 }
 
 pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
-    const payload = try temporaryPayload(bytes);
-    var cursor = Cursor.initWithAllocator(std.heap.page_allocator, payload);
+    const allocator = std.heap.page_allocator;
+    const payload = try temporaryPayload(allocator, bytes);
+    defer allocator.free(payload);
+    var cursor = Cursor.initWithAllocator(allocator, payload);
 
     const header = try readTemporaryHeader(&cursor);
     const width = header.width;
@@ -457,45 +480,68 @@ pub fn firstTlmPtlm(bytes: []const u8) !u32 {
     return CodestreamError.InvalidCodestream;
 }
 
-fn temporaryPayload(bytes: []const u8) ![]const u8 {
+fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
     var cursor: usize = 2;
-    var tile_part_end: ?usize = null;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
-        const marker_start = cursor;
         cursor += 2;
-        if (marker == @intFromEnum(Marker.sod)) break;
+        if (marker == @intFromEnum(Marker.sot)) {
+            cursor -= 2;
+            break;
+        }
         if (marker == @intFromEnum(Marker.eoc)) return CodestreamError.InvalidCodestream;
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, cursor);
         if (segment_length < 2 or bytes.len - cursor < segment_length) {
             return CodestreamError.TruncatedData;
         }
-        if (marker == @intFromEnum(Marker.sot)) {
-            if (segment_length != 10) return CodestreamError.InvalidCodestream;
-            const psot = readU32Be(bytes, cursor + 4);
-            if (psot != 0) {
-                const end = try std.math.add(usize, marker_start, psot);
-                if (end > bytes.len) return CodestreamError.TruncatedData;
-                tile_part_end = end;
-            }
-        }
         cursor += segment_length;
     } else {
         return CodestreamError.InvalidCodestream;
     }
 
-    const end = tile_part_end orelse bytes.len - 2;
-    if (end < cursor or bytes.len - end < 2) return CodestreamError.TruncatedData;
-    if (readU16Be(bytes, end) != @intFromEnum(Marker.eoc)) {
-        return CodestreamError.InvalidCodestream;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        if (marker == @intFromEnum(Marker.eoc)) {
+            cursor += 2;
+            if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            return out.toOwnedSlice(allocator);
+        }
+        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+
+        const marker_start = cursor;
+        cursor += 2;
+        if (bytes.len - cursor < 10) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length != 10) return CodestreamError.InvalidCodestream;
+        const psot = readU32Be(bytes, cursor + 4);
+        if (psot == 0) return CodestreamError.UnsupportedPayload;
+        const tile_part_end = try std.math.add(usize, marker_start, psot);
+        if (tile_part_end > bytes.len or tile_part_end < cursor + segment_length + 2) {
+            return CodestreamError.TruncatedData;
+        }
+
+        cursor += segment_length;
+        if (readU16Be(bytes, cursor) != @intFromEnum(Marker.sod)) {
+            return CodestreamError.InvalidCodestream;
+        }
+        cursor += 2;
+
+        const payload_start = try skipPacketBoundaryMarkers(bytes, cursor, tile_part_end);
+        try out.appendSlice(allocator, bytes[payload_start..tile_part_end]);
+        cursor = tile_part_end;
     }
-    return bytes[cursor..end];
+
+    return CodestreamError.InvalidCodestream;
 }
 
 fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_component: u8) !void {
@@ -777,21 +823,67 @@ fn appendQcd(
     }
 }
 
-fn appendTlm(allocator: std.mem.Allocator, out: *std.ArrayList(u8), psot: u32) !void {
-    try appendMarker(allocator, out, .tlm);
-    try appendU16Be(allocator, out, 8);
-    try out.append(allocator, 0);
-    try out.append(allocator, 0x40);
-    try appendU32Be(allocator, out, psot);
+fn skipPacketBoundaryMarkers(bytes: []const u8, start: usize, end: usize) !usize {
+    var cursor = start;
+    if (end - cursor >= 6 and readU16Be(bytes, cursor) == @intFromEnum(Marker.sop)) {
+        const segment_length = readU16Be(bytes, cursor + 2);
+        if (segment_length != 4) return CodestreamError.InvalidCodestream;
+        cursor += 6;
+    }
+    if (end - cursor >= 2 and readU16Be(bytes, cursor) == @intFromEnum(Marker.eph)) {
+        cursor += 2;
+    }
+    return cursor;
 }
 
-fn appendSot(allocator: std.mem.Allocator, out: *std.ArrayList(u8), psot: u32) !void {
+fn appendTlm(allocator: std.mem.Allocator, out: *std.ArrayList(u8), psots: []const u32) !void {
+    if (psots.len == 0 or psots.len > 255) return CodestreamError.InvalidCodestream;
+    try appendMarker(allocator, out, .tlm);
+    const ltlm = try std.math.add(u16, 4, @as(u16, @intCast(psots.len * 5)));
+    try appendU16Be(allocator, out, ltlm);
+    try out.append(allocator, 0);
+    try out.append(allocator, 0x50);
+    for (psots) |psot| {
+        try out.append(allocator, 0);
+        try appendU32Be(allocator, out, psot);
+    }
+}
+
+fn appendSot(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    psot: u32,
+    tile_part_index: u8,
+    tile_part_count: u8,
+) !void {
     try appendMarker(allocator, out, .sot);
     try appendU16Be(allocator, out, 10);
     try appendU16Be(allocator, out, 0);
     try appendU32Be(allocator, out, psot);
-    try out.append(allocator, 0);
-    try out.append(allocator, 1);
+    try out.append(allocator, tile_part_index);
+    try out.append(allocator, tile_part_count);
+}
+
+fn appendSop(allocator: std.mem.Allocator, out: *std.ArrayList(u8), sequence: u16) !void {
+    try appendMarker(allocator, out, .sop);
+    try appendU16Be(allocator, out, 4);
+    try appendU16Be(allocator, out, sequence);
+}
+
+fn tilePartCountForOptions(levels: u8, options: LosslessOptions) usize {
+    if (options.tile_part_divisions == 'R') return @as(usize, levels) + 1;
+    return 1;
+}
+
+fn payloadChunk(payload: []const u8, index: usize, chunks: usize) []const u8 {
+    const start = payload.len * index / chunks;
+    const end = payload.len * (index + 1) / chunks;
+    return payload[start..end];
+}
+
+fn packetMarkerBytes(options: LosslessOptions) usize {
+    return (if (options.sop) @as(usize, 6) else 0) +
+        (if (options.eph) @as(usize, 2) else 0);
 }
 
 fn appendTemporaryPayload(

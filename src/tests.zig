@@ -290,6 +290,8 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("tlm")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("qcd")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sot")));
+    try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sop")));
+    try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eph")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sod")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eoc")));
     try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP3") != null);
@@ -297,8 +299,13 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     const sot_index = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     const psot = try codestream.firstSotPsot(bytes);
     const ptlm = try codestream.firstTlmPtlm(bytes);
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    const expected_tile_parts = @as(usize, stats.levels) + 1;
     try std.testing.expectEqual(psot, ptlm);
-    try std.testing.expectEqual(bytes.len - 2, sot_index + psot);
+    try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("sop")));
+    try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("eph")));
+    try std.testing.expectEqual(codestream.markerValue("sot"), readU16BeTest(bytes, sot_index + psot));
 }
 
 test "profiled lossless codestream matches normal encoder" {
@@ -619,6 +626,7 @@ test "temporary payload records resolution ordered tile-part plan" {
     try std.testing.expectEqual(@as(u8, 3), stats.tile_part_plan[3]);
     try std.testing.expectEqual(@as(u8, 4), stats.packet_plan_count);
     try std.testing.expectEqual(@as(u64, 12), stats.packet_count);
+    try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
 }
 
 test "temporary payload omits tile-part plan when tile parts are disabled" {
@@ -697,10 +705,14 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingMarker;
     const psot = try codestream.firstSotPsot(bytes);
     try std.testing.expectEqual(psot, try codestream.firstTlmPtlm(bytes));
-    try std.testing.expectEqual(@as(u16, 8), readU16BeTest(bytes, tlm + 2));
+    try std.testing.expectEqual(@as(u16, 34), readU16BeTest(bytes, tlm + 2));
     try std.testing.expectEqual(@as(u8, 0), bytes[tlm + 4]);
-    try std.testing.expectEqual(@as(u8, 0x40), bytes[tlm + 5]);
-    try std.testing.expectEqual(psot, readU32BeTest(bytes, tlm + 6));
+    try std.testing.expectEqual(@as(u8, 0x50), bytes[tlm + 5]);
+    try std.testing.expectEqual(@as(u8, 0), bytes[tlm + 6]);
+    try std.testing.expectEqual(psot, readU32BeTest(bytes, tlm + 7));
+    try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("sop")));
+    try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("eph")));
 
     const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
     try std.testing.expectEqual(@as(u16, 18), readU16BeTest(bytes, cod + 2));
@@ -828,6 +840,16 @@ fn findMarker(bytes: []const u8, marker: u16) ?usize {
         if (value == marker) return i;
     }
     return null;
+}
+
+fn countMarker(bytes: []const u8, marker: u16) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i + 1 < bytes.len) : (i += 1) {
+        const value = (@as(u16, bytes[i]) << 8) | bytes[i + 1];
+        if (value == marker) count += 1;
+    }
+    return count;
 }
 
 fn readU16BeTest(bytes: []const u8, offset: usize) u16 {
