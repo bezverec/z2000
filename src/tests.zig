@@ -6,6 +6,7 @@ const codestream = @import("codestream.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const jp2 = @import("jp2.zig");
+const packet_plan = @import("packet_plan.zig");
 const simd = @import("simd.zig");
 const subband = @import("subband.zig");
 const tiff = @import("tiff.zig");
@@ -291,7 +292,7 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sod")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eoc")));
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP3") != null);
 
     const sot_index = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     const psot = try codestream.firstSotPsot(bytes);
@@ -534,6 +535,14 @@ test "temporary codestream analyzer reports block and stream stats" {
     try std.testing.expectEqual(@as(u8, 2), stats.tile_part_plan_count);
     try std.testing.expectEqual(@as(u8, 0), stats.tile_part_plan[0]);
     try std.testing.expectEqual(@as(u8, 1), stats.tile_part_plan[1]);
+    try std.testing.expectEqual(@as(u8, 2), stats.packet_plan_count);
+    try std.testing.expectEqual(@as(u64, 6), stats.packet_count);
+    try std.testing.expectEqual(@as(u32, 2), stats.packet_plan[0].width);
+    try std.testing.expectEqual(@as(u32, 1), stats.packet_plan[0].height);
+    try std.testing.expectEqual(@as(u64, 3), stats.packet_plan[0].packets);
+    try std.testing.expectEqual(@as(u32, 4), stats.packet_plan[1].width);
+    try std.testing.expectEqual(@as(u32, 2), stats.packet_plan[1].height);
+    try std.testing.expectEqual(@as(u64, 3), stats.packet_plan[1].packets);
     try std.testing.expect(stats.payload_bytes < stats.codestream_bytes);
     try std.testing.expect(stats.components[0].blocks > 0);
     try std.testing.expect(stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.significance)].streams > 0);
@@ -541,6 +550,36 @@ test "temporary codestream analyzer reports block and stream stats" {
         @as(u64, 0),
         stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.cleanup)].raw_bytes,
     );
+}
+
+test "RPCL packet plan computes precinct grids per resolution" {
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 8, .height = 8 },
+    };
+
+    const plan = try packet_plan.rpclSingleTile(17, 9, 2, 3, 2, &precincts);
+    try std.testing.expectEqual(@as(u8, 3), plan.resolution_count);
+
+    try std.testing.expectEqual(@as(u32, 5), plan.resolutions[0].width);
+    try std.testing.expectEqual(@as(u32, 3), plan.resolutions[0].height);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[0].precincts_x);
+    try std.testing.expectEqual(@as(u32, 1), plan.resolutions[0].precincts_y);
+    try std.testing.expectEqual(@as(u64, 12), plan.resolutions[0].packets);
+
+    try std.testing.expectEqual(@as(u32, 9), plan.resolutions[1].width);
+    try std.testing.expectEqual(@as(u32, 5), plan.resolutions[1].height);
+    try std.testing.expectEqual(@as(u32, 3), plan.resolutions[1].precincts_x);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[1].precincts_y);
+    try std.testing.expectEqual(@as(u64, 36), plan.resolutions[1].packets);
+
+    try std.testing.expectEqual(@as(u32, 17), plan.resolutions[2].width);
+    try std.testing.expectEqual(@as(u32, 9), plan.resolutions[2].height);
+    try std.testing.expectEqual(@as(u32, 3), plan.resolutions[2].precincts_x);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[2].precincts_y);
+    try std.testing.expectEqual(@as(u64, 36), plan.resolutions[2].packets);
+    try std.testing.expectEqual(@as(u64, 84), plan.packets);
 }
 
 test "temporary payload records resolution ordered tile-part plan" {
@@ -578,6 +617,8 @@ test "temporary payload records resolution ordered tile-part plan" {
     try std.testing.expectEqual(@as(u8, 1), stats.tile_part_plan[1]);
     try std.testing.expectEqual(@as(u8, 2), stats.tile_part_plan[2]);
     try std.testing.expectEqual(@as(u8, 3), stats.tile_part_plan[3]);
+    try std.testing.expectEqual(@as(u8, 4), stats.packet_plan_count);
+    try std.testing.expectEqual(@as(u64, 12), stats.packet_count);
 }
 
 test "temporary payload omits tile-part plan when tile parts are disabled" {

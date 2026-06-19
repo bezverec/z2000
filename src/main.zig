@@ -394,7 +394,27 @@ fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void 
             std.debug.print("R{}", .{stats.tile_part_plan[index]});
         }
     }
+    if (stats.packet_plan_count > 0) {
+        std.debug.print(", packets {}", .{stats.packet_count});
+    }
     std.debug.print("\n", .{});
+    if (stats.packet_plan_count > 0) {
+        for (stats.packet_plan[0..stats.packet_plan_count], 0..) |resolution, index| {
+            std.debug.print(
+                "  R{}: {}x{}, precinct {}x{}, grid {}x{}, packets {}\n",
+                .{
+                    index,
+                    resolution.width,
+                    resolution.height,
+                    resolution.precinct_width,
+                    resolution.precinct_height,
+                    resolution.precincts_x,
+                    resolution.precincts_y,
+                    resolution.packets,
+                },
+            );
+        }
+    }
     std.debug.print(
         "  codestream {} bytes, temporary payload {} bytes\n",
         .{ stats.codestream_bytes, stats.payload_bytes },

@@ -40,7 +40,7 @@ pub fn forwardRct(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes 
         const g = @as(i32, rgb.samples[i * 3 + 1]);
         const b = @as(i32, rgb.samples[i * 3 + 2]);
 
-        y[i] = @divFloor(r + 2 * g + b, 4);
+        y[i] = floorQuarter(r + 2 * g + b);
         cb[i] = b - g;
         cr[i] = r - g;
     }
@@ -67,7 +67,7 @@ pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbIma
     errdefer allocator.free(samples);
 
     for (0..pixels) |i| {
-        const g = planes.y[i] - @divFloor(planes.cb[i] + planes.cr[i], 4);
+        const g = planes.y[i] - floorQuarter(planes.cb[i] + planes.cr[i]);
         const r = planes.cr[i] + g;
         const b = planes.cb[i] + g;
 
@@ -94,4 +94,8 @@ pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbIma
 fn maxSample(bit_depth: u8) !i32 {
     if (bit_depth == 0 or bit_depth > 16) return ColorError.InvalidImage;
     return (@as(i32, 1) << @as(u5, @intCast(bit_depth))) - 1;
+}
+
+fn floorQuarter(value: i32) i32 {
+    return value >> 2;
 }

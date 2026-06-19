@@ -3,6 +3,7 @@ const bitplane = @import("bitplane.zig");
 const color = @import("color.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
+const packet_plan = @import("packet_plan.zig");
 const subband = @import("subband.zig");
 const wavelet_int = @import("wavelet_int.zig");
 
@@ -28,6 +29,7 @@ const Marker = enum(u16) {
 const temporary_magic_v0 = "ZJ2K-CBLK-BP0";
 const temporary_magic_v1 = "ZJ2K-CBLK-BP1";
 const temporary_magic_v2 = "ZJ2K-CBLK-BP2";
+const temporary_magic_v3 = "ZJ2K-CBLK-BP3";
 
 pub const PassKind = enum(u8) {
     significance = 0,
@@ -74,6 +76,9 @@ pub const TemporaryStats = struct {
     tile_part_divisions: ?u8,
     tile_part_plan_count: u8,
     tile_part_plan: [33]u8,
+    packet_plan_count: u8,
+    packet_plan: [33]packet_plan.Resolution,
+    packet_count: u64,
     payload_bytes: usize,
     codestream_bytes: usize,
     components: [3]ComponentStats,
@@ -345,6 +350,9 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
         .tile_part_divisions = header.tile_part_divisions,
         .tile_part_plan_count = header.tile_part_plan_count,
         .tile_part_plan = header.tile_part_plan,
+        .packet_plan_count = header.packet_plan_count,
+        .packet_plan = header.packet_plan,
+        .packet_count = header.packet_count,
         .payload_bytes = payload.len,
         .codestream_bytes = bytes.len,
         .components = [_]ComponentStats{.{}} ** 3,
@@ -540,6 +548,9 @@ const TemporaryHeader = struct {
     tile_part_divisions: ?u8,
     tile_part_plan_count: u8,
     tile_part_plan: [33]u8,
+    packet_plan_count: u8,
+    packet_plan: [33]packet_plan.Resolution,
+    packet_count: u64,
 };
 
 fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
@@ -550,6 +561,8 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         1
     else if (std.mem.eql(u8, magic, temporary_magic_v2))
         2
+    else if (std.mem.eql(u8, magic, temporary_magic_v3))
+        3
     else
         return CodestreamError.UnsupportedPayload;
 
@@ -561,6 +574,7 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
     const block_height = try cursor.readU16();
     const tile_part_divisions = if (version >= 1) try readTilePartDivisions(cursor) else null;
     const tile_part_plan = if (version >= 2) try readTilePartPlan(cursor) else emptyTilePartPlan();
+    const packets = if (version >= 3) try readPacketPlan(cursor) else emptyPacketPlan();
 
     return .{
         .width = width,
@@ -572,6 +586,9 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         .tile_part_divisions = tile_part_divisions,
         .tile_part_plan_count = tile_part_plan.count,
         .tile_part_plan = tile_part_plan.entries,
+        .packet_plan_count = packets.resolution_count,
+        .packet_plan = packets.resolutions,
+        .packet_count = packets.packets,
     };
 }
 
@@ -601,6 +618,48 @@ fn readTilePartPlan(cursor: *Cursor) !TilePartPlan {
     var index: usize = 0;
     while (index < count) : (index += 1) {
         plan.entries[index] = try cursor.readU8();
+    }
+
+    return plan;
+}
+
+fn emptyPacketPlan() packet_plan.Plan {
+    return .{
+        .resolution_count = 0,
+        .resolutions = [_]packet_plan.Resolution{.{
+            .width = 0,
+            .height = 0,
+            .precinct_width = 0,
+            .precinct_height = 0,
+            .precincts_x = 0,
+            .precincts_y = 0,
+            .precincts = 0,
+            .packets = 0,
+        }} ** 33,
+        .packets = 0,
+    };
+}
+
+fn readPacketPlan(cursor: *Cursor) !packet_plan.Plan {
+    var plan = emptyPacketPlan();
+    const count = try cursor.readU8();
+    if (count > plan.resolutions.len) return CodestreamError.InvalidCodestream;
+    plan.resolution_count = count;
+
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        const res = packet_plan.Resolution{
+            .width = try cursor.readU32(),
+            .height = try cursor.readU32(),
+            .precinct_width = try cursor.readU32(),
+            .precinct_height = try cursor.readU32(),
+            .precincts_x = try cursor.readU32(),
+            .precincts_y = try cursor.readU32(),
+            .precincts = try cursor.readU64(),
+            .packets = try cursor.readU64(),
+        };
+        plan.resolutions[index] = res;
+        plan.packets += res.packets;
     }
 
     return plan;
@@ -742,7 +801,7 @@ fn appendTemporaryPayload(
     levels: u8,
     options: LosslessOptions,
 ) !void {
-    try out.appendSlice(allocator, temporary_magic_v2);
+    try out.appendSlice(allocator, temporary_magic_v3);
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.width)));
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.height)));
     try out.append(allocator, planes.bit_depth);
@@ -751,6 +810,7 @@ fn appendTemporaryPayload(
     try appendU16Be(allocator, out, options.block_height);
     try out.append(allocator, options.tile_part_divisions orelse 0);
     try appendTilePartPlan(allocator, out, levels, options);
+    try appendPacketPlan(allocator, out, planes.width, planes.height, levels, options);
 
     const bands = try subband.makeBands(allocator, planes.width, planes.height, levels);
     defer allocator.free(bands);
@@ -760,6 +820,45 @@ fn appendTemporaryPayload(
     try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks);
     try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks);
     try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks);
+}
+
+fn appendPacketPlan(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    width: usize,
+    height: usize,
+    levels: u8,
+    options: LosslessOptions,
+) !void {
+    var precincts: [33]packet_plan.Precinct = undefined;
+    var index: usize = 0;
+    while (index < options.precinct_count) : (index += 1) {
+        precincts[index] = .{
+            .width = options.precincts[index].width,
+            .height = options.precincts[index].height,
+        };
+    }
+
+    const plan = try packet_plan.rpclSingleTile(
+        width,
+        height,
+        levels,
+        3,
+        options.layers,
+        precincts[0..options.precinct_count],
+    );
+
+    try out.append(allocator, plan.resolution_count);
+    for (plan.resolutions[0..plan.resolution_count]) |resolution| {
+        try appendU32Be(allocator, out, resolution.width);
+        try appendU32Be(allocator, out, resolution.height);
+        try appendU32Be(allocator, out, resolution.precinct_width);
+        try appendU32Be(allocator, out, resolution.precinct_height);
+        try appendU32Be(allocator, out, resolution.precincts_x);
+        try appendU32Be(allocator, out, resolution.precincts_y);
+        try appendU64Be(allocator, out, resolution.precincts);
+        try appendU64Be(allocator, out, resolution.packets);
+    }
 }
 
 fn appendTilePartPlan(
@@ -843,6 +942,17 @@ fn appendU32Be(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u32
     try out.append(allocator, @as(u8, @truncate(value)));
 }
 
+fn appendU64Be(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u64) !void {
+    try out.append(allocator, @as(u8, @truncate(value >> 56)));
+    try out.append(allocator, @as(u8, @truncate(value >> 48)));
+    try out.append(allocator, @as(u8, @truncate(value >> 40)));
+    try out.append(allocator, @as(u8, @truncate(value >> 32)));
+    try out.append(allocator, @as(u8, @truncate(value >> 24)));
+    try out.append(allocator, @as(u8, @truncate(value >> 16)));
+    try out.append(allocator, @as(u8, @truncate(value >> 8)));
+    try out.append(allocator, @as(u8, @truncate(value)));
+}
+
 fn readU16Be(bytes: []const u8, offset: usize) u16 {
     return (@as(u16, bytes[offset]) << 8) | @as(u16, bytes[offset + 1]);
 }
@@ -908,6 +1018,18 @@ const Cursor = struct {
             (@as(u32, bytes[1]) << 16) |
             (@as(u32, bytes[2]) << 8) |
             bytes[3];
+    }
+
+    fn readU64(self: *Cursor) !u64 {
+        const bytes = try self.readBytes(8);
+        return (@as(u64, bytes[0]) << 56) |
+            (@as(u64, bytes[1]) << 48) |
+            (@as(u64, bytes[2]) << 40) |
+            (@as(u64, bytes[3]) << 32) |
+            (@as(u64, bytes[4]) << 24) |
+            (@as(u64, bytes[5]) << 16) |
+            (@as(u64, bytes[6]) << 8) |
+            bytes[7];
     }
 
     fn readRect(self: *Cursor) !subband.Rect {
