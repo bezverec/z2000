@@ -173,9 +173,7 @@ pub fn encodeBlockPassesScratch(
     var bitplane_index = bitplanes;
     while (bitplane_index > 0) {
         bitplane_index -= 1;
-        for (magnitudes) |mag| {
-            refinement.writeBitAssumeCapacity(((mag >> @as(u5, @intCast(bitplane_index))) & 1) != 0);
-        }
+        refinement.writeMagnitudeBitsAssumeCapacity(magnitudes, @intCast(bitplane_index));
     }
 
     const significance_bytes = try significance.finishView();
@@ -511,6 +509,28 @@ const BitWriter = struct {
             self.bytes.appendAssumeCapacity(self.current);
             self.current = 0;
             self.used = 0;
+        }
+    }
+
+    fn writeMagnitudeBitsAssumeCapacity(self: *BitWriter, magnitudes: []const u32, bit_index: u5) void {
+        var index: usize = 0;
+
+        if (self.used != 0) {
+            while (index < magnitudes.len and self.used != 0) : (index += 1) {
+                self.writeBitAssumeCapacity(((magnitudes[index] >> bit_index) & 1) != 0);
+            }
+        }
+
+        while (index + 8 <= magnitudes.len) : (index += 8) {
+            var byte: u8 = 0;
+            inline for (0..8) |offset| {
+                byte |= @as(u8, @intCast((magnitudes[index + offset] >> bit_index) & 1)) << @as(u3, @intCast(7 - offset));
+            }
+            self.bytes.appendAssumeCapacity(byte);
+        }
+
+        while (index < magnitudes.len) : (index += 1) {
+            self.writeBitAssumeCapacity(((magnitudes[index] >> bit_index) & 1) != 0);
         }
     }
 
