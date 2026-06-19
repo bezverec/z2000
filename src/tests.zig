@@ -498,6 +498,12 @@ test "arithmetic entropy codec roundtrips biased stream" {
     try std.testing.expectEqualSlices(u8, input[0..], decoded);
 }
 
+test "bitplane reports ISO-style coding pass counts" {
+    try std.testing.expectEqual(@as(u16, 0), bitplane.isoCodingPassCount(0, 0));
+    try std.testing.expectEqual(@as(u16, 1), bitplane.isoCodingPassCount(1, 4));
+    try std.testing.expectEqual(@as(u16, 22), bitplane.isoCodingPassCount(8, 1));
+}
+
 test "raw bitplane block writer roundtrips a block" {
     const allocator = std.testing.allocator;
     const original = [_]i32{
@@ -643,6 +649,7 @@ test "temporary codestream analyzer reports block and stream stats" {
     try std.testing.expectEqual(@as(u64, 3), stats.packet_plan[1].packets);
     try std.testing.expect(stats.payload_bytes < stats.codestream_bytes);
     try std.testing.expect(stats.components[0].blocks > 0);
+    try std.testing.expect(stats.components[0].coding_passes > 0);
     try std.testing.expect(stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.significance)].streams > 0);
     try std.testing.expectEqual(
         @as(u64, 0),
@@ -991,21 +998,20 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
         if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
         cursor += 2;
 
-        while (cursor + 1 < tile_part_end) {
+        while (cursor + 1 < tile_part_end) : (cursor += 1) {
             const prefix_marker = readU16BeTest(bytes, cursor);
             if (prefix_marker == sop) {
                 if (tile_part_end - cursor < 6) return error.Truncated;
                 if (marker == sop) count += 1;
                 cursor += 6;
+                if (cursor < tile_part_end) cursor += 1;
                 if (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) == eph) {
                     if (marker == eph) count += 1;
-                    cursor += 2;
+                    cursor += 1;
                 }
             } else if (prefix_marker == eph) {
                 if (marker == eph) count += 1;
-                cursor += 2;
-            } else {
-                break;
+                cursor += 1;
             }
         }
 

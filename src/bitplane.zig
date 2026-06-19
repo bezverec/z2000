@@ -95,6 +95,11 @@ pub const BlockScratch = struct {
     }
 };
 
+pub fn isoCodingPassCount(bitplanes: u8, non_zero_count: u32) u16 {
+    if (bitplanes == 0 or non_zero_count == 0) return 0;
+    return @as(u16, bitplanes) * 3 - 2;
+}
+
 pub fn encodeBlockPasses(
     allocator: std.mem.Allocator,
     plane: []const i32,

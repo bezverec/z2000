@@ -440,7 +440,7 @@ fn tilePartDivisionLabel(value: ?u8) []const u8 {
 
 fn printComponentStats(label: []const u8, stats: codestream.ComponentStats) void {
     std.debug.print(
-        "  {s}: blocks {} active {} empty {}, coeffs {} active-coeffs {} nonzero {}, max bitplanes {}\n",
+        "  {s}: blocks {} active {} empty {}, coeffs {} active-coeffs {} nonzero {}, max bitplanes {}, T1 passes {}\n",
         .{
             label,
             stats.blocks,
@@ -450,6 +450,7 @@ fn printComponentStats(label: []const u8, stats: codestream.ComponentStats) void
             stats.active_coeffs,
             stats.non_zero_coeffs,
             stats.max_bitplanes,
+            stats.coding_passes,
         },
     );
 
@@ -486,6 +487,7 @@ fn totalComponentStats(stats: codestream.TemporaryStats) codestream.ComponentSta
         total.active_coeffs += component.active_coeffs;
         total.non_zero_coeffs += component.non_zero_coeffs;
         total.max_bitplanes = @max(total.max_bitplanes, component.max_bitplanes);
+        total.coding_passes += component.coding_passes;
         for (component.pass_streams, 0..) |stream, index| {
             total.pass_streams[index].streams += stream.streams;
             total.pass_streams[index].raw_bytes += stream.raw_bytes;
