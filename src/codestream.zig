@@ -1083,6 +1083,13 @@ fn appendEntropyStream(
     scratch: *entropy.Scratch,
     bytes: []const u8,
 ) !void {
+    if (bytes.len == 0) {
+        try out.append(allocator, @intFromEnum(entropy.Method.raw));
+        try appendU32Be(allocator, out, 0);
+        try appendU32Be(allocator, out, 0);
+        return;
+    }
+
     const encoded = try entropy.encodeAutoBorrowingRawScratch(scratch, bytes);
 
     try out.append(allocator, @intFromEnum(encoded.method));

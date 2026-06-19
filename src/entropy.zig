@@ -95,7 +95,7 @@ pub fn encodeAutoBorrowingRaw(allocator: std.mem.Allocator, input: []const u8) !
 }
 
 pub fn encodeAutoBorrowingRawScratch(scratch: *Scratch, input: []const u8) !EncodedView {
-    const rle = try encodeRleInto(scratch, input);
+    const rle = try encodeRleInto(scratch, input, input.len);
     const bit_rle = if (shouldTryBitRle(input))
         try encodeBitRleInto(scratch, input)
     else
@@ -152,7 +152,7 @@ fn encodeRle(allocator: std.mem.Allocator, input: []const u8) !Encoded {
     var scratch = Scratch.init(allocator);
     defer scratch.deinit();
 
-    const view = try encodeRleInto(&scratch, input);
+    const view = try encodeRleInto(&scratch, input, null);
     return .{
         .method = view.method,
         .raw_len = view.raw_len,
@@ -160,20 +160,23 @@ fn encodeRle(allocator: std.mem.Allocator, input: []const u8) !Encoded {
     };
 }
 
-fn encodeRleInto(scratch: *Scratch, input: []const u8) !EncodedView {
+fn encodeRleInto(scratch: *Scratch, input: []const u8, max_output_len: ?usize) !EncodedView {
     scratch.rle.clearRetainingCapacity();
     var literal_start: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
         const run_len = repeatedRun(input, i);
         if (run_len >= 4) {
-            try flushLiteral(scratch.allocator, &scratch.rle, input[literal_start..i]);
+            if (try flushLiteralBounded(scratch.allocator, &scratch.rle, input[literal_start..i], max_output_len)) {
+                return rleView(input, scratch.rle.items);
+            }
             var remaining = run_len;
             while (remaining > 0) {
                 const chunk = @min(remaining, 255);
                 try scratch.rle.append(scratch.allocator, 1);
                 try scratch.rle.append(scratch.allocator, @as(u8, @intCast(chunk)));
                 try scratch.rle.append(scratch.allocator, input[i]);
+                if (hitLimit(scratch.rle.items.len, max_output_len)) return rleView(input, scratch.rle.items);
                 remaining -= chunk;
             }
             i += run_len;
@@ -183,12 +186,8 @@ fn encodeRleInto(scratch: *Scratch, input: []const u8) !EncodedView {
         }
     }
 
-    try flushLiteral(scratch.allocator, &scratch.rle, input[literal_start..]);
-    return .{
-        .method = .rle,
-        .raw_len = @as(u32, @intCast(input.len)),
-        .bytes = scratch.rle.items,
-    };
+    _ = try flushLiteralBounded(scratch.allocator, &scratch.rle, input[literal_start..], max_output_len);
+    return rleView(input, scratch.rle.items);
 }
 
 fn decodeRle(allocator: std.mem.Allocator, raw_len: u32, encoded: []const u8) ![]u8 {
@@ -428,14 +427,37 @@ const BinaryModel = struct {
 };
 
 fn flushLiteral(allocator: std.mem.Allocator, out: *std.ArrayList(u8), literal: []const u8) !void {
+    _ = try flushLiteralBounded(allocator, out, literal, null);
+}
+
+fn flushLiteralBounded(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    literal: []const u8,
+    max_output_len: ?usize,
+) !bool {
     var offset: usize = 0;
     while (offset < literal.len) {
         const chunk = @min(literal.len - offset, 255);
         try out.append(allocator, 0);
         try out.append(allocator, @as(u8, @intCast(chunk)));
         try out.appendSlice(allocator, literal[offset .. offset + chunk]);
+        if (hitLimit(out.items.len, max_output_len)) return true;
         offset += chunk;
     }
+    return false;
+}
+
+fn hitLimit(len: usize, max_output_len: ?usize) bool {
+    return if (max_output_len) |max| len >= max else false;
+}
+
+fn rleView(input: []const u8, bytes: []const u8) EncodedView {
+    return .{
+        .method = .rle,
+        .raw_len = @as(u32, @intCast(input.len)),
+        .bytes = bytes,
+    };
 }
 
 fn repeatedRun(input: []const u8, start: usize) usize {

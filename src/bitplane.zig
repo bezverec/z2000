@@ -64,6 +64,7 @@ pub const BlockScratch = struct {
     allocator: std.mem.Allocator,
     significance: BitWriter,
     refinement: BitWriter,
+    magnitudes: std.ArrayList(u32) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) BlockScratch {
         return .{
@@ -76,12 +77,14 @@ pub const BlockScratch = struct {
     pub fn deinit(self: *BlockScratch) void {
         self.significance.deinit();
         self.refinement.deinit();
+        self.magnitudes.deinit(self.allocator);
         self.* = undefined;
     }
 
     fn reset(self: *BlockScratch) void {
         self.significance.reset();
         self.refinement.reset();
+        self.magnitudes.clearRetainingCapacity();
     }
 };
 
@@ -148,6 +151,7 @@ pub fn encodeBlockPassesScratch(
     const refinement_bits = try std.math.mul(usize, scan.non_zero_count, bitplanes);
     try significance.ensureUnusedBits(significance_bits);
     try refinement.ensureUnusedBits(refinement_bits);
+    try scratch.magnitudes.ensureUnusedCapacity(scratch.allocator, scan.non_zero_count);
 
     var y: usize = 0;
     while (y < active_rect.height) : (y += 1) {
@@ -160,23 +164,17 @@ pub fn encodeBlockPassesScratch(
             significance.writeBitAssumeCapacity(is_significant);
             if (is_significant) {
                 significance.writeBitAssumeCapacity(coeff < 0);
+                scratch.magnitudes.appendAssumeCapacity(mag);
             }
         }
     }
 
+    const magnitudes = scratch.magnitudes.items;
     var bitplane_index = bitplanes;
     while (bitplane_index > 0) {
         bitplane_index -= 1;
-        y = 0;
-        while (y < active_rect.height) : (y += 1) {
-            const row = (active_rect.y + y) * stride;
-            var x: usize = 0;
-            while (x < active_rect.width) : (x += 1) {
-                const mag = magnitude(plane[row + active_rect.x + x]);
-                if (mag != 0) {
-                    refinement.writeBitAssumeCapacity(((mag >> @as(u5, @intCast(bitplane_index))) & 1) != 0);
-                }
-            }
+        for (magnitudes) |mag| {
+            refinement.writeBitAssumeCapacity(((mag >> @as(u5, @intCast(bitplane_index))) & 1) != 0);
         }
     }
 
