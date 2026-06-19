@@ -33,6 +33,7 @@ const temporary_magic_v0 = "ZJ2K-CBLK-BP0";
 const temporary_magic_v1 = "ZJ2K-CBLK-BP1";
 const temporary_magic_v2 = "ZJ2K-CBLK-BP2";
 const temporary_magic_v3 = "ZJ2K-CBLK-BP3";
+const temporary_magic_v4 = "ZJ2K-CBLK-BP4";
 const temporary_packet_header_empty: u8 = 0x00;
 const temporary_packet_header_non_empty: u8 = 0x80;
 
@@ -538,7 +539,7 @@ pub fn decodeLosslessTemporaryWithOptions(
     @memset(cb, 0);
     @memset(cr, 0);
 
-    try readComponentPayloads(&cursor, y, cb, cr, width, options);
+    try readComponentPayloads(&cursor, y, cb, cr, width, header.version, options);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, options);
@@ -589,9 +590,9 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
         .components = [_]ComponentStats{.{}} ** 3,
     };
 
-    try readComponentStats(&cursor, &stats.components[0], 0);
-    try readComponentStats(&cursor, &stats.components[1], 1);
-    try readComponentStats(&cursor, &stats.components[2], 2);
+    try readComponentStats(&cursor, &stats.components[0], 0, header.version);
+    try readComponentStats(&cursor, &stats.components[1], 1, header.version);
+    try readComponentStats(&cursor, &stats.components[2], 2, header.version);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     return stats;
@@ -756,7 +757,7 @@ fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return CodestreamError.InvalidCodestream;
 }
 
-fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_component: u8) !void {
+fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_component: u8, payload_version: u8) !void {
     const component_index = try cursor.readU8();
     if (component_index != expected_component) return CodestreamError.InvalidCodestream;
 
@@ -778,6 +779,7 @@ fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_c
         const active_rect = try cursor.readRect();
         const bitplanes = try cursor.readU8();
         const non_zero_count = try cursor.readU32();
+        _ = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
         var significance = try readEntropyStream(cursor);
         defer significance.deinit(cursor.allocator);
         var refinement = try readEntropyStream(cursor);
@@ -801,6 +803,7 @@ const DecodeComponentPayloadJob = struct {
     plane: []i32,
     stride: usize,
     component_index: u8,
+    payload_version: u8,
     result: anyerror!void = {},
 };
 
@@ -810,35 +813,36 @@ fn readComponentPayloads(
     cb: []i32,
     cr: []i32,
     stride: usize,
+    payload_version: u8,
     options: DecodeOptions,
 ) !void {
     if (componentThreadCountFor(options.threads) < 2) {
-        try readComponentPayload(cursor, y, stride, 0);
-        try readComponentPayload(cursor, cb, stride, 1);
-        try readComponentPayload(cursor, cr, stride, 2);
+        try readComponentPayload(cursor, y, stride, 0, payload_version);
+        try readComponentPayload(cursor, cb, stride, 1, payload_version);
+        try readComponentPayload(cursor, cr, stride, 2, payload_version);
         return;
     }
 
-    const slices = try readComponentPayloadSlices(cursor);
+    const slices = try readComponentPayloadSlices(cursor, payload_version);
     var jobs = [_]DecodeComponentPayloadJob{
-        .{ .bytes = slices[0], .plane = y, .stride = stride, .component_index = 0 },
-        .{ .bytes = slices[1], .plane = cb, .stride = stride, .component_index = 1 },
-        .{ .bytes = slices[2], .plane = cr, .stride = stride, .component_index = 2 },
+        .{ .bytes = slices[0], .plane = y, .stride = stride, .component_index = 0, .payload_version = payload_version },
+        .{ .bytes = slices[1], .plane = cb, .stride = stride, .component_index = 1, .payload_version = payload_version },
+        .{ .bytes = slices[2], .plane = cr, .stride = stride, .component_index = 2, .payload_version = payload_version },
     };
     try runComponentJobs(DecodeComponentPayloadJob, &jobs, componentThreadCountFor(options.threads), decodeComponentPayloadWorker);
 }
 
-fn readComponentPayloadSlices(cursor: *Cursor) ![3][]const u8 {
+fn readComponentPayloadSlices(cursor: *Cursor, payload_version: u8) ![3][]const u8 {
     var slices: [3][]const u8 = undefined;
     inline for (0..3) |component| {
         const start = cursor.index;
-        try skipComponentPayload(cursor, component);
+        try skipComponentPayload(cursor, component, payload_version);
         slices[component] = cursor.bytes[start..cursor.index];
     }
     return slices;
 }
 
-fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8) !void {
+fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8, payload_version: u8) !void {
     const component_index = try cursor.readU8();
     if (component_index != expected_component) return CodestreamError.InvalidCodestream;
 
@@ -858,8 +862,9 @@ fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8) !void 
         if (block_band >= band_count) return CodestreamError.InvalidCodestream;
         _ = try cursor.readRect();
         _ = try cursor.readRect();
-        _ = try cursor.readU8();
-        _ = try cursor.readU32();
+        const bitplanes = try cursor.readU8();
+        const non_zero_count = try cursor.readU32();
+        _ = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
         _ = try readEntropyStreamInfo(cursor);
         _ = try readEntropyStreamInfo(cursor);
         _ = try readEntropyStreamInfo(cursor);
@@ -868,7 +873,7 @@ fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8) !void 
 
 fn decodeComponentPayloadWorker(job: *DecodeComponentPayloadJob) void {
     var cursor = Cursor.initWithAllocator(std.heap.smp_allocator, job.bytes);
-    readComponentPayload(&cursor, job.plane, job.stride, job.component_index) catch |err| {
+    readComponentPayload(&cursor, job.plane, job.stride, job.component_index, job.payload_version) catch |err| {
         job.result = err;
         return;
     };
@@ -880,6 +885,7 @@ fn decodeComponentPayloadWorker(job: *DecodeComponentPayloadJob) void {
 }
 
 const TemporaryHeader = struct {
+    version: u8,
     width: usize,
     height: usize,
     bit_depth: u8,
@@ -904,6 +910,8 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         2
     else if (std.mem.eql(u8, magic, temporary_magic_v3))
         3
+    else if (std.mem.eql(u8, magic, temporary_magic_v4))
+        4
     else
         return CodestreamError.UnsupportedPayload;
 
@@ -918,6 +926,7 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
     const packets = if (version >= 3) try readPacketPlan(cursor) else emptyPacketPlan();
 
     return .{
+        .version = version,
         .width = width,
         .height = height,
         .bit_depth = bit_depth,
@@ -1006,7 +1015,16 @@ fn readPacketPlan(cursor: *Cursor) !packet_plan.Plan {
     return plan;
 }
 
-fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_component: u8) !void {
+fn readStoredCodingPasses(cursor: *Cursor, payload_version: u8, bitplanes: u8, non_zero_count: u32) !u16 {
+    const expected = bitplane.isoCodingPassCount(bitplanes, non_zero_count);
+    if (payload_version < 4) return expected;
+
+    const stored = try cursor.readU16();
+    if (stored != expected) return CodestreamError.InvalidCodestream;
+    return stored;
+}
+
+fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_component: u8, payload_version: u8) !void {
     const component_index = try cursor.readU8();
     if (component_index != expected_component) return CodestreamError.InvalidCodestream;
 
@@ -1029,12 +1047,13 @@ fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_componen
         const active_rect = try cursor.readRect();
         const bitplanes = try cursor.readU8();
         const non_zero_count = try cursor.readU32();
+        const coding_passes = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
 
         stats.coeffs += rectArea(block_rect);
         stats.active_coeffs += rectArea(active_rect);
         stats.non_zero_coeffs += non_zero_count;
         stats.max_bitplanes = @max(stats.max_bitplanes, bitplanes);
-        stats.coding_passes += bitplane.isoCodingPassCount(bitplanes, non_zero_count);
+        stats.coding_passes += coding_passes;
         if (active_rect.width == 0 or active_rect.height == 0) {
             stats.empty_blocks += 1;
         } else {
@@ -1219,13 +1238,24 @@ fn appendTemporaryPacketPayloads(
             return CodestreamError.InvalidCodestream;
         }
         packet_cursor += 1;
+        const header_body_start = packet_cursor;
+        const body_len = readVariableLength(bytes, &packet_cursor, packet_end) catch {
+            try appendLegacyTemporaryPacketPayload(allocator, out, bytes, header_body_start, packet_end, header);
+            cursor = packet_end;
+            continue;
+        };
 
         if (packet_end - packet_cursor >= 2 and readU16Be(bytes, packet_cursor) == @intFromEnum(Marker.eph)) {
             packet_cursor += 2;
         }
 
-        if (header == temporary_packet_header_empty and packet_cursor != packet_end) {
-            return CodestreamError.InvalidCodestream;
+        const new_header_ok = body_len <= std.math.maxInt(usize) and
+            packet_end - packet_cursor == @as(usize, @intCast(body_len)) and
+            ((header == temporary_packet_header_empty) == (body_len == 0));
+        if (!new_header_ok) {
+            try appendLegacyTemporaryPacketPayload(allocator, out, bytes, header_body_start, packet_end, header);
+            cursor = packet_end;
+            continue;
         }
         try out.appendSlice(allocator, bytes[packet_cursor..packet_end]);
         cursor = packet_end;
@@ -1233,6 +1263,27 @@ fn appendTemporaryPacketPayloads(
 
     if (cursor != end) return CodestreamError.InvalidCodestream;
     return cursor;
+}
+
+fn appendLegacyTemporaryPacketPayload(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    bytes: []const u8,
+    start: usize,
+    end: usize,
+    header: u8,
+) !void {
+    var cursor = start;
+    if (end - cursor >= 2 and readU16Be(bytes, cursor) == @intFromEnum(Marker.eph)) {
+        cursor += 2;
+    } else if (header != temporary_packet_header_empty) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    if (header == temporary_packet_header_empty and cursor != end) {
+        return CodestreamError.InvalidCodestream;
+    }
+    try out.appendSlice(allocator, bytes[cursor..end]);
 }
 
 fn appendSot(
@@ -1313,14 +1364,18 @@ fn pltBytesForPacketLengths(options: LosslessOptions, packet_count: u64, data_by
 
 fn packetizedPayloadByteCount(options: LosslessOptions, packet_count: u64, data_bytes: usize) !usize {
     if (packet_count == 0) return data_bytes;
-    const overhead = try std.math.mul(u64, packetOverheadBytes(options), packet_count);
-    const total = try std.math.add(u64, overhead, @as(u64, @intCast(data_bytes)));
+    var total: u64 = 0;
+    var packet: u64 = 0;
+    while (packet < packet_count) : (packet += 1) {
+        total = try std.math.add(u64, total, packetizedLengthForIndex(options, data_bytes, packet_count, packet));
+    }
     if (total > std.math.maxInt(usize)) return CodestreamError.ImageTooLarge;
     return @intCast(total);
 }
 
 fn packetizedLengthForIndex(options: LosslessOptions, data_bytes: usize, packet_count: u64, packet_index: u64) u64 {
-    return packetOverheadBytes(options) + packetDataLengthForIndex(data_bytes, packet_count, packet_index);
+    const data_len = packetDataLengthForIndex(data_bytes, packet_count, packet_index);
+    return packetOverheadBytes(options, data_len) + data_len;
 }
 
 fn packetDataLengthForIndex(data_bytes: usize, packet_count: u64, packet_index: u64) u64 {
@@ -1332,8 +1387,8 @@ fn packetDataLengthForIndex(data_bytes: usize, packet_count: u64, packet_index: 
     return @intCast(end - start);
 }
 
-fn packetOverheadBytes(options: LosslessOptions) u64 {
-    return @as(u64, 1) +
+fn packetOverheadBytes(options: LosslessOptions, data_len: u64) u64 {
+    return @as(u64, 1 + pltLengthByteCount(data_len)) +
         (if (options.sop) @as(u64, 6) else 0) +
         (if (options.eph) @as(u64, 2) else 0);
 }
@@ -1364,6 +1419,21 @@ fn appendPltLength(allocator: std.mem.Allocator, out: *std.ArrayList(u8), length
     }
 }
 
+fn readVariableLength(bytes: []const u8, cursor: *usize, end: usize) !u64 {
+    var length: u64 = 0;
+    var byte_count: usize = 0;
+    while (cursor.* < end) {
+        if (byte_count == 10) return CodestreamError.InvalidCodestream;
+        const byte = bytes[cursor.*];
+        cursor.* += 1;
+        if (length > (std.math.maxInt(u64) >> 7)) return CodestreamError.InvalidCodestream;
+        length = (length << 7) | @as(u64, byte & 0x7f);
+        byte_count += 1;
+        if ((byte & 0x80) == 0) return length;
+    }
+    return CodestreamError.TruncatedData;
+}
+
 fn appendSop(allocator: std.mem.Allocator, out: *std.ArrayList(u8), sequence: u16) !void {
     try appendMarker(allocator, out, .sop);
     try appendU16Be(allocator, out, 4);
@@ -1392,6 +1462,7 @@ fn appendTemporaryPackets(
             packet_sequence.* +%= 1;
         }
         try out.append(allocator, if (data_len == 0) temporary_packet_header_empty else temporary_packet_header_non_empty);
+        try appendPltLength(allocator, out, data_len);
         if (options.eph) try appendMarker(allocator, out, .eph);
         try out.appendSlice(allocator, data[data_cursor .. data_cursor + data_len]);
         data_cursor += data_len;
@@ -1417,7 +1488,7 @@ fn appendTemporaryPayload(
     levels: u8,
     options: LosslessOptions,
 ) !void {
-    try out.appendSlice(allocator, temporary_magic_v3);
+    try out.appendSlice(allocator, temporary_magic_v4);
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.width)));
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.height)));
     try out.append(allocator, planes.bit_depth);
@@ -1572,6 +1643,7 @@ fn appendComponentPayload(
         try appendRect(allocator, out, encoded.active_rect);
         try out.append(allocator, encoded.bitplanes);
         try appendU32Be(allocator, out, encoded.non_zero_count);
+        try appendU16Be(allocator, out, bitplane.isoCodingPassCount(encoded.bitplanes, encoded.non_zero_count));
         try appendEntropyStream(allocator, out, &entropy_scratch, encoded.significance_bytes);
         try appendEntropyStream(allocator, out, &entropy_scratch, encoded.refinement_bytes);
         try appendEntropyStream(allocator, out, &entropy_scratch, encoded.cleanup_bytes);

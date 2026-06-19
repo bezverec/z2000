@@ -352,7 +352,7 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eph")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sod")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eoc")));
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP4") != null);
 
     const sot_index = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     const psot = try codestream.firstSotPsot(bytes);
@@ -1054,7 +1054,7 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
                 if (tile_part_end - cursor < 6) return error.Truncated;
                 if (marker == sop) count += 1;
                 cursor += 6;
-                if (cursor < tile_part_end) cursor += 1;
+                try skipTemporaryPacketHeader(bytes, &cursor, tile_part_end);
                 if (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) == eph) {
                     if (marker == eph) count += 1;
                     cursor += 1;
@@ -1069,6 +1069,20 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
     }
 
     return error.MissingEoc;
+}
+
+fn skipTemporaryPacketHeader(bytes: []const u8, cursor: *usize, end: usize) !void {
+    if (cursor.* >= end) return error.Truncated;
+    cursor.* += 1;
+    var byte_count: usize = 0;
+    while (cursor.* < end) {
+        if (byte_count == 10) return error.InvalidPacketHeader;
+        const byte = bytes[cursor.*];
+        cursor.* += 1;
+        byte_count += 1;
+        if ((byte & 0x80) == 0) return;
+    }
+    return error.Truncated;
 }
 
 fn countTilePartHeaderMarker(bytes: []const u8, marker: u16) !usize {
