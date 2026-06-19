@@ -12,6 +12,7 @@ const scan_lanes = simd.i32_lanes;
 const ScanVector = @Vector(scan_lanes, i32);
 const ScanMaskVector = @Vector(scan_lanes, u32);
 const scan_lane_masks = makeScanLaneMasks();
+const max_codeblock_area = 4096;
 
 const BlockScan = struct {
     active_rect: subband.Rect,
@@ -319,11 +320,15 @@ pub fn decodeBlockPasses(
     const last_row = rect.y + rect.height - 1;
     const last_col = rect.x + rect.width - 1;
     if (last_col >= stride or last_row >= plane.len / stride) return BitplaneError.InvalidBlock;
+    const active_area = try std.math.mul(usize, rect.width, rect.height);
+    if (active_area > max_codeblock_area or @as(usize, @intCast(non_zero_count)) > active_area) return BitplaneError.InvalidBlock;
 
     var sig_reader = BitReader.init(significance_bytes);
     var ref_reader = BitReader.init(refinement_bytes);
+    var significant_positions: [max_codeblock_area]usize = undefined;
 
     var signs_read: u32 = 0;
+    var positions_len: usize = 0;
     var y: usize = 0;
     while (y < rect.height) : (y += 1) {
         const row = (rect.y + y) * stride;
@@ -331,7 +336,10 @@ pub fn decodeBlockPasses(
         while (x < rect.width) : (x += 1) {
             if (try sig_reader.readBit()) {
                 const negative = try sig_reader.readBit();
-                plane[row + rect.x + x] = if (negative) -1 else 1;
+                const index = row + rect.x + x;
+                significant_positions[positions_len] = index;
+                positions_len += 1;
+                plane[index] = if (negative) -1 else 1;
                 signs_read += 1;
             }
         }
@@ -342,36 +350,27 @@ pub fn decodeBlockPasses(
     var bitplane_index = bitplanes;
     while (bitplane_index > 0) {
         bitplane_index -= 1;
-        y = 0;
-        while (y < rect.height) : (y += 1) {
-            const row = (rect.y + y) * stride;
-            var x: usize = 0;
-            while (x < rect.width) : (x += 1) {
-                const index = row + rect.x + x;
-                if (plane[index] == 0) continue;
-                if (try ref_reader.readBit()) {
-                    const bit = @as(i32, 1) << @as(u5, @intCast(bitplane_index));
-                    if (plane[index] > 0) {
-                        plane[index] += bit;
-                    } else {
-                        plane[index] -= bit;
-                    }
+        var position_index: usize = 0;
+        while (position_index < positions_len) : (position_index += 1) {
+            const index = significant_positions[position_index];
+            if (try ref_reader.readBit()) {
+                const bit = @as(i32, 1) << @as(u5, @intCast(bitplane_index));
+                if (plane[index] > 0) {
+                    plane[index] += bit;
+                } else {
+                    plane[index] -= bit;
                 }
             }
         }
     }
 
-    y = 0;
-    while (y < rect.height) : (y += 1) {
-        const row = (rect.y + y) * stride;
-        var x: usize = 0;
-        while (x < rect.width) : (x += 1) {
-            const index = row + rect.x + x;
-            if (plane[index] > 0) {
-                plane[index] -= 1;
-            } else if (plane[index] < 0) {
-                plane[index] += 1;
-            }
+    var position_index: usize = 0;
+    while (position_index < positions_len) : (position_index += 1) {
+        const index = significant_positions[position_index];
+        if (plane[index] > 0) {
+            plane[index] -= 1;
+        } else {
+            plane[index] += 1;
         }
     }
 }

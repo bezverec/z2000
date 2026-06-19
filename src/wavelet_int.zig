@@ -17,32 +17,27 @@ const ShiftVector = @Vector(vertical_lanes, u5);
 
 pub const Workspace = struct {
     allocator: std.mem.Allocator,
-    line: []i32,
     scratch: []i32,
 
     pub fn init(allocator: std.mem.Allocator, max_dim: usize) !Workspace {
         if (max_dim == 0) return TransformError.InvalidDimensions;
-        const line = try allocator.alloc(i32, max_dim);
-        errdefer allocator.free(line);
         const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
         const scratch = try allocator.alloc(i32, scratch_len);
         errdefer allocator.free(scratch);
         return .{
             .allocator = allocator,
-            .line = line,
             .scratch = scratch,
         };
     }
 
     pub fn deinit(self: *Workspace) void {
-        self.allocator.free(self.line);
         self.allocator.free(self.scratch);
         self.* = undefined;
     }
 
     fn require(self: Workspace, max_dim: usize) !void {
         const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
-        if (self.line.len < max_dim or self.scratch.len < scratch_len) {
+        if (self.scratch.len < scratch_len) {
             return TransformError.InvalidDimensions;
         }
     }
@@ -141,7 +136,6 @@ pub fn inverse53WithWorkspace(
 
     const max_dim = @max(width, height);
     try workspace.require(max_dim);
-    const line = workspace.line;
     const scratch = workspace.scratch;
 
     var level = actual_levels;
@@ -149,11 +143,7 @@ pub fn inverse53WithWorkspace(
         level -= 1;
         const shape = shapes[level];
 
-        for (0..shape.width) |col| {
-            for (0..shape.height) |row| line[row] = data[row * width + col];
-            inverse53Line(line[0..shape.height], scratch[0..shape.height]);
-            for (0..shape.height) |row| data[row * width + col] = line[row];
-        }
+        inverse53Columns(data, width, shape.width, shape.height, scratch);
 
         for (0..shape.height) |row| {
             inverse53Line(rowSlice(data, width, row, shape.width), scratch[0..shape.width]);
@@ -267,6 +257,104 @@ fn forward53ColumnScalar(data: []i32, stride: usize, col: usize, height: usize, 
     while (row < height) : (row += 2) {
         scratch[out] = data[row * stride + col];
         out += 1;
+    }
+
+    row = 0;
+    while (row < height) : (row += 1) {
+        data[row * stride + col] = scratch[row];
+    }
+}
+
+fn inverse53Columns(data: []i32, stride: usize, width: usize, height: usize, scratch: []i32) void {
+    if (height < 2) return;
+
+    var col: usize = 0;
+    while (col + vertical_lanes <= width) : (col += vertical_lanes) {
+        inverse53ColumnVector(data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+    }
+    while (col < width) : (col += 1) {
+        inverse53ColumnScalar(data, stride, col, height, scratch[0..height]);
+    }
+}
+
+fn inverse53ColumnVector(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
+    const lows = lowCount(height);
+    var low: usize = 0;
+    var high: usize = lows;
+    var row: usize = 0;
+    while (row < height) : (row += 1) {
+        const packed_row = if ((row & 1) == 0) blk: {
+            const value = low;
+            low += 1;
+            break :blk value;
+        } else blk: {
+            const value = high;
+            high += 1;
+            break :blk value;
+        };
+        storeScratchVector(scratch, row, loadVector(data, stride, packed_row, col));
+    }
+
+    row = 0;
+    while (row < height) : (row += 2) {
+        const left = if (row > 0)
+            loadScratchVector(scratch, row - 1)
+        else
+            loadScratchVector(scratch, 1);
+        const right = if (row + 1 < height)
+            loadScratchVector(scratch, row + 1)
+        else
+            loadScratchVector(scratch, row - 1);
+        const updated = loadScratchVector(scratch, row) - floorQuarterBiasedVector(left + right);
+        storeScratchVector(scratch, row, updated);
+    }
+
+    row = 1;
+    while (row < height) : (row += 2) {
+        const right = if (row + 1 < height)
+            loadScratchVector(scratch, row + 1)
+        else
+            loadScratchVector(scratch, row - 1);
+        const updated = loadScratchVector(scratch, row) +
+            floorHalfVector(loadScratchVector(scratch, row - 1) + right);
+        storeScratchVector(scratch, row, updated);
+    }
+
+    row = 0;
+    while (row < height) : (row += 1) {
+        storeVector(data, stride, row, col, loadScratchVector(scratch, row));
+    }
+}
+
+fn inverse53ColumnScalar(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
+    const lows = lowCount(height);
+    var low: usize = 0;
+    var high: usize = lows;
+    var row: usize = 0;
+    while (row < height) : (row += 1) {
+        const packed_row = if ((row & 1) == 0) blk: {
+            const value = low;
+            low += 1;
+            break :blk value;
+        } else blk: {
+            const value = high;
+            high += 1;
+            break :blk value;
+        };
+        scratch[row] = data[packed_row * stride + col];
+    }
+
+    row = 0;
+    while (row < height) : (row += 2) {
+        const left = if (row > 0) scratch[row - 1] else scratch[1];
+        const right = if (row + 1 < height) scratch[row + 1] else scratch[row - 1];
+        scratch[row] -= floorQuarterBiased(left + right);
+    }
+
+    row = 1;
+    while (row < height) : (row += 2) {
+        const right = if (row + 1 < height) scratch[row + 1] else scratch[row - 1];
+        scratch[row] += floorHalf(scratch[row - 1] + right);
     }
 
     row = 0;
