@@ -597,6 +597,7 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 0x07), bytes[cod + 4]);
     try std.testing.expectEqual(@intFromEnum(codestream.ProgressionOrder.rpcl), bytes[cod + 5]);
     try std.testing.expectEqual(@as(u16, 1), readU16BeTest(bytes, cod + 6));
+    try std.testing.expectEqual(@as(u8, 1), bytes[cod + 8]);
     try std.testing.expectEqual(@as(u8, 5), bytes[cod + 9]);
     try std.testing.expectEqual(@as(u8, 4), bytes[cod + 10]);
     try std.testing.expectEqual(@as(u8, 4), bytes[cod + 11]);
@@ -608,6 +609,11 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 17]);
     try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 18]);
     try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 19]);
+
+    const qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingMarker;
+    try std.testing.expectEqual(@as(u16, 19), readU16BeTest(bytes, qcd + 2));
+    try std.testing.expectEqual(@as(u8, 0x40), bytes[qcd + 4]);
+    try std.testing.expectEqual(@as(u8, 0x40), bytes[qcd + 5]);
 }
 
 test "code-block style options are reflected in COD marker" {
@@ -645,6 +651,38 @@ test "code-block style options are reflected in COD marker" {
 
     const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
     try std.testing.expectEqual(@as(u8, 0x3f), bytes[cod + 12]);
+}
+
+test "unsupported lossy coding path fails closed" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        0,  0,  0,
+        10, 20, 30,
+        40, 50, 60,
+        70, 80, 90,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, .{
+            .transform = .irreversible_9_7,
+        }),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, .{
+            .quantization = .scalar_expounded,
+        }),
+    );
 }
 
 fn appendIfdEntryLe(

@@ -161,6 +161,22 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.progression = try parseProgression(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--mct")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.mct = try parseMct(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--transform")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.transform = try parseJpeg2000Transform(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--qstyle")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.quantization = try parseQuantizationStyle(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--guard-bits")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.guard_bits = try std.fmt.parseInt(u8, args[index], 10);
         } else if (std.mem.eql(u8, args[index], "--resolutions")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -254,7 +270,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         command_timings.write_ns;
 
     std.debug.print(
-        "wrote JP2 marker skeleton {s} -> {s} ({}x{}, {} bits/channel, levels {}, tile {}x{}, block {}x{}, progression {s}, layers {}, tile-parts {s}, TLM {}); packet coder is next\n",
+        "wrote JP2 marker skeleton {s} -> {s} ({}x{}, {} bits/channel, levels {}, tile {}x{}, block {}x{}, progression {s}, layers {}, MCT {s}, transform {s}, QCD {s}/guard {}, tile-parts {s}, TLM {}); packet coder is next\n",
         .{
             args[0],
             args[1],
@@ -268,6 +284,10 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             options.block_height,
             options.progression.label(),
             options.layers,
+            options.mct.label(),
+            options.transform.label(),
+            options.quantization.label(),
+            options.guard_bits,
             tilePartDivisionLabel(options.tile_part_divisions),
             options.tlm,
         },
@@ -530,6 +550,61 @@ fn parseProgression(value: []const u8) !codestream.ProgressionOrder {
     return error.InvalidValue;
 }
 
+fn parseMct(value: []const u8) !codestream.MultipleComponentTransform {
+    if (std.ascii.eqlIgnoreCase(value, "yes") or
+        std.ascii.eqlIgnoreCase(value, "on") or
+        std.ascii.eqlIgnoreCase(value, "rct") or
+        std.ascii.eqlIgnoreCase(value, "ict"))
+    {
+        return .yes;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "none") or
+        std.ascii.eqlIgnoreCase(value, "off") or
+        std.mem.eql(u8, value, "0"))
+    {
+        return .none;
+    }
+    return error.InvalidValue;
+}
+
+fn parseJpeg2000Transform(value: []const u8) !codestream.WaveletTransform {
+    if (std.ascii.eqlIgnoreCase(value, "5-3") or
+        std.ascii.eqlIgnoreCase(value, "53") or
+        std.ascii.eqlIgnoreCase(value, "reversible"))
+    {
+        return .reversible_5_3;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "9-7") or
+        std.ascii.eqlIgnoreCase(value, "97") or
+        std.ascii.eqlIgnoreCase(value, "irreversible"))
+    {
+        return .irreversible_9_7;
+    }
+    return error.InvalidValue;
+}
+
+fn parseQuantizationStyle(value: []const u8) !codestream.QuantizationStyle {
+    if (std.ascii.eqlIgnoreCase(value, "none") or
+        std.ascii.eqlIgnoreCase(value, "no-quantization") or
+        std.mem.eql(u8, value, "0"))
+    {
+        return .none;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "scalar-derived") or
+        std.ascii.eqlIgnoreCase(value, "derived") or
+        std.mem.eql(u8, value, "1"))
+    {
+        return .scalar_derived;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "scalar-expounded") or
+        std.ascii.eqlIgnoreCase(value, "expounded") or
+        std.mem.eql(u8, value, "2"))
+    {
+        return .scalar_expounded;
+    }
+    return error.InvalidValue;
+}
+
 fn parseU32Pair(value: []const u8) !U32Pair {
     var parts = std.mem.splitScalar(u8, value, ',');
     const first_text = parts.next() orelse return error.InvalidValue;
@@ -587,7 +662,7 @@ fn usage() void {
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--precincts LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2>
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif>

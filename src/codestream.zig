@@ -99,10 +99,52 @@ pub const PrecinctSize = struct {
     height: u16,
 };
 
+pub const MultipleComponentTransform = enum(u8) {
+    none = 0,
+    yes = 1,
+
+    pub fn label(self: MultipleComponentTransform) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .yes => "yes",
+        };
+    }
+};
+
+pub const WaveletTransform = enum(u8) {
+    irreversible_9_7 = 0,
+    reversible_5_3 = 1,
+
+    pub fn label(self: WaveletTransform) []const u8 {
+        return switch (self) {
+            .irreversible_9_7 => "9-7",
+            .reversible_5_3 => "5-3",
+        };
+    }
+};
+
+pub const QuantizationStyle = enum(u5) {
+    none = 0,
+    scalar_derived = 1,
+    scalar_expounded = 2,
+
+    pub fn label(self: QuantizationStyle) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .scalar_derived => "scalar-derived",
+            .scalar_expounded => "scalar-expounded",
+        };
+    }
+};
+
 pub const LosslessOptions = struct {
     levels: u8 = 5,
     layers: u16 = 1,
     progression: ProgressionOrder = .rpcl,
+    mct: MultipleComponentTransform = .yes,
+    transform: WaveletTransform = .reversible_5_3,
+    quantization: QuantizationStyle = .none,
+    guard_bits: u8 = 2,
     tile_width: u32 = 4096,
     tile_height: u32 = 4096,
     block_width: u16 = 64,
@@ -177,6 +219,7 @@ fn encodeLosslessWithOptionsMeasured(
     try validateTileSize(options.tile_width, options.tile_height);
     try validatePrecincts(options);
     try validateTilePartDivisions(options.tile_part_divisions);
+    try validateCodingPath(options);
     if (options.layers == 0) return CodestreamError.InvalidCodestream;
 
     const color_start = monotonicNs();
@@ -211,7 +254,7 @@ fn encodeLosslessWithOptionsMeasured(
     try appendMarker(allocator, &out, .soc);
     try appendSiz(allocator, &out, rgb, options);
     try appendCod(allocator, &out, levels, options);
-    try appendQcd(allocator, &out, levels);
+    try appendQcd(allocator, &out, levels, options);
     const psot = try std.math.add(u32, 14, @as(u32, @intCast(tile_payload.items.len)));
     if (options.tlm) try appendTlm(allocator, &out, psot);
     try appendSot(allocator, &out, psot);
@@ -608,12 +651,12 @@ fn appendCod(
     try out.append(allocator, codingStyleFlags(options));
     try out.append(allocator, @intFromEnum(options.progression));
     try appendU16Be(allocator, out, options.layers);
-    try out.append(allocator, 1);
+    try out.append(allocator, @intFromEnum(options.mct));
     try out.append(allocator, levels);
     try out.append(allocator, codeBlockExponent(options.block_width));
     try out.append(allocator, codeBlockExponent(options.block_height));
     try out.append(allocator, codeBlockStyle(options));
-    try out.append(allocator, 1);
+    try out.append(allocator, @intFromEnum(options.transform));
     if (uses_precincts) {
         var resolution: usize = 0;
         while (resolution <= levels) : (resolution += 1) {
@@ -622,11 +665,16 @@ fn appendCod(
     }
 }
 
-fn appendQcd(allocator: std.mem.Allocator, out: *std.ArrayList(u8), levels: u8) !void {
+fn appendQcd(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    levels: u8,
+    options: LosslessOptions,
+) !void {
     const bands = 1 + 3 * @as(u16, levels);
     try appendMarker(allocator, out, .qcd);
     try appendU16Be(allocator, out, 3 + bands);
-    try out.append(allocator, 2 << 5);
+    try out.append(allocator, qcdStyleByte(options));
     for (0..bands) |_| {
         try out.append(allocator, 8 << 3);
     }
@@ -900,6 +948,13 @@ fn validateTilePartDivisions(value: ?u8) !void {
     }
 }
 
+fn validateCodingPath(options: LosslessOptions) !void {
+    if (options.mct != .yes) return CodestreamError.UnsupportedPayload;
+    if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
+    if (options.quantization != .none) return CodestreamError.UnsupportedPayload;
+    if (options.guard_bits > 7) return CodestreamError.InvalidCodestream;
+}
+
 fn isValidBlockEdge(value: u16) bool {
     return value >= 4 and value <= 1024 and value & (value - 1) == 0;
 }
@@ -942,4 +997,8 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
     if (options.predictable_termination) style |= 0x10;
     if (options.segmentation_symbols) style |= 0x20;
     return style;
+}
+
+fn qcdStyleByte(options: LosslessOptions) u8 {
+    return (options.guard_bits << 5) | @intFromEnum(options.quantization);
 }

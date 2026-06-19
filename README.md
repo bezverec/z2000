@@ -70,7 +70,8 @@ zig build run -- tiff-info input.tif
 zig build run -- tiff-to-jp2 input.tif output.jp2 \
   [--levels 5|--resolutions 6] [--tile 4096,4096] [--progression RPCL] \
   [--precincts "[256,256],[256,256],[128,128]"] [--block 64] [--layers 1] \
-  [--tlm|--no-tlm] [--timings]
+  [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] \
+  [--guard-bits 2] [--tlm|--no-tlm] [--timings]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif
@@ -88,6 +89,15 @@ lines we are targeting:
 
 - `--tile W,H` maps to Grok `-t` and Kakadu `Stiles`.
 - `--progression RPCL` maps to Grok `-p RPCL` and Kakadu `Corder=RPCL`.
+- `--mct yes` maps to COD multiple component transform. The current supported
+  path is RCT for reversible lossless RGB; `--mct none` fails closed until a
+  no-MCT tile pipeline exists.
+- `--transform 5-3` maps to COD wavelet transform 1. `--transform 9-7` parses
+  but fails closed until the TIFF/JP2 path has a real irreversible ICT/9-7
+  pipeline.
+- `--qstyle none` and `--guard-bits 2` map to QCD `Sqcd`. Scalar-derived and
+  scalar-expounded quantization parse but fail closed until lossy quantization
+  is implemented for JP2 output.
 - `--resolutions 6` maps to Grok `-n 6`; it is equivalent to `--levels 5`
   and Kakadu `Clevels=5`.
 - `--precincts "[256,256],[256,256],[128,128]"` maps to Grok `-c` and Kakadu
