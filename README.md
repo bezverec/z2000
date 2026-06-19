@@ -147,7 +147,7 @@ zig build run -- tiff-to-jp2 example.tif example.jp2 \
 These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`QCD`/
 `TLM`/`PLT`) and temporary payload metadata. `--tile-parts R` writes physical
 resolution-ordered tile-parts and records the matching RPCL packet-grid plan in
-temporary payload version `BP3`. Real T2 packet headers, true packet payload
+temporary payload version `BP4`. Real T2 packet headers, true packet payload
 interleaving, quality-layer truncation, EBCOT pass behavior for each code-block
 style bit, and rate control still require the ISO packet writer. Lossy
 `--rate/--rates` requests fail closed for now instead of silently producing a

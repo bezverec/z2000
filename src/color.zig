@@ -27,7 +27,8 @@ pub const RctPlanes = struct {
 pub fn forwardRct(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes {
     if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
     const pixels = try std.math.mul(usize, rgb.width, rgb.height);
-    if (rgb.samples.len != pixels * 3) return ColorError.InvalidImage;
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
 
     const y = try allocator.alloc(i32, pixels);
     errdefer allocator.free(y);
@@ -54,9 +55,10 @@ pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbIma
     if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
         return ColorError.InvalidImage;
     }
+    const sample_count = try std.math.mul(usize, pixels, 3);
 
     const max_sample = try maxSample(planes.bit_depth);
-    const samples = try allocator.alloc(u16, pixels * 3);
+    const samples = try allocator.alloc(u16, sample_count);
     errdefer allocator.free(samples);
 
     try inverseRctVector(samples, planes, pixels, max_sample);

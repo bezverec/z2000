@@ -1201,14 +1201,17 @@ fn appendPltSegmentLengths(
     if (segment.len == 0) return CodestreamError.InvalidCodestream;
     _ = segment[0];
     var length: usize = 0;
+    var pending_length = false;
     for (segment[1..]) |byte| {
         length = (length << 7) | (byte & 0x7f);
+        pending_length = true;
         if ((byte & 0x80) == 0) {
             try packet_lengths.append(allocator, length);
             length = 0;
+            pending_length = false;
         }
     }
-    if (length != 0) return CodestreamError.InvalidCodestream;
+    if (pending_length) return CodestreamError.InvalidCodestream;
 }
 
 fn appendTemporaryPacketPayloads(

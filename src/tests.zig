@@ -781,6 +781,43 @@ test "temporary payload records resolution ordered tile-part plan" {
     try std.testing.expectEqual(@as(usize, 12), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
 }
 
+test "temporary payload rejects unterminated PLT lengths" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 32,
+        .block_height = 32,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const plt = findMarker(corrupted, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(corrupted, plt + 2);
+    corrupted[plt + 2 + segment_length - 1] = 0x80;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
 test "temporary payload omits tile-part plan when tile parts are disabled" {
     const allocator = std.testing.allocator;
     const width = 8;
@@ -1158,14 +1195,17 @@ fn sumPltSegment(segment: []const u8) !usize {
     if (segment.len == 0) return error.InvalidPlt;
     var sum: usize = 0;
     var length: usize = 0;
+    var pending_length = false;
     for (segment[1..]) |byte| {
         length = (length << 7) | (byte & 0x7f);
+        pending_length = true;
         if ((byte & 0x80) == 0) {
             sum += length;
             length = 0;
+            pending_length = false;
         }
     }
-    if (length != 0) return error.InvalidPlt;
+    if (pending_length) return error.InvalidPlt;
     return sum;
 }
 
