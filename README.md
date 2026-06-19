@@ -21,7 +21,8 @@ This first milestone is intentionally small and honest:
 - TLM marker segments for current tile-part lengths
 - PLT packet-length marker segments in tile-part headers
 - physical resolution-ordered tile-parts for `--tile-parts R`
-- T2 packet-header bitstream and tag-tree primitives with marker-safe bit stuffing
+- T2 packet-header bitstream, tag-tree, coding-pass, and segment-length
+  primitives with marker-safe bit stuffing
 - pass-oriented temporary code-block payloads: significance, refinement, cleanup
 - swappable pass-stream entropy layer with raw/RLE/bit-RLE auto-selection
 - explicit experimental adaptive arithmetic backend for pass streams
@@ -293,8 +294,8 @@ Optimization read from those numbers:
 
 ## Roadmap
 
-1. Use the new T2 bitstream/tag-tree layer for real inclusion and zero-bitplane
-   packet headers, then replace temporary packet payload interleaving.
+1. Use the new T2 bitstream/tag-tree/coding-pass/length layer for real packet
+   headers, then replace temporary packet payload interleaving.
 2. Add MQ arithmetic coding for code-block pass streams.
 3. Implement quality-layer truncation and rate allocation.
 4. Replace the temporary decoder with strict ISO packet/header parsing.

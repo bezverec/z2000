@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const PacketHeaderError = error{
+    InvalidPacketHeader,
     InvalidTagTree,
     InvalidMarkerStuffing,
     TruncatedHeader,
@@ -71,6 +72,15 @@ pub const PacketHeaderReader = struct {
         if (self.bits_remaining == 0) try self.loadByte();
         self.bits_remaining -= 1;
         return ((self.current >> @intCast(self.bits_remaining)) & 1) != 0;
+    }
+
+    pub fn readBits(self: *PacketHeaderReader, bit_count: u6) PacketHeaderError!u64 {
+        var value: u64 = 0;
+        var index: u6 = 0;
+        while (index < bit_count) : (index += 1) {
+            value = (value << 1) | @intFromBool(try self.readBit());
+        }
+        return value;
     }
 
     pub fn byteAlign(self: *PacketHeaderReader) PacketHeaderError!void {
@@ -336,7 +346,84 @@ pub fn readPacketPresenceHeader(bytes: []const u8, cursor: *usize, end: usize) !
     return present;
 }
 
+pub fn writeCodingPassCount(writer: *PacketHeaderWriter, pass_count: u16) !void {
+    if (pass_count == 0 or pass_count > 164) return PacketHeaderError.InvalidPacketHeader;
+    if (pass_count == 1) {
+        try writer.writeBit(false);
+    } else if (pass_count == 2) {
+        try writer.writeBits(0b10, 2);
+    } else if (pass_count <= 5) {
+        try writer.writeBits(0b110, 3);
+        try writer.writeBits(pass_count - 3, 2);
+    } else if (pass_count <= 36) {
+        try writer.writeBits(0b1110, 4);
+        try writer.writeBits(pass_count - 6, 5);
+    } else {
+        try writer.writeBits(0b11110, 5);
+        try writer.writeBits(pass_count - 37, 7);
+    }
+}
+
+pub fn readCodingPassCount(reader: *PacketHeaderReader) !u16 {
+    if (!try reader.readBit()) return 1;
+    if (!try reader.readBit()) return 2;
+    if (!try reader.readBit()) return @as(u16, 3) + @as(u16, @intCast(try reader.readBits(2)));
+    if (!try reader.readBit()) return @as(u16, 6) + @as(u16, @intCast(try reader.readBits(5)));
+    if (!try reader.readBit()) return @as(u16, 37) + @as(u16, @intCast(try reader.readBits(7)));
+    return PacketHeaderError.InvalidPacketHeader;
+}
+
+pub const SegmentLengthState = struct {
+    lblock: u8 = 3,
+
+    pub fn write(
+        self: *SegmentLengthState,
+        writer: *PacketHeaderWriter,
+        pass_count: u16,
+        byte_length: u64,
+    ) !void {
+        const extra_bits = try passCountLengthBits(pass_count);
+        while (true) {
+            const bit_count = try self.lengthBitCount(extra_bits);
+            if (fitsInBits(byte_length, bit_count)) break;
+            if (self.lblock == 63) return PacketHeaderError.InvalidPacketHeader;
+            try writer.writeBit(true);
+            self.lblock += 1;
+        }
+        try writer.writeBit(false);
+        try writer.writeBits(byte_length, try self.lengthBitCount(extra_bits));
+    }
+
+    pub fn read(
+        self: *SegmentLengthState,
+        reader: *PacketHeaderReader,
+        pass_count: u16,
+    ) !u64 {
+        const extra_bits = try passCountLengthBits(pass_count);
+        while (try reader.readBit()) {
+            if (self.lblock == 63) return PacketHeaderError.InvalidPacketHeader;
+            self.lblock += 1;
+        }
+        return reader.readBits(try self.lengthBitCount(extra_bits));
+    }
+
+    fn lengthBitCount(self: SegmentLengthState, extra_bits: u6) !u6 {
+        const bits = @as(u16, self.lblock) + @as(u16, extra_bits);
+        if (bits > 63) return PacketHeaderError.InvalidPacketHeader;
+        return @intCast(bits);
+    }
+};
+
 pub fn zeroBitPlaneCount(nominal_bitplanes: u8, encoded_bitplanes: u8) !u8 {
-    if (encoded_bitplanes > nominal_bitplanes) return PacketHeaderError.InvalidTagTree;
+    if (encoded_bitplanes > nominal_bitplanes) return PacketHeaderError.InvalidPacketHeader;
     return nominal_bitplanes - encoded_bitplanes;
+}
+
+fn passCountLengthBits(pass_count: u16) !u6 {
+    if (pass_count == 0 or pass_count > 164) return PacketHeaderError.InvalidPacketHeader;
+    return @intCast(15 - @clz(pass_count));
+}
+
+fn fitsInBits(value: u64, bit_count: u6) bool {
+    return value < (@as(u64, 1) << bit_count);
 }

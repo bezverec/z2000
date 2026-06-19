@@ -122,7 +122,62 @@ test "T2 tag-tree encoder and decoder preserve threshold decisions" {
 test "T2 zero bit-plane count bridges T1 block bitplane metadata" {
     try std.testing.expectEqual(@as(u8, 5), try t2.zeroBitPlaneCount(8, 3));
     try std.testing.expectEqual(@as(u8, 0), try t2.zeroBitPlaneCount(8, 8));
-    try std.testing.expectError(t2.PacketHeaderError.InvalidTagTree, t2.zeroBitPlaneCount(3, 4));
+    try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, t2.zeroBitPlaneCount(3, 4));
+}
+
+test "T2 coding pass count coder roundtrips ISO packet header ranges" {
+    const allocator = std.testing.allocator;
+    const pass_counts = [_]u16{ 1, 2, 3, 5, 6, 36, 37, 164 };
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+    for (pass_counts) |pass_count| {
+        try t2.writeCodingPassCount(&writer, pass_count);
+    }
+    try writer.finish();
+
+    var reader = t2.PacketHeaderReader.init(bytes.items);
+    for (pass_counts) |pass_count| {
+        try std.testing.expectEqual(pass_count, try t2.readCodingPassCount(&reader));
+    }
+    try reader.byteAlign();
+    try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
+    try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, t2.writeCodingPassCount(&writer, 0));
+    try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, t2.writeCodingPassCount(&writer, 165));
+}
+
+test "T2 segment length coder preserves Lblock state" {
+    const allocator = std.testing.allocator;
+    const Segment = struct {
+        passes: u16,
+        bytes: u64,
+    };
+    const segments = [_]Segment{
+        .{ .passes = 1, .bytes = 7 },
+        .{ .passes = 1, .bytes = 8 },
+        .{ .passes = 6, .bytes = 63 },
+        .{ .passes = 37, .bytes = 1024 },
+    };
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+    var write_state = t2.SegmentLengthState{};
+    for (segments) |segment| {
+        try write_state.write(&writer, segment.passes, segment.bytes);
+    }
+    try writer.finish();
+
+    var reader = t2.PacketHeaderReader.init(bytes.items);
+    var read_state = t2.SegmentLengthState{};
+    for (segments) |segment| {
+        try std.testing.expectEqual(segment.bytes, try read_state.read(&reader, segment.passes));
+    }
+    try reader.byteAlign();
+    try std.testing.expectEqual(write_state.lblock, read_state.lblock);
+    try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
+    try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, write_state.write(&writer, 0, 1));
 }
 
 test "9/7 wavelet roundtrips within floating point tolerance" {
