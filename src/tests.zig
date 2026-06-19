@@ -498,6 +498,39 @@ test "raw bitplane block writer roundtrips a block" {
     try std.testing.expectEqualSlices(i32, original[0..], decoded[0..]);
 }
 
+test "bitplane refinement packing roundtrips full vector groups" {
+    const allocator = std.testing.allocator;
+    const original = [_]i32{
+        1,  -2,  3,   -4,
+        5,  -6,  7,   -8,
+        9,  -10, 11,  -12,
+        13, -14, 127, -128,
+    };
+    var decoded = [_]i32{0} ** original.len;
+
+    var encoded = try bitplane.encodeBlock(allocator, original[0..], 4, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 4,
+    });
+    defer encoded.deinit(allocator);
+
+    try std.testing.expect(encoded.non_zero_count >= 16);
+    try std.testing.expect(encoded.refinement_bytes.len >= encoded.bitplanes * 2);
+
+    try bitplane.decodeBlock(
+        decoded[0..],
+        4,
+        encoded.active_rect,
+        encoded.bitplanes,
+        encoded.non_zero_count,
+        encoded.bytes,
+    );
+
+    try std.testing.expectEqualSlices(i32, original[0..], decoded[0..]);
+}
+
 test "temporary lossless codestream roundtrips RGB samples" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{

@@ -12,6 +12,10 @@ const scan_lanes = simd.i32_lanes;
 const ScanVector = @Vector(scan_lanes, i32);
 const ScanMaskVector = @Vector(scan_lanes, u32);
 const scan_lane_masks = makeScanLaneMasks();
+const neon_pack_lanes = simd.neon_i32_lanes;
+const NeonPackVector = @Vector(neon_pack_lanes, u32);
+const neon_pack_masks: NeonPackVector = .{ 0x80, 0x40, 0x20, 0x10 };
+const neon_pack_tail_masks: NeonPackVector = .{ 0x08, 0x04, 0x02, 0x01 };
 const max_codeblock_area = 4096;
 
 const BlockScan = struct {
@@ -548,11 +552,7 @@ const BitWriter = struct {
         }
 
         while (index + 8 <= magnitudes.len) : (index += 8) {
-            var byte: u8 = 0;
-            inline for (0..8) |offset| {
-                byte |= @as(u8, @intCast((magnitudes[index + offset] >> bit_index) & 1)) << @as(u3, @intCast(7 - offset));
-            }
-            self.bytes.appendAssumeCapacity(byte);
+            self.bytes.appendAssumeCapacity(packMagnitudeByte(magnitudes[index..][0..8], bit_index));
         }
 
         while (index < magnitudes.len) : (index += 1) {
@@ -584,6 +584,29 @@ const BitWriter = struct {
         return self.bytes.items;
     }
 };
+
+fn packMagnitudeByte(magnitudes: *const [8]u32, bit_index: u5) u8 {
+    if (simd.has_neon) {
+        return packMagnitudeByteNeon(magnitudes, bit_index);
+    }
+
+    var byte: u8 = 0;
+    inline for (0..8) |offset| {
+        byte |= @as(u8, @intCast((magnitudes[offset] >> bit_index) & 1)) << @as(u3, @intCast(7 - offset));
+    }
+    return byte;
+}
+
+fn packMagnitudeByteNeon(magnitudes: *const [8]u32, bit_index: u5) u8 {
+    const shift: @Vector(neon_pack_lanes, u5) = @splat(bit_index);
+    const low_values: NeonPackVector = magnitudes[0..4].*;
+    const high_values: NeonPackVector = magnitudes[4..8].*;
+    const low = (low_values >> shift) & @as(NeonPackVector, @splat(1));
+    const high = (high_values >> shift) & @as(NeonPackVector, @splat(1));
+    const low_bits = low * neon_pack_masks;
+    const high_bits = high * neon_pack_tail_masks;
+    return @as(u8, @intCast(@reduce(.Or, low_bits) | @reduce(.Or, high_bits)));
+}
 
 const ByteCursor = struct {
     bytes: []const u8,
