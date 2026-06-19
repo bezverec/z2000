@@ -265,12 +265,15 @@ fn encodeLosslessWithOptionsMeasured(
     try appendSiz(allocator, &out, rgb, options);
     try appendCod(allocator, &out, levels, options);
     try appendQcd(allocator, &out, levels, options);
+    const packets = try makePacketPlan(rgb.width, rgb.height, levels, options);
     const tile_parts = tilePartCountForOptions(levels, options);
     var psots: [33]u32 = undefined;
+    var tile_part_packets: [33]u64 = undefined;
     var tile_part_index: usize = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
         const chunk = payloadChunk(tile_payload.items, tile_part_index, tile_parts);
-        const packet_markers = packetMarkerBytes(options);
+        tile_part_packets[tile_part_index] = packetCountForTilePart(packets, tile_part_index, tile_parts, options);
+        const packet_markers = try packetMarkerBytesForCount(options, tile_part_packets[tile_part_index]);
         psots[tile_part_index] = try std.math.add(u32, 14, @as(u32, @intCast(packet_markers + chunk.len)));
     }
 
@@ -281,11 +284,7 @@ fn encodeLosslessWithOptionsMeasured(
         const chunk = payloadChunk(tile_payload.items, tile_part_index, tile_parts);
         try appendSot(allocator, &out, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
         try appendMarker(allocator, &out, .sod);
-        if (options.sop) {
-            try appendSop(allocator, &out, packet_sequence);
-            packet_sequence +%= 1;
-        }
-        if (options.eph) try appendMarker(allocator, &out, .eph);
+        try appendPacketBoundaryMarkers(allocator, &out, options, tile_part_packets[tile_part_index], &packet_sequence);
         try out.appendSlice(allocator, chunk);
     }
     try appendMarker(allocator, &out, .eoc);
@@ -825,13 +824,14 @@ fn appendQcd(
 
 fn skipPacketBoundaryMarkers(bytes: []const u8, start: usize, end: usize) !usize {
     var cursor = start;
-    if (end - cursor >= 6 and readU16Be(bytes, cursor) == @intFromEnum(Marker.sop)) {
+    while (end - cursor >= 2 and readU16Be(bytes, cursor) == @intFromEnum(Marker.sop)) {
+        if (end - cursor < 6) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, cursor + 2);
         if (segment_length != 4) return CodestreamError.InvalidCodestream;
         cursor += 6;
-    }
-    if (end - cursor >= 2 and readU16Be(bytes, cursor) == @intFromEnum(Marker.eph)) {
-        cursor += 2;
+        if (end - cursor >= 2 and readU16Be(bytes, cursor) == @intFromEnum(Marker.eph)) {
+            cursor += 2;
+        }
     }
     return cursor;
 }
@@ -870,6 +870,23 @@ fn appendSop(allocator: std.mem.Allocator, out: *std.ArrayList(u8), sequence: u1
     try appendU16Be(allocator, out, sequence);
 }
 
+fn appendPacketBoundaryMarkers(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    options: LosslessOptions,
+    packet_count: u64,
+    packet_sequence: *u16,
+) !void {
+    var packet: u64 = 0;
+    while (packet < packet_count) : (packet += 1) {
+        if (options.sop) {
+            try appendSop(allocator, out, packet_sequence.*);
+            packet_sequence.* +%= 1;
+        }
+        if (options.eph) try appendMarker(allocator, out, .eph);
+    }
+}
+
 fn tilePartCountForOptions(levels: u8, options: LosslessOptions) usize {
     if (options.tile_part_divisions == 'R') return @as(usize, levels) + 1;
     return 1;
@@ -881,9 +898,12 @@ fn payloadChunk(payload: []const u8, index: usize, chunks: usize) []const u8 {
     return payload[start..end];
 }
 
-fn packetMarkerBytes(options: LosslessOptions) usize {
-    return (if (options.sop) @as(usize, 6) else 0) +
-        (if (options.eph) @as(usize, 2) else 0);
+fn packetMarkerBytesForCount(options: LosslessOptions, packet_count: u64) !usize {
+    const per_packet = (if (options.sop) @as(u64, 6) else 0) +
+        (if (options.eph) @as(u64, 2) else 0);
+    const bytes = try std.math.mul(u64, per_packet, packet_count);
+    if (bytes > std.math.maxInt(usize)) return CodestreamError.ImageTooLarge;
+    return @intCast(bytes);
 }
 
 fn appendTemporaryPayload(
@@ -922,23 +942,7 @@ fn appendPacketPlan(
     levels: u8,
     options: LosslessOptions,
 ) !void {
-    var precincts: [33]packet_plan.Precinct = undefined;
-    var index: usize = 0;
-    while (index < options.precinct_count) : (index += 1) {
-        precincts[index] = .{
-            .width = options.precincts[index].width,
-            .height = options.precincts[index].height,
-        };
-    }
-
-    const plan = try packet_plan.rpclSingleTile(
-        width,
-        height,
-        levels,
-        3,
-        options.layers,
-        precincts[0..options.precinct_count],
-    );
+    const plan = try makePacketPlan(width, height, levels, options);
 
     try out.append(allocator, plan.resolution_count);
     for (plan.resolutions[0..plan.resolution_count]) |resolution| {
@@ -951,6 +955,38 @@ fn appendPacketPlan(
         try appendU64Be(allocator, out, resolution.precincts);
         try appendU64Be(allocator, out, resolution.packets);
     }
+}
+
+fn makePacketPlan(width: usize, height: usize, levels: u8, options: LosslessOptions) !packet_plan.Plan {
+    var precincts: [33]packet_plan.Precinct = undefined;
+    var index: usize = 0;
+    while (index < options.precinct_count) : (index += 1) {
+        precincts[index] = .{
+            .width = options.precincts[index].width,
+            .height = options.precincts[index].height,
+        };
+    }
+
+    return packet_plan.rpclSingleTile(
+        width,
+        height,
+        levels,
+        3,
+        options.layers,
+        precincts[0..options.precinct_count],
+    );
+}
+
+fn packetCountForTilePart(
+    plan: packet_plan.Plan,
+    tile_part_index: usize,
+    tile_parts: usize,
+    options: LosslessOptions,
+) u64 {
+    if (options.tile_part_divisions == 'R' and tile_parts == plan.resolution_count) {
+        return plan.resolutions[tile_part_index].packets;
+    }
+    return plan.packets;
 }
 
 fn appendTilePartPlan(

@@ -303,8 +303,8 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     const expected_tile_parts = @as(usize, stats.levels) + 1;
     try std.testing.expectEqual(psot, ptlm);
     try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("sot")));
-    try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("sop")));
-    try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("eph")));
+    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
+    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
     try std.testing.expectEqual(codestream.markerValue("sot"), readU16BeTest(bytes, sot_index + psot));
 }
 
@@ -627,6 +627,8 @@ test "temporary payload records resolution ordered tile-part plan" {
     try std.testing.expectEqual(@as(u8, 4), stats.packet_plan_count);
     try std.testing.expectEqual(@as(u64, 12), stats.packet_count);
     try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 12), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
+    try std.testing.expectEqual(@as(usize, 12), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
 }
 
 test "temporary payload omits tile-part plan when tile parts are disabled" {
@@ -710,9 +712,10 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 0x50), bytes[tlm + 5]);
     try std.testing.expectEqual(@as(u8, 0), bytes[tlm + 6]);
     try std.testing.expectEqual(psot, readU32BeTest(bytes, tlm + 7));
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
     try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("sot")));
-    try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("sop")));
-    try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("eph")));
+    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
+    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
 
     const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
     try std.testing.expectEqual(@as(u16, 18), readU16BeTest(bytes, cod + 2));
@@ -850,6 +853,64 @@ fn countMarker(bytes: []const u8, marker: u16) usize {
         if (value == marker) count += 1;
     }
     return count;
+}
+
+fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+    const sop = codestream.markerValue("sop");
+    const eph = codestream.markerValue("eph");
+
+    var count: usize = 0;
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len and readU16BeTest(bytes, cursor) != sot) {
+        cursor += 2;
+        if (readU16BeTest(bytes, cursor - 2) == eoc) return error.MissingSot;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        cursor += segment_length;
+    }
+
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        if (marker_value == eoc) return count;
+        if (marker_value != sot) return error.MissingSot;
+        if (bytes.len - cursor < 14) return error.Truncated;
+
+        const tile_part_start = cursor;
+        const segment_length = readU16BeTest(bytes, cursor + 2);
+        if (segment_length != 10) return error.InvalidSot;
+        const psot = readU32BeTest(bytes, cursor + 6);
+        const tile_part_end = tile_part_start + psot;
+        if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
+
+        cursor += 12;
+        if (readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
+        cursor += 2;
+
+        while (cursor + 1 < tile_part_end) {
+            const prefix_marker = readU16BeTest(bytes, cursor);
+            if (prefix_marker == sop) {
+                if (tile_part_end - cursor < 6) return error.Truncated;
+                if (marker == sop) count += 1;
+                cursor += 6;
+                if (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) == eph) {
+                    if (marker == eph) count += 1;
+                    cursor += 2;
+                }
+            } else if (prefix_marker == eph) {
+                if (marker == eph) count += 1;
+                cursor += 2;
+            } else {
+                break;
+            }
+        }
+
+        cursor = tile_part_end;
+    }
+
+    return error.MissingEoc;
 }
 
 fn readU16BeTest(bytes: []const u8, offset: usize) u16 {
