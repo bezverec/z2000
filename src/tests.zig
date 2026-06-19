@@ -655,6 +655,8 @@ test "temporary payload records resolution ordered tile-part plan" {
     try std.testing.expectEqual(@as(u8, 4), stats.packet_plan_count);
     try std.testing.expectEqual(@as(u64, 12), stats.packet_count);
     try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 4), try countTilePartHeaderMarker(bytes, codestream.markerValue("plt")));
+    try std.testing.expectEqual(try sumTilePartPayloadBytes(bytes), try sumTilePartPltLengths(bytes));
     try std.testing.expectEqual(@as(usize, 12), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
     try std.testing.expectEqual(@as(usize, 12), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
 }
@@ -742,6 +744,8 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(psot, readU32BeTest(bytes, tlm + 7));
     const stats = try codestream.analyzeLosslessTemporary(bytes);
     try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 6), try countTilePartHeaderMarker(bytes, codestream.markerValue("plt")));
+    try std.testing.expectEqual(try sumTilePartPayloadBytes(bytes), try sumTilePartPltLengths(bytes));
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
 
@@ -914,7 +918,14 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
         if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
 
         cursor += 12;
-        if (readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
+        while (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) != sod) {
+            cursor += 2;
+            if (tile_part_end - cursor < 2) return error.Truncated;
+            const header_segment_length = readU16BeTest(bytes, cursor);
+            if (header_segment_length < 2 or tile_part_end - cursor < header_segment_length) return error.Truncated;
+            cursor += header_segment_length;
+        }
+        if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
         cursor += 2;
 
         while (cursor + 1 < tile_part_end) {
@@ -939,6 +950,90 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
     }
 
     return error.MissingEoc;
+}
+
+fn countTilePartHeaderMarker(bytes: []const u8, marker: u16) !usize {
+    return try walkTilePartHeaders(bytes, marker, null, null);
+}
+
+fn sumTilePartPltLengths(bytes: []const u8) !usize {
+    var sum: usize = 0;
+    _ = try walkTilePartHeaders(bytes, codestream.markerValue("plt"), &sum, null);
+    return sum;
+}
+
+fn sumTilePartPayloadBytes(bytes: []const u8) !usize {
+    var sum: usize = 0;
+    _ = try walkTilePartHeaders(bytes, codestream.markerValue("plt"), null, &sum);
+    return sum;
+}
+
+fn walkTilePartHeaders(bytes: []const u8, marker: u16, plt_sum: ?*usize, payload_sum: ?*usize) !usize {
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+
+    var count: usize = 0;
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len and readU16BeTest(bytes, cursor) != sot) {
+        cursor += 2;
+        if (readU16BeTest(bytes, cursor - 2) == eoc) return error.MissingSot;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        cursor += segment_length;
+    }
+
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        if (marker_value == eoc) return count;
+        if (marker_value != sot) return error.MissingSot;
+        if (bytes.len - cursor < 14) return error.Truncated;
+
+        const tile_part_start = cursor;
+        const segment_length = readU16BeTest(bytes, cursor + 2);
+        if (segment_length != 10) return error.InvalidSot;
+        const psot = readU32BeTest(bytes, cursor + 6);
+        const tile_part_end = tile_part_start + psot;
+        if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
+
+        cursor += 12;
+        while (cursor + 1 < tile_part_end) {
+            const tile_header_marker = readU16BeTest(bytes, cursor);
+            if (tile_header_marker == sod) break;
+            if (tile_part_end - cursor < 4) return error.Truncated;
+            const header_segment_start = cursor;
+            const header_segment_length = readU16BeTest(bytes, cursor + 2);
+            if (header_segment_length < 2 or tile_part_end - cursor - 2 < header_segment_length) return error.Truncated;
+            if (tile_header_marker == marker) count += 1;
+            if (tile_header_marker == codestream.markerValue("plt")) {
+                if (plt_sum) |sum| {
+                    sum.* += try sumPltSegment(bytes[header_segment_start + 4 .. header_segment_start + 2 + header_segment_length]);
+                }
+            }
+            cursor += 2 + header_segment_length;
+        }
+
+        if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
+        if (payload_sum) |sum| sum.* += tile_part_end - (cursor + 2);
+        cursor = tile_part_end;
+    }
+
+    return error.MissingEoc;
+}
+
+fn sumPltSegment(segment: []const u8) !usize {
+    if (segment.len == 0) return error.InvalidPlt;
+    var sum: usize = 0;
+    var length: usize = 0;
+    for (segment[1..]) |byte| {
+        length = (length << 7) | (byte & 0x7f);
+        if ((byte & 0x80) == 0) {
+            sum += length;
+            length = 0;
+        }
+    }
+    if (length != 0) return error.InvalidPlt;
+    return sum;
 }
 
 fn readU16BeTest(bytes: []const u8, offset: usize) u16 {

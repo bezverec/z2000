@@ -18,15 +18,17 @@ This first milestone is intentionally small and honest:
 - temporary RGB JP2 encode/decode roundtrip back to TIFF
 - active code-block bounding boxes for faster sparse block payloads
 - accurate SOT `Psot` tile-part lengths in the marker skeleton
-- TLM marker segment for the current single tile-part length
+- TLM marker segments for current tile-part lengths
+- PLT packet-length marker segments in tile-part headers
+- physical resolution-ordered tile-parts for `--tile-parts R`
 - pass-oriented temporary code-block payloads: significance, refinement, cleanup
 - swappable pass-stream entropy layer with raw/RLE/bit-RLE auto-selection
 - explicit experimental adaptive arithmetic backend for pass streams
 
 It is not yet an ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The JP2
 container boxes are now scaffolded, but the `jp2c` payload is still temporary.
-The missing large pieces are precincts, packet progression orders, EBCOT coding
-passes, MQ arithmetic coding, and strict ISO-compatible packet syntax.
+The missing large pieces are real T2 packet headers, EBCOT coding passes, MQ
+arithmetic coding, and strict ISO-compatible packet payload syntax.
 
 ## Build
 
@@ -110,7 +112,7 @@ lines we are targeting:
   SEGMARK at marker/config level.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level.
-- `--tlm` writes a TLM marker segment for the current single tile-part length.
+- `--tlm` writes TLM marker entries for the current tile-part lengths.
 - `--layers N` maps to `Clayers=N`.
 - `--tile-parts R` maps to Kakadu `ORGtparts=R` and Grok `-u R`; the current
   temporary payload records resolution-ordered tile-part intent.
@@ -138,14 +140,13 @@ zig build run -- tiff-to-jp2 example.tif example.jp2 \
 ```
 
 These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`QCD`/
-`TLM`) and temporary payload metadata. `--tile-parts R` is recorded as a
-resolution-ordered tile-part plan plus RPCL packet-grid plan in temporary
-payload version `BP3`. Real RPCL
-packet ordering, precinct packetization, SOP/EPH marker emission inside
-packets, physical multi-tile-part division by resolution, quality layers,
-EBCOT pass behavior for each code-block style bit, and rate control still
-require the ISO packet writer. Lossy `--rate/--rates` requests fail closed for
-now instead of silently producing a lossless file.
+`TLM`/`PLT`) and temporary payload metadata. `--tile-parts R` writes physical
+resolution-ordered tile-parts and records the matching RPCL packet-grid plan in
+temporary payload version `BP3`. Real T2 packet headers, true packet payload
+interleaving, quality-layer truncation, EBCOT pass behavior for each code-block
+style bit, and rate control still require the ISO packet writer. Lossy
+`--rate/--rates` requests fail closed for now instead of silently producing a
+lossless file.
 
 ## Performance and Safety Direction
 
@@ -279,10 +280,9 @@ Optimization read from those numbers:
 
 ## Roadmap
 
-1. Emit real JPEG2000 Part 1 codestream marker segments: SOC, SIZ, COD, QCD,
-   TLM, SOT, SOD, EOC.
+1. Replace temporary pass layout with ISO T2 packet headers and packet payload
+   interleaving.
 2. Add MQ arithmetic coding for code-block pass streams.
-3. Replace temporary pass layout with ISO packet headers and pass length fields.
-4. Add packet progression and packet headers.
-5. Replace the temporary decoder with strict ISO packet/header parsing.
-6. Add tile-parallel scheduling and scratch-buffer reuse for Grok-class throughput.
+3. Implement quality-layer truncation and rate allocation.
+4. Replace the temporary decoder with strict ISO packet/header parsing.
+5. Add tile-parallel scheduling and scratch-buffer reuse for Grok-class throughput.

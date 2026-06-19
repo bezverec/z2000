@@ -20,6 +20,7 @@ const Marker = enum(u16) {
     siz = 0xff51,
     cod = 0xff52,
     tlm = 0xff55,
+    plt = 0xff58,
     qcd = 0xff5c,
     sot = 0xff90,
     sop = 0xff91,
@@ -269,12 +270,16 @@ fn encodeLosslessWithOptionsMeasured(
     const tile_parts = tilePartCountForOptions(levels, options);
     var psots: [33]u32 = undefined;
     var tile_part_packets: [33]u64 = undefined;
+    var tile_part_payload_bytes: [33]usize = undefined;
     var tile_part_index: usize = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
         const chunk = payloadChunk(tile_payload.items, tile_part_index, tile_parts);
         tile_part_packets[tile_part_index] = packetCountForTilePart(packets, tile_part_index, tile_parts, options);
         const packet_markers = try packetMarkerBytesForCount(options, tile_part_packets[tile_part_index]);
-        psots[tile_part_index] = try std.math.add(u32, 14, @as(u32, @intCast(packet_markers + chunk.len)));
+        tile_part_payload_bytes[tile_part_index] = try std.math.add(usize, packet_markers, chunk.len);
+        const plt_bytes = try pltBytesForPacketLengths(tile_part_packets[tile_part_index], tile_part_payload_bytes[tile_part_index]);
+        const tile_part_bytes = try std.math.add(usize, plt_bytes, tile_part_payload_bytes[tile_part_index]);
+        psots[tile_part_index] = try std.math.add(u32, 14, @as(u32, @intCast(tile_part_bytes)));
     }
 
     if (options.tlm) try appendTlm(allocator, &out, psots[0..tile_parts]);
@@ -283,6 +288,7 @@ fn encodeLosslessWithOptionsMeasured(
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
         const chunk = payloadChunk(tile_payload.items, tile_part_index, tile_parts);
         try appendSot(allocator, &out, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
+        try appendPlt(allocator, &out, tile_part_packets[tile_part_index], tile_part_payload_bytes[tile_part_index]);
         try appendMarker(allocator, &out, .sod);
         try appendPacketBoundaryMarkers(allocator, &out, options, tile_part_packets[tile_part_index], &packet_sequence);
         try out.appendSlice(allocator, chunk);
@@ -530,9 +536,7 @@ fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         }
 
         cursor += segment_length;
-        if (readU16Be(bytes, cursor) != @intFromEnum(Marker.sod)) {
-            return CodestreamError.InvalidCodestream;
-        }
+        cursor = try skipTilePartHeaderMarkers(bytes, cursor, tile_part_end);
         cursor += 2;
 
         const payload_start = try skipPacketBoundaryMarkers(bytes, cursor, tile_part_end);
@@ -849,6 +853,25 @@ fn appendTlm(allocator: std.mem.Allocator, out: *std.ArrayList(u8), psots: []con
     }
 }
 
+fn skipTilePartHeaderMarkers(bytes: []const u8, start: usize, end: usize) !usize {
+    var cursor = start;
+    while (cursor + 1 < end) {
+        const marker = readU16Be(bytes, cursor);
+        if (marker == @intFromEnum(Marker.sod)) return cursor;
+        if (marker == @intFromEnum(Marker.sot) or marker == @intFromEnum(Marker.eoc)) {
+            return CodestreamError.InvalidCodestream;
+        }
+        cursor += 2;
+        if (end - cursor < 2) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length < 2 or end - cursor < segment_length) {
+            return CodestreamError.TruncatedData;
+        }
+        cursor += segment_length;
+    }
+    return CodestreamError.InvalidCodestream;
+}
+
 fn appendSot(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -862,6 +885,101 @@ fn appendSot(
     try appendU32Be(allocator, out, psot);
     try out.append(allocator, tile_part_index);
     try out.append(allocator, tile_part_count);
+}
+
+fn appendPlt(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    packet_count: u64,
+    total_packet_bytes: usize,
+) !void {
+    if (packet_count == 0) return;
+
+    var packet: u64 = 0;
+    var marker_index: u8 = 0;
+    var segment = std.ArrayList(u8).empty;
+    defer segment.deinit(allocator);
+
+    while (packet < packet_count) : (packet += 1) {
+        const packet_length = packetLengthForIndex(total_packet_bytes, packet_count, packet);
+        const encoded_len = pltLengthByteCount(packet_length);
+        if (segment.items.len + encoded_len > 65532) {
+            try flushPltSegment(allocator, out, marker_index, segment.items);
+            if (marker_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
+            marker_index += 1;
+            segment.clearRetainingCapacity();
+        }
+        try appendPltLength(allocator, &segment, packet_length);
+    }
+
+    if (segment.items.len > 0) {
+        try flushPltSegment(allocator, out, marker_index, segment.items);
+    }
+}
+
+fn flushPltSegment(allocator: std.mem.Allocator, out: *std.ArrayList(u8), marker_index: u8, lengths: []const u8) !void {
+    try appendMarker(allocator, out, .plt);
+    const lplt = try std.math.add(u16, 3, @as(u16, @intCast(lengths.len)));
+    try appendU16Be(allocator, out, lplt);
+    try out.append(allocator, marker_index);
+    try out.appendSlice(allocator, lengths);
+}
+
+fn pltBytesForPacketLengths(packet_count: u64, total_packet_bytes: usize) !usize {
+    if (packet_count == 0) return 0;
+    var bytes: usize = 5;
+    var segment_payload_bytes: usize = 0;
+    var marker_count: usize = 1;
+
+    var packet: u64 = 0;
+    while (packet < packet_count) : (packet += 1) {
+        const encoded_len = pltLengthByteCount(packetLengthForIndex(total_packet_bytes, packet_count, packet));
+        if (segment_payload_bytes + encoded_len > 65532) {
+            marker_count += 1;
+            if (marker_count > 256) return CodestreamError.InvalidCodestream;
+            bytes = try std.math.add(usize, bytes, 5);
+            segment_payload_bytes = 0;
+        }
+        segment_payload_bytes += encoded_len;
+        bytes = try std.math.add(usize, bytes, encoded_len);
+    }
+
+    return bytes;
+}
+
+fn packetLengthForIndex(total_packet_bytes: usize, packet_count: u64, packet_index: u64) u64 {
+    const total = @as(u128, @intCast(total_packet_bytes));
+    const count = @as(u128, packet_count);
+    const index = @as(u128, packet_index);
+    const end = total * (index + 1) / count;
+    const start = total * index / count;
+    return @intCast(end - start);
+}
+
+fn pltLengthByteCount(length: u64) usize {
+    var value = length >> 7;
+    var count: usize = 1;
+    while (value > 0) : (value >>= 7) count += 1;
+    return count;
+}
+
+fn appendPltLength(allocator: std.mem.Allocator, out: *std.ArrayList(u8), length: u64) !void {
+    var bytes: [10]u8 = undefined;
+    var count: usize = 0;
+    var value = length;
+    bytes[count] = @as(u8, @intCast(value & 0x7f));
+    count += 1;
+    value >>= 7;
+    while (value > 0) {
+        bytes[count] = @as(u8, @intCast(value & 0x7f)) | 0x80;
+        count += 1;
+        value >>= 7;
+    }
+
+    while (count > 0) {
+        count -= 1;
+        try out.append(allocator, bytes[count]);
+    }
 }
 
 fn appendSop(allocator: std.mem.Allocator, out: *std.ArrayList(u8), sequence: u16) !void {
