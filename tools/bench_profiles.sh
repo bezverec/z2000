@@ -12,12 +12,33 @@ zig build -Doptimize=ReleaseFast >/dev/null
 PRECINCTS='[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]'
 RATES='362,256,181,128,90,64,45,32,22,16,11,8'
 TIF2JP2=${TIF2JP2:-tif2jp2}
+VALID2000=${VALID2000:-../valid2000/jp2.py}
+VALID2000_PYTHON=${VALID2000_PYTHON:-python3}
+VALID2000_JPYLYZER_CMD=${VALID2000_JPYLYZER_CMD:-}
 
 if command -v "$TIF2JP2" >/dev/null 2>&1; then
   HAVE_TIF2JP2=1
 else
   HAVE_TIF2JP2=0
   echo "warning: tif2jp2 wrapper not found; set TIF2JP2=/path/to/tif2jp2 to include it" >&2
+fi
+
+if [ -f "$VALID2000" ]; then
+  HAVE_VALID2000=1
+  if [ -z "$VALID2000_JPYLYZER_CMD" ] && [ -x "../valid2000/.venv/bin/jpylyzer" ]; then
+    VALID2000_JPYLYZER_CMD="../valid2000/.venv/bin/jpylyzer"
+  fi
+  if [ -z "$VALID2000_JPYLYZER_CMD" ]; then
+    if command -v jpylyzer >/dev/null 2>&1; then
+      VALID2000_JPYLYZER_CMD=$(command -v jpylyzer)
+    else
+      HAVE_VALID2000=0
+      echo "warning: valid2000 found but jpylyzer is missing; set VALID2000_JPYLYZER_CMD=/path/to/jpylyzer to include validation" >&2
+    fi
+  fi
+else
+  HAVE_VALID2000=0
+  echo "warning: valid2000 not found; set VALID2000=/path/to/jp2.py to include validation" >&2
 fi
 
 ./zig-out/bin/z2000 tiff-to-jp2 "$INPUT" bench-ours-profile-timings.jp2 \
@@ -48,6 +69,28 @@ else
     "./zig-out/bin/z2000 decode-temp-jp2 bench-ours-profile.jp2 bench-ours-profile-decoded.tif" \
     "grk_decompress -i bench-grok-profile.jp2 -o bench-grok-profile-decoded.tif" \
     "opj_decompress -i bench-openjpeg-profile.jp2 -o bench-openjpeg-profile-decoded.tif -quiet"
+fi
+
+if [ "$HAVE_VALID2000" -eq 1 ]; then
+  if [ "$HAVE_TIF2JP2" -eq 1 ]; then
+    hyperfine --warmup 1 --runs 3 \
+      "$VALID2000_PYTHON \"$VALID2000\" bench-ours-profile.jp2 --jpylyzer-cmd \"$VALID2000_JPYLYZER_CMD\" --scan-markers --dump-jp2scan > bench-valid2000-ours.log || true" \
+      "$VALID2000_PYTHON \"$VALID2000\" bench-grok-profile.jp2 --jpylyzer-cmd \"$VALID2000_JPYLYZER_CMD\" --scan-markers --dump-jp2scan > bench-valid2000-grok.log || true" \
+      "$VALID2000_PYTHON \"$VALID2000\" bench-openjpeg-profile.jp2 --jpylyzer-cmd \"$VALID2000_JPYLYZER_CMD\" --scan-markers --dump-jp2scan > bench-valid2000-openjpeg.log || true" \
+      "$VALID2000_PYTHON \"$VALID2000\" bench-tif2jp2-profile.jp2 --jpylyzer-cmd \"$VALID2000_JPYLYZER_CMD\" --scan-markers --dump-jp2scan > bench-valid2000-tif2jp2.log || true"
+  else
+    hyperfine --warmup 1 --runs 3 \
+      "$VALID2000_PYTHON \"$VALID2000\" bench-ours-profile.jp2 --jpylyzer-cmd \"$VALID2000_JPYLYZER_CMD\" --scan-markers --dump-jp2scan > bench-valid2000-ours.log || true" \
+      "$VALID2000_PYTHON \"$VALID2000\" bench-grok-profile.jp2 --jpylyzer-cmd \"$VALID2000_JPYLYZER_CMD\" --scan-markers --dump-jp2scan > bench-valid2000-grok.log || true" \
+      "$VALID2000_PYTHON \"$VALID2000\" bench-openjpeg-profile.jp2 --jpylyzer-cmd \"$VALID2000_JPYLYZER_CMD\" --scan-markers --dump-jp2scan > bench-valid2000-openjpeg.log || true"
+  fi
+
+  for log in bench-valid2000-ours.log bench-valid2000-grok.log bench-valid2000-openjpeg.log bench-valid2000-tif2jp2.log; do
+    if [ -f "$log" ]; then
+      echo "$log:"
+      grep -E '^(JP2SCAN:|SUMMARY:|BATCH SUMMARY:)' "$log" || true
+    fi
+  done
 fi
 
 hyperfine --warmup 2 --runs 6 \
