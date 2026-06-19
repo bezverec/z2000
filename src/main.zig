@@ -231,6 +231,10 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             index += 1;
             if (index >= args.len or args[index].len != 1) return error.InvalidValue;
             options.tile_part_divisions = args[index][0];
+        } else if (std.mem.eql(u8, args[index], "--threads")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.threads = try std.fmt.parseInt(u8, args[index], 10);
         } else if (std.mem.eql(u8, args[index], "--timings")) {
             show_timings = true;
         } else if (std.mem.eql(u8, args[index], "--rates") or std.mem.eql(u8, args[index], "--rate")) {
@@ -270,7 +274,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         command_timings.write_ns;
 
     std.debug.print(
-        "wrote JP2 marker skeleton {s} -> {s} ({}x{}, {} bits/channel, levels {}, tile {}x{}, block {}x{}, progression {s}, layers {}, MCT {s}, transform {s}, QCD {s}/guard {}, tile-parts {s}, TLM {}); packet coder is next\n",
+        "wrote JP2 marker skeleton {s} -> {s} ({}x{}, {} bits/channel, levels {}, tile {}x{}, block {}x{}, progression {s}, layers {}, MCT {s}, transform {s}, QCD {s}/guard {}, tile-parts {s}, TLM {}, threads {}); packet coder is next\n",
         .{
             args[0],
             args[1],
@@ -290,6 +294,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             options.guard_bits,
             tilePartDivisionLabel(options.tile_part_divisions),
             options.tlm,
+            options.threads,
         },
     );
     if (show_timings) {
@@ -693,7 +698,7 @@ fn usage() void {
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2>
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif>

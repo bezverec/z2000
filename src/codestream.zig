@@ -175,6 +175,7 @@ pub const LosslessOptions = struct {
     eph: bool = true,
     tlm: bool = true,
     tile_part_divisions: ?u8 = 'R',
+    threads: u8 = 1,
 
     pub fn precinctForResolution(self: LosslessOptions, resolution: usize) PrecinctSize {
         const count = @as(usize, self.precinct_count);
@@ -217,6 +218,145 @@ pub fn encodeLosslessWithOptionsProfiled(
     return encodeLosslessWithOptionsMeasured(allocator, rgb, options, timings);
 }
 
+const ComponentSlices = struct {
+    y: []i32,
+    cb: []i32,
+    cr: []i32,
+
+    fn get(self: ComponentSlices, index: usize) []i32 {
+        return switch (index) {
+            0 => self.y,
+            1 => self.cb,
+            2 => self.cr,
+            else => unreachable,
+        };
+    }
+};
+
+const DwtJob = struct {
+    plane: []i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    result: anyerror!void = {},
+};
+
+fn forwardComponents53(
+    allocator: std.mem.Allocator,
+    planes: *color.RctPlanes,
+    options: LosslessOptions,
+) !u8 {
+    const levels = actualDwtLevels(planes.width, planes.height, options.levels);
+    const slices = ComponentSlices{ .y = planes.y, .cb = planes.cb, .cr = planes.cr };
+    if (componentThreadCount(options) < 2) {
+        var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(planes.width, planes.height));
+        defer wavelet_workspace.deinit();
+        inline for (0..3) |component| {
+            _ = try wavelet_int.forward53WithWorkspace(
+                &wavelet_workspace,
+                slices.get(component),
+                planes.width,
+                planes.height,
+                levels,
+            );
+        }
+        return levels;
+    }
+
+    var jobs: [3]DwtJob = undefined;
+    for (&jobs, 0..) |*job, component| {
+        job.* = .{
+            .plane = slices.get(component),
+            .width = planes.width,
+            .height = planes.height,
+            .levels = levels,
+        };
+    }
+
+    const active_threads: usize = @intCast(componentThreadCount(options));
+    const spawn_count = active_threads - 1;
+    var threads: [2]std.Thread = undefined;
+    var spawned: usize = 0;
+    while (spawned < spawn_count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, dwtWorker, .{&jobs[spawned]}) catch |err| {
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+    var component = spawned;
+    while (component < jobs.len) : (component += 1) {
+        dwtWorker(&jobs[component]);
+    }
+    for (threads[0..spawned]) |thread| thread.join();
+    for (jobs) |job| try job.result;
+    return levels;
+}
+
+fn dwtWorker(job: *DwtJob) void {
+    var workspace = wavelet_int.Workspace.init(std.heap.smp_allocator, @max(job.width, job.height)) catch |err| {
+        job.result = err;
+        return;
+    };
+    defer workspace.deinit();
+    _ = wavelet_int.forward53WithWorkspace(&workspace, job.plane, job.width, job.height, job.levels) catch |err| {
+        job.result = err;
+        return;
+    };
+    job.result = {};
+}
+
+fn actualDwtLevels(width: usize, height: usize, requested_levels: u8) u8 {
+    var cur_width = width;
+    var cur_height = height;
+    var done: u8 = 0;
+    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        cur_width = (cur_width + 1) / 2;
+        cur_height = (cur_height + 1) / 2;
+    }
+    return done;
+}
+
+fn componentThreadCount(options: LosslessOptions) u8 {
+    return @min(options.threads, 3);
+}
+
+const ComponentPayloadJob = struct {
+    component_index: u8,
+    plane: []const i32,
+    stride: usize,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    bytes: []u8 = &.{},
+    result: anyerror!void = {},
+
+    fn deinit(self: *ComponentPayloadJob) void {
+        std.heap.smp_allocator.free(self.bytes);
+        self.bytes = &.{};
+    }
+};
+
+fn componentPayloadWorker(job: *ComponentPayloadJob) void {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(std.heap.smp_allocator);
+    appendComponentPayload(
+        std.heap.smp_allocator,
+        &out,
+        job.component_index,
+        job.plane,
+        job.stride,
+        job.bands,
+        job.blocks,
+    ) catch |err| {
+        job.result = err;
+        return;
+    };
+    job.bytes = out.toOwnedSlice(std.heap.smp_allocator) catch |err| {
+        job.result = err;
+        return;
+    };
+    job.result = {};
+}
+
 fn encodeLosslessWithOptionsMeasured(
     allocator: std.mem.Allocator,
     rgb: image.RgbImage,
@@ -235,6 +375,7 @@ fn encodeLosslessWithOptionsMeasured(
     try validateTilePartDivisions(options.tile_part_divisions);
     try validateCodingPath(options);
     if (options.layers == 0) return CodestreamError.InvalidCodestream;
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
 
     const color_start = monotonicNs();
     var planes = try color.forwardRct(allocator, rgb);
@@ -242,17 +383,7 @@ fn encodeLosslessWithOptionsMeasured(
     if (timings) |t| t.color_transform_ns = elapsedNs(color_start);
 
     const wavelet_start = monotonicNs();
-    var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(rgb.width, rgb.height));
-    defer wavelet_workspace.deinit();
-    const levels = try wavelet_int.forward53WithWorkspace(
-        &wavelet_workspace,
-        planes.y,
-        rgb.width,
-        rgb.height,
-        options.levels,
-    );
-    _ = try wavelet_int.forward53WithWorkspace(&wavelet_workspace, planes.cb, rgb.width, rgb.height, levels);
-    _ = try wavelet_int.forward53WithWorkspace(&wavelet_workspace, planes.cr, rgb.width, rgb.height, levels);
+    const levels = try forwardComponents53(allocator, &planes, options);
     if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
 
     var tile_payload: std.ArrayList(u8) = .empty;
@@ -1148,9 +1279,47 @@ fn appendTemporaryPayload(
     const blocks = try subband.makeCodeBlocks(allocator, bands, options.block_width, options.block_height);
     defer allocator.free(blocks);
 
-    try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks);
-    try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks);
-    try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks);
+    if (componentThreadCount(options) < 2) {
+        try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks);
+        try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks);
+        try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks);
+    } else {
+        try appendComponentPayloadsParallel(allocator, out, planes, bands, blocks, options);
+    }
+}
+
+fn appendComponentPayloadsParallel(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    planes: color.RctPlanes,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+) !void {
+    var jobs = [_]ComponentPayloadJob{
+        .{ .component_index = 0, .plane = planes.y, .stride = planes.width, .bands = bands, .blocks = blocks },
+        .{ .component_index = 1, .plane = planes.cb, .stride = planes.width, .bands = bands, .blocks = blocks },
+        .{ .component_index = 2, .plane = planes.cr, .stride = planes.width, .bands = bands, .blocks = blocks },
+    };
+    defer for (&jobs) |*job| job.deinit();
+
+    const active_threads: usize = @intCast(componentThreadCount(options));
+    const spawn_count = active_threads - 1;
+    var threads: [2]std.Thread = undefined;
+    var spawned: usize = 0;
+    while (spawned < spawn_count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, componentPayloadWorker, .{&jobs[spawned]}) catch |err| {
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+    var component = spawned;
+    while (component < jobs.len) : (component += 1) {
+        componentPayloadWorker(&jobs[component]);
+    }
+    for (threads[0..spawned]) |thread| thread.join();
+    for (jobs) |job| try job.result;
+    for (jobs) |job| try out.appendSlice(allocator, job.bytes);
 }
 
 fn appendPacketPlan(

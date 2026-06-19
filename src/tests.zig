@@ -599,6 +599,48 @@ test "temporary lossless codestream roundtrips RGB samples" {
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
+test "threaded temporary lossless codestream roundtrips RGB samples" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 4;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 5) % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 7 + 3) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 11 + 9) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 32,
+        .block_height = 32,
+        .threads = 3,
+    });
+    defer allocator.free(bytes);
+    const serial_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 32,
+        .block_height = 32,
+        .threads = 1,
+    });
+    defer allocator.free(serial_bytes);
+    try std.testing.expectEqualSlices(u8, serial_bytes, bytes);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
 test "temporary codestream analyzer reports block and stream stats" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{

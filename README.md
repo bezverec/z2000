@@ -73,7 +73,7 @@ zig build run -- tiff-to-jp2 input.tif output.jp2 \
   [--levels 5|--resolutions 6] [--tile 4096,4096] [--progression RPCL] \
   [--precincts "[256,256],[256,256],[128,128]"] [--block 64] [--layers 1] \
   [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] \
-  [--guard-bits 2] [--tlm|--no-tlm] [--timings]
+  [--guard-bits 2] [--tlm|--no-tlm] [--threads N] [--timings]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif
@@ -120,6 +120,10 @@ lines we are targeting:
   generation, JP2 wrapping, and disk write. This is the first pass at deciding
   whether the next optimization should target SIMD compute, scratch-buffer
   reuse/cache locality, or IO.
+- `--threads N` enables component-level parallelism for the current temporary
+  encoder, capped at the three Y/Cb/Cr components. `N=1` keeps the original
+  single-threaded path; `N>=2` parallelizes independent DWT and block-payload
+  component encoding while preserving deterministic output order.
 
 Archival-style scaffold:
 
