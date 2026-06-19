@@ -21,14 +21,16 @@ This first milestone is intentionally small and honest:
 - TLM marker segments for current tile-part lengths
 - PLT packet-length marker segments in tile-part headers
 - physical resolution-ordered tile-parts for `--tile-parts R`
+- T2 packet-header bitstream primitives with marker-safe bit stuffing
 - pass-oriented temporary code-block payloads: significance, refinement, cleanup
 - swappable pass-stream entropy layer with raw/RLE/bit-RLE auto-selection
 - explicit experimental adaptive arithmetic backend for pass streams
 
 It is not yet an ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The JP2
 container boxes are now scaffolded, but the `jp2c` payload is still temporary.
-The missing large pieces are real T2 packet headers, EBCOT coding passes, MQ
-arithmetic coding, and strict ISO-compatible packet payload syntax.
+The missing large pieces are complete T2 packet headers with tag-trees, EBCOT
+coding passes, MQ arithmetic coding, and strict ISO-compatible packet payload
+syntax.
 
 ## Build
 
@@ -285,8 +287,8 @@ Optimization read from those numbers:
 
 ## Roadmap
 
-1. Replace temporary pass layout with ISO T2 packet headers and packet payload
-   interleaving.
+1. Extend the new T2 bitstream layer with inclusion/zero-bitplane tag-trees,
+   then replace temporary packet headers and packet payload interleaving.
 2. Add MQ arithmetic coding for code-block pass streams.
 3. Implement quality-layer truncation and rate allocation.
 4. Replace the temporary decoder with strict ISO packet/header parsing.

@@ -5,6 +5,7 @@ const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const packet_plan = @import("packet_plan.zig");
 const subband = @import("subband.zig");
+const t2 = @import("t2.zig");
 const wavelet_int = @import("wavelet_int.zig");
 
 pub const CodestreamError = error{
@@ -1236,11 +1237,11 @@ fn appendTemporaryPacketPayloads(
         }
 
         if (packet_cursor >= packet_end) return CodestreamError.TruncatedData;
-        const header = bytes[packet_cursor];
-        if (header != temporary_packet_header_empty and header != temporary_packet_header_non_empty) {
-            return CodestreamError.InvalidCodestream;
-        }
-        packet_cursor += 1;
+        const present = t2.readPacketPresenceHeader(bytes, &packet_cursor, packet_end) catch |err| switch (err) {
+            t2.PacketHeaderError.TruncatedHeader => return CodestreamError.TruncatedData,
+            t2.PacketHeaderError.InvalidMarkerStuffing => return CodestreamError.InvalidCodestream,
+        };
+        const header = if (present) temporary_packet_header_non_empty else temporary_packet_header_empty;
         const header_body_start = packet_cursor;
         const body_len = readVariableLength(bytes, &packet_cursor, packet_end) catch {
             try appendLegacyTemporaryPacketPayload(allocator, out, bytes, header_body_start, packet_end, header);
@@ -1464,7 +1465,7 @@ fn appendTemporaryPackets(
             try appendSop(allocator, out, packet_sequence.*);
             packet_sequence.* +%= 1;
         }
-        try out.append(allocator, if (data_len == 0) temporary_packet_header_empty else temporary_packet_header_non_empty);
+        try t2.appendPacketPresenceHeader(allocator, out, data_len != 0);
         try appendPltLength(allocator, out, data_len);
         if (options.eph) try appendMarker(allocator, out, .eph);
         try out.appendSlice(allocator, data[data_cursor .. data_cursor + data_len]);

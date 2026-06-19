@@ -9,6 +9,7 @@ const jp2 = @import("jp2.zig");
 const packet_plan = @import("packet_plan.zig");
 const simd = @import("simd.zig");
 const subband = @import("subband.zig");
+const t2 = @import("t2.zig");
 const tiff = @import("tiff.zig");
 const wavelet = @import("wavelet.zig");
 const wavelet_int = @import("wavelet_int.zig");
@@ -46,6 +47,44 @@ test "SIMD lane policy is a supported power-of-two width" {
     try std.testing.expect((simd.i32_lanes & (simd.i32_lanes - 1)) == 0);
     try std.testing.expectEqual(@as(comptime_int, 2), simd.f32_pair_lanes);
     try std.testing.expect(simd.family.len > 0);
+}
+
+test "T2 packet header presence bit matches temporary envelope bytes" {
+    const allocator = std.testing.allocator;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    try t2.appendPacketPresenceHeader(allocator, &out, false);
+    try t2.appendPacketPresenceHeader(allocator, &out, true);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x80 }, out.items);
+
+    var cursor: usize = 0;
+    try std.testing.expect(!try t2.readPacketPresenceHeader(out.items, &cursor, out.items.len));
+    try std.testing.expectEqual(@as(usize, 1), cursor);
+    try std.testing.expect(try t2.readPacketPresenceHeader(out.items, &cursor, out.items.len));
+    try std.testing.expectEqual(out.items.len, cursor);
+}
+
+test "T2 packet header bitstream inserts marker-safe stuff bits after 0xff" {
+    const allocator = std.testing.allocator;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var writer = t2.PacketHeaderWriter.init(allocator, &out);
+    try writer.writeBits(0xff, 8);
+    try writer.writeBit(true);
+    try writer.finish();
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xff, 0x40 }, out.items);
+
+    var reader = t2.PacketHeaderReader.init(out.items);
+    var bit_count: usize = 0;
+    while (bit_count < 9) : (bit_count += 1) {
+        try std.testing.expect(try reader.readBit());
+    }
+    try reader.byteAlign();
+    try std.testing.expectEqual(out.items.len, reader.bytesConsumed());
 }
 
 test "9/7 wavelet roundtrips within floating point tolerance" {
