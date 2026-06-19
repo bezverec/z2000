@@ -643,7 +643,7 @@ test "threaded temporary lossless codestream roundtrips RGB samples" {
     try std.testing.expectEqualSlices(u8, serial_bytes, two_thread_bytes);
     try std.testing.expectEqualSlices(u8, serial_bytes, bytes);
 
-    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = 3 });
     defer decoded.deinit();
 
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);

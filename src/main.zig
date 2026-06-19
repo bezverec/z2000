@@ -352,9 +352,22 @@ fn jp2StatsCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
 }
 
 fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len != 2) {
+    if (args.len < 2) {
         usage();
         return error.InvalidCommand;
+    }
+
+    var options = codestream.DecodeOptions{};
+    var index: usize = 2;
+    while (index < args.len) {
+        if (std.mem.eql(u8, args[index], "--threads")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.threads = try std.fmt.parseInt(u8, args[index], 10);
+        } else {
+            return error.UnknownOption;
+        }
+        index += 1;
     }
 
     const max_file_size = 1024 * 1024 * 1024;
@@ -367,13 +380,13 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     defer allocator.free(bytes);
 
     const j2k = try jp2.extractCodestream(bytes);
-    var rgb = try codestream.decodeLosslessTemporary(allocator, j2k);
+    var rgb = try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options);
     defer rgb.deinit();
 
     try tiff.writeRgb(io, allocator, rgb, args[1]);
     std.debug.print(
-        "decoded temporary JP2 payload {s} -> {s} ({}x{}, {} bits/channel)\n",
-        .{ args[0], args[1], rgb.width, rgb.height, rgb.bit_depth },
+        "decoded temporary JP2 payload {s} -> {s} ({}x{}, {} bits/channel, threads {})\n",
+        .{ args[0], args[1], rgb.width, rgb.height, rgb.bit_depth, options.threads },
     );
 }
 
@@ -701,7 +714,7 @@ fn usage() void {
         \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2>
-        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif>
+        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.

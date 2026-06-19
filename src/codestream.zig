@@ -192,6 +192,10 @@ pub const EncodeTimings = struct {
     marker_ns: u64 = 0,
 };
 
+pub const DecodeOptions = struct {
+    threads: u8 = 1,
+};
+
 pub fn encodeLosslessSkeleton(
     allocator: std.mem.Allocator,
     rgb: image.RgbImage,
@@ -290,6 +294,55 @@ fn dwtWorker(job: *DwtJob) void {
     job.result = {};
 }
 
+fn inverseDwtWorker(job: *DwtJob) void {
+    var workspace = wavelet_int.Workspace.init(std.heap.smp_allocator, @max(job.width, job.height)) catch |err| {
+        job.result = err;
+        return;
+    };
+    defer workspace.deinit();
+    wavelet_int.inverse53WithWorkspace(&workspace, job.plane, job.width, job.height, job.levels) catch |err| {
+        job.result = err;
+        return;
+    };
+    job.result = {};
+}
+
+fn inverseComponents53(
+    allocator: std.mem.Allocator,
+    slices: ComponentSlices,
+    width: usize,
+    height: usize,
+    levels: u8,
+    options: DecodeOptions,
+) !void {
+    if (componentThreadCountFor(options.threads) < 2) {
+        var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+        defer wavelet_workspace.deinit();
+        inline for (0..3) |component| {
+            try wavelet_int.inverse53WithWorkspace(
+                &wavelet_workspace,
+                slices.get(component),
+                width,
+                height,
+                levels,
+            );
+        }
+        return;
+    }
+
+    var jobs: [3]DwtJob = undefined;
+    for (&jobs, 0..) |*job, component| {
+        job.* = .{
+            .plane = slices.get(component),
+            .width = width,
+            .height = height,
+            .levels = levels,
+        };
+    }
+
+    try runComponentJobs(DwtJob, &jobs, componentThreadCountFor(options.threads), inverseDwtWorker);
+}
+
 fn runComponentJobs(
     comptime Job: type,
     jobs: *[3]Job,
@@ -328,7 +381,11 @@ fn actualDwtLevels(width: usize, height: usize, requested_levels: u8) u8 {
 }
 
 fn componentThreadCount(options: LosslessOptions) u8 {
-    return @min(options.threads, 3);
+    return componentThreadCountFor(options.threads);
+}
+
+fn componentThreadCountFor(thread_count: u8) u8 {
+    return @min(thread_count, 3);
 }
 
 const ComponentPayloadJob = struct {
@@ -449,6 +506,14 @@ pub fn decodeLosslessTemporary(
     allocator: std.mem.Allocator,
     bytes: []const u8,
 ) !image.RgbImage {
+    return decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
+}
+
+pub fn decodeLosslessTemporaryWithOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+) !image.RgbImage {
     const payload = try temporaryPayload(allocator, bytes);
     defer allocator.free(payload);
     var cursor = Cursor.initWithAllocator(allocator, payload);
@@ -460,6 +525,7 @@ pub fn decodeLosslessTemporary(
     const levels = header.levels;
 
     if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
 
     const y = try allocator.alloc(i32, pixels);
@@ -472,16 +538,10 @@ pub fn decodeLosslessTemporary(
     @memset(cb, 0);
     @memset(cr, 0);
 
-    try readComponentPayload(&cursor, y, width, 0);
-    try readComponentPayload(&cursor, cb, width, 1);
-    try readComponentPayload(&cursor, cr, width, 2);
+    try readComponentPayloads(&cursor, y, cb, cr, width, options);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
-    var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
-    defer wavelet_workspace.deinit();
-    try wavelet_int.inverse53WithWorkspace(&wavelet_workspace, y, width, height, levels);
-    try wavelet_int.inverse53WithWorkspace(&wavelet_workspace, cb, width, height, levels);
-    try wavelet_int.inverse53WithWorkspace(&wavelet_workspace, cr, width, height, levels);
+    try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, options);
 
     var planes = color.RctPlanes{
         .allocator = allocator,
@@ -734,6 +794,89 @@ fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_c
             refinement.bytes,
         );
     }
+}
+
+const DecodeComponentPayloadJob = struct {
+    bytes: []const u8,
+    plane: []i32,
+    stride: usize,
+    component_index: u8,
+    result: anyerror!void = {},
+};
+
+fn readComponentPayloads(
+    cursor: *Cursor,
+    y: []i32,
+    cb: []i32,
+    cr: []i32,
+    stride: usize,
+    options: DecodeOptions,
+) !void {
+    if (componentThreadCountFor(options.threads) < 2) {
+        try readComponentPayload(cursor, y, stride, 0);
+        try readComponentPayload(cursor, cb, stride, 1);
+        try readComponentPayload(cursor, cr, stride, 2);
+        return;
+    }
+
+    const slices = try readComponentPayloadSlices(cursor);
+    var jobs = [_]DecodeComponentPayloadJob{
+        .{ .bytes = slices[0], .plane = y, .stride = stride, .component_index = 0 },
+        .{ .bytes = slices[1], .plane = cb, .stride = stride, .component_index = 1 },
+        .{ .bytes = slices[2], .plane = cr, .stride = stride, .component_index = 2 },
+    };
+    try runComponentJobs(DecodeComponentPayloadJob, &jobs, componentThreadCountFor(options.threads), decodeComponentPayloadWorker);
+}
+
+fn readComponentPayloadSlices(cursor: *Cursor) ![3][]const u8 {
+    var slices: [3][]const u8 = undefined;
+    inline for (0..3) |component| {
+        const start = cursor.index;
+        try skipComponentPayload(cursor, component);
+        slices[component] = cursor.bytes[start..cursor.index];
+    }
+    return slices;
+}
+
+fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8) !void {
+    const component_index = try cursor.readU8();
+    if (component_index != expected_component) return CodestreamError.InvalidCodestream;
+
+    const band_count = try cursor.readU16();
+    const block_count = try cursor.readU32();
+
+    var band_index: usize = 0;
+    while (band_index < band_count) : (band_index += 1) {
+        _ = try cursor.readU8();
+        _ = try cursor.readU8();
+        _ = try cursor.readRect();
+    }
+
+    var block_index: usize = 0;
+    while (block_index < block_count) : (block_index += 1) {
+        const block_band = try cursor.readU16();
+        if (block_band >= band_count) return CodestreamError.InvalidCodestream;
+        _ = try cursor.readRect();
+        _ = try cursor.readRect();
+        _ = try cursor.readU8();
+        _ = try cursor.readU32();
+        _ = try readEntropyStreamInfo(cursor);
+        _ = try readEntropyStreamInfo(cursor);
+        _ = try readEntropyStreamInfo(cursor);
+    }
+}
+
+fn decodeComponentPayloadWorker(job: *DecodeComponentPayloadJob) void {
+    var cursor = Cursor.initWithAllocator(std.heap.smp_allocator, job.bytes);
+    readComponentPayload(&cursor, job.plane, job.stride, job.component_index) catch |err| {
+        job.result = err;
+        return;
+    };
+    if (!cursor.finished()) {
+        job.result = CodestreamError.InvalidCodestream;
+        return;
+    }
+    job.result = {};
 }
 
 const TemporaryHeader = struct {

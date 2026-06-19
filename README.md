@@ -76,7 +76,7 @@ zig build run -- tiff-to-jp2 input.tif output.jp2 \
   [--guard-bits 2] [--tlm|--no-tlm] [--threads N] [--timings]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
-zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif
+zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N]
 ```
 
 Current TIFF support is deliberately narrow: TIFF 6.0 header + first IFD,
@@ -123,7 +123,8 @@ lines we are targeting:
 - `--threads N` enables component-level parallelism for the current temporary
   encoder, capped at the three Y/Cb/Cr components. `N=1` keeps the original
   single-threaded path; `N>=2` parallelizes independent DWT and block-payload
-  component encoding while preserving deterministic output order.
+  component encoding while preserving deterministic output order. The temporary
+  decoder accepts the same flag for component payload decode and inverse DWT.
 
 Archival-style scaffold:
 

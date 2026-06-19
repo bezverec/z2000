@@ -36,28 +36,7 @@ pub fn forwardRct(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes 
     const cr = try allocator.alloc(i32, pixels);
     errdefer allocator.free(cr);
 
-    if (simd.has_neon) {
-        forwardRctNeon(rgb.samples, y, cb, cr, pixels);
-        return .{
-            .allocator = allocator,
-            .width = rgb.width,
-            .height = rgb.height,
-            .bit_depth = rgb.bit_depth,
-            .y = y,
-            .cb = cb,
-            .cr = cr,
-        };
-    }
-
-    for (0..pixels) |i| {
-        const r = @as(i32, rgb.samples[i * 3]);
-        const g = @as(i32, rgb.samples[i * 3 + 1]);
-        const b = @as(i32, rgb.samples[i * 3 + 2]);
-
-        y[i] = floorQuarter(r + 2 * g + b);
-        cb[i] = b - g;
-        cr[i] = r - g;
-    }
+    forwardRctVector(rgb.samples, y, cb, cr, pixels);
 
     return .{
         .allocator = allocator,
@@ -80,32 +59,7 @@ pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbIma
     const samples = try allocator.alloc(u16, pixels * 3);
     errdefer allocator.free(samples);
 
-    if (simd.has_neon) {
-        try inverseRctNeon(samples, planes, pixels, max_sample);
-        return .{
-            .allocator = allocator,
-            .width = planes.width,
-            .height = planes.height,
-            .bit_depth = planes.bit_depth,
-            .samples = samples,
-        };
-    }
-
-    for (0..pixels) |i| {
-        const g = planes.y[i] - floorQuarter(planes.cb[i] + planes.cr[i]);
-        const r = planes.cr[i] + g;
-        const b = planes.cb[i] + g;
-
-        if (r < 0 or g < 0 or b < 0 or
-            r > max_sample or g > max_sample or b > max_sample)
-        {
-            return ColorError.SampleOutOfRange;
-        }
-
-        samples[i * 3] = @intCast(r);
-        samples[i * 3 + 1] = @intCast(g);
-        samples[i * 3 + 2] = @intCast(b);
-    }
+    try inverseRctVector(samples, planes, pixels, max_sample);
 
     return .{
         .allocator = allocator,
@@ -116,22 +70,23 @@ pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbIma
     };
 }
 
-const RctVector = @Vector(simd.neon_i32_lanes, i32);
-const RctShiftVector = @Vector(simd.neon_i32_lanes, u5);
+const rct_lanes = simd.i32_lanes;
+const RctVector = @Vector(rct_lanes, i32);
+const RctShiftVector = @Vector(rct_lanes, u5);
 const rct_shift_1: RctShiftVector = @splat(1);
 const rct_shift_2: RctShiftVector = @splat(2);
 
-fn forwardRctNeon(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels: usize) void {
+fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels: usize) void {
     var i: usize = 0;
-    while (i + simd.neon_i32_lanes <= pixels) : (i += simd.neon_i32_lanes) {
+    while (i + rct_lanes <= pixels) : (i += rct_lanes) {
         const rgb = loadRgbVector(samples, i);
         const two_g = rgb.g << rct_shift_1;
         const y_vec = floorQuarterVector(rgb.r + two_g + rgb.b);
         const cb_vec = rgb.b - rgb.g;
         const cr_vec = rgb.r - rgb.g;
-        y[i..][0..simd.neon_i32_lanes].* = @as([simd.neon_i32_lanes]i32, y_vec);
-        cb[i..][0..simd.neon_i32_lanes].* = @as([simd.neon_i32_lanes]i32, cb_vec);
-        cr[i..][0..simd.neon_i32_lanes].* = @as([simd.neon_i32_lanes]i32, cr_vec);
+        y[i..][0..rct_lanes].* = @as([rct_lanes]i32, y_vec);
+        cb[i..][0..rct_lanes].* = @as([rct_lanes]i32, cb_vec);
+        cr[i..][0..rct_lanes].* = @as([rct_lanes]i32, cr_vec);
     }
 
     while (i < pixels) : (i += 1) {
@@ -144,15 +99,15 @@ fn forwardRctNeon(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels: 
     }
 }
 
-fn inverseRctNeon(samples: []u16, planes: RctPlanes, pixels: usize, max_sample: i32) !void {
+fn inverseRctVector(samples: []u16, planes: RctPlanes, pixels: usize, max_sample: i32) !void {
     const zero: RctVector = @splat(0);
     const max: RctVector = @splat(max_sample);
 
     var i: usize = 0;
-    while (i + simd.neon_i32_lanes <= pixels) : (i += simd.neon_i32_lanes) {
-        const y: RctVector = planes.y[i..][0..simd.neon_i32_lanes].*;
-        const cb: RctVector = planes.cb[i..][0..simd.neon_i32_lanes].*;
-        const cr: RctVector = planes.cr[i..][0..simd.neon_i32_lanes].*;
+    while (i + rct_lanes <= pixels) : (i += rct_lanes) {
+        const y: RctVector = planes.y[i..][0..rct_lanes].*;
+        const cb: RctVector = planes.cb[i..][0..rct_lanes].*;
+        const cr: RctVector = planes.cr[i..][0..rct_lanes].*;
         const g = y - floorQuarterVector(cb + cr);
         const r = cr + g;
         const b = cb + g;
@@ -191,7 +146,7 @@ fn loadRgbVector(samples: []const u16, pixel_index: usize) RgbVector {
     var r: RctVector = @splat(0);
     var g: RctVector = @splat(0);
     var b: RctVector = @splat(0);
-    inline for (0..simd.neon_i32_lanes) |lane| {
+    inline for (0..rct_lanes) |lane| {
         const base = (pixel_index + lane) * 3;
         r[lane] = @intCast(samples[base]);
         g[lane] = @intCast(samples[base + 1]);
@@ -201,7 +156,7 @@ fn loadRgbVector(samples: []const u16, pixel_index: usize) RgbVector {
 }
 
 fn storeRgbVector(samples: []u16, pixel_index: usize, r: RctVector, g: RctVector, b: RctVector) void {
-    inline for (0..simd.neon_i32_lanes) |lane| {
+    inline for (0..rct_lanes) |lane| {
         const base = (pixel_index + lane) * 3;
         samples[base] = @intCast(r[lane]);
         samples[base + 1] = @intCast(g[lane]);
