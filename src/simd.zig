@@ -14,6 +14,7 @@ pub const has_neon: bool = switch (builtin.target.cpu.arch) {
 };
 
 pub const neon_i32_lanes: comptime_int = 4;
+pub const f32_pair_lanes: comptime_int = 2;
 
 pub const family: []const u8 = switch (builtin.target.cpu.arch) {
     .x86, .x86_64 => x86Family(),

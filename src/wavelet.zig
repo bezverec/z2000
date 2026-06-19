@@ -1,4 +1,5 @@
 const std = @import("std");
+const simd = @import("simd.zig");
 
 pub const Wavelet = enum(u8) {
     reversible_5_3 = 0,
@@ -21,6 +22,14 @@ const LevelShape = struct {
     width: usize,
     height: usize,
 };
+
+const dwt97_alpha: f32 = -1.586134342059924;
+const dwt97_beta: f32 = -0.052980118572961;
+const dwt97_gamma: f32 = 0.882911075530934;
+const dwt97_delta: f32 = 0.443506852043971;
+const dwt97_k: f32 = 1.1496043988602418;
+const dwt97_inv_k: f32 = 1.0 / dwt97_k;
+const ScalePairVector = @Vector(simd.f32_pair_lanes, f32);
 
 pub fn forward2D(
     allocator: std.mem.Allocator,
@@ -168,16 +177,12 @@ fn inverse53(data: []f32, scratch: []f32) void {
 }
 
 fn forward97(data: []f32, scratch: []f32) void {
-    liftOdd(data, -1.586134342059924);
-    liftEven(data, -0.052980118572961);
-    liftOdd(data, 0.882911075530934);
-    liftEven(data, 0.443506852043971);
+    liftOdd(data, dwt97_alpha);
+    liftEven(data, dwt97_beta);
+    liftOdd(data, dwt97_gamma);
+    liftEven(data, dwt97_delta);
 
-    const k = 1.1496043988602418;
-    var i: usize = 0;
-    while (i < data.len) : (i += 2) data[i] *= k;
-    i = 1;
-    while (i < data.len) : (i += 2) data[i] /= k;
+    scaleEvenOdd(data, dwt97_k, dwt97_inv_k);
 
     packEvenOdd(data, scratch);
 }
@@ -185,16 +190,25 @@ fn forward97(data: []f32, scratch: []f32) void {
 fn inverse97(data: []f32, scratch: []f32) void {
     unpackEvenOdd(data, scratch);
 
-    const k = 1.1496043988602418;
-    var i: usize = 0;
-    while (i < data.len) : (i += 2) data[i] /= k;
-    i = 1;
-    while (i < data.len) : (i += 2) data[i] *= k;
+    scaleEvenOdd(data, dwt97_inv_k, dwt97_k);
 
-    liftEven(data, -0.443506852043971);
-    liftOdd(data, -0.882911075530934);
-    liftEven(data, 0.052980118572961);
-    liftOdd(data, 1.586134342059924);
+    liftEven(data, -dwt97_delta);
+    liftOdd(data, -dwt97_gamma);
+    liftEven(data, -dwt97_beta);
+    liftOdd(data, -dwt97_alpha);
+}
+
+fn scaleEvenOdd(data: []f32, even_scale: f32, odd_scale: f32) void {
+    // Adjacent even/odd samples map cleanly to 3DNow-style f32x2 scaling.
+    const scales: ScalePairVector = .{ even_scale, odd_scale };
+    var i: usize = 0;
+    while (i + simd.f32_pair_lanes <= data.len) : (i += simd.f32_pair_lanes) {
+        const pair: ScalePairVector = data[i..][0..simd.f32_pair_lanes].*;
+        data[i..][0..simd.f32_pair_lanes].* = @as([simd.f32_pair_lanes]f32, pair * scales);
+    }
+    if (i < data.len) {
+        data[i] *= even_scale;
+    }
 }
 
 fn liftOdd(data: []f32, coefficient: f32) void {

@@ -44,6 +44,7 @@ test "5/3 wavelet roundtrips integer-like samples" {
 test "SIMD lane policy is a supported power-of-two width" {
     try std.testing.expect(simd.i32_lanes == 4 or simd.i32_lanes == 8 or simd.i32_lanes == 16);
     try std.testing.expect((simd.i32_lanes & (simd.i32_lanes - 1)) == 0);
+    try std.testing.expectEqual(@as(comptime_int, 2), simd.f32_pair_lanes);
     try std.testing.expect(simd.family.len > 0);
 }
 
@@ -71,6 +72,35 @@ test "9/7 wavelet roundtrips within floating point tolerance" {
 
     for (data, original) |actual, expected| {
         try std.testing.expectApproxEqAbs(expected, actual, 0.01);
+    }
+}
+
+test "9/7 wavelet roundtrips odd scaling tails" {
+    const allocator = std.testing.allocator;
+    const width = 5;
+    const height = 5;
+
+    var data = [_]f32{
+        1.0,  2.5,  4.0,  8.0,   16.0,
+        3.0,  5.5,  9.0,  14.0,  22.0,
+        7.0,  11.0, 18.0, 29.0,  47.0,
+        -1.0, -3.0, -8.0, -13.0, -21.0,
+        31.0, 0.25, -0.5, 63.0,  127.0,
+    };
+    const original = data;
+
+    const levels = try wavelet.forward2D(
+        allocator,
+        data[0..],
+        width,
+        height,
+        3,
+        .irreversible_9_7,
+    );
+    try wavelet.inverse2D(allocator, data[0..], width, height, levels, .irreversible_9_7);
+
+    for (data, original) |actual, expected| {
+        try std.testing.expectApproxEqAbs(expected, actual, 0.015);
     }
 }
 
