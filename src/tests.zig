@@ -221,6 +221,34 @@ test "RCT transform roundtrips a small RGB image" {
     try std.testing.expectEqualSlices(u16, rgb.samples, reconstructed.samples);
 }
 
+test "RCT transform roundtrips vector block and tail" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        0,   1,   2,
+        3,   5,   8,
+        13,  21,  34,
+        55,  89,  144,
+        233, 144, 55,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 5,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var planes = try color.forwardRct(allocator, rgb);
+    defer planes.deinit();
+
+    var reconstructed = try color.inverseRct(allocator, planes);
+    defer reconstructed.deinit();
+
+    try std.testing.expectEqualSlices(u16, rgb.samples, reconstructed.samples);
+}
+
 test "integer 5/3 DWT roundtrips signed component plane" {
     const allocator = std.testing.allocator;
     const width = 5;

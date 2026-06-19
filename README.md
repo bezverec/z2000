@@ -35,10 +35,10 @@ zig build
 zig build test
 ```
 
-SIMD lane selection is centralized in `src/simd.zig`. Native ARM targets use a
-NEON-width 4xi32 policy, x86_64 AVX2 builds use 8xi32, and x86_64 AVX-512F
-builds use 16xi32 for portable `@Vector` kernels such as the bitplane block
-scanner. Cross-compile checks used during development:
+SIMD lane selection is centralized in `src/simd.zig`. Native AArch64 targets use
+an explicit NEON-128 4xi32 policy for portable `@Vector` kernels, x86_64 AVX2
+builds use 8xi32, and x86_64 AVX-512F builds use 16xi32 for wider block scans.
+Cross-compile checks used during development:
 
 ```sh
 zig build -Dtarget=x86_64-macos -Dcpu=haswell -Doptimize=ReleaseFast
@@ -254,11 +254,12 @@ them into the codestream. This mostly reduces allocator churn in the hottest
 block payload path; larger wins still require a better pass coder and
 parallelism.
 
-The first retained SIMD pass is in the bitplane block scanner. It scans
-contiguous coefficient rows in 4-wide integer vectors to combine non-zero
-detection and max-magnitude discovery in one pass before writing significance
-and refinement streams. RCT SIMD was tested but not kept because the current
-interleaved RGB input makes deinterleave overhead dominate that small phase.
+The first retained SIMD passes are the bitplane block scanner and AArch64 RCT.
+The block scanner scans contiguous coefficient rows in integer vectors to
+combine non-zero detection and max-magnitude discovery in one pass before
+writing significance and refinement streams. On NEON targets, the reversible RGB
+color transform handles four pixels at a time while keeping a scalar tail for
+non-multiple-of-four image widths.
 
 The integer 5/3 DWT now transforms horizontal rows in place and keeps the line
 buffer only for strided vertical columns. This removes a full row copy in each

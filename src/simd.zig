@@ -8,9 +8,17 @@ pub const i32_lanes: comptime_int = switch (builtin.target.cpu.arch) {
     else => 4,
 };
 
+pub const has_neon: bool = switch (builtin.target.cpu.arch) {
+    .aarch64, .aarch64_be => true,
+    else => false,
+};
+
+pub const neon_i32_lanes: comptime_int = 4;
+
 pub const family: []const u8 = switch (builtin.target.cpu.arch) {
     .x86, .x86_64 => x86Family(),
-    .aarch64, .aarch64_be, .arm, .armeb, .thumb, .thumbeb => "NEON-width",
+    .aarch64, .aarch64_be => "NEON-128",
+    .arm, .armeb, .thumb, .thumbeb => "ARM-vector",
     else => "portable",
 };
 
