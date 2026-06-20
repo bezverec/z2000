@@ -45,6 +45,7 @@ Important `tiff-to-jp2` options:
 - `--tile-parts none|R`
 - `--sop`, `--eph`, `--tlm`
 - `--threads N`
+- `--debug-temp-sidecar`
 - `--timings`
 
 Unsupported progression orders, ICT, 9-7 JP2 output, scalar quantization,
@@ -83,10 +84,12 @@ Primary public functions:
 
 Notes:
 
-- `encodeLosslessWithOptions` writes a JPEG2000 marker scaffold plus private
-  temporary payload.
-- The latest private payload is BP8.
-- `decodeLosslessTemporary*` only decodes project-private payloads.
+- `encodeLosslessWithOptions` writes JPEG2000 markers with strict RPCL packet
+  payloads in `SOD`.
+- The latest private payload is BP8 and is emitted only when
+  `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
+- `decodeLosslessTemporary*` only decodes project-private payloads and therefore
+  requires the debug sidecar until strict T1 image reconstruction lands.
 
 ## `src/t2.zig`
 

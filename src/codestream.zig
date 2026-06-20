@@ -23,6 +23,7 @@ const Marker = enum(u16) {
     soc = 0xff4f,
     siz = 0xff51,
     cod = 0xff52,
+    com = 0xff64,
     tlm = 0xff55,
     plt = 0xff58,
     qcd = 0xff5c,
@@ -42,6 +43,7 @@ const temporary_magic_v5 = "ZJ2K-CBLK-BP5";
 const temporary_magic_v6 = "ZJ2K-CBLK-BP6";
 const temporary_magic_v7 = "ZJ2K-CBLK-BP7";
 const temporary_magic_v8 = "ZJ2K-CBLK-BP8";
+const temporary_comment_magic = "ZJ2K-TEMP-PAYLOAD1";
 const temporary_packet_header_empty: u8 = 0x00;
 const temporary_packet_header_non_empty: u8 = 0x80;
 const max_quality_layers = rate_alloc.max_layers;
@@ -208,6 +210,7 @@ pub const LosslessOptions = struct {
     tlm: bool = true,
     tile_part_divisions: ?u8 = 'R',
     threads: u8 = 1,
+    emit_temporary_payload_sidecar: bool = false,
 
     pub fn precinctForResolution(self: LosslessOptions, resolution: usize) PrecinctSize {
         const count = @as(usize, self.precinct_count);
@@ -422,10 +425,9 @@ fn componentThreadCountFor(thread_count: u8) u8 {
 
 const ComponentPayloadJob = struct {
     component_index: u8,
-    plane: []const i32,
-    stride: usize,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
+    catalog: []const RpclShadowBlock,
     options: LosslessOptions,
     bytes: []u8 = &.{},
     result: anyerror!void = {},
@@ -436,10 +438,50 @@ const ComponentPayloadJob = struct {
     }
 };
 
-const ComponentBlockPayloadJob = struct {
+const ComponentCatalogJob = struct {
     plane: []const i32,
     stride: usize,
     blocks: []const subband.CodeBlock,
+    nominal_bitplanes: u8,
+    options: LosslessOptions,
+    include_bitplane_payload: bool,
+    catalog: ComponentRpclShadowCatalog = undefined,
+    initialized: bool = false,
+    result: anyerror!void = {},
+
+    fn deinit(self: *ComponentCatalogJob) void {
+        if (self.initialized) {
+            self.catalog.deinit();
+            self.initialized = false;
+        }
+    }
+};
+
+const ComponentCatalogBlockJob = struct {
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    blocks: []const subband.CodeBlock,
+    catalog_blocks: []RpclShadowBlock,
+    nominal_bitplanes: u8,
+    options: LosslessOptions,
+    include_bitplane_payload: bool,
+    initialized: usize = 0,
+    result: anyerror!void = {},
+
+    fn deinit(self: *ComponentCatalogBlockJob) void {
+        for (self.catalog_blocks[0..self.initialized]) |*block| block.deinit(self.allocator);
+        self.initialized = 0;
+    }
+
+    fn release(self: *ComponentCatalogBlockJob) void {
+        self.initialized = 0;
+    }
+};
+
+const ComponentBlockPayloadJob = struct {
+    blocks: []const subband.CodeBlock,
+    catalog: []const RpclShadowBlock,
     options: LosslessOptions,
     bytes: []u8 = &.{},
     result: anyerror!void = {},
@@ -451,11 +493,13 @@ const ComponentBlockPayloadJob = struct {
 };
 
 const RpclShadowBlock = struct {
+    bitplane: ?bitplane.EncodedBlockPasses,
     segment: ebcot.CodeBlockSegment,
     layers: [max_quality_layers]t2.LayerTruncation,
     encoded: t2.EncodedLayerBlock,
 
     fn deinit(self: *RpclShadowBlock, allocator: std.mem.Allocator) void {
+        if (self.bitplane) |*passes| passes.deinit(allocator);
         self.segment.deinit(allocator);
         self.* = undefined;
     }
@@ -477,6 +521,88 @@ const RpclShadowStreamInfo = struct {
     bytes: u64 = 0,
 };
 
+const RpclPacketStream = struct {
+    allocator: std.mem.Allocator = undefined,
+    packet_lengths: []u32 = &.{},
+    packet_bytes: []u8 = &.{},
+
+    fn deinit(self: *RpclPacketStream) void {
+        if (self.packet_lengths.len > 0) self.allocator.free(self.packet_lengths);
+        if (self.packet_bytes.len > 0) self.allocator.free(self.packet_bytes);
+        self.* = .{};
+    }
+};
+
+const TemporaryRpclBlock = struct {
+    nominal_bitplanes: u8,
+    encoded_bitplanes: u8,
+    layers: [max_quality_layers]t2.LayerTruncation,
+    payload: []const u8,
+};
+
+const TemporaryComponentRpclCatalog = struct {
+    allocator: std.mem.Allocator,
+    blocks: []TemporaryRpclBlock,
+
+    fn deinit(self: *TemporaryComponentRpclCatalog) void {
+        self.allocator.free(self.blocks);
+        self.* = undefined;
+    }
+};
+
+const RpclBlockIndexCell = struct {
+    indexes: std.ArrayList(usize) = .empty,
+};
+
+const RpclBlockIndex = struct {
+    allocator: std.mem.Allocator,
+    resolution_offsets: [33]usize,
+    resolution_count: u8,
+    cells: []RpclBlockIndexCell,
+
+    fn init(allocator: std.mem.Allocator, plan: packet_plan.Plan) !RpclBlockIndex {
+        var resolution_offsets: [33]usize = [_]usize{0} ** 33;
+        var cell_count: usize = 0;
+        var resolution_index: usize = 0;
+        while (resolution_index < plan.resolution_count) : (resolution_index += 1) {
+            resolution_offsets[resolution_index] = cell_count;
+            const resolution_cells = try std.math.mul(usize, @as(usize, @intCast(plan.resolutions[resolution_index].precincts)), 3);
+            cell_count = try std.math.add(usize, cell_count, resolution_cells);
+        }
+
+        const cells = try allocator.alloc(RpclBlockIndexCell, cell_count);
+        for (cells) |*entry| entry.* = .{};
+        return .{
+            .allocator = allocator,
+            .resolution_offsets = resolution_offsets,
+            .resolution_count = plan.resolution_count,
+            .cells = cells,
+        };
+    }
+
+    fn deinit(self: *RpclBlockIndex) void {
+        for (self.cells) |*entry| entry.indexes.deinit(self.allocator);
+        self.allocator.free(self.cells);
+        self.* = undefined;
+    }
+
+    fn cell(self: *RpclBlockIndex, resolution: u8, precinct_index: u64, component: u16) !*RpclBlockIndexCell {
+        if (resolution >= self.resolution_count or component >= 3) return CodestreamError.InvalidCodestream;
+        const offset = try std.math.add(usize, self.resolution_offsets[resolution], try std.math.mul(usize, @as(usize, @intCast(precinct_index)), 3));
+        const index = try std.math.add(usize, offset, @as(usize, @intCast(component)));
+        if (index >= self.cells.len) return CodestreamError.InvalidCodestream;
+        return &self.cells[index];
+    }
+
+    fn indexesFor(self: *const RpclBlockIndex, resolution: u8, precinct_index: u64, component: u16) ![]const usize {
+        if (resolution >= self.resolution_count or component >= 3) return CodestreamError.InvalidCodestream;
+        const offset = try std.math.add(usize, self.resolution_offsets[resolution], try std.math.mul(usize, @as(usize, @intCast(precinct_index)), 3));
+        const index = try std.math.add(usize, offset, @as(usize, @intCast(component)));
+        if (index >= self.cells.len) return CodestreamError.InvalidCodestream;
+        return self.cells[index].indexes.items;
+    }
+};
+
 fn componentPayloadWorker(job: *ComponentPayloadJob) void {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(std.heap.smp_allocator);
@@ -484,10 +610,9 @@ fn componentPayloadWorker(job: *ComponentPayloadJob) void {
         std.heap.smp_allocator,
         &out,
         job.component_index,
-        job.plane,
-        job.stride,
         job.bands,
         job.blocks,
+        job.catalog,
         job.options,
     ) catch |err| {
         job.result = err;
@@ -500,27 +625,70 @@ fn componentPayloadWorker(job: *ComponentPayloadJob) void {
     job.result = {};
 }
 
+fn componentCatalogWorker(job: *ComponentCatalogJob) void {
+    job.catalog = buildComponentRpclShadowCatalog(
+        std.heap.smp_allocator,
+        job.plane,
+        job.stride,
+        job.blocks,
+        job.nominal_bitplanes,
+        job.options,
+        job.include_bitplane_payload,
+    ) catch |err| {
+        job.result = err;
+        return;
+    };
+    job.initialized = true;
+    job.result = {};
+}
+
+fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
+    if (job.blocks.len != job.catalog_blocks.len) {
+        job.result = CodestreamError.InvalidCodestream;
+        return;
+    }
+
+    var bitplane_scratch = bitplane.BlockScratch.init(job.allocator);
+    defer bitplane_scratch.deinit();
+    var ebcot_scratch = ebcot.DirectBlockScratch.init(job.allocator);
+    defer ebcot_scratch.deinit();
+
+    for (job.blocks, 0..) |block, index| {
+        job.catalog_blocks[index] = buildRpclShadowBlock(
+            job.allocator,
+            &bitplane_scratch,
+            &ebcot_scratch,
+            job.plane,
+            job.stride,
+            block.rect,
+            job.nominal_bitplanes,
+            job.options,
+            job.include_bitplane_payload,
+        ) catch |err| {
+            job.result = err;
+            return;
+        };
+        const layer_count: usize = @intCast(job.options.layers);
+        job.catalog_blocks[index].encoded.layers = job.catalog_blocks[index].layers[0..layer_count];
+        job.initialized += 1;
+    }
+    job.result = {};
+}
+
 fn componentBlockPayloadWorker(job: *ComponentBlockPayloadJob) void {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(std.heap.smp_allocator);
 
-    var scratch = bitplane.BlockScratch.init(std.heap.smp_allocator);
-    defer scratch.deinit();
     var entropy_scratch = entropy.Scratch.init(std.heap.smp_allocator);
     defer entropy_scratch.deinit();
-    var ebcot_scratch = ebcot.DirectBlockScratch.init(std.heap.smp_allocator);
-    defer ebcot_scratch.deinit();
 
     appendComponentBlockPayloads(
         std.heap.smp_allocator,
         &out,
-        job.plane,
-        job.stride,
         job.blocks,
+        job.catalog,
         job.options,
-        &scratch,
         &entropy_scratch,
-        &ebcot_scratch,
     ) catch |err| {
         job.result = err;
         return;
@@ -566,8 +734,10 @@ fn encodeLosslessWithOptionsMeasured(
 
     var tile_payload: std.ArrayList(u8) = .empty;
     defer tile_payload.deinit(allocator);
+    var rpcl_stream: RpclPacketStream = .{};
+    defer rpcl_stream.deinit();
     const payload_start = monotonicNs();
-    try appendTemporaryPayload(allocator, &tile_payload, planes, levels, options);
+    try appendTemporaryPayload(allocator, &tile_payload, planes, levels, options, &rpcl_stream);
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
 
     var out: std.ArrayList(u8) = .empty;
@@ -578,17 +748,20 @@ fn encodeLosslessWithOptionsMeasured(
     try appendSiz(allocator, &out, rgb, options);
     try appendCod(allocator, &out, levels, options);
     try appendQcd(allocator, &out, levels, options);
+    if (options.emit_temporary_payload_sidecar) {
+        try appendTemporaryPayloadComments(allocator, &out, tile_payload.items);
+    }
     const packets = try makePacketPlan(rgb.width, rgb.height, levels, options);
+    if (rpcl_stream.packet_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
     const tile_parts = tilePartCountForOptions(levels, options);
     var psots: [33]u32 = undefined;
-    var tile_part_packets: [33]u64 = undefined;
     var tile_part_payload_bytes: [33]usize = undefined;
     var tile_part_index: usize = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
-        const chunk = payloadChunk(tile_payload.items, tile_part_index, tile_parts);
-        tile_part_packets[tile_part_index] = packetCountForTilePart(packets, tile_part_index, tile_parts, options);
-        tile_part_payload_bytes[tile_part_index] = try packetizedPayloadByteCount(options, tile_part_packets[tile_part_index], chunk.len);
-        const plt_bytes = try pltBytesForPacketLengths(options, tile_part_packets[tile_part_index], chunk.len);
+        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, options);
+        const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
+        tile_part_payload_bytes[tile_part_index] = try rpclPacketPayloadByteCount(options, packet_lengths);
+        const plt_bytes = try pltBytesForRpclPacketLengths(options, packet_lengths);
         const tile_part_bytes = try std.math.add(usize, plt_bytes, tile_part_payload_bytes[tile_part_index]);
         psots[tile_part_index] = try std.math.add(u32, 14, @as(u32, @intCast(tile_part_bytes)));
     }
@@ -597,11 +770,21 @@ fn encodeLosslessWithOptionsMeasured(
     var packet_sequence: u16 = 0;
     tile_part_index = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
-        const chunk = payloadChunk(tile_payload.items, tile_part_index, tile_parts);
+        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, options);
+        const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
+        const packet_bytes_start = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start);
+        const packet_bytes_end = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start + packet_range.count);
         try appendSot(allocator, &out, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
-        try appendPlt(allocator, &out, options, tile_part_packets[tile_part_index], chunk.len);
+        try appendPltFromRpclPacketLengths(allocator, &out, options, packet_lengths);
         try appendMarker(allocator, &out, .sod);
-        try appendTemporaryPackets(allocator, &out, options, tile_part_packets[tile_part_index], chunk, &packet_sequence);
+        try appendRpclPackets(
+            allocator,
+            &out,
+            options,
+            packet_lengths,
+            rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
+            &packet_sequence,
+        );
     }
     try appendMarker(allocator, &out, .eoc);
     if (timings) |t| {
@@ -649,7 +832,7 @@ pub fn decodeLosslessTemporaryWithOptions(
     @memset(cr, 0);
 
     try readComponentPayloads(&cursor, y, cb, cr, width, header.version, header.layers, options);
-    _ = try readRpclShadowStreamInfo(&cursor, header.version);
+    _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, options);
@@ -670,8 +853,15 @@ pub fn decodeLosslessTemporaryWithOptions(
 
 pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
     const allocator = std.heap.page_allocator;
-    const payload = try temporaryPayload(allocator, bytes);
-    defer allocator.free(payload);
+    if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
+        defer allocator.free(payload);
+        try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+        return analyzeTemporaryPayloadBytes(allocator, bytes, payload);
+    }
+    return analyzeStrictPacketStats(allocator, bytes);
+}
+
+fn analyzeTemporaryPayloadBytes(allocator: std.mem.Allocator, codestream_bytes: []const u8, payload: []const u8) !TemporaryStats {
     var cursor = Cursor.initWithAllocator(allocator, payload);
 
     const header = try readTemporaryHeader(&cursor);
@@ -699,19 +889,170 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
         .rpcl_shadow_packets = 0,
         .rpcl_shadow_bytes = 0,
         .payload_bytes = payload.len,
-        .codestream_bytes = bytes.len,
+        .codestream_bytes = codestream_bytes.len,
         .components = [_]ComponentStats{.{}} ** 3,
     };
 
     try readComponentStats(&cursor, &stats.components[0], 0, header.version, header.layers);
     try readComponentStats(&cursor, &stats.components[1], 1, header.version, header.layers);
     try readComponentStats(&cursor, &stats.components[2], 2, header.version, header.layers);
-    const rpcl_shadow = try readRpclShadowStreamInfo(&cursor, header.version);
+    const rpcl_shadow = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
     stats.rpcl_shadow_packets = rpcl_shadow.packets;
     stats.rpcl_shadow_bytes = rpcl_shadow.bytes;
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     return stats;
+}
+
+fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !TemporaryStats {
+    const header = try readStrictCodestreamMetadata(bytes);
+    var stream = try readStrictSodRpclPacketStream(allocator, bytes);
+    defer stream.deinit();
+    if (stream.packet_lengths.len != header.packet_count) return CodestreamError.InvalidCodestream;
+
+    return .{
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .levels = header.levels,
+        .layers = header.layers,
+        .block_width = header.block_width,
+        .block_height = header.block_height,
+        .tile_part_divisions = header.tile_part_divisions,
+        .tile_part_plan_count = header.tile_part_plan_count,
+        .tile_part_plan = header.tile_part_plan,
+        .packet_plan_count = header.packet_plan_count,
+        .packet_plan = header.packet_plan,
+        .packet_count = header.packet_count,
+        .rpcl_shadow_packets = @intCast(stream.packet_lengths.len),
+        .rpcl_shadow_bytes = @intCast(stream.packet_bytes.len),
+        .payload_bytes = 0,
+        .codestream_bytes = bytes.len,
+        .components = [_]ComponentStats{.{}} ** 3,
+    };
+}
+
+fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var width: usize = 0;
+    var height: usize = 0;
+    var bit_depth: u8 = 0;
+    var levels: u8 = 0;
+    var layers: u16 = 0;
+    var block_width: u16 = 0;
+    var block_height: u16 = 0;
+    var precincts = defaultPrecincts();
+    var precinct_count: u8 = 0;
+    var saw_siz = false;
+    var saw_cod = false;
+    var tile_part_count: usize = 0;
+
+    var cursor: usize = 2;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        if (marker == @intFromEnum(Marker.sot)) break;
+        if (marker == @intFromEnum(Marker.eoc) or marker == @intFromEnum(Marker.sod)) {
+            return CodestreamError.InvalidCodestream;
+        }
+        cursor += 2;
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) {
+            return CodestreamError.TruncatedData;
+        }
+        const segment = bytes[cursor + 2 .. cursor + segment_length];
+        if (marker == @intFromEnum(Marker.siz)) {
+            if (segment.len < 36) return CodestreamError.InvalidCodestream;
+            const xsiz = readU32Be(segment, 2);
+            const ysiz = readU32Be(segment, 6);
+            const xosiz = readU32Be(segment, 10);
+            const yosiz = readU32Be(segment, 14);
+            if (xsiz <= xosiz or ysiz <= yosiz) return CodestreamError.InvalidCodestream;
+            const components = readU16Be(segment, 34);
+            if (components != 3 or segment.len < 36 + @as(usize, components) * 3) return CodestreamError.InvalidCodestream;
+            width = xsiz - xosiz;
+            height = ysiz - yosiz;
+            bit_depth = (segment[36] & 0x7f) + 1;
+            saw_siz = true;
+        } else if (marker == @intFromEnum(Marker.cod)) {
+            if (segment.len < 10) return CodestreamError.InvalidCodestream;
+            const scod = segment[0];
+            if (segment[1] != @intFromEnum(ProgressionOrder.rpcl)) return CodestreamError.UnsupportedPayload;
+            layers = readU16Be(segment, 2);
+            levels = segment[5];
+            block_width = @as(u16, 1) << @as(u4, @intCast(segment[6] + 2));
+            block_height = @as(u16, 1) << @as(u4, @intCast(segment[7] + 2));
+            precinct_count = if ((scod & 0x01) != 0) levels + 1 else 0;
+            if (precinct_count > precincts.len or segment.len < 10 + @as(usize, precinct_count)) {
+                return CodestreamError.InvalidCodestream;
+            }
+            if (precinct_count > 0) {
+                for (segment[10..][0..precinct_count], 0..) |byte, index| {
+                    precincts[index] = .{
+                        .width = @as(u16, 1) << @as(u4, @intCast(byte & 0x0f)),
+                        .height = @as(u16, 1) << @as(u4, @intCast(byte >> 4)),
+                    };
+                }
+            }
+            saw_cod = true;
+        }
+        cursor += segment_length;
+    }
+    if (!saw_siz or !saw_cod or width == 0 or height == 0 or layers == 0) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var scan = cursor;
+    while (scan < bytes.len) {
+        if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, scan);
+        if (marker == @intFromEnum(Marker.eoc)) break;
+        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (bytes.len - scan < 12) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, scan + 2);
+        if (segment_length != 10) return CodestreamError.InvalidCodestream;
+        const psot = readU32Be(bytes, scan + 6);
+        if (psot == 0) return CodestreamError.UnsupportedPayload;
+        const tile_part_end = try std.math.add(usize, scan, psot);
+        if (tile_part_end > bytes.len) return CodestreamError.TruncatedData;
+        tile_part_count += 1;
+        scan = tile_part_end;
+    }
+
+    const options = LosslessOptions{
+        .levels = levels,
+        .layers = layers,
+        .block_width = block_width,
+        .block_height = block_height,
+        .precincts = precincts,
+        .precinct_count = if (precinct_count == 0) 1 else precinct_count,
+    };
+    const plan = try makePacketPlan(width, height, levels, options);
+    const tile_part_plan = if (tile_part_count == @as(usize, levels) + 1)
+        resolutionTilePartPlan(levels)
+    else
+        emptyTilePartPlan();
+
+    return .{
+        .version = 8,
+        .width = width,
+        .height = height,
+        .bit_depth = bit_depth,
+        .levels = levels,
+        .layers = layers,
+        .block_width = block_width,
+        .block_height = block_height,
+        .tile_part_divisions = if (tile_part_plan.count > 0) 'R' else null,
+        .tile_part_plan_count = tile_part_plan.count,
+        .tile_part_plan = tile_part_plan.entries,
+        .packet_plan_count = plan.resolution_count,
+        .packet_plan = plan.resolutions,
+        .packet_count = plan.packets,
+    };
 }
 
 pub fn hasMarker(bytes: []const u8, marker: u16) bool {
@@ -810,6 +1151,12 @@ fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         return CodestreamError.InvalidCodestream;
     }
 
+    if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
+        errdefer allocator.free(payload);
+        try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+        return payload;
+    }
+
     var cursor: usize = 2;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
@@ -871,6 +1218,566 @@ fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     }
 
     return CodestreamError.InvalidCodestream;
+}
+
+fn temporaryPayloadFromComments(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var saw_payload = false;
+    var expected_total: ?u32 = null;
+    var next_chunk: u32 = 0;
+
+    var cursor: usize = 2;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        cursor += 2;
+        if (marker == @intFromEnum(Marker.sot)) break;
+        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) {
+            return CodestreamError.TruncatedData;
+        }
+        const segment = bytes[cursor + 2 .. cursor + segment_length];
+        if (marker == @intFromEnum(Marker.com)) {
+            try appendTemporaryPayloadCommentChunk(allocator, &out, segment, &saw_payload, &expected_total, &next_chunk);
+        }
+        cursor += segment_length;
+    }
+
+    if (!saw_payload) return null;
+    if (expected_total == null or next_chunk != expected_total.?) return CodestreamError.InvalidCodestream;
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendTemporaryPayloadCommentChunk(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    segment: []const u8,
+    saw_payload: *bool,
+    expected_total: *?u32,
+    next_chunk: *u32,
+) !void {
+    if (segment.len < 2 + temporary_comment_magic.len + 8) return;
+    if (readU16Be(segment, 0) != 0) return;
+    const comment = segment[2..];
+    if (!std.mem.eql(u8, comment[0..temporary_comment_magic.len], temporary_comment_magic)) return;
+
+    const header = temporary_comment_magic.len;
+    const chunk_index = readU32Be(comment, header);
+    const chunk_count = readU32Be(comment, header + 4);
+    if (chunk_count == 0) return CodestreamError.InvalidCodestream;
+    if (expected_total.*) |total| {
+        if (chunk_count != total) return CodestreamError.InvalidCodestream;
+    } else {
+        expected_total.* = chunk_count;
+    }
+    if (chunk_index != next_chunk.* or chunk_index >= chunk_count) return CodestreamError.InvalidCodestream;
+
+    saw_payload.* = true;
+    next_chunk.* += 1;
+    try out.appendSlice(allocator, comment[header + 8 ..]);
+}
+
+fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !void {
+    var cursor: usize = 2;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        cursor += 2;
+        if (marker == @intFromEnum(Marker.sot)) {
+            cursor -= 2;
+            break;
+        }
+        if (marker == @intFromEnum(Marker.eoc)) return CodestreamError.InvalidCodestream;
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) {
+            return CodestreamError.TruncatedData;
+        }
+        cursor += segment_length;
+    } else {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        if (marker == @intFromEnum(Marker.eoc)) {
+            cursor += 2;
+            if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            return;
+        }
+        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+
+        const marker_start = cursor;
+        cursor += 2;
+        if (bytes.len - cursor < 10) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length != 10) return CodestreamError.InvalidCodestream;
+        const psot = readU32Be(bytes, cursor + 4);
+        if (psot == 0) return CodestreamError.UnsupportedPayload;
+        const tile_part_end = try std.math.add(usize, marker_start, psot);
+        if (tile_part_end > bytes.len or tile_part_end < cursor + segment_length + 2) {
+            return CodestreamError.TruncatedData;
+        }
+
+        cursor += segment_length;
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(allocator);
+        cursor = try readTilePartHeaderMarkers(allocator, bytes, cursor, tile_part_end, &packet_lengths);
+        cursor += 2;
+        if (packet_lengths.items.len > 0) {
+            var payload_bytes: usize = 0;
+            for (packet_lengths.items) |packet_length| {
+                payload_bytes = try std.math.add(usize, payload_bytes, packet_length);
+            }
+            if (payload_bytes != tile_part_end - cursor) return CodestreamError.InvalidCodestream;
+        }
+        cursor = tile_part_end;
+    }
+
+    return CodestreamError.InvalidCodestream;
+}
+
+fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: []const u8, payload: []const u8) !void {
+    var expected = try readRpclPacketStreamFromTemporary(allocator, payload);
+    defer expected.deinit();
+    if (expected.packet_lengths.len == 0) {
+        try validateTilePartPayloads(allocator, bytes);
+        return;
+    }
+
+    var actual = try readStrictSodRpclPacketStream(allocator, bytes);
+    defer actual.deinit();
+
+    if (!std.mem.eql(u32, expected.packet_lengths, actual.packet_lengths)) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (!std.mem.eql(u8, expected.packet_bytes, actual.packet_bytes)) {
+        return CodestreamError.InvalidCodestream;
+    }
+    validateStrictRpclT2Packets(allocator, payload, actual) catch |err| switch (err) {
+        CodestreamError.ImageTooLarge,
+        CodestreamError.TooManyLevels,
+        CodestreamError.InvalidCodestream,
+        CodestreamError.UnsupportedPayload,
+        CodestreamError.TruncatedData,
+        => return err,
+        else => return CodestreamError.InvalidCodestream,
+    };
+}
+
+fn readRpclPacketStreamFromTemporary(allocator: std.mem.Allocator, payload: []const u8) !RpclPacketStream {
+    var cursor = Cursor.initWithAllocator(allocator, payload);
+    const header = try readTemporaryHeader(&cursor);
+    if (header.version < 8) return .{};
+
+    try skipComponentPayload(&cursor, 0, header.version, header.layers);
+    try skipComponentPayload(&cursor, 1, header.version, header.layers);
+    try skipComponentPayload(&cursor, 2, header.version, header.layers);
+
+    const packet_count = try cursor.readU64();
+    if (packet_count != header.packet_count) return CodestreamError.InvalidCodestream;
+    const byte_count = try cursor.readU64();
+    const packet_count_usize = std.math.cast(usize, packet_count) orelse return CodestreamError.InvalidCodestream;
+    const lengths = try allocator.alloc(u32, packet_count_usize);
+    errdefer allocator.free(lengths);
+    var packet_bytes: std.ArrayList(u8) = .empty;
+    errdefer packet_bytes.deinit(allocator);
+
+    var actual_bytes: u64 = 0;
+    for (lengths) |*length| {
+        const packet_len = try cursor.readU32();
+        length.* = packet_len;
+        actual_bytes = try std.math.add(u64, actual_bytes, packet_len);
+        const packet = try cursor.readBytes(@as(usize, @intCast(packet_len)));
+        try packet_bytes.appendSlice(allocator, packet);
+    }
+    if (actual_bytes != byte_count) return CodestreamError.InvalidCodestream;
+    if (!cursor.finished()) return CodestreamError.InvalidCodestream;
+
+    return .{
+        .allocator = allocator,
+        .packet_lengths = lengths,
+        .packet_bytes = try packet_bytes.toOwnedSlice(allocator),
+    };
+}
+
+fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8, actual: RpclPacketStream) !void {
+    var cursor = Cursor.initWithAllocator(allocator, payload);
+    const header = try readTemporaryHeader(&cursor);
+    if (header.version < 8) return;
+
+    var catalogs: [3]TemporaryComponentRpclCatalog = undefined;
+    var initialized_catalogs: usize = 0;
+    defer {
+        for (catalogs[0..initialized_catalogs]) |*catalog| catalog.deinit();
+    }
+    inline for (0..3) |component| {
+        catalogs[component] = try readTemporaryComponentRpclCatalog(allocator, &cursor, component, header.version, header.layers, header.bit_depth);
+        initialized_catalogs += 1;
+    }
+
+    _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
+    if (!cursor.finished()) return CodestreamError.InvalidCodestream;
+
+    const plan = temporaryPacketPlan(header);
+    const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
+    defer allocator.free(bands);
+    const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
+    defer allocator.free(blocks);
+    var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
+    defer rpcl_index.deinit();
+
+    if (actual.packet_lengths.len != header.packet_count) return CodestreamError.InvalidCodestream;
+    var sequence: u64 = 0;
+    var packet_byte_offset: usize = 0;
+    var resolution_index: usize = 0;
+    while (resolution_index < header.packet_plan_count) : (resolution_index += 1) {
+        const resolution = plan.resolutions[resolution_index];
+        var precinct_index: u64 = 0;
+        while (precinct_index < resolution.precincts) : (precinct_index += 1) {
+            var component: u16 = 0;
+            while (component < 3) : (component += 1) {
+                const selected = try rpcl_index.indexesFor(@intCast(resolution_index), precinct_index, component);
+                if (selected.len == 0) {
+                    var layer: u16 = 0;
+                    while (layer < header.layers) : (layer += 1) {
+                        const packet = packetSliceForSequence(actual, sequence, packet_byte_offset);
+                        try validateEmptyRpclPacket(packet.bytes);
+                        packet_byte_offset = packet.next_offset;
+                        sequence += 1;
+                    }
+                    continue;
+                }
+
+                var state = try t2.PrecinctPacketReaderState.init(allocator, selected.len, 1, selected.len);
+                defer state.deinit();
+                const locations = try sequentialPacketLocations(allocator, selected.len);
+                defer allocator.free(locations);
+                const decoded = try allocator.alloc(t2.DecodedPacketBlock, selected.len);
+                defer allocator.free(decoded);
+                const payloads = try allocator.alloc(?[]const u8, selected.len);
+                defer allocator.free(payloads);
+                const max_zero_bitplanes = maxZeroBitplanes(catalogs[component].blocks, selected);
+
+                var layer: u16 = 0;
+                while (layer < header.layers) : (layer += 1) {
+                    const packet_bytes = packetSliceForSequence(actual, sequence, packet_byte_offset);
+                    const packet = packet_plan.Packet{
+                        .sequence = sequence,
+                        .resolution = @intCast(resolution_index),
+                        .precinct_x = @intCast(precinct_index % resolution.precincts_x),
+                        .precinct_y = @intCast(precinct_index / resolution.precincts_x),
+                        .precinct_index = precinct_index,
+                        .component = component,
+                        .layer = layer,
+                    };
+                    const read = try state.readRpclPacket(
+                        allocator,
+                        packet_bytes.bytes,
+                        packet,
+                        @intCast(resolution_index),
+                        component,
+                        precinct_index,
+                        locations,
+                        max_zero_bitplanes,
+                        decoded,
+                        payloads,
+                    );
+                    if (read.packet_length != packet_bytes.bytes.len) return CodestreamError.InvalidCodestream;
+                    try validateDecodedRpclPacketBlocks(catalogs[component].blocks, selected, layer, decoded, payloads);
+                    packet_byte_offset = packet_bytes.next_offset;
+                    sequence += 1;
+                }
+            }
+        }
+    }
+    if (sequence != header.packet_count or packet_byte_offset != actual.packet_bytes.len) return CodestreamError.InvalidCodestream;
+}
+
+fn readTemporaryComponentRpclCatalog(
+    allocator: std.mem.Allocator,
+    cursor: *Cursor,
+    comptime expected_component: u8,
+    payload_version: u8,
+    layer_count: u16,
+    nominal_bitplanes: u8,
+) !TemporaryComponentRpclCatalog {
+    const component_index = try cursor.readU8();
+    if (component_index != expected_component) return CodestreamError.InvalidCodestream;
+
+    const band_count = try cursor.readU16();
+    const block_count = try cursor.readU32();
+
+    var band_index: usize = 0;
+    while (band_index < band_count) : (band_index += 1) {
+        _ = try cursor.readU8();
+        _ = try cursor.readU8();
+        _ = try cursor.readRect();
+    }
+
+    const blocks = try allocator.alloc(TemporaryRpclBlock, block_count);
+    errdefer allocator.free(blocks);
+    for (blocks) |*block| block.* = undefined;
+
+    var block_index: usize = 0;
+    while (block_index < block_count) : (block_index += 1) {
+        const block_band = try cursor.readU16();
+        if (block_band >= band_count) return CodestreamError.InvalidCodestream;
+        _ = try cursor.readRect();
+        _ = try cursor.readRect();
+        const bitplanes = try cursor.readU8();
+        const non_zero_count = try cursor.readU32();
+        const coding_passes = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
+        const layers = try readLayerAllocation(cursor, payload_version, layer_count, coding_passes);
+        _ = try readEntropyStreamInfo(cursor);
+        _ = try readEntropyStreamInfo(cursor);
+        _ = try readEntropyStreamInfo(cursor);
+        const ebcot_segment = try readEbcotSegmentInfo(cursor, payload_version, coding_passes);
+        if (payload_version < 7 and ebcot_segment.mq_bytes != 0) return CodestreamError.InvalidCodestream;
+        const payload_len = std.math.cast(usize, ebcot_segment.mq_bytes) orelse return CodestreamError.InvalidCodestream;
+        const payload = if (payload_version >= 7) try cursor.readBytes(payload_len) else &.{};
+
+        var converted_layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+        for (layers[0..@as(usize, @intCast(layer_count))], 0..) |layer, index| {
+            converted_layers[index] = .{
+                .cumulative_passes = layer.cumulative_passes,
+                .cumulative_bytes = layer.cumulative_bytes,
+            };
+        }
+        blocks[block_index] = .{
+            .nominal_bitplanes = @max(nominal_bitplanes, bitplanes),
+            .encoded_bitplanes = bitplanes,
+            .layers = converted_layers,
+            .payload = payload,
+        };
+    }
+
+    return .{
+        .allocator = allocator,
+        .blocks = blocks,
+    };
+}
+
+fn temporaryPacketPlan(header: TemporaryHeader) packet_plan.Plan {
+    return .{
+        .resolution_count = header.packet_plan_count,
+        .resolutions = header.packet_plan,
+        .packets = header.packet_count,
+    };
+}
+
+const PacketSlice = struct {
+    bytes: []const u8,
+    next_offset: usize,
+};
+
+fn packetSliceForSequence(stream: RpclPacketStream, sequence: u64, byte_offset: usize) PacketSlice {
+    const index: usize = @intCast(sequence);
+    const length: usize = @intCast(stream.packet_lengths[index]);
+    return .{
+        .bytes = stream.packet_bytes[byte_offset..][0..length],
+        .next_offset = byte_offset + length,
+    };
+}
+
+fn validateEmptyRpclPacket(bytes: []const u8) !void {
+    var cursor: usize = 0;
+    const present = try t2.readPacketPresenceHeader(bytes, &cursor, bytes.len);
+    if (present or cursor != bytes.len) return CodestreamError.InvalidCodestream;
+}
+
+fn sequentialPacketLocations(allocator: std.mem.Allocator, count: usize) ![]t2.PacketBlockLocation {
+    const locations = try allocator.alloc(t2.PacketBlockLocation, count);
+    for (locations, 0..) |*location, index| {
+        location.* = .{ .leaf_x = index, .leaf_y = 0 };
+    }
+    return locations;
+}
+
+fn maxZeroBitplanes(blocks: []const TemporaryRpclBlock, selected: []const usize) u8 {
+    var max_zero: u8 = 0;
+    for (selected) |block_index| {
+        const block = blocks[block_index];
+        max_zero = @max(max_zero, block.nominal_bitplanes);
+    }
+    return max_zero;
+}
+
+fn validateDecodedRpclPacketBlocks(
+    blocks: []const TemporaryRpclBlock,
+    selected: []const usize,
+    layer: u16,
+    decoded: []const t2.DecodedPacketBlock,
+    payloads: []const ?[]const u8,
+) !void {
+    if (selected.len != decoded.len or selected.len != payloads.len) return CodestreamError.InvalidCodestream;
+    for (selected, 0..) |block_index, index| {
+        if (block_index >= blocks.len) return CodestreamError.InvalidCodestream;
+        const block = blocks[block_index];
+        const previous = if (layer == 0)
+            t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 }
+        else
+            block.layers[layer - 1];
+        const current = block.layers[layer];
+        const contribution = try t2.layerContribution(previous, current);
+        const actual = decoded[index];
+        if (actual.included != contribution.included) return CodestreamError.InvalidCodestream;
+        if (!contribution.included) {
+            if (actual.first_inclusion or actual.zero_bitplanes != 0 or actual.pass_count != 0 or actual.byte_length != 0) {
+                return CodestreamError.InvalidCodestream;
+            }
+            if (payloads[index] != null) return CodestreamError.InvalidCodestream;
+            continue;
+        }
+
+        const first_inclusion = previous.cumulative_passes == 0 and previous.cumulative_bytes == 0;
+        if (actual.first_inclusion != first_inclusion) return CodestreamError.InvalidCodestream;
+        const expected_zero = if (first_inclusion)
+            try t2.zeroBitPlaneCount(block.nominal_bitplanes, block.encoded_bitplanes)
+        else
+            0;
+        if (actual.zero_bitplanes != expected_zero) return CodestreamError.InvalidCodestream;
+        if (actual.pass_count != contribution.pass_count or actual.byte_length != contribution.byte_length) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const expected_payload = try t2.layerPayloadSlice(block.payload, previous, current);
+        const actual_payload = payloads[index] orelse return CodestreamError.InvalidCodestream;
+        if (!std.mem.eql(u8, expected_payload, actual_payload)) return CodestreamError.InvalidCodestream;
+    }
+}
+
+fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8) !RpclPacketStream {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var lengths: std.ArrayList(u32) = .empty;
+    errdefer lengths.deinit(allocator);
+    var packet_bytes: std.ArrayList(u8) = .empty;
+    errdefer packet_bytes.deinit(allocator);
+
+    var cursor: usize = 2;
+    cursor = try skipMainHeaderToFirstSot(bytes, cursor);
+    var packet_sequence: u16 = 0;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        if (marker == @intFromEnum(Marker.eoc)) {
+            cursor += 2;
+            if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            const owned_lengths = try lengths.toOwnedSlice(allocator);
+            errdefer allocator.free(owned_lengths);
+            const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
+            return .{
+                .allocator = allocator,
+                .packet_lengths = owned_lengths,
+                .packet_bytes = owned_packet_bytes,
+            };
+        }
+        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+
+        const marker_start = cursor;
+        cursor += 2;
+        if (bytes.len - cursor < 10) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length != 10) return CodestreamError.InvalidCodestream;
+        const psot = readU32Be(bytes, cursor + 4);
+        if (psot == 0) return CodestreamError.UnsupportedPayload;
+        const tile_part_end = try std.math.add(usize, marker_start, psot);
+        if (tile_part_end > bytes.len or tile_part_end < cursor + segment_length + 2) {
+            return CodestreamError.TruncatedData;
+        }
+
+        cursor += segment_length;
+        var tile_packet_lengths: std.ArrayList(usize) = .empty;
+        defer tile_packet_lengths.deinit(allocator);
+        const sod = try readTilePartHeaderMarkers(allocator, bytes, cursor, tile_part_end, &tile_packet_lengths);
+        if (tile_packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
+        cursor = sod + 2;
+        try appendStrictSodPackets(
+            allocator,
+            &lengths,
+            &packet_bytes,
+            bytes,
+            cursor,
+            tile_part_end,
+            tile_packet_lengths.items,
+            &packet_sequence,
+        );
+        cursor = tile_part_end;
+    }
+
+    return CodestreamError.InvalidCodestream;
+}
+
+fn skipMainHeaderToFirstSot(bytes: []const u8, start: usize) !usize {
+    var cursor = start;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        cursor += 2;
+        if (marker == @intFromEnum(Marker.sot)) return cursor - 2;
+        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) {
+            return CodestreamError.TruncatedData;
+        }
+        cursor += segment_length;
+    }
+    return CodestreamError.InvalidCodestream;
+}
+
+fn appendStrictSodPackets(
+    allocator: std.mem.Allocator,
+    lengths: *std.ArrayList(u32),
+    packet_bytes: *std.ArrayList(u8),
+    bytes: []const u8,
+    start: usize,
+    end: usize,
+    packet_lengths: []const usize,
+    packet_sequence: *u16,
+) !void {
+    var cursor = start;
+    for (packet_lengths) |packet_length| {
+        const packet_end = try std.math.add(usize, cursor, packet_length);
+        if (packet_end > end) return CodestreamError.TruncatedData;
+        var packet_start = cursor;
+
+        if (packet_end - packet_start >= 2 and readU16Be(bytes, packet_start) == @intFromEnum(Marker.sop)) {
+            if (packet_end - packet_start < 6) return CodestreamError.TruncatedData;
+            const segment_length = readU16Be(bytes, packet_start + 2);
+            if (segment_length != 4) return CodestreamError.InvalidCodestream;
+            const sequence = readU16Be(bytes, packet_start + 4);
+            if (sequence != packet_sequence.*) return CodestreamError.InvalidCodestream;
+            packet_sequence.* +%= 1;
+            packet_start += 6;
+        }
+
+        var packet_payload_end = packet_end;
+        if (packet_payload_end - packet_start >= 2 and readU16Be(bytes, packet_payload_end - 2) == @intFromEnum(Marker.eph)) {
+            packet_payload_end -= 2;
+        }
+        if (packet_payload_end < packet_start) return CodestreamError.InvalidCodestream;
+        const payload_len = packet_payload_end - packet_start;
+        const payload_len_u32 = std.math.cast(u32, payload_len) orelse return CodestreamError.InvalidCodestream;
+        try lengths.append(allocator, payload_len_u32);
+        try packet_bytes.appendSlice(allocator, bytes[packet_start..packet_payload_end]);
+        cursor = packet_end;
+    }
+    if (cursor != end) return CodestreamError.InvalidCodestream;
 }
 
 fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_component: u8, payload_version: u8, layer_count: u16) !void {
@@ -1106,6 +2013,16 @@ fn emptyTilePartPlan() TilePartPlan {
     };
 }
 
+fn resolutionTilePartPlan(levels: u8) TilePartPlan {
+    var plan = emptyTilePartPlan();
+    plan.count = levels + 1;
+    var resolution: u8 = 0;
+    while (resolution < plan.count) : (resolution += 1) {
+        plan.entries[resolution] = resolution;
+    }
+    return plan;
+}
+
 fn readTilePartPlan(cursor: *Cursor) !TilePartPlan {
     var plan = emptyTilePartPlan();
     const count = try cursor.readU8();
@@ -1241,10 +2158,11 @@ fn skipEbcotSegmentPayload(cursor: *Cursor, payload_version: u8, byte_length: u6
     _ = try cursor.readBytes(len);
 }
 
-fn readRpclShadowStreamInfo(cursor: *Cursor, payload_version: u8) !RpclShadowStreamInfo {
+fn readRpclShadowStreamInfo(cursor: *Cursor, payload_version: u8, expected_packet_count: u64) !RpclShadowStreamInfo {
     if (payload_version < 8) return .{};
 
     const packet_count = try cursor.readU64();
+    if (packet_count != expected_packet_count) return CodestreamError.InvalidCodestream;
     const byte_count = try cursor.readU64();
     var actual_bytes: u64 = 0;
     var packet_index: u64 = 0;
@@ -1417,6 +2335,35 @@ fn appendTlm(allocator: std.mem.Allocator, out: *std.ArrayList(u8), psots: []con
     }
 }
 
+fn appendTemporaryPayloadComments(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    payload: []const u8,
+) !void {
+    const header_len = temporary_comment_magic.len + 8;
+    const max_comment_bytes = 65531;
+    if (header_len >= max_comment_bytes) return CodestreamError.InvalidCodestream;
+    const max_payload_bytes = max_comment_bytes - header_len;
+    const chunk_count = try std.math.divCeil(usize, payload.len, max_payload_bytes);
+    if (chunk_count == 0 or chunk_count > std.math.maxInt(u32)) return CodestreamError.InvalidCodestream;
+
+    var chunk_index: usize = 0;
+    while (chunk_index < chunk_count) : (chunk_index += 1) {
+        const start = chunk_index * max_payload_bytes;
+        const end = @min(payload.len, start + max_payload_bytes);
+        const comment_len = header_len + (end - start);
+        const segment_length = try std.math.add(u16, 4, @as(u16, @intCast(comment_len)));
+
+        try appendMarker(allocator, out, .com);
+        try appendU16Be(allocator, out, segment_length);
+        try appendU16Be(allocator, out, 0);
+        try out.appendSlice(allocator, temporary_comment_magic);
+        try appendU32Be(allocator, out, @intCast(chunk_index));
+        try appendU32Be(allocator, out, @intCast(chunk_count));
+        try out.appendSlice(allocator, payload[start..end]);
+    }
+}
+
 fn readTilePartHeaderMarkers(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -1558,30 +2505,28 @@ fn appendSot(
     try out.append(allocator, tile_part_count);
 }
 
-fn appendPlt(
+fn appendPltFromRpclPacketLengths(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
     options: LosslessOptions,
-    packet_count: u64,
-    data_bytes: usize,
+    packet_lengths: []const u32,
 ) !void {
-    if (packet_count == 0) return;
+    if (packet_lengths.len == 0) return;
 
-    var packet: u64 = 0;
     var marker_index: u8 = 0;
     var segment = std.ArrayList(u8).empty;
     defer segment.deinit(allocator);
 
-    while (packet < packet_count) : (packet += 1) {
-        const packet_length = packetizedLengthForIndex(options, data_bytes, packet_count, packet);
-        const encoded_len = pltLengthByteCount(packet_length);
+    for (packet_lengths) |packet_length| {
+        const adjusted_length = rpclPacketLengthWithMarkers(options, packet_length);
+        const encoded_len = pltLengthByteCount(adjusted_length);
         if (segment.items.len + encoded_len > 65532) {
             try flushPltSegment(allocator, out, marker_index, segment.items);
             if (marker_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
             marker_index += 1;
             segment.clearRetainingCapacity();
         }
-        try appendPltLength(allocator, &segment, packet_length);
+        try appendPltLength(allocator, &segment, adjusted_length);
     }
 
     if (segment.items.len > 0) {
@@ -1597,15 +2542,14 @@ fn flushPltSegment(allocator: std.mem.Allocator, out: *std.ArrayList(u8), marker
     try out.appendSlice(allocator, lengths);
 }
 
-fn pltBytesForPacketLengths(options: LosslessOptions, packet_count: u64, data_bytes: usize) !usize {
-    if (packet_count == 0) return 0;
+fn pltBytesForRpclPacketLengths(options: LosslessOptions, packet_lengths: []const u32) !usize {
+    if (packet_lengths.len == 0) return 0;
     var bytes: usize = 5;
     var segment_payload_bytes: usize = 0;
     var marker_count: usize = 1;
 
-    var packet: u64 = 0;
-    while (packet < packet_count) : (packet += 1) {
-        const encoded_len = pltLengthByteCount(packetizedLengthForIndex(options, data_bytes, packet_count, packet));
+    for (packet_lengths) |packet_length| {
+        const encoded_len = pltLengthByteCount(rpclPacketLengthWithMarkers(options, packet_length));
         if (segment_payload_bytes + encoded_len > 65532) {
             marker_count += 1;
             if (marker_count > 256) return CodestreamError.InvalidCodestream;
@@ -1619,33 +2563,16 @@ fn pltBytesForPacketLengths(options: LosslessOptions, packet_count: u64, data_by
     return bytes;
 }
 
-fn packetizedPayloadByteCount(options: LosslessOptions, packet_count: u64, data_bytes: usize) !usize {
-    if (packet_count == 0) return data_bytes;
-    var total: u64 = 0;
-    var packet: u64 = 0;
-    while (packet < packet_count) : (packet += 1) {
-        total = try std.math.add(u64, total, packetizedLengthForIndex(options, data_bytes, packet_count, packet));
+fn rpclPacketPayloadByteCount(options: LosslessOptions, packet_lengths: []const u32) !usize {
+    var total: usize = 0;
+    for (packet_lengths) |packet_length| {
+        total = try std.math.add(usize, total, @as(usize, @intCast(rpclPacketLengthWithMarkers(options, packet_length))));
     }
-    if (total > std.math.maxInt(usize)) return CodestreamError.ImageTooLarge;
-    return @intCast(total);
+    return total;
 }
 
-fn packetizedLengthForIndex(options: LosslessOptions, data_bytes: usize, packet_count: u64, packet_index: u64) u64 {
-    const data_len = packetDataLengthForIndex(data_bytes, packet_count, packet_index);
-    return packetOverheadBytes(options, data_len) + data_len;
-}
-
-fn packetDataLengthForIndex(data_bytes: usize, packet_count: u64, packet_index: u64) u64 {
-    const total = @as(u128, @intCast(data_bytes));
-    const count = @as(u128, packet_count);
-    const index = @as(u128, packet_index);
-    const end = total * (index + 1) / count;
-    const start = total * index / count;
-    return @intCast(end - start);
-}
-
-fn packetOverheadBytes(options: LosslessOptions, data_len: u64) u64 {
-    return @as(u64, 1 + pltLengthByteCount(data_len)) +
+fn rpclPacketLengthWithMarkers(options: LosslessOptions, packet_length: u32) u64 {
+    return @as(u64, packet_length) +
         (if (options.sop) @as(u64, 6) else 0) +
         (if (options.eph) @as(u64, 2) else 0);
 }
@@ -1697,45 +2624,32 @@ fn appendSop(allocator: std.mem.Allocator, out: *std.ArrayList(u8), sequence: u1
     try appendU16Be(allocator, out, sequence);
 }
 
-fn appendTemporaryPackets(
+fn appendRpclPackets(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
     options: LosslessOptions,
-    packet_count: u64,
-    data: []const u8,
+    packet_lengths: []const u32,
+    packet_bytes: []const u8,
     packet_sequence: *u16,
 ) !void {
-    if (packet_count == 0) {
-        try out.appendSlice(allocator, data);
-        return;
-    }
-
-    var packet: u64 = 0;
-    var data_cursor: usize = 0;
-    while (packet < packet_count) : (packet += 1) {
-        const data_len = @as(usize, @intCast(packetDataLengthForIndex(data.len, packet_count, packet)));
+    var cursor: usize = 0;
+    for (packet_lengths) |packet_length| {
+        const end = try std.math.add(usize, cursor, packet_length);
+        if (end > packet_bytes.len) return CodestreamError.InvalidCodestream;
         if (options.sop) {
             try appendSop(allocator, out, packet_sequence.*);
             packet_sequence.* +%= 1;
         }
-        try t2.appendPacketPresenceHeader(allocator, out, data_len != 0);
-        try appendPltLength(allocator, out, data_len);
+        try out.appendSlice(allocator, packet_bytes[cursor..end]);
         if (options.eph) try appendMarker(allocator, out, .eph);
-        try out.appendSlice(allocator, data[data_cursor .. data_cursor + data_len]);
-        data_cursor += data_len;
+        cursor = end;
     }
-    if (data_cursor != data.len) return CodestreamError.InvalidCodestream;
+    if (cursor != packet_bytes.len) return CodestreamError.InvalidCodestream;
 }
 
 fn tilePartCountForOptions(levels: u8, options: LosslessOptions) usize {
     if (options.tile_part_divisions == 'R') return @as(usize, levels) + 1;
     return 1;
-}
-
-fn payloadChunk(payload: []const u8, index: usize, chunks: usize) []const u8 {
-    const start = payload.len * index / chunks;
-    const end = payload.len * (index + 1) / chunks;
-    return payload[start..end];
 }
 
 fn appendTemporaryPayload(
@@ -1744,50 +2658,61 @@ fn appendTemporaryPayload(
     planes: color.RctPlanes,
     levels: u8,
     options: LosslessOptions,
+    rpcl_stream: ?*RpclPacketStream,
 ) !void {
-    try out.appendSlice(allocator, temporary_magic_v8);
-    try appendU32Be(allocator, out, @as(u32, @intCast(planes.width)));
-    try appendU32Be(allocator, out, @as(u32, @intCast(planes.height)));
-    try out.append(allocator, planes.bit_depth);
-    try out.append(allocator, levels);
-    try appendU16Be(allocator, out, options.block_width);
-    try appendU16Be(allocator, out, options.block_height);
-    try out.append(allocator, options.tile_part_divisions orelse 0);
-    try appendTilePartPlan(allocator, out, levels, options);
-    try appendPacketPlan(allocator, out, planes.width, planes.height, levels, options);
-    try appendU16Be(allocator, out, options.layers);
+    if (options.emit_temporary_payload_sidecar) {
+        try out.appendSlice(allocator, temporary_magic_v8);
+        try appendU32Be(allocator, out, @as(u32, @intCast(planes.width)));
+        try appendU32Be(allocator, out, @as(u32, @intCast(planes.height)));
+        try out.append(allocator, planes.bit_depth);
+        try out.append(allocator, levels);
+        try appendU16Be(allocator, out, options.block_width);
+        try appendU16Be(allocator, out, options.block_height);
+        try out.append(allocator, options.tile_part_divisions orelse 0);
+        try appendTilePartPlan(allocator, out, levels, options);
+        try appendPacketPlan(allocator, out, planes.width, planes.height, levels, options);
+        try appendU16Be(allocator, out, options.layers);
+    }
 
     const bands = try subband.makeBands(allocator, planes.width, planes.height, levels);
     defer allocator.free(bands);
     const blocks = try subband.makeCodeBlocks(allocator, bands, options.block_width, options.block_height);
     defer allocator.free(blocks);
 
-    if (payloadBlockThreadCount(options, blocks.len) > 1) {
-        try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks, options);
-        try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks, options);
-        try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks, options);
-    } else if (componentThreadCount(options) < 2) {
-        try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks, options);
-        try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks, options);
-        try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks, options);
-    } else {
-        try appendComponentPayloadsParallel(allocator, out, planes, bands, blocks, options);
+    var catalogs = try buildComponentRpclShadowCatalogs(allocator, planes, blocks, options, options.emit_temporary_payload_sidecar);
+    defer {
+        for (&catalogs) |*catalog| catalog.deinit();
     }
-    try appendRpclShadowStream(allocator, out, planes, bands, blocks, levels, options);
+
+    if (options.emit_temporary_payload_sidecar) {
+        if (payloadBlockThreadCount(options, blocks.len) > 1) {
+            try appendComponentPayload(allocator, out, 0, bands, blocks, catalogs[0].blocks, options);
+            try appendComponentPayload(allocator, out, 1, bands, blocks, catalogs[1].blocks, options);
+            try appendComponentPayload(allocator, out, 2, bands, blocks, catalogs[2].blocks, options);
+        } else if (componentThreadCount(options) < 2) {
+            try appendComponentPayload(allocator, out, 0, bands, blocks, catalogs[0].blocks, options);
+            try appendComponentPayload(allocator, out, 1, bands, blocks, catalogs[1].blocks, options);
+            try appendComponentPayload(allocator, out, 2, bands, blocks, catalogs[2].blocks, options);
+        } else {
+            try appendComponentPayloadsParallel(allocator, out, bands, blocks, catalogs, options);
+        }
+    }
+    const shadow_out: ?*std.ArrayList(u8) = if (options.emit_temporary_payload_sidecar) out else null;
+    try appendRpclShadowStream(allocator, shadow_out, planes, bands, blocks, catalogs, levels, options, rpcl_stream);
 }
 
 fn appendComponentPayloadsParallel(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    planes: color.RctPlanes,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
+    catalogs: [3]ComponentRpclShadowCatalog,
     options: LosslessOptions,
 ) !void {
     var jobs = [_]ComponentPayloadJob{
-        .{ .component_index = 0, .plane = planes.y, .stride = planes.width, .bands = bands, .blocks = blocks, .options = options },
-        .{ .component_index = 1, .plane = planes.cb, .stride = planes.width, .bands = bands, .blocks = blocks, .options = options },
-        .{ .component_index = 2, .plane = planes.cr, .stride = planes.width, .bands = bands, .blocks = blocks, .options = options },
+        .{ .component_index = 0, .bands = bands, .blocks = blocks, .catalog = catalogs[0].blocks, .options = options },
+        .{ .component_index = 1, .bands = bands, .blocks = blocks, .catalog = catalogs[1].blocks, .options = options },
+        .{ .component_index = 2, .bands = bands, .blocks = blocks, .catalog = catalogs[2].blocks, .options = options },
     };
     defer for (&jobs) |*job| job.deinit();
 
@@ -1797,28 +2722,18 @@ fn appendComponentPayloadsParallel(
 
 fn appendRpclShadowStream(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: ?*std.ArrayList(u8),
     planes: color.RctPlanes,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
+    catalogs: [3]ComponentRpclShadowCatalog,
     levels: u8,
     options: LosslessOptions,
+    rpcl_stream: ?*RpclPacketStream,
 ) !void {
     const plan = try makePacketPlan(planes.width, planes.height, levels, options);
-    var catalogs: [3]ComponentRpclShadowCatalog = undefined;
-    var initialized: usize = 0;
-    errdefer {
-        for (catalogs[0..initialized]) |*catalog| catalog.deinit();
-    }
-    catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.y, planes.width, blocks, planes.bit_depth, options);
-    initialized += 1;
-    catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.cb, planes.width, blocks, planes.bit_depth, options);
-    initialized += 1;
-    catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.cr, planes.width, blocks, planes.bit_depth, options);
-    initialized += 1;
-    defer {
-        for (catalogs[0..initialized]) |*catalog| catalog.deinit();
-    }
+    var rpcl_index = try buildRpclBlockIndex(allocator, plan, levels, bands, blocks);
+    defer rpcl_index.deinit();
 
     var packet_bytes: std.ArrayList(u8) = .empty;
     defer packet_bytes.deinit(allocator);
@@ -1833,38 +2748,32 @@ fn appendRpclShadowStream(
         while (precinct_index < resolution.precincts) : (precinct_index += 1) {
             var component: u16 = 0;
             while (component < 3) : (component += 1) {
-                const first_layer_packet = packet_plan.Packet{
-                    .sequence = sequence,
-                    .resolution = resolution_index,
-                    .precinct_x = @intCast(precinct_index % resolution.precincts_x),
-                    .precinct_y = @intCast(precinct_index / resolution.precincts_x),
-                    .precinct_index = precinct_index,
-                    .component = component,
-                    .layer = 0,
-                };
-                const selected = try t2.collectRpclCodeBlockIndexes(
-                    allocator,
-                    plan,
-                    first_layer_packet,
-                    levels,
-                    bands,
-                    blocks,
-                );
-                defer allocator.free(selected);
+                {
+                    const first_layer_packet = packet_plan.Packet{
+                        .sequence = sequence,
+                        .resolution = resolution_index,
+                        .precinct_x = @intCast(precinct_index % resolution.precincts_x),
+                        .precinct_y = @intCast(precinct_index / resolution.precincts_x),
+                        .precinct_index = precinct_index,
+                        .component = component,
+                        .layer = 0,
+                    };
+                    const selected = try rpcl_index.indexesFor(resolution_index, precinct_index, component);
 
-                try appendRpclShadowPacketsForSelection(
-                    allocator,
-                    &packet_bytes,
-                    &packet_lengths,
-                    &catalogs[@intCast(component)],
-                    selected,
-                    first_layer_packet,
-                    resolution_index,
-                    component,
-                    precinct_index,
-                    options.layers,
-                    &sequence,
-                );
+                    try appendRpclShadowPacketsForSelection(
+                        allocator,
+                        &packet_bytes,
+                        &packet_lengths,
+                        &catalogs[@intCast(component)],
+                        selected,
+                        first_layer_packet,
+                        resolution_index,
+                        component,
+                        precinct_index,
+                        options.layers,
+                        &sequence,
+                    );
+                }
             }
         }
     }
@@ -1872,16 +2781,121 @@ fn appendRpclShadowStream(
         return CodestreamError.InvalidCodestream;
     }
 
-    try appendU64Be(allocator, out, @intCast(packet_lengths.items.len));
-    try appendU64Be(allocator, out, @intCast(packet_bytes.items.len));
-    var cursor: usize = 0;
-    for (packet_lengths.items) |packet_len| {
-        try appendU32Be(allocator, out, packet_len);
-        const end = try std.math.add(usize, cursor, packet_len);
-        try out.appendSlice(allocator, packet_bytes.items[cursor..end]);
-        cursor = end;
+    if (out) |sidecar| {
+        try appendU64Be(allocator, sidecar, @intCast(packet_lengths.items.len));
+        try appendU64Be(allocator, sidecar, @intCast(packet_bytes.items.len));
+        var cursor: usize = 0;
+        for (packet_lengths.items) |packet_len| {
+            try appendU32Be(allocator, sidecar, packet_len);
+            const end = try std.math.add(usize, cursor, packet_len);
+            try sidecar.appendSlice(allocator, packet_bytes.items[cursor..end]);
+            cursor = end;
+        }
+        if (cursor != packet_bytes.items.len) return CodestreamError.InvalidCodestream;
     }
-    if (cursor != packet_bytes.items.len) return CodestreamError.InvalidCodestream;
+
+    if (rpcl_stream) |stream| {
+        stream.deinit();
+        const owned_lengths = try packet_lengths.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_lengths);
+        const owned_bytes = try packet_bytes.toOwnedSlice(allocator);
+        stream.* = .{
+            .allocator = allocator,
+            .packet_lengths = owned_lengths,
+            .packet_bytes = owned_bytes,
+        };
+    }
+}
+
+fn buildRpclBlockIndex(
+    allocator: std.mem.Allocator,
+    plan: packet_plan.Plan,
+    levels: u8,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+) !RpclBlockIndex {
+    var index = try RpclBlockIndex.init(allocator, plan);
+    errdefer index.deinit();
+
+    for (blocks, 0..) |block, block_index| {
+        if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
+        const resolution_index = try t2.bandResolutionIndex(levels, bands[block.band_index]);
+        const block_rect = try t2.codeBlockPacketRect(block);
+        const resolution = plan.resolutions[resolution_index];
+        if (block_rect.width == 0 or block_rect.height == 0) continue;
+
+        const first_precinct_x = block_rect.x / resolution.precinct_width;
+        const first_precinct_y = block_rect.y / resolution.precinct_height;
+        const right = @as(u64, block_rect.x) + @as(u64, block_rect.width);
+        const bottom = @as(u64, block_rect.y) + @as(u64, block_rect.height);
+        const last_precinct_x: u32 = @intCast(@min(
+            @as(u64, resolution.precincts_x - 1),
+            (right - 1) / resolution.precinct_width,
+        ));
+        const last_precinct_y: u32 = @intCast(@min(
+            @as(u64, resolution.precincts_y - 1),
+            (bottom - 1) / resolution.precinct_height,
+        ));
+        if (first_precinct_x >= resolution.precincts_x or first_precinct_y >= resolution.precincts_y) {
+            return CodestreamError.InvalidCodestream;
+        }
+
+        var precinct_y = first_precinct_y;
+        while (precinct_y <= last_precinct_y) : (precinct_y += 1) {
+            var precinct_x = first_precinct_x;
+            while (precinct_x <= last_precinct_x) : (precinct_x += 1) {
+                const precinct_index = @as(u64, precinct_y) * resolution.precincts_x + precinct_x;
+                const precinct = try packet_plan.precinctRect(plan, resolution_index, precinct_index);
+                if (!packet_plan.rectsIntersect(precinct, block_rect)) continue;
+
+                var component: u16 = 0;
+                while (component < 3) : (component += 1) {
+                    const cell = try index.cell(resolution_index, precinct_index, component);
+                    try cell.indexes.append(allocator, block_index);
+                }
+            }
+        }
+    }
+
+    return index;
+}
+
+fn buildComponentRpclShadowCatalogs(
+    allocator: std.mem.Allocator,
+    planes: color.RctPlanes,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+    include_bitplane_payload: bool,
+) ![3]ComponentRpclShadowCatalog {
+    if (payloadBlockThreadCount(options, blocks.len) > 1 or componentThreadCount(options) < 2) {
+        var catalogs: [3]ComponentRpclShadowCatalog = undefined;
+        var initialized: usize = 0;
+        errdefer {
+            for (catalogs[0..initialized]) |*catalog| catalog.deinit();
+        }
+        catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.y, planes.width, blocks, planes.bit_depth, options, include_bitplane_payload);
+        initialized += 1;
+        catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.cb, planes.width, blocks, planes.bit_depth, options, include_bitplane_payload);
+        initialized += 1;
+        catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.cr, planes.width, blocks, planes.bit_depth, options, include_bitplane_payload);
+        return catalogs;
+    }
+
+    var jobs = [_]ComponentCatalogJob{
+        .{ .plane = planes.y, .stride = planes.width, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+        .{ .plane = planes.cb, .stride = planes.width, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+        .{ .plane = planes.cr, .stride = planes.width, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+    };
+    defer for (&jobs) |*job| job.deinit();
+
+    try runComponentJobs(ComponentCatalogJob, &jobs, componentThreadCount(options), componentCatalogWorker);
+
+    var catalogs: [3]ComponentRpclShadowCatalog = undefined;
+    for (&jobs, 0..) |*job, index| {
+        catalogs[index] = job.catalog;
+        job.initialized = false;
+    }
+    return catalogs;
 }
 
 fn buildComponentRpclShadowCatalog(
@@ -1891,6 +2905,7 @@ fn buildComponentRpclShadowCatalog(
     blocks: []const subband.CodeBlock,
     nominal_bitplanes: u8,
     options: LosslessOptions,
+    include_bitplane_payload: bool,
 ) !ComponentRpclShadowCatalog {
     const catalog_blocks = try allocator.alloc(RpclShadowBlock, blocks.len);
     errdefer allocator.free(catalog_blocks);
@@ -1900,28 +2915,41 @@ fn buildComponentRpclShadowCatalog(
         for (catalog_blocks[0..initialized]) |*block| block.deinit(allocator);
     }
 
-    var scratch = ebcot.DirectBlockScratch.init(allocator);
-    defer scratch.deinit();
-    for (blocks, 0..) |block, index| {
-        var segment = try ebcot.encodeCodeBlockSegmentDirectScratch(&scratch, plane, stride, block.rect);
-        errdefer segment.deinit(allocator);
-        var layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
-        try computeLayerTruncations(&layers, options, .{
-            .pass_count = segment.pass_count,
-            .byte_length = segment.byte_length,
-        });
-
-        catalog_blocks[index] = .{
-            .segment = segment,
-            .layers = layers,
-            .encoded = .{
-                .location = .{ .leaf_x = 0, .leaf_y = 0 },
-                .nominal_bitplanes = @max(nominal_bitplanes, segment.bitplanes),
-                .encoded_bitplanes = segment.bitplanes,
-                .layers = &.{},
-                .payload = segment.bytes,
-            },
+    const worker_count = payloadBlockThreadCount(options, blocks.len);
+    if (worker_count > 1) {
+        try buildComponentRpclShadowCatalogBlocksParallel(
+            allocator,
+            plane,
+            stride,
+            blocks,
+            catalog_blocks,
+            nominal_bitplanes,
+            options,
+            include_bitplane_payload,
+            worker_count,
+        );
+        return .{
+            .allocator = allocator,
+            .blocks = catalog_blocks,
         };
+    }
+
+    var bitplane_scratch = bitplane.BlockScratch.init(allocator);
+    defer bitplane_scratch.deinit();
+    var ebcot_scratch = ebcot.DirectBlockScratch.init(allocator);
+    defer ebcot_scratch.deinit();
+    for (blocks, 0..) |block, index| {
+        catalog_blocks[index] = try buildRpclShadowBlock(
+            allocator,
+            &bitplane_scratch,
+            &ebcot_scratch,
+            plane,
+            stride,
+            block.rect,
+            nominal_bitplanes,
+            options,
+            include_bitplane_payload,
+        );
         const layer_count: usize = @intCast(options.layers);
         catalog_blocks[index].encoded.layers = catalog_blocks[index].layers[0..layer_count];
         initialized += 1;
@@ -1930,6 +2958,119 @@ fn buildComponentRpclShadowCatalog(
     return .{
         .allocator = allocator,
         .blocks = catalog_blocks,
+    };
+}
+
+fn buildComponentRpclShadowCatalogBlocksParallel(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    blocks: []const subband.CodeBlock,
+    catalog_blocks: []RpclShadowBlock,
+    nominal_bitplanes: u8,
+    options: LosslessOptions,
+    include_bitplane_payload: bool,
+    worker_count: usize,
+) !void {
+    if (blocks.len != catalog_blocks.len) return CodestreamError.InvalidCodestream;
+
+    var jobs = try allocator.alloc(ComponentCatalogBlockJob, worker_count);
+    defer allocator.free(jobs);
+    for (jobs, 0..) |*job, index| {
+        const start = blockRangeBoundary(blocks.len, worker_count, index);
+        const end = blockRangeBoundary(blocks.len, worker_count, index + 1);
+        job.* = .{
+            .allocator = allocator,
+            .plane = plane,
+            .stride = stride,
+            .blocks = blocks[start..end],
+            .catalog_blocks = catalog_blocks[start..end],
+            .nominal_bitplanes = nominal_bitplanes,
+            .options = options,
+            .include_bitplane_payload = include_bitplane_payload,
+        };
+    }
+    defer for (jobs) |*job| job.deinit();
+
+    const spawn_count = worker_count - 1;
+    var threads = try allocator.alloc(std.Thread, spawn_count);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < spawn_count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, componentCatalogBlockWorker, .{&jobs[spawned]}) catch |err| {
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+
+    componentCatalogBlockWorker(&jobs[spawn_count]);
+    for (threads[0..spawned]) |thread| thread.join();
+
+    for (jobs) |job| try job.result;
+    for (jobs) |*job| job.release();
+}
+
+fn buildRpclShadowBlock(
+    allocator: std.mem.Allocator,
+    bitplane_scratch: *bitplane.BlockScratch,
+    ebcot_scratch: *ebcot.DirectBlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    nominal_bitplanes: u8,
+    options: LosslessOptions,
+    include_bitplane_payload: bool,
+) !RpclShadowBlock {
+    var segment = try ebcot.encodeCodeBlockSegmentDirectScratch(ebcot_scratch, plane, stride, rect);
+    errdefer segment.deinit(allocator);
+
+    var bitplane_passes: ?bitplane.EncodedBlockPasses = null;
+    errdefer if (bitplane_passes) |*passes| passes.deinit(allocator);
+    if (include_bitplane_payload) {
+        const bitplane_view = try bitplane.encodeBlockPassesScratch(bitplane_scratch, plane, stride, rect);
+        bitplane_passes = try cloneBitplanePasses(allocator, bitplane_view);
+        const coding_passes = bitplane.isoCodingPassCount(bitplane_passes.?.bitplanes, bitplane_passes.?.non_zero_count);
+        if (segment.pass_count != coding_passes) return CodestreamError.InvalidCodestream;
+    }
+
+    var layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+    try computeLayerTruncations(&layers, options, .{
+        .pass_count = segment.pass_count,
+        .byte_length = segment.byte_length,
+    });
+
+    return .{
+        .bitplane = bitplane_passes,
+        .segment = segment,
+        .layers = layers,
+        .encoded = .{
+            .location = .{ .leaf_x = 0, .leaf_y = 0 },
+            .nominal_bitplanes = @max(nominal_bitplanes, segment.bitplanes),
+            .encoded_bitplanes = segment.bitplanes,
+            .layers = &.{},
+            .payload = segment.bytes,
+        },
+    };
+}
+
+fn cloneBitplanePasses(
+    allocator: std.mem.Allocator,
+    view: bitplane.EncodedBlockPassView,
+) !bitplane.EncodedBlockPasses {
+    const significance_bytes = try allocator.dupe(u8, view.significance_bytes);
+    errdefer allocator.free(significance_bytes);
+    const refinement_bytes = try allocator.dupe(u8, view.refinement_bytes);
+    errdefer allocator.free(refinement_bytes);
+    const cleanup_bytes = try allocator.dupe(u8, view.cleanup_bytes);
+    errdefer allocator.free(cleanup_bytes);
+
+    return .{
+        .active_rect = view.active_rect,
+        .bitplanes = view.bitplanes,
+        .non_zero_count = view.non_zero_count,
+        .significance_bytes = significance_bytes,
+        .refinement_bytes = refinement_bytes,
+        .cleanup_bytes = cleanup_bytes,
     };
 }
 
@@ -2078,16 +3219,41 @@ fn makePacketPlan(width: usize, height: usize, levels: u8, options: LosslessOpti
     );
 }
 
-fn packetCountForTilePart(
+const PacketRange = struct {
+    start: usize,
+    count: usize,
+};
+
+fn tilePartPacketRange(
     plan: packet_plan.Plan,
     tile_part_index: usize,
     tile_parts: usize,
     options: LosslessOptions,
-) u64 {
+) PacketRange {
     if (options.tile_part_divisions == 'R' and tile_parts == plan.resolution_count) {
-        return plan.resolutions[tile_part_index].packets;
+        var start: usize = 0;
+        var resolution: usize = 0;
+        while (resolution < tile_part_index) : (resolution += 1) {
+            start += @intCast(plan.resolutions[resolution].packets);
+        }
+        return .{
+            .start = start,
+            .count = @intCast(plan.resolutions[tile_part_index].packets),
+        };
     }
-    return plan.packets;
+    return .{
+        .start = 0,
+        .count = @intCast(plan.packets),
+    };
+}
+
+fn rpclPacketByteOffset(packet_lengths: []const u32, packet_index: usize) !usize {
+    if (packet_index > packet_lengths.len) return CodestreamError.InvalidCodestream;
+    var offset: usize = 0;
+    for (packet_lengths[0..packet_index]) |packet_length| {
+        offset = try std.math.add(usize, offset, packet_length);
+    }
+    return offset;
 }
 
 fn appendTilePartPlan(
@@ -2117,12 +3283,12 @@ fn appendComponentPayload(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
     component_index: u8,
-    plane: []const i32,
-    stride: usize,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
+    catalog: []const RpclShadowBlock,
     options: LosslessOptions,
 ) !void {
+    if (catalog.len != blocks.len) return CodestreamError.InvalidCodestream;
     try out.append(allocator, component_index);
     try appendU16Be(allocator, out, @as(u16, @intCast(bands.len)));
     try appendU32Be(allocator, out, @as(u32, @intCast(blocks.len)));
@@ -2135,24 +3301,17 @@ fn appendComponentPayload(
 
     const block_threads = payloadBlockThreadCount(options, blocks.len);
     if (block_threads > 1) {
-        try appendComponentBlocksParallel(allocator, out, plane, stride, blocks, options, block_threads);
+        try appendComponentBlocksParallel(allocator, out, blocks, catalog, options, block_threads);
     } else {
-        var scratch = bitplane.BlockScratch.init(allocator);
-        defer scratch.deinit();
         var entropy_scratch = entropy.Scratch.init(allocator);
         defer entropy_scratch.deinit();
-        var ebcot_scratch = ebcot.DirectBlockScratch.init(allocator);
-        defer ebcot_scratch.deinit();
         try appendComponentBlockPayloads(
             allocator,
             out,
-            plane,
-            stride,
             blocks,
+            catalog,
             options,
-            &scratch,
             &entropy_scratch,
-            &ebcot_scratch,
         );
     }
 }
@@ -2160,25 +3319,20 @@ fn appendComponentPayload(
 fn appendComponentBlockPayloads(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    plane: []const i32,
-    stride: usize,
     blocks: []const subband.CodeBlock,
+    catalog: []const RpclShadowBlock,
     options: LosslessOptions,
-    scratch: *bitplane.BlockScratch,
     entropy_scratch: *entropy.Scratch,
-    ebcot_scratch: *ebcot.DirectBlockScratch,
 ) !void {
-    for (blocks) |block| {
+    if (catalog.len != blocks.len) return CodestreamError.InvalidCodestream;
+    for (blocks, catalog) |block, catalog_block| {
         try appendComponentBlockPayload(
             allocator,
             out,
-            plane,
-            stride,
             block,
+            catalog_block,
             options,
-            scratch,
             entropy_scratch,
-            ebcot_scratch,
         );
     }
 }
@@ -2186,20 +3340,16 @@ fn appendComponentBlockPayloads(
 fn appendComponentBlockPayload(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    plane: []const i32,
-    stride: usize,
     block: subband.CodeBlock,
+    catalog_block: RpclShadowBlock,
     options: LosslessOptions,
-    scratch: *bitplane.BlockScratch,
     entropy_scratch: *entropy.Scratch,
-    ebcot_scratch: *ebcot.DirectBlockScratch,
 ) !void {
     try appendU16Be(allocator, out, @as(u16, @intCast(block.band_index)));
     try appendRect(allocator, out, block.rect);
 
-    const encoded = try bitplane.encodeBlockPassesScratch(scratch, plane, stride, block.rect);
-    var ebcot_segment = try ebcot.encodeCodeBlockSegmentDirectScratch(ebcot_scratch, plane, stride, block.rect);
-    defer ebcot_segment.deinit(allocator);
+    const encoded = catalog_block.bitplane orelse return CodestreamError.InvalidCodestream;
+    const ebcot_segment = catalog_block.segment;
     {
         try appendRect(allocator, out, encoded.active_rect);
         try out.append(allocator, encoded.bitplanes);
@@ -2222,29 +3372,22 @@ fn appendComponentBlockPayload(
 fn appendComponentBlocksParallel(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    plane: []const i32,
-    stride: usize,
     blocks: []const subband.CodeBlock,
+    catalog: []const RpclShadowBlock,
     options: LosslessOptions,
     worker_count: usize,
 ) !void {
+    if (catalog.len != blocks.len) return CodestreamError.InvalidCodestream;
     if (worker_count <= 1) {
-        var scratch = bitplane.BlockScratch.init(allocator);
-        defer scratch.deinit();
         var entropy_scratch = entropy.Scratch.init(allocator);
         defer entropy_scratch.deinit();
-        var ebcot_scratch = ebcot.DirectBlockScratch.init(allocator);
-        defer ebcot_scratch.deinit();
         return appendComponentBlockPayloads(
             allocator,
             out,
-            plane,
-            stride,
             blocks,
+            catalog,
             options,
-            &scratch,
             &entropy_scratch,
-            &ebcot_scratch,
         );
     }
 
@@ -2256,9 +3399,8 @@ fn appendComponentBlocksParallel(
         const start = blockRangeBoundary(blocks.len, worker_count, index);
         const end = blockRangeBoundary(blocks.len, worker_count, index + 1);
         job.* = .{
-            .plane = plane,
-            .stride = stride,
             .blocks = blocks[start..end],
+            .catalog = catalog[start..end],
             .options = options,
         };
     }

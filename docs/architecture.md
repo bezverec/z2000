@@ -44,13 +44,16 @@ decode strict ISO packet payloads.
 - tile-part headers with `SOT`/`SOD`/`EOC`;
 - optional `SOP` and `EPH` marker instances;
 - `PLT` packet-length marker segments;
-- a temporary private payload identified by `ZJ2K-CBLK-BP*`.
+- an optional debug private payload sidecar identified by `ZJ2K-CBLK-BP*`,
+  stored in chunked `COM` marker segments when explicitly requested.
 
 The latest temporary payload version is `BP8`. It keeps the old bitplane streams
 for lossless project-private decode, carries actual EBCOT/MQ bytes per
 code-block segment, and stores a shadow RPCL packet stream built by the T2
-writer. These packets are not yet the primary `SOD` payload; they are staging
-data for replacing the project-private packetization.
+writer. That RPCL packet stream is now the primary tile-part `SOD` payload, and
+its packet lengths are the source for `PLT`. The private sidecar is no longer
+emitted by default; it remains as a debug/compatibility path so project-private
+roundtrip decode can continue while strict T1 image reconstruction catches up.
 
 ## T1 Direction
 
@@ -91,8 +94,9 @@ The most recent bridge pieces are:
 - `appendRpclPacketForIndexes`, which appends a packet from selected encoded
   blocks and updates writer state.
 
-The next integration step is to promote the BP8 shadow RPCL packet stream into
-the main tile-part `SOD` payload and use its packet lengths for `PLT`.
+The next integration step is to add a strict narrow-path reader for the same
+RPCL/RCT/5-3 packets and close the packet-header differences reported by
+independent decoders.
 
 ## Parallelism And Scratch Reuse
 

@@ -16,6 +16,9 @@ const neon_pack_lanes = simd.neon_i32_lanes;
 const NeonPackVector = @Vector(neon_pack_lanes, u32);
 const neon_pack_masks: NeonPackVector = .{ 0x80, 0x40, 0x20, 0x10 };
 const neon_pack_tail_masks: NeonPackVector = .{ 0x08, 0x04, 0x02, 0x01 };
+const byte_pack_lanes = 8;
+const BytePackVector = @Vector(byte_pack_lanes, u32);
+const byte_pack_masks: BytePackVector = .{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 };
 const max_codeblock_area = 4096;
 
 const BlockScan = struct {
@@ -739,12 +742,22 @@ fn packMagnitudeByte(magnitudes: *const [8]u32, bit_index: u5) u8 {
     if (simd.has_neon) {
         return packMagnitudeByteNeon(magnitudes, bit_index);
     }
+    if (simd.i32_lanes >= byte_pack_lanes) {
+        return packMagnitudeByteVector(magnitudes, bit_index);
+    }
 
     var byte: u8 = 0;
     inline for (0..8) |offset| {
         byte |= @as(u8, @intCast((magnitudes[offset] >> bit_index) & 1)) << @as(u3, @intCast(7 - offset));
     }
     return byte;
+}
+
+fn packMagnitudeByteVector(magnitudes: *const [8]u32, bit_index: u5) u8 {
+    const shift: @Vector(byte_pack_lanes, u5) = @splat(bit_index);
+    const values: BytePackVector = magnitudes.*;
+    const bits = ((values >> shift) & @as(BytePackVector, @splat(1))) * byte_pack_masks;
+    return @as(u8, @intCast(@reduce(.Or, bits)));
 }
 
 fn packMagnitudeByteNeon(magnitudes: *const [8]u32, bit_index: u5) u8 {

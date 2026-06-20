@@ -1,5 +1,6 @@
 const std = @import("std");
 const mq = @import("mq.zig");
+const simd = @import("simd.zig");
 const subband = @import("subband.zig");
 
 pub const EbcotError = error{
@@ -155,10 +156,20 @@ const flag_significant: u8 = 1 << 0;
 const flag_visited: u8 = 1 << 1;
 const flag_became_significant: u8 = 1 << 2;
 const zero_context_lut = makeZeroContextLut();
+const stats_lanes = simd.i32_lanes;
+const StatsVector = @Vector(stats_lanes, i32);
+const StatsMaskVector = @Vector(stats_lanes, u32);
+const stats_lane_masks = makeStatsLaneMasks();
+const flag_clear_lanes = simd.i32_lanes * @sizeOf(i32);
+const FlagClearVector = @Vector(flag_clear_lanes, u8);
 
 pub const DirectBlockScratch = struct {
     allocator: std.mem.Allocator,
     flags: std.ArrayList(u8) = .empty,
+    significant_words: std.ArrayList(u64) = .empty,
+    row_words: usize = 0,
+    width: usize = 0,
+    height: usize = 0,
     pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty,
     bytes: std.ArrayList(u8) = .empty,
     encoder: ?mq.Encoder = null,
@@ -170,6 +181,7 @@ pub const DirectBlockScratch = struct {
     pub fn deinit(self: *DirectBlockScratch) void {
         if (self.encoder) |*encoder| encoder.deinit();
         self.flags.deinit(self.allocator);
+        self.significant_words.deinit(self.allocator);
         self.pass_payloads.deinit(self.allocator);
         self.bytes.deinit(self.allocator);
         self.* = undefined;
@@ -180,8 +192,13 @@ pub const DirectBlockScratch = struct {
         self.bytes.clearRetainingCapacity();
     }
 
-    fn ensureBlockState(self: *DirectBlockScratch, area: usize) !void {
+    fn ensureBlockState(self: *DirectBlockScratch, width: usize, height: usize, area: usize) !void {
         try self.flags.resize(self.allocator, area);
+        const row_words = rowWordCount(width);
+        try self.significant_words.resize(self.allocator, try std.math.mul(usize, row_words, height));
+        self.row_words = row_words;
+        self.width = width;
+        self.height = height;
     }
 
     fn mqEncoder(self: *DirectBlockScratch) !*mq.Encoder {
@@ -408,8 +425,9 @@ pub fn encodeCodeBlockSegmentDirectScratch(
     }
 
     const area = try blockArea(rect);
-    try scratch.ensureBlockState(area);
+    try scratch.ensureBlockState(rect.width, rect.height, area);
     @memset(scratch.flags.items, 0);
+    @memset(scratch.significant_words.items, 0);
 
     var pass_index: u16 = 0;
     var bitplane_index = stats.bitplanes;
@@ -683,15 +701,17 @@ fn emitDirectSignificancePass(
     var it = ScanIterator.init(rect.width, rect.height);
     while (it.next()) |pos| {
         const index = localIndex(rect.width, pos.x, pos.y);
-        if (hasFlag(scratch.flags.items, index, .significant) or neighborSignificanceFlags(scratch.flags.items, rect.width, rect.height, pos.x, pos.y) == 0) continue;
+        const neighbor_count = neighborSignificanceRows(scratch, pos.x, pos.y);
+        if (hasSignificantRow(scratch, pos.x, pos.y) or neighbor_count == 0) continue;
         setFlag(scratch.flags.items, index, .visited);
         const bit = isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane);
-        try encoder.write(mqContextIndex(zeroContext(neighborSignificanceFlags(scratch.flags.items, rect.width, rect.height, pos.x, pos.y))), bit);
+        try encoder.write(mqContextIndex(zeroContext(neighbor_count)), bit);
         symbol_count += 1;
         if (bit) {
             try encoder.write(mqContextIndex(.sign), plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0);
             symbol_count += 1;
             setFlag(scratch.flags.items, index, .significant);
+            setSignificantRow(scratch, pos.x, pos.y);
             setFlag(scratch.flags.items, index, .became_significant);
         }
     }
@@ -716,7 +736,7 @@ fn emitDirectRefinementPass(
     var it = ScanIterator.init(rect.width, rect.height);
     while (it.next()) |pos| {
         const index = localIndex(rect.width, pos.x, pos.y);
-        if (!hasFlag(scratch.flags.items, index, .significant) or hasFlag(scratch.flags.items, index, .became_significant)) continue;
+        if (!hasSignificantRow(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .became_significant)) continue;
         try encoder.write(mqContextIndex(.refinement), isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane));
         symbol_count += 1;
     }
@@ -741,14 +761,15 @@ fn emitDirectCleanupPass(
     var it = ScanIterator.init(rect.width, rect.height);
     while (it.next()) |pos| {
         const index = localIndex(rect.width, pos.x, pos.y);
-        if (hasFlag(scratch.flags.items, index, .significant) or hasFlag(scratch.flags.items, index, .visited)) continue;
+        if (hasSignificantRow(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .visited)) continue;
         const bit = isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane);
-        try encoder.write(mqContextIndex(zeroContext(neighborSignificanceFlags(scratch.flags.items, rect.width, rect.height, pos.x, pos.y))), bit);
+        try encoder.write(mqContextIndex(zeroContext(neighborSignificanceRows(scratch, pos.x, pos.y))), bit);
         symbol_count += 1;
         if (bit) {
             try encoder.write(mqContextIndex(.sign), plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0);
             symbol_count += 1;
             setFlag(scratch.flags.items, index, .significant);
+            setSignificantRow(scratch, pos.x, pos.y);
             setFlag(scratch.flags.items, index, .became_significant);
         }
     }
@@ -850,6 +871,11 @@ fn blockStats(plane: []const i32, stride: usize, rect: subband.Rect) BlockStats 
     while (y < rect.height) : (y += 1) {
         const row = (rect.y + y) * stride + rect.x;
         var x: usize = 0;
+        while (x + stats_lanes <= rect.width) : (x += stats_lanes) {
+            const chunk = blockStatsChunk(plane[row + x ..][0..stats_lanes]);
+            max_mag = @max(max_mag, chunk.max_mag);
+            non_zero_count += @popCount(chunk.mask);
+        }
         while (x < rect.width) : (x += 1) {
             const mag = magnitude(plane[row + x]);
             max_mag = @max(max_mag, mag);
@@ -860,6 +886,29 @@ fn blockStats(plane: []const i32, stride: usize, rect: subband.Rect) BlockStats 
         .bitplanes = bitPlaneCount(max_mag),
         .non_zero_count = non_zero_count,
     };
+}
+
+const BlockStatsChunk = struct {
+    mask: u32,
+    max_mag: u32,
+};
+
+fn blockStatsChunk(values: *const [stats_lanes]i32) BlockStatsChunk {
+    const coeffs: StatsVector = values.*;
+    const zero: StatsVector = @splat(0);
+    const abs_values = @select(i32, coeffs < zero, -coeffs, coeffs);
+    const max_mag = @as(u32, @intCast(@reduce(.Max, abs_values)));
+    const non_zero = coeffs != zero;
+    const mask = @reduce(.Or, @select(u32, non_zero, stats_lane_masks, @as(StatsMaskVector, @splat(0))));
+    return .{ .mask = mask, .max_mag = max_mag };
+}
+
+fn makeStatsLaneMasks() StatsMaskVector {
+    var masks: [stats_lanes]u32 = undefined;
+    inline for (0..stats_lanes) |lane| {
+        masks[lane] = @as(u32, 1) << @as(u5, @intCast(lane));
+    }
+    return masks;
 }
 
 fn blockArea(rect: subband.Rect) !usize {
@@ -914,7 +963,74 @@ fn setFlag(flags: []u8, index: usize, kind: FlagKind) void {
 
 fn clearFlag(flags: []u8, kind: FlagKind) void {
     const mask = ~flagMask(kind);
-    for (flags) |*flag| flag.* &= mask;
+    const mask_vec: FlagClearVector = @splat(mask);
+    var index: usize = 0;
+    while (index + flag_clear_lanes <= flags.len) : (index += flag_clear_lanes) {
+        clearFlagChunk(flags[index..][0..flag_clear_lanes], mask_vec);
+    }
+    while (index < flags.len) : (index += 1) {
+        flags[index] &= mask;
+    }
+}
+
+fn clearFlagChunk(values: *[flag_clear_lanes]u8, mask: FlagClearVector) void {
+    const chunk: FlagClearVector = values.*;
+    values.* = chunk & mask;
+}
+
+fn rowWordCount(width: usize) usize {
+    return (width + 63) / 64;
+}
+
+fn significantWordIndex(scratch: *const DirectBlockScratch, x: usize, y: usize) usize {
+    return y * scratch.row_words + x / 64;
+}
+
+fn significantBit(x: usize) u64 {
+    return @as(u64, 1) << @as(u6, @intCast(x & 63));
+}
+
+fn hasSignificantRow(scratch: *const DirectBlockScratch, x: usize, y: usize) bool {
+    return (scratch.significant_words.items[significantWordIndex(scratch, x, y)] & significantBit(x)) != 0;
+}
+
+fn setSignificantRow(scratch: *DirectBlockScratch, x: usize, y: usize) void {
+    scratch.significant_words.items[significantWordIndex(scratch, x, y)] |= significantBit(x);
+}
+
+fn neighborSignificanceRows(scratch: *const DirectBlockScratch, x: usize, y: usize) u4 {
+    var count: u4 = 0;
+    const min_y = if (y == 0) 0 else y - 1;
+    const max_y = @min(scratch.height - 1, y + 1);
+    const min_x = if (x == 0) 0 else x - 1;
+    const max_x = @min(scratch.width - 1, x + 1);
+    const first_word = min_x / 64;
+    const last_word = max_x / 64;
+
+    var yy = min_y;
+    while (yy <= max_y) : (yy += 1) {
+        const row_start = yy * scratch.row_words;
+        var word = first_word;
+        while (word <= last_word) : (word += 1) {
+            const word_min_x = word * 64;
+            const lo = if (min_x > word_min_x) min_x - word_min_x else 0;
+            const hi = @min(max_x - word_min_x, 63);
+            var mask = bitRangeMask(lo, hi);
+            if (yy == y and word == x / 64) mask &= ~significantBit(x);
+            count += @intCast(@popCount(scratch.significant_words.items[row_start + word] & mask));
+        }
+    }
+    return count;
+}
+
+fn bitRangeMask(lo: usize, hi: usize) u64 {
+    const all: u64 = std.math.maxInt(u64);
+    const lower = all << @as(u6, @intCast(lo));
+    const upper = if (hi == 63)
+        all
+    else
+        (@as(u64, 1) << @as(u6, @intCast(hi + 1))) - 1;
+    return lower & upper;
 }
 
 fn neighborSignificanceFlags(flags: []const u8, width: usize, height: usize, x: usize, y: usize) u4 {

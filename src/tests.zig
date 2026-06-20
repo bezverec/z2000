@@ -1782,7 +1782,7 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eph")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sod")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eoc")));
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
 
     const sot_index = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     const psot = try codestream.firstSotPsot(bytes);
@@ -1794,6 +1794,35 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
     try std.testing.expectEqual(codestream.markerValue("sot"), readU16BeTest(bytes, sot_index + psot));
+}
+
+test "debug temporary sidecar option preserves BP8 COM payload" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        10, 20, 30,
+        40, 50, 60,
+        70, 80, 90,
+        100, 110, 120,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") != null);
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expect(stats.payload_bytes > 0);
 }
 
 test "profiled lossless codestream matches normal encoder" {
@@ -2306,6 +2335,40 @@ test "EBCOT direct MQ segment matches symbol oracle" {
     try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, direct.passes);
 }
 
+test "EBCOT direct MQ row masks match oracle across word boundaries" {
+    const allocator = std.testing.allocator;
+    const width = 70;
+    const height = 4;
+    var plane = [_]i32{0} ** (width * height);
+    plane[63] = 5;
+    plane[64] = -7;
+    plane[65] = 3;
+    plane[width + 62] = 2;
+    plane[width + 66] = -4;
+    plane[2 * width + 0] = 9;
+    plane[3 * width + 69] = -6;
+
+    var block = try ebcot.encodeBlock(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer block.deinit(allocator);
+    var oracle = try ebcot.encodeBlockSymbolsSegment(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer oracle.deinit(allocator);
+
+    var direct = try ebcot.encodeCodeBlockSegmentDirect(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer direct.deinit(allocator);
+
+    try std.testing.expectEqual(oracle.bitplanes, direct.bitplanes);
+    try std.testing.expectEqual(oracle.non_zero_count, direct.non_zero_count);
+    try std.testing.expectEqual(oracle.pass_count, direct.pass_count);
+    try std.testing.expectEqual(oracle.byte_length, direct.byte_length);
+    try std.testing.expectEqualSlices(u8, oracle.bytes, direct.bytes);
+    try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, direct.passes);
+}
+
 test "EBCOT direct MQ scratch reuses buffers" {
     const allocator = std.testing.allocator;
     const first_plane = [_]i32{
@@ -2467,7 +2530,7 @@ test "temporary lossless codestream roundtrips RGB samples" {
         .samples = samples,
     };
 
-    const bytes = try codestream.encodeLosslessSkeleton(allocator, rgb, 2);
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .emit_temporary_payload_sidecar = true });
     defer allocator.free(bytes);
 
     var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
@@ -2504,6 +2567,7 @@ test "threaded temporary lossless codestream roundtrips RGB samples" {
         .block_width = 4,
         .block_height = 4,
         .threads = 3,
+        .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(bytes);
     const serial_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
@@ -2511,6 +2575,7 @@ test "threaded temporary lossless codestream roundtrips RGB samples" {
         .block_width = 4,
         .block_height = 4,
         .threads = 1,
+        .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(serial_bytes);
     const two_thread_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
@@ -2518,6 +2583,7 @@ test "threaded temporary lossless codestream roundtrips RGB samples" {
         .block_width = 4,
         .block_height = 4,
         .threads = 2,
+        .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(two_thread_bytes);
     const block_thread_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
@@ -2525,6 +2591,7 @@ test "threaded temporary lossless codestream roundtrips RGB samples" {
         .block_width = 4,
         .block_height = 4,
         .threads = 6,
+        .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(block_thread_bytes);
     try std.testing.expectEqualSlices(u8, serial_bytes, two_thread_bytes);
@@ -2564,6 +2631,7 @@ test "temporary codestream analyzer reports block and stream stats" {
         .layers = 3,
         .block_width = 32,
         .block_height = 32,
+        .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(bytes);
 
@@ -2636,6 +2704,7 @@ test "quality-layer rate allocation records truncation metadata without changing
         .block_height = 32,
         .layers = 3,
         .rate_count = 2,
+        .emit_temporary_payload_sidecar = true,
     };
     options.rates[0] = 8.0;
     options.rates[1] = 2.0;
@@ -2871,6 +2940,7 @@ test "temporary payload records resolution ordered tile-part plan" {
         .block_width = 32,
         .block_height = 32,
         .tile_part_divisions = 'R',
+        .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(bytes);
 
@@ -2911,6 +2981,7 @@ test "temporary payload rejects unterminated PLT lengths" {
         .block_width = 32,
         .block_height = 32,
         .tile_part_divisions = 'R',
+        .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(bytes);
 
@@ -2925,6 +2996,255 @@ test "temporary payload rejects unterminated PLT lengths" {
         codestream.CodestreamError.InvalidCodestream,
         codestream.analyzeLosslessTemporary(corrupted),
     );
+}
+
+test "temporary payload rejects BP8 shadow packet count mismatch" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+        .tile_part_divisions = 'R',
+        .layers = 2,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    const payload = try extractTemporaryPayloadForTest(allocator, bytes);
+    defer allocator.free(payload);
+
+    const shadow_count = try bp8ShadowPacketCountOffsetForTest(payload);
+    payload[shadow_count + 7] ^= 0x01;
+    const wrapped = try wrapTemporaryPayloadForTest(allocator, payload);
+    defer allocator.free(wrapped);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(wrapped),
+    );
+}
+
+test "temporary payload rejects SOD packet bytes that diverge from BP8 shadow stream" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 5) % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 11) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 17) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .layers = 2,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    var payload_offset = try firstSodPayloadOffsetForTest(corrupted);
+    if (readU16BeTest(corrupted, payload_offset) == codestream.markerValue("sop")) {
+        payload_offset += 6;
+    }
+    if (payload_offset >= corrupted.len) return error.Truncated;
+    corrupted[payload_offset] ^= 0x01;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
+test "temporary payload rejects corrupt T2 packet header mirrored in BP8 shadow stream" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 13) % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 19) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 23) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .layers = 2,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    const payload = try extractTemporaryPayloadForTest(allocator, bytes);
+    defer allocator.free(payload);
+    const shadow_packet_byte = try bp8FirstShadowPacketByteOffsetForTest(payload);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    var sod_packet_byte = try firstSodPayloadOffsetForTest(corrupted);
+    if (readU16BeTest(corrupted, sod_packet_byte) == codestream.markerValue("sop")) {
+        sod_packet_byte += 6;
+    }
+    corrupted[sod_packet_byte] ^= 0x40;
+    try xorTemporaryPayloadCommentByteForTest(corrupted, shadow_packet_byte, 0x40);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
+test "temporary payload rejects PLT packet length mismatch" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const plt = findMarker(corrupted, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(corrupted, plt + 2);
+    corrupted[plt + 2 + segment_length - 1] ^= 0x01;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
+test "temporary payload rejects bad SOP sequence outside packet bytes" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const sop = try firstSodPayloadOffsetForTest(corrupted);
+    try std.testing.expectEqual(codestream.markerValue("sop"), readU16BeTest(corrupted, sop));
+    corrupted[sop + 5] ^= 0x01;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
+test "temporary payload strict RPCL decode accepts SOP and EPH disabled" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 3) % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 7) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 11) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .sop = false,
+        .eph = false,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expect(stats.rpcl_shadow_packets > 0);
+    try std.testing.expectEqual(@as(usize, 0), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
+    try std.testing.expectEqual(@as(usize, 0), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
 }
 
 test "temporary payload omits tile-part plan when tile parts are disabled" {
@@ -2948,6 +3268,7 @@ test "temporary payload omits tile-part plan when tile parts are disabled" {
         .block_width = 64,
         .block_height = 64,
         .tile_part_divisions = null,
+        .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(bytes);
 
@@ -3148,6 +3469,18 @@ fn appendU32Le(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u32
     try out.append(allocator, @as(u8, @truncate(value >> 24)));
 }
 
+fn appendU16BeTest(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16) !void {
+    try out.append(allocator, @as(u8, @truncate(value >> 8)));
+    try out.append(allocator, @as(u8, @truncate(value)));
+}
+
+fn appendU32BeTest(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u32) !void {
+    try out.append(allocator, @as(u8, @truncate(value >> 24)));
+    try out.append(allocator, @as(u8, @truncate(value >> 16)));
+    try out.append(allocator, @as(u8, @truncate(value >> 8)));
+    try out.append(allocator, @as(u8, @truncate(value)));
+}
+
 fn findMarker(bytes: []const u8, marker: u16) ?usize {
     var i: usize = 0;
     while (i + 1 < bytes.len) : (i += 1) {
@@ -3198,30 +3531,53 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
         if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
 
         cursor += 12;
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(std.testing.allocator);
         while (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) != sod) {
+            const tile_header_marker = readU16BeTest(bytes, cursor);
             cursor += 2;
             if (tile_part_end - cursor < 2) return error.Truncated;
             const header_segment_length = readU16BeTest(bytes, cursor);
             if (header_segment_length < 2 or tile_part_end - cursor < header_segment_length) return error.Truncated;
+            if (tile_header_marker == codestream.markerValue("plt")) {
+                try appendPltLengthsForTest(std.testing.allocator, &packet_lengths, bytes[cursor + 2 .. cursor + header_segment_length]);
+            }
             cursor += header_segment_length;
         }
         if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
         cursor += 2;
 
-        while (cursor + 1 < tile_part_end) : (cursor += 1) {
-            const prefix_marker = readU16BeTest(bytes, cursor);
-            if (prefix_marker == sop) {
-                if (tile_part_end - cursor < 6) return error.Truncated;
-                if (marker == sop) count += 1;
-                cursor += 6;
-                try skipTemporaryPacketHeader(bytes, &cursor, tile_part_end);
-                if (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) == eph) {
+        if (packet_lengths.items.len > 0) {
+            for (packet_lengths.items) |packet_length| {
+                const packet_start = cursor;
+                const packet_end = packet_start + packet_length;
+                if (packet_end > tile_part_end) return error.Truncated;
+                if (packet_end - packet_start >= 2 and readU16BeTest(bytes, packet_start) == sop) {
+                    if (packet_end - packet_start < 6) return error.Truncated;
+                    if (marker == sop) count += 1;
+                }
+                if (packet_end - packet_start >= 2 and readU16BeTest(bytes, packet_end - 2) == eph) {
+                    if (marker == eph) count += 1;
+                }
+                cursor = packet_end;
+            }
+            if (cursor != tile_part_end) return error.InvalidCodestream;
+        } else {
+            while (cursor + 1 < tile_part_end) : (cursor += 1) {
+                const prefix_marker = readU16BeTest(bytes, cursor);
+                if (prefix_marker == sop) {
+                    if (tile_part_end - cursor < 6) return error.Truncated;
+                    if (marker == sop) count += 1;
+                    cursor += 6;
+                    try skipTemporaryPacketHeader(bytes, &cursor, tile_part_end);
+                    if (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) == eph) {
+                        if (marker == eph) count += 1;
+                        cursor += 1;
+                    }
+                } else if (prefix_marker == eph) {
                     if (marker == eph) count += 1;
                     cursor += 1;
                 }
-            } else if (prefix_marker == eph) {
-                if (marker == eph) count += 1;
-                cursor += 1;
             }
         }
 
@@ -3229,6 +3585,50 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
     }
 
     return error.MissingEoc;
+}
+
+fn firstSodPayloadOffsetForTest(bytes: []const u8) !usize {
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len) {
+        const marker = readU16BeTest(bytes, cursor);
+        cursor += 2;
+        if (marker == sot) {
+            cursor -= 2;
+            break;
+        }
+        if (marker == sod or marker == eoc) return error.MissingSot;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) return error.Truncated;
+        cursor += segment_length;
+    } else {
+        return error.MissingSot;
+    }
+
+    if (bytes.len - cursor < 12 or readU16BeTest(bytes, cursor) != sot) return error.MissingSot;
+    const tile_part_start = cursor;
+    const segment_length = readU16BeTest(bytes, cursor + 2);
+    if (segment_length != 10) return error.InvalidSot;
+    const psot = readU32BeTest(bytes, cursor + 6);
+    const tile_part_end = tile_part_start + psot;
+    if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
+    cursor += 12;
+
+    while (cursor + 1 < tile_part_end) {
+        const marker = readU16BeTest(bytes, cursor);
+        cursor += 2;
+        if (marker == sod) return cursor;
+        if (marker == sot or marker == eoc) return error.MissingSod;
+        if (tile_part_end - cursor < 2) return error.Truncated;
+        const header_segment_length = readU16BeTest(bytes, cursor);
+        if (header_segment_length < 2 or tile_part_end - cursor < header_segment_length) return error.Truncated;
+        cursor += header_segment_length;
+    }
+    return error.MissingSod;
 }
 
 fn skipTemporaryPacketHeader(bytes: []const u8, cursor: *usize, end: usize) !void {
@@ -3332,6 +3732,277 @@ fn sumPltSegment(segment: []const u8) !usize {
     return sum;
 }
 
+fn extractTemporaryPayloadForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const soc = codestream.markerValue("soc");
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+    const sop = codestream.markerValue("sop");
+    const eph = codestream.markerValue("eph");
+    const plt = codestream.markerValue("plt");
+
+    if (bytes.len < 2 or readU16BeTest(bytes, 0) != soc) return error.InvalidCodestream;
+    if (try extractTemporaryPayloadCommentForTest(allocator, bytes)) |payload| return payload;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len and readU16BeTest(bytes, cursor) != sot) {
+        if (readU16BeTest(bytes, cursor) == eoc) return error.MissingSot;
+        cursor += 2;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) return error.Truncated;
+        cursor += segment_length;
+    }
+
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        if (marker_value == eoc) return out.toOwnedSlice(allocator);
+        if (marker_value != sot) return error.MissingSot;
+        const tile_part_start = cursor;
+        if (bytes.len - cursor < 14) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor + 2);
+        if (segment_length != 10) return error.InvalidSot;
+        const psot = readU32BeTest(bytes, cursor + 6);
+        const tile_part_end = tile_part_start + psot;
+        if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
+        cursor += 12;
+
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(allocator);
+        while (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) != sod) {
+            const tile_header_marker = readU16BeTest(bytes, cursor);
+            cursor += 2;
+            if (tile_part_end - cursor < 2) return error.Truncated;
+            const header_segment_length = readU16BeTest(bytes, cursor);
+            if (header_segment_length < 2 or tile_part_end - cursor < header_segment_length) return error.Truncated;
+            if (tile_header_marker == plt) {
+                try appendPltLengthsForTest(allocator, &packet_lengths, bytes[cursor + 2 .. cursor + header_segment_length]);
+            }
+            cursor += header_segment_length;
+        }
+
+        if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
+        cursor += 2;
+        if (packet_lengths.items.len == 0) {
+            try out.appendSlice(allocator, bytes[cursor..tile_part_end]);
+        } else {
+            var packet_start = cursor;
+            for (packet_lengths.items) |packet_length| {
+                const packet_end = packet_start + packet_length;
+                if (packet_end > tile_part_end) return error.Truncated;
+                var packet_cursor = packet_start;
+                if (packet_end - packet_cursor >= 2 and readU16BeTest(bytes, packet_cursor) == sop) {
+                    if (packet_end - packet_cursor < 6) return error.Truncated;
+                    packet_cursor += 6;
+                }
+                if (packet_cursor >= packet_end) return error.Truncated;
+                packet_cursor += 1;
+                _ = try readVariableLengthForTest(bytes, &packet_cursor, packet_end);
+                if (packet_end - packet_cursor >= 2 and readU16BeTest(bytes, packet_cursor) == eph) {
+                    packet_cursor += 2;
+                }
+                try out.appendSlice(allocator, bytes[packet_cursor..packet_end]);
+                packet_start = packet_end;
+            }
+            if (packet_start != tile_part_end) return error.InvalidCodestream;
+        }
+        cursor = tile_part_end;
+    }
+
+    return error.MissingEoc;
+}
+
+fn extractTemporaryPayloadCommentForTest(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
+    const soc = codestream.markerValue("soc");
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+    const com = codestream.markerValue("com");
+    const magic = "ZJ2K-TEMP-PAYLOAD1";
+
+    if (bytes.len < 2 or readU16BeTest(bytes, 0) != soc) return error.InvalidCodestream;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var expected_total: ?u32 = null;
+    var next_chunk: u32 = 0;
+    var saw_payload = false;
+
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        cursor += 2;
+        if (marker_value == sot) break;
+        if (marker_value == sod or marker_value == eoc) return error.InvalidCodestream;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) return error.Truncated;
+        const segment = bytes[cursor + 2 .. cursor + segment_length];
+        if (marker_value == com and segment.len >= 2 + magic.len + 8 and readU16BeTest(segment, 0) == 0) {
+            const comment = segment[2..];
+            if (std.mem.eql(u8, comment[0..magic.len], magic)) {
+                const chunk_index = readU32BeTest(comment, magic.len);
+                const chunk_count = readU32BeTest(comment, magic.len + 4);
+                if (chunk_count == 0) return error.InvalidCodestream;
+                if (expected_total) |total| {
+                    if (chunk_count != total) return error.InvalidCodestream;
+                } else {
+                    expected_total = chunk_count;
+                }
+                if (chunk_index != next_chunk or chunk_index >= chunk_count) return error.InvalidCodestream;
+                next_chunk += 1;
+                saw_payload = true;
+                try out.appendSlice(allocator, comment[magic.len + 8 ..]);
+            }
+        }
+        cursor += segment_length;
+    }
+
+    if (!saw_payload) return null;
+    if (expected_total == null or next_chunk != expected_total.?) return error.InvalidCodestream;
+    return try out.toOwnedSlice(allocator);
+}
+
+fn xorTemporaryPayloadCommentByteForTest(bytes: []u8, payload_offset: usize, mask: u8) !void {
+    const soc = codestream.markerValue("soc");
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+    const com = codestream.markerValue("com");
+    const magic = "ZJ2K-TEMP-PAYLOAD1";
+
+    if (bytes.len < 2 or readU16BeTest(bytes, 0) != soc) return error.InvalidCodestream;
+    var consumed_payload: usize = 0;
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        cursor += 2;
+        if (marker_value == sot) break;
+        if (marker_value == sod or marker_value == eoc) return error.InvalidCodestream;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) return error.Truncated;
+        const segment_start = cursor + 2;
+        const segment = bytes[segment_start .. cursor + segment_length];
+        if (marker_value == com and segment.len >= 2 + magic.len + 8 and readU16BeTest(segment, 0) == 0) {
+            const comment = segment[2..];
+            if (std.mem.eql(u8, comment[0..magic.len], magic)) {
+                const chunk_payload_start = segment_start + 2 + magic.len + 8;
+                const chunk_payload_len = segment.len - (2 + magic.len + 8);
+                if (payload_offset < consumed_payload + chunk_payload_len) {
+                    bytes[chunk_payload_start + (payload_offset - consumed_payload)] ^= mask;
+                    return;
+                }
+                consumed_payload += chunk_payload_len;
+            }
+        }
+        cursor += segment_length;
+    }
+    return error.MissingPayloadByte;
+}
+
+fn wrapTemporaryPayloadForTest(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendU16BeTest(allocator, &out, codestream.markerValue("soc"));
+    try appendU16BeTest(allocator, &out, codestream.markerValue("sot"));
+    try appendU16BeTest(allocator, &out, 10);
+    try appendU16BeTest(allocator, &out, 0);
+    try appendU32BeTest(allocator, &out, @intCast(14 + payload.len));
+    try out.append(allocator, 0);
+    try out.append(allocator, 1);
+    try appendU16BeTest(allocator, &out, codestream.markerValue("sod"));
+    try out.appendSlice(allocator, payload);
+    try appendU16BeTest(allocator, &out, codestream.markerValue("eoc"));
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendPltLengthsForTest(allocator: std.mem.Allocator, out: *std.ArrayList(usize), segment: []const u8) !void {
+    if (segment.len == 0) return error.InvalidPlt;
+    var length: usize = 0;
+    var pending_length = false;
+    for (segment[1..]) |byte| {
+        length = (length << 7) | (byte & 0x7f);
+        pending_length = true;
+        if ((byte & 0x80) == 0) {
+            try out.append(allocator, length);
+            length = 0;
+            pending_length = false;
+        }
+    }
+    if (pending_length) return error.InvalidPlt;
+}
+
+fn readVariableLengthForTest(bytes: []const u8, cursor: *usize, end: usize) !u64 {
+    var length: u64 = 0;
+    var byte_count: usize = 0;
+    while (cursor.* < end) {
+        if (byte_count == 10) return error.InvalidPacketHeader;
+        const byte = bytes[cursor.*];
+        cursor.* += 1;
+        length = (length << 7) | @as(u64, byte & 0x7f);
+        byte_count += 1;
+        if ((byte & 0x80) == 0) return length;
+    }
+    return error.Truncated;
+}
+
+fn bp8ShadowPacketCountOffsetForTest(payload: []const u8) !usize {
+    var cursor: usize = 0;
+    if (payload.len < "ZJ2K-CBLK-BP8".len or !std.mem.eql(u8, payload[0.."ZJ2K-CBLK-BP8".len], "ZJ2K-CBLK-BP8")) {
+        return error.InvalidPayload;
+    }
+    cursor += "ZJ2K-CBLK-BP8".len;
+    cursor += 4 + 4 + 1 + 1 + 2 + 2 + 1;
+    const tile_part_plan_count = payload[cursor];
+    cursor += 1 + tile_part_plan_count;
+    const packet_plan_count = payload[cursor];
+    cursor += 1 + @as(usize, packet_plan_count) * 40;
+    cursor += 2;
+
+    var component: usize = 0;
+    while (component < 3) : (component += 1) {
+        cursor += 1;
+        const band_count = readU16BeTest(payload, cursor);
+        cursor += 2;
+        const block_count = readU32BeTest(payload, cursor);
+        cursor += 4;
+        cursor += @as(usize, band_count) * 18;
+
+        var block_index: u32 = 0;
+        while (block_index < block_count) : (block_index += 1) {
+            cursor += 2 + 16 + 16 + 1 + 4 + 2;
+            const layer_count = readU16BeTest(payload, cursor);
+            cursor += 2 + @as(usize, layer_count) * 10;
+            var stream_index: usize = 0;
+            while (stream_index < 3) : (stream_index += 1) {
+                cursor += 1 + 4;
+                const encoded_len = readU32BeTest(payload, cursor);
+                cursor += 4 + encoded_len;
+            }
+            const pass_count = readU16BeTest(payload, cursor);
+            cursor += 2;
+            const byte_length = readU64BeTest(payload, cursor);
+            cursor += 8 + @as(usize, pass_count) * 30 + @as(usize, @intCast(byte_length));
+        }
+    }
+    if (cursor + 16 > payload.len) return error.InvalidPayload;
+    return cursor;
+}
+
+fn bp8FirstShadowPacketByteOffsetForTest(payload: []const u8) !usize {
+    const count_offset = try bp8ShadowPacketCountOffsetForTest(payload);
+    const packet_count = readU64BeTest(payload, count_offset);
+    if (packet_count == 0) return error.InvalidPayload;
+    const first_length_offset = count_offset + 16;
+    if (first_length_offset + 4 > payload.len) return error.InvalidPayload;
+    const first_length = readU32BeTest(payload, first_length_offset);
+    if (first_length == 0 or first_length_offset + 4 + first_length > payload.len) return error.InvalidPayload;
+    return first_length_offset + 4;
+}
+
 fn mqContextsFromSymbols(allocator: std.mem.Allocator, symbols: []const mq.Symbol) ![]usize {
     const contexts = try allocator.alloc(usize, symbols.len);
     for (symbols, 0..) |symbol, index| {
@@ -3365,4 +4036,15 @@ fn readU32BeTest(bytes: []const u8, offset: usize) u32 {
         (@as(u32, bytes[offset + 1]) << 16) |
         (@as(u32, bytes[offset + 2]) << 8) |
         bytes[offset + 3];
+}
+
+fn readU64BeTest(bytes: []const u8, offset: usize) u64 {
+    return (@as(u64, bytes[offset]) << 56) |
+        (@as(u64, bytes[offset + 1]) << 48) |
+        (@as(u64, bytes[offset + 2]) << 40) |
+        (@as(u64, bytes[offset + 3]) << 32) |
+        (@as(u64, bytes[offset + 4]) << 24) |
+        (@as(u64, bytes[offset + 5]) << 16) |
+        (@as(u64, bytes[offset + 6]) << 8) |
+        bytes[offset + 7];
 }
