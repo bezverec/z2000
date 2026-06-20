@@ -76,7 +76,7 @@ zig build run -- dng-info input.dng
 zig build run -- tiff-to-jp2 input.tif output.jp2 \
   [--levels 5|--resolutions 6] [--tile 4096,4096] [--progression RPCL] \
   [--precincts "[256,256],[256,256],[128,128]"] [--block 64] [--layers 1] \
-  [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] \
+  [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] \
   [--guard-bits 2] [--tlm|--no-tlm] [--threads N] [--timings]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
@@ -98,11 +98,13 @@ ground for a later narrow `dng-to-jp2` RGB/preview path.
 The CLI now accepts the JPEG2000 profile knobs used by the Grok/Kakadu command
 lines we are targeting:
 
-- `--tile W,H` maps to Grok `-t` and Kakadu `Stiles`.
-- `--progression RPCL` maps to Grok `-p RPCL` and Kakadu `Corder=RPCL`.
-- `--mct yes` maps to COD multiple component transform. The current supported
-  path is RCT for reversible lossless RGB; `--mct none` fails closed until a
-  no-MCT tile pipeline exists.
+- `--tile W,H` maps to Grok `-t` and Kakadu `Stiles`; tile sizes smaller than
+  the image fail closed until multi-tile encoding exists.
+- `--progression RPCL` maps to Grok `-p RPCL` and Kakadu `Corder=RPCL`; other
+  progression orders fail closed until matching payload packetization exists.
+- `--mct rct` maps to COD multiple component transform 1. The current supported
+  path is RCT for reversible lossless RGB; `--mct ict` and `--mct none` fail
+  closed until those tile pipelines exist.
 - `--transform 5-3` maps to COD wavelet transform 1. `--transform 9-7` parses
   but fails closed until the TIFF/JP2 path has a real irreversible ICT/9-7
   pipeline.
@@ -123,8 +125,9 @@ lines we are targeting:
   `Cuse_eph=yes` at marker/config level.
 - `--tlm` writes TLM marker entries for the current tile-part lengths.
 - `--layers N` maps to `Clayers=N`.
-- `--tile-parts R` maps to Kakadu `ORGtparts=R` and Grok `-u R`; the current
-  temporary payload records resolution-ordered tile-part intent.
+- `--tile-parts R` maps to Kakadu `ORGtparts=R` and Grok `-u R`; L/C/P
+  tile-part divisions fail closed until their payload ordering exists. Use
+  `--tile-parts none` to disable tile-part division.
 - `--timings` prints a phase breakdown for TIFF read, RCT, DWT, block payload
   generation, JP2 wrapping, and disk write. This is the first pass at deciding
   whether the next optimization should target SIMD compute, scratch-buffer
@@ -156,18 +159,21 @@ zig build run -- tiff-to-jp2 example.tif example.jp2 \
 These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`QCD`/
 `TLM`/`PLT`) and temporary payload metadata. `--tile-parts R` writes physical
 resolution-ordered tile-parts and records the matching RPCL packet-grid plan in
-temporary payload version `BP4`. Real T2 packet headers, true packet payload
-interleaving, quality-layer truncation, EBCOT pass behavior for each code-block
-style bit, and rate control still require the ISO packet writer. Lossy
-`--rate/--rates` requests fail closed for now instead of silently producing a
-lossless file.
+temporary payload version `BP5`. BP5 also records per-code-block quality-layer
+truncation metadata and rate-allocation targets from `--rates`; the temporary
+decoder still consumes the full project-private payload for lossless roundtrip
+until true packet payload interleaving lands. Real T2 packet payload
+interleaving, EBCOT pass behavior for each code-block style bit, and MQ-backed
+ISO packet payloads still require the ISO packet writer.
 
 ## Performance and Safety Direction
 
 - Keep parsers bounds-checked and allocation-limited.
 - Use checked integer math for dimensions, offsets, byte counts, and box sizes.
 - Keep hot image data in contiguous component buffers before DWT.
-- Add tile-level parallelism before code-block parallelism.
+- Keep tile-level parallelism fail-closed until real multi-tile payload layout
+  exists; the current hot path uses component-level scheduling with per-worker
+  scratch-buffer reuse.
 - Benchmark encode/decode throughput, memory peak, and lossless roundtrip
   against OpenJPEG and Grok on the same TIFF corpus.
 
@@ -297,6 +303,7 @@ Optimization read from those numbers:
 1. Use the new T2 bitstream/tag-tree/coding-pass/length layer for real packet
    headers, then replace temporary packet payload interleaving.
 2. Add MQ arithmetic coding for code-block pass streams.
-3. Implement quality-layer truncation and rate allocation.
+3. Use BP5 quality-layer truncation metadata when writing real packet payloads.
 4. Replace the temporary decoder with strict ISO packet/header parsing.
-5. Add tile-parallel scheduling and scratch-buffer reuse for Grok-class throughput.
+5. Add real multi-tile payload layout, then tile-parallel scheduling on top of
+   the per-worker scratch-buffer model.

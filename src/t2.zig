@@ -414,9 +414,209 @@ pub const SegmentLengthState = struct {
     }
 };
 
+pub const PacketBlock = struct {
+    leaf_x: usize,
+    leaf_y: usize,
+    included: bool,
+    previously_included: bool = false,
+    zero_bitplanes: u8 = 0,
+    pass_count: u16 = 0,
+    byte_length: u64 = 0,
+};
+
+pub const PacketBlockLocation = struct {
+    leaf_x: usize,
+    leaf_y: usize,
+};
+
+pub const CodeBlockPacketState = struct {
+    included: bool = false,
+    length_state: SegmentLengthState = .{},
+};
+
+pub const DecodedPacketBlock = struct {
+    included: bool,
+    first_inclusion: bool,
+    zero_bitplanes: u8,
+    pass_count: u16,
+    byte_length: u64,
+};
+
+pub fn writeCodeBlockPacketHeader(
+    writer: *PacketHeaderWriter,
+    inclusion: *TagTreeEncoder,
+    zero_bitplanes: *TagTreeEncoder,
+    length_state: *SegmentLengthState,
+    layer: u32,
+    block: PacketBlock,
+) !void {
+    if (block.previously_included) {
+        try writer.writeBit(block.included);
+        if (!block.included) return;
+    } else {
+        try inclusion.encode(block.leaf_x, block.leaf_y, layer + 1, writer);
+        if (!block.included) return;
+        try writeZeroBitPlaneValue(zero_bitplanes, block.leaf_x, block.leaf_y, block.zero_bitplanes, writer);
+    }
+
+    try writeCodingPassCount(writer, block.pass_count);
+    try length_state.write(writer, block.pass_count, block.byte_length);
+}
+
+pub fn writePrecinctPacketHeader(
+    writer: *PacketHeaderWriter,
+    inclusion: *TagTreeEncoder,
+    zero_bitplanes: *TagTreeEncoder,
+    states: []CodeBlockPacketState,
+    layer: u32,
+    blocks: []const PacketBlock,
+) !void {
+    if (states.len != blocks.len) return PacketHeaderError.InvalidPacketHeader;
+
+    var packet_included = false;
+    for (blocks) |block| {
+        packet_included = packet_included or block.included;
+    }
+
+    try writer.writeBit(packet_included);
+    if (!packet_included) return;
+
+    for (blocks, 0..) |block, index| {
+        var actual = block;
+        actual.previously_included = states[index].included;
+        try writeCodeBlockPacketHeader(
+            writer,
+            inclusion,
+            zero_bitplanes,
+            &states[index].length_state,
+            layer,
+            actual,
+        );
+        if (block.included) states[index].included = true;
+    }
+}
+
+pub fn readCodeBlockPacketHeader(
+    reader: *PacketHeaderReader,
+    inclusion: *TagTreeDecoder,
+    zero_bitplanes: *TagTreeDecoder,
+    length_state: *SegmentLengthState,
+    layer: u32,
+    leaf_x: usize,
+    leaf_y: usize,
+    previously_included: bool,
+    max_zero_bitplanes: u8,
+) !DecodedPacketBlock {
+    const included = if (previously_included)
+        try reader.readBit()
+    else
+        try inclusion.decode(leaf_x, leaf_y, layer + 1, reader);
+
+    if (!included) {
+        return .{
+            .included = false,
+            .first_inclusion = false,
+            .zero_bitplanes = 0,
+            .pass_count = 0,
+            .byte_length = 0,
+        };
+    }
+
+    const first_inclusion = !previously_included;
+    const zeros = if (first_inclusion)
+        try readZeroBitPlaneValue(zero_bitplanes, leaf_x, leaf_y, max_zero_bitplanes, reader)
+    else
+        0;
+    const pass_count = try readCodingPassCount(reader);
+    const byte_length = try length_state.read(reader, pass_count);
+
+    return .{
+        .included = true,
+        .first_inclusion = first_inclusion,
+        .zero_bitplanes = zeros,
+        .pass_count = pass_count,
+        .byte_length = byte_length,
+    };
+}
+
+pub fn readPrecinctPacketHeader(
+    reader: *PacketHeaderReader,
+    inclusion: *TagTreeDecoder,
+    zero_bitplanes: *TagTreeDecoder,
+    states: []CodeBlockPacketState,
+    layer: u32,
+    locations: []const PacketBlockLocation,
+    max_zero_bitplanes: u8,
+    decoded: []DecodedPacketBlock,
+) !bool {
+    if (states.len != locations.len or decoded.len != locations.len) {
+        return PacketHeaderError.InvalidPacketHeader;
+    }
+
+    const packet_included = try reader.readBit();
+    if (!packet_included) {
+        for (decoded) |*block| {
+            block.* = .{
+                .included = false,
+                .first_inclusion = false,
+                .zero_bitplanes = 0,
+                .pass_count = 0,
+                .byte_length = 0,
+            };
+        }
+        return false;
+    }
+
+    for (locations, 0..) |location, index| {
+        decoded[index] = try readCodeBlockPacketHeader(
+            reader,
+            inclusion,
+            zero_bitplanes,
+            &states[index].length_state,
+            layer,
+            location.leaf_x,
+            location.leaf_y,
+            states[index].included,
+            max_zero_bitplanes,
+        );
+        if (decoded[index].included) states[index].included = true;
+    }
+
+    return true;
+}
+
 pub fn zeroBitPlaneCount(nominal_bitplanes: u8, encoded_bitplanes: u8) !u8 {
     if (encoded_bitplanes > nominal_bitplanes) return PacketHeaderError.InvalidPacketHeader;
     return nominal_bitplanes - encoded_bitplanes;
+}
+
+fn writeZeroBitPlaneValue(
+    zero_bitplanes: *TagTreeEncoder,
+    leaf_x: usize,
+    leaf_y: usize,
+    value: u8,
+    writer: *PacketHeaderWriter,
+) !void {
+    var threshold: u32 = 1;
+    while (threshold <= @as(u32, value) + 1) : (threshold += 1) {
+        try zero_bitplanes.encode(leaf_x, leaf_y, threshold, writer);
+    }
+}
+
+fn readZeroBitPlaneValue(
+    zero_bitplanes: *TagTreeDecoder,
+    leaf_x: usize,
+    leaf_y: usize,
+    max_zero_bitplanes: u8,
+    reader: *PacketHeaderReader,
+) !u8 {
+    var threshold: u32 = 1;
+    while (threshold <= @as(u32, max_zero_bitplanes) + 1) : (threshold += 1) {
+        if (try zero_bitplanes.decode(leaf_x, leaf_y, threshold, reader)) {
+            return @intCast(threshold - 1);
+        }
+    }
+    return PacketHeaderError.InvalidPacketHeader;
 }
 
 fn passCountLengthBits(pass_count: u16) !u6 {

@@ -4,10 +4,13 @@ const color = @import("color.zig");
 const codec = @import("codec.zig");
 const codestream = @import("codestream.zig");
 const dng = @import("formats/dng.zig");
+const ebcot = @import("ebcot.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const jp2 = @import("jp2.zig");
+const mq = @import("mq.zig");
 const packet_plan = @import("packet_plan.zig");
+const rate_alloc = @import("rate_alloc.zig");
 const simd = @import("simd.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
@@ -180,6 +183,232 @@ test "T2 segment length coder preserves Lblock state" {
     try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, write_state.write(&writer, 0, 1));
 }
 
+test "T2 block packet header roundtrips first inclusion metadata" {
+    const allocator = std.testing.allocator;
+    const inclusion_values = [_]u32{0};
+    const zero_bitplane_values = [_]u32{5};
+    const pass_count = bitplane.isoCodingPassCount(3, 4);
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+    var inclusion_encoder = try t2.TagTreeEncoder.init(allocator, 1, 1, inclusion_values[0..]);
+    defer inclusion_encoder.deinit();
+    var zero_encoder = try t2.TagTreeEncoder.init(allocator, 1, 1, zero_bitplane_values[0..]);
+    defer zero_encoder.deinit();
+    var write_lengths = t2.SegmentLengthState{};
+
+    try t2.writeCodeBlockPacketHeader(
+        &writer,
+        &inclusion_encoder,
+        &zero_encoder,
+        &write_lengths,
+        0,
+        .{
+            .leaf_x = 0,
+            .leaf_y = 0,
+            .included = true,
+            .zero_bitplanes = 5,
+            .pass_count = pass_count,
+            .byte_length = 321,
+        },
+    );
+    try writer.finish();
+
+    var reader = t2.PacketHeaderReader.init(bytes.items);
+    var inclusion_decoder = try t2.TagTreeDecoder.init(allocator, 1, 1);
+    defer inclusion_decoder.deinit();
+    var zero_decoder = try t2.TagTreeDecoder.init(allocator, 1, 1);
+    defer zero_decoder.deinit();
+    var read_lengths = t2.SegmentLengthState{};
+
+    const decoded = try t2.readCodeBlockPacketHeader(
+        &reader,
+        &inclusion_decoder,
+        &zero_decoder,
+        &read_lengths,
+        0,
+        0,
+        0,
+        false,
+        8,
+    );
+    try reader.byteAlign();
+    try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
+    try std.testing.expect(decoded.included);
+    try std.testing.expect(decoded.first_inclusion);
+    try std.testing.expectEqual(@as(u8, 5), decoded.zero_bitplanes);
+    try std.testing.expectEqual(pass_count, decoded.pass_count);
+    try std.testing.expectEqual(@as(u64, 321), decoded.byte_length);
+    try std.testing.expectEqual(write_lengths.lblock, read_lengths.lblock);
+}
+
+test "T2 block packet header roundtrips continued block metadata" {
+    const allocator = std.testing.allocator;
+    const values = [_]u32{0};
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+    var inclusion_encoder = try t2.TagTreeEncoder.init(allocator, 1, 1, values[0..]);
+    defer inclusion_encoder.deinit();
+    var zero_encoder = try t2.TagTreeEncoder.init(allocator, 1, 1, values[0..]);
+    defer zero_encoder.deinit();
+    var write_lengths = t2.SegmentLengthState{};
+
+    try t2.writeCodeBlockPacketHeader(
+        &writer,
+        &inclusion_encoder,
+        &zero_encoder,
+        &write_lengths,
+        1,
+        .{
+            .leaf_x = 0,
+            .leaf_y = 0,
+            .included = true,
+            .previously_included = true,
+            .pass_count = 2,
+            .byte_length = 9,
+        },
+    );
+    try writer.finish();
+
+    var reader = t2.PacketHeaderReader.init(bytes.items);
+    var inclusion_decoder = try t2.TagTreeDecoder.init(allocator, 1, 1);
+    defer inclusion_decoder.deinit();
+    var zero_decoder = try t2.TagTreeDecoder.init(allocator, 1, 1);
+    defer zero_decoder.deinit();
+    var read_lengths = t2.SegmentLengthState{};
+
+    const decoded = try t2.readCodeBlockPacketHeader(
+        &reader,
+        &inclusion_decoder,
+        &zero_decoder,
+        &read_lengths,
+        1,
+        0,
+        0,
+        true,
+        8,
+    );
+    try reader.byteAlign();
+    try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
+    try std.testing.expect(decoded.included);
+    try std.testing.expect(!decoded.first_inclusion);
+    try std.testing.expectEqual(@as(u8, 0), decoded.zero_bitplanes);
+    try std.testing.expectEqual(@as(u16, 2), decoded.pass_count);
+    try std.testing.expectEqual(@as(u64, 9), decoded.byte_length);
+    try std.testing.expectEqual(write_lengths.lblock, read_lengths.lblock);
+}
+
+test "T2 precinct packet header roundtrips first and continued layers" {
+    const allocator = std.testing.allocator;
+    const inclusion_values = [_]u32{
+        0, 1,
+        0, 3,
+    };
+    const zero_bitplane_values = [_]u32{
+        5, 2,
+        4, 1,
+    };
+    const locations = [_]t2.PacketBlockLocation{
+        .{ .leaf_x = 0, .leaf_y = 0 },
+        .{ .leaf_x = 1, .leaf_y = 0 },
+        .{ .leaf_x = 0, .leaf_y = 1 },
+        .{ .leaf_x = 1, .leaf_y = 1 },
+    };
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var inclusion_encoder = try t2.TagTreeEncoder.init(allocator, 2, 2, inclusion_values[0..]);
+    defer inclusion_encoder.deinit();
+    var zero_encoder = try t2.TagTreeEncoder.init(allocator, 2, 2, zero_bitplane_values[0..]);
+    defer zero_encoder.deinit();
+    var write_states = [_]t2.CodeBlockPacketState{.{}} ** 4;
+
+    {
+        var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+        const blocks = [_]t2.PacketBlock{
+            .{ .leaf_x = 0, .leaf_y = 0, .included = true, .zero_bitplanes = 5, .pass_count = 7, .byte_length = 321 },
+            .{ .leaf_x = 1, .leaf_y = 0, .included = false },
+            .{ .leaf_x = 0, .leaf_y = 1, .included = true, .zero_bitplanes = 4, .pass_count = 1, .byte_length = 8 },
+            .{ .leaf_x = 1, .leaf_y = 1, .included = false },
+        };
+        try t2.writePrecinctPacketHeader(&writer, &inclusion_encoder, &zero_encoder, write_states[0..], 0, blocks[0..]);
+        try writer.finish();
+    }
+
+    const second_packet_offset = bytes.items.len;
+    {
+        var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+        const blocks = [_]t2.PacketBlock{
+            .{ .leaf_x = 0, .leaf_y = 0, .included = true, .pass_count = 2, .byte_length = 17 },
+            .{ .leaf_x = 1, .leaf_y = 0, .included = true, .zero_bitplanes = 2, .pass_count = 1, .byte_length = 9 },
+            .{ .leaf_x = 0, .leaf_y = 1, .included = false },
+            .{ .leaf_x = 1, .leaf_y = 1, .included = false },
+        };
+        try t2.writePrecinctPacketHeader(&writer, &inclusion_encoder, &zero_encoder, write_states[0..], 1, blocks[0..]);
+        try writer.finish();
+    }
+
+    var inclusion_decoder = try t2.TagTreeDecoder.init(allocator, 2, 2);
+    defer inclusion_decoder.deinit();
+    var zero_decoder = try t2.TagTreeDecoder.init(allocator, 2, 2);
+    defer zero_decoder.deinit();
+    var read_states = [_]t2.CodeBlockPacketState{.{}} ** 4;
+    var decoded: [4]t2.DecodedPacketBlock = undefined;
+
+    var first_reader = t2.PacketHeaderReader.init(bytes.items[0..second_packet_offset]);
+    try std.testing.expect(try t2.readPrecinctPacketHeader(
+        &first_reader,
+        &inclusion_decoder,
+        &zero_decoder,
+        read_states[0..],
+        0,
+        locations[0..],
+        8,
+        decoded[0..],
+    ));
+    try first_reader.byteAlign();
+    try std.testing.expectEqual(second_packet_offset, first_reader.bytesConsumed());
+    try std.testing.expect(decoded[0].included);
+    try std.testing.expect(decoded[0].first_inclusion);
+    try std.testing.expectEqual(@as(u8, 5), decoded[0].zero_bitplanes);
+    try std.testing.expectEqual(@as(u16, 7), decoded[0].pass_count);
+    try std.testing.expectEqual(@as(u64, 321), decoded[0].byte_length);
+    try std.testing.expect(!decoded[1].included);
+    try std.testing.expect(decoded[2].included);
+    try std.testing.expect(decoded[2].first_inclusion);
+    try std.testing.expectEqual(@as(u8, 4), decoded[2].zero_bitplanes);
+    try std.testing.expectEqual(@as(u64, 8), decoded[2].byte_length);
+    try std.testing.expect(!decoded[3].included);
+
+    var second_reader = t2.PacketHeaderReader.init(bytes.items[second_packet_offset..]);
+    try std.testing.expect(try t2.readPrecinctPacketHeader(
+        &second_reader,
+        &inclusion_decoder,
+        &zero_decoder,
+        read_states[0..],
+        1,
+        locations[0..],
+        8,
+        decoded[0..],
+    ));
+    try second_reader.byteAlign();
+    try std.testing.expectEqual(bytes.items.len - second_packet_offset, second_reader.bytesConsumed());
+    try std.testing.expect(decoded[0].included);
+    try std.testing.expect(!decoded[0].first_inclusion);
+    try std.testing.expectEqual(@as(u16, 2), decoded[0].pass_count);
+    try std.testing.expectEqual(@as(u64, 17), decoded[0].byte_length);
+    try std.testing.expect(decoded[1].included);
+    try std.testing.expect(decoded[1].first_inclusion);
+    try std.testing.expectEqual(@as(u8, 2), decoded[1].zero_bitplanes);
+    try std.testing.expectEqual(@as(u64, 9), decoded[1].byte_length);
+    try std.testing.expect(!decoded[2].included);
+    try std.testing.expect(!decoded[3].included);
+    try std.testing.expectEqualSlices(t2.CodeBlockPacketState, write_states[0..], read_states[0..]);
+}
+
 test "9/7 wavelet roundtrips within floating point tolerance" {
     const allocator = std.testing.allocator;
     const width = 6;
@@ -268,7 +497,7 @@ test "codec encodes and decodes a small grayscale image" {
     try std.testing.expectEqualSlices(u8, input.pixels, decoded.image.pixels);
 }
 
-test "TIFF parser reads uncompressed RGB strip" {
+test "TIFF parser reads uncompressed RGB strip with per-component sample format" {
     const allocator = std.testing.allocator;
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(allocator);
@@ -283,9 +512,9 @@ test "TIFF parser reads uncompressed RGB strip" {
     try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, 134);
     try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
     try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
-    try appendIfdEntryLe(allocator, &bytes, 273, 4, 1, 140);
+    try appendIfdEntryLe(allocator, &bytes, 273, 4, 1, 146);
     try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
-    try appendIfdEntryLe(allocator, &bytes, 278, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 339, 3, 3, 140);
     try appendIfdEntryLe(allocator, &bytes, 279, 4, 1, 6);
     try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
     try appendU32Le(allocator, &bytes, 0);
@@ -293,6 +522,9 @@ test "TIFF parser reads uncompressed RGB strip" {
     try appendU16Le(allocator, &bytes, 8);
     try appendU16Le(allocator, &bytes, 8);
     try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 1);
     try bytes.appendSlice(allocator, &.{ 10, 20, 30, 40, 50, 60 });
 
     var rgb = try tiff.parseRgb(allocator, bytes.items);
@@ -551,7 +783,7 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eph")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sod")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eoc")));
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP5") != null);
 
     const sot_index = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     const psot = try codestream.firstSotPsot(bytes);
@@ -641,6 +873,47 @@ test "raw bitplane block writer emits compact block data" {
     try std.testing.expect(encoded.bytes.len < plane.len * @sizeOf(i32));
 }
 
+test "bitplane packet contribution bridges T1 metadata into T2 fields" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{
+        0, -7,
+        0, 3,
+    };
+
+    var encoded = try bitplane.encodeBlockPasses(allocator, plane[0..], 2, .{
+        .x = 0,
+        .y = 0,
+        .width = 2,
+        .height = 2,
+    });
+    defer encoded.deinit(allocator);
+
+    const contribution = try bitplane.packetContribution(8, encoded);
+    try std.testing.expect(contribution.included);
+    try std.testing.expectEqual(@as(u8, 5), contribution.zero_bitplanes);
+    try std.testing.expectEqual(@as(u16, 7), contribution.pass_count);
+    try std.testing.expectEqual(
+        @as(u64, @intCast(encoded.significance_bytes.len + encoded.refinement_bytes.len + encoded.cleanup_bytes.len)),
+        contribution.byte_length,
+    );
+    try std.testing.expectError(bitplane.BitplaneError.InvalidBlock, bitplane.packetContribution(2, encoded));
+
+    const empty_plane = [_]i32{ 0, 0, 0, 0 };
+    var empty = try bitplane.encodeBlockPasses(allocator, empty_plane[0..], 2, .{
+        .x = 0,
+        .y = 0,
+        .width = 2,
+        .height = 2,
+    });
+    defer empty.deinit(allocator);
+
+    const empty_contribution = try bitplane.packetContribution(8, empty);
+    try std.testing.expect(!empty_contribution.included);
+    try std.testing.expectEqual(@as(u8, 0), empty_contribution.zero_bitplanes);
+    try std.testing.expectEqual(@as(u16, 0), empty_contribution.pass_count);
+    try std.testing.expectEqual(@as(u64, 0), empty_contribution.byte_length);
+}
+
 test "entropy auto codec roundtrips repetitive and literal bytes" {
     const allocator = std.testing.allocator;
     const input = "aaaaaaaabbbbccccxyz0123456789aaaa";
@@ -697,10 +970,219 @@ test "arithmetic entropy codec roundtrips biased stream" {
     try std.testing.expectEqualSlices(u8, input[0..], decoded);
 }
 
+test "MQ coder roundtrips short multi-context symbol stream" {
+    const allocator = std.testing.allocator;
+    const symbols = [_]mq.Symbol{
+        .{ .context = 0, .bit = false },
+        .{ .context = 1, .bit = true },
+        .{ .context = 0, .bit = false },
+        .{ .context = 1, .bit = true },
+        .{ .context = 2, .bit = true },
+        .{ .context = 2, .bit = false },
+        .{ .context = 0, .bit = true },
+    };
+
+    var encoded = try mq.encode(allocator, 3, symbols[0..]);
+    defer encoded.deinit(allocator);
+    try expectMarkerStuffingIsValid(encoded.bytes);
+
+    const contexts = try mqContextsFromSymbols(allocator, symbols[0..]);
+    defer allocator.free(contexts);
+    const decoded = try mq.decode(allocator, 3, encoded.bytes, encoded.symbol_count, contexts);
+    defer allocator.free(decoded);
+    try expectMqBitsEqual(symbols[0..], decoded);
+}
+
+test "MQ coder roundtrips all-zero and all-one streams" {
+    const allocator = std.testing.allocator;
+    const zeros = [_]mq.Symbol{.{ .context = 0, .bit = false }} ** 256;
+    const ones = [_]mq.Symbol{.{ .context = 0, .bit = true }} ** 256;
+
+    var encoded_zeros = try mq.encode(allocator, 1, zeros[0..]);
+    defer encoded_zeros.deinit(allocator);
+    try expectMarkerStuffingIsValid(encoded_zeros.bytes);
+    const zero_contexts = try mqContextsFromSymbols(allocator, zeros[0..]);
+    defer allocator.free(zero_contexts);
+    const decoded_zeros = try mq.decode(allocator, 1, encoded_zeros.bytes, encoded_zeros.symbol_count, zero_contexts);
+    defer allocator.free(decoded_zeros);
+    try expectMqBitsEqual(zeros[0..], decoded_zeros);
+
+    var encoded_ones = try mq.encode(allocator, 1, ones[0..]);
+    defer encoded_ones.deinit(allocator);
+    try expectMarkerStuffingIsValid(encoded_ones.bytes);
+    const one_contexts = try mqContextsFromSymbols(allocator, ones[0..]);
+    defer allocator.free(one_contexts);
+    const decoded_ones = try mq.decode(allocator, 1, encoded_ones.bytes, encoded_ones.symbol_count, one_contexts);
+    defer allocator.free(decoded_ones);
+    try expectMqBitsEqual(ones[0..], decoded_ones);
+}
+
+test "MQ coder roundtrips alternating stream" {
+    const allocator = std.testing.allocator;
+    var symbols: [257]mq.Symbol = undefined;
+    for (&symbols, 0..) |*symbol, index| {
+        symbol.* = .{ .context = index % 3, .bit = (index % 2) != 0 };
+    }
+
+    var encoded = try mq.encode(allocator, 3, symbols[0..]);
+    defer encoded.deinit(allocator);
+    try expectMarkerStuffingIsValid(encoded.bytes);
+    const contexts = try mqContextsFromSymbols(allocator, symbols[0..]);
+    defer allocator.free(contexts);
+    const decoded = try mq.decode(allocator, 3, encoded.bytes, encoded.symbol_count, contexts);
+    defer allocator.free(decoded);
+    try expectMqBitsEqual(symbols[0..], decoded);
+}
+
+test "MQ coder resetContext keeps encoder and decoder synchronized" {
+    const allocator = std.testing.allocator;
+    const before = [_]mq.Symbol{
+        .{ .context = 0, .bit = true },
+        .{ .context = 0, .bit = true },
+        .{ .context = 0, .bit = false },
+        .{ .context = 0, .bit = true },
+    };
+    const after = [_]mq.Symbol{
+        .{ .context = 0, .bit = false },
+        .{ .context = 0, .bit = false },
+        .{ .context = 0, .bit = true },
+        .{ .context = 0, .bit = false },
+    };
+
+    var encoder = try mq.Encoder.init(allocator, 1);
+    defer encoder.deinit();
+    for (before) |symbol| try encoder.write(symbol.context, symbol.bit);
+    try encoder.resetContext(0);
+    for (after) |symbol| try encoder.write(symbol.context, symbol.bit);
+    var encoded = try encoder.finish();
+    defer encoded.deinit(allocator);
+    try expectMarkerStuffingIsValid(encoded.bytes);
+
+    var decoder = try mq.Decoder.init(allocator, 1, encoded.bytes, encoded.symbol_count);
+    defer decoder.deinit();
+    for (before) |symbol| {
+        try std.testing.expectEqual(symbol.bit, try decoder.read(symbol.context));
+    }
+    try decoder.resetContext(0);
+    for (after) |symbol| {
+        try std.testing.expectEqual(symbol.bit, try decoder.read(symbol.context));
+    }
+}
+
 test "bitplane reports ISO-style coding pass counts" {
     try std.testing.expectEqual(@as(u16, 0), bitplane.isoCodingPassCount(0, 0));
     try std.testing.expectEqual(@as(u16, 1), bitplane.isoCodingPassCount(1, 4));
     try std.testing.expectEqual(@as(u16, 22), bitplane.isoCodingPassCount(8, 1));
+}
+
+test "bitplane exposes ISO-style coding pass order" {
+    const expected = [_]bitplane.CodingPass{
+        .{ .kind = .cleanup, .magnitude_bitplane = 2 },
+        .{ .kind = .significance, .magnitude_bitplane = 1 },
+        .{ .kind = .refinement, .magnitude_bitplane = 1 },
+        .{ .kind = .cleanup, .magnitude_bitplane = 1 },
+        .{ .kind = .significance, .magnitude_bitplane = 0 },
+        .{ .kind = .refinement, .magnitude_bitplane = 0 },
+        .{ .kind = .cleanup, .magnitude_bitplane = 0 },
+    };
+
+    for (expected, 0..) |pass, index| {
+        try std.testing.expectEqual(pass, try bitplane.codingPassAt(3, 4, @intCast(index)));
+    }
+    try std.testing.expectError(bitplane.BitplaneError.InvalidBlock, bitplane.codingPassAt(3, 4, expected.len));
+    try std.testing.expectError(bitplane.BitplaneError.InvalidBlock, bitplane.codingPassAt(0, 0, 0));
+}
+
+test "EBCOT cleanup pass emits top bitplane significance and sign symbols" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{
+        0, -4,
+        2, 0,
+    };
+
+    var encoded = try ebcot.encodeBlock(allocator, plane[0..], 2, .{ .x = 0, .y = 0, .width = 2, .height = 2 });
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u8, 3), encoded.bitplanes);
+    try std.testing.expectEqual(@as(u32, 2), encoded.non_zero_count);
+    try std.testing.expectEqual(@as(usize, 7), encoded.passes.len);
+    try std.testing.expectEqual(ebcot.PassKind.cleanup, encoded.passes[0].kind);
+    try std.testing.expectEqual(@as(u8, 2), encoded.passes[0].magnitude_bitplane);
+
+    const top = encoded.symbols[encoded.passes[0].first_symbol..][0..encoded.passes[0].symbol_count];
+    try std.testing.expectEqual(@as(usize, 5), top.len);
+    try std.testing.expectEqual(ebcot.SymbolKind.zero_coding, top[0].kind);
+    try std.testing.expectEqual(false, top[0].bit);
+    try std.testing.expectEqual(ebcot.SymbolKind.zero_coding, top[1].kind);
+    try std.testing.expectEqual(false, top[1].bit);
+    try std.testing.expectEqual(@as(usize, 0), top[1].x);
+    try std.testing.expectEqual(@as(usize, 1), top[1].y);
+    try std.testing.expectEqual(ebcot.SymbolKind.zero_coding, top[2].kind);
+    try std.testing.expectEqual(true, top[2].bit);
+    try std.testing.expectEqual(@as(usize, 1), top[2].x);
+    try std.testing.expectEqual(@as(usize, 0), top[2].y);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, top[3].kind);
+    try std.testing.expectEqual(true, top[3].bit);
+}
+
+test "EBCOT significance propagation precedes cleanup on lower bitplanes" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{ 4, 2 };
+
+    var encoded = try ebcot.encodeBlock(allocator, plane[0..], 2, .{ .x = 0, .y = 0, .width = 2, .height = 1 });
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectEqual(ebcot.PassKind.cleanup, encoded.passes[0].kind);
+    try std.testing.expectEqual(ebcot.PassKind.significance, encoded.passes[1].kind);
+    try std.testing.expectEqual(ebcot.PassKind.refinement, encoded.passes[2].kind);
+    try std.testing.expectEqual(ebcot.PassKind.cleanup, encoded.passes[3].kind);
+
+    const sig = encoded.symbols[encoded.passes[1].first_symbol..][0..encoded.passes[1].symbol_count];
+    try std.testing.expectEqual(@as(usize, 2), sig.len);
+    try std.testing.expectEqual(ebcot.SymbolKind.zero_coding, sig[0].kind);
+    try std.testing.expectEqual(true, sig[0].bit);
+    try std.testing.expectEqual(@as(usize, 1), sig[0].x);
+    try std.testing.expectEqual(ebcot.Context.zero1, sig[0].context);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, sig[1].kind);
+    try std.testing.expectEqual(false, sig[1].bit);
+
+    const refinement = encoded.symbols[encoded.passes[2].first_symbol..][0..encoded.passes[2].symbol_count];
+    try std.testing.expectEqual(@as(usize, 1), refinement.len);
+    try std.testing.expectEqual(ebcot.SymbolKind.magnitude_refinement, refinement[0].kind);
+    try std.testing.expectEqual(@as(usize, 0), refinement[0].x);
+    try std.testing.expectEqual(false, refinement[0].bit);
+}
+
+test "EBCOT scratch encoder reuses block state buffers" {
+    const allocator = std.testing.allocator;
+    const first_plane = [_]i32{
+        0, -4, 0, 1,
+        2, 0,  0, 0,
+        0, 0,  3, 0,
+        0, 0,  0, 0,
+    };
+    const second_plane = [_]i32{ 4, 2 };
+
+    var scratch = ebcot.BlockScratch.init(allocator);
+    defer scratch.deinit();
+
+    const first = try ebcot.encodeBlockScratch(&scratch, first_plane[0..], 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 });
+    try std.testing.expectEqual(@as(usize, 7), first.passes.len);
+    try std.testing.expect(first.symbols.len > 0);
+    const significant_capacity = scratch.significant.capacity;
+    const visited_capacity = scratch.visited.capacity;
+    const became_capacity = scratch.became_significant.capacity;
+    const pass_capacity = scratch.passes.capacity;
+    const symbol_capacity = scratch.symbols.capacity;
+
+    const second = try ebcot.encodeBlockScratch(&scratch, second_plane[0..], 2, .{ .x = 0, .y = 0, .width = 2, .height = 1 });
+    try std.testing.expectEqual(@as(usize, 7), second.passes.len);
+    try std.testing.expect(second.symbols.len < first.symbols.len);
+    try std.testing.expectEqual(significant_capacity, scratch.significant.capacity);
+    try std.testing.expectEqual(visited_capacity, scratch.visited.capacity);
+    try std.testing.expectEqual(became_capacity, scratch.became_significant.capacity);
+    try std.testing.expectEqual(pass_capacity, scratch.passes.capacity);
+    try std.testing.expectEqual(symbol_capacity, scratch.symbols.capacity);
 }
 
 test "raw bitplane block writer roundtrips a block" {
@@ -906,6 +1388,7 @@ test "temporary codestream analyzer reports block and stream stats" {
 
     const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
         .levels = 1,
+        .layers = 3,
         .block_width = 32,
         .block_height = 32,
     });
@@ -916,6 +1399,7 @@ test "temporary codestream analyzer reports block and stream stats" {
     try std.testing.expectEqual(rgb.height, stats.height);
     try std.testing.expectEqual(rgb.bit_depth, stats.bit_depth);
     try std.testing.expectEqual(@as(u8, 1), stats.levels);
+    try std.testing.expectEqual(@as(u16, 3), stats.layers);
     try std.testing.expectEqual(@as(u16, 32), stats.block_width);
     try std.testing.expectEqual(@as(u16, 32), stats.block_height);
     try std.testing.expectEqual(@as(?u8, 'R'), stats.tile_part_divisions);
@@ -923,21 +1407,73 @@ test "temporary codestream analyzer reports block and stream stats" {
     try std.testing.expectEqual(@as(u8, 0), stats.tile_part_plan[0]);
     try std.testing.expectEqual(@as(u8, 1), stats.tile_part_plan[1]);
     try std.testing.expectEqual(@as(u8, 2), stats.packet_plan_count);
-    try std.testing.expectEqual(@as(u64, 6), stats.packet_count);
+    try std.testing.expectEqual(@as(u64, 18), stats.packet_count);
     try std.testing.expectEqual(@as(u32, 2), stats.packet_plan[0].width);
     try std.testing.expectEqual(@as(u32, 1), stats.packet_plan[0].height);
-    try std.testing.expectEqual(@as(u64, 3), stats.packet_plan[0].packets);
+    try std.testing.expectEqual(@as(u64, 9), stats.packet_plan[0].packets);
     try std.testing.expectEqual(@as(u32, 4), stats.packet_plan[1].width);
     try std.testing.expectEqual(@as(u32, 2), stats.packet_plan[1].height);
-    try std.testing.expectEqual(@as(u64, 3), stats.packet_plan[1].packets);
+    try std.testing.expectEqual(@as(u64, 9), stats.packet_plan[1].packets);
     try std.testing.expect(stats.payload_bytes < stats.codestream_bytes);
     try std.testing.expect(stats.components[0].blocks > 0);
     try std.testing.expect(stats.components[0].coding_passes > 0);
+    try std.testing.expect(stats.components[0].quality_layers[0].blocks > 0);
+    try std.testing.expect(stats.components[0].quality_layers[1].cumulative_passes >= stats.components[0].quality_layers[0].cumulative_passes);
+    try std.testing.expectEqual(stats.components[0].coding_passes, stats.components[0].quality_layers[2].cumulative_passes);
     try std.testing.expect(stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.significance)].streams > 0);
     try std.testing.expectEqual(
         @as(u64, 0),
         stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.cleanup)].raw_bytes,
     );
+}
+
+test "quality-layer rate allocation records truncation metadata without changing lossless roundtrip" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        0,   10,  20,
+        30,  40,  50,
+        60,  70,  80,
+        90,  100, 110,
+        120, 130, 140,
+        150, 160, 170,
+        180, 190, 200,
+        210, 220, 230,
+        240, 120, 60,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 3,
+        .height = 3,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = codestream.LosslessOptions{
+        .levels = 1,
+        .block_width = 32,
+        .block_height = 32,
+        .layers = 3,
+        .rate_count = 2,
+    };
+    options.rates[0] = 8.0;
+    options.rates[1] = 2.0;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(u16, 3), stats.layers);
+    const y = stats.components[0];
+    try std.testing.expect(y.quality_layers[0].blocks > 0);
+    try std.testing.expect(y.quality_layers[0].cumulative_bytes <= y.quality_layers[1].cumulative_bytes);
+    try std.testing.expect(y.quality_layers[1].cumulative_bytes <= y.quality_layers[2].cumulative_bytes);
+    try std.testing.expectEqual(y.coding_passes, y.quality_layers[2].cumulative_passes);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
 test "RPCL packet plan computes precinct grids per resolution" {
@@ -968,6 +1504,26 @@ test "RPCL packet plan computes precinct grids per resolution" {
     try std.testing.expectEqual(@as(u32, 2), plan.resolutions[2].precincts_y);
     try std.testing.expectEqual(@as(u64, 36), plan.resolutions[2].packets);
     try std.testing.expectEqual(@as(u64, 84), plan.packets);
+}
+
+test "rate allocator distributes block truncation points across quality layers" {
+    var layers: [4]rate_alloc.Truncation = undefined;
+    try rate_alloc.allocateEven(layers[0..], .{ .pass_count = 10, .byte_length = 100 });
+
+    try std.testing.expectEqual(rate_alloc.Truncation{ .cumulative_passes = 3, .cumulative_bytes = 30 }, layers[0]);
+    try std.testing.expectEqual(rate_alloc.Truncation{ .cumulative_passes = 5, .cumulative_bytes = 50 }, layers[1]);
+    try std.testing.expectEqual(rate_alloc.Truncation{ .cumulative_passes = 8, .cumulative_bytes = 80 }, layers[2]);
+    try std.testing.expectEqual(rate_alloc.Truncation{ .cumulative_passes = 10, .cumulative_bytes = 100 }, layers[3]);
+}
+
+test "rate allocator maps compression ratios to cumulative layer budgets" {
+    var layers: [3]rate_alloc.Truncation = undefined;
+    const rates = [_]f64{ 8.0, 2.0 };
+    try rate_alloc.allocateFromCompressionRatios(layers[0..], .{ .pass_count = 12, .byte_length = 96 }, rates[0..]);
+
+    try std.testing.expectEqual(rate_alloc.Truncation{ .cumulative_passes = 2, .cumulative_bytes = 16 }, layers[0]);
+    try std.testing.expectEqual(rate_alloc.Truncation{ .cumulative_passes = 6, .cumulative_bytes = 48 }, layers[1]);
+    try std.testing.expectEqual(rate_alloc.Truncation{ .cumulative_passes = 12, .cumulative_bytes = 96 }, layers[2]);
 }
 
 test "temporary payload records resolution ordered tile-part plan" {
@@ -1200,7 +1756,7 @@ test "code-block style options are reflected in COD marker" {
     try std.testing.expectEqual(@as(u8, 0x3f), bytes[cod + 12]);
 }
 
-test "unsupported lossy coding path fails closed" {
+test "unsupported JP2 profile marker options fail closed" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
         0,  0,  0,
@@ -1218,18 +1774,32 @@ test "unsupported lossy coding path fails closed" {
         .samples = samples,
     };
 
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, .{
-            .transform = .irreversible_9_7,
-        }),
-    );
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, .{
-            .quantization = .scalar_expounded,
-        }),
-    );
+    const UnsupportedCase = struct {
+        label: []const u8,
+        options: codestream.LosslessOptions,
+    };
+    const cases = [_]UnsupportedCase{
+        .{ .label = "LRCP progression", .options = .{ .progression = .lrcp } },
+        .{ .label = "RLCP progression", .options = .{ .progression = .rlcp } },
+        .{ .label = "PCRL progression", .options = .{ .progression = .pcrl } },
+        .{ .label = "CPRL progression", .options = .{ .progression = .cprl } },
+        .{ .label = "L tile-parts", .options = .{ .tile_part_divisions = 'L' } },
+        .{ .label = "C tile-parts", .options = .{ .tile_part_divisions = 'C' } },
+        .{ .label = "P tile-parts", .options = .{ .tile_part_divisions = 'P' } },
+        .{ .label = "ICT", .options = .{ .mct = .ict } },
+        .{ .label = "9-7 JP2", .options = .{ .transform = .irreversible_9_7 } },
+        .{ .label = "scalar-derived quantization", .options = .{ .quantization = .scalar_derived } },
+        .{ .label = "scalar-expounded quantization", .options = .{ .quantization = .scalar_expounded } },
+        .{ .label = "multi-tile request", .options = .{ .tile_width = 1, .tile_height = 2 } },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("unsupported profile case failed: {s}\n", .{scenario.label});
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options),
+        );
+    }
 }
 
 fn appendIfdEntryLe(
@@ -1440,6 +2010,30 @@ fn sumPltSegment(segment: []const u8) !usize {
     }
     if (pending_length) return error.InvalidPlt;
     return sum;
+}
+
+fn mqContextsFromSymbols(allocator: std.mem.Allocator, symbols: []const mq.Symbol) ![]usize {
+    const contexts = try allocator.alloc(usize, symbols.len);
+    for (symbols, 0..) |symbol, index| {
+        contexts[index] = symbol.context;
+    }
+    return contexts;
+}
+
+fn expectMqBitsEqual(symbols: []const mq.Symbol, bits: []const bool) !void {
+    try std.testing.expectEqual(symbols.len, bits.len);
+    for (symbols, bits) |symbol, bit| {
+        try std.testing.expectEqual(symbol.bit, bit);
+    }
+}
+
+fn expectMarkerStuffingIsValid(bytes: []const u8) !void {
+    var index: usize = 1;
+    while (index < bytes.len) : (index += 1) {
+        if (bytes[index - 1] == 0xff) {
+            try std.testing.expect((bytes[index] & 0x80) == 0);
+        }
+    }
 }
 
 fn readU16BeTest(bytes: []const u8, offset: usize) u16 {

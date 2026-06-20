@@ -129,7 +129,6 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
     var bits_count: usize = 0;
     var strip_offsets_ref: ?ValueRef = null;
     var strip_counts_ref: ?ValueRef = null;
-    var rows_per_strip: ?u32 = null;
     var samples_per_pixel: u16 = 1;
     var planar_config: u16 = 1;
     var sample_format: u16 = 1;
@@ -151,10 +150,10 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
             262 => photometric = try readSingleU16(bytes, endian, entry),
             273 => strip_offsets_ref = try valueRef(bytes, entry),
             277 => samples_per_pixel = try readSingleU16(bytes, endian, entry),
-            278 => rows_per_strip = try readSingleU32(bytes, endian, entry),
+            278 => {},
             279 => strip_counts_ref = try valueRef(bytes, entry),
             284 => planar_config = try readSingleU16(bytes, endian, entry),
-            339 => sample_format = try readSingleU16(bytes, endian, entry),
+            339 => sample_format = try readSampleFormat(bytes, endian, entry),
             else => {},
         }
     }
@@ -164,7 +163,6 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
     const photo = photometric orelse return TiffError.MissingRequiredTag;
     const offsets_ref = strip_offsets_ref orelse return TiffError.MissingRequiredTag;
     const counts_ref = strip_counts_ref orelse return TiffError.MissingRequiredTag;
-    _ = rows_per_strip orelse return TiffError.MissingRequiredTag;
 
     if (w == 0 or h == 0) return TiffError.InvalidTagValue;
     if (compression != 1) return TiffError.UnsupportedCompression;
@@ -285,6 +283,19 @@ fn readSingleU32(bytes: []const u8, endian: Endian, entry: IfdEntry) !u32 {
     const ref = try valueRef(bytes, entry);
     if (ref.count != 1) return TiffError.InvalidTagValue;
     return readU32Value(bytes, endian, ref, 0);
+}
+
+fn readSampleFormat(bytes: []const u8, endian: Endian, entry: IfdEntry) !u16 {
+    const ref = try valueRef(bytes, entry);
+    if (ref.count == 0) return TiffError.InvalidTagValue;
+    const first = try readU16Value(bytes, endian, ref, 0);
+    var index: usize = 1;
+    while (index < ref.count) : (index += 1) {
+        if (try readU16Value(bytes, endian, ref, index) != first) {
+            return TiffError.UnsupportedSampleFormat;
+        }
+    }
+    return first;
 }
 
 fn readU16Value(bytes: []const u8, endian: Endian, ref: ValueRef, index: usize) !u16 {

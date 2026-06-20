@@ -24,6 +24,11 @@ const BlockScan = struct {
     max_mag: u32,
 };
 
+const PackedBits = struct {
+    bits: u32,
+    bit_count: u6,
+};
+
 pub const EncodedBlock = struct {
     active_rect: subband.Rect,
     bitplanes: u8,
@@ -67,6 +72,24 @@ pub const EncodedBlockPassView = struct {
     cleanup_bytes: []const u8,
 };
 
+pub const CodingPassKind = enum(u8) {
+    significance = 0,
+    refinement = 1,
+    cleanup = 2,
+};
+
+pub const CodingPass = struct {
+    kind: CodingPassKind,
+    magnitude_bitplane: u8,
+};
+
+pub const PacketContribution = struct {
+    included: bool,
+    zero_bitplanes: u8,
+    pass_count: u16,
+    byte_length: u64,
+};
+
 pub const BlockScratch = struct {
     allocator: std.mem.Allocator,
     significance: BitWriter,
@@ -98,6 +121,53 @@ pub const BlockScratch = struct {
 pub fn isoCodingPassCount(bitplanes: u8, non_zero_count: u32) u16 {
     if (bitplanes == 0 or non_zero_count == 0) return 0;
     return @as(u16, bitplanes) * 3 - 2;
+}
+
+pub fn codingPassAt(bitplanes: u8, non_zero_count: u32, pass_index: u16) !CodingPass {
+    const pass_count = isoCodingPassCount(bitplanes, non_zero_count);
+    if (pass_index >= pass_count) return BitplaneError.InvalidBlock;
+
+    const top_bitplane = bitplanes - 1;
+    if (pass_index == 0) {
+        return .{ .kind = .cleanup, .magnitude_bitplane = top_bitplane };
+    }
+
+    const adjusted = pass_index - 1;
+    const lower_bitplane_index: u8 = @intCast(adjusted / 3);
+    const phase = adjusted % 3;
+    return .{
+        .kind = switch (phase) {
+            0 => .significance,
+            1 => .refinement,
+            2 => .cleanup,
+            else => unreachable,
+        },
+        .magnitude_bitplane = top_bitplane - 1 - lower_bitplane_index,
+    };
+}
+
+pub fn packetContribution(nominal_bitplanes: u8, passes: anytype) !PacketContribution {
+    if (passes.bitplanes > nominal_bitplanes) return BitplaneError.InvalidBlock;
+
+    const pass_count = isoCodingPassCount(passes.bitplanes, passes.non_zero_count);
+    if (pass_count == 0) {
+        return .{
+            .included = false,
+            .zero_bitplanes = 0,
+            .pass_count = 0,
+            .byte_length = 0,
+        };
+    }
+
+    const significance_len: u64 = @intCast(passes.significance_bytes.len);
+    const refinement_len: u64 = @intCast(passes.refinement_bytes.len);
+    const cleanup_len: u64 = @intCast(passes.cleanup_bytes.len);
+    return .{
+        .included = true,
+        .zero_bitplanes = nominal_bitplanes - passes.bitplanes,
+        .pass_count = pass_count,
+        .byte_length = significance_len + refinement_len + cleanup_len,
+    };
 }
 
 pub fn encodeBlockPasses(
@@ -177,13 +247,13 @@ pub fn encodeBlockPassesScratch(
                 continue;
             }
 
+            const chunk_bits = packSignificanceChunk(chunk.mask, chunk.sign_mask);
+            significance.writeBitsAssumeCapacity(chunk_bits.bits, chunk_bits.bit_count);
+
             inline for (0..scan_lanes) |lane| {
                 if ((chunk.mask & (@as(u32, 1) << @as(u5, @intCast(lane)))) != 0) {
                     const coeff = values[lane];
-                    significance.writePresentAndSignAssumeCapacity(coeff < 0);
                     scratch.magnitudes.appendAssumeCapacity(magnitude(coeff));
-                } else {
-                    significance.writeBitAssumeCapacity(false);
                 }
             }
         }
@@ -283,6 +353,7 @@ fn scanBlock(plane: []const i32, stride: usize, rect: subband.Rect) BlockScan {
 
 const ScanChunk = struct {
     mask: u32,
+    sign_mask: u32,
     max_mag: u32,
 };
 
@@ -293,7 +364,28 @@ fn scanChunk(values: *const [scan_lanes]i32) ScanChunk {
     const max_mag = @as(u32, @intCast(@reduce(.Max, abs_values)));
     const non_zero = coeffs != zero;
     const mask = @reduce(.Or, @select(u32, non_zero, scan_lane_masks, @as(ScanMaskVector, @splat(0))));
-    return .{ .mask = mask, .max_mag = max_mag };
+    const negative = coeffs < zero;
+    const sign_mask = @reduce(.Or, @select(u32, negative, scan_lane_masks, @as(ScanMaskVector, @splat(0))));
+    return .{ .mask = mask, .sign_mask = sign_mask, .max_mag = max_mag };
+}
+
+fn packSignificanceChunk(mask: u32, sign_mask: u32) PackedBits {
+    var bits: u32 = 0;
+    var bit_count: u6 = 0;
+
+    inline for (0..scan_lanes) |lane| {
+        const lane_bit = @as(u32, 1) << @as(u5, @intCast(lane));
+        bits <<= 1;
+        bit_count += 1;
+        if ((mask & lane_bit) != 0) {
+            bits |= 1;
+            bits <<= 1;
+            bit_count += 1;
+            if ((sign_mask & lane_bit) != 0) bits |= 1;
+        }
+    }
+
+    return .{ .bits = bits, .bit_count = bit_count };
 }
 
 fn makeScanLaneMasks() ScanMaskVector {
@@ -542,6 +634,25 @@ const BitWriter = struct {
             self.bytes.appendAssumeCapacity(self.current);
             self.current = 0;
             self.used = 0;
+        }
+    }
+
+    fn writeBitsAssumeCapacity(self: *BitWriter, value: u32, bit_count: u6) void {
+        var remaining = bit_count;
+        while (remaining > 0) {
+            const free: u4 = 8 - self.used;
+            const take: u4 = if (remaining < free) @intCast(remaining) else free;
+            const shift = remaining - take;
+            const mask = (@as(u32, 1) << @as(u5, @intCast(take))) - 1;
+            const chunk: u8 = @intCast((value >> @as(u5, @intCast(shift))) & mask);
+            self.current |= chunk << @as(u3, @intCast(free - take));
+            self.used += take;
+            remaining = shift;
+            if (self.used == 8) {
+                self.bytes.appendAssumeCapacity(self.current);
+                self.current = 0;
+                self.used = 0;
+            }
         }
     }
 

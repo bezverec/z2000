@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const bitplane = @import("bitplane.zig");
 const color = @import("color.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const packet_plan = @import("packet_plan.zig");
+const rate_alloc = @import("rate_alloc.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
 const wavelet_int = @import("wavelet_int.zig");
@@ -35,8 +37,10 @@ const temporary_magic_v1 = "ZJ2K-CBLK-BP1";
 const temporary_magic_v2 = "ZJ2K-CBLK-BP2";
 const temporary_magic_v3 = "ZJ2K-CBLK-BP3";
 const temporary_magic_v4 = "ZJ2K-CBLK-BP4";
+const temporary_magic_v5 = "ZJ2K-CBLK-BP5";
 const temporary_packet_header_empty: u8 = 0x00;
 const temporary_packet_header_non_empty: u8 = 0x80;
+const max_quality_layers = rate_alloc.max_layers;
 
 pub const PassKind = enum(u8) {
     significance = 0,
@@ -56,6 +60,12 @@ pub const EntropyStreamStats = struct {
     }
 };
 
+pub const QualityLayerStats = struct {
+    blocks: u64 = 0,
+    cumulative_passes: u64 = 0,
+    cumulative_bytes: u64 = 0,
+};
+
 pub const ComponentStats = struct {
     blocks: u64 = 0,
     active_blocks: u64 = 0,
@@ -65,6 +75,7 @@ pub const ComponentStats = struct {
     non_zero_coeffs: u64 = 0,
     max_bitplanes: u8 = 0,
     coding_passes: u64 = 0,
+    quality_layers: [max_quality_layers]QualityLayerStats = [_]QualityLayerStats{.{}} ** max_quality_layers,
     pass_streams: [3]EntropyStreamStats = [_]EntropyStreamStats{.{}} ** 3,
     method_streams: [4]EntropyStreamStats = [_]EntropyStreamStats{.{}} ** 4,
 
@@ -79,6 +90,7 @@ pub const TemporaryStats = struct {
     height: usize,
     bit_depth: u8,
     levels: u8,
+    layers: u16,
     block_width: u16,
     block_height: u16,
     tile_part_divisions: ?u8,
@@ -117,12 +129,14 @@ pub const PrecinctSize = struct {
 
 pub const MultipleComponentTransform = enum(u8) {
     none = 0,
-    yes = 1,
+    rct = 1,
+    ict = 2,
 
     pub fn label(self: MultipleComponentTransform) []const u8 {
         return switch (self) {
             .none => "none",
-            .yes => "yes",
+            .rct => "RCT",
+            .ict => "ICT",
         };
     }
 };
@@ -156,8 +170,10 @@ pub const QuantizationStyle = enum(u5) {
 pub const LosslessOptions = struct {
     levels: u8 = 5,
     layers: u16 = 1,
+    rates: [max_quality_layers]f64 = [_]f64{0} ** max_quality_layers,
+    rate_count: u8 = 0,
     progression: ProgressionOrder = .rpcl,
-    mct: MultipleComponentTransform = .yes,
+    mct: MultipleComponentTransform = .rct,
     transform: WaveletTransform = .reversible_5_3,
     quantization: QuantizationStyle = .none,
     guard_bits: u8 = 2,
@@ -396,6 +412,7 @@ const ComponentPayloadJob = struct {
     stride: usize,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
     bytes: []u8 = &.{},
     result: anyerror!void = {},
 
@@ -416,6 +433,7 @@ fn componentPayloadWorker(job: *ComponentPayloadJob) void {
         job.stride,
         job.bands,
         job.blocks,
+        job.options,
     ) catch |err| {
         job.result = err;
         return;
@@ -440,11 +458,14 @@ fn encodeLosslessWithOptionsMeasured(
     }
     if (options.levels > 32) return CodestreamError.TooManyLevels;
     try validateBlockSize(options.block_width, options.block_height);
-    try validateTileSize(options.tile_width, options.tile_height);
+    try validateTileSize(options.tile_width, options.tile_height, rgb.width, rgb.height);
     try validatePrecincts(options);
     try validateTilePartDivisions(options.tile_part_divisions);
     try validateCodingPath(options);
     if (options.layers == 0) return CodestreamError.InvalidCodestream;
+    if (options.layers > max_quality_layers) return CodestreamError.InvalidCodestream;
+    if (options.rate_count > options.layers) return CodestreamError.InvalidCodestream;
+    try validateRates(options);
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
 
     const color_start = monotonicNs();
@@ -540,7 +561,7 @@ pub fn decodeLosslessTemporaryWithOptions(
     @memset(cb, 0);
     @memset(cr, 0);
 
-    try readComponentPayloads(&cursor, y, cb, cr, width, header.version, options);
+    try readComponentPayloads(&cursor, y, cb, cr, width, header.version, header.layers, options);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, options);
@@ -578,6 +599,7 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
         .height = height,
         .bit_depth = bit_depth,
         .levels = levels,
+        .layers = header.layers,
         .block_width = header.block_width,
         .block_height = header.block_height,
         .tile_part_divisions = header.tile_part_divisions,
@@ -591,9 +613,9 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
         .components = [_]ComponentStats{.{}} ** 3,
     };
 
-    try readComponentStats(&cursor, &stats.components[0], 0, header.version);
-    try readComponentStats(&cursor, &stats.components[1], 1, header.version);
-    try readComponentStats(&cursor, &stats.components[2], 2, header.version);
+    try readComponentStats(&cursor, &stats.components[0], 0, header.version, header.layers);
+    try readComponentStats(&cursor, &stats.components[1], 1, header.version, header.layers);
+    try readComponentStats(&cursor, &stats.components[2], 2, header.version, header.layers);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     return stats;
@@ -758,7 +780,7 @@ fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return CodestreamError.InvalidCodestream;
 }
 
-fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_component: u8, payload_version: u8) !void {
+fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_component: u8, payload_version: u8, layer_count: u16) !void {
     const component_index = try cursor.readU8();
     if (component_index != expected_component) return CodestreamError.InvalidCodestream;
 
@@ -780,7 +802,8 @@ fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_c
         const active_rect = try cursor.readRect();
         const bitplanes = try cursor.readU8();
         const non_zero_count = try cursor.readU32();
-        _ = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
+        const coding_passes = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
+        _ = try readLayerAllocation(cursor, payload_version, layer_count, coding_passes);
         var significance = try readEntropyStream(cursor);
         defer significance.deinit(cursor.allocator);
         var refinement = try readEntropyStream(cursor);
@@ -805,6 +828,7 @@ const DecodeComponentPayloadJob = struct {
     stride: usize,
     component_index: u8,
     payload_version: u8,
+    layer_count: u16,
     result: anyerror!void = {},
 };
 
@@ -815,35 +839,36 @@ fn readComponentPayloads(
     cr: []i32,
     stride: usize,
     payload_version: u8,
+    layer_count: u16,
     options: DecodeOptions,
 ) !void {
     if (componentThreadCountFor(options.threads) < 2) {
-        try readComponentPayload(cursor, y, stride, 0, payload_version);
-        try readComponentPayload(cursor, cb, stride, 1, payload_version);
-        try readComponentPayload(cursor, cr, stride, 2, payload_version);
+        try readComponentPayload(cursor, y, stride, 0, payload_version, layer_count);
+        try readComponentPayload(cursor, cb, stride, 1, payload_version, layer_count);
+        try readComponentPayload(cursor, cr, stride, 2, payload_version, layer_count);
         return;
     }
 
-    const slices = try readComponentPayloadSlices(cursor, payload_version);
+    const slices = try readComponentPayloadSlices(cursor, payload_version, layer_count);
     var jobs = [_]DecodeComponentPayloadJob{
-        .{ .bytes = slices[0], .plane = y, .stride = stride, .component_index = 0, .payload_version = payload_version },
-        .{ .bytes = slices[1], .plane = cb, .stride = stride, .component_index = 1, .payload_version = payload_version },
-        .{ .bytes = slices[2], .plane = cr, .stride = stride, .component_index = 2, .payload_version = payload_version },
+        .{ .bytes = slices[0], .plane = y, .stride = stride, .component_index = 0, .payload_version = payload_version, .layer_count = layer_count },
+        .{ .bytes = slices[1], .plane = cb, .stride = stride, .component_index = 1, .payload_version = payload_version, .layer_count = layer_count },
+        .{ .bytes = slices[2], .plane = cr, .stride = stride, .component_index = 2, .payload_version = payload_version, .layer_count = layer_count },
     };
     try runComponentJobs(DecodeComponentPayloadJob, &jobs, componentThreadCountFor(options.threads), decodeComponentPayloadWorker);
 }
 
-fn readComponentPayloadSlices(cursor: *Cursor, payload_version: u8) ![3][]const u8 {
+fn readComponentPayloadSlices(cursor: *Cursor, payload_version: u8, layer_count: u16) ![3][]const u8 {
     var slices: [3][]const u8 = undefined;
     inline for (0..3) |component| {
         const start = cursor.index;
-        try skipComponentPayload(cursor, component, payload_version);
+        try skipComponentPayload(cursor, component, payload_version, layer_count);
         slices[component] = cursor.bytes[start..cursor.index];
     }
     return slices;
 }
 
-fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8, payload_version: u8) !void {
+fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8, payload_version: u8, layer_count: u16) !void {
     const component_index = try cursor.readU8();
     if (component_index != expected_component) return CodestreamError.InvalidCodestream;
 
@@ -865,7 +890,8 @@ fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8, payloa
         _ = try cursor.readRect();
         const bitplanes = try cursor.readU8();
         const non_zero_count = try cursor.readU32();
-        _ = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
+        const coding_passes = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
+        _ = try readLayerAllocation(cursor, payload_version, layer_count, coding_passes);
         _ = try readEntropyStreamInfo(cursor);
         _ = try readEntropyStreamInfo(cursor);
         _ = try readEntropyStreamInfo(cursor);
@@ -874,7 +900,7 @@ fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8, payloa
 
 fn decodeComponentPayloadWorker(job: *DecodeComponentPayloadJob) void {
     var cursor = Cursor.initWithAllocator(std.heap.smp_allocator, job.bytes);
-    readComponentPayload(&cursor, job.plane, job.stride, job.component_index, job.payload_version) catch |err| {
+    readComponentPayload(&cursor, job.plane, job.stride, job.component_index, job.payload_version, job.layer_count) catch |err| {
         job.result = err;
         return;
     };
@@ -891,6 +917,7 @@ const TemporaryHeader = struct {
     height: usize,
     bit_depth: u8,
     levels: u8,
+    layers: u16,
     block_width: u16,
     block_height: u16,
     tile_part_divisions: ?u8,
@@ -913,6 +940,8 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         3
     else if (std.mem.eql(u8, magic, temporary_magic_v4))
         4
+    else if (std.mem.eql(u8, magic, temporary_magic_v5))
+        5
     else
         return CodestreamError.UnsupportedPayload;
 
@@ -925,6 +954,8 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
     const tile_part_divisions = if (version >= 1) try readTilePartDivisions(cursor) else null;
     const tile_part_plan = if (version >= 2) try readTilePartPlan(cursor) else emptyTilePartPlan();
     const packets = if (version >= 3) try readPacketPlan(cursor) else emptyPacketPlan();
+    const layers = if (version >= 5) try cursor.readU16() else inferLayerCount(packets);
+    if (layers == 0 or layers > max_quality_layers) return CodestreamError.InvalidCodestream;
 
     return .{
         .version = version,
@@ -932,6 +963,7 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         .height = height,
         .bit_depth = bit_depth,
         .levels = levels,
+        .layers = layers,
         .block_width = block_width,
         .block_height = block_height,
         .tile_part_divisions = tile_part_divisions,
@@ -941,6 +973,17 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         .packet_plan = packets.resolutions,
         .packet_count = packets.packets,
     };
+}
+
+fn inferLayerCount(plan: packet_plan.Plan) u16 {
+    if (plan.resolution_count == 0) return 1;
+    for (plan.resolutions[0..plan.resolution_count]) |resolution| {
+        if (resolution.precincts == 0) continue;
+        if (resolution.packets % (resolution.precincts * 3) == 0) {
+            return @intCast(resolution.packets / (resolution.precincts * 3));
+        }
+    }
+    return 1;
 }
 
 fn readTilePartDivisions(cursor: *Cursor) !?u8 {
@@ -1025,7 +1068,36 @@ fn readStoredCodingPasses(cursor: *Cursor, payload_version: u8, bitplanes: u8, n
     return stored;
 }
 
-fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_component: u8, payload_version: u8) !void {
+fn readLayerAllocation(
+    cursor: *Cursor,
+    payload_version: u8,
+    expected_layers: u16,
+    coding_passes: u16,
+) ![max_quality_layers]rate_alloc.Truncation {
+    var layers = [_]rate_alloc.Truncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+    if (payload_version < 5) return layers;
+
+    const layer_count = try cursor.readU16();
+    if (layer_count == 0 or layer_count > max_quality_layers) return CodestreamError.InvalidCodestream;
+    if (expected_layers != 0 and layer_count != expected_layers) return CodestreamError.InvalidCodestream;
+
+    var previous_passes: u16 = 0;
+    var previous_bytes: u64 = 0;
+    var layer_index: usize = 0;
+    while (layer_index < layer_count) : (layer_index += 1) {
+        const passes = try cursor.readU16();
+        const bytes = try cursor.readU64();
+        if (passes < previous_passes or passes > coding_passes) return CodestreamError.InvalidCodestream;
+        if (bytes < previous_bytes) return CodestreamError.InvalidCodestream;
+        layers[layer_index] = .{ .cumulative_passes = passes, .cumulative_bytes = bytes };
+        previous_passes = passes;
+        previous_bytes = bytes;
+    }
+
+    return layers;
+}
+
+fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_component: u8, payload_version: u8, layer_count: u16) !void {
     const component_index = try cursor.readU8();
     if (component_index != expected_component) return CodestreamError.InvalidCodestream;
 
@@ -1049,6 +1121,7 @@ fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_componen
         const bitplanes = try cursor.readU8();
         const non_zero_count = try cursor.readU32();
         const coding_passes = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
+        const layer_allocation = try readLayerAllocation(cursor, payload_version, layer_count, coding_passes);
 
         stats.coeffs += rectArea(block_rect);
         stats.active_coeffs += rectArea(active_rect);
@@ -1059,6 +1132,14 @@ fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_componen
             stats.empty_blocks += 1;
         } else {
             stats.active_blocks += 1;
+        }
+        if (payload_version >= 5) {
+            for (layer_allocation[0..@as(usize, @intCast(@min(max_quality_layers, stats.quality_layers.len)))], 0..) |layer, index| {
+                if (layer.cumulative_passes == 0 and layer.cumulative_bytes == 0) continue;
+                stats.quality_layers[index].blocks += 1;
+                stats.quality_layers[index].cumulative_passes += layer.cumulative_passes;
+                stats.quality_layers[index].cumulative_bytes += layer.cumulative_bytes;
+            }
         }
 
         const significance = try readEntropyStreamInfo(cursor);
@@ -1494,7 +1575,7 @@ fn appendTemporaryPayload(
     levels: u8,
     options: LosslessOptions,
 ) !void {
-    try out.appendSlice(allocator, temporary_magic_v4);
+    try out.appendSlice(allocator, temporary_magic_v5);
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.width)));
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.height)));
     try out.append(allocator, planes.bit_depth);
@@ -1504,6 +1585,7 @@ fn appendTemporaryPayload(
     try out.append(allocator, options.tile_part_divisions orelse 0);
     try appendTilePartPlan(allocator, out, levels, options);
     try appendPacketPlan(allocator, out, planes.width, planes.height, levels, options);
+    try appendU16Be(allocator, out, options.layers);
 
     const bands = try subband.makeBands(allocator, planes.width, planes.height, levels);
     defer allocator.free(bands);
@@ -1511,9 +1593,9 @@ fn appendTemporaryPayload(
     defer allocator.free(blocks);
 
     if (componentThreadCount(options) < 2) {
-        try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks);
-        try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks);
-        try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks);
+        try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks, options);
+        try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks, options);
+        try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks, options);
     } else {
         try appendComponentPayloadsParallel(allocator, out, planes, bands, blocks, options);
     }
@@ -1528,9 +1610,9 @@ fn appendComponentPayloadsParallel(
     options: LosslessOptions,
 ) !void {
     var jobs = [_]ComponentPayloadJob{
-        .{ .component_index = 0, .plane = planes.y, .stride = planes.width, .bands = bands, .blocks = blocks },
-        .{ .component_index = 1, .plane = planes.cb, .stride = planes.width, .bands = bands, .blocks = blocks },
-        .{ .component_index = 2, .plane = planes.cr, .stride = planes.width, .bands = bands, .blocks = blocks },
+        .{ .component_index = 0, .plane = planes.y, .stride = planes.width, .bands = bands, .blocks = blocks, .options = options },
+        .{ .component_index = 1, .plane = planes.cb, .stride = planes.width, .bands = bands, .blocks = blocks, .options = options },
+        .{ .component_index = 2, .plane = planes.cr, .stride = planes.width, .bands = bands, .blocks = blocks, .options = options },
     };
     defer for (&jobs) |*job| job.deinit();
 
@@ -1624,6 +1706,7 @@ fn appendComponentPayload(
     stride: usize,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
 ) !void {
     try out.append(allocator, component_index);
     try appendU16Be(allocator, out, @as(u16, @intCast(bands.len)));
@@ -1649,7 +1732,12 @@ fn appendComponentPayload(
         try appendRect(allocator, out, encoded.active_rect);
         try out.append(allocator, encoded.bitplanes);
         try appendU32Be(allocator, out, encoded.non_zero_count);
-        try appendU16Be(allocator, out, bitplane.isoCodingPassCount(encoded.bitplanes, encoded.non_zero_count));
+        const coding_passes = bitplane.isoCodingPassCount(encoded.bitplanes, encoded.non_zero_count);
+        try appendU16Be(allocator, out, coding_passes);
+        try appendLayerAllocation(allocator, out, options, .{
+            .pass_count = coding_passes,
+            .byte_length = @intCast(encoded.significance_bytes.len + encoded.refinement_bytes.len + encoded.cleanup_bytes.len),
+        });
         try appendEntropyStream(allocator, out, &entropy_scratch, encoded.significance_bytes);
         try appendEntropyStream(allocator, out, &entropy_scratch, encoded.refinement_bytes);
         try appendEntropyStream(allocator, out, &entropy_scratch, encoded.cleanup_bytes);
@@ -1703,10 +1791,22 @@ fn elapsedNs(start: u64) u64 {
 }
 
 fn monotonicNs() u64 {
-    var ts: std.c.timespec = undefined;
-    const rc = std.c.clock_gettime(.MONOTONIC, &ts);
-    if (rc != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        var frequency: windows.LARGE_INTEGER = undefined;
+        var counter: windows.LARGE_INTEGER = undefined;
+        if (!windows.ntdll.RtlQueryPerformanceFrequency(&frequency).toBool()) return 0;
+        if (!windows.ntdll.RtlQueryPerformanceCounter(&counter).toBool()) return 0;
+        if (frequency <= 0 or counter < 0) return 0;
+        return @intCast((@as(u128, @intCast(counter)) * std.time.ns_per_s) / @as(u128, @intCast(frequency)));
+    }
+
+    const posix = std.posix;
+    var ts: posix.timespec = undefined;
+    return switch (posix.errno(posix.system.clock_gettime(posix.CLOCK.MONOTONIC, &ts))) {
+        .SUCCESS => @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec)),
+        else => 0,
+    };
 }
 
 const Cursor = struct {
@@ -1831,6 +1931,31 @@ fn appendEntropyStream(
     try out.appendSlice(allocator, encoded.bytes);
 }
 
+fn appendLayerAllocation(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    options: LosslessOptions,
+    block: rate_alloc.Block,
+) !void {
+    var layers: [max_quality_layers]rate_alloc.Truncation = undefined;
+    const layer_count: usize = @intCast(options.layers);
+    if (options.rate_count > 0) {
+        try rate_alloc.allocateFromCompressionRatios(
+            layers[0..layer_count],
+            block,
+            options.rates[0..options.rate_count],
+        );
+    } else {
+        try rate_alloc.allocateEven(layers[0..layer_count], block);
+    }
+
+    try appendU16Be(allocator, out, options.layers);
+    for (layers[0..layer_count]) |layer| {
+        try appendU16Be(allocator, out, layer.cumulative_passes);
+        try appendU64Be(allocator, out, layer.cumulative_bytes);
+    }
+}
+
 fn rectArea(rect: subband.Rect) u64 {
     return @as(u64, @intCast(rect.width)) * @as(u64, @intCast(rect.height));
 }
@@ -1847,8 +1972,9 @@ fn validateBlockSize(width: u16, height: u16) !void {
     if (@as(u32, width) * @as(u32, height) > 4096) return CodestreamError.InvalidCodestream;
 }
 
-fn validateTileSize(width: u32, height: u32) !void {
+fn validateTileSize(width: u32, height: u32, image_width: usize, image_height: usize) !void {
     if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
+    if (width < image_width or height < image_height) return CodestreamError.UnsupportedPayload;
 }
 
 fn validatePrecincts(options: LosslessOptions) !void {
@@ -1862,16 +1988,25 @@ fn validatePrecincts(options: LosslessOptions) !void {
     }
 }
 
+fn validateRates(options: LosslessOptions) !void {
+    if (options.rate_count > max_quality_layers) return CodestreamError.InvalidCodestream;
+    for (options.rates[0..options.rate_count]) |rate| {
+        if (!std.math.isFinite(rate) or rate <= 0) return CodestreamError.InvalidCodestream;
+    }
+}
+
 fn validateTilePartDivisions(value: ?u8) !void {
     const actual = value orelse return;
     switch (actual) {
-        'R', 'L', 'C', 'P' => {},
+        'R' => {},
+        'L', 'C', 'P' => return CodestreamError.UnsupportedPayload,
         else => return CodestreamError.InvalidCodestream,
     }
 }
 
 fn validateCodingPath(options: LosslessOptions) !void {
-    if (options.mct != .yes) return CodestreamError.UnsupportedPayload;
+    if (options.progression != .rpcl) return CodestreamError.UnsupportedPayload;
+    if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
     if (options.quantization != .none) return CodestreamError.UnsupportedPayload;
     if (options.guard_bits > 7) return CodestreamError.InvalidCodestream;
