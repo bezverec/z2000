@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const codec = @import("codec.zig");
 const codestream = @import("codestream.zig");
 const dng = @import("formats/dng.zig");
@@ -284,8 +285,13 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             options.tlm = false;
         } else if (std.mem.eql(u8, args[index], "--tile-parts")) {
             index += 1;
-            if (index >= args.len or args[index].len != 1) return error.InvalidValue;
-            options.tile_part_divisions = args[index][0];
+            if (index >= args.len) return error.MissingValue;
+            if (std.mem.eql(u8, args[index], "none") or std.mem.eql(u8, args[index], "0")) {
+                options.tile_part_divisions = null;
+            } else {
+                if (args[index].len != 1) return error.InvalidValue;
+                options.tile_part_divisions = args[index][0];
+            }
         } else if (std.mem.eql(u8, args[index], "--threads")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -293,7 +299,9 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         } else if (std.mem.eql(u8, args[index], "--timings")) {
             show_timings = true;
         } else if (std.mem.eql(u8, args[index], "--rates") or std.mem.eql(u8, args[index], "--rate")) {
-            return codestream.CodestreamError.UnsupportedPayload;
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            try parseRates(args[index], &options);
         } else {
             return error.UnknownOption;
         }
@@ -447,13 +455,14 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
 
 fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void {
     std.debug.print(
-        "JP2 temporary payload stats: {s}: {}x{}, {} bits/channel, levels {}, block {}x{}, tile-parts {s}",
+        "JP2 temporary payload stats: {s}: {}x{}, {} bits/channel, levels {}, layers {}, block {}x{}, tile-parts {s}",
         .{
             path,
             stats.width,
             stats.height,
             stats.bit_depth,
             stats.levels,
+            stats.layers,
             stats.block_width,
             stats.block_height,
             tilePartDivisionLabel(stats.tile_part_divisions),
@@ -527,6 +536,18 @@ fn printComponentStats(label: []const u8, stats: codestream.ComponentStats) void
         },
     );
 
+    if (stats.ebcot_segments.blocks != 0) {
+        std.debug.print(
+            "    EBCOT shadow: blocks {}, passes {}, symbols {}, MQ bytes {} B\n",
+            .{
+                stats.ebcot_segments.blocks,
+                stats.ebcot_segments.passes,
+                stats.ebcot_segments.symbols,
+                stats.ebcot_segments.mq_bytes,
+            },
+        );
+    }
+
     const pass_labels = [_][]const u8{ "sig", "ref", "cleanup" };
     for (stats.pass_streams, 0..) |stream, index| {
         printStreamStats(pass_labels[index], stream);
@@ -535,6 +556,14 @@ fn printComponentStats(label: []const u8, stats: codestream.ComponentStats) void
     const method_labels = [_][]const u8{ "raw", "rle", "bit-rle", "arith" };
     for (stats.method_streams, 0..) |stream, index| {
         if (stream.streams != 0) printStreamStats(method_labels[index], stream);
+    }
+
+    for (stats.quality_layers, 0..) |layer, index| {
+        if (layer.blocks == 0) continue;
+        std.debug.print(
+            "    layer {}: blocks {}, cumulative passes {}, cumulative bytes {} B\n",
+            .{ index + 1, layer.blocks, layer.cumulative_passes, layer.cumulative_bytes },
+        );
     }
 }
 
@@ -561,6 +590,15 @@ fn totalComponentStats(stats: codestream.TemporaryStats) codestream.ComponentSta
         total.non_zero_coeffs += component.non_zero_coeffs;
         total.max_bitplanes = @max(total.max_bitplanes, component.max_bitplanes);
         total.coding_passes += component.coding_passes;
+        total.ebcot_segments.blocks += component.ebcot_segments.blocks;
+        total.ebcot_segments.passes += component.ebcot_segments.passes;
+        total.ebcot_segments.symbols += component.ebcot_segments.symbols;
+        total.ebcot_segments.mq_bytes += component.ebcot_segments.mq_bytes;
+        for (component.quality_layers, 0..) |layer, index| {
+            total.quality_layers[index].blocks += layer.blocks;
+            total.quality_layers[index].cumulative_passes += layer.cumulative_passes;
+            total.quality_layers[index].cumulative_bytes += layer.cumulative_bytes;
+        }
         for (component.pass_streams, 0..) |stream, index| {
             total.pass_streams[index].streams += stream.streams;
             total.pass_streams[index].raw_bytes += stream.raw_bytes;
@@ -619,10 +657,22 @@ fn elapsedNs(start: u64) u64 {
 }
 
 fn monotonicNs() u64 {
-    var ts: std.c.timespec = undefined;
-    const rc = std.c.clock_gettime(.MONOTONIC, &ts);
-    if (rc != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        var frequency: windows.LARGE_INTEGER = undefined;
+        var counter: windows.LARGE_INTEGER = undefined;
+        if (!windows.ntdll.RtlQueryPerformanceFrequency(&frequency).toBool()) return 0;
+        if (!windows.ntdll.RtlQueryPerformanceCounter(&counter).toBool()) return 0;
+        if (frequency <= 0 or counter < 0) return 0;
+        return @intCast((@as(u128, @intCast(counter)) * std.time.ns_per_s) / @as(u128, @intCast(frequency)));
+    }
+
+    const posix = std.posix;
+    var ts: posix.timespec = undefined;
+    return switch (posix.errno(posix.system.clock_gettime(posix.CLOCK.MONOTONIC, &ts))) {
+        .SUCCESS => @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec)),
+        else => 0,
+    };
 }
 
 fn parseWavelet(value: []const u8) !wavelet.Wavelet {
@@ -657,10 +707,12 @@ fn parseProgression(value: []const u8) !codestream.ProgressionOrder {
 fn parseMct(value: []const u8) !codestream.MultipleComponentTransform {
     if (std.ascii.eqlIgnoreCase(value, "yes") or
         std.ascii.eqlIgnoreCase(value, "on") or
-        std.ascii.eqlIgnoreCase(value, "rct") or
-        std.ascii.eqlIgnoreCase(value, "ict"))
+        std.ascii.eqlIgnoreCase(value, "rct"))
     {
-        return .yes;
+        return .rct;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "ict")) {
+        return .ict;
     }
     if (std.ascii.eqlIgnoreCase(value, "none") or
         std.ascii.eqlIgnoreCase(value, "off") or
@@ -760,6 +812,24 @@ fn parsePrecincts(value: []const u8, options: *codestream.LosslessOptions) !void
     options.precinct_count = @as(u8, @intCast(count));
 }
 
+fn parseRates(value: []const u8, options: *codestream.LosslessOptions) !void {
+    var count: usize = 0;
+    var parts = std.mem.splitScalar(u8, value, ',');
+    while (parts.next()) |raw_part| {
+        const part = std.mem.trim(u8, raw_part, " \t\r\n");
+        if (part.len == 0) return error.InvalidValue;
+        if (count >= options.rates.len) return error.InvalidValue;
+        const rate = try std.fmt.parseFloat(f64, part);
+        if (!std.math.isFinite(rate) or rate <= 0) return error.InvalidValue;
+        options.rates[count] = rate;
+        count += 1;
+    }
+
+    if (count == 0) return error.InvalidValue;
+    options.rate_count = @intCast(count);
+    options.layers = @intCast(count);
+}
+
 fn usage() void {
     std.debug.print(
         \\Usage:
@@ -767,7 +837,7 @@ fn usage() void {
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
         \\  z2000 dng-info <input.dng>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct yes|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--tlm|--no-tlm] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2>
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N]
