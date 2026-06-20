@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const bitplane = @import("bitplane.zig");
 const color = @import("color.zig");
+const ebcot = @import("ebcot.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const packet_plan = @import("packet_plan.zig");
@@ -38,6 +39,9 @@ const temporary_magic_v2 = "ZJ2K-CBLK-BP2";
 const temporary_magic_v3 = "ZJ2K-CBLK-BP3";
 const temporary_magic_v4 = "ZJ2K-CBLK-BP4";
 const temporary_magic_v5 = "ZJ2K-CBLK-BP5";
+const temporary_magic_v6 = "ZJ2K-CBLK-BP6";
+const temporary_magic_v7 = "ZJ2K-CBLK-BP7";
+const temporary_magic_v8 = "ZJ2K-CBLK-BP8";
 const temporary_packet_header_empty: u8 = 0x00;
 const temporary_packet_header_non_empty: u8 = 0x80;
 const max_quality_layers = rate_alloc.max_layers;
@@ -66,6 +70,13 @@ pub const QualityLayerStats = struct {
     cumulative_bytes: u64 = 0,
 };
 
+pub const EbcotSegmentStats = struct {
+    blocks: u64 = 0,
+    passes: u64 = 0,
+    symbols: u64 = 0,
+    mq_bytes: u64 = 0,
+};
+
 pub const ComponentStats = struct {
     blocks: u64 = 0,
     active_blocks: u64 = 0,
@@ -75,6 +86,7 @@ pub const ComponentStats = struct {
     non_zero_coeffs: u64 = 0,
     max_bitplanes: u8 = 0,
     coding_passes: u64 = 0,
+    ebcot_segments: EbcotSegmentStats = .{},
     quality_layers: [max_quality_layers]QualityLayerStats = [_]QualityLayerStats{.{}} ** max_quality_layers,
     pass_streams: [3]EntropyStreamStats = [_]EntropyStreamStats{.{}} ** 3,
     method_streams: [4]EntropyStreamStats = [_]EntropyStreamStats{.{}} ** 4,
@@ -99,6 +111,8 @@ pub const TemporaryStats = struct {
     packet_plan_count: u8,
     packet_plan: [33]packet_plan.Resolution,
     packet_count: u64,
+    rpcl_shadow_packets: u64,
+    rpcl_shadow_bytes: u64,
     payload_bytes: usize,
     codestream_bytes: usize,
     components: [3]ComponentStats,
@@ -422,6 +436,47 @@ const ComponentPayloadJob = struct {
     }
 };
 
+const ComponentBlockPayloadJob = struct {
+    plane: []const i32,
+    stride: usize,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+    bytes: []u8 = &.{},
+    result: anyerror!void = {},
+
+    fn deinit(self: *ComponentBlockPayloadJob) void {
+        std.heap.smp_allocator.free(self.bytes);
+        self.bytes = &.{};
+    }
+};
+
+const RpclShadowBlock = struct {
+    segment: ebcot.CodeBlockSegment,
+    layers: [max_quality_layers]t2.LayerTruncation,
+    encoded: t2.EncodedLayerBlock,
+
+    fn deinit(self: *RpclShadowBlock, allocator: std.mem.Allocator) void {
+        self.segment.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const ComponentRpclShadowCatalog = struct {
+    allocator: std.mem.Allocator,
+    blocks: []RpclShadowBlock,
+
+    fn deinit(self: *ComponentRpclShadowCatalog) void {
+        for (self.blocks) |*block| block.deinit(self.allocator);
+        self.allocator.free(self.blocks);
+        self.* = undefined;
+    }
+};
+
+const RpclShadowStreamInfo = struct {
+    packets: u64 = 0,
+    bytes: u64 = 0,
+};
+
 fn componentPayloadWorker(job: *ComponentPayloadJob) void {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(std.heap.smp_allocator);
@@ -434,6 +489,38 @@ fn componentPayloadWorker(job: *ComponentPayloadJob) void {
         job.bands,
         job.blocks,
         job.options,
+    ) catch |err| {
+        job.result = err;
+        return;
+    };
+    job.bytes = out.toOwnedSlice(std.heap.smp_allocator) catch |err| {
+        job.result = err;
+        return;
+    };
+    job.result = {};
+}
+
+fn componentBlockPayloadWorker(job: *ComponentBlockPayloadJob) void {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(std.heap.smp_allocator);
+
+    var scratch = bitplane.BlockScratch.init(std.heap.smp_allocator);
+    defer scratch.deinit();
+    var entropy_scratch = entropy.Scratch.init(std.heap.smp_allocator);
+    defer entropy_scratch.deinit();
+    var ebcot_scratch = ebcot.DirectBlockScratch.init(std.heap.smp_allocator);
+    defer ebcot_scratch.deinit();
+
+    appendComponentBlockPayloads(
+        std.heap.smp_allocator,
+        &out,
+        job.plane,
+        job.stride,
+        job.blocks,
+        job.options,
+        &scratch,
+        &entropy_scratch,
+        &ebcot_scratch,
     ) catch |err| {
         job.result = err;
         return;
@@ -562,6 +649,7 @@ pub fn decodeLosslessTemporaryWithOptions(
     @memset(cr, 0);
 
     try readComponentPayloads(&cursor, y, cb, cr, width, header.version, header.layers, options);
+    _ = try readRpclShadowStreamInfo(&cursor, header.version);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, options);
@@ -608,6 +696,8 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
         .packet_plan_count = header.packet_plan_count,
         .packet_plan = header.packet_plan,
         .packet_count = header.packet_count,
+        .rpcl_shadow_packets = 0,
+        .rpcl_shadow_bytes = 0,
         .payload_bytes = payload.len,
         .codestream_bytes = bytes.len,
         .components = [_]ComponentStats{.{}} ** 3,
@@ -616,6 +706,9 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
     try readComponentStats(&cursor, &stats.components[0], 0, header.version, header.layers);
     try readComponentStats(&cursor, &stats.components[1], 1, header.version, header.layers);
     try readComponentStats(&cursor, &stats.components[2], 2, header.version, header.layers);
+    const rpcl_shadow = try readRpclShadowStreamInfo(&cursor, header.version);
+    stats.rpcl_shadow_packets = rpcl_shadow.packets;
+    stats.rpcl_shadow_bytes = rpcl_shadow.bytes;
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     return stats;
@@ -810,6 +903,8 @@ fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_c
         defer refinement.deinit(cursor.allocator);
         var cleanup = try readEntropyStream(cursor);
         defer cleanup.deinit(cursor.allocator);
+        const ebcot_segment = try readEbcotSegmentInfo(cursor, payload_version, coding_passes);
+        try skipEbcotSegmentPayload(cursor, payload_version, ebcot_segment.mq_bytes);
         try bitplane.decodeBlockPasses(
             plane,
             stride,
@@ -895,6 +990,8 @@ fn skipComponentPayload(cursor: *Cursor, comptime expected_component: u8, payloa
         _ = try readEntropyStreamInfo(cursor);
         _ = try readEntropyStreamInfo(cursor);
         _ = try readEntropyStreamInfo(cursor);
+        const ebcot_segment = try readEbcotSegmentInfo(cursor, payload_version, coding_passes);
+        try skipEbcotSegmentPayload(cursor, payload_version, ebcot_segment.mq_bytes);
     }
 }
 
@@ -942,6 +1039,12 @@ fn readTemporaryHeader(cursor: *Cursor) !TemporaryHeader {
         4
     else if (std.mem.eql(u8, magic, temporary_magic_v5))
         5
+    else if (std.mem.eql(u8, magic, temporary_magic_v6))
+        6
+    else if (std.mem.eql(u8, magic, temporary_magic_v7))
+        7
+    else if (std.mem.eql(u8, magic, temporary_magic_v8))
+        8
     else
         return CodestreamError.UnsupportedPayload;
 
@@ -1097,6 +1200,67 @@ fn readLayerAllocation(
     return layers;
 }
 
+fn readEbcotSegmentInfo(cursor: *Cursor, payload_version: u8, coding_passes: u16) !EbcotSegmentStats {
+    if (payload_version < 6) return .{};
+
+    const pass_count = try cursor.readU16();
+    if (pass_count != coding_passes) return CodestreamError.InvalidCodestream;
+    const byte_length = try cursor.readU64();
+
+    var stats = EbcotSegmentStats{};
+    stats.blocks = if (pass_count == 0 and byte_length == 0) 0 else 1;
+    stats.passes = @as(u64, pass_count);
+    stats.mq_bytes = byte_length;
+
+    var previous_end: u64 = 0;
+    var pass_index: usize = 0;
+    while (pass_index < @as(usize, pass_count)) : (pass_index += 1) {
+        const kind = try cursor.readU8();
+        if (kind > 2) return CodestreamError.InvalidCodestream;
+        _ = try cursor.readU8();
+        const symbol_count = try cursor.readU32();
+        const byte_offset = try cursor.readU64();
+        const pass_bytes = try cursor.readU64();
+        const cumulative_bytes = try cursor.readU64();
+        if (byte_offset != previous_end) return CodestreamError.InvalidCodestream;
+        if (cumulative_bytes < byte_offset or cumulative_bytes - byte_offset != pass_bytes) {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (cumulative_bytes > byte_length) return CodestreamError.InvalidCodestream;
+        previous_end = cumulative_bytes;
+        stats.symbols += @as(u64, symbol_count);
+    }
+    if (previous_end != byte_length) return CodestreamError.InvalidCodestream;
+
+    return stats;
+}
+
+fn skipEbcotSegmentPayload(cursor: *Cursor, payload_version: u8, byte_length: u64) !void {
+    if (payload_version < 7) return;
+    const len = std.math.cast(usize, byte_length) orelse return CodestreamError.InvalidCodestream;
+    _ = try cursor.readBytes(len);
+}
+
+fn readRpclShadowStreamInfo(cursor: *Cursor, payload_version: u8) !RpclShadowStreamInfo {
+    if (payload_version < 8) return .{};
+
+    const packet_count = try cursor.readU64();
+    const byte_count = try cursor.readU64();
+    var actual_bytes: u64 = 0;
+    var packet_index: u64 = 0;
+    while (packet_index < packet_count) : (packet_index += 1) {
+        const packet_len = try cursor.readU32();
+        actual_bytes = try std.math.add(u64, actual_bytes, packet_len);
+        _ = try cursor.readBytes(@intCast(packet_len));
+    }
+    if (actual_bytes != byte_count) return CodestreamError.InvalidCodestream;
+
+    return .{
+        .packets = packet_count,
+        .bytes = byte_count,
+    };
+}
+
 fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_component: u8, payload_version: u8, layer_count: u16) !void {
     const component_index = try cursor.readU8();
     if (component_index != expected_component) return CodestreamError.InvalidCodestream;
@@ -1148,6 +1312,12 @@ fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_componen
         stats.addStream(.significance, significance);
         stats.addStream(.refinement, refinement);
         stats.addStream(.cleanup, cleanup);
+        const ebcot_segment = try readEbcotSegmentInfo(cursor, payload_version, coding_passes);
+        try skipEbcotSegmentPayload(cursor, payload_version, ebcot_segment.mq_bytes);
+        stats.ebcot_segments.blocks += ebcot_segment.blocks;
+        stats.ebcot_segments.passes += ebcot_segment.passes;
+        stats.ebcot_segments.symbols += ebcot_segment.symbols;
+        stats.ebcot_segments.mq_bytes += ebcot_segment.mq_bytes;
     }
 }
 
@@ -1575,7 +1745,7 @@ fn appendTemporaryPayload(
     levels: u8,
     options: LosslessOptions,
 ) !void {
-    try out.appendSlice(allocator, temporary_magic_v5);
+    try out.appendSlice(allocator, temporary_magic_v8);
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.width)));
     try appendU32Be(allocator, out, @as(u32, @intCast(planes.height)));
     try out.append(allocator, planes.bit_depth);
@@ -1592,13 +1762,18 @@ fn appendTemporaryPayload(
     const blocks = try subband.makeCodeBlocks(allocator, bands, options.block_width, options.block_height);
     defer allocator.free(blocks);
 
-    if (componentThreadCount(options) < 2) {
+    if (payloadBlockThreadCount(options, blocks.len) > 1) {
+        try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks, options);
+        try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks, options);
+        try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks, options);
+    } else if (componentThreadCount(options) < 2) {
         try appendComponentPayload(allocator, out, 0, planes.y, planes.width, bands, blocks, options);
         try appendComponentPayload(allocator, out, 1, planes.cb, planes.width, bands, blocks, options);
         try appendComponentPayload(allocator, out, 2, planes.cr, planes.width, bands, blocks, options);
     } else {
         try appendComponentPayloadsParallel(allocator, out, planes, bands, blocks, options);
     }
+    try appendRpclShadowStream(allocator, out, planes, bands, blocks, levels, options);
 }
 
 fn appendComponentPayloadsParallel(
@@ -1618,6 +1793,246 @@ fn appendComponentPayloadsParallel(
 
     try runComponentJobs(ComponentPayloadJob, &jobs, componentThreadCount(options), componentPayloadWorker);
     for (jobs) |job| try out.appendSlice(allocator, job.bytes);
+}
+
+fn appendRpclShadowStream(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    planes: color.RctPlanes,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    levels: u8,
+    options: LosslessOptions,
+) !void {
+    const plan = try makePacketPlan(planes.width, planes.height, levels, options);
+    var catalogs: [3]ComponentRpclShadowCatalog = undefined;
+    var initialized: usize = 0;
+    errdefer {
+        for (catalogs[0..initialized]) |*catalog| catalog.deinit();
+    }
+    catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.y, planes.width, blocks, planes.bit_depth, options);
+    initialized += 1;
+    catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.cb, planes.width, blocks, planes.bit_depth, options);
+    initialized += 1;
+    catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.cr, planes.width, blocks, planes.bit_depth, options);
+    initialized += 1;
+    defer {
+        for (catalogs[0..initialized]) |*catalog| catalog.deinit();
+    }
+
+    var packet_bytes: std.ArrayList(u8) = .empty;
+    defer packet_bytes.deinit(allocator);
+    var packet_lengths: std.ArrayList(u32) = .empty;
+    defer packet_lengths.deinit(allocator);
+
+    var sequence: u64 = 0;
+    var resolution_index: u8 = 0;
+    while (resolution_index < plan.resolution_count) : (resolution_index += 1) {
+        const resolution = plan.resolutions[resolution_index];
+        var precinct_index: u64 = 0;
+        while (precinct_index < resolution.precincts) : (precinct_index += 1) {
+            var component: u16 = 0;
+            while (component < 3) : (component += 1) {
+                const first_layer_packet = packet_plan.Packet{
+                    .sequence = sequence,
+                    .resolution = resolution_index,
+                    .precinct_x = @intCast(precinct_index % resolution.precincts_x),
+                    .precinct_y = @intCast(precinct_index / resolution.precincts_x),
+                    .precinct_index = precinct_index,
+                    .component = component,
+                    .layer = 0,
+                };
+                const selected = try t2.collectRpclCodeBlockIndexes(
+                    allocator,
+                    plan,
+                    first_layer_packet,
+                    levels,
+                    bands,
+                    blocks,
+                );
+                defer allocator.free(selected);
+
+                try appendRpclShadowPacketsForSelection(
+                    allocator,
+                    &packet_bytes,
+                    &packet_lengths,
+                    &catalogs[@intCast(component)],
+                    selected,
+                    first_layer_packet,
+                    resolution_index,
+                    component,
+                    precinct_index,
+                    options.layers,
+                    &sequence,
+                );
+            }
+        }
+    }
+    if (sequence != plan.packets or packet_lengths.items.len != plan.packets) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    try appendU64Be(allocator, out, @intCast(packet_lengths.items.len));
+    try appendU64Be(allocator, out, @intCast(packet_bytes.items.len));
+    var cursor: usize = 0;
+    for (packet_lengths.items) |packet_len| {
+        try appendU32Be(allocator, out, packet_len);
+        const end = try std.math.add(usize, cursor, packet_len);
+        try out.appendSlice(allocator, packet_bytes.items[cursor..end]);
+        cursor = end;
+    }
+    if (cursor != packet_bytes.items.len) return CodestreamError.InvalidCodestream;
+}
+
+fn buildComponentRpclShadowCatalog(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    blocks: []const subband.CodeBlock,
+    nominal_bitplanes: u8,
+    options: LosslessOptions,
+) !ComponentRpclShadowCatalog {
+    const catalog_blocks = try allocator.alloc(RpclShadowBlock, blocks.len);
+    errdefer allocator.free(catalog_blocks);
+
+    var initialized: usize = 0;
+    errdefer {
+        for (catalog_blocks[0..initialized]) |*block| block.deinit(allocator);
+    }
+
+    var scratch = ebcot.DirectBlockScratch.init(allocator);
+    defer scratch.deinit();
+    for (blocks, 0..) |block, index| {
+        var segment = try ebcot.encodeCodeBlockSegmentDirectScratch(&scratch, plane, stride, block.rect);
+        errdefer segment.deinit(allocator);
+        var layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+        try computeLayerTruncations(&layers, options, .{
+            .pass_count = segment.pass_count,
+            .byte_length = segment.byte_length,
+        });
+
+        catalog_blocks[index] = .{
+            .segment = segment,
+            .layers = layers,
+            .encoded = .{
+                .location = .{ .leaf_x = 0, .leaf_y = 0 },
+                .nominal_bitplanes = @max(nominal_bitplanes, segment.bitplanes),
+                .encoded_bitplanes = segment.bitplanes,
+                .layers = &.{},
+                .payload = segment.bytes,
+            },
+        };
+        const layer_count: usize = @intCast(options.layers);
+        catalog_blocks[index].encoded.layers = catalog_blocks[index].layers[0..layer_count];
+        initialized += 1;
+    }
+
+    return .{
+        .allocator = allocator,
+        .blocks = catalog_blocks,
+    };
+}
+
+fn computeLayerTruncations(
+    out: *[max_quality_layers]t2.LayerTruncation,
+    options: LosslessOptions,
+    block: rate_alloc.Block,
+) !void {
+    var layers: [max_quality_layers]rate_alloc.Truncation = undefined;
+    const layer_count: usize = @intCast(options.layers);
+    if (options.rate_count > 0) {
+        try rate_alloc.allocateFromCompressionRatios(
+            layers[0..layer_count],
+            block,
+            options.rates[0..options.rate_count],
+        );
+    } else {
+        try rate_alloc.allocateEven(layers[0..layer_count], block);
+    }
+
+    @memset(out, .{ .cumulative_passes = 0, .cumulative_bytes = 0 });
+    for (layers[0..layer_count], 0..) |layer, index| {
+        out[index] = .{
+            .cumulative_passes = layer.cumulative_passes,
+            .cumulative_bytes = layer.cumulative_bytes,
+        };
+    }
+}
+
+fn appendRpclShadowPacketsForSelection(
+    allocator: std.mem.Allocator,
+    packet_bytes: *std.ArrayList(u8),
+    packet_lengths: *std.ArrayList(u32),
+    catalog: *const ComponentRpclShadowCatalog,
+    selected: []const usize,
+    first_layer_packet: packet_plan.Packet,
+    expected_resolution: u8,
+    expected_component: u16,
+    expected_precinct: u64,
+    layer_count: u16,
+    sequence: *u64,
+) !void {
+    if (selected.len == 0) {
+        var layer: u16 = 0;
+        while (layer < layer_count) : (layer += 1) {
+            const start = packet_bytes.items.len;
+            try t2.appendPacketPresenceHeader(allocator, packet_bytes, false);
+            try appendShadowPacketLength(allocator, packet_lengths, packet_bytes.items.len - start);
+            sequence.* += 1;
+        }
+        return;
+    }
+
+    const encoded = try allocator.alloc(t2.EncodedLayerBlock, selected.len);
+    defer allocator.free(encoded);
+    const sequential_indexes = try allocator.alloc(usize, selected.len);
+    defer allocator.free(sequential_indexes);
+    for (selected, 0..) |source_index, index| {
+        if (source_index >= catalog.blocks.len) return CodestreamError.InvalidCodestream;
+        encoded[index] = catalog.blocks[source_index].encoded;
+        encoded[index].location = .{ .leaf_x = index, .leaf_y = 0 };
+        sequential_indexes[index] = index;
+    }
+
+    var writer_state = try t2.PrecinctPacketWriterState.initForEncodedBlocks(allocator, encoded);
+    defer writer_state.deinit();
+
+    var layer: u16 = 0;
+    while (layer < layer_count) : (layer += 1) {
+        const packet = packet_plan.Packet{
+            .sequence = sequence.*,
+            .resolution = first_layer_packet.resolution,
+            .precinct_x = first_layer_packet.precinct_x,
+            .precinct_y = first_layer_packet.precinct_y,
+            .precinct_index = first_layer_packet.precinct_index,
+            .component = first_layer_packet.component,
+            .layer = layer,
+        };
+        const start = packet_bytes.items.len;
+        _ = try t2.appendRpclPacketForIndexes(
+            &writer_state,
+            allocator,
+            packet_bytes,
+            packet,
+            expected_resolution,
+            expected_component,
+            expected_precinct,
+            encoded,
+            sequential_indexes,
+        );
+        try appendShadowPacketLength(allocator, packet_lengths, packet_bytes.items.len - start);
+        sequence.* += 1;
+    }
+}
+
+fn appendShadowPacketLength(allocator: std.mem.Allocator, lengths: *std.ArrayList(u32), length: usize) !void {
+    if (length > std.math.maxInt(u32)) return CodestreamError.ImageTooLarge;
+    try lengths.append(allocator, @intCast(length));
+}
+
+fn payloadBlockThreadCount(options: LosslessOptions, block_count: usize) usize {
+    if (options.threads <= 3 or block_count < 2) return 1;
+    return @min(@as(usize, options.threads), block_count);
 }
 
 fn appendPacketPlan(
@@ -1718,30 +2133,156 @@ fn appendComponentPayload(
         try appendRect(allocator, out, band.rect);
     }
 
-    var scratch = bitplane.BlockScratch.init(allocator);
-    defer scratch.deinit();
-    var entropy_scratch = entropy.Scratch.init(allocator);
-    defer entropy_scratch.deinit();
+    const block_threads = payloadBlockThreadCount(options, blocks.len);
+    if (block_threads > 1) {
+        try appendComponentBlocksParallel(allocator, out, plane, stride, blocks, options, block_threads);
+    } else {
+        var scratch = bitplane.BlockScratch.init(allocator);
+        defer scratch.deinit();
+        var entropy_scratch = entropy.Scratch.init(allocator);
+        defer entropy_scratch.deinit();
+        var ebcot_scratch = ebcot.DirectBlockScratch.init(allocator);
+        defer ebcot_scratch.deinit();
+        try appendComponentBlockPayloads(
+            allocator,
+            out,
+            plane,
+            stride,
+            blocks,
+            options,
+            &scratch,
+            &entropy_scratch,
+            &ebcot_scratch,
+        );
+    }
+}
 
+fn appendComponentBlockPayloads(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    plane: []const i32,
+    stride: usize,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+    scratch: *bitplane.BlockScratch,
+    entropy_scratch: *entropy.Scratch,
+    ebcot_scratch: *ebcot.DirectBlockScratch,
+) !void {
     for (blocks) |block| {
-        try appendU16Be(allocator, out, @as(u16, @intCast(block.band_index)));
-        try appendRect(allocator, out, block.rect);
+        try appendComponentBlockPayload(
+            allocator,
+            out,
+            plane,
+            stride,
+            block,
+            options,
+            scratch,
+            entropy_scratch,
+            ebcot_scratch,
+        );
+    }
+}
 
-        const encoded = try bitplane.encodeBlockPassesScratch(&scratch, plane, stride, block.rect);
+fn appendComponentBlockPayload(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    plane: []const i32,
+    stride: usize,
+    block: subband.CodeBlock,
+    options: LosslessOptions,
+    scratch: *bitplane.BlockScratch,
+    entropy_scratch: *entropy.Scratch,
+    ebcot_scratch: *ebcot.DirectBlockScratch,
+) !void {
+    try appendU16Be(allocator, out, @as(u16, @intCast(block.band_index)));
+    try appendRect(allocator, out, block.rect);
 
+    const encoded = try bitplane.encodeBlockPassesScratch(scratch, plane, stride, block.rect);
+    var ebcot_segment = try ebcot.encodeCodeBlockSegmentDirectScratch(ebcot_scratch, plane, stride, block.rect);
+    defer ebcot_segment.deinit(allocator);
+    {
         try appendRect(allocator, out, encoded.active_rect);
         try out.append(allocator, encoded.bitplanes);
         try appendU32Be(allocator, out, encoded.non_zero_count);
         const coding_passes = bitplane.isoCodingPassCount(encoded.bitplanes, encoded.non_zero_count);
+        if (ebcot_segment.pass_count != coding_passes) return CodestreamError.InvalidCodestream;
         try appendU16Be(allocator, out, coding_passes);
         try appendLayerAllocation(allocator, out, options, .{
-            .pass_count = coding_passes,
-            .byte_length = @intCast(encoded.significance_bytes.len + encoded.refinement_bytes.len + encoded.cleanup_bytes.len),
+            .pass_count = ebcot_segment.pass_count,
+            .byte_length = ebcot_segment.byte_length,
         });
-        try appendEntropyStream(allocator, out, &entropy_scratch, encoded.significance_bytes);
-        try appendEntropyStream(allocator, out, &entropy_scratch, encoded.refinement_bytes);
-        try appendEntropyStream(allocator, out, &entropy_scratch, encoded.cleanup_bytes);
+        try appendEntropyStream(allocator, out, entropy_scratch, encoded.significance_bytes);
+        try appendEntropyStream(allocator, out, entropy_scratch, encoded.refinement_bytes);
+        try appendEntropyStream(allocator, out, entropy_scratch, encoded.cleanup_bytes);
+        try appendEbcotSegmentInfo(allocator, out, ebcot_segment);
+        try appendEbcotSegmentPayload(allocator, out, ebcot_segment);
     }
+}
+
+fn appendComponentBlocksParallel(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    plane: []const i32,
+    stride: usize,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+    worker_count: usize,
+) !void {
+    if (worker_count <= 1) {
+        var scratch = bitplane.BlockScratch.init(allocator);
+        defer scratch.deinit();
+        var entropy_scratch = entropy.Scratch.init(allocator);
+        defer entropy_scratch.deinit();
+        var ebcot_scratch = ebcot.DirectBlockScratch.init(allocator);
+        defer ebcot_scratch.deinit();
+        return appendComponentBlockPayloads(
+            allocator,
+            out,
+            plane,
+            stride,
+            blocks,
+            options,
+            &scratch,
+            &entropy_scratch,
+            &ebcot_scratch,
+        );
+    }
+
+    var jobs = try allocator.alloc(ComponentBlockPayloadJob, worker_count);
+    defer allocator.free(jobs);
+    defer for (jobs) |*job| job.deinit();
+
+    for (jobs, 0..) |*job, index| {
+        const start = blockRangeBoundary(blocks.len, worker_count, index);
+        const end = blockRangeBoundary(blocks.len, worker_count, index + 1);
+        job.* = .{
+            .plane = plane,
+            .stride = stride,
+            .blocks = blocks[start..end],
+            .options = options,
+        };
+    }
+
+    const spawn_count = worker_count - 1;
+    var threads = try allocator.alloc(std.Thread, spawn_count);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < spawn_count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, componentBlockPayloadWorker, .{&jobs[spawned]}) catch |err| {
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+
+    componentBlockPayloadWorker(&jobs[spawn_count]);
+    for (threads[0..spawned]) |thread| thread.join();
+
+    for (jobs) |job| try job.result;
+    for (jobs) |job| try out.appendSlice(allocator, job.bytes);
+}
+
+fn blockRangeBoundary(block_count: usize, worker_count: usize, index: usize) usize {
+    return (block_count * index) / worker_count;
 }
 
 fn appendRect(allocator: std.mem.Allocator, out: *std.ArrayList(u8), rect: subband.Rect) !void {
@@ -1929,6 +2470,32 @@ fn appendEntropyStream(
     try appendU32Be(allocator, out, encoded.raw_len);
     try appendU32Be(allocator, out, @as(u32, @intCast(encoded.bytes.len)));
     try out.appendSlice(allocator, encoded.bytes);
+}
+
+fn appendEbcotSegmentInfo(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    segment: ebcot.CodeBlockSegment,
+) !void {
+    try appendU16Be(allocator, out, segment.pass_count);
+    try appendU64Be(allocator, out, segment.byte_length);
+    for (segment.passes) |pass| {
+        try out.append(allocator, @intFromEnum(pass.kind));
+        try out.append(allocator, pass.magnitude_bitplane);
+        try appendU32Be(allocator, out, @intCast(pass.symbol_count));
+        try appendU64Be(allocator, out, @intCast(pass.byte_offset));
+        try appendU64Be(allocator, out, @intCast(pass.byte_length));
+        try appendU64Be(allocator, out, pass.cumulative_bytes);
+    }
+}
+
+fn appendEbcotSegmentPayload(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    segment: ebcot.CodeBlockSegment,
+) !void {
+    if (@as(u64, @intCast(segment.bytes.len)) != segment.byte_length) return CodestreamError.InvalidCodestream;
+    try out.appendSlice(allocator, segment.bytes);
 }
 
 fn appendLayerAllocation(

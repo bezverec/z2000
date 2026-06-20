@@ -21,11 +21,17 @@ This first milestone is intentionally small and honest:
 - TLM marker segments for current tile-part lengths
 - PLT packet-length marker segments in tile-part headers
 - physical resolution-ordered tile-parts for `--tile-parts R`
+- explicit RPCL packet sequence iterator for single-tile packet ordering
 - T2 packet-header bitstream, tag-tree, coding-pass, and segment-length
   primitives with marker-safe bit stuffing
+- fail-closed validation for standalone RPCL/T2 packet metadata helpers
+- T2 code-block grid mapping from subband block rects to tag-tree leaves
+- quality-layer-to-packet delta mapping for EBCOT code-block segment slices
+- standalone T2 precinct layer packet assembly/reader for EBCOT payload slices
 - pass-oriented temporary code-block payloads: significance, refinement, cleanup
 - swappable pass-stream entropy layer with raw/RLE/bit-RLE auto-selection
 - explicit experimental adaptive arithmetic backend for pass streams
+- standalone EBCOT/MQ shadow code-block segments for future ISO packet payloads
 
 It is not yet an ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The JP2
 container boxes are now scaffolded, but the `jp2c` payload is still temporary.
@@ -132,11 +138,12 @@ lines we are targeting:
   generation, JP2 wrapping, and disk write. This is the first pass at deciding
   whether the next optimization should target SIMD compute, scratch-buffer
   reuse/cache locality, or IO.
-- `--threads N` enables component-level parallelism for the current temporary
-  encoder, capped at the three Y/Cb/Cr components. `N=1` keeps the original
-  single-threaded path; `N>=2` parallelizes independent DWT and block-payload
-  component encoding while preserving deterministic output order. The temporary
-  decoder accepts the same flag for component payload decode and inverse DWT.
+- `--threads N` enables deterministic parallelism for the current temporary
+  encoder. `N=1` keeps the original single-threaded path; `2..3` parallelizes
+  independent Y/Cb/Cr DWT and component payload encoding; `N>3` keeps component
+  order stable and parallelizes payload code-block ranges with per-worker
+  scratch buffers. The temporary decoder accepts the same flag for component
+  payload decode and inverse DWT.
 
 Archival-style scaffold:
 
@@ -159,12 +166,14 @@ zig build run -- tiff-to-jp2 example.tif example.jp2 \
 These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`QCD`/
 `TLM`/`PLT`) and temporary payload metadata. `--tile-parts R` writes physical
 resolution-ordered tile-parts and records the matching RPCL packet-grid plan in
-temporary payload version `BP5`. BP5 also records per-code-block quality-layer
-truncation metadata and rate-allocation targets from `--rates`; the temporary
-decoder still consumes the full project-private payload for lossless roundtrip
-until true packet payload interleaving lands. Real T2 packet payload
-interleaving, EBCOT pass behavior for each code-block style bit, and MQ-backed
-ISO packet payloads still require the ISO packet writer.
+temporary payload metadata. BP6 added per-code-block quality-layer truncation
+metadata, rate-allocation targets from `--rates`, and shadow EBCOT/MQ segment
+metadata for stats. BP7 carries the actual EBCOT/MQ bytes, and BP8 adds a shadow
+RPCL packet stream built from normalized code-block leaf locations. The
+temporary decoder still consumes the project-private bitplane payload for
+lossless roundtrip; the BP8 RPCL stream is staging data for replacing the main
+packet payload. Full EBCOT pass behavior for each code-block style bit and
+strict ISO packet decode still require more work.
 
 ## Performance and Safety Direction
 
@@ -172,8 +181,8 @@ ISO packet payloads still require the ISO packet writer.
 - Use checked integer math for dimensions, offsets, byte counts, and box sizes.
 - Keep hot image data in contiguous component buffers before DWT.
 - Keep tile-level parallelism fail-closed until real multi-tile payload layout
-  exists; the current hot path uses component-level scheduling with per-worker
-  scratch-buffer reuse.
+  exists; the current hot path uses component-level scheduling plus encode-side
+  code-block range scheduling with per-worker scratch-buffer reuse.
 - Benchmark encode/decode throughput, memory peak, and lossless roundtrip
   against OpenJPEG and Grok on the same TIFF corpus.
 
@@ -219,9 +228,11 @@ payloads, temporary pass-stream entropy, and resolution-ordered tile-parts:
 
 The encode comparison is still not fair yet: `z2000` performs TIFF parsing, RCT,
 integer 5/3 DWT, code-block partitioning, bitplane-ordered temporary pass
-writing, and JPEG2000 marker emission, but it does not yet perform EBCOT coding
-passes or MQ entropy coding. Treat the number as the transform/block pipeline
-budget we must preserve while adding the real packet coder.
+writing, JPEG2000 marker emission, shadow EBCOT/MQ segment metadata, and a
+shadow BP8 RPCL packet stream. The main packet payload is still the
+project-private temporary format, so treat the number as the transform/block
+pipeline budget we must preserve while replacing that payload with the real
+packet coder.
 
 The temporary decoder is lossless for files produced by this project-private
 payload. A 256x256 RGB TIFF generated by `tools/make_bench_tiff.py` roundtrips
@@ -232,9 +243,10 @@ entries for resolution-ordered tile-parts. OpenJPEG `opj_dump` indexes the
 current single-tile archival profile as six tile-parts for six resolutions.
 
 The block payload is now split into significance, bitplane-ordered refinement,
-and a cleanup placeholder. The temporary decoder only needs significance and
-refinement to roundtrip this project-private payload, so cleanup bytes are
-intentionally not generated until the real EBCOT/MQ pass structure lands.
+and a cleanup placeholder for the temporary decoder. In parallel, BP8 records
+shadow EBCOT/MQ segment bytes, T2 layer deltas, and a real RPCL packet stream
+so the ISO packet writer can start consuming real code-block contribution
+boundaries.
 
 `jp2-stats` inspects the temporary payload without decoding pixels. On the
 2048x2048 smoke file it reports 3072 code-blocks, all active, 12,183,966
@@ -290,8 +302,8 @@ DWT workspace across Y/Cb/Cr instead of allocating line buffers per component.
 Optimization read from those numbers:
 
 - Grok wins wall-clock mainly through parallelism: its user CPU is much higher
-  than wall time. The next speed step for `z2000` should be tile/component or
-  code-block parallelism with scratch-buffer reuse.
+  than wall time. The next speed steps for `z2000` are real tile scheduling and
+  broader code-block parallelism with scratch-buffer reuse.
 - The largest size gap is entropy coding. `z2000` still stores 6.7 MB of encoded
   refinement stream bytes in the archival profile, so real EBCOT context passes
   plus MQ coding are the next compression step.
@@ -300,10 +312,10 @@ Optimization read from those numbers:
 
 ## Roadmap
 
-1. Use the new T2 bitstream/tag-tree/coding-pass/length layer for real packet
-   headers, then replace temporary packet payload interleaving.
-2. Add MQ arithmetic coding for code-block pass streams.
-3. Use BP5 quality-layer truncation metadata when writing real packet payloads.
-4. Replace the temporary decoder with strict ISO packet/header parsing.
+1. Promote the BP8 shadow RPCL packet stream from temporary metadata into the
+   main SOD payload and PLT length source.
+2. Replace the shadow EBCOT/MQ segment path with the primary encoder payload.
+3. Replace the temporary decoder with strict ISO packet/header parsing.
+4. Cross-check the narrow RPCL/RCT/5-3 path against independent decoders.
 5. Add real multi-tile payload layout, then tile-parallel scheduling on top of
    the per-worker scratch-buffer model.

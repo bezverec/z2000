@@ -536,6 +536,18 @@ fn printComponentStats(label: []const u8, stats: codestream.ComponentStats) void
         },
     );
 
+    if (stats.ebcot_segments.blocks != 0) {
+        std.debug.print(
+            "    EBCOT shadow: blocks {}, passes {}, symbols {}, MQ bytes {} B\n",
+            .{
+                stats.ebcot_segments.blocks,
+                stats.ebcot_segments.passes,
+                stats.ebcot_segments.symbols,
+                stats.ebcot_segments.mq_bytes,
+            },
+        );
+    }
+
     const pass_labels = [_][]const u8{ "sig", "ref", "cleanup" };
     for (stats.pass_streams, 0..) |stream, index| {
         printStreamStats(pass_labels[index], stream);
@@ -578,6 +590,10 @@ fn totalComponentStats(stats: codestream.TemporaryStats) codestream.ComponentSta
         total.non_zero_coeffs += component.non_zero_coeffs;
         total.max_bitplanes = @max(total.max_bitplanes, component.max_bitplanes);
         total.coding_passes += component.coding_passes;
+        total.ebcot_segments.blocks += component.ebcot_segments.blocks;
+        total.ebcot_segments.passes += component.ebcot_segments.passes;
+        total.ebcot_segments.symbols += component.ebcot_segments.symbols;
+        total.ebcot_segments.mq_bytes += component.ebcot_segments.mq_bytes;
         for (component.quality_layers, 0..) |layer, index| {
             total.quality_layers[index].blocks += layer.blocks;
             total.quality_layers[index].cumulative_passes += layer.cumulative_passes;

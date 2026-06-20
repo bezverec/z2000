@@ -128,6 +128,15 @@ pub const Encoder = struct {
         self.contexts[context].reset();
     }
 
+    pub fn resetAll(self: *Encoder) void {
+        @memset(self.contexts, .{});
+        self.writer.resetRetainingCapacity();
+        self.low = 0;
+        self.high = max_code;
+        self.pending = 0;
+        self.symbol_count = 0;
+    }
+
     pub fn write(self: *Encoder, context: usize, bit: bool) !void {
         if (context >= self.contexts.len) return MqError.InvalidContext;
         const split = splitFor(self.low, self.high, self.contexts[context]);
@@ -143,6 +152,23 @@ pub const Encoder = struct {
     }
 
     pub fn finish(self: *Encoder) !Encoded {
+        try self.finalize();
+
+        return .{
+            .symbol_count = self.symbol_count,
+            .bytes = try self.writer.finish(),
+        };
+    }
+
+    pub fn finishInto(self: *Encoder, allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !usize {
+        try self.finalize();
+        if (self.writer.used != 0) try self.writer.flushByte();
+        const start = out.items.len;
+        try out.appendSlice(allocator, self.writer.bytes.items);
+        return out.items.len - start;
+    }
+
+    fn finalize(self: *Encoder) !void {
         self.pending += 1;
         if (self.low < quarter) {
             try self.emitBit(false);
@@ -151,11 +177,6 @@ pub const Encoder = struct {
             try self.emitBit(true);
             while (self.pending > 0) : (self.pending -= 1) try self.writer.writeBit(false);
         }
-
-        return .{
-            .symbol_count = self.symbol_count,
-            .bytes = try self.writer.finish(),
-        };
     }
 
     fn renormalize(self: *Encoder) !void {
@@ -322,6 +343,13 @@ const MarkerStuffedBitWriter = struct {
     fn deinit(self: *MarkerStuffedBitWriter) void {
         self.bytes.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    fn resetRetainingCapacity(self: *MarkerStuffedBitWriter) void {
+        self.bytes.clearRetainingCapacity();
+        self.current = 0;
+        self.used = 0;
+        self.bits_per_byte = 8;
     }
 
     fn writeBit(self: *MarkerStuffedBitWriter, bit: bool) !void {
