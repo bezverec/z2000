@@ -20,11 +20,12 @@ style behavior, and real packet payload interleaving.
 
 Tasks:
 
-- Promote the BP8 shadow RPCL packet stream into the main tile-part payload.
-- Replace temporary PLT packet lengths with lengths from real packets.
-- Keep the old temporary payload only as a transition/debug payload.
-- Add a strict ISO packet parser for the same narrow path.
-- Add cross-decoder validation with OpenJPEG, Grok, and Kakadu.
+- Keep the promoted BP8 RPCL packet stream as the main tile-part payload.
+- Keep `PLT` sourced from real RPCL packet lengths.
+- Keep the old temporary payload only as an opt-in debug `COM` sidecar.
+- Use the strict ISO packet parser for the same narrow path.
+- Close remaining packet-header/T1 conformance gaps found by OpenJPEG, Grok,
+  and Kakadu smoke tests.
 
 Exit criteria:
 
