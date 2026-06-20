@@ -13,6 +13,30 @@ encoder before broadening profile coverage.
 - Avoid license contamination: use external implementations only for behavioral
   understanding, tests, and benchmarks, not copied code.
 
+## Near-Term ISO Task Ledger
+
+- T1/EBCOT: tighten the coding pass model with cleanup run mode, JPEG2000-style
+  sign context and prediction, more precise refinement contexts, and real
+  termination/reset behavior driven by COD code-block style flags. Keep
+  row-mask and stripe-mask optimization going only when byte-for-byte oracle
+  tests continue to pass.
+- T2 packet state: make include tag-tree state, zero-bitplane tag-tree state,
+  `numlenbits`, layer deltas, and packet header state explicit per
+  resolution/precinct/component/layer. Finish RPCL first; add LRCP, PCRL, and
+  CPRL only after each progression has a matching writer, reader, and tests.
+- JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
+  signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
+  Start with 8-bit and 16-bit RGB plus sRGB `colr`; keep JPX-only features
+  rejected until JPX boxes are intentionally implemented.
+- Profiles: enable ICT, irreversible 9/7, and scalar quantization only after
+  the corresponding transform, quantization, T1, and T2 payload behavior exists.
+  Until then, continue returning `UnsupportedPayload`.
+- Multi-tile: introduce a real tile grid, per-tile DWT, per-tile packet state,
+  and tile-part scheduling before allowing tile sizes smaller than the image.
+- Interop gate: for each major phase, keep OpenJPEG/Grok/Kakadu checks for
+  encode/decode roundtrip, marker conformance, output size, strict reader
+  validation, and single-thread plus multi-thread encode/decode benchmarks.
+
 ## Phase 1: Finish The Narrow Lossless RPCL Path
 
 Goal: single-tile RGB lossless JP2 with RCT, 5/3, RPCL, no exotic code-block
