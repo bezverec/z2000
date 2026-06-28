@@ -18,12 +18,14 @@ encoder before broadening profile coverage.
 - T1/EBCOT: tighten the coding pass model with cleanup run mode, JPEG2000-style
   sign context and prediction, more precise refinement contexts, and real
   termination/reset behavior driven by COD code-block style flags. Keep
-  row-mask and stripe-mask optimization going only when byte-for-byte oracle
-  tests continue to pass.
+  row-mask, stripe-mask, and SIMD-aware block-stats optimization going only when
+  byte-for-byte oracle tests continue to pass.
 - T2 packet state: make include tag-tree state, zero-bitplane tag-tree state,
   `numlenbits`, layer deltas, and packet header state explicit per
-  resolution/precinct/component/layer. Finish RPCL first; add LRCP, PCRL, and
-  CPRL only after each progression has a matching writer, reader, and tests.
+  resolution/precinct/component/layer. The RPCL path now tracks layer bounds,
+  sequence, precinct coordinates, whole-packet consumption, and rollback on
+  failed reads; next extend the same discipline when adding LRCP, PCRL, and
+  CPRL, each with matching writer, reader, and tests.
 - JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
   Start with 8-bit and 16-bit RGB plus sRGB `colr`; keep JPX-only features
@@ -47,7 +49,9 @@ Tasks:
 - Keep the promoted BP8 RPCL packet stream as the main tile-part payload.
 - Keep `PLT` sourced from real RPCL packet lengths.
 - Keep the old temporary payload only as an opt-in debug `COM` sidecar.
-- Use the strict ISO packet parser for the same narrow path.
+- Keep strict RPCL/T2 packet state validation active for the same narrow path.
+- Add strict T1 reconstruction from EBCOT/MQ payload so decode no longer needs
+  the private sidecar.
 - Close remaining packet-header/T1 conformance gaps found by OpenJPEG, Grok,
   and Kakadu smoke tests.
 
@@ -87,7 +91,8 @@ Tasks:
 - Add packet parsing from codestream tile-parts.
 - Validate SOP/EPH sequencing.
 - Validate PLT/TLM consistency against actual packet and tile-part lengths.
-- Keep RPCL as the first supported progression.
+- Keep RPCL as the first supported progression, with bounded per-precinct state
+  and whole-packet reader validation.
 - Add LRCP/PCRL/CPRL only after packet payload ordering is implemented and
   tested for each.
 - Extend tile-part division beyond none and `R` only after payload order and

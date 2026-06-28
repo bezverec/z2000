@@ -68,6 +68,7 @@ The T1 work is split into two paths:
 - context selection scaffolding;
 - MQ encode/decode roundtrip tests;
 - direct MQ emission with scratch-buffer reuse;
+- shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;
 - per-pass byte truncation metadata for quality layers.
 
 The implementation is still not a complete Part 1 T1 coder. Several code-block
@@ -96,15 +97,16 @@ The most recent bridge pieces are:
 - `layerPacketBlocksForIndexes`, which converts encoded blocks into packet blocks;
 - `appendRpclPacketForIndexes`, which appends a packet from selected encoded
   blocks and updates writer state.
+- RPCL writer/reader state now tracks layer bounds, next layer, next sequence,
+  precinct coordinates, inclusion tag-tree state, zero-bitplane tag-tree state,
+  `numlenbits`, cumulative pass/byte deltas, and strict whole-packet
+  consumption.
 
-The next integration step is to add a strict narrow-path reader for the same
-RPCL/RCT/5-3 packets and close the packet-header differences reported by
-independent decoders. T2 packet state should remain live across layers and
-progression order steps: inclusion tag-trees, zero-bitplane tag-trees,
-`numlenbits`, cumulative pass/byte deltas, and packet-header cursor state are
-part of the codestream contract, not scratch-only helpers. RPCL remains the
-priority path; LRCP, PCRL, and CPRL stay fail-closed until their ordering is
-implemented on both write and read sides.
+The next integration step is to connect strict T2 packet views to real T1 image
+reconstruction from the EBCOT/MQ payload, then close packet-header differences
+reported by independent decoders. RPCL remains the priority path; LRCP, PCRL,
+and CPRL stay fail-closed until their ordering is implemented on both write and
+read sides.
 
 ## Parallelism And Scratch Reuse
 
