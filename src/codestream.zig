@@ -1459,7 +1459,7 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
                     continue;
                 }
 
-                var state = try t2.PrecinctPacketReaderState.init(allocator, selected.len, 1, selected.len);
+                var state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, selected.len, 1, selected.len, header.layers);
                 defer state.deinit();
                 const locations = try sequentialPacketLocations(allocator, selected.len);
                 defer allocator.free(locations);

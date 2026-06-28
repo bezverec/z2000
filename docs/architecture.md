@@ -71,8 +71,11 @@ The T1 work is split into two paths:
 - per-pass byte truncation metadata for quality layers.
 
 The implementation is still not a complete Part 1 T1 coder. Several code-block
-style options are marker-level only or rejected until their exact payload effect
-is implemented.
+style options are rejected or treated as incomplete until their exact payload
+effect is implemented. The next T1 work should make cleanup run mode, sign
+context prediction, refinement context selection, and COD-driven
+termination/reset behavior explicit in both the symbol oracle and direct MQ
+paths before the options are advertised as supported.
 
 ## T2 Direction
 
@@ -96,7 +99,12 @@ The most recent bridge pieces are:
 
 The next integration step is to add a strict narrow-path reader for the same
 RPCL/RCT/5-3 packets and close the packet-header differences reported by
-independent decoders.
+independent decoders. T2 packet state should remain live across layers and
+progression order steps: inclusion tag-trees, zero-bitplane tag-trees,
+`numlenbits`, cumulative pass/byte deltas, and packet-header cursor state are
+part of the codestream contract, not scratch-only helpers. RPCL remains the
+priority path; LRCP, PCRL, and CPRL stay fail-closed until their ordering is
+implemented on both write and read sides.
 
 ## Parallelism And Scratch Reuse
 
@@ -119,5 +127,14 @@ These are intentionally not treated as complete yet:
 - real multi-tile payload layout;
 - ICT and irreversible 9/7 JP2 output;
 - scalar-derived or scalar-expounded JP2 quantization payloads;
+- JPX-only box features;
 - strict ISO packet payload decode;
 - full code-block style bit behavior in T1.
+
+## Interop Gates
+
+Each major ISO-facing slice should be checked against OpenJPEG, Grok, and
+Kakadu where the current feature set is expected to be accepted. The gate should
+record encode time, decode time, output bytes, marker conformance, strict reader
+validation, and roundtrip correctness for both single-thread and multi-thread
+runs.

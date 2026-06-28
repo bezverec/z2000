@@ -49,7 +49,8 @@ Important `tiff-to-jp2` options:
 - `--timings`
 
 Unsupported progression orders, ICT, 9-7 JP2 output, scalar quantization,
-multi-tile requests, and unsupported tile-part divisions currently fail closed.
+multi-tile requests, unsupported tile-part divisions, and code-block style
+options whose payload behavior is not implemented should fail closed.
 
 ## `src/codestream.zig`
 
@@ -154,6 +155,10 @@ Primary public functions:
 `RpclIterator` emits packets in resolution, precinct, component, layer order for
 the current single-tile RPCL path.
 
+Future progression iterators must not be exposed as supported CLI options until
+their packet writer, strict reader, packet-state lifetime, and corruption tests
+exist.
+
 ## `src/ebcot.zig`
 
 Primary public types:
@@ -184,6 +189,11 @@ Primary public functions:
 
 `CodeBlockSegment` carries MQ bytes plus per-pass byte offsets and cumulative
 truncation points. It is the bridge from T1 work into T2 packet payloads.
+
+The T1 TODO is to bring the direct MQ path closer to JPEG2000 Part 1 by adding
+cleanup run mode, sign prediction contexts, refined magnitude-refinement
+contexts, and real COD style flag behavior before advertising those flags as
+supported.
 
 ## `src/rate_alloc.zig`
 
@@ -223,3 +233,6 @@ for RPCL packet selection.
   external library contract.
 - Error behavior should remain fail-closed for unsupported JPEG2000 profiles.
 - Existing tests are the best source of intended behavior for edge cases.
+- Interop and benchmark updates should report z2000, Grok, OpenJPEG, and Kakadu
+  encode/decode time, output bytes, strict reader status, and roundtrip
+  correctness for single-thread and multi-thread runs.

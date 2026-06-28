@@ -239,20 +239,8 @@ pub fn encodeBlockScratch(
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
-    var max_mag: u32 = 0;
-    var non_zero_count: u32 = 0;
-    var y: usize = 0;
-    while (y < rect.height) : (y += 1) {
-        const row = (rect.y + y) * stride + rect.x;
-        var x: usize = 0;
-        while (x < rect.width) : (x += 1) {
-            const mag = magnitude(plane[row + x]);
-            max_mag = @max(max_mag, mag);
-            if (mag != 0) non_zero_count += 1;
-        }
-    }
-
-    const bitplanes = bitPlaneCount(max_mag);
+    const stats = blockStats(plane, stride, rect);
+    const bitplanes = stats.bitplanes;
     if (bitplanes == 0) {
         return .{
             .bitplanes = 0,
@@ -343,7 +331,7 @@ pub fn encodeBlockScratch(
 
     return .{
         .bitplanes = bitplanes,
-        .non_zero_count = non_zero_count,
+        .non_zero_count = stats.non_zero_count,
         .passes = scratch.passes.items,
         .symbols = scratch.symbols.items,
     };
