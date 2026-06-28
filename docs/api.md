@@ -134,6 +134,11 @@ Usage pattern for the new RPCL bridge:
 4. Use `appendRpclPacketForIndexes` for each layer packet.
 5. Keep the writer state alive across layers for the same precinct.
 
+The RPCL writer/reader state is intentionally strict: it tracks the configured
+layer count, next layer, next sequence, precinct coordinates, tag-tree lows,
+`numlenbits`, and cumulative pass/byte deltas. `readRpclPacket` consumes exactly
+one packet slice and rejects trailing bytes.
+
 ## `src/packet_plan.zig`
 
 Primary public types:
@@ -189,6 +194,9 @@ Primary public functions:
 
 `CodeBlockSegment` carries MQ bytes plus per-pass byte offsets and cumulative
 truncation points. It is the bridge from T1 work into T2 packet payloads.
+The symbol oracle and direct MQ path share SIMD-aware block-stat scanning so
+bitplane and non-zero metadata stay aligned across portable, AVX2-width, and
+NEON-width builds.
 
 The T1 TODO is to bring the direct MQ path closer to JPEG2000 Part 1 by adding
 cleanup run mode, sign prediction contexts, refined magnitude-refinement
