@@ -1280,10 +1280,10 @@ test "T2 packet state validates cumulative layer deltas" {
 test "T2 RPCL packet state writes and reads layer deltas" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{
-        0, -7, 0, 5,
-        1, 0,  -2, 0,
-        0, 0,  0, 0,
-        9, -12, 0, 4,
+        0, -7,  0,  5,
+        1, 0,   -2, 0,
+        0, 0,   0,  0,
+        9, -12, 0,  4,
     };
 
     var segment = try ebcot.encodeCodeBlockSegmentDirect(allocator, plane[0..], 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 });
@@ -1303,12 +1303,13 @@ test "T2 RPCL packet state writes and reads layer deltas" {
     const second = t2.LayerTruncation{ .cumulative_passes = second_point.cumulative_passes, .cumulative_bytes = second_point.cumulative_bytes };
     const zero_bitplanes = @as(u32, 8 - segment.bitplanes);
 
-    var writer_state = try t2.PrecinctPacketWriterState.init(
+    var writer_state = try t2.PrecinctPacketWriterState.initWithLayerCount(
         allocator,
         1,
         1,
         &[_]u32{0},
         &[_]u32{zero_bitplanes},
+        2,
     );
     defer writer_state.deinit();
     var packet_bytes = std.ArrayList(u8).empty;
@@ -1331,6 +1332,10 @@ test "T2 RPCL packet state writes and reads layer deltas" {
         0,
         first_blocks[0..],
     );
+    try std.testing.expectEqual(@as(u16, 1), writer_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), writer_state.next_sequence);
+    try std.testing.expectEqual(@as(?u32, 0), writer_state.precinct_x);
+    try std.testing.expectEqual(@as(?u32, 0), writer_state.precinct_y);
 
     const second_offset = packet_bytes.items.len;
     const second_blocks = [_]t2.LayerPacketBlock{.{
@@ -1350,12 +1355,14 @@ test "T2 RPCL packet state writes and reads layer deltas" {
         0,
         second_blocks[0..],
     );
+    try std.testing.expectEqual(@as(u16, 2), writer_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 2), writer_state.next_sequence);
 
     try std.testing.expectEqual(@as(u16, 2), writer_state.states[0].cumulative_passes);
     try std.testing.expectEqual(second.cumulative_bytes, writer_state.states[0].cumulative_bytes);
     try std.testing.expectEqual(@as(u8, @intCast(zero_bitplanes)), writer_state.states[0].zero_bitplanes);
 
-    var reader_state = try t2.PrecinctPacketReaderState.init(allocator, 1, 1, 1);
+    var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, 1, 1, 1, 2);
     defer reader_state.deinit();
     var decoded: [1]t2.DecodedPacketBlock = undefined;
     var payloads: [1]?[]const u8 = undefined;
@@ -1376,6 +1383,10 @@ test "T2 RPCL packet state writes and reads layer deltas" {
     try std.testing.expectEqual(first_written.packet_length(), first_read.packet_length);
     try std.testing.expect(decoded[0].first_inclusion);
     try std.testing.expectEqualSlices(u8, try t2.layerPayloadSlice(segment.bytes, zero, first), payloads[0].?);
+    try std.testing.expectEqual(@as(u16, 1), reader_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), reader_state.next_sequence);
+    try std.testing.expectEqual(@as(?u32, 0), reader_state.precinct_x);
+    try std.testing.expectEqual(@as(?u32, 0), reader_state.precinct_y);
 
     const second_read = try reader_state.readRpclPacket(
         allocator,
@@ -1392,6 +1403,8 @@ test "T2 RPCL packet state writes and reads layer deltas" {
     try std.testing.expectEqual(second_written.packet_length(), second_read.packet_length);
     try std.testing.expect(!decoded[0].first_inclusion);
     try std.testing.expectEqualSlices(u8, try t2.layerPayloadSlice(segment.bytes, first, second), payloads[0].?);
+    try std.testing.expectEqual(@as(u16, 2), reader_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 2), reader_state.next_sequence);
     try std.testing.expectEqualSlices(t2.CodeBlockPacketState, writer_state.states, reader_state.states);
 
     try std.testing.expectError(
@@ -1406,6 +1419,306 @@ test "T2 RPCL packet state writes and reads layer deltas" {
             second_blocks[0..],
         ),
     );
+}
+
+test "T2 RPCL packet state rejects out-of-order layer packets" {
+    const allocator = std.testing.allocator;
+    const payload = [_]u8{ 1, 2, 3, 4 };
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var writer_state = try t2.PrecinctPacketWriterState.initWithLayerCount(
+        allocator,
+        1,
+        1,
+        &[_]u32{0},
+        &[_]u32{5},
+        2,
+    );
+    defer writer_state.deinit();
+
+    const block = [_]t2.LayerPacketBlock{.{
+        .location = .{ .leaf_x = 0, .leaf_y = 0 },
+        .nominal_bitplanes = 8,
+        .encoded_bitplanes = 3,
+        .previous = .{ .cumulative_passes = 0, .cumulative_bytes = 0 },
+        .current = .{ .cumulative_passes = 1, .cumulative_bytes = 2 },
+        .payload = payload[0..],
+    }};
+    const skipped_layer = packet_plan.Packet{
+        .sequence = 1,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 1,
+    };
+
+    try std.testing.expectError(
+        t2.PacketHeaderError.InvalidPacketHeader,
+        writer_state.appendRpclPacket(allocator, &out, skipped_layer, 0, 0, 0, block[0..]),
+    );
+    try std.testing.expectEqual(@as(u16, 0), writer_state.next_layer);
+    try std.testing.expect(!writer_state.states[0].included);
+
+    const first_layer = packet_plan.Packet{
+        .sequence = 0,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 0,
+    };
+    _ = try writer_state.appendRpclPacket(allocator, &out, first_layer, 0, 0, 0, block[0..]);
+    try std.testing.expectEqual(@as(u16, 1), writer_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), writer_state.next_sequence);
+
+    try std.testing.expectError(
+        t2.PacketHeaderError.InvalidPacketHeader,
+        writer_state.appendRpclPacket(allocator, &out, first_layer, 0, 0, 0, block[0..]),
+    );
+    try std.testing.expectEqual(@as(u16, 1), writer_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), writer_state.next_sequence);
+
+    const wrong_sequence = packet_plan.Packet{
+        .sequence = 7,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 1,
+    };
+    try std.testing.expectError(
+        t2.PacketHeaderError.InvalidPacketHeader,
+        writer_state.appendRpclPacket(allocator, &out, wrong_sequence, 0, 0, 0, block[0..]),
+    );
+    try std.testing.expectEqual(@as(u16, 1), writer_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), writer_state.next_sequence);
+
+    const wrong_precinct_coords = packet_plan.Packet{
+        .sequence = 1,
+        .resolution = 0,
+        .precinct_x = 1,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 1,
+    };
+    try std.testing.expectError(
+        t2.PacketHeaderError.InvalidPacketHeader,
+        writer_state.appendRpclPacket(allocator, &out, wrong_precinct_coords, 0, 0, 0, block[0..]),
+    );
+    try std.testing.expectEqual(@as(u16, 1), writer_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), writer_state.next_sequence);
+}
+
+test "T2 RPCL packet state rejects packets past configured layer count" {
+    const allocator = std.testing.allocator;
+    const payload = [_]u8{ 1, 2, 3, 4 };
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var writer_state = try t2.PrecinctPacketWriterState.initWithLayerCount(
+        allocator,
+        1,
+        1,
+        &[_]u32{0},
+        &[_]u32{5},
+        1,
+    );
+    defer writer_state.deinit();
+
+    const block = [_]t2.LayerPacketBlock{.{
+        .location = .{ .leaf_x = 0, .leaf_y = 0 },
+        .nominal_bitplanes = 8,
+        .encoded_bitplanes = 3,
+        .previous = .{ .cumulative_passes = 0, .cumulative_bytes = 0 },
+        .current = .{ .cumulative_passes = 1, .cumulative_bytes = 2 },
+        .payload = payload[0..],
+    }};
+    const first = packet_plan.Packet{
+        .sequence = 0,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 0,
+    };
+    _ = try writer_state.appendRpclPacket(allocator, &out, first, 0, 0, 0, block[0..]);
+    try std.testing.expectEqual(@as(u16, 1), writer_state.next_layer);
+
+    const past_end = packet_plan.Packet{
+        .sequence = 1,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 1,
+    };
+    try std.testing.expectError(
+        t2.PacketHeaderError.InvalidPacketHeader,
+        writer_state.appendRpclPacket(allocator, &out, past_end, 0, 0, 0, block[0..]),
+    );
+    try std.testing.expectEqual(@as(u16, 1), writer_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), writer_state.next_sequence);
+}
+
+test "T2 RPCL reader state preserves order on failed packet decode" {
+    const allocator = std.testing.allocator;
+    const payload = [_]u8{ 1, 2, 3, 4 };
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var writer_state = try t2.PrecinctPacketWriterState.initWithLayerCount(
+        allocator,
+        1,
+        1,
+        &[_]u32{0},
+        &[_]u32{5},
+        1,
+    );
+    defer writer_state.deinit();
+
+    const packet = packet_plan.Packet{
+        .sequence = 0,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 0,
+    };
+    const block = [_]t2.LayerPacketBlock{.{
+        .location = .{ .leaf_x = 0, .leaf_y = 0 },
+        .nominal_bitplanes = 8,
+        .encoded_bitplanes = 3,
+        .previous = .{ .cumulative_passes = 0, .cumulative_bytes = 0 },
+        .current = .{ .cumulative_passes = 1, .cumulative_bytes = 2 },
+        .payload = payload[0..],
+    }};
+    _ = try writer_state.appendRpclPacket(allocator, &out, packet, 0, 0, 0, block[0..]);
+
+    var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, 1, 1, 1, 1);
+    defer reader_state.deinit();
+    var decoded: [1]t2.DecodedPacketBlock = undefined;
+    var payloads: [1]?[]const u8 = undefined;
+    const locations = [_]t2.PacketBlockLocation{.{ .leaf_x = 0, .leaf_y = 0 }};
+    const original_states = try allocator.dupe(t2.CodeBlockPacketState, reader_state.states);
+    defer allocator.free(original_states);
+
+    try std.testing.expectError(
+        t2.PacketHeaderError.TruncatedHeader,
+        reader_state.readRpclPacket(
+            allocator,
+            out.items[0 .. out.items.len - 1],
+            packet,
+            0,
+            0,
+            0,
+            locations[0..],
+            8,
+            decoded[0..],
+            payloads[0..],
+        ),
+    );
+    try std.testing.expectEqual(@as(u16, 0), reader_state.next_layer);
+    try std.testing.expectEqualSlices(t2.CodeBlockPacketState, original_states, reader_state.states);
+
+    const skipped_layer = packet_plan.Packet{
+        .sequence = 1,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 1,
+    };
+    try std.testing.expectError(
+        t2.PacketHeaderError.InvalidPacketHeader,
+        reader_state.readRpclPacket(
+            allocator,
+            out.items,
+            skipped_layer,
+            0,
+            0,
+            0,
+            locations[0..],
+            8,
+            decoded[0..],
+            payloads[0..],
+        ),
+    );
+    try std.testing.expectEqual(@as(u16, 0), reader_state.next_layer);
+
+    var packet_with_trailing = try std.ArrayList(u8).initCapacity(allocator, out.items.len + 1);
+    defer packet_with_trailing.deinit(allocator);
+    try packet_with_trailing.appendSlice(allocator, out.items);
+    try packet_with_trailing.append(allocator, 0);
+    try std.testing.expectError(
+        t2.PacketHeaderError.InvalidPacketHeader,
+        reader_state.readRpclPacket(
+            allocator,
+            packet_with_trailing.items,
+            packet,
+            0,
+            0,
+            0,
+            locations[0..],
+            8,
+            decoded[0..],
+            payloads[0..],
+        ),
+    );
+    try std.testing.expectEqual(@as(u16, 0), reader_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, null), reader_state.next_sequence);
+    try std.testing.expectEqualSlices(t2.CodeBlockPacketState, original_states, reader_state.states);
+
+    _ = try reader_state.readRpclPacket(
+        allocator,
+        out.items,
+        packet,
+        0,
+        0,
+        0,
+        locations[0..],
+        8,
+        decoded[0..],
+        payloads[0..],
+    );
+    try std.testing.expectEqual(@as(u16, 1), reader_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), reader_state.next_sequence);
+
+    const wrong_sequence = packet_plan.Packet{
+        .sequence = 7,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = 0,
+        .layer = 1,
+    };
+    try std.testing.expectError(
+        t2.PacketHeaderError.InvalidPacketHeader,
+        reader_state.readRpclPacket(
+            allocator,
+            out.items,
+            wrong_sequence,
+            0,
+            0,
+            0,
+            locations[0..],
+            8,
+            decoded[0..],
+            payloads[0..],
+        ),
+    );
+    try std.testing.expectEqual(@as(u16, 1), reader_state.next_layer);
+    try std.testing.expectEqual(@as(?u64, 1), reader_state.next_sequence);
 }
 
 test "9/7 wavelet roundtrips within floating point tolerance" {
@@ -1799,9 +2112,9 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
 test "debug temporary sidecar option preserves BP8 COM payload" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
-        10, 20, 30,
-        40, 50, 60,
-        70, 80, 90,
+        10,  20,  30,
+        40,  50,  60,
+        70,  80,  90,
         100, 110, 120,
     });
     defer allocator.free(samples);
@@ -2181,6 +2494,25 @@ test "EBCOT significance propagation precedes cleanup on lower bitplanes" {
     try std.testing.expectEqual(false, refinement[0].bit);
 }
 
+test "EBCOT symbol oracle scans block stats across vector tails" {
+    const allocator = std.testing.allocator;
+    const width = 11;
+    const height = 3;
+    var plane = [_]i32{0} ** (width * height);
+    plane[0] = 1;
+    plane[7] = -2;
+    plane[8] = 3;
+    plane[width + 10] = -17;
+    plane[2 * width + 4] = 9;
+
+    var encoded = try ebcot.encodeBlock(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 5), encoded.non_zero_count);
+    try std.testing.expectEqual(@as(u8, 5), encoded.bitplanes);
+    try std.testing.expect(encoded.symbols.len > 0);
+}
+
 test "EBCOT scratch encoder reuses block state buffers" {
     const allocator = std.testing.allocator;
     const first_plane = [_]i32{
@@ -2307,11 +2639,11 @@ test "EBCOT code-block segment records MQ payload truncation points" {
 test "EBCOT direct MQ segment matches symbol oracle" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{
-        0,  -7, 0,  5,  3,
-        1,  0,  -2, 0,  0,
-        0,  0,  0,  0,  -1,
-        9,  -12, 0,  4,  0,
-        0,  6,  0,  -8, 2,
+        0, -7,  0,  5,  3,
+        1, 0,   -2, 0,  0,
+        0, 0,   0,  0,  -1,
+        9, -12, 0,  4,  0,
+        0, 6,   0,  -8, 2,
     };
 
     var block = try ebcot.encodeBlock(allocator, plane[0..], 5, .{ .x = 0, .y = 0, .width = 5, .height = 5 });
@@ -2372,10 +2704,10 @@ test "EBCOT direct MQ row masks match oracle across word boundaries" {
 test "EBCOT direct MQ scratch reuses buffers" {
     const allocator = std.testing.allocator;
     const first_plane = [_]i32{
-        0,  -7, 0,  5,
-        1,  0,  -2, 0,
-        0,  0,  0,  0,
-        9,  -12, 0,  4,
+        0, -7,  0,  5,
+        1, 0,   -2, 0,
+        0, 0,   0,  0,
+        9, -12, 0,  4,
     };
     const second_plane = [_]i32{ 4, 2 };
 

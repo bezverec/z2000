@@ -559,6 +559,11 @@ pub const PrecinctPacketWriterState = struct {
     inclusion: TagTreeEncoder,
     zero_bitplanes: TagTreeEncoder,
     states: []CodeBlockPacketState,
+    layer_count: ?u16 = null,
+    next_layer: u16 = 0,
+    next_sequence: ?u64 = null,
+    precinct_x: ?u32 = null,
+    precinct_y: ?u32 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -581,16 +586,32 @@ pub const PrecinctPacketWriterState = struct {
         };
     }
 
+    pub fn initWithLayerCount(
+        allocator: std.mem.Allocator,
+        leaves_x: usize,
+        leaves_y: usize,
+        first_inclusion_layers: []const u32,
+        zero_bitplane_values: []const u32,
+        layer_count: u16,
+    ) !PrecinctPacketWriterState {
+        if (layer_count == 0) return PacketHeaderError.InvalidPacketHeader;
+        var state = try init(allocator, leaves_x, leaves_y, first_inclusion_layers, zero_bitplane_values);
+        state.layer_count = layer_count;
+        return state;
+    }
+
     pub fn initForEncodedBlocks(allocator: std.mem.Allocator, blocks: []const EncodedLayerBlock) !PrecinctPacketWriterState {
         if (blocks.len == 0) return PacketHeaderError.InvalidPacketHeader;
 
         var leaves_x: usize = 0;
         var leaves_y: usize = 0;
+        const layer_count = blocks[0].layers.len;
         for (blocks) |block| {
-            if (block.layers.len == 0) return PacketHeaderError.InvalidPacketHeader;
+            if (block.layers.len == 0 or block.layers.len != layer_count) return PacketHeaderError.InvalidPacketHeader;
             leaves_x = @max(leaves_x, block.location.leaf_x + 1);
             leaves_y = @max(leaves_y, block.location.leaf_y + 1);
         }
+        const layer_count_u16 = std.math.cast(u16, layer_count) orelse return PacketHeaderError.InvalidPacketHeader;
         const leaf_count = try std.math.mul(usize, leaves_x, leaves_y);
         if (leaf_count != blocks.len) return PacketHeaderError.InvalidPacketHeader;
 
@@ -611,7 +632,7 @@ pub const PrecinctPacketWriterState = struct {
             zero_bitplane_values[index] = try zeroBitPlaneCount(block.nominal_bitplanes, block.encoded_bitplanes);
         }
 
-        return init(allocator, leaves_x, leaves_y, first_inclusion_layers, zero_bitplane_values);
+        return initWithLayerCount(allocator, leaves_x, leaves_y, first_inclusion_layers, zero_bitplane_values, layer_count_u16);
     }
 
     pub fn deinit(self: *PrecinctPacketWriterState) void {
@@ -631,13 +652,8 @@ pub const PrecinctPacketWriterState = struct {
         expected_precinct: u64,
         blocks: []const LayerPacketBlock,
     ) !WrittenPacket {
-        if (packet.resolution != expected_resolution or
-            packet.component != expected_component or
-            packet.precinct_index != expected_precinct)
-        {
-            return PacketHeaderError.InvalidPacketHeader;
-        }
-        return appendPrecinctLayerPacket(
+        try validateRpclPacketCursor(self.layer_count, self.next_sequence, self.precinct_x, self.precinct_y, self.next_layer, packet, expected_resolution, expected_component, expected_precinct);
+        const written = try appendPrecinctLayerPacket(
             allocator,
             out,
             &self.inclusion,
@@ -646,6 +662,9 @@ pub const PrecinctPacketWriterState = struct {
             packet.layer,
             blocks,
         );
+        self.next_layer = std.math.add(u16, self.next_layer, 1) catch return PacketHeaderError.InvalidPacketHeader;
+        try advanceRpclPacketCursor(&self.next_sequence, &self.precinct_x, &self.precinct_y, packet);
+        return written;
     }
 };
 
@@ -654,6 +673,11 @@ pub const PrecinctPacketReaderState = struct {
     inclusion: TagTreeDecoder,
     zero_bitplanes: TagTreeDecoder,
     states: []CodeBlockPacketState,
+    layer_count: ?u16 = null,
+    next_layer: u16 = 0,
+    next_sequence: ?u64 = null,
+    precinct_x: ?u32 = null,
+    precinct_y: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator, leaves_x: usize, leaves_y: usize, block_count: usize) !PrecinctPacketReaderState {
         var inclusion = try TagTreeDecoder.init(allocator, leaves_x, leaves_y);
@@ -668,6 +692,13 @@ pub const PrecinctPacketReaderState = struct {
             .zero_bitplanes = zero_bitplanes,
             .states = states,
         };
+    }
+
+    pub fn initWithLayerCount(allocator: std.mem.Allocator, leaves_x: usize, leaves_y: usize, block_count: usize, layer_count: u16) !PrecinctPacketReaderState {
+        if (layer_count == 0) return PacketHeaderError.InvalidPacketHeader;
+        var state = try init(allocator, leaves_x, leaves_y, block_count);
+        state.layer_count = layer_count;
+        return state;
     }
 
     pub fn deinit(self: *PrecinctPacketReaderState) void {
@@ -690,13 +721,27 @@ pub const PrecinctPacketReaderState = struct {
         decoded: []DecodedPacketBlock,
         payloads: []?[]const u8,
     ) !ReadPacket {
-        if (packet.resolution != expected_resolution or
-            packet.component != expected_component or
-            packet.precinct_index != expected_precinct)
-        {
-            return PacketHeaderError.InvalidPacketHeader;
+        try validateRpclPacketCursor(self.layer_count, self.next_sequence, self.precinct_x, self.precinct_y, self.next_layer, packet, expected_resolution, expected_component, expected_precinct);
+        const saved_next_layer = self.next_layer;
+        const saved_next_sequence = self.next_sequence;
+        const saved_precinct_x = self.precinct_x;
+        const saved_precinct_y = self.precinct_y;
+        const saved_states = try allocator.dupe(CodeBlockPacketState, self.states);
+        defer allocator.free(saved_states);
+        const saved_inclusion_lows = try allocator.dupe(u32, self.inclusion.lows);
+        defer allocator.free(saved_inclusion_lows);
+        const saved_zero_lows = try allocator.dupe(u32, self.zero_bitplanes.lows);
+        defer allocator.free(saved_zero_lows);
+        errdefer {
+            self.next_layer = saved_next_layer;
+            self.next_sequence = saved_next_sequence;
+            self.precinct_x = saved_precinct_x;
+            self.precinct_y = saved_precinct_y;
+            @memcpy(self.states, saved_states);
+            @memcpy(self.inclusion.lows, saved_inclusion_lows);
+            @memcpy(self.zero_bitplanes.lows, saved_zero_lows);
         }
-        return readPrecinctLayerPacket(
+        const read = try readPrecinctLayerPacket(
             allocator,
             bytes,
             &self.inclusion,
@@ -708,8 +753,55 @@ pub const PrecinctPacketReaderState = struct {
             decoded,
             payloads,
         );
+        if (read.packet_length != bytes.len) return PacketHeaderError.InvalidPacketHeader;
+        self.next_layer = std.math.add(u16, self.next_layer, 1) catch return PacketHeaderError.InvalidPacketHeader;
+        try advanceRpclPacketCursor(&self.next_sequence, &self.precinct_x, &self.precinct_y, packet);
+        return read;
     }
 };
+
+fn validateRpclPacketCursor(
+    layer_count: ?u16,
+    next_sequence: ?u64,
+    precinct_x: ?u32,
+    precinct_y: ?u32,
+    next_layer: u16,
+    packet: packet_plan.Packet,
+    expected_resolution: u8,
+    expected_component: u16,
+    expected_precinct: u64,
+) !void {
+    if (packet.resolution != expected_resolution or
+        packet.component != expected_component or
+        packet.precinct_index != expected_precinct or
+        packet.layer != next_layer)
+    {
+        return PacketHeaderError.InvalidPacketHeader;
+    }
+    if (layer_count) |count| {
+        if (packet.layer >= count) return PacketHeaderError.InvalidPacketHeader;
+    }
+    if (next_sequence) |sequence| {
+        if (packet.sequence != sequence) return PacketHeaderError.InvalidPacketHeader;
+    }
+    if (precinct_x) |x| {
+        if (packet.precinct_x != x) return PacketHeaderError.InvalidPacketHeader;
+    }
+    if (precinct_y) |y| {
+        if (packet.precinct_y != y) return PacketHeaderError.InvalidPacketHeader;
+    }
+}
+
+fn advanceRpclPacketCursor(
+    next_sequence: *?u64,
+    precinct_x: *?u32,
+    precinct_y: *?u32,
+    packet: packet_plan.Packet,
+) !void {
+    if (precinct_x.* == null) precinct_x.* = packet.precinct_x;
+    if (precinct_y.* == null) precinct_y.* = packet.precinct_y;
+    next_sequence.* = std.math.add(u64, packet.sequence, 1) catch return PacketHeaderError.InvalidPacketHeader;
+}
 
 pub fn layerContribution(previous: LayerTruncation, current: LayerTruncation) !LayerContribution {
     if (current.cumulative_passes < previous.cumulative_passes) return PacketHeaderError.InvalidPacketHeader;
