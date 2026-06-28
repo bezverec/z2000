@@ -1136,6 +1136,33 @@ pub fn writePrecinctPacketHeader(
     try writer.writeBit(packet_included);
     if (!packet_included) return;
 
+    try writePrecinctPacketHeaderBody(
+        writer,
+        inclusion,
+        zero_bitplanes,
+        states,
+        layer,
+        blocks,
+    );
+}
+
+pub fn packetBlocksIncluded(blocks: []const PacketBlock) bool {
+    for (blocks) |block| {
+        if (block.included) return true;
+    }
+    return false;
+}
+
+pub fn writePrecinctPacketHeaderBody(
+    writer: *PacketHeaderWriter,
+    inclusion: *TagTreeEncoder,
+    zero_bitplanes: *TagTreeEncoder,
+    states: []CodeBlockPacketState,
+    layer: u32,
+    blocks: []const PacketBlock,
+) !void {
+    if (states.len != blocks.len) return PacketHeaderError.InvalidPacketHeader;
+
     for (blocks, 0..) |block, index| {
         var actual = block;
         actual.previously_included = states[index].included;
@@ -1231,6 +1258,34 @@ pub fn readPrecinctPacketHeader(
         return false;
     }
 
+    try readPrecinctPacketHeaderBody(
+        reader,
+        inclusion,
+        zero_bitplanes,
+        states,
+        layer,
+        locations,
+        max_zero_bitplanes,
+        decoded,
+    );
+
+    return true;
+}
+
+pub fn readPrecinctPacketHeaderBody(
+    reader: *PacketHeaderReader,
+    inclusion: *TagTreeDecoder,
+    zero_bitplanes: *TagTreeDecoder,
+    states: []CodeBlockPacketState,
+    layer: u32,
+    locations: []const PacketBlockLocation,
+    max_zero_bitplanes: u8,
+    decoded: []DecodedPacketBlock,
+) !void {
+    if (states.len != locations.len or decoded.len != locations.len) {
+        return PacketHeaderError.InvalidPacketHeader;
+    }
+
     for (locations, 0..) |location, index| {
         decoded[index] = try readCodeBlockPacketHeader(
             reader,
@@ -1254,8 +1309,6 @@ pub fn readPrecinctPacketHeader(
                 return PacketHeaderError.InvalidPacketHeader;
         }
     }
-
-    return true;
 }
 
 pub fn zeroBitPlaneCount(nominal_bitplanes: u8, encoded_bitplanes: u8) !u8 {

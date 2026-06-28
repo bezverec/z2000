@@ -71,12 +71,14 @@ The T1 work is split into two paths:
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;
 - per-pass byte truncation metadata for quality layers.
 
-The implementation is still not a complete Part 1 T1 coder. Several code-block
-style options are rejected or treated as incomplete until their exact payload
-effect is implemented. The next T1 work should make cleanup run mode, sign
-context prediction, refinement context selection, and COD-driven
-termination/reset behavior explicit in both the symbol oracle and direct MQ
-paths before the options are advertised as supported.
+The implementation is still not a complete Part 1 T1 coder. Code-block style
+options such as BYPASS, RESET, TERMALL, vertical causal, predictable
+termination, and segmentation symbols are parsed but rejected with
+`UnsupportedPayload` until their exact payload effect is implemented. The next
+T1 work should make cleanup run mode, sign context prediction, refinement
+context selection, and COD-driven termination/reset behavior explicit in both
+the symbol oracle and direct MQ paths before the options are advertised as
+supported.
 
 ## T2 Direction
 

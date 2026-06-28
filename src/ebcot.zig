@@ -26,8 +26,12 @@ pub const Context = enum(u8) {
     zero6 = 6,
     zero7 = 7,
     zero8 = 8,
-    sign = 9,
-    refinement = 10,
+    sign0 = 9,
+    sign1 = 10,
+    sign2 = 11,
+    sign3 = 12,
+    sign4 = 13,
+    refinement = 14,
 };
 
 pub const SymbolKind = enum(u8) {
@@ -156,6 +160,7 @@ const flag_significant: u8 = 1 << 0;
 const flag_visited: u8 = 1 << 1;
 const flag_became_significant: u8 = 1 << 2;
 const zero_context_lut = makeZeroContextLut();
+const sign_context_lut = makeSignContextLut();
 const stats_lanes = simd.i32_lanes;
 const StatsVector = @Vector(stats_lanes, i32);
 const StatsMaskVector = @Vector(stats_lanes, u32);
@@ -206,6 +211,11 @@ pub const DirectBlockScratch = struct {
         self.encoder = try mq.Encoder.init(self.allocator, mq_context_count);
         return &self.encoder.?;
     }
+};
+
+const SignCoding = struct {
+    context: Context,
+    predicted_negative: bool,
 };
 
 pub fn encodeBlock(
@@ -387,6 +397,22 @@ pub fn encodeCodeBlockSegment(
     });
 }
 
+pub fn encodeCodeBlockSegmentContinuous(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+) !CodeBlockSegment {
+    var block = try encodeBlock(allocator, plane, stride, rect);
+    defer block.deinit(allocator);
+    return encodeBlockSymbolsSegmentContinuous(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+}
+
 pub fn encodeCodeBlockSegmentDirect(
     allocator: std.mem.Allocator,
     plane: []const i32,
@@ -486,6 +512,77 @@ pub fn encodeBlockSymbolsSegment(allocator: std.mem.Allocator, block: EncodedBlo
     };
 }
 
+pub fn encodeBlockSymbolsSegmentContinuous(allocator: std.mem.Allocator, block: EncodedBlockView) !CodeBlockSegment {
+    if (block.passes.len == 0) {
+        const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
+        errdefer allocator.free(passes);
+        const bytes = try allocator.dupe(u8, &.{});
+        return .{
+            .bitplanes = block.bitplanes,
+            .non_zero_count = block.non_zero_count,
+            .pass_count = 0,
+            .byte_length = 0,
+            .passes = passes,
+            .bytes = bytes,
+        };
+    }
+
+    var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
+    errdefer pass_payloads.deinit(allocator);
+    var encoder = try mq.Encoder.init(allocator, mq_context_count);
+    defer encoder.deinit();
+
+    var symbol_offset: usize = 0;
+    var previous_bytes: u64 = 0;
+    for (block.passes) |pass| {
+        if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
+        const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
+        for (pass_symbols) |symbol| {
+            try encoder.write(mqContextIndex(symbol.context), symbol.bit);
+        }
+
+        const cumulative_bytes = encoderBufferedByteCount(&encoder);
+        try pass_payloads.append(allocator, .{
+            .kind = pass.kind,
+            .magnitude_bitplane = pass.magnitude_bitplane,
+            .symbol_count = pass.symbol_count,
+            .byte_offset = @intCast(previous_bytes),
+            .byte_length = @intCast(cumulative_bytes - previous_bytes),
+            .cumulative_bytes = cumulative_bytes,
+        });
+        previous_bytes = cumulative_bytes;
+        symbol_offset += pass.symbol_count;
+    }
+    if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
+
+    const encoded = try encoder.finish();
+    errdefer allocator.free(encoded.bytes);
+    if (pass_payloads.items.len > 0) {
+        const last = &pass_payloads.items[pass_payloads.items.len - 1];
+        if (encoded.bytes.len < last.byte_offset) return EbcotError.InvalidBlock;
+        last.byte_length = encoded.bytes.len - last.byte_offset;
+        last.cumulative_bytes = @intCast(encoded.bytes.len);
+    } else if (encoded.bytes.len != 0) {
+        return EbcotError.InvalidBlock;
+    }
+
+    const pass_slice = try pass_payloads.toOwnedSlice(allocator);
+    errdefer allocator.free(pass_slice);
+
+    return .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .pass_count = @intCast(pass_slice.len),
+        .byte_length = @intCast(encoded.bytes.len),
+        .passes = pass_slice,
+        .bytes = encoded.bytes,
+    };
+}
+
+fn encoderBufferedByteCount(encoder: *const mq.Encoder) u64 {
+    return @as(u64, @intCast(encoder.writer.bytes.items.len)) + @intFromBool(encoder.writer.used != 0);
+}
+
 fn ownedSegmentFromDirectScratch(
     scratch: *DirectBlockScratch,
     bitplanes: u8,
@@ -537,6 +634,17 @@ pub fn decodeCodeBlockSegmentBits(
     return bits;
 }
 
+pub fn decodeCodeBlockSegmentBitsContinuous(
+    allocator: std.mem.Allocator,
+    segment: CodeBlockSegment,
+    templates: []const Symbol,
+) ![]bool {
+    var total_symbols: usize = 0;
+    for (segment.passes) |pass| total_symbols += pass.symbol_count;
+    if (total_symbols != templates.len) return mq.MqError.InvalidData;
+    return decodeSymbolBitsMq(allocator, segment.bytes, templates.len, templates);
+}
+
 fn emitSignificancePass(
     allocator: std.mem.Allocator,
     passes: *std.ArrayList(Pass),
@@ -559,7 +667,7 @@ fn emitSignificancePass(
         visited[index] = true;
         try emitZeroCoding(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant);
         if (isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane)) {
-            try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index);
+            try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant);
             significant[index] = true;
             became_significant[index] = true;
         }
@@ -621,7 +729,7 @@ fn emitCleanupPass(
         if (significant[index] or visited[index]) continue;
         try emitZeroCoding(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant);
         if (isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane)) {
-            try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index);
+            try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant);
             significant[index] = true;
             became_significant[index] = true;
         }
@@ -661,12 +769,15 @@ fn emitSign(
     pos: ScanPos,
     bitplane: u8,
     pass_index: u16,
+    significant: []const bool,
 ) !void {
+    const coding = signCoding(plane, stride, rect, pos.x, pos.y, significant);
+    const negative = plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0;
     try symbols.append(allocator, .{
         .pass_index = pass_index,
         .kind = .sign,
-        .context = .sign,
-        .bit = plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0,
+        .context = coding.context,
+        .bit = negative != coding.predicted_negative,
         .x = pos.x,
         .y = pos.y,
         .magnitude_bitplane = bitplane,
@@ -696,7 +807,9 @@ fn emitDirectSignificancePass(
         try encoder.write(mqContextIndex(zeroContext(neighbor_count)), bit);
         symbol_count += 1;
         if (bit) {
-            try encoder.write(mqContextIndex(.sign), plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0);
+            const sign = signCodingRows(scratch, plane, stride, rect, pos.x, pos.y);
+            const negative = plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0;
+            try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
             symbol_count += 1;
             setFlag(scratch.flags.items, index, .significant);
             setSignificantRow(scratch, pos.x, pos.y);
@@ -754,7 +867,9 @@ fn emitDirectCleanupPass(
         try encoder.write(mqContextIndex(zeroContext(neighborSignificanceRows(scratch, pos.x, pos.y))), bit);
         symbol_count += 1;
         if (bit) {
-            try encoder.write(mqContextIndex(.sign), plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0);
+            const sign = signCodingRows(scratch, plane, stride, rect, pos.x, pos.y);
+            const negative = plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0;
+            try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
             symbol_count += 1;
             setFlag(scratch.flags.items, index, .significant);
             setSignificantRow(scratch, pos.x, pos.y);
@@ -931,6 +1046,82 @@ fn makeZeroContextLut() [9]Context {
         context.* = @enumFromInt(index);
     }
     return lut;
+}
+
+fn makeSignContextLut() [5]Context {
+    return .{ .sign0, .sign1, .sign2, .sign3, .sign4 };
+}
+
+fn signCoding(
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    y: usize,
+    significant: []const bool,
+) SignCoding {
+    const score = signScore(plane, stride, rect, x, y, significant);
+    return signCodingFromScore(score);
+}
+
+fn signScore(
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    y: usize,
+    significant: []const bool,
+) i8 {
+    var score: i8 = 0;
+    if (x > 0 and significant[localIndex(rect.width, x - 1, y)]) {
+        score += signContribution(plane[(rect.y + y) * stride + rect.x + x - 1]);
+    }
+    if (x + 1 < rect.width and significant[localIndex(rect.width, x + 1, y)]) {
+        score += signContribution(plane[(rect.y + y) * stride + rect.x + x + 1]);
+    }
+    if (y > 0 and significant[localIndex(rect.width, x, y - 1)]) {
+        score += signContribution(plane[(rect.y + y - 1) * stride + rect.x + x]);
+    }
+    if (y + 1 < rect.height and significant[localIndex(rect.width, x, y + 1)]) {
+        score += signContribution(plane[(rect.y + y + 1) * stride + rect.x + x]);
+    }
+    return score;
+}
+
+fn signCodingRows(
+    scratch: *const DirectBlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    y: usize,
+) SignCoding {
+    var score: i8 = 0;
+    if (x > 0 and hasSignificantRow(scratch, x - 1, y)) {
+        score += signContribution(plane[(rect.y + y) * stride + rect.x + x - 1]);
+    }
+    if (x + 1 < rect.width and hasSignificantRow(scratch, x + 1, y)) {
+        score += signContribution(plane[(rect.y + y) * stride + rect.x + x + 1]);
+    }
+    if (y > 0 and hasSignificantRow(scratch, x, y - 1)) {
+        score += signContribution(plane[(rect.y + y - 1) * stride + rect.x + x]);
+    }
+    if (y + 1 < rect.height and hasSignificantRow(scratch, x, y + 1)) {
+        score += signContribution(plane[(rect.y + y + 1) * stride + rect.x + x]);
+    }
+    return signCodingFromScore(score);
+}
+
+fn signCodingFromScore(score: i8) SignCoding {
+    const context_index: usize = @intCast(@min(@abs(score), 4));
+    return .{
+        .context = sign_context_lut[context_index],
+        .predicted_negative = score > 0,
+    };
+}
+
+fn signContribution(value: i32) i8 {
+    return if (value < 0) 1 else -1;
 }
 
 fn flagMask(kind: FlagKind) u8 {

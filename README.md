@@ -123,10 +123,9 @@ lines we are targeting:
   `Cprecincts`.
 - `--block 64` maps to Grok `-b 64,64` and Kakadu `Cblk={64,64}`.
 - `--bypass`, `--reset-context`, `--terminate-all`, `--vertical-causal`,
-  `--predictable-termination`, and `--segmentation-symbols` map to JPEG2000
-  Part 1 code-block style bits in COD `SPcod`. They correspond to Kakadu-style
-  `Cmodes` choices such as BYPASS, RESET, RESTART/TERMALL, CAUSAL, ERTERM, and
-  SEGMARK at marker/config level.
+  `--predictable-termination`, and `--segmentation-symbols` are parsed but fail
+  closed with `UnsupportedPayload` until the T1 payload implements the matching
+  JPEG2000 Part 1 code-block style behavior.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level.
 - `--tlm` writes TLM marker entries for the current tile-part lengths.
@@ -151,7 +150,7 @@ Archival-style scaffold:
 zig build run -- tiff-to-jp2 example.tif example.jp2 \
   --tile 4096,4096 --progression RPCL --resolutions 6 \
   --precincts "[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]" \
-  --block 64 --layers 1 --tile-parts R --bypass --sop --eph
+  --block 64 --layers 1 --tile-parts R --sop --eph
 ```
 
 Production-master-style scaffold:
@@ -160,7 +159,7 @@ Production-master-style scaffold:
 zig build run -- tiff-to-jp2 example.tif example.jp2 \
   --tile 1024,1024 --progression RPCL --resolutions 6 \
   --precincts "[256,256],[256,256],[128,128]" \
-  --block 64 --layers 12 --tile-parts R --bypass --no-sop --no-eph
+  --block 64 --layers 12 --tile-parts R --no-sop --no-eph
 ```
 
 These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`QCD`/
@@ -171,9 +170,10 @@ metadata, rate-allocation targets from `--rates`, and shadow EBCOT/MQ segment
 metadata for stats. BP7 carries the actual EBCOT/MQ bytes, and BP8 adds a shadow
 RPCL packet stream built from normalized code-block leaf locations. The
 temporary decoder still consumes the project-private bitplane payload for
-lossless roundtrip; the BP8 RPCL stream is staging data for replacing the main
-packet payload. Full EBCOT pass behavior for each code-block style bit and
-strict ISO packet decode still require more work.
+lossless roundtrip. The BP8 RPCL stream is now the main tile-part packet payload,
+but strict T1 reconstruction and external decoder interop still require more
+work. Code-block style options remain fail-closed until their payload behavior
+is implemented.
 
 ## Performance and Safety Direction
 
@@ -210,7 +210,7 @@ example:
 ./zig-out/bin/z2000 tiff-to-jp2 bench-rgb-2048.tif bench-ours-profile.jp2 \
   --tile 4096,4096 --progression RPCL --resolutions 6 \
   --precincts "[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]" \
-  --block 64 --layers 1 --tile-parts R --bypass --sop --eph --tlm --timings
+  --block 64 --layers 1 --tile-parts R --sop --eph --tlm --timings
 ```
 
 Current local baseline on a synthetic uncompressed RGB TIFF 2048x2048 after

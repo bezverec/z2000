@@ -199,7 +199,7 @@ pub const LosslessOptions = struct {
     block_height: u16 = 64,
     precincts: [33]PrecinctSize = defaultPrecincts(),
     precinct_count: u8 = 3,
-    bypass: bool = true,
+    bypass: bool = false,
     reset_context: bool = false,
     terminate_all: bool = false,
     vertical_causal: bool = false,
@@ -524,10 +524,12 @@ const RpclShadowStreamInfo = struct {
 const RpclPacketStream = struct {
     allocator: std.mem.Allocator = undefined,
     packet_lengths: []u32 = &.{},
+    packet_header_lengths: []u32 = &.{},
     packet_bytes: []u8 = &.{},
 
     fn deinit(self: *RpclPacketStream) void {
         if (self.packet_lengths.len > 0) self.allocator.free(self.packet_lengths);
+        if (self.packet_header_lengths.len > 0) self.allocator.free(self.packet_header_lengths);
         if (self.packet_bytes.len > 0) self.allocator.free(self.packet_bytes);
         self.* = .{};
     }
@@ -552,6 +554,50 @@ const TemporaryComponentRpclCatalog = struct {
 
 const RpclBlockIndexCell = struct {
     indexes: std.ArrayList(usize) = .empty,
+};
+
+const RpclPacketBandGroup = struct {
+    band_index: usize,
+    encoded: []t2.EncodedLayerBlock,
+    indexes: []usize,
+    writer_state: t2.PrecinctPacketWriterState,
+
+    fn deinit(self: *RpclPacketBandGroup, allocator: std.mem.Allocator) void {
+        self.writer_state.deinit();
+        allocator.free(self.indexes);
+        allocator.free(self.encoded);
+        self.* = undefined;
+    }
+};
+
+const PreparedRpclPacketGroup = struct {
+    packet_blocks: []t2.PacketBlock,
+    payload_slices: [][]const u8,
+
+    fn deinit(self: *PreparedRpclPacketGroup, allocator: std.mem.Allocator) void {
+        allocator.free(self.payload_slices);
+        allocator.free(self.packet_blocks);
+        self.* = undefined;
+    }
+};
+
+const RpclPacketReaderBandGroup = struct {
+    band_index: usize,
+    source_indexes: []usize,
+    locations: []t2.PacketBlockLocation,
+    reader_state: t2.PrecinctPacketReaderState,
+    decoded: []t2.DecodedPacketBlock,
+    payloads: []?[]const u8,
+    max_zero_bitplanes: u8,
+
+    fn deinit(self: *RpclPacketReaderBandGroup, allocator: std.mem.Allocator) void {
+        allocator.free(self.payloads);
+        allocator.free(self.decoded);
+        self.reader_state.deinit();
+        allocator.free(self.locations);
+        allocator.free(self.source_indexes);
+        self.* = undefined;
+    }
 };
 
 const RpclBlockIndex = struct {
@@ -753,6 +799,7 @@ fn encodeLosslessWithOptionsMeasured(
     }
     const packets = try makePacketPlan(rgb.width, rgb.height, levels, options);
     if (rpcl_stream.packet_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
+    if (rpcl_stream.packet_header_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
     const tile_parts = tilePartCountForOptions(levels, options);
     var psots: [33]u32 = undefined;
     var tile_part_payload_bytes: [33]usize = undefined;
@@ -772,6 +819,7 @@ fn encodeLosslessWithOptionsMeasured(
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
         const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, options);
         const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
+        const packet_header_lengths = rpcl_stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
         const packet_bytes_start = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start);
         const packet_bytes_end = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start + packet_range.count);
         try appendSot(allocator, &out, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
@@ -782,6 +830,7 @@ fn encodeLosslessWithOptionsMeasured(
             &out,
             options,
             packet_lengths,
+            packet_header_lengths,
             rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
             &packet_sequence,
         );
@@ -1459,15 +1508,20 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
                     continue;
                 }
 
-                var state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, selected.len, 1, selected.len, header.layers);
-                defer state.deinit();
-                const locations = try sequentialPacketLocations(allocator, selected.len);
-                defer allocator.free(locations);
-                const decoded = try allocator.alloc(t2.DecodedPacketBlock, selected.len);
-                defer allocator.free(decoded);
-                const payloads = try allocator.alloc(?[]const u8, selected.len);
-                defer allocator.free(payloads);
-                const max_zero_bitplanes = maxZeroBitplanes(catalogs[component].blocks, selected);
+                const groups = try buildRpclPacketReaderBandGroups(
+                    allocator,
+                    bands,
+                    blocks,
+                    header.block_width,
+                    header.block_height,
+                    catalogs[component].blocks,
+                    selected,
+                    header.layers,
+                );
+                defer {
+                    for (groups) |*group| group.deinit(allocator);
+                    allocator.free(groups);
+                }
 
                 var layer: u16 = 0;
                 while (layer < header.layers) : (layer += 1) {
@@ -1481,20 +1535,17 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
                         .component = component,
                         .layer = layer,
                     };
-                    const read = try state.readRpclPacket(
+                    const read = try readRpclPacketForBandGroups(
                         allocator,
                         packet_bytes.bytes,
                         packet,
                         @intCast(resolution_index),
                         component,
                         precinct_index,
-                        locations,
-                        max_zero_bitplanes,
-                        decoded,
-                        payloads,
+                        catalogs[component].blocks,
+                        groups,
                     );
                     if (read.packet_length != packet_bytes.bytes.len) return CodestreamError.InvalidCodestream;
-                    try validateDecodedRpclPacketBlocks(catalogs[component].blocks, selected, layer, decoded, payloads);
                     packet_byte_offset = packet_bytes.next_offset;
                     sequence += 1;
                 }
@@ -1596,12 +1647,215 @@ fn validateEmptyRpclPacket(bytes: []const u8) !void {
     if (present or cursor != bytes.len) return CodestreamError.InvalidCodestream;
 }
 
-fn sequentialPacketLocations(allocator: std.mem.Allocator, count: usize) ![]t2.PacketBlockLocation {
-    const locations = try allocator.alloc(t2.PacketBlockLocation, count);
-    for (locations, 0..) |*location, index| {
-        location.* = .{ .leaf_x = index, .leaf_y = 0 };
+fn buildRpclPacketReaderBandGroups(
+    allocator: std.mem.Allocator,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    block_width: u16,
+    block_height: u16,
+    catalog: []const TemporaryRpclBlock,
+    selected: []const usize,
+    layer_count: u16,
+) ![]RpclPacketReaderBandGroup {
+    var groups: std.ArrayList(RpclPacketReaderBandGroup) = .empty;
+    errdefer {
+        for (groups.items) |*group| group.deinit(allocator);
+        groups.deinit(allocator);
     }
-    return locations;
+
+    var cursor: usize = 0;
+    while (cursor < selected.len) {
+        const first_source = selected[cursor];
+        if (first_source >= blocks.len or first_source >= catalog.len) return CodestreamError.InvalidCodestream;
+        const band_index = blocks[first_source].band_index;
+        if (band_index >= bands.len) return CodestreamError.InvalidCodestream;
+
+        var end = cursor + 1;
+        while (end < selected.len and blocks[selected[end]].band_index == band_index) : (end += 1) {
+            if (selected[end] >= blocks.len or selected[end] >= catalog.len) return CodestreamError.InvalidCodestream;
+        }
+
+        try groups.append(allocator, try buildRpclPacketReaderBandGroup(
+            allocator,
+            bands[band_index],
+            blocks,
+            block_width,
+            block_height,
+            catalog,
+            selected[cursor..end],
+            band_index,
+            layer_count,
+        ));
+        cursor = end;
+    }
+
+    return groups.toOwnedSlice(allocator);
+}
+
+fn buildRpclPacketReaderBandGroup(
+    allocator: std.mem.Allocator,
+    band: subband.Band,
+    blocks: []const subband.CodeBlock,
+    block_width: u16,
+    block_height: u16,
+    catalog: []const TemporaryRpclBlock,
+    selected: []const usize,
+    band_index: usize,
+    layer_count: u16,
+) !RpclPacketReaderBandGroup {
+    if (selected.len == 0) return CodestreamError.InvalidCodestream;
+    const grid = try t2.CodeBlockGrid.init(
+        band.rect.x,
+        band.rect.y,
+        band.rect.width,
+        band.rect.height,
+        block_width,
+        block_height,
+    );
+
+    var min_x: usize = std.math.maxInt(usize);
+    var min_y: usize = std.math.maxInt(usize);
+    var max_x: usize = 0;
+    var max_y: usize = 0;
+    const original_locations = try allocator.alloc(t2.PacketBlockLocation, selected.len);
+    defer allocator.free(original_locations);
+    for (selected, 0..) |source_index, index| {
+        if (source_index >= blocks.len or source_index >= catalog.len) return CodestreamError.InvalidCodestream;
+        const block = blocks[source_index];
+        if (block.band_index != band_index) return CodestreamError.InvalidCodestream;
+        const location = try grid.locationForRect(.{
+            .x = block.rect.x,
+            .y = block.rect.y,
+            .width = block.rect.width,
+            .height = block.rect.height,
+        });
+        original_locations[index] = location;
+        min_x = @min(min_x, location.leaf_x);
+        min_y = @min(min_y, location.leaf_y);
+        max_x = @max(max_x, location.leaf_x);
+        max_y = @max(max_y, location.leaf_y);
+    }
+
+    const leaves_x = max_x - min_x + 1;
+    const leaves_y = max_y - min_y + 1;
+    const leaf_count = try std.math.mul(usize, leaves_x, leaves_y);
+    if (leaf_count != selected.len) return CodestreamError.InvalidCodestream;
+
+    const source_indexes = try allocator.alloc(usize, leaf_count);
+    errdefer allocator.free(source_indexes);
+    const locations = try allocator.alloc(t2.PacketBlockLocation, leaf_count);
+    errdefer allocator.free(locations);
+    const filled = try allocator.alloc(bool, leaf_count);
+    defer allocator.free(filled);
+    @memset(filled, false);
+
+    for (selected, 0..) |source_index, source_offset| {
+        const location = original_locations[source_offset];
+        const local_x = location.leaf_x - min_x;
+        const local_y = location.leaf_y - min_y;
+        const local_index = local_y * leaves_x + local_x;
+        if (local_index >= leaf_count or filled[local_index]) return CodestreamError.InvalidCodestream;
+        filled[local_index] = true;
+        source_indexes[local_index] = source_index;
+        locations[local_index] = .{ .leaf_x = local_x, .leaf_y = local_y };
+    }
+    for (filled) |is_filled| {
+        if (!is_filled) return CodestreamError.InvalidCodestream;
+    }
+
+    var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, leaves_x, leaves_y, leaf_count, layer_count);
+    errdefer reader_state.deinit();
+    const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
+    errdefer allocator.free(decoded);
+    const payloads = try allocator.alloc(?[]const u8, leaf_count);
+    errdefer allocator.free(payloads);
+
+    return .{
+        .band_index = band_index,
+        .source_indexes = source_indexes,
+        .locations = locations,
+        .reader_state = reader_state,
+        .decoded = decoded,
+        .payloads = payloads,
+        .max_zero_bitplanes = maxZeroBitplanes(catalog, source_indexes),
+    };
+}
+
+fn readRpclPacketForBandGroups(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    packet: packet_plan.Packet,
+    expected_resolution: u8,
+    expected_component: u16,
+    expected_precinct: u64,
+    catalog: []const TemporaryRpclBlock,
+    groups: []RpclPacketReaderBandGroup,
+) !t2.ReadPacket {
+    _ = allocator;
+    if (packet.resolution != expected_resolution or
+        packet.component != expected_component or
+        packet.precinct_index != expected_precinct)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var reader = t2.PacketHeaderReader.init(bytes);
+    const packet_included = try reader.readBit();
+    if (packet_included) {
+        for (groups) |*group| {
+            try t2.readPrecinctPacketHeaderBody(
+                &reader,
+                &group.reader_state.inclusion,
+                &group.reader_state.zero_bitplanes,
+                group.reader_state.states,
+                packet.layer,
+                group.locations,
+                group.max_zero_bitplanes,
+                group.decoded,
+            );
+        }
+    } else {
+        for (groups) |*group| {
+            for (group.decoded) |*decoded| {
+                decoded.* = .{
+                    .included = false,
+                    .first_inclusion = false,
+                    .zero_bitplanes = 0,
+                    .pass_count = 0,
+                    .byte_length = 0,
+                };
+            }
+        }
+    }
+    try reader.byteAlign();
+
+    const payload_offset = reader.bytesConsumed();
+    var cursor = payload_offset;
+    var payload_length: usize = 0;
+    var included_blocks: usize = 0;
+    for (groups) |*group| {
+        for (group.decoded, group.payloads) |decoded, *payload| {
+            payload.* = null;
+            if (!decoded.included) continue;
+            const byte_length = std.math.cast(usize, decoded.byte_length) orelse return CodestreamError.InvalidCodestream;
+            const end = try std.math.add(usize, cursor, byte_length);
+            if (end > bytes.len) return CodestreamError.TruncatedData;
+            payload.* = bytes[cursor..end];
+            cursor = end;
+            payload_length += byte_length;
+            included_blocks += 1;
+        }
+        try validateDecodedRpclPacketBlocks(catalog, group.source_indexes, @intCast(packet.layer), group.decoded, group.payloads);
+    }
+    if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+
+    return .{
+        .header_length = payload_offset,
+        .payload_offset = payload_offset,
+        .payload_length = payload_length,
+        .packet_length = cursor,
+        .included_blocks = included_blocks,
+    };
 }
 
 fn maxZeroBitplanes(blocks: []const TemporaryRpclBlock, selected: []const usize) u8 {
@@ -1666,6 +1920,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
 
+    const eph_enabled = try mainHeaderUsesEph(bytes);
     var cursor: usize = 2;
     cursor = try skipMainHeaderToFirstSot(bytes, cursor);
     var packet_sequence: u16 = 0;
@@ -1712,6 +1967,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
             cursor,
             tile_part_end,
             tile_packet_lengths.items,
+            eph_enabled,
             &packet_sequence,
         );
         cursor = tile_part_end;
@@ -1740,6 +1996,40 @@ fn skipMainHeaderToFirstSot(bytes: []const u8, start: usize) !usize {
     return CodestreamError.InvalidCodestream;
 }
 
+fn mainHeaderUsesEph(bytes: []const u8) !bool {
+    var cursor: usize = 2;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        cursor += 2;
+        if (marker == @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) {
+            return CodestreamError.TruncatedData;
+        }
+        const segment = bytes[cursor + 2 .. cursor + segment_length];
+        if (marker == @intFromEnum(Marker.cod)) {
+            if (segment.len < 1) return CodestreamError.InvalidCodestream;
+            return (segment[0] & 0x04) != 0;
+        }
+        cursor += segment_length;
+    }
+    return CodestreamError.InvalidCodestream;
+}
+
+fn findMarkerInPacket(bytes: []const u8, start: usize, end: usize, marker: Marker) ?usize {
+    const marker_value = @intFromEnum(marker);
+    var cursor = start;
+    while (cursor + 1 < end) : (cursor += 1) {
+        if (readU16Be(bytes, cursor) == marker_value) return cursor;
+    }
+    return null;
+}
+
 fn appendStrictSodPackets(
     allocator: std.mem.Allocator,
     lengths: *std.ArrayList(u32),
@@ -1748,16 +2038,15 @@ fn appendStrictSodPackets(
     start: usize,
     end: usize,
     packet_lengths: []const usize,
+    eph_enabled: bool,
     packet_sequence: *u16,
 ) !void {
     var cursor = start;
     for (packet_lengths) |packet_length| {
-        const packet_end = try std.math.add(usize, cursor, packet_length);
-        if (packet_end > end) return CodestreamError.TruncatedData;
         var packet_start = cursor;
 
-        if (packet_end - packet_start >= 2 and readU16Be(bytes, packet_start) == @intFromEnum(Marker.sop)) {
-            if (packet_end - packet_start < 6) return CodestreamError.TruncatedData;
+        if (end - packet_start >= 2 and readU16Be(bytes, packet_start) == @intFromEnum(Marker.sop)) {
+            if (end - packet_start < 6) return CodestreamError.TruncatedData;
             const segment_length = readU16Be(bytes, packet_start + 2);
             if (segment_length != 4) return CodestreamError.InvalidCodestream;
             const sequence = readU16Be(bytes, packet_start + 4);
@@ -1766,15 +2055,23 @@ fn appendStrictSodPackets(
             packet_start += 6;
         }
 
-        var packet_payload_end = packet_end;
-        if (packet_payload_end - packet_start >= 2 and readU16Be(bytes, packet_payload_end - 2) == @intFromEnum(Marker.eph)) {
-            packet_payload_end -= 2;
-        }
-        if (packet_payload_end < packet_start) return CodestreamError.InvalidCodestream;
-        const payload_len = packet_payload_end - packet_start;
+        const framed_length = try std.math.add(usize, packet_length, if (eph_enabled) @as(usize, 2) else 0);
+        const packet_end = try std.math.add(usize, packet_start, framed_length);
+        if (packet_end > end) return CodestreamError.TruncatedData;
+        const eph_offset = if (eph_enabled)
+            findMarkerInPacket(bytes, packet_start, packet_end, .eph) orelse return CodestreamError.InvalidCodestream
+        else
+            null;
+        const payload_len = packet_end - packet_start - (if (eph_offset != null) @as(usize, 2) else 0);
+        if (payload_len != packet_length) return CodestreamError.InvalidCodestream;
         const payload_len_u32 = std.math.cast(u32, payload_len) orelse return CodestreamError.InvalidCodestream;
         try lengths.append(allocator, payload_len_u32);
-        try packet_bytes.appendSlice(allocator, bytes[packet_start..packet_payload_end]);
+        if (eph_offset) |offset| {
+            try packet_bytes.appendSlice(allocator, bytes[packet_start..offset]);
+            try packet_bytes.appendSlice(allocator, bytes[offset + 2 .. packet_end]);
+        } else {
+            try packet_bytes.appendSlice(allocator, bytes[packet_start..packet_end]);
+        }
         cursor = packet_end;
     }
     if (cursor != end) return CodestreamError.InvalidCodestream;
@@ -2511,6 +2808,7 @@ fn appendPltFromRpclPacketLengths(
     options: LosslessOptions,
     packet_lengths: []const u32,
 ) !void {
+    _ = options;
     if (packet_lengths.len == 0) return;
 
     var marker_index: u8 = 0;
@@ -2518,15 +2816,14 @@ fn appendPltFromRpclPacketLengths(
     defer segment.deinit(allocator);
 
     for (packet_lengths) |packet_length| {
-        const adjusted_length = rpclPacketLengthWithMarkers(options, packet_length);
-        const encoded_len = pltLengthByteCount(adjusted_length);
+        const encoded_len = pltLengthByteCount(packet_length);
         if (segment.items.len + encoded_len > 65532) {
             try flushPltSegment(allocator, out, marker_index, segment.items);
             if (marker_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
             marker_index += 1;
             segment.clearRetainingCapacity();
         }
-        try appendPltLength(allocator, &segment, adjusted_length);
+        try appendPltLength(allocator, &segment, packet_length);
     }
 
     if (segment.items.len > 0) {
@@ -2543,13 +2840,14 @@ fn flushPltSegment(allocator: std.mem.Allocator, out: *std.ArrayList(u8), marker
 }
 
 fn pltBytesForRpclPacketLengths(options: LosslessOptions, packet_lengths: []const u32) !usize {
+    _ = options;
     if (packet_lengths.len == 0) return 0;
     var bytes: usize = 5;
     var segment_payload_bytes: usize = 0;
     var marker_count: usize = 1;
 
     for (packet_lengths) |packet_length| {
-        const encoded_len = pltLengthByteCount(rpclPacketLengthWithMarkers(options, packet_length));
+        const encoded_len = pltLengthByteCount(packet_length);
         if (segment_payload_bytes + encoded_len > 65532) {
             marker_count += 1;
             if (marker_count > 256) return CodestreamError.InvalidCodestream;
@@ -2629,19 +2927,24 @@ fn appendRpclPackets(
     out: *std.ArrayList(u8),
     options: LosslessOptions,
     packet_lengths: []const u32,
+    packet_header_lengths: []const u32,
     packet_bytes: []const u8,
     packet_sequence: *u16,
 ) !void {
+    if (packet_lengths.len != packet_header_lengths.len) return CodestreamError.InvalidCodestream;
     var cursor: usize = 0;
-    for (packet_lengths) |packet_length| {
+    for (packet_lengths, packet_header_lengths) |packet_length, packet_header_length| {
         const end = try std.math.add(usize, cursor, packet_length);
         if (end > packet_bytes.len) return CodestreamError.InvalidCodestream;
+        if (packet_header_length > packet_length) return CodestreamError.InvalidCodestream;
+        const header_end = try std.math.add(usize, cursor, packet_header_length);
         if (options.sop) {
             try appendSop(allocator, out, packet_sequence.*);
             packet_sequence.* +%= 1;
         }
-        try out.appendSlice(allocator, packet_bytes[cursor..end]);
+        try out.appendSlice(allocator, packet_bytes[cursor..header_end]);
         if (options.eph) try appendMarker(allocator, out, .eph);
+        try out.appendSlice(allocator, packet_bytes[header_end..end]);
         cursor = end;
     }
     if (cursor != packet_bytes.len) return CodestreamError.InvalidCodestream;
@@ -2739,6 +3042,8 @@ fn appendRpclShadowStream(
     defer packet_bytes.deinit(allocator);
     var packet_lengths: std.ArrayList(u32) = .empty;
     defer packet_lengths.deinit(allocator);
+    var packet_header_lengths: std.ArrayList(u32) = .empty;
+    defer packet_header_lengths.deinit(allocator);
 
     var sequence: u64 = 0;
     var resolution_index: u8 = 0;
@@ -2764,6 +3069,10 @@ fn appendRpclShadowStream(
                         allocator,
                         &packet_bytes,
                         &packet_lengths,
+                        &packet_header_lengths,
+                        bands,
+                        blocks,
+                        options,
                         &catalogs[@intCast(component)],
                         selected,
                         first_layer_packet,
@@ -2777,7 +3086,10 @@ fn appendRpclShadowStream(
             }
         }
     }
-    if (sequence != plan.packets or packet_lengths.items.len != plan.packets) {
+    if (sequence != plan.packets or
+        packet_lengths.items.len != plan.packets or
+        packet_header_lengths.items.len != plan.packets)
+    {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -2798,10 +3110,13 @@ fn appendRpclShadowStream(
         stream.deinit();
         const owned_lengths = try packet_lengths.toOwnedSlice(allocator);
         errdefer allocator.free(owned_lengths);
+        const owned_header_lengths = try packet_header_lengths.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_header_lengths);
         const owned_bytes = try packet_bytes.toOwnedSlice(allocator);
         stream.* = .{
             .allocator = allocator,
             .packet_lengths = owned_lengths,
+            .packet_header_lengths = owned_header_lengths,
             .packet_bytes = owned_bytes,
         };
     }
@@ -3021,7 +3336,10 @@ fn buildRpclShadowBlock(
     options: LosslessOptions,
     include_bitplane_payload: bool,
 ) !RpclShadowBlock {
-    var segment = try ebcot.encodeCodeBlockSegmentDirectScratch(ebcot_scratch, plane, stride, rect);
+    var segment = if (options.layers == 1)
+        try ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect)
+    else
+        try ebcot.encodeCodeBlockSegmentDirectScratch(ebcot_scratch, plane, stride, rect);
     errdefer segment.deinit(allocator);
 
     var bitplane_passes: ?bitplane.EncodedBlockPasses = null;
@@ -3104,6 +3422,10 @@ fn appendRpclShadowPacketsForSelection(
     allocator: std.mem.Allocator,
     packet_bytes: *std.ArrayList(u8),
     packet_lengths: *std.ArrayList(u32),
+    packet_header_lengths: *std.ArrayList(u32),
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
     catalog: *const ComponentRpclShadowCatalog,
     selected: []const usize,
     first_layer_packet: packet_plan.Packet,
@@ -3119,24 +3441,17 @@ fn appendRpclShadowPacketsForSelection(
             const start = packet_bytes.items.len;
             try t2.appendPacketPresenceHeader(allocator, packet_bytes, false);
             try appendShadowPacketLength(allocator, packet_lengths, packet_bytes.items.len - start);
+            try appendShadowPacketLength(allocator, packet_header_lengths, packet_bytes.items.len - start);
             sequence.* += 1;
         }
         return;
     }
 
-    const encoded = try allocator.alloc(t2.EncodedLayerBlock, selected.len);
-    defer allocator.free(encoded);
-    const sequential_indexes = try allocator.alloc(usize, selected.len);
-    defer allocator.free(sequential_indexes);
-    for (selected, 0..) |source_index, index| {
-        if (source_index >= catalog.blocks.len) return CodestreamError.InvalidCodestream;
-        encoded[index] = catalog.blocks[source_index].encoded;
-        encoded[index].location = .{ .leaf_x = index, .leaf_y = 0 };
-        sequential_indexes[index] = index;
+    const groups = try buildRpclPacketBandGroups(allocator, bands, blocks, options, catalog, selected, layer_count);
+    defer {
+        for (groups) |*group| group.deinit(allocator);
+        allocator.free(groups);
     }
-
-    var writer_state = try t2.PrecinctPacketWriterState.initForEncodedBlocks(allocator, encoded);
-    defer writer_state.deinit();
 
     var layer: u16 = 0;
     while (layer < layer_count) : (layer += 1) {
@@ -3150,20 +3465,263 @@ fn appendRpclShadowPacketsForSelection(
             .layer = layer,
         };
         const start = packet_bytes.items.len;
-        _ = try t2.appendRpclPacketForIndexes(
-            &writer_state,
+        const written = try appendRpclPacketForBandGroups(
             allocator,
             packet_bytes,
+            groups,
             packet,
             expected_resolution,
             expected_component,
             expected_precinct,
-            encoded,
-            sequential_indexes,
         );
         try appendShadowPacketLength(allocator, packet_lengths, packet_bytes.items.len - start);
+        try appendShadowPacketLength(allocator, packet_header_lengths, written.header_length);
         sequence.* += 1;
     }
+}
+
+fn buildRpclPacketBandGroups(
+    allocator: std.mem.Allocator,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+    catalog: *const ComponentRpclShadowCatalog,
+    selected: []const usize,
+    layer_count: u16,
+) ![]RpclPacketBandGroup {
+    var groups: std.ArrayList(RpclPacketBandGroup) = .empty;
+    errdefer {
+        for (groups.items) |*group| group.deinit(allocator);
+        groups.deinit(allocator);
+    }
+
+    var cursor: usize = 0;
+    while (cursor < selected.len) {
+        const first_source = selected[cursor];
+        if (first_source >= blocks.len or first_source >= catalog.blocks.len) return CodestreamError.InvalidCodestream;
+        const band_index = blocks[first_source].band_index;
+        if (band_index >= bands.len) return CodestreamError.InvalidCodestream;
+
+        var end = cursor + 1;
+        while (end < selected.len and blocks[selected[end]].band_index == band_index) : (end += 1) {
+            if (selected[end] >= blocks.len or selected[end] >= catalog.blocks.len) return CodestreamError.InvalidCodestream;
+        }
+
+        try groups.append(allocator, try buildRpclPacketBandGroup(
+            allocator,
+            bands[band_index],
+            blocks,
+            options,
+            catalog,
+            selected[cursor..end],
+            band_index,
+            layer_count,
+        ));
+        cursor = end;
+    }
+
+    return groups.toOwnedSlice(allocator);
+}
+
+fn buildRpclPacketBandGroup(
+    allocator: std.mem.Allocator,
+    band: subband.Band,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+    catalog: *const ComponentRpclShadowCatalog,
+    selected: []const usize,
+    band_index: usize,
+    layer_count: u16,
+) !RpclPacketBandGroup {
+    if (selected.len == 0) return CodestreamError.InvalidCodestream;
+    const grid = try t2.CodeBlockGrid.init(
+        band.rect.x,
+        band.rect.y,
+        band.rect.width,
+        band.rect.height,
+        options.block_width,
+        options.block_height,
+    );
+
+    var min_x: usize = std.math.maxInt(usize);
+    var min_y: usize = std.math.maxInt(usize);
+    var max_x: usize = 0;
+    var max_y: usize = 0;
+    const locations = try allocator.alloc(t2.PacketBlockLocation, selected.len);
+    defer allocator.free(locations);
+    for (selected, 0..) |source_index, index| {
+        if (source_index >= blocks.len or source_index >= catalog.blocks.len) return CodestreamError.InvalidCodestream;
+        const block = blocks[source_index];
+        if (block.band_index != band_index) return CodestreamError.InvalidCodestream;
+        const location = try grid.locationForRect(.{
+            .x = block.rect.x,
+            .y = block.rect.y,
+            .width = block.rect.width,
+            .height = block.rect.height,
+        });
+        locations[index] = location;
+        min_x = @min(min_x, location.leaf_x);
+        min_y = @min(min_y, location.leaf_y);
+        max_x = @max(max_x, location.leaf_x);
+        max_y = @max(max_y, location.leaf_y);
+    }
+
+    const leaves_x = max_x - min_x + 1;
+    const leaves_y = max_y - min_y + 1;
+    const leaf_count = try std.math.mul(usize, leaves_x, leaves_y);
+    if (leaf_count != selected.len) return CodestreamError.InvalidCodestream;
+
+    const encoded = try allocator.alloc(t2.EncodedLayerBlock, leaf_count);
+    errdefer allocator.free(encoded);
+    const indexes = try allocator.alloc(usize, leaf_count);
+    errdefer allocator.free(indexes);
+    const filled = try allocator.alloc(bool, leaf_count);
+    defer allocator.free(filled);
+    @memset(filled, false);
+
+    for (selected, 0..) |source_index, source_offset| {
+        const location = locations[source_offset];
+        const local_x = location.leaf_x - min_x;
+        const local_y = location.leaf_y - min_y;
+        const local_index = local_y * leaves_x + local_x;
+        if (local_index >= leaf_count or filled[local_index]) return CodestreamError.InvalidCodestream;
+        filled[local_index] = true;
+        encoded[local_index] = catalog.blocks[source_index].encoded;
+        encoded[local_index].location = .{ .leaf_x = local_x, .leaf_y = local_y };
+        indexes[local_index] = local_index;
+    }
+
+    for (filled) |is_filled| {
+        if (!is_filled) return CodestreamError.InvalidCodestream;
+    }
+
+    var writer_state = try t2.PrecinctPacketWriterState.initForEncodedBlocks(allocator, encoded);
+    errdefer writer_state.deinit();
+    if (writer_state.layer_count == null or writer_state.layer_count.? != layer_count) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    return .{
+        .band_index = band_index,
+        .encoded = encoded,
+        .indexes = indexes,
+        .writer_state = writer_state,
+    };
+}
+
+fn appendRpclPacketForBandGroups(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    groups: []RpclPacketBandGroup,
+    packet: packet_plan.Packet,
+    expected_resolution: u8,
+    expected_component: u16,
+    expected_precinct: u64,
+) !t2.WrittenPacket {
+    if (packet.resolution != expected_resolution or
+        packet.component != expected_component or
+        packet.precinct_index != expected_precinct)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    const prepared = try allocator.alloc(PreparedRpclPacketGroup, groups.len);
+    defer allocator.free(prepared);
+    var initialized: usize = 0;
+    defer {
+        for (prepared[0..initialized]) |*group| group.deinit(allocator);
+    }
+
+    var packet_included = false;
+    var payload_length: usize = 0;
+    var included_blocks: usize = 0;
+    for (groups, 0..) |*group, group_index| {
+        prepared[group_index] = try prepareRpclPacketGroup(allocator, group, packet.layer);
+        initialized += 1;
+        packet_included = packet_included or t2.packetBlocksIncluded(prepared[group_index].packet_blocks);
+        for (prepared[group_index].packet_blocks, prepared[group_index].payload_slices) |packet_block, payload| {
+            if (packet_block.included) {
+                payload_length = try std.math.add(usize, payload_length, payload.len);
+                included_blocks += 1;
+            }
+        }
+    }
+
+    const header_offset = out.items.len;
+    var writer = t2.PacketHeaderWriter.init(allocator, out);
+    try writer.writeBit(packet_included);
+    if (packet_included) {
+        for (groups, prepared[0..initialized]) |*group, prepared_group| {
+            try t2.writePrecinctPacketHeaderBody(
+                &writer,
+                &group.writer_state.inclusion,
+                &group.writer_state.zero_bitplanes,
+                group.writer_state.states,
+                packet.layer,
+                prepared_group.packet_blocks,
+            );
+        }
+    }
+    try writer.finish();
+    const header_length = out.items.len - header_offset;
+    const payload_offset = out.items.len;
+
+    if (packet_included) {
+        for (prepared[0..initialized]) |prepared_group| {
+            for (prepared_group.packet_blocks, prepared_group.payload_slices) |packet_block, payload| {
+                if (packet_block.included) try out.appendSlice(allocator, payload);
+            }
+        }
+    }
+
+    return .{
+        .header_offset = header_offset,
+        .header_length = header_length,
+        .payload_offset = payload_offset,
+        .payload_length = payload_length,
+        .included_blocks = included_blocks,
+    };
+}
+
+fn prepareRpclPacketGroup(
+    allocator: std.mem.Allocator,
+    group: *RpclPacketBandGroup,
+    layer: u32,
+) !PreparedRpclPacketGroup {
+    const layer_index: usize = @intCast(layer);
+    const layer_blocks = try t2.layerPacketBlocksForIndexes(allocator, group.encoded, group.indexes, layer_index);
+    defer allocator.free(layer_blocks);
+
+    const packet_blocks = try allocator.alloc(t2.PacketBlock, layer_blocks.len);
+    errdefer allocator.free(packet_blocks);
+    const payload_slices = try allocator.alloc([]const u8, layer_blocks.len);
+    errdefer allocator.free(payload_slices);
+
+    for (layer_blocks, 0..) |block, index| {
+        if (block.previous.cumulative_passes != group.writer_state.states[index].cumulative_passes or
+            block.previous.cumulative_bytes != group.writer_state.states[index].cumulative_bytes)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        packet_blocks[index] = try t2.packetBlockForLayer(
+            block.location,
+            block.nominal_bitplanes,
+            block.encoded_bitplanes,
+            block.previous,
+            block.current,
+        );
+        payload_slices[index] = try t2.layerPayloadSlice(block.payload, block.previous, block.current);
+        if (packet_blocks[index].included) {
+            if (payload_slices[index].len != packet_blocks[index].byte_length) return CodestreamError.InvalidCodestream;
+        } else if (payload_slices[index].len != 0) {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
+
+    return .{
+        .packet_blocks = packet_blocks,
+        .payload_slices = payload_slices,
+    };
 }
 
 fn appendShadowPacketLength(allocator: std.mem.Allocator, lengths: *std.ArrayList(u32), length: usize) !void {
@@ -3718,6 +4276,15 @@ fn validateCodingPath(options: LosslessOptions) !void {
     if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
     if (options.quantization != .none) return CodestreamError.UnsupportedPayload;
+    if (options.bypass or
+        options.reset_context or
+        options.terminate_all or
+        options.vertical_causal or
+        options.predictable_termination or
+        options.segmentation_symbols)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
     if (options.guard_bits > 7) return CodestreamError.InvalidCodestream;
 }
 
