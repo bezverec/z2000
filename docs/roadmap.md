@@ -19,7 +19,8 @@ encoder before broadening profile coverage.
   sign context and prediction, more precise refinement contexts, and real
   termination/reset behavior driven by COD code-block style flags. Keep
   row-mask, stripe-mask, and SIMD-aware block-stats optimization going only when
-  byte-for-byte oracle tests continue to pass.
+  byte-for-byte oracle tests continue to pass. Code-block style flags currently
+  fail closed until that behavior is connected to the emitted payload.
 - T2 packet state: make include tag-tree state, zero-bitplane tag-tree state,
   `numlenbits`, layer deltas, and packet header state explicit per
   resolution/precinct/component/layer. The RPCL path now tracks layer bounds,

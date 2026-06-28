@@ -2109,6 +2109,30 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expectEqual(codestream.markerValue("sot"), readU16BeTest(bytes, sot_index + psot));
 }
 
+test "lossless codestream places EPH before non-empty packet payload" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        10,  20,  30,
+        40,  50,  60,
+        70,  80,  90,
+        100, 110, 120,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessSkeleton(allocator, rgb, 2);
+    defer allocator.free(bytes);
+
+    try std.testing.expect(try hasNonTrailingEphPacketForTest(bytes));
+}
+
 test "debug temporary sidecar option preserves BP8 COM payload" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
@@ -2466,6 +2490,23 @@ test "EBCOT cleanup pass emits top bitplane significance and sign symbols" {
     try std.testing.expectEqual(true, top[3].bit);
 }
 
+test "EBCOT sign coding uses neighbor prediction context" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{ -4, -4 };
+
+    var encoded = try ebcot.encodeBlock(allocator, plane[0..], 2, .{ .x = 0, .y = 0, .width = 2, .height = 1 });
+    defer encoded.deinit(allocator);
+
+    const top = encoded.symbols[encoded.passes[0].first_symbol..][0..encoded.passes[0].symbol_count];
+    try std.testing.expectEqual(@as(usize, 4), top.len);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, top[1].kind);
+    try std.testing.expectEqual(ebcot.Context.sign0, top[1].context);
+    try std.testing.expectEqual(true, top[1].bit);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, top[3].kind);
+    try std.testing.expectEqual(ebcot.Context.sign1, top[3].context);
+    try std.testing.expectEqual(false, top[3].bit);
+}
+
 test "EBCOT significance propagation precedes cleanup on lower bitplanes" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{ 4, 2 };
@@ -2631,6 +2672,50 @@ test "EBCOT code-block segment records MQ payload truncation points" {
     const decoded_bits = try ebcot.decodeCodeBlockSegmentBits(allocator, segment, block.symbols);
     defer allocator.free(decoded_bits);
     try std.testing.expectEqual(block.symbols.len, decoded_bits.len);
+    for (block.symbols, decoded_bits) |symbol, bit| {
+        try std.testing.expectEqual(symbol.bit, bit);
+    }
+}
+
+test "EBCOT continuous MQ segment roundtrips whole code-block payload" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{
+        0,  -7,  0,  5,
+        1,  0,   -2, 0,
+        3,  0,   0,  -6,
+        9,  -12, 0,  4,
+    };
+
+    var block = try ebcot.encodeBlock(allocator, plane[0..], 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 });
+    defer block.deinit(allocator);
+    var segment = try ebcot.encodeBlockSymbolsSegmentContinuous(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer segment.deinit(allocator);
+
+    try std.testing.expectEqual(block.bitplanes, segment.bitplanes);
+    try std.testing.expectEqual(block.non_zero_count, segment.non_zero_count);
+    try std.testing.expectEqual(@as(u16, @intCast(block.passes.len)), segment.pass_count);
+    try std.testing.expectEqual(@as(u64, @intCast(segment.bytes.len)), segment.byte_length);
+    try expectMarkerStuffingIsValid(segment.bytes);
+
+    var previous_end: u64 = 0;
+    for (segment.passes, block.passes) |payload, pass| {
+        try std.testing.expectEqual(pass.kind, payload.kind);
+        try std.testing.expectEqual(pass.magnitude_bitplane, payload.magnitude_bitplane);
+        try std.testing.expectEqual(pass.symbol_count, payload.symbol_count);
+        try std.testing.expectEqual(previous_end, @as(u64, @intCast(payload.byte_offset)));
+        try std.testing.expect(payload.cumulative_bytes >= previous_end);
+        try std.testing.expectEqual(payload.cumulative_bytes - previous_end, @as(u64, @intCast(payload.byte_length)));
+        previous_end = payload.cumulative_bytes;
+    }
+    try std.testing.expectEqual(segment.byte_length, previous_end);
+
+    const decoded_bits = try ebcot.decodeCodeBlockSegmentBitsContinuous(allocator, segment, block.symbols);
+    defer allocator.free(decoded_bits);
     for (block.symbols, decoded_bits) |symbol, bit| {
         try std.testing.expectEqual(symbol.bit, bit);
     }
@@ -3287,9 +3372,14 @@ test "temporary payload records resolution ordered tile-part plan" {
     try std.testing.expectEqual(@as(u64, 12), stats.packet_count);
     try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expectEqual(@as(usize, 4), try countTilePartHeaderMarker(bytes, codestream.markerValue("plt")));
-    try std.testing.expectEqual(try sumTilePartPayloadBytes(bytes), try sumTilePartPltLengths(bytes));
-    try std.testing.expectEqual(@as(usize, 12), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
-    try std.testing.expectEqual(@as(usize, 12), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
+    const sop_count = try countTilePartPrefixMarker(bytes, codestream.markerValue("sop"));
+    const eph_count = try countTilePartPrefixMarker(bytes, codestream.markerValue("eph"));
+    try std.testing.expectEqual(@as(usize, 12), sop_count);
+    try std.testing.expectEqual(@as(usize, 12), eph_count);
+    try std.testing.expectEqual(
+        try sumTilePartPayloadBytes(bytes),
+        try sumTilePartPltLengths(bytes) + sop_count * 6 + eph_count * 2,
+    );
 }
 
 test "temporary payload rejects unterminated PLT lengths" {
@@ -3637,7 +3727,6 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
         .layers = 1,
         .block_width = 64,
         .block_height = 64,
-        .bypass = true,
         .sop = true,
         .eph = true,
     };
@@ -3664,9 +3753,14 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     const stats = try codestream.analyzeLosslessTemporary(bytes);
     try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expectEqual(@as(usize, 6), try countTilePartHeaderMarker(bytes, codestream.markerValue("plt")));
-    try std.testing.expectEqual(try sumTilePartPayloadBytes(bytes), try sumTilePartPltLengths(bytes));
-    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
-    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
+    const sop_count = try countTilePartPrefixMarker(bytes, codestream.markerValue("sop"));
+    const eph_count = try countTilePartPrefixMarker(bytes, codestream.markerValue("eph"));
+    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), sop_count);
+    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), eph_count);
+    try std.testing.expectEqual(
+        try sumTilePartPayloadBytes(bytes),
+        try sumTilePartPltLengths(bytes) + sop_count * 6 + eph_count * 2,
+    );
 
     const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
     try std.testing.expectEqual(@as(u16, 18), readU16BeTest(bytes, cod + 2));
@@ -3677,7 +3771,7 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 5), bytes[cod + 9]);
     try std.testing.expectEqual(@as(u8, 4), bytes[cod + 10]);
     try std.testing.expectEqual(@as(u8, 4), bytes[cod + 11]);
-    try std.testing.expectEqual(@as(u8, 1), bytes[cod + 12]);
+    try std.testing.expectEqual(@as(u8, 0), bytes[cod + 12]);
     try std.testing.expectEqual(@as(u8, 1), bytes[cod + 13]);
     try std.testing.expectEqual(@as(u8, 0x88), bytes[cod + 14]);
     try std.testing.expectEqual(@as(u8, 0x88), bytes[cod + 15]);
@@ -3692,10 +3786,10 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 0x40), bytes[qcd + 5]);
 }
 
-test "code-block style options are reflected in COD marker" {
+test "unsupported code-block style options fail closed" {
     const allocator = std.testing.allocator;
-    const width = 8;
-    const height = 8;
+    const width = 2;
+    const height = 2;
     const samples = try allocator.alloc(u16, width * height * 3);
     defer allocator.free(samples);
     for (0..width * height) |i| {
@@ -3712,21 +3806,26 @@ test "code-block style options are reflected in COD marker" {
         .samples = samples,
     };
 
-    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
-        .levels = 1,
-        .block_width = 64,
-        .block_height = 64,
-        .bypass = true,
-        .reset_context = true,
-        .terminate_all = true,
-        .vertical_causal = true,
-        .predictable_termination = true,
-        .segmentation_symbols = true,
-    });
-    defer allocator.free(bytes);
+    const UnsupportedCase = struct {
+        label: []const u8,
+        options: codestream.LosslessOptions,
+    };
+    const cases = [_]UnsupportedCase{
+        .{ .label = "BYPASS", .options = .{ .bypass = true } },
+        .{ .label = "RESET", .options = .{ .reset_context = true } },
+        .{ .label = "TERMALL", .options = .{ .terminate_all = true } },
+        .{ .label = "CAUSAL", .options = .{ .vertical_causal = true } },
+        .{ .label = "ERTERM", .options = .{ .predictable_termination = true } },
+        .{ .label = "SEGMARK", .options = .{ .segmentation_symbols = true } },
+    };
 
-    const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
-    try std.testing.expectEqual(@as(u8, 0x3f), bytes[cod + 12]);
+    for (cases) |scenario| {
+        errdefer std.debug.print("unsupported code-block style case failed: {s}\n", .{scenario.label});
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options),
+        );
+    }
 }
 
 test "unsupported JP2 profile marker options fail closed" {
@@ -3882,16 +3981,19 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
         if (packet_lengths.items.len > 0) {
             for (packet_lengths.items) |packet_length| {
                 const packet_start = cursor;
-                const packet_end = packet_start + packet_length;
-                if (packet_end > tile_part_end) return error.Truncated;
-                if (packet_end - packet_start >= 2 and readU16BeTest(bytes, packet_start) == sop) {
-                    if (packet_end - packet_start < 6) return error.Truncated;
+                var packet_content_start = packet_start;
+                if (tile_part_end - packet_content_start >= 2 and readU16BeTest(bytes, packet_content_start) == sop) {
+                    if (tile_part_end - packet_content_start < 6) return error.Truncated;
                     if (marker == sop) count += 1;
+                    packet_content_start += 6;
                 }
-                if (packet_end - packet_start >= 2 and readU16BeTest(bytes, packet_end - 2) == eph) {
+                const packet_search_end = @min(tile_part_end, packet_content_start + packet_length + 2);
+                const has_eph = findMarkerInPacketForTest(bytes, packet_content_start, packet_search_end, eph) != null;
+                if (has_eph) {
                     if (marker == eph) count += 1;
                 }
-                cursor = packet_end;
+                cursor = packet_content_start + packet_length + if (has_eph) @as(usize, 2) else 0;
+                if (cursor > tile_part_end) return error.Truncated;
             }
             if (cursor != tile_part_end) return error.InvalidCodestream;
         } else {
@@ -3975,6 +4077,82 @@ fn skipTemporaryPacketHeader(bytes: []const u8, cursor: *usize, end: usize) !voi
         if ((byte & 0x80) == 0) return;
     }
     return error.Truncated;
+}
+
+fn findMarkerInPacketForTest(bytes: []const u8, start: usize, end: usize, marker: u16) ?usize {
+    var cursor = start;
+    while (cursor + 1 < end) : (cursor += 1) {
+        if (readU16BeTest(bytes, cursor) == marker) return cursor;
+    }
+    return null;
+}
+
+fn hasNonTrailingEphPacketForTest(bytes: []const u8) !bool {
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+    const eph = codestream.markerValue("eph");
+
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len and readU16BeTest(bytes, cursor) != sot) {
+        cursor += 2;
+        if (readU16BeTest(bytes, cursor - 2) == eoc) return error.MissingSot;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        cursor += segment_length;
+    }
+
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        if (marker_value == eoc) return false;
+        if (marker_value != sot) return error.MissingSot;
+        if (bytes.len - cursor < 14) return error.Truncated;
+
+        const tile_part_start = cursor;
+        const segment_length = readU16BeTest(bytes, cursor + 2);
+        if (segment_length != 10) return error.InvalidSot;
+        const psot = readU32BeTest(bytes, cursor + 6);
+        const tile_part_end = tile_part_start + psot;
+        if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
+
+        cursor += 12;
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(std.testing.allocator);
+        while (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) != sod) {
+            const tile_header_marker = readU16BeTest(bytes, cursor);
+            cursor += 2;
+            if (tile_part_end - cursor < 2) return error.Truncated;
+            const header_segment_length = readU16BeTest(bytes, cursor);
+            if (header_segment_length < 2 or tile_part_end - cursor < header_segment_length) return error.Truncated;
+            if (tile_header_marker == codestream.markerValue("plt")) {
+                try appendPltLengthsForTest(std.testing.allocator, &packet_lengths, bytes[cursor + 2 .. cursor + header_segment_length]);
+            }
+            cursor += header_segment_length;
+        }
+        if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
+        cursor += 2;
+
+        for (packet_lengths.items) |packet_length| {
+            const packet_start = cursor;
+            var packet_content_start = packet_start;
+            if (tile_part_end - packet_content_start >= 2 and
+                readU16BeTest(bytes, packet_content_start) == codestream.markerValue("sop"))
+            {
+                if (tile_part_end - packet_content_start < 6) return error.Truncated;
+                packet_content_start += 6;
+            }
+            const packet_search_end = @min(tile_part_end, packet_content_start + packet_length + 2);
+            const has_eph = findMarkerInPacketForTest(bytes, packet_content_start, packet_search_end, eph);
+            cursor = packet_content_start + packet_length + if (has_eph != null) @as(usize, 2) else 0;
+            if (cursor > tile_part_end) return error.Truncated;
+            if (has_eph) |offset| {
+                if (offset + 2 < cursor) return true;
+            }
+        }
+        if (cursor != tile_part_end) return error.InvalidCodestream;
+    }
+
+    return error.MissingEoc;
 }
 
 fn countTilePartHeaderMarker(bytes: []const u8, marker: u16) !usize {
