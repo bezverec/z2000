@@ -3706,6 +3706,44 @@ test "temporary payload rejects BP8 block layout that diverges from ISO layout" 
     );
 }
 
+test "temporary payload rejects BP8 band metadata that diverges from ISO subbands" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    const payload = try extractTemporaryPayloadCommentForTest(allocator, bytes) orelse return error.MissingPayload;
+    defer allocator.free(payload);
+
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const first_band_kind = try bp8FirstBandKindOffsetForTest(payload);
+    try xorTemporaryPayloadCommentByteForTest(corrupted, first_band_kind, 0x01);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
 test "temporary payload rejects SOD packet bytes that diverge from BP8 shadow stream" {
     const allocator = std.testing.allocator;
     const width = 16;
@@ -4840,6 +4878,32 @@ fn bp8FirstBlockBandOffsetForTest(payload: []const u8) !usize {
     const band_bytes = @as(usize, band_count) * 18;
     if (cursor + band_bytes + 2 > payload.len) return error.InvalidPayload;
     cursor += band_bytes;
+    return cursor;
+}
+
+fn bp8FirstBandKindOffsetForTest(payload: []const u8) !usize {
+    var cursor: usize = 0;
+    if (payload.len < "ZJ2K-CBLK-BP8".len or !std.mem.eql(u8, payload[0.."ZJ2K-CBLK-BP8".len], "ZJ2K-CBLK-BP8")) {
+        return error.InvalidPayload;
+    }
+    cursor += "ZJ2K-CBLK-BP8".len;
+    cursor += 4 + 4 + 1 + 1 + 2 + 2 + 1;
+    if (cursor >= payload.len) return error.InvalidPayload;
+    const tile_part_plan_count = payload[cursor];
+    cursor += 1 + tile_part_plan_count;
+    if (cursor >= payload.len) return error.InvalidPayload;
+    const packet_plan_count = payload[cursor];
+    cursor += 1 + @as(usize, packet_plan_count) * 40;
+    if (cursor + 2 > payload.len) return error.InvalidPayload;
+    cursor += 2;
+
+    if (cursor + 7 > payload.len) return error.InvalidPayload;
+    cursor += 1;
+    const band_count = readU16BeTest(payload, cursor);
+    cursor += 2;
+    _ = readU32BeTest(payload, cursor);
+    cursor += 4;
+    if (band_count == 0 or cursor >= payload.len) return error.InvalidPayload;
     return cursor;
 }
 

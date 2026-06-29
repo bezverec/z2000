@@ -1618,13 +1618,19 @@ fn decodeStrictRpclImageFromPackets(
     const header = try readTemporaryHeader(&cursor);
     if (header.version < 8) return CodestreamError.UnsupportedPayload;
 
+    const plan = temporaryPacketPlan(header);
+    const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
+    defer allocator.free(bands);
+    const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
+    defer allocator.free(blocks);
+
     var catalogs: [3]TemporaryComponentRpclCatalog = undefined;
     var initialized_catalogs: usize = 0;
     defer {
         for (catalogs[0..initialized_catalogs]) |*catalog| catalog.deinit();
     }
     inline for (0..3) |component| {
-        catalogs[component] = try readTemporaryComponentRpclCatalog(allocator, &cursor, component, header.version, header.layers, header.bit_depth);
+        catalogs[component] = try readTemporaryComponentRpclCatalog(allocator, &cursor, component, header.version, header.layers, header.bit_depth, bands);
         initialized_catalogs += 1;
     }
 
@@ -1641,11 +1647,6 @@ fn decodeStrictRpclImageFromPackets(
     _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
-    const plan = temporaryPacketPlan(header);
-    const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
-    defer allocator.free(bands);
-    const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
-    defer allocator.free(blocks);
     try validateTemporaryCatalogsMatchCodeBlocks(catalogs, blocks);
     var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
     defer rpcl_index.deinit();
@@ -1743,18 +1744,26 @@ fn readTemporaryComponentRpclCatalog(
     payload_version: u8,
     layer_count: u16,
     nominal_bitplanes: u8,
+    expected_bands: []const subband.Band,
 ) !TemporaryComponentRpclCatalog {
     const component_index = try cursor.readU8();
     if (component_index != expected_component) return CodestreamError.InvalidCodestream;
 
     const band_count = try cursor.readU16();
     const block_count = try cursor.readU32();
+    if (band_count != expected_bands.len) return CodestreamError.InvalidCodestream;
 
     var band_index: usize = 0;
     while (band_index < band_count) : (band_index += 1) {
-        _ = try cursor.readU8();
-        _ = try cursor.readU8();
-        _ = try cursor.readRect();
+        const kind_value = try cursor.readU8();
+        if (kind_value > @intFromEnum(subband.Kind.hh)) return CodestreamError.InvalidCodestream;
+        const kind: subband.Kind = @enumFromInt(kind_value);
+        const level = try cursor.readU8();
+        const rect = try cursor.readRect();
+        const expected = expected_bands[band_index];
+        if (kind != expected.kind or level != expected.level or !rectsEqual(rect, expected.rect)) {
+            return CodestreamError.InvalidCodestream;
+        }
     }
 
     const blocks = try allocator.alloc(TemporaryRpclBlock, block_count);
