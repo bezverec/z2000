@@ -99,12 +99,13 @@ uncompressed RGB, chunky/interleaved samples, 8 or 16 bits per channel, strip
 storage. Unsupported compression, planar layout, palette color, CMYK, tiled
 TIFF, floating samples, and multipage handling fail closed.
 
-ICC profile handling is planned in staged slices. The first slice should
-preserve an embedded TIFF ICC profile byte-for-byte into a JP2 restricted ICC
-`colr` box without changing pixel values. This targets common RGB profiles such
-as eciRGBv2 and Adobe RGB as opaque ICC payloads first. Actual color conversion
-between profiles is a later optional LittleCMS-backed step, not part of the
-current narrow TIFF -> JP2 path.
+ICC profile handling is staged. The current TIFF -> JP2 path preserves an
+embedded TIFF ICC profile from tag 34675 byte-for-byte into a JP2 restricted
+ICC `colr` box without changing pixel values, and `decode-temp-jp2` writes that
+profile back to TIFF. This targets common RGB profiles such as eciRGBv2 and
+Adobe RGB as opaque ICC payloads first. Actual color conversion between
+profiles is a later optional LittleCMS-backed step, not part of the current
+narrow path.
 
 `dng-info` uses the generic TIFF/IFD metadata layer to inspect DNG-style files
 without decoding RAW CFA data. It reports DNG version tags, camera strings, CFA

@@ -117,6 +117,7 @@ Primary public functions:
 - `wrapRgbCodestream(allocator, input, codestream)`
 - `parseInfo(bytes)`
 - `extractCodestream(bytes)`
+- `extractIccProfile(allocator, bytes)`
 
 The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
@@ -126,12 +127,13 @@ features until they are intentionally implemented. The writer applies the same
 basic guard rails for RGB input: non-empty dimensions, 8/16 bit depth, and a
 sample buffer matching `width * height * 3`.
 
-Planned ICC support should be staged as metadata preservation before color
-conversion: read TIFF ICC tag 34675, store an owned profile on the RGB image
-metadata, and write a JP2 restricted ICC `colr` box when present. The first
-implementation should treat eciRGBv2, Adobe RGB, and other RGB ICC profiles as
-opaque payloads and preserve bytes without transforming samples. Profile
-conversion should be a later optional LittleCMS-backed path.
+ICC support is staged as metadata preservation before color conversion. TIFF
+tag 34675 is stored as owned RGB image metadata, `wrapRgbCodestream` writes a
+JP2 restricted ICC `colr` box when present, `parseInfo` reports ICC presence and
+profile byte count, and `extractIccProfile` returns an owned copy of the profile
+payload. eciRGBv2, Adobe RGB, and other RGB ICC profiles are treated as opaque
+payloads and preserved without transforming samples. Profile conversion remains
+a later optional LittleCMS-backed path.
 
 ## `src/t2.zig`
 

@@ -18,8 +18,10 @@ pub const RgbImage = struct {
     height: usize,
     bit_depth: u8,
     samples: []u16,
+    icc_profile: ?[]u8 = null,
 
     pub fn deinit(self: *RgbImage) void {
+        if (self.icc_profile) |profile| self.allocator.free(profile);
         self.allocator.free(self.samples);
         self.* = undefined;
     }

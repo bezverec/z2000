@@ -387,7 +387,7 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
 
     const info = try jp2.parseInfo(bytes);
     std.debug.print(
-        "JP2: {s}: {}x{}, {} components, {} bits/component, {} codestream bytes\n",
+        "JP2: {s}: {}x{}, {} components, {} bits/component, {} codestream bytes, ICC {s}",
         .{
             args[0],
             info.width,
@@ -395,8 +395,13 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
             info.components,
             info.bits_per_component,
             info.codestream_bytes,
+            if (info.has_icc_profile) "yes" else "no",
         },
     );
+    if (info.has_icc_profile) {
+        std.debug.print(" ({} bytes)", .{info.icc_profile_bytes});
+    }
+    std.debug.print("\n", .{});
 }
 
 fn jp2StatsCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -450,6 +455,10 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     const j2k = try jp2.extractCodestream(bytes);
     var rgb = try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options);
     defer rgb.deinit();
+    if (try jp2.extractIccProfile(allocator, bytes)) |profile| {
+        if (rgb.icc_profile) |existing| allocator.free(existing);
+        rgb.icc_profile = profile;
+    }
 
     try tiff.writeRgb(io, allocator, rgb, args[1]);
     std.debug.print(

@@ -17,6 +17,7 @@ pub const TiffError = error{
 
 const max_file_size = 1024 * 1024 * 1024;
 const max_pixels = 268_435_456;
+const max_icc_profile_bytes = 16 * 1024 * 1024;
 
 const Endian = enum {
     little,
@@ -59,9 +60,16 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
         return TiffError.ImageTooLarge;
     }
 
-    const entry_count: u16 = 10;
+    const icc_profile = rgb.icc_profile;
+    if (icc_profile) |profile| {
+        if (profile.len == 0 or profile.len > max_icc_profile_bytes) return TiffError.InvalidTagValue;
+        if (profile.len > std.math.maxInt(u32)) return TiffError.ImageTooLarge;
+    }
+
+    const entry_count: u16 = if (icc_profile != null) 11 else 10;
     const bits_offset: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
     const raster_offset: u32 = bits_offset + 6;
+    const icc_offset: u32 = try std.math.add(u32, raster_offset, @as(u32, @intCast(raster_bytes)));
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
@@ -80,6 +88,9 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
     try appendIfdEntryLe(allocator, &out, 278, 4, 1, @as(u32, @intCast(rgb.height)));
     try appendIfdEntryLe(allocator, &out, 279, 4, 1, @as(u32, @intCast(raster_bytes)));
     try appendIfdEntryLe(allocator, &out, 284, 3, 1, 1);
+    if (icc_profile) |profile| {
+        try appendIfdEntryLe(allocator, &out, 34675, 7, @as(u32, @intCast(profile.len)), icc_offset);
+    }
     try appendU32Le(allocator, &out, 0);
     try appendU16Le(allocator, &out, rgb.bit_depth);
     try appendU16Le(allocator, &out, rgb.bit_depth);
@@ -95,6 +106,7 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
             try appendU16Le(allocator, &out, sample);
         }
     }
+    if (icc_profile) |profile| try out.appendSlice(allocator, profile);
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.items });
 }
@@ -132,6 +144,7 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
     var samples_per_pixel: u16 = 1;
     var planar_config: u16 = 1;
     var sample_format: u16 = 1;
+    var icc_profile_ref: ?ValueRef = null;
 
     for (0..entry_count) |i| {
         const entry = readEntry(bytes, entries_offset + i * 12, endian);
@@ -154,6 +167,7 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
             279 => strip_counts_ref = try valueRef(bytes, entry),
             284 => planar_config = try readSingleU16(bytes, endian, entry),
             339 => sample_format = try readSampleFormat(bytes, endian, entry),
+            34675 => icc_profile_ref = try valueRef(bytes, entry),
             else => {},
         }
     }
@@ -223,12 +237,16 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
 
     if (sample_index != sample_count) return TiffError.InvalidTagValue;
 
+    const icc_profile = if (icc_profile_ref) |ref| try readIccProfile(allocator, bytes, endian, ref) else null;
+    errdefer if (icc_profile) |profile| allocator.free(profile);
+
     return .{
         .allocator = allocator,
         .width = width_usize,
         .height = height_usize,
         .bit_depth = @as(u8, @intCast(bits[0])),
         .samples = samples,
+        .icc_profile = icc_profile,
     };
 }
 
@@ -266,11 +284,39 @@ fn valueRef(bytes: []const u8, entry: IfdEntry) !ValueRef {
 
 fn typeSize(field_type: u16) ?usize {
     return switch (field_type) {
-        1, 2 => 1,
+        1, 2, 7 => 1,
         3 => 2,
         4 => 4,
         else => null,
     };
+}
+
+fn readIccProfile(allocator: std.mem.Allocator, bytes: []const u8, endian: Endian, ref: ValueRef) ![]u8 {
+    if (ref.count == 0 or ref.count > max_icc_profile_bytes) return TiffError.InvalidTagValue;
+    if (ref.field_type != 1 and ref.field_type != 7) return TiffError.InvalidTagValue;
+    const out = try allocator.alloc(u8, ref.count);
+    errdefer allocator.free(out);
+    if (ref.offset) |offset| {
+        @memcpy(out, bytes[offset..][0..ref.count]);
+    } else {
+        var inline_bytes: [4]u8 = undefined;
+        switch (endian) {
+            .little => {
+                inline_bytes[0] = @as(u8, @truncate(ref.inline_value));
+                inline_bytes[1] = @as(u8, @truncate(ref.inline_value >> 8));
+                inline_bytes[2] = @as(u8, @truncate(ref.inline_value >> 16));
+                inline_bytes[3] = @as(u8, @truncate(ref.inline_value >> 24));
+            },
+            .big => {
+                inline_bytes[0] = @as(u8, @truncate(ref.inline_value >> 24));
+                inline_bytes[1] = @as(u8, @truncate(ref.inline_value >> 16));
+                inline_bytes[2] = @as(u8, @truncate(ref.inline_value >> 8));
+                inline_bytes[3] = @as(u8, @truncate(ref.inline_value));
+            },
+        }
+        @memcpy(out, inline_bytes[0..ref.count]);
+    }
+    return out;
 }
 
 fn readSingleU16(bytes: []const u8, endian: Endian, entry: IfdEntry) !u16 {

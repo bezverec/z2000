@@ -15,7 +15,8 @@ payload behavior not implemented yet are rejected with `UnsupportedPayload`.
 Current RGB TIFF to temporary JP2 encode:
 
 1. `src/tiff.zig` reads a narrow subset of TIFF 6.0:
-   uncompressed chunky RGB, 8 or 16 bits per channel, strip storage.
+   uncompressed chunky RGB, 8 or 16 bits per channel, strip storage, and an
+   optional embedded ICC profile from tag 34675.
 2. `src/color.zig` converts RGB samples into reversible RCT planes.
 3. `src/wavelet_int.zig` applies the reversible integer 5/3 transform.
 4. `src/subband.zig` builds subband and code-block grids.
@@ -29,11 +30,15 @@ Current RGB TIFF to temporary JP2 encode:
    packet read/write state, and RPCL packet assembly helpers.
 10. `src/codestream.zig` writes JPEG2000 markers, PLT-backed RPCL tile-part
     payloads, and optional debug private `COM` sidecar metadata.
-11. `src/jp2.zig` wraps the codestream in JP2 boxes.
+11. `src/jp2.zig` wraps the codestream in JP2 boxes, using enumerated sRGB
+    `colr` by default or restricted ICC `colr` when the TIFF supplied an ICC
+    profile.
 
 JP2 decode for z2000-produced files now uses the strict RPCL packet block
 catalog for the current RPCL/RCT/5-3 path. Debug sidecar decode remains as an
-oracle/compatibility path.
+oracle/compatibility path. If the JP2 wrapper carries a restricted ICC color
+profile, `decode-temp-jp2` preserves it back into TIFF tag 34675 without color
+conversion.
 
 ## Codestream Layers
 

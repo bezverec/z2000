@@ -15,6 +15,8 @@ pub const Info = struct {
     height: u32,
     components: u16,
     bits_per_component: u8,
+    has_icc_profile: bool = false,
+    icc_profile_bytes: usize = 0,
     codestream_bytes: usize,
 };
 
@@ -74,10 +76,19 @@ pub fn wrapRgbCodestream(
 
     var colr: std.ArrayList(u8) = .empty;
     defer colr.deinit(allocator);
-    try colr.append(allocator, 1);
-    try colr.append(allocator, 0);
-    try colr.append(allocator, 0);
-    try appendU32Be(allocator, &colr, 16);
+    if (input.icc_profile) |profile| {
+        if (profile.len == 0) return Jp2Error.UnsupportedProfile;
+        if (profile.len > std.math.maxInt(u32) - 11) return Jp2Error.CodestreamTooLarge;
+        try colr.append(allocator, 2);
+        try colr.append(allocator, 0);
+        try colr.append(allocator, 0);
+        try colr.appendSlice(allocator, profile);
+    } else {
+        try colr.append(allocator, 1);
+        try colr.append(allocator, 0);
+        try colr.append(allocator, 0);
+        try appendU32Be(allocator, &colr, 16);
+    }
     try appendBox(allocator, &jp2h, .color, colr.items);
     try appendBox(allocator, &out, .jp2_header, jp2h.items);
 
@@ -97,6 +108,8 @@ pub fn parseInfo(bytes: []const u8) !Info {
         .height = 0,
         .components = 0,
         .bits_per_component = 0,
+        .has_icc_profile = false,
+        .icc_profile_bytes = 0,
         .codestream_bytes = 0,
     };
 
@@ -152,10 +165,37 @@ pub fn extractCodestream(bytes: []const u8) ![]const u8 {
     return Jp2Error.MissingRequiredBox;
 }
 
+pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
+    const info = try parseInfo(bytes);
+    if (!info.has_icc_profile) return null;
+
+    var cursor: usize = 0;
+    while (cursor < bytes.len) {
+        const box = try nextBox(bytes, &cursor);
+        if (box.kind == @intFromEnum(BoxType.jp2_header)) {
+            return extractIccProfileFromJp2Header(allocator, box.payload);
+        }
+    }
+    return Jp2Error.MissingRequiredBox;
+}
+
 const Box = struct {
     kind: u32,
     payload: []const u8,
 };
+
+fn extractIccProfileFromJp2Header(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
+    var cursor: usize = 0;
+    while (cursor < bytes.len) {
+        const box = try nextBox(bytes, &cursor);
+        if (box.kind != @intFromEnum(BoxType.color)) continue;
+        if (box.payload.len < 3) return Jp2Error.InvalidBox;
+        if (box.payload[0] != 2) return null;
+        if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
+        return try allocator.dupe(u8, box.payload[3..]);
+    }
+    return Jp2Error.MissingRequiredBox;
+}
 
 fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var cursor: usize = 0;
@@ -190,14 +230,26 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
             @intFromEnum(BoxType.bits_per_component) => return Jp2Error.UnsupportedProfile,
             @intFromEnum(BoxType.color) => {
                 if (!saw_ihdr or saw_colr) return Jp2Error.InvalidBox;
-                if (box.payload.len < 7) return Jp2Error.InvalidBox;
+                if (box.payload.len < 3) return Jp2Error.InvalidBox;
                 const method = box.payload[0];
                 const precedence = box.payload[1];
                 const approximation = box.payload[2];
-                const enum_cs = readU32Be(box.payload, 3);
                 if (precedence != 0 or approximation != 0) return Jp2Error.UnsupportedProfile;
-                if (method != 1 or enum_cs != 16) return Jp2Error.UnsupportedColorSpace;
-                if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
+                switch (method) {
+                    1 => {
+                        if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
+                        const enum_cs = readU32Be(box.payload, 3);
+                        if (enum_cs != 16) return Jp2Error.UnsupportedColorSpace;
+                        info.has_icc_profile = false;
+                        info.icc_profile_bytes = 0;
+                    },
+                    2 => {
+                        if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
+                        info.has_icc_profile = true;
+                        info.icc_profile_bytes = box.payload.len - 3;
+                    },
+                    else => return Jp2Error.UnsupportedColorSpace,
+                }
                 saw_colr = true;
             },
             else => return Jp2Error.InvalidBox,

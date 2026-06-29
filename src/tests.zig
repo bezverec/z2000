@@ -1874,6 +1874,49 @@ test "TIFF parser reads uncompressed RGB strip with per-component sample format"
     try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, rgb.samples);
 }
 
+test "TIFF parser preserves embedded ICC profile tag" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    const entry_count: u16 = 11;
+    const bits_offset: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
+    const raster_offset: u32 = bits_offset + 6;
+    const icc_offset: u32 = raster_offset + 6;
+    const icc = "eciRGBv2 synthetic ICC";
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, 8);
+
+    try appendU16Le(allocator, &bytes, entry_count);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, bits_offset);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 273, 4, 1, raster_offset);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 278, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 279, 4, 1, 6);
+    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 34675, 7, icc.len, icc_offset);
+    try appendU32Le(allocator, &bytes, 0);
+
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try bytes.appendSlice(allocator, &.{ 10, 20, 30, 40, 50, 60 });
+    try bytes.appendSlice(allocator, icc);
+
+    var rgb = try tiff.parseRgb(allocator, bytes.items);
+    defer rgb.deinit();
+
+    try std.testing.expect(rgb.icc_profile != null);
+    try std.testing.expectEqualSlices(u8, icc, rgb.icc_profile.?);
+    try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, rgb.samples);
+}
+
 test "DNG info parser reads primary IFD metadata and SubIFD summaries" {
     const allocator = std.testing.allocator;
     var bytes: std.ArrayList(u8) = .empty;
@@ -1963,6 +2006,39 @@ test "JP2 wrapper records RGB image header" {
     try std.testing.expectEqual(@as(u16, 3), info.components);
     try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
     try std.testing.expectEqual(@as(usize, 20), info.codestream_bytes);
+}
+
+test "JP2 wrapper preserves restricted ICC color profile" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    const icc = try allocator.dupe(u8, "Adobe RGB synthetic ICC");
+    var rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+        .icc_profile = icc,
+    };
+    defer rgb.deinit();
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    defer allocator.free(wrapped);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expect(info.has_icc_profile);
+    try std.testing.expectEqual(icc.len, info.icc_profile_bytes);
+    const extracted = try jp2.extractIccProfile(allocator, wrapped);
+    defer if (extracted) |profile| allocator.free(profile);
+    try std.testing.expect(extracted != null);
+    try std.testing.expectEqualSlices(u8, icc, extracted.?);
+
+    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+    const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+    try std.testing.expectEqual(@as(u8, 2), wrapped[colr_payload.start]);
+    try std.testing.expectEqual(@as(u8, 0), wrapped[colr_payload.start + 1]);
+    try std.testing.expectEqual(@as(u8, 0), wrapped[colr_payload.start + 2]);
+    try std.testing.expectEqualSlices(u8, icc, wrapped[colr_payload.start + 3 .. colr_payload.end]);
 }
 
 test "JP2 wrapper rejects unsupported RGB input metadata" {

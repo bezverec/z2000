@@ -27,9 +27,10 @@ entries are grouped by development milestone rather than semantic version.
 - Defaulted normal encode to SOP-on and EPH-off for the current independent
   decoder interop path; explicit `--eph` remains available for packet-boundary
   diagnostics while EPH sequencing is hardened.
-- Documented the planned ICC profile path: first preserve TIFF tag 34675 into a
-  JP2 restricted ICC `colr` box byte-for-byte, then add optional LittleCMS-backed
-  profile conversion later.
+- Added the first ICC preservation slice: TIFF tag 34675 is carried as owned RGB
+  image metadata, JP2 wrapping writes a restricted ICC `colr` box, `jp2-info`
+  reports ICC presence/size, and `decode-temp-jp2` writes the profile back to
+  TIFF without transforming pixel values.
 
 ### Temporary JP2 Payload
 
