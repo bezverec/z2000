@@ -909,11 +909,12 @@ pub fn decodeLosslessTemporaryWithOptions(
     options: DecodeOptions,
 ) !image.RgbImage {
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
-    const payload = try temporaryPayload(allocator, bytes);
+    const payload = try temporaryPayloadRaw(allocator, bytes);
     defer allocator.free(payload);
     if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
         return strict;
     }
+    try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
     return decodeTemporaryPayloadWithOptions(allocator, payload, options);
 }
 
@@ -1260,13 +1261,18 @@ pub fn firstTlmPtlm(bytes: []const u8) !u32 {
 }
 
 fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const payload = try temporaryPayloadRaw(allocator, bytes);
+    errdefer allocator.free(payload);
+    try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+    return payload;
+}
+
+fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
     if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
-        errdefer allocator.free(payload);
-        try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
         return payload;
     }
 
