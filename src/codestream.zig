@@ -124,6 +124,7 @@ pub const TemporaryStats = struct {
     bit_depth: u8,
     levels: u8,
     layers: u16,
+    code_block_style: ebcot.CodeBlockStyle = .{},
     block_width: u16,
     block_height: u16,
     tile_part_divisions: ?u8,
@@ -614,6 +615,7 @@ pub const StrictPacketBlock = struct {
     rect: subband.Rect,
     nominal_bitplanes: u8,
     encoded_bitplanes: u8,
+    code_block_style: ebcot.CodeBlockStyle = .{},
     cumulative_passes: u16,
     cumulative_bytes: u64,
     payload_offset: usize,
@@ -777,6 +779,7 @@ const StrictRpclBlockAssembly = struct {
     rect: subband.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     nominal_bitplanes: u8 = 0,
     encoded_bitplanes: u8 = 0,
+    code_block_style: ebcot.CodeBlockStyle = .{},
 
     fn deinit(self: *StrictRpclBlockAssembly, allocator: std.mem.Allocator) void {
         self.payload.deinit(allocator);
@@ -1302,6 +1305,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var layers: u16 = 0;
     var block_width: u16 = 0;
     var block_height: u16 = 0;
+    var parsed_code_block_style = ebcot.CodeBlockStyle{};
     var precincts = defaultPrecincts();
     var precinct_count: u8 = 0;
     var saw_siz = false;
@@ -1373,7 +1377,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             block_width = try codeBlockSizeFromCodExponent(segment[6]);
             block_height = try codeBlockSizeFromCodExponent(segment[7]);
             try validateBlockSize(block_width, block_height);
-            if (segment[8] != 0) return CodestreamError.UnsupportedPayload;
+            parsed_code_block_style = try parseCodeBlockStyleByte(segment[8]);
             if (segment[9] != @intFromEnum(WaveletTransform.reversible_5_3)) return CodestreamError.UnsupportedPayload;
             precinct_count = if ((scod & 0x01) != 0) levels + 1 else 0;
             if (precinct_count > precincts.len or segment.len < 10 + @as(usize, precinct_count)) {
@@ -1433,6 +1437,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .bit_depth = bit_depth,
         .levels = levels,
         .layers = layers,
+        .code_block_style = parsed_code_block_style,
         .block_width = block_width,
         .block_height = block_height,
         .tile_part_divisions = if (tile_part_plan.count > 0) 'R' else null,
@@ -2268,7 +2273,7 @@ fn assembleStrictPacketCatalogHeaders(
     var assemblies = try StrictComponentAssemblySet.init(allocator, blocks.len);
     errdefer assemblies.deinit();
     inline for (0..3) |component| {
-        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], blocks, header.bit_depth);
+        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], blocks, header.bit_depth, header.code_block_style);
     }
 
     var active_groups: []StrictPacketAuditBandGroup = &.{};
@@ -2438,6 +2443,11 @@ fn collectStrictPacketAuditBlocks(
             }
             block.cumulative_passes = std.math.add(u16, block.cumulative_passes, decoded.pass_count) catch return CodestreamError.InvalidCodestream;
             block.cumulative_bytes = try std.math.add(u64, block.cumulative_bytes, decoded.byte_length);
+            const inferred_bitplanes = inferredBitplanesForCodingPassPrefix(block.cumulative_passes);
+            if (inferred_bitplanes > block.encoded_bitplanes) {
+                block.encoded_bitplanes = inferred_bitplanes;
+                block.nominal_bitplanes = @max(block.nominal_bitplanes, block.encoded_bitplanes);
+            }
             try block.payload.appendSlice(assembly.allocator, payload);
             if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
         }
@@ -2448,6 +2458,7 @@ fn initializeStrictAssemblyGeometry(
     assembly: *StrictComponentAssembly,
     source_blocks: []const subband.CodeBlock,
     nominal_bitplanes: u8,
+    code_block_style: ebcot.CodeBlockStyle,
 ) !void {
     if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
     for (assembly.blocks, source_blocks) |*block, source| {
@@ -2455,6 +2466,7 @@ fn initializeStrictAssemblyGeometry(
         block.rect = source.rect;
         block.nominal_bitplanes = nominal_bitplanes;
         block.encoded_bitplanes = 0;
+        block.code_block_style = code_block_style;
     }
 }
 
@@ -2482,6 +2494,11 @@ fn strictAssemblyStats(assemblies: [3]StrictComponentAssembly) !StrictAssemblySt
         }
     }
     return stats;
+}
+
+fn inferredBitplanesForCodingPassPrefix(pass_count: u16) u8 {
+    if (pass_count == 0) return 0;
+    return @intCast(1 + (@as(u16, pass_count - 1) + 2) / 3);
 }
 
 fn strictPacketBlockCatalogFromAssemblies(
@@ -2516,6 +2533,7 @@ fn strictPacketBlockCatalogFromAssemblies(
                 .rect = source.rect,
                 .nominal_bitplanes = source.nominal_bitplanes,
                 .encoded_bitplanes = source.encoded_bitplanes,
+                .code_block_style = source.code_block_style,
                 .cumulative_passes = source.cumulative_passes,
                 .cumulative_bytes = source.cumulative_bytes,
                 .payload_offset = payload_offset,
@@ -3115,13 +3133,14 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
         if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
             return CodestreamError.InvalidCodestream;
         }
-        const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferred(
+        const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
             allocator,
             block.encoded_bitplanes,
             block.cumulative_passes,
             payload,
             block.rect.width,
             block.rect.height,
+            block.code_block_style,
         );
         defer allocator.free(decoded);
         try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
@@ -3183,17 +3202,21 @@ fn decodeStrictBlockCoefficients(
     };
     const complete_block = pass_count == expected.passes.len;
     _ = layer_count;
-    return if (complete_block)
-        ebcot.decodeCodeBlockPayloadContinuousInferred(
+    if (complete_block and !actual.code_block_style.terminate_all) {
+        return ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
             allocator,
             expected.encoded_bitplanes,
             actual.cumulative_passes,
             actual.payload.items,
             expected.rect.width,
             expected.rect.height,
-        )
+            actual.code_block_style,
+        );
+    }
+    return if (complete_block)
+        ebcot.decodeCodeBlockSegmentCoefficientsContinuousWithStyle(allocator, segment, expected.rect.width, expected.rect.height, actual.code_block_style)
     else
-        ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, expected.rect.width, expected.rect.height);
+        ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartialWithStyle(allocator, segment, expected.rect.width, expected.rect.height, actual.code_block_style);
 }
 
 fn markStrictZeroBlockCovered(
@@ -3759,13 +3782,16 @@ fn appendStrictSodPacketPayload(
     bytes: []const u8,
     cursor: *usize,
     end: usize,
-    packet_length: usize,
+    framed_packet_length: usize,
     eph_enabled: bool,
     packet_sequence: *u16,
 ) !u32 {
-    var packet_start = cursor.*;
-    if (packet_start > end) return CodestreamError.TruncatedData;
+    const frame_start = cursor.*;
+    if (frame_start > end) return CodestreamError.TruncatedData;
+    const packet_end = try std.math.add(usize, frame_start, framed_packet_length);
+    if (packet_end > end) return CodestreamError.TruncatedData;
 
+    var packet_start = frame_start;
     if (end - packet_start >= 2 and readU16Be(bytes, packet_start) == @intFromEnum(Marker.sop)) {
         if (end - packet_start < 6) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, packet_start + 2);
@@ -3776,15 +3802,11 @@ fn appendStrictSodPacketPayload(
         packet_start += 6;
     }
 
-    const framed_length = try std.math.add(usize, packet_length, if (eph_enabled) @as(usize, 2) else 0);
-    const packet_end = try std.math.add(usize, packet_start, framed_length);
-    if (packet_end > end) return CodestreamError.TruncatedData;
     const eph_offset = if (eph_enabled)
         findMarkerInPacket(bytes, packet_start, packet_end, .eph) orelse return CodestreamError.InvalidCodestream
     else
         null;
     const payload_len = packet_end - packet_start - (if (eph_offset != null) @as(usize, 2) else 0);
-    if (payload_len != packet_length) return CodestreamError.InvalidCodestream;
     const payload_len_u32 = std.math.cast(u32, payload_len) orelse return CodestreamError.InvalidCodestream;
     if (eph_offset) |offset| {
         try packet_bytes.appendSlice(allocator, bytes[packet_start..offset]);
@@ -3938,6 +3960,7 @@ const TemporaryHeader = struct {
     bit_depth: u8,
     levels: u8,
     layers: u16,
+    code_block_style: ebcot.CodeBlockStyle = .{},
     block_width: u16,
     block_height: u16,
     tile_part_divisions: ?u8,
@@ -4568,7 +4591,6 @@ fn appendPltFromRpclPacketLengths(
     options: LosslessOptions,
     packet_lengths: []const u32,
 ) !void {
-    _ = options;
     if (packet_lengths.len == 0) return;
 
     var marker_index: u8 = 0;
@@ -4576,14 +4598,15 @@ fn appendPltFromRpclPacketLengths(
     defer segment.deinit(allocator);
 
     for (packet_lengths) |packet_length| {
-        const encoded_len = pltLengthByteCount(packet_length);
+        const framed_packet_length = rpclPacketLengthWithMarkers(options, packet_length);
+        const encoded_len = pltLengthByteCount(framed_packet_length);
         if (segment.items.len + encoded_len > 65532) {
             try flushPltSegment(allocator, out, marker_index, segment.items);
             if (marker_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
             marker_index += 1;
             segment.clearRetainingCapacity();
         }
-        try appendPltLength(allocator, &segment, packet_length);
+        try appendPltLength(allocator, &segment, framed_packet_length);
     }
 
     if (segment.items.len > 0) {
@@ -4600,14 +4623,13 @@ fn flushPltSegment(allocator: std.mem.Allocator, out: *std.ArrayList(u8), marker
 }
 
 fn pltBytesForRpclPacketLengths(options: LosslessOptions, packet_lengths: []const u32) !usize {
-    _ = options;
     if (packet_lengths.len == 0) return 0;
     var bytes: usize = 5;
     var segment_payload_bytes: usize = 0;
     var marker_count: usize = 1;
 
     for (packet_lengths) |packet_length| {
-        const encoded_len = pltLengthByteCount(packet_length);
+        const encoded_len = pltLengthByteCount(rpclPacketLengthWithMarkers(options, packet_length));
         if (segment_payload_bytes + encoded_len > 65532) {
             marker_count += 1;
             if (marker_count > 256) return CodestreamError.InvalidCodestream;
@@ -6092,6 +6114,17 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
     if (options.predictable_termination) style |= 0x10;
     if (options.segmentation_symbols) style |= 0x20;
     return style;
+}
+
+fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
+    if ((style & ~@as(u8, 0x3f)) != 0) return CodestreamError.InvalidCodestream;
+    if ((style & 0x01) != 0 or (style & 0x10) != 0) return CodestreamError.UnsupportedPayload;
+    return .{
+        .reset_context = (style & 0x02) != 0,
+        .terminate_all = (style & 0x04) != 0,
+        .vertical_causal = (style & 0x08) != 0,
+        .segmentation_symbols = (style & 0x20) != 0,
+    };
 }
 
 fn qcdStyleByte(options: LosslessOptions) u8 {

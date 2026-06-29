@@ -97,6 +97,11 @@ const Context = struct {
     }
 };
 
+pub const ContextSnapshot = struct {
+    state: u8 = 0,
+    mps: bool = false,
+};
+
 pub const Encoder = struct {
     allocator: std.mem.Allocator,
     contexts: []Context,
@@ -134,6 +139,10 @@ pub const Encoder = struct {
 
     pub fn resetAll(self: *Encoder) void {
         self.resetContexts();
+        self.resetSegmentRetainingContexts();
+    }
+
+    pub fn resetSegmentRetainingContexts(self: *Encoder) void {
         self.writer.resetRetainingCapacity();
         self.low = 0;
         self.high = max_code;
@@ -253,6 +262,21 @@ pub const Decoder = struct {
 
     pub fn resetContexts(self: *Decoder) void {
         @memset(self.contexts, .{});
+    }
+
+    pub fn importContexts(self: *Decoder, contexts: []const ContextSnapshot) !void {
+        if (contexts.len != self.contexts.len) return MqError.InvalidContext;
+        for (contexts, self.contexts) |source, *dest| {
+            if (source.state >= state_table.len) return MqError.InvalidContext;
+            dest.* = .{ .state = source.state, .mps = source.mps };
+        }
+    }
+
+    pub fn exportContexts(self: *const Decoder, contexts: []ContextSnapshot) !void {
+        if (contexts.len != self.contexts.len) return MqError.InvalidContext;
+        for (self.contexts, contexts) |source, *dest| {
+            dest.* = .{ .state = source.state, .mps = source.mps };
+        }
     }
 
     pub fn read(self: *Decoder, context: usize) !bool {

@@ -23,6 +23,7 @@ const BoxType = enum(u32) {
     file_type = fourcc("ftyp"),
     jp2_header = fourcc("jp2h"),
     image_header = fourcc("ihdr"),
+    bits_per_component = fourcc("bpcc"),
     color = fourcc("colr"),
     contiguous_codestream = fourcc("jp2c"),
 };
@@ -128,7 +129,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
                 info.codestream_bytes = box.payload.len;
                 saw_jp2c = true;
             },
-            else => {},
+            else => return Jp2Error.InvalidBox,
         }
         box_index += 1;
     }
@@ -140,6 +141,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
 }
 
 pub fn extractCodestream(bytes: []const u8) ![]const u8 {
+    _ = try parseInfo(bytes);
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor);
@@ -185,6 +187,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 }
                 saw_ihdr = true;
             },
+            @intFromEnum(BoxType.bits_per_component) => return Jp2Error.UnsupportedProfile,
             @intFromEnum(BoxType.color) => {
                 if (!saw_ihdr or saw_colr) return Jp2Error.InvalidBox;
                 if (box.payload.len < 7) return Jp2Error.InvalidBox;
@@ -197,7 +200,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
                 saw_colr = true;
             },
-            else => {},
+            else => return Jp2Error.InvalidBox,
         }
         box_index += 1;
     }

@@ -637,7 +637,6 @@ pub fn encodeBlockSymbolsSegmentContinuous(allocator: std.mem.Allocator, block: 
 }
 
 pub fn encodeBlockSymbolsSegmentContinuousWithStyle(allocator: std.mem.Allocator, block: EncodedBlockView, style: CodeBlockStyle) !CodeBlockSegment {
-    if (style.terminate_all) return encodeBlockSymbolsSegment(allocator, block);
     if (block.passes.len == 0) {
         const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
         errdefer allocator.free(passes);
@@ -651,6 +650,7 @@ pub fn encodeBlockSymbolsSegmentContinuousWithStyle(allocator: std.mem.Allocator
             .bytes = bytes,
         };
     }
+    if (style.terminate_all) return encodeBlockSymbolsSegmentTerminated(allocator, block, style);
 
     var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
     errdefer pass_payloads.deinit(allocator);
@@ -702,6 +702,52 @@ pub fn encodeBlockSymbolsSegmentContinuousWithStyle(allocator: std.mem.Allocator
         .byte_length = @intCast(encoded.bytes.len),
         .passes = pass_slice,
         .bytes = encoded.bytes,
+    };
+}
+
+fn encodeBlockSymbolsSegmentTerminated(allocator: std.mem.Allocator, block: EncodedBlockView, style: CodeBlockStyle) !CodeBlockSegment {
+    var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
+    errdefer pass_payloads.deinit(allocator);
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    var encoder = try mq.Encoder.init(allocator, mq_context_count);
+    defer encoder.deinit();
+
+    var symbol_offset: usize = 0;
+    for (block.passes, 0..) |pass, pass_ordinal| {
+        if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
+        if (style.reset_context and pass_ordinal != 0) encoder.resetContexts();
+        const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
+        const byte_offset = bytes.items.len;
+        for (pass_symbols) |symbol| {
+            try encoder.write(mqContextIndex(symbol.context), symbol.bit);
+        }
+        const encoded_len = try encoder.finishInto(allocator, &bytes);
+
+        try pass_payloads.append(allocator, .{
+            .kind = pass.kind,
+            .magnitude_bitplane = pass.magnitude_bitplane,
+            .symbol_count = pass.symbol_count,
+            .byte_offset = byte_offset,
+            .byte_length = encoded_len,
+            .cumulative_bytes = @intCast(bytes.items.len),
+        });
+        symbol_offset += pass.symbol_count;
+        encoder.resetSegmentRetainingContexts();
+    }
+    if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
+
+    const pass_slice = try pass_payloads.toOwnedSlice(allocator);
+    errdefer allocator.free(pass_slice);
+    const byte_slice = try bytes.toOwnedSlice(allocator);
+
+    return .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .pass_count = @intCast(pass_slice.len),
+        .byte_length = @intCast(byte_slice.len),
+        .passes = pass_slice,
+        .bytes = byte_slice,
     };
 }
 
@@ -1020,11 +1066,6 @@ const SegmentMqMode = enum {
     continuous,
 };
 
-fn effectiveSegmentMqMode(mode: SegmentMqMode, style: CodeBlockStyle) SegmentMqMode {
-    if (mode == .continuous and style.terminate_all) return .direct;
-    return mode;
-}
-
 fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
     scratch: *DecodeBlockScratch,
     segment: CodeBlockSegment,
@@ -1065,7 +1106,8 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
 
     var total_symbols: usize = 0;
     for (segment.passes) |pass| total_symbols += pass.symbol_count;
-    const effective_mode = effectiveSegmentMqMode(mode, style);
+    const effective_mode: SegmentMqMode = if (mode == .continuous and style.terminate_all) .direct else mode;
+    const carry_direct_contexts = style.terminate_all;
     var continuous_decoder: mq.Decoder = undefined;
     var continuous_decoder_active = false;
     defer if (continuous_decoder_active) continuous_decoder.deinit();
@@ -1073,6 +1115,7 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
         continuous_decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, segment.bytes, total_symbols);
         continuous_decoder_active = true;
     }
+    var terminated_contexts: [mq_context_count]mq.ContextSnapshot = [_]mq.ContextSnapshot{.{}} ** mq_context_count;
 
     var pass_index: u16 = 0;
     var bitplane_index = segment.bitplanes;
@@ -1085,7 +1128,10 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
             clearFlag(scratch.flags.items, .visited);
             resetContinuousPassContexts(effective_mode, style, &continuous_decoder, pass_index);
             switch (effective_mode) {
-                .direct => try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
+                .direct => if (carry_direct_contexts)
+                    try decodeCleanupPassWithContexts(scratch, segment.passes[pass_index], segment.bytes, bitplane, style, &terminated_contexts, pass_index)
+                else
+                    try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
                 .continuous => try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane, style),
             }
             pass_index += 1;
@@ -1095,7 +1141,10 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
         clearFlag(scratch.flags.items, .visited);
         resetContinuousPassContexts(effective_mode, style, &continuous_decoder, pass_index);
         switch (effective_mode) {
-            .direct => try decodeSignificancePass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
+            .direct => if (carry_direct_contexts)
+                try decodeSignificancePassWithContexts(scratch, segment.passes[pass_index], segment.bytes, bitplane, style, &terminated_contexts, pass_index)
+            else
+                try decodeSignificancePass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
             .continuous => try decodeSignificancePassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane, style),
         }
         pass_index += 1;
@@ -1103,7 +1152,10 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
 
         resetContinuousPassContexts(effective_mode, style, &continuous_decoder, pass_index);
         switch (effective_mode) {
-            .direct => try decodeRefinementPass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
+            .direct => if (carry_direct_contexts)
+                try decodeRefinementPassWithContexts(scratch, segment.passes[pass_index], segment.bytes, bitplane, style, &terminated_contexts, pass_index)
+            else
+                try decodeRefinementPass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
             .continuous => try decodeRefinementPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane, style),
         }
         pass_index += 1;
@@ -1111,7 +1163,10 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
 
         resetContinuousPassContexts(effective_mode, style, &continuous_decoder, pass_index);
         switch (effective_mode) {
-            .direct => try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
+            .direct => if (carry_direct_contexts)
+                try decodeCleanupPassWithContexts(scratch, segment.passes[pass_index], segment.bytes, bitplane, style, &terminated_contexts, pass_index)
+            else
+                try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
             .continuous => try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane, style),
         }
         pass_index += 1;
@@ -1195,6 +1250,21 @@ fn decodeSignificancePass(
     var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
     defer decoder.deinit();
     try decodeSignificancePassSymbols(scratch, pass, &decoder, bitplane, style);
+}
+
+fn decodeSignificancePassWithContexts(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    bitplane: u8,
+    style: CodeBlockStyle,
+    contexts: []mq.ContextSnapshot,
+    pass_index: u16,
+) !void {
+    var decoder = try passDecoderWithContexts(scratch, pass, bytes, contexts, style, pass_index);
+    defer decoder.deinit();
+    try decodeSignificancePassSymbols(scratch, pass, &decoder, bitplane, style);
+    try decoder.exportContexts(contexts);
 }
 
 fn decodeSignificancePassContinuous(
@@ -1314,6 +1384,21 @@ fn decodeRefinementPass(
     try decodeRefinementPassSymbols(scratch, pass, &decoder, bitplane, style);
 }
 
+fn decodeRefinementPassWithContexts(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    bitplane: u8,
+    style: CodeBlockStyle,
+    contexts: []mq.ContextSnapshot,
+    pass_index: u16,
+) !void {
+    var decoder = try passDecoderWithContexts(scratch, pass, bytes, contexts, style, pass_index);
+    defer decoder.deinit();
+    try decodeRefinementPassSymbols(scratch, pass, &decoder, bitplane, style);
+    try decoder.exportContexts(contexts);
+}
+
 fn decodeRefinementPassContinuous(
     scratch: *DecodeBlockScratch,
     pass: CodeBlockPassPayload,
@@ -1431,6 +1516,21 @@ fn decodeCleanupPass(
     var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
     defer decoder.deinit();
     try decodeCleanupPassSymbols(scratch, pass, &decoder, bitplane, style);
+}
+
+fn decodeCleanupPassWithContexts(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    bitplane: u8,
+    style: CodeBlockStyle,
+    contexts: []mq.ContextSnapshot,
+    pass_index: u16,
+) !void {
+    var decoder = try passDecoderWithContexts(scratch, pass, bytes, contexts, style, pass_index);
+    defer decoder.deinit();
+    try decodeCleanupPassSymbols(scratch, pass, &decoder, bitplane, style);
+    try decoder.exportContexts(contexts);
 }
 
 fn decodeCleanupPassContinuous(
@@ -2379,6 +2479,25 @@ fn validatePassPayload(
     const byte_end = std.math.add(usize, pass.byte_offset, pass.byte_length) catch return EbcotError.InvalidBlock;
     if (byte_end > bytes.len) return EbcotError.InvalidBlock;
     if (pass.cumulative_bytes != byte_end) return EbcotError.InvalidBlock;
+}
+
+fn passDecoderWithContexts(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    contexts: []mq.ContextSnapshot,
+    style: CodeBlockStyle,
+    pass_index: u16,
+) !mq.Decoder {
+    const byte_end = std.math.add(usize, pass.byte_offset, pass.byte_length) catch return EbcotError.InvalidBlock;
+    if (byte_end > bytes.len) return EbcotError.InvalidBlock;
+    if (contexts.len != mq_context_count) return EbcotError.InvalidBlock;
+    if (style.reset_context and pass_index != 0) @memset(contexts, .{});
+
+    var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..byte_end], pass.symbol_count);
+    errdefer decoder.deinit();
+    try decoder.importContexts(contexts);
+    return decoder;
 }
 
 fn bitRangeMask(lo: usize, hi: usize) u64 {

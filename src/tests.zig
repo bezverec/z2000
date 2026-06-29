@@ -2038,6 +2038,77 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
     }
 }
 
+test "JP2 reader rejects non-basic box ordering and duplicates" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    defer allocator.free(wrapped);
+    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+    const jp2h_start = jp2h_payload.start - 8;
+    const jp2h_end = jp2h_payload.end;
+    const jp2c_payload = try findJp2BoxPayload(wrapped, "jp2c");
+    const jp2c_start = jp2c_payload.start - 8;
+    const jp2c_end = jp2c_payload.end;
+
+    {
+        const duplicate = try insertJp2BoxForTest(allocator, wrapped, wrapped.len, "jp2c", "second-codestream");
+        defer allocator.free(duplicate);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(duplicate));
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.extractCodestream(duplicate));
+    }
+
+    {
+        var reordered: std.ArrayList(u8) = .empty;
+        defer reordered.deinit(allocator);
+        try reordered.appendSlice(allocator, wrapped[0..jp2h_start]);
+        try reordered.appendSlice(allocator, wrapped[jp2c_start..jp2c_end]);
+        try reordered.appendSlice(allocator, wrapped[jp2h_start..jp2h_end]);
+        const bytes = try reordered.toOwnedSlice(allocator);
+        defer allocator.free(bytes);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(bytes));
+    }
+
+    {
+        const extra = try insertJp2BoxForTest(allocator, wrapped, jp2c_start, "free", "");
+        defer allocator.free(extra);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(extra));
+    }
+}
+
+test "JP2 reader rejects variable bits-per-component child box" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    defer allocator.free(wrapped);
+    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+    const with_bpcc = try allocator.dupe(u8, wrapped);
+    defer allocator.free(with_bpcc);
+    const colr_payload = try findJp2ChildBoxPayload(with_bpcc, jp2h_payload, "colr");
+    @memcpy(with_bpcc[colr_payload.start - 4 ..][0..4], "bpcc");
+
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(with_bpcc));
+}
+
 test "RCT transform matches JPEG2000 reversible equations" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{ 10, 20, 30 });
@@ -3345,25 +3416,34 @@ test "EBCOT terminate-all style writes and decodes pass-terminated MQ segments" 
         .segmentation_symbols = true,
     };
 
-    var block = try ebcot.encodeBlockWithStyle(allocator, plane[0..], width, rect, style);
-    defer block.deinit(allocator);
-    var oracle = try ebcot.encodeBlockSymbolsSegment(allocator, .{
-        .bitplanes = block.bitplanes,
-        .non_zero_count = block.non_zero_count,
-        .passes = block.passes,
-        .symbols = block.symbols,
-    });
-    defer oracle.deinit(allocator);
-
     var terminated = try ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], width, rect, style);
     defer terminated.deinit(allocator);
-
-    try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, terminated.passes);
-    try std.testing.expectEqualSlices(u8, oracle.bytes, terminated.bytes);
 
     const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsContinuousWithStyle(allocator, terminated, width, height, style);
     defer allocator.free(decoded);
     try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+
+    const reset_style = ebcot.CodeBlockStyle{
+        .reset_context = true,
+        .terminate_all = true,
+        .vertical_causal = true,
+        .segmentation_symbols = true,
+    };
+    var reset_block = try ebcot.encodeBlockWithStyle(allocator, plane[0..], width, rect, reset_style);
+    defer reset_block.deinit(allocator);
+    var reset_oracle = try ebcot.encodeBlockSymbolsSegment(allocator, .{
+        .bitplanes = reset_block.bitplanes,
+        .non_zero_count = reset_block.non_zero_count,
+        .passes = reset_block.passes,
+        .symbols = reset_block.symbols,
+    });
+    defer reset_oracle.deinit(allocator);
+    var terminated_reset = try ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], width, rect, reset_style);
+    defer terminated_reset.deinit(allocator);
+
+    try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, reset_oracle.passes, terminated_reset.passes);
+    try std.testing.expectEqualSlices(u8, reset_oracle.bytes, terminated_reset.bytes);
+    try std.testing.expect(!std.mem.eql(u8, reset_oracle.bytes, terminated.bytes));
 
     try std.testing.expectError(
         ebcot.EbcotError.InvalidBlock,
@@ -4177,7 +4257,7 @@ test "temporary payload records resolution ordered tile-part plan" {
     try std.testing.expectEqual(@as(usize, 12), eph_count);
     try std.testing.expectEqual(
         try sumTilePartPayloadBytes(bytes),
-        try sumTilePartPltLengths(bytes) + sop_count * 6 + eph_count * 2,
+        try sumTilePartPltLengths(bytes),
     );
 }
 
@@ -4944,7 +5024,7 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), eph_count);
     try std.testing.expectEqual(
         try sumTilePartPayloadBytes(bytes),
-        try sumTilePartPltLengths(bytes) + sop_count * 6 + eph_count * 2,
+        try sumTilePartPltLengths(bytes),
     );
 
     const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
@@ -5378,6 +5458,24 @@ fn findJp2ChildBoxPayload(bytes: []const u8, parent: Jp2BoxPayload, comptime kin
     return error.MissingJp2Box;
 }
 
+fn insertJp2BoxForTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    offset: usize,
+    comptime kind: *const [4]u8,
+    payload: []const u8,
+) ![]u8 {
+    if (offset > bytes.len) return error.InvalidOffset;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..offset]);
+    try appendU32BeTest(allocator, &out, @as(u32, @intCast(payload.len + 8)));
+    try appendU32BeTest(allocator, &out, fourccTest(kind));
+    try out.appendSlice(allocator, payload);
+    try out.appendSlice(allocator, bytes[offset..]);
+    return out.toOwnedSlice(allocator);
+}
+
 fn fourccTest(comptime value: *const [4]u8) u32 {
     return (@as(u32, value[0]) << 24) |
         (@as(u32, value[1]) << 16) |
@@ -5492,19 +5590,20 @@ fn countTilePartPrefixMarker(bytes: []const u8, marker: u16) !usize {
         if (packet_lengths.items.len > 0) {
             for (packet_lengths.items) |packet_length| {
                 const packet_start = cursor;
+                const packet_end = packet_start + packet_length;
+                if (packet_end > tile_part_end) return error.Truncated;
                 var packet_content_start = packet_start;
                 if (tile_part_end - packet_content_start >= 2 and readU16BeTest(bytes, packet_content_start) == sop) {
                     if (tile_part_end - packet_content_start < 6) return error.Truncated;
                     if (marker == sop) count += 1;
                     packet_content_start += 6;
                 }
-                const packet_search_end = @min(tile_part_end, packet_content_start + packet_length + 2);
+                const packet_search_end = @min(tile_part_end, packet_end);
                 const has_eph = findMarkerInPacketForTest(bytes, packet_content_start, packet_search_end, eph) != null;
                 if (has_eph) {
                     if (marker == eph) count += 1;
                 }
-                cursor = packet_content_start + packet_length + if (has_eph) @as(usize, 2) else 0;
-                if (cursor > tile_part_end) return error.Truncated;
+                cursor = packet_end;
             }
             if (cursor != tile_part_end) return error.InvalidCodestream;
         } else {
@@ -5645,6 +5744,8 @@ fn hasNonTrailingEphPacketForTest(bytes: []const u8) !bool {
 
         for (packet_lengths.items) |packet_length| {
             const packet_start = cursor;
+            const packet_end = packet_start + packet_length;
+            if (packet_end > tile_part_end) return error.Truncated;
             var packet_content_start = packet_start;
             if (tile_part_end - packet_content_start >= 2 and
                 readU16BeTest(bytes, packet_content_start) == codestream.markerValue("sop"))
@@ -5652,10 +5753,9 @@ fn hasNonTrailingEphPacketForTest(bytes: []const u8) !bool {
                 if (tile_part_end - packet_content_start < 6) return error.Truncated;
                 packet_content_start += 6;
             }
-            const packet_search_end = @min(tile_part_end, packet_content_start + packet_length + 2);
+            const packet_search_end = @min(tile_part_end, packet_end);
             const has_eph = findMarkerInPacketForTest(bytes, packet_content_start, packet_search_end, eph);
-            cursor = packet_content_start + packet_length + if (has_eph != null) @as(usize, 2) else 0;
-            if (cursor > tile_part_end) return error.Truncated;
+            cursor = packet_end;
             if (has_eph) |offset| {
                 if (offset + 2 < cursor) return true;
             }
