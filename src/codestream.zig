@@ -1063,6 +1063,8 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
     var precinct_count: u8 = 0;
     var saw_siz = false;
     var saw_cod = false;
+    var saw_qcd = false;
+    var qcd_band_count: usize = 0;
     var tile_part_count: usize = 0;
 
     var cursor: usize = 2;
@@ -1096,30 +1098,48 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
         } else if (marker == @intFromEnum(Marker.cod)) {
             if (segment.len < 10) return CodestreamError.InvalidCodestream;
             const scod = segment[0];
+            if ((scod & ~@as(u8, 0x07)) != 0) return CodestreamError.InvalidCodestream;
             if (segment[1] != @intFromEnum(ProgressionOrder.rpcl)) return CodestreamError.UnsupportedPayload;
             layers = readU16Be(segment, 2);
+            if (segment[4] != @intFromEnum(MultipleComponentTransform.rct)) return CodestreamError.UnsupportedPayload;
             levels = segment[5];
-            block_width = @as(u16, 1) << @as(u4, @intCast(segment[6] + 2));
-            block_height = @as(u16, 1) << @as(u4, @intCast(segment[7] + 2));
+            if (levels > 32) return CodestreamError.TooManyLevels;
+            block_width = try codeBlockSizeFromCodExponent(segment[6]);
+            block_height = try codeBlockSizeFromCodExponent(segment[7]);
+            try validateBlockSize(block_width, block_height);
+            if (segment[8] != 0) return CodestreamError.UnsupportedPayload;
+            if (segment[9] != @intFromEnum(WaveletTransform.reversible_5_3)) return CodestreamError.UnsupportedPayload;
             precinct_count = if ((scod & 0x01) != 0) levels + 1 else 0;
             if (precinct_count > precincts.len or segment.len < 10 + @as(usize, precinct_count)) {
                 return CodestreamError.InvalidCodestream;
             }
             if (precinct_count > 0) {
                 for (segment[10..][0..precinct_count], 0..) |byte, index| {
-                    precincts[index] = .{
+                    const precinct = PrecinctSize{
                         .width = @as(u16, 1) << @as(u4, @intCast(byte & 0x0f)),
                         .height = @as(u16, 1) << @as(u4, @intCast(byte >> 4)),
+                    };
+                    if (!isValidPrecinctEdge(precinct.width) or !isValidPrecinctEdge(precinct.height)) {
+                        return CodestreamError.InvalidCodestream;
+                    }
+                    precincts[index] = .{
+                        .width = precinct.width,
+                        .height = precinct.height,
                     };
                 }
             }
             saw_cod = true;
+        } else if (marker == @intFromEnum(Marker.qcd)) {
+            if (saw_qcd) return CodestreamError.InvalidCodestream;
+            qcd_band_count = try validateStrictQcdSegment(segment);
+            saw_qcd = true;
         }
         cursor += segment_length;
     }
-    if (!saw_siz or !saw_cod or width == 0 or height == 0 or layers == 0) {
+    if (!saw_siz or !saw_cod or !saw_qcd or width == 0 or height == 0 or layers == 0) {
         return CodestreamError.InvalidCodestream;
     }
+    if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
 
     var scan = cursor;
     while (scan < bytes.len) {
@@ -1168,6 +1188,26 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
         .packet_plan = plan.resolutions,
         .packet_count = plan.packets,
     };
+}
+
+fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
+    if (exponent > 8) return CodestreamError.InvalidCodestream;
+    return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
+}
+
+fn validateStrictQcdSegment(segment: []const u8) !usize {
+    if (segment.len < 2) return CodestreamError.InvalidCodestream;
+    const style = segment[0];
+    const quantization_value = style & 0x1f;
+    if (quantization_value > @intFromEnum(QuantizationStyle.scalar_expounded)) return CodestreamError.InvalidCodestream;
+    const quantization: QuantizationStyle = @enumFromInt(quantization_value);
+    if (quantization != .none) return CodestreamError.UnsupportedPayload;
+    const guard_bits = style >> 5;
+    if (guard_bits != 2) return CodestreamError.UnsupportedPayload;
+    for (segment[1..]) |exponent| {
+        if (exponent != 0x40) return CodestreamError.UnsupportedPayload;
+    }
+    return segment.len - 1;
 }
 
 pub fn hasMarker(bytes: []const u8, marker: u16) bool {

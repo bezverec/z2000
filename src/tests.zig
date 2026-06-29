@@ -4070,6 +4070,99 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 0x40), bytes[qcd + 5]);
 }
 
+test "strict COD marker reader rejects unsupported coding profile bytes" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+    });
+    defer allocator.free(bytes);
+
+    const CodCase = struct {
+        label: []const u8,
+        offset: usize,
+        value: u8,
+        expected: anyerror,
+    };
+    const cases = [_]CodCase{
+        .{ .label = "reserved Scod bit", .offset = 4, .value = 0x87, .expected = codestream.CodestreamError.InvalidCodestream },
+        .{ .label = "unsupported MCT", .offset = 8, .value = 2, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
+        .{ .label = "unsupported code-block style", .offset = 12, .value = 1, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("COD corruption case failed: {s}\n", .{scenario.label});
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        const cod = findMarker(corrupted, codestream.markerValue("cod")) orelse return error.MissingMarker;
+        corrupted[cod + scenario.offset] = scenario.value;
+        try std.testing.expectError(scenario.expected, codestream.analyzeLosslessTemporary(corrupted));
+    }
+}
+
+test "strict QCD marker reader rejects unsupported quantization profile bytes" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+    });
+    defer allocator.free(bytes);
+
+    const QcdCase = struct {
+        label: []const u8,
+        offset: usize,
+        value: u8,
+        expected: anyerror,
+    };
+    const cases = [_]QcdCase{
+        .{ .label = "unsupported scalar quantization", .offset = 4, .value = 0x41, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported guard bits", .offset = 4, .value = 0x20, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported reversible exponent", .offset = 5, .value = 0x41, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "invalid quantization style", .offset = 4, .value = 0x5f, .expected = codestream.CodestreamError.InvalidCodestream },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("QCD corruption case failed: {s}\n", .{scenario.label});
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        const qcd = findMarker(corrupted, codestream.markerValue("qcd")) orelse return error.MissingMarker;
+        corrupted[qcd + scenario.offset] = scenario.value;
+        try std.testing.expectError(scenario.expected, codestream.analyzeLosslessTemporary(corrupted));
+    }
+}
+
 test "unsupported code-block style options fail closed" {
     const allocator = std.testing.allocator;
     const width = 2;
