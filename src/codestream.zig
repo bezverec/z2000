@@ -4707,36 +4707,17 @@ fn buildRpclBlockIndex(
         const resolution = plan.resolutions[resolution_index];
         if (block_rect.width == 0 or block_rect.height == 0) continue;
 
-        const first_precinct_x = block_rect.x / resolution.precinct_width;
-        const first_precinct_y = block_rect.y / resolution.precinct_height;
-        const right = @as(u64, block_rect.x) + @as(u64, block_rect.width);
-        const bottom = @as(u64, block_rect.y) + @as(u64, block_rect.height);
-        const last_precinct_x: u32 = @intCast(@min(
-            @as(u64, resolution.precincts_x - 1),
-            (right - 1) / resolution.precinct_width,
-        ));
-        const last_precinct_y: u32 = @intCast(@min(
-            @as(u64, resolution.precincts_y - 1),
-            (bottom - 1) / resolution.precinct_height,
-        ));
-        if (first_precinct_x >= resolution.precincts_x or first_precinct_y >= resolution.precincts_y) {
+        const precinct_x = block_rect.x / resolution.precinct_width;
+        const precinct_y = block_rect.y / resolution.precinct_height;
+        if (precinct_x >= resolution.precincts_x or precinct_y >= resolution.precincts_y) {
             return CodestreamError.InvalidCodestream;
         }
+        const precinct_index = @as(u64, precinct_y) * resolution.precincts_x + precinct_x;
 
-        var precinct_y = first_precinct_y;
-        while (precinct_y <= last_precinct_y) : (precinct_y += 1) {
-            var precinct_x = first_precinct_x;
-            while (precinct_x <= last_precinct_x) : (precinct_x += 1) {
-                const precinct_index = @as(u64, precinct_y) * resolution.precincts_x + precinct_x;
-                const precinct = try packet_plan.precinctRect(plan, resolution_index, precinct_index);
-                if (!packet_plan.rectsIntersect(precinct, block_rect)) continue;
-
-                var component: u16 = 0;
-                while (component < 3) : (component += 1) {
-                    const cell = try index.cell(resolution_index, precinct_index, component);
-                    try cell.indexes.append(allocator, block_index);
-                }
-            }
+        var component: u16 = 0;
+        while (component < 3) : (component += 1) {
+            const cell = try index.cell(resolution_index, precinct_index, component);
+            try cell.indexes.append(allocator, block_index);
         }
     }
 

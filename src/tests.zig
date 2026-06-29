@@ -2220,6 +2220,44 @@ test "lossless codestream places EPH before non-empty packet payload" {
     try std.testing.expect(try hasNonTrailingEphPacketForTest(bytes));
 }
 
+test "strict RPCL stats handle blocks across precinct grid boundaries once" {
+    const allocator = std.testing.allocator;
+    const width = 257;
+    const height = 385;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 7) % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 13 + 5) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 17 + 11) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 5,
+        .tile_width = 512,
+        .tile_height = 512,
+        .block_width = 64,
+        .block_height = 64,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(bytes);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(stats.t2_included_blocks, stats.t2_assembled_blocks);
+    try std.testing.expectEqual(stats.t2_payload_bytes, stats.t2_assembled_bytes);
+    var catalog = try codestream.readStrictPacketBlockCatalog(allocator, bytes);
+    defer catalog.deinit();
+    try std.testing.expect(catalog.components[0].len > 0);
+}
+
 test "debug temporary sidecar option preserves BP8 COM payload" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{

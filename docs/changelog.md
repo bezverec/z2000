@@ -78,6 +78,9 @@ entries are grouped by development milestone rather than semantic version.
   available, instead of treating SOD bytes as a temporary payload.
 - BP8 debug validation now compares the public strict block catalog against the
   BP8 EBCOT catalog for geometry, cumulative pass/byte deltas, and payload bytes.
+- Fixed RPCL code-block indexing so each block is assigned to one precinct cell
+  instead of every intersecting precinct, avoiding duplicate first-inclusion
+  state and reducing packet payload size on larger images.
 
 ### Parallelism And Performance
 
