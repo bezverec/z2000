@@ -15,9 +15,10 @@ encoder before broadening profile coverage.
 
 ## Near-Term ISO Task Ledger
 
-- T1/EBCOT: tighten the coding pass model with cleanup run mode, JPEG2000-style
-  sign context and prediction, more precise refinement contexts, and real
-  termination/reset behavior driven by COD code-block style flags. Keep
+- T1/EBCOT: continue tightening the coding pass model after cleanup run mode,
+  JPEG2000-style directional sign context/prediction, and more precise
+  refinement contexts. Real termination/reset behavior still needs to be
+  driven by COD code-block style flags. Keep
   row-mask, stripe-mask, and SIMD-aware block-stats optimization going only when
   byte-for-byte oracle tests continue to pass. Code-block style flags currently
   fail closed until that behavior is connected to the emitted payload.

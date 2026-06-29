@@ -306,8 +306,8 @@ Optimization read from those numbers:
 
 ## Roadmap
 
-1. Tighten T1/EBCOT context modeling and termination behavior for the current
-   continuous MQ payload.
+1. Tighten remaining T1/EBCOT cleanup edge cases and COD-driven termination
+   behavior for the current continuous MQ payload.
 2. Cross-check the narrow RPCL/RCT/5-3 path against independent decoders.
 3. Close packet/header differences found by OpenJPEG, Grok, and Kakadu.
 4. Add real multi-tile payload layout, then tile-parallel scheduling on top of

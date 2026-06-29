@@ -1858,32 +1858,21 @@ fn signCoding(
     y: usize,
     significant: []const bool,
 ) SignCoding {
-    const score = signScore(plane, stride, rect, x, y, significant);
-    return signCodingFromScore(score);
-}
-
-fn signScore(
-    plane: []const i32,
-    stride: usize,
-    rect: subband.Rect,
-    x: usize,
-    y: usize,
-    significant: []const bool,
-) i8 {
-    var score: i8 = 0;
+    var horizontal: i8 = 0;
+    var vertical: i8 = 0;
     if (x > 0 and significant[localIndex(rect.width, x - 1, y)]) {
-        score += signContribution(plane[(rect.y + y) * stride + rect.x + x - 1]);
+        horizontal += signContribution(plane[(rect.y + y) * stride + rect.x + x - 1]);
     }
     if (x + 1 < rect.width and significant[localIndex(rect.width, x + 1, y)]) {
-        score += signContribution(plane[(rect.y + y) * stride + rect.x + x + 1]);
+        horizontal += signContribution(plane[(rect.y + y) * stride + rect.x + x + 1]);
     }
     if (y > 0 and significant[localIndex(rect.width, x, y - 1)]) {
-        score += signContribution(plane[(rect.y + y - 1) * stride + rect.x + x]);
+        vertical += signContribution(plane[(rect.y + y - 1) * stride + rect.x + x]);
     }
     if (y + 1 < rect.height and significant[localIndex(rect.width, x, y + 1)]) {
-        score += signContribution(plane[(rect.y + y + 1) * stride + rect.x + x]);
+        vertical += signContribution(plane[(rect.y + y + 1) * stride + rect.x + x]);
     }
-    return score;
+    return signCodingFromContributions(horizontal, vertical);
 }
 
 fn signCodingRows(
@@ -1894,32 +1883,77 @@ fn signCodingRows(
     x: usize,
     y: usize,
 ) SignCoding {
-    var score: i8 = 0;
+    var horizontal: i8 = 0;
+    var vertical: i8 = 0;
     if (x > 0 and hasSignificantRow(scratch, x - 1, y)) {
-        score += signContribution(plane[(rect.y + y) * stride + rect.x + x - 1]);
+        horizontal += signContribution(plane[(rect.y + y) * stride + rect.x + x - 1]);
     }
     if (x + 1 < rect.width and hasSignificantRow(scratch, x + 1, y)) {
-        score += signContribution(plane[(rect.y + y) * stride + rect.x + x + 1]);
+        horizontal += signContribution(plane[(rect.y + y) * stride + rect.x + x + 1]);
     }
     if (y > 0 and hasSignificantRow(scratch, x, y - 1)) {
-        score += signContribution(plane[(rect.y + y - 1) * stride + rect.x + x]);
+        vertical += signContribution(plane[(rect.y + y - 1) * stride + rect.x + x]);
     }
     if (y + 1 < rect.height and hasSignificantRow(scratch, x, y + 1)) {
-        score += signContribution(plane[(rect.y + y + 1) * stride + rect.x + x]);
+        vertical += signContribution(plane[(rect.y + y + 1) * stride + rect.x + x]);
     }
-    return signCodingFromScore(score);
+    return signCodingFromContributions(horizontal, vertical);
 }
 
-fn signCodingFromScore(score: i8) SignCoding {
-    const context_index: usize = @intCast(@min(@abs(score), 4));
+fn signCodingFromContributions(horizontal_score: i8, vertical_score: i8) SignCoding {
+    var horizontal = clampSignContribution(horizontal_score);
+    var vertical = clampSignContribution(vertical_score);
+    const predicted_negative = if (horizontal == 0 and vertical == 0)
+        false
+    else
+        !(horizontal > 0 or (horizontal == 0 and vertical > 0));
+
+    if (horizontal < 0) {
+        horizontal = -horizontal;
+        vertical = -vertical;
+    }
+
+    const context_index: usize = if (horizontal == 0)
+        if (vertical == 0) 0 else 1
+    else if (vertical < 0)
+        2
+    else if (vertical == 0)
+        3
+    else
+        4;
+
     return .{
         .context = sign_context_lut[context_index],
-        .predicted_negative = score > 0,
+        .predicted_negative = predicted_negative,
     };
 }
 
+fn clampSignContribution(score: i8) i8 {
+    if (score < 0) return -1;
+    if (score > 0) return 1;
+    return 0;
+}
+
 fn signContribution(value: i32) i8 {
-    return if (value < 0) 1 else -1;
+    return if (value < 0) -1 else 1;
+}
+
+fn signCodingRowsDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) SignCoding {
+    var horizontal: i8 = 0;
+    var vertical: i8 = 0;
+    if (x > 0 and hasSignificantRowDecode(scratch, x - 1, y)) {
+        horizontal += signContribution(scratch.coeffs.items[localIndex(scratch.width, x - 1, y)]);
+    }
+    if (x + 1 < scratch.width and hasSignificantRowDecode(scratch, x + 1, y)) {
+        horizontal += signContribution(scratch.coeffs.items[localIndex(scratch.width, x + 1, y)]);
+    }
+    if (y > 0 and hasSignificantRowDecode(scratch, x, y - 1)) {
+        vertical += signContribution(scratch.coeffs.items[localIndex(scratch.width, x, y - 1)]);
+    }
+    if (y + 1 < scratch.height and hasSignificantRowDecode(scratch, x, y + 1)) {
+        vertical += signContribution(scratch.coeffs.items[localIndex(scratch.width, x, y + 1)]);
+    }
+    return signCodingFromContributions(horizontal, vertical);
 }
 
 fn flagMask(kind: FlagKind) u8 {
@@ -2036,23 +2070,6 @@ fn neighborSignificanceRowsDecode(scratch: *const DecodeBlockScratch, x: usize, 
         }
     }
     return count;
-}
-
-fn signCodingRowsDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) SignCoding {
-    var score: i8 = 0;
-    if (x > 0 and hasSignificantRowDecode(scratch, x - 1, y)) {
-        score += signContribution(scratch.coeffs.items[localIndex(scratch.width, x - 1, y)]);
-    }
-    if (x + 1 < scratch.width and hasSignificantRowDecode(scratch, x + 1, y)) {
-        score += signContribution(scratch.coeffs.items[localIndex(scratch.width, x + 1, y)]);
-    }
-    if (y > 0 and hasSignificantRowDecode(scratch, x, y - 1)) {
-        score += signContribution(scratch.coeffs.items[localIndex(scratch.width, x, y - 1)]);
-    }
-    if (y + 1 < scratch.height and hasSignificantRowDecode(scratch, x, y + 1)) {
-        score += signContribution(scratch.coeffs.items[localIndex(scratch.width, x, y + 1)]);
-    }
-    return signCodingFromScore(score);
 }
 
 fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitplane: u8, negative: bool) void {

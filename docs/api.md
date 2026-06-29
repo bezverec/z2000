@@ -239,10 +239,11 @@ layers. The symbol oracle and direct MQ path remain useful test and comparison
 surfaces, and share SIMD-aware block-stat scanning so bitplane and non-zero
 metadata stay aligned across portable, AVX2-width, and NEON-width builds.
 
-The T1 TODO is to bring the direct MQ path closer to JPEG2000 Part 1 by adding
-cleanup run mode, sign prediction contexts, refined magnitude-refinement
-contexts, and real COD style flag behavior before advertising those flags as
-supported.
+The T1 TODO is to bring the direct MQ path closer to JPEG2000 Part 1 by
+finishing remaining cleanup edge cases and real COD style flag behavior before
+advertising those flags as supported. Cleanup run mode, directional sign
+prediction contexts, and refined magnitude-refinement contexts are now covered
+by oracle tests in the current narrow path.
 
 ## `src/rate_alloc.zig`
 

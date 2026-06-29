@@ -2694,8 +2694,48 @@ test "EBCOT sign coding uses neighbor prediction context" {
     try std.testing.expectEqual(ebcot.Context.sign0, top[1].context);
     try std.testing.expectEqual(true, top[1].bit);
     try std.testing.expectEqual(ebcot.SymbolKind.sign, top[3].kind);
-    try std.testing.expectEqual(ebcot.Context.sign1, top[3].context);
+    try std.testing.expectEqual(ebcot.Context.sign3, top[3].context);
     try std.testing.expectEqual(false, top[3].bit);
+}
+
+test "EBCOT sign coding separates horizontal vertical and mixed sign contexts" {
+    const allocator = std.testing.allocator;
+
+    const vertical_plane = [_]i32{ -4, -4 };
+    var vertical = try ebcot.encodeBlock(allocator, vertical_plane[0..], 1, .{ .x = 0, .y = 0, .width = 1, .height = 2 });
+    defer vertical.deinit(allocator);
+
+    const vertical_top = vertical.symbols[vertical.passes[0].first_symbol..][0..vertical.passes[0].symbol_count];
+    try std.testing.expectEqual(@as(usize, 4), vertical_top.len);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, vertical_top[3].kind);
+    try std.testing.expectEqual(ebcot.Context.sign1, vertical_top[3].context);
+    try std.testing.expectEqual(false, vertical_top[3].bit);
+
+    const opposing_plane = [_]i32{
+        -4, 4,
+        -4, 4,
+    };
+    var opposing = try ebcot.encodeBlock(allocator, opposing_plane[0..], 2, .{ .x = 0, .y = 0, .width = 2, .height = 2 });
+    defer opposing.deinit(allocator);
+
+    const opposing_top = opposing.symbols[opposing.passes[0].first_symbol..][0..opposing.passes[0].symbol_count];
+    try std.testing.expectEqual(@as(usize, 8), opposing_top.len);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, opposing_top[7].kind);
+    try std.testing.expectEqual(ebcot.Context.sign2, opposing_top[7].context);
+    try std.testing.expectEqual(true, opposing_top[7].bit);
+
+    const matching_plane = [_]i32{
+        -4, -4,
+        -4, -4,
+    };
+    var matching = try ebcot.encodeBlock(allocator, matching_plane[0..], 2, .{ .x = 0, .y = 0, .width = 2, .height = 2 });
+    defer matching.deinit(allocator);
+
+    const matching_top = matching.symbols[matching.passes[0].first_symbol..][0..matching.passes[0].symbol_count];
+    try std.testing.expectEqual(@as(usize, 8), matching_top.len);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, matching_top[7].kind);
+    try std.testing.expectEqual(ebcot.Context.sign4, matching_top[7].context);
+    try std.testing.expectEqual(false, matching_top[7].bit);
 }
 
 test "EBCOT significance propagation precedes cleanup on lower bitplanes" {

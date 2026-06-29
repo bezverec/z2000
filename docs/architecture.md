@@ -65,7 +65,8 @@ The T1 work is split into two paths:
 `ebcot.zig` has:
 
 - cleanup, significance, and refinement pass metadata;
-- context selection scaffolding;
+- zero, sign, and refinement context selection shared by the symbol oracle,
+  direct MQ encoder, and coefficient decoder;
 - cleanup run-mode aggregation/run-length symbols for full four-row clean
   stripes;
 - MQ encode/decode roundtrip tests;
@@ -77,9 +78,9 @@ The implementation is still not a complete Part 1 T1 coder. Code-block style
 options such as BYPASS, RESET, TERMALL, vertical causal, predictable
 termination, and segmentation symbols are parsed but rejected with
 `UnsupportedPayload` until their exact payload effect is implemented. The next
-T1 work should continue tightening sign context prediction, refinement context
-selection, remaining cleanup edge cases, and COD-driven termination/reset
-behavior before the options are advertised as supported.
+T1 work should continue tightening remaining cleanup edge cases, COD-driven
+termination/reset behavior, and byte-for-byte oracle coverage before the
+options are advertised as supported.
 
 ## T2 Direction
 
