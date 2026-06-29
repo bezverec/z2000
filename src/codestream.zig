@@ -1615,7 +1615,16 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
     }
     if (sequence != header.packet_count or packet_byte_offset != actual.packet_bytes.len) return CodestreamError.InvalidCodestream;
     inline for (0..3) |component| {
-        try validateStrictComponentAssembly(allocator, catalogs[component].blocks, assemblies[component], header.layers);
+        try validateStrictComponentAssembly(catalogs[component].blocks, assemblies[component], header.layers);
+        const reconstructed = try reconstructStrictComponentCoefficients(
+            allocator,
+            header.width,
+            header.height,
+            catalogs[component].blocks,
+            assemblies[component],
+            header.layers,
+        );
+        allocator.free(reconstructed);
     }
 }
 
@@ -1962,7 +1971,6 @@ fn collectStrictRpclPacketBlocks(
 }
 
 fn validateStrictComponentAssembly(
-    allocator: std.mem.Allocator,
     catalog: []const TemporaryRpclBlock,
     assembly: StrictComponentAssembly,
     layer_count: u16,
@@ -1979,16 +1987,63 @@ fn validateStrictComponentAssembly(
         if (!std.mem.eql(u8, expected.payload[0..expected_len], actual.payload.items)) {
             return CodestreamError.InvalidCodestream;
         }
-        try validateStrictBlockT1Reconstruction(allocator, expected, actual, layer_count);
     }
 }
 
-fn validateStrictBlockT1Reconstruction(
+fn validateStrictDecodedBlock(
+    expected: TemporaryRpclBlock,
+    actual: StrictRpclBlockAssembly,
+    decoded: []const i32,
+) !void {
+    const pass_count: usize = @intCast(actual.cumulative_passes);
+    const complete_block = pass_count == expected.passes.len;
+    if (@as(u64, @intCast(decoded.len)) != rectArea(expected.rect)) return CodestreamError.InvalidCodestream;
+    const decoded_non_zero = countNonZeroI32(decoded);
+    if (complete_block and decoded_non_zero != expected.non_zero_count) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (!complete_block and decoded_non_zero > expected.non_zero_count) {
+        return CodestreamError.InvalidCodestream;
+    }
+}
+
+fn reconstructStrictComponentCoefficients(
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    catalog: []const TemporaryRpclBlock,
+    assembly: StrictComponentAssembly,
+    layer_count: u16,
+) ![]i32 {
+    if (catalog.len != assembly.blocks.len) return CodestreamError.InvalidCodestream;
+    const pixels = try std.math.mul(usize, width, height);
+    const plane = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(plane);
+    @memset(plane, 0);
+
+    const covered = try allocator.alloc(bool, pixels);
+    defer allocator.free(covered);
+    @memset(covered, false);
+
+    for (catalog, assembly.blocks) |expected, actual| {
+        const decoded = try decodeStrictBlockCoefficients(allocator, expected, actual, layer_count);
+        defer allocator.free(decoded);
+        try validateStrictDecodedBlock(expected, actual, decoded);
+        try scatterStrictDecodedBlock(plane, covered, width, height, expected.rect, decoded);
+    }
+    for (covered) |is_covered| {
+        if (!is_covered) return CodestreamError.InvalidCodestream;
+    }
+
+    return plane;
+}
+
+fn decodeStrictBlockCoefficients(
     allocator: std.mem.Allocator,
     expected: TemporaryRpclBlock,
     actual: StrictRpclBlockAssembly,
     layer_count: u16,
-) !void {
+) ![]i32 {
     const pass_count: usize = @intCast(actual.cumulative_passes);
     if (pass_count > expected.passes.len) return CodestreamError.InvalidCodestream;
 
@@ -2001,24 +2056,45 @@ fn validateStrictBlockT1Reconstruction(
         .bytes = actual.payload.items,
     };
     const complete_block = pass_count == expected.passes.len;
-    const decoded = if (layer_count == 1)
+    return if (layer_count == 1)
         if (complete_block)
-            try ebcot.decodeCodeBlockSegmentCoefficientsContinuous(allocator, segment, expected.rect.width, expected.rect.height)
+            ebcot.decodeCodeBlockSegmentCoefficientsContinuous(allocator, segment, expected.rect.width, expected.rect.height)
         else
-            try ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, expected.rect.width, expected.rect.height)
+            ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, expected.rect.width, expected.rect.height)
     else if (complete_block)
-        try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height)
+        ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height)
     else
-        try ebcot.decodeCodeBlockSegmentCoefficientsPartial(allocator, segment, expected.rect.width, expected.rect.height);
-    defer allocator.free(decoded);
-    if (@as(u64, @intCast(decoded.len)) != rectArea(expected.rect)) return CodestreamError.InvalidCodestream;
-    const decoded_non_zero = countNonZeroI32(decoded);
-    if (complete_block and decoded_non_zero != expected.non_zero_count) {
-        return CodestreamError.InvalidCodestream;
+        ebcot.decodeCodeBlockSegmentCoefficientsPartial(allocator, segment, expected.rect.width, expected.rect.height);
+}
+
+fn scatterStrictDecodedBlock(
+    plane: []i32,
+    covered: []bool,
+    plane_width: usize,
+    plane_height: usize,
+    rect: subband.Rect,
+    decoded: []const i32,
+) !void {
+    if (plane.len != covered.len) return CodestreamError.InvalidCodestream;
+    if (decoded.len != rectArea(rect)) return CodestreamError.InvalidCodestream;
+    const end_x = try std.math.add(usize, rect.x, rect.width);
+    const end_y = try std.math.add(usize, rect.y, rect.height);
+    if (end_x > plane_width or end_y > plane_height) return CodestreamError.InvalidCodestream;
+
+    var source: usize = 0;
+    var y = rect.y;
+    while (y < end_y) : (y += 1) {
+        const row_offset = try std.math.mul(usize, y, plane_width);
+        var x = rect.x;
+        while (x < end_x) : (x += 1) {
+            const index = try std.math.add(usize, row_offset, x);
+            if (index >= plane.len or covered[index]) return CodestreamError.InvalidCodestream;
+            plane[index] = decoded[source];
+            covered[index] = true;
+            source += 1;
+        }
     }
-    if (!complete_block and decoded_non_zero > expected.non_zero_count) {
-        return CodestreamError.InvalidCodestream;
-    }
+    if (source != decoded.len) return CodestreamError.InvalidCodestream;
 }
 
 fn countNonZeroI32(values: []const i32) u32 {
