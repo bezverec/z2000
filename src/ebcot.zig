@@ -687,6 +687,17 @@ pub fn decodeCodeBlockSegmentCoefficients(
     return decodeCodeBlockSegmentCoefficientsScratch(&scratch, segment, width, height);
 }
 
+pub fn decodeCodeBlockSegmentCoefficientsContinuous(
+    allocator: std.mem.Allocator,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+) ![]i32 {
+    var scratch = DecodeBlockScratch.init(allocator);
+    defer scratch.deinit();
+    return decodeCodeBlockSegmentCoefficientsContinuousScratch(&scratch, segment, width, height);
+}
+
 pub fn decodeCodeBlockSegmentCoefficientsScratch(
     scratch: *DecodeBlockScratch,
     segment: CodeBlockSegment,
@@ -745,6 +756,69 @@ pub fn decodeCodeBlockSegmentCoefficientsScratch(
     return out;
 }
 
+pub fn decodeCodeBlockSegmentCoefficientsContinuousScratch(
+    scratch: *DecodeBlockScratch,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+) ![]i32 {
+    if (width == 0 or height == 0) return EbcotError.InvalidBlock;
+    const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
+    if (area > max_codeblock_area) return EbcotError.InvalidBlock;
+    if (segment.pass_count != segment.passes.len) return EbcotError.InvalidBlock;
+    if (segment.byte_length != segment.bytes.len) return EbcotError.InvalidBlock;
+    if (segment.bitplanes == 0) {
+        if (segment.pass_count != 0 or segment.bytes.len != 0) return EbcotError.InvalidBlock;
+        const out = try scratch.allocator.alloc(i32, area);
+        @memset(out, 0);
+        return out;
+    }
+
+    try scratch.ensureBlockState(width, height, area);
+    @memset(scratch.flags.items, 0);
+    @memset(scratch.significant_words.items, 0);
+    @memset(scratch.coeffs.items, 0);
+
+    var expected_passes: u16 = 0;
+    expected_passes += 1;
+    if (segment.bitplanes > 1) expected_passes += @as(u16, segment.bitplanes - 1) * 3;
+    if (segment.pass_count != expected_passes) return EbcotError.InvalidBlock;
+
+    var total_symbols: usize = 0;
+    for (segment.passes) |pass| total_symbols += pass.symbol_count;
+    var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, segment.bytes, total_symbols);
+    defer decoder.deinit();
+
+    var pass_index: u16 = 0;
+    var bitplane_index = segment.bitplanes;
+    while (bitplane_index > 0) {
+        bitplane_index -= 1;
+        const bitplane: u8 = @intCast(bitplane_index);
+        clearFlag(scratch.flags.items, .became_significant);
+
+        if (bitplane == segment.bitplanes - 1) {
+            clearFlag(scratch.flags.items, .visited);
+            try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &decoder, bitplane);
+            pass_index += 1;
+            continue;
+        }
+
+        clearFlag(scratch.flags.items, .visited);
+        try decodeSignificancePassContinuous(scratch, segment.passes[pass_index], segment.bytes, &decoder, bitplane);
+        pass_index += 1;
+
+        try decodeRefinementPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &decoder, bitplane);
+        pass_index += 1;
+
+        try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &decoder, bitplane);
+        pass_index += 1;
+    }
+    if (pass_index != segment.pass_count or decoder.remaining != 0) return EbcotError.InvalidBlock;
+
+    const out = try scratch.allocator.dupe(i32, scratch.coeffs.items);
+    return out;
+}
+
 fn emitSignificancePass(
     allocator: std.mem.Allocator,
     passes: *std.ArrayList(Pass),
@@ -785,6 +859,26 @@ fn decodeSignificancePass(
     try validatePassPayload(pass, bytes, .significance, bitplane);
     var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
     defer decoder.deinit();
+    try decodeSignificancePassSymbols(scratch, pass, &decoder, bitplane);
+}
+
+fn decodeSignificancePassContinuous(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    decoder: *mq.Decoder,
+    bitplane: u8,
+) !void {
+    try validatePassPayload(pass, bytes, .significance, bitplane);
+    try decodeSignificancePassSymbols(scratch, pass, decoder, bitplane);
+}
+
+fn decodeSignificancePassSymbols(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    decoder: *mq.Decoder,
+    bitplane: u8,
+) !void {
     var symbol_count: usize = 0;
 
     var it = ScanIterator.init(scratch.width, scratch.height);
@@ -848,6 +942,26 @@ fn decodeRefinementPass(
     try validatePassPayload(pass, bytes, .refinement, bitplane);
     var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
     defer decoder.deinit();
+    try decodeRefinementPassSymbols(scratch, pass, &decoder, bitplane);
+}
+
+fn decodeRefinementPassContinuous(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    decoder: *mq.Decoder,
+    bitplane: u8,
+) !void {
+    try validatePassPayload(pass, bytes, .refinement, bitplane);
+    try decodeRefinementPassSymbols(scratch, pass, decoder, bitplane);
+}
+
+fn decodeRefinementPassSymbols(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    decoder: *mq.Decoder,
+    bitplane: u8,
+) !void {
     var symbol_count: usize = 0;
 
     var it = ScanIterator.init(scratch.width, scratch.height);
@@ -901,6 +1015,26 @@ fn decodeCleanupPass(
     try validatePassPayload(pass, bytes, .cleanup, bitplane);
     var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
     defer decoder.deinit();
+    try decodeCleanupPassSymbols(scratch, pass, &decoder, bitplane);
+}
+
+fn decodeCleanupPassContinuous(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    decoder: *mq.Decoder,
+    bitplane: u8,
+) !void {
+    try validatePassPayload(pass, bytes, .cleanup, bitplane);
+    try decodeCleanupPassSymbols(scratch, pass, decoder, bitplane);
+}
+
+fn decodeCleanupPassSymbols(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    decoder: *mq.Decoder,
+    bitplane: u8,
+) !void {
     var symbol_count: usize = 0;
 
     var it = ScanIterator.init(scratch.width, scratch.height);

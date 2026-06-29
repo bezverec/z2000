@@ -115,10 +115,10 @@ contributions from decoded T2 packets and compares the resulting cumulative
 bytes/pass state against the BP8 EBCOT/MQ catalog. This keeps the next strict
 decode step focused on mapping those assembled block payloads into T1
 coefficient reconstruction.
-For the current multi-layer direct MQ path, validation also runs the assembled
-block payload through the T1 coefficient decoder and checks reconstructed
-non-zero counts. Single-layer continuous MQ segments remain byte-validated until
-the matching continuous coefficient decoder is wired in.
+For complete block payloads, validation also runs the assembled bytes through
+the matching T1 coefficient decoder: continuous MQ for the single-layer path and
+direct MQ for the current multi-layer path. Layer-truncated blocks remain
+byte/pass validated until partial coefficient reconstruction is wired in.
 
 ## Parallelism And Scratch Reuse
 

@@ -1992,10 +1992,6 @@ fn validateStrictBlockT1Reconstruction(
     const pass_count: usize = @intCast(actual.cumulative_passes);
     if (pass_count > expected.passes.len) return CodestreamError.InvalidCodestream;
 
-    if (layer_count == 1 and expected.encoded_bitplanes != 0) {
-        return;
-    }
-
     if (pass_count != expected.passes.len and expected.encoded_bitplanes != 0) {
         return;
     }
@@ -2008,7 +2004,10 @@ fn validateStrictBlockT1Reconstruction(
         .passes = expected.passes[0..pass_count],
         .bytes = actual.payload.items,
     };
-    const decoded = try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height);
+    const decoded = if (layer_count == 1)
+        try ebcot.decodeCodeBlockSegmentCoefficientsContinuous(allocator, segment, expected.rect.width, expected.rect.height)
+    else
+        try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height);
     defer allocator.free(decoded);
     if (@as(u64, @intCast(decoded.len)) != rectArea(expected.rect)) return CodestreamError.InvalidCodestream;
     if (pass_count == expected.passes.len and countNonZeroI32(decoded) != expected.non_zero_count) {
