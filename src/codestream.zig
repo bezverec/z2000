@@ -546,6 +546,7 @@ const RpclPacketStream = struct {
 };
 
 const TemporaryRpclBlock = struct {
+    band_index: usize,
     rect: subband.Rect,
     nominal_bitplanes: u8,
     encoded_bitplanes: u8,
@@ -1645,6 +1646,7 @@ fn decodeStrictRpclImageFromPackets(
     defer allocator.free(bands);
     const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
     defer allocator.free(blocks);
+    try validateTemporaryCatalogsMatchCodeBlocks(catalogs, blocks);
     var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
     defer rpcl_index.deinit();
 
@@ -1792,6 +1794,7 @@ fn readTemporaryComponentRpclCatalog(
             };
         }
         blocks[block_index] = .{
+            .band_index = block_band,
             .rect = block_rect,
             .nominal_bitplanes = @max(nominal_bitplanes, bitplanes),
             .encoded_bitplanes = bitplanes,
@@ -2094,6 +2097,34 @@ fn validateStrictComponentAssembly(
             return CodestreamError.InvalidCodestream;
         }
     }
+}
+
+fn validateTemporaryCatalogsMatchCodeBlocks(
+    catalogs: [3]TemporaryComponentRpclCatalog,
+    blocks: []const subband.CodeBlock,
+) !void {
+    inline for (0..3) |component| {
+        try validateTemporaryCatalogMatchesCodeBlocks(catalogs[component].blocks, blocks);
+    }
+}
+
+fn validateTemporaryCatalogMatchesCodeBlocks(
+    catalog: []const TemporaryRpclBlock,
+    blocks: []const subband.CodeBlock,
+) !void {
+    if (catalog.len != blocks.len) return CodestreamError.InvalidCodestream;
+    for (catalog, blocks) |entry, block| {
+        if (entry.band_index != block.band_index or !rectsEqual(entry.rect, block.rect)) {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
+}
+
+fn rectsEqual(a: subband.Rect, b: subband.Rect) bool {
+    return a.x == b.x and
+        a.y == b.y and
+        a.width == b.width and
+        a.height == b.height;
 }
 
 fn validateStrictDecodedBlock(
