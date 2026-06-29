@@ -129,6 +129,10 @@ pub const TemporaryStats = struct {
     t2_present_packets: u64,
     t2_absent_packets: u64,
     t2_geometry_empty_packets: u64,
+    t2_header_decoded_packets: u64,
+    t2_header_bytes: u64,
+    t2_payload_bytes: u64,
+    t2_included_blocks: u64,
     rpcl_shadow_packets: u64,
     rpcl_shadow_bytes: u64,
     payload_bytes: usize,
@@ -581,6 +585,10 @@ pub const StrictPacketHeaderAudit = struct {
     present_packets: u64 = 0,
     absent_packets: u64 = 0,
     geometry_empty_packets: u64 = 0,
+    header_decoded_packets: u64 = 0,
+    header_bytes: u64 = 0,
+    payload_bytes: u64 = 0,
+    included_blocks: u64 = 0,
 };
 
 const TlmEntry = struct {
@@ -690,6 +698,20 @@ const RpclPacketReaderBandGroup = struct {
         self.reader_state.deinit();
         allocator.free(self.locations);
         allocator.free(self.source_indexes);
+        self.* = undefined;
+    }
+};
+
+const StrictPacketAuditBandGroup = struct {
+    locations: []t2.PacketBlockLocation,
+    reader_state: t2.PrecinctPacketReaderState,
+    decoded: []t2.DecodedPacketBlock,
+    max_zero_bitplanes: u8,
+
+    fn deinit(self: *StrictPacketAuditBandGroup, allocator: std.mem.Allocator) void {
+        allocator.free(self.decoded);
+        self.reader_state.deinit();
+        allocator.free(self.locations);
         self.* = undefined;
     }
 };
@@ -1089,6 +1111,10 @@ fn analyzeTemporaryPayloadBytes(
         .t2_present_packets = 0,
         .t2_absent_packets = 0,
         .t2_geometry_empty_packets = 0,
+        .t2_header_decoded_packets = 0,
+        .t2_header_bytes = 0,
+        .t2_payload_bytes = 0,
+        .t2_included_blocks = 0,
         .rpcl_shadow_packets = 0,
         .rpcl_shadow_bytes = 0,
         .payload_bytes = payload.len,
@@ -1134,6 +1160,10 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
         .t2_present_packets = audit.present_packets,
         .t2_absent_packets = audit.absent_packets,
         .t2_geometry_empty_packets = audit.geometry_empty_packets,
+        .t2_header_decoded_packets = audit.header_decoded_packets,
+        .t2_header_bytes = audit.header_bytes,
+        .t2_payload_bytes = audit.payload_bytes,
+        .t2_included_blocks = audit.included_blocks,
         .rpcl_shadow_packets = 0,
         .rpcl_shadow_bytes = 0,
         .payload_bytes = 0,
@@ -1984,32 +2014,253 @@ fn auditStrictPacketCatalogHeaders(
     defer rpcl_index.deinit();
 
     var audit = StrictPacketHeaderAudit{};
+    var active_groups: []StrictPacketAuditBandGroup = &.{};
+    defer {
+        for (active_groups) |*group| group.deinit(allocator);
+        if (active_groups.len > 0) allocator.free(active_groups);
+    }
     for (catalog.entries) |entry| {
         const selected = try rpcl_index.indexesFor(entry.packet.resolution, entry.packet.precinct_index, entry.packet.component);
         const packet_bytes = catalog.packetBytes(entry);
         audit.packets += 1;
+        if (entry.packet.layer == 0) {
+            for (active_groups) |*group| group.deinit(allocator);
+            if (active_groups.len > 0) allocator.free(active_groups);
+            active_groups = &.{};
+            if (selected.len > 0) {
+                active_groups = try buildStrictPacketAuditBandGroups(
+                    allocator,
+                    bands,
+                    blocks,
+                    header.block_width,
+                    header.block_height,
+                    selected,
+                    header.layers,
+                    header.bit_depth,
+                );
+            }
+        } else if (selected.len > 0 and active_groups.len == 0) {
+            return CodestreamError.InvalidCodestream;
+        }
+
         if (selected.len == 0) {
-            try validateEmptyRpclPacket(packet_bytes);
+            const read = try readStrictPacketHeaderForAudit(packet_bytes, entry.packet, &.{});
+            if (read.present or read.included_blocks != 0 or read.payload_length != 0) {
+                return CodestreamError.InvalidCodestream;
+            }
             audit.geometry_empty_packets += 1;
             audit.absent_packets += 1;
+            audit.header_decoded_packets += 1;
+            audit.header_bytes += read.header_length;
             continue;
         }
 
-        if (try readStrictPacketPresence(packet_bytes)) {
+        const read = try readStrictPacketHeaderForAudit(packet_bytes, entry.packet, active_groups);
+        audit.header_decoded_packets += 1;
+        audit.header_bytes += read.header_length;
+        audit.payload_bytes += read.payload_length;
+        audit.included_blocks += read.included_blocks;
+        if (read.present) {
             audit.present_packets += 1;
         } else {
-            try validateEmptyRpclPacket(packet_bytes);
             audit.absent_packets += 1;
         }
     }
     if (audit.packets != header.packet_count) return CodestreamError.InvalidCodestream;
     if (audit.present_packets + audit.absent_packets != audit.packets) return CodestreamError.InvalidCodestream;
+    if (audit.header_decoded_packets != audit.packets) return CodestreamError.InvalidCodestream;
     return audit;
 }
 
-fn readStrictPacketPresence(bytes: []const u8) !bool {
+const StrictPacketHeaderRead = struct {
+    present: bool,
+    header_length: u64,
+    payload_length: u64,
+    included_blocks: u64,
+};
+
+fn readStrictPacketHeaderForAudit(
+    bytes: []const u8,
+    packet: packet_plan.Packet,
+    groups: []StrictPacketAuditBandGroup,
+) !StrictPacketHeaderRead {
     var reader = t2.PacketHeaderReader.init(bytes);
-    return reader.readBit() catch return CodestreamError.InvalidCodestream;
+    const packet_included = reader.readBit() catch return CodestreamError.InvalidCodestream;
+    if (packet_included) {
+        if (groups.len == 0) return CodestreamError.InvalidCodestream;
+        for (groups) |*group| {
+            t2.readPrecinctPacketHeaderBody(
+                &reader,
+                &group.reader_state.inclusion,
+                &group.reader_state.zero_bitplanes,
+                group.reader_state.states,
+                packet.layer,
+                group.locations,
+                group.max_zero_bitplanes,
+                group.decoded,
+            ) catch return CodestreamError.InvalidCodestream;
+        }
+    } else {
+        for (groups) |*group| {
+            for (group.decoded) |*decoded| {
+                decoded.* = .{
+                    .included = false,
+                    .first_inclusion = false,
+                    .zero_bitplanes = 0,
+                    .pass_count = 0,
+                    .byte_length = 0,
+                };
+            }
+        }
+    }
+    reader.byteAlign() catch return CodestreamError.InvalidCodestream;
+
+    const header_length = reader.bytesConsumed();
+    var payload_length: u64 = 0;
+    var included_blocks: u64 = 0;
+    for (groups) |group| {
+        for (group.decoded) |decoded| {
+            if (!decoded.included) continue;
+            payload_length = try std.math.add(u64, payload_length, decoded.byte_length);
+            included_blocks += 1;
+        }
+    }
+    const payload_length_usize = std.math.cast(usize, payload_length) orelse return CodestreamError.InvalidCodestream;
+    if (try std.math.add(usize, header_length, payload_length_usize) != bytes.len) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    return .{
+        .present = packet_included,
+        .header_length = @intCast(header_length),
+        .payload_length = payload_length,
+        .included_blocks = included_blocks,
+    };
+}
+
+fn buildStrictPacketAuditBandGroups(
+    allocator: std.mem.Allocator,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    block_width: u16,
+    block_height: u16,
+    selected: []const usize,
+    layer_count: u16,
+    nominal_bitplanes: u8,
+) ![]StrictPacketAuditBandGroup {
+    var groups: std.ArrayList(StrictPacketAuditBandGroup) = .empty;
+    errdefer {
+        for (groups.items) |*group| group.deinit(allocator);
+        groups.deinit(allocator);
+    }
+
+    var cursor: usize = 0;
+    while (cursor < selected.len) {
+        const first_source = selected[cursor];
+        if (first_source >= blocks.len) return CodestreamError.InvalidCodestream;
+        const band_index = blocks[first_source].band_index;
+        if (band_index >= bands.len) return CodestreamError.InvalidCodestream;
+
+        var end = cursor + 1;
+        while (end < selected.len and blocks[selected[end]].band_index == band_index) : (end += 1) {
+            if (selected[end] >= blocks.len) return CodestreamError.InvalidCodestream;
+        }
+
+        try groups.append(allocator, try buildStrictPacketAuditBandGroup(
+            allocator,
+            bands[band_index],
+            blocks,
+            block_width,
+            block_height,
+            selected[cursor..end],
+            band_index,
+            layer_count,
+            nominal_bitplanes,
+        ));
+        cursor = end;
+    }
+
+    return groups.toOwnedSlice(allocator);
+}
+
+fn buildStrictPacketAuditBandGroup(
+    allocator: std.mem.Allocator,
+    band: subband.Band,
+    blocks: []const subband.CodeBlock,
+    block_width: u16,
+    block_height: u16,
+    selected: []const usize,
+    band_index: usize,
+    layer_count: u16,
+    nominal_bitplanes: u8,
+) !StrictPacketAuditBandGroup {
+    if (selected.len == 0) return CodestreamError.InvalidCodestream;
+    const grid = try t2.CodeBlockGrid.init(
+        band.rect.x,
+        band.rect.y,
+        band.rect.width,
+        band.rect.height,
+        block_width,
+        block_height,
+    );
+
+    var min_x: usize = std.math.maxInt(usize);
+    var min_y: usize = std.math.maxInt(usize);
+    var max_x: usize = 0;
+    var max_y: usize = 0;
+    const original_locations = try allocator.alloc(t2.PacketBlockLocation, selected.len);
+    defer allocator.free(original_locations);
+    for (selected, 0..) |source_index, index| {
+        if (source_index >= blocks.len) return CodestreamError.InvalidCodestream;
+        const block = blocks[source_index];
+        if (block.band_index != band_index) return CodestreamError.InvalidCodestream;
+        const location = try grid.locationForRect(.{
+            .x = block.rect.x,
+            .y = block.rect.y,
+            .width = block.rect.width,
+            .height = block.rect.height,
+        });
+        original_locations[index] = location;
+        min_x = @min(min_x, location.leaf_x);
+        min_y = @min(min_y, location.leaf_y);
+        max_x = @max(max_x, location.leaf_x);
+        max_y = @max(max_y, location.leaf_y);
+    }
+
+    const leaves_x = max_x - min_x + 1;
+    const leaves_y = max_y - min_y + 1;
+    const leaf_count = try std.math.mul(usize, leaves_x, leaves_y);
+    if (leaf_count != selected.len) return CodestreamError.InvalidCodestream;
+
+    const locations = try allocator.alloc(t2.PacketBlockLocation, leaf_count);
+    errdefer allocator.free(locations);
+    const filled = try allocator.alloc(bool, leaf_count);
+    defer allocator.free(filled);
+    @memset(filled, false);
+
+    for (original_locations) |location| {
+        const local_x = location.leaf_x - min_x;
+        const local_y = location.leaf_y - min_y;
+        const local_index = local_y * leaves_x + local_x;
+        if (local_index >= leaf_count or filled[local_index]) return CodestreamError.InvalidCodestream;
+        filled[local_index] = true;
+        locations[local_index] = .{ .leaf_x = local_x, .leaf_y = local_y };
+    }
+    for (filled) |is_filled| {
+        if (!is_filled) return CodestreamError.InvalidCodestream;
+    }
+
+    var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, leaves_x, leaves_y, leaf_count, layer_count);
+    errdefer reader_state.deinit();
+    const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
+    errdefer allocator.free(decoded);
+
+    return .{
+        .locations = locations,
+        .reader_state = reader_state,
+        .decoded = decoded,
+        .max_zero_bitplanes = nominal_bitplanes,
+    };
 }
 
 fn buildRpclPacketReaderBandGroups(
