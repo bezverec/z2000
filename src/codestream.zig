@@ -600,6 +600,37 @@ const RpclPacketReaderBandGroup = struct {
     }
 };
 
+const StrictRpclBlockAssembly = struct {
+    payload: std.ArrayList(u8) = .empty,
+    cumulative_passes: u16 = 0,
+    cumulative_bytes: u64 = 0,
+
+    fn deinit(self: *StrictRpclBlockAssembly, allocator: std.mem.Allocator) void {
+        self.payload.deinit(allocator);
+        self.* = .{};
+    }
+};
+
+const StrictComponentAssembly = struct {
+    allocator: std.mem.Allocator,
+    blocks: []StrictRpclBlockAssembly,
+
+    fn init(allocator: std.mem.Allocator, block_count: usize) !StrictComponentAssembly {
+        const blocks = try allocator.alloc(StrictRpclBlockAssembly, block_count);
+        for (blocks) |*block| block.* = .{};
+        return .{
+            .allocator = allocator,
+            .blocks = blocks,
+        };
+    }
+
+    fn deinit(self: *StrictComponentAssembly) void {
+        for (self.blocks) |*block| block.deinit(self.allocator);
+        self.allocator.free(self.blocks);
+        self.* = undefined;
+    }
+};
+
 const RpclBlockIndex = struct {
     allocator: std.mem.Allocator,
     resolution_offsets: [33]usize,
@@ -1475,6 +1506,16 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
         initialized_catalogs += 1;
     }
 
+    var assemblies: [3]StrictComponentAssembly = undefined;
+    var initialized_assemblies: usize = 0;
+    defer {
+        for (assemblies[0..initialized_assemblies]) |*assembly| assembly.deinit();
+    }
+    inline for (0..3) |component| {
+        assemblies[component] = try StrictComponentAssembly.init(allocator, catalogs[component].blocks.len);
+        initialized_assemblies += 1;
+    }
+
     _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
@@ -1546,6 +1587,10 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
                         groups,
                     );
                     if (read.packet_length != packet_bytes.bytes.len) return CodestreamError.InvalidCodestream;
+                    try collectStrictRpclPacketBlocks(
+                        &assemblies[component],
+                        groups,
+                    );
                     packet_byte_offset = packet_bytes.next_offset;
                     sequence += 1;
                 }
@@ -1553,6 +1598,9 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
         }
     }
     if (sequence != header.packet_count or packet_byte_offset != actual.packet_bytes.len) return CodestreamError.InvalidCodestream;
+    inline for (0..3) |component| {
+        try validateStrictComponentAssembly(catalogs[component].blocks, assemblies[component], header.layers);
+    }
 }
 
 fn readTemporaryComponentRpclCatalog(
@@ -1856,6 +1904,53 @@ fn readRpclPacketForBandGroups(
         .packet_length = cursor,
         .included_blocks = included_blocks,
     };
+}
+
+fn collectStrictRpclPacketBlocks(
+    assembly: *StrictComponentAssembly,
+    groups: []const RpclPacketReaderBandGroup,
+) !void {
+    for (groups) |group| {
+        if (group.source_indexes.len != group.decoded.len or group.source_indexes.len != group.payloads.len) {
+            return CodestreamError.InvalidCodestream;
+        }
+        for (group.source_indexes, 0..) |block_index, index| {
+            if (block_index >= assembly.blocks.len) return CodestreamError.InvalidCodestream;
+            const decoded = group.decoded[index];
+            if (!decoded.included) {
+                if (group.payloads[index] != null) return CodestreamError.InvalidCodestream;
+                continue;
+            }
+
+            const payload = group.payloads[index] orelse return CodestreamError.InvalidCodestream;
+            if (payload.len != decoded.byte_length) return CodestreamError.InvalidCodestream;
+            var block = &assembly.blocks[block_index];
+            block.cumulative_passes = std.math.add(u16, block.cumulative_passes, decoded.pass_count) catch return CodestreamError.InvalidCodestream;
+            block.cumulative_bytes = try std.math.add(u64, block.cumulative_bytes, decoded.byte_length);
+            try block.payload.appendSlice(assembly.allocator, payload);
+            if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+        }
+    }
+}
+
+fn validateStrictComponentAssembly(
+    catalog: []const TemporaryRpclBlock,
+    assembly: StrictComponentAssembly,
+    layer_count: u16,
+) !void {
+    if (catalog.len != assembly.blocks.len) return CodestreamError.InvalidCodestream;
+    if (layer_count == 0 or layer_count > max_quality_layers) return CodestreamError.InvalidCodestream;
+    const final_layer: usize = @intCast(layer_count - 1);
+    for (catalog, assembly.blocks) |expected, actual| {
+        const final = expected.layers[final_layer];
+        if (actual.cumulative_passes != final.cumulative_passes) return CodestreamError.InvalidCodestream;
+        if (actual.cumulative_bytes != final.cumulative_bytes) return CodestreamError.InvalidCodestream;
+        const expected_len = std.math.cast(usize, final.cumulative_bytes) orelse return CodestreamError.InvalidCodestream;
+        if (expected_len > expected.payload.len) return CodestreamError.InvalidCodestream;
+        if (!std.mem.eql(u8, expected.payload[0..expected_len], actual.payload.items)) {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
 }
 
 fn maxZeroBitplanes(blocks: []const TemporaryRpclBlock, selected: []const usize) u8 {

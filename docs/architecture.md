@@ -110,6 +110,12 @@ reported by independent decoders. RPCL remains the priority path; LRCP, PCRL,
 and CPRL stay fail-closed until their ordering is implemented on both write and
 read sides.
 
+The strict RPCL validation path now also reassembles per-code-block payload
+contributions from decoded T2 packets and compares the resulting cumulative
+bytes/pass state against the BP8 EBCOT/MQ catalog. This keeps the next strict
+decode step focused on mapping those assembled block payloads into T1
+coefficient reconstruction.
+
 ## Parallelism And Scratch Reuse
 
 The current temporary encoder is deterministic across thread counts.
