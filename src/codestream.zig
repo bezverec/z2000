@@ -123,6 +123,8 @@ pub const TemporaryStats = struct {
     packet_plan_count: u8,
     packet_plan: [33]packet_plan.Resolution,
     packet_count: u64,
+    sod_packets: u64,
+    sod_packet_bytes: u64,
     rpcl_shadow_packets: u64,
     rpcl_shadow_bytes: u64,
     payload_bytes: usize,
@@ -526,7 +528,7 @@ const ComponentRpclShadowCatalog = struct {
     }
 };
 
-const RpclShadowStreamInfo = struct {
+const PacketStreamInfo = struct {
     packets: u64 = 0,
     bytes: u64 = 0,
 };
@@ -954,7 +956,7 @@ pub fn decodeLosslessTemporaryWithOptions(
     if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
         return strict;
     }
-    try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+    _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
     return decodeTemporaryPayloadWithOptions(allocator, payload, options);
 }
 
@@ -1009,13 +1011,18 @@ pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
     const allocator = std.heap.page_allocator;
     if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
         defer allocator.free(payload);
-        try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
-        return analyzeTemporaryPayloadBytes(allocator, bytes, payload);
+        const sod = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+        return analyzeTemporaryPayloadBytes(allocator, bytes, payload, sod);
     }
     return analyzeStrictPacketStats(allocator, bytes);
 }
 
-fn analyzeTemporaryPayloadBytes(allocator: std.mem.Allocator, codestream_bytes: []const u8, payload: []const u8) !TemporaryStats {
+fn analyzeTemporaryPayloadBytes(
+    allocator: std.mem.Allocator,
+    codestream_bytes: []const u8,
+    payload: []const u8,
+    sod: PacketStreamInfo,
+) !TemporaryStats {
     var cursor = Cursor.initWithAllocator(allocator, payload);
 
     const header = try readTemporaryHeader(&cursor);
@@ -1040,6 +1047,8 @@ fn analyzeTemporaryPayloadBytes(allocator: std.mem.Allocator, codestream_bytes: 
         .packet_plan_count = header.packet_plan_count,
         .packet_plan = header.packet_plan,
         .packet_count = header.packet_count,
+        .sod_packets = sod.packets,
+        .sod_packet_bytes = sod.bytes,
         .rpcl_shadow_packets = 0,
         .rpcl_shadow_bytes = 0,
         .payload_bytes = payload.len,
@@ -1078,8 +1087,10 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
         .packet_plan_count = header.packet_plan_count,
         .packet_plan = header.packet_plan,
         .packet_count = header.packet_count,
-        .rpcl_shadow_packets = @intCast(stream.packet_lengths.len),
-        .rpcl_shadow_bytes = @intCast(stream.packet_bytes.len),
+        .sod_packets = @intCast(stream.packet_lengths.len),
+        .sod_packet_bytes = @intCast(stream.packet_bytes.len),
+        .rpcl_shadow_packets = 0,
+        .rpcl_shadow_bytes = 0,
         .payload_bytes = 0,
         .codestream_bytes = bytes.len,
         .components = [_]ComponentStats{.{}} ** 3,
@@ -1325,7 +1336,7 @@ pub fn firstTlmPtlm(bytes: []const u8) !u32 {
 fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const payload = try temporaryPayloadRaw(allocator, bytes);
     errdefer allocator.free(payload);
-    try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+    _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
     return payload;
 }
 
@@ -1512,17 +1523,21 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
     return CodestreamError.InvalidCodestream;
 }
 
-fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: []const u8, payload: []const u8) !void {
+fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: []const u8, payload: []const u8) !PacketStreamInfo {
     try validateStrictMetadataMatchesTemporary(bytes, payload);
     var expected = try readRpclPacketStreamFromTemporary(allocator, payload);
     defer expected.deinit();
     if (expected.packet_lengths.len == 0) {
         try validateTilePartPayloads(allocator, bytes);
-        return;
+        return .{};
     }
 
     var actual = try readStrictSodRpclPacketStream(allocator, bytes);
     defer actual.deinit();
+    const sod = PacketStreamInfo{
+        .packets = @intCast(actual.packet_lengths.len),
+        .bytes = @intCast(actual.packet_bytes.len),
+    };
 
     if (!std.mem.eql(u32, expected.packet_lengths, actual.packet_lengths)) {
         return CodestreamError.InvalidCodestream;
@@ -1546,6 +1561,7 @@ fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: 
         defer temporary_image.deinit();
         try validateRgbImagesEqual(temporary_image, strict.image);
     }
+    return sod;
 }
 
 fn decodeStrictRpclImageWithTemporaryMetadata(
@@ -3205,7 +3221,7 @@ fn skipEbcotSegmentPayload(cursor: *Cursor, payload_version: u8, byte_length: u6
     _ = try cursor.readBytes(len);
 }
 
-fn readRpclShadowStreamInfo(cursor: *Cursor, payload_version: u8, expected_packet_count: u64) !RpclShadowStreamInfo {
+fn readRpclShadowStreamInfo(cursor: *Cursor, payload_version: u8, expected_packet_count: u64) !PacketStreamInfo {
     if (payload_version < 8) return .{};
 
     const packet_count = try cursor.readU64();

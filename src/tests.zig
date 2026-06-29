@@ -2103,6 +2103,11 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     const stats = try codestream.analyzeLosslessTemporary(bytes);
     const expected_tile_parts = @as(usize, stats.levels) + 1;
     try std.testing.expectEqual(psot, ptlm);
+    try std.testing.expectEqual(@as(usize, 0), stats.payload_bytes);
+    try std.testing.expectEqual(stats.packet_count, stats.sod_packets);
+    try std.testing.expect(stats.sod_packet_bytes > 0);
+    try std.testing.expectEqual(@as(u64, 0), stats.rpcl_shadow_packets);
+    try std.testing.expectEqual(@as(u64, 0), stats.rpcl_shadow_bytes);
     try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
@@ -3240,6 +3245,8 @@ test "temporary codestream analyzer reports block and stream stats" {
     try std.testing.expectEqual(@as(u8, 1), stats.tile_part_plan[1]);
     try std.testing.expectEqual(@as(u8, 2), stats.packet_plan_count);
     try std.testing.expectEqual(@as(u64, 18), stats.packet_count);
+    try std.testing.expectEqual(stats.packet_count, stats.sod_packets);
+    try std.testing.expect(stats.sod_packet_bytes > 0);
     try std.testing.expectEqual(stats.packet_count, stats.rpcl_shadow_packets);
     try std.testing.expect(stats.rpcl_shadow_bytes > 0);
     try std.testing.expectEqual(@as(u32, 2), stats.packet_plan[0].width);
@@ -4133,6 +4140,7 @@ test "temporary payload strict RPCL decode accepts SOP and EPH disabled" {
     defer allocator.free(bytes);
 
     const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expect(stats.sod_packets > 0);
     try std.testing.expect(stats.rpcl_shadow_packets > 0);
     try std.testing.expectEqual(@as(usize, 0), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
     try std.testing.expectEqual(@as(usize, 0), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
@@ -4220,6 +4228,9 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 0), bytes[tlm + 6]);
     try std.testing.expectEqual(psot, readU32BeTest(bytes, tlm + 7));
     const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(stats.packet_count, stats.sod_packets);
+    try std.testing.expect(stats.sod_packet_bytes > 0);
+    try std.testing.expectEqual(@as(u64, 0), stats.rpcl_shadow_packets);
     try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expectEqual(@as(usize, 6), try countTilePartHeaderMarker(bytes, codestream.markerValue("plt")));
     const sop_count = try countTilePartPrefixMarker(bytes, codestream.markerValue("sop"));
