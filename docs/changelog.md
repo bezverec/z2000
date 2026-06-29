@@ -90,6 +90,9 @@ entries are grouped by development milestone rather than semantic version.
 - Normal no-sidecar strict decode now reconstructs the current single-layer
   RPCL/RCT/5-3 path from the strict T2 block catalog, including zero-block
   geometry derived from codestream subband layout.
+- Multi-layer lossless encode now uses continuous MQ code-block segments too,
+  with quality-layer byte ranges snapped to actual coding-pass truncation
+  points and mirrored consistently in BP8 debug metadata.
 
 ### Parallelism And Performance
 

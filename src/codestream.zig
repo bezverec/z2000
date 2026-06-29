@@ -3039,8 +3039,6 @@ fn decodeStrictRpclImageFromBlockCatalog(
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
 ) !image.RgbImage {
-    if (header.layers != 1) return CodestreamError.UnsupportedPayload;
-
     var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog);
     defer strict_planes.deinit();
     try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
@@ -3184,7 +3182,8 @@ fn decodeStrictBlockCoefficients(
         .bytes = actual.payload.items,
     };
     const complete_block = pass_count == expected.passes.len;
-    return if (layer_count == 1 and complete_block)
+    _ = layer_count;
+    return if (complete_block)
         ebcot.decodeCodeBlockPayloadContinuousInferred(
             allocator,
             expected.encoded_bitplanes,
@@ -3193,12 +3192,8 @@ fn decodeStrictBlockCoefficients(
             expected.rect.width,
             expected.rect.height,
         )
-    else if (layer_count == 1)
-        ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, expected.rect.width, expected.rect.height)
-    else if (complete_block)
-        ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height)
     else
-        ebcot.decodeCodeBlockSegmentCoefficientsPartial(allocator, segment, expected.rect.width, expected.rect.height);
+        ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, expected.rect.width, expected.rect.height);
 }
 
 fn markStrictZeroBlockCovered(
@@ -5082,10 +5077,8 @@ fn buildRpclShadowBlock(
     options: LosslessOptions,
     include_bitplane_payload: bool,
 ) !RpclShadowBlock {
-    var segment = if (options.layers == 1)
-        try ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect)
-    else
-        try ebcot.encodeCodeBlockSegmentDirectScratch(ebcot_scratch, plane, stride, rect);
+    _ = ebcot_scratch;
+    var segment = try ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect);
     errdefer segment.deinit(allocator);
 
     var bitplane_passes: ?bitplane.EncodedBlockPasses = null;
@@ -5098,10 +5091,7 @@ fn buildRpclShadowBlock(
     }
 
     var layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
-    try computeLayerTruncations(&layers, options, .{
-        .pass_count = segment.pass_count,
-        .byte_length = segment.byte_length,
-    });
+    try computeLayerTruncations(&layers, options, segment);
 
     return .{
         .bitplane = bitplane_passes,
@@ -5141,10 +5131,14 @@ fn cloneBitplanePasses(
 fn computeLayerTruncations(
     out: *[max_quality_layers]t2.LayerTruncation,
     options: LosslessOptions,
-    block: rate_alloc.Block,
+    segment: ebcot.CodeBlockSegment,
 ) !void {
     var layers: [max_quality_layers]rate_alloc.Truncation = undefined;
     const layer_count: usize = @intCast(options.layers);
+    const block = rate_alloc.Block{
+        .pass_count = segment.pass_count,
+        .byte_length = segment.byte_length,
+    };
     if (options.rate_count > 0) {
         try rate_alloc.allocateFromCompressionRatios(
             layers[0..layer_count],
@@ -5156,12 +5150,46 @@ fn computeLayerTruncations(
     }
 
     @memset(out, .{ .cumulative_passes = 0, .cumulative_bytes = 0 });
+    var previous = t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 };
     for (layers[0..layer_count], 0..) |layer, index| {
+        const is_final = index == layer_count - 1;
+        const truncation = try normalizedLayerTruncation(segment, layer.cumulative_passes, previous, is_final);
         out[index] = .{
-            .cumulative_passes = layer.cumulative_passes,
-            .cumulative_bytes = layer.cumulative_bytes,
+            .cumulative_passes = truncation.cumulative_passes,
+            .cumulative_bytes = truncation.cumulative_bytes,
+        };
+        previous = out[index];
+    }
+}
+
+fn normalizedLayerTruncation(
+    segment: ebcot.CodeBlockSegment,
+    requested_passes: u16,
+    previous: t2.LayerTruncation,
+    is_final: bool,
+) !t2.LayerTruncation {
+    if (is_final) {
+        return .{
+            .cumulative_passes = segment.pass_count,
+            .cumulative_bytes = segment.byte_length,
         };
     }
+
+    var passes = @min(requested_passes, segment.pass_count);
+    while (passes > previous.cumulative_passes) {
+        const truncation = try segment.truncationPointForPasses(passes);
+        if (truncation.cumulative_bytes > previous.cumulative_bytes and
+            truncation.cumulative_bytes < segment.byte_length)
+        {
+            return .{
+                .cumulative_passes = truncation.cumulative_passes,
+                .cumulative_bytes = truncation.cumulative_bytes,
+            };
+        }
+        passes -= 1;
+    }
+
+    return previous;
 }
 
 fn appendRpclShadowPacketsForSelection(
@@ -5661,10 +5689,7 @@ fn appendComponentBlockPayload(
         const coding_passes = bitplane.isoCodingPassCount(encoded.bitplanes, encoded.non_zero_count);
         if (ebcot_segment.pass_count != coding_passes) return CodestreamError.InvalidCodestream;
         try appendU16Be(allocator, out, coding_passes);
-        try appendLayerAllocation(allocator, out, options, .{
-            .pass_count = ebcot_segment.pass_count,
-            .byte_length = ebcot_segment.byte_length,
-        });
+        try appendLayerAllocation(allocator, out, options, ebcot_segment);
         try appendEntropyStream(allocator, out, entropy_scratch, encoded.significance_bytes);
         try appendEntropyStream(allocator, out, entropy_scratch, encoded.refinement_bytes);
         try appendEntropyStream(allocator, out, entropy_scratch, encoded.cleanup_bytes);
@@ -5948,22 +5973,13 @@ fn appendLayerAllocation(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
     options: LosslessOptions,
-    block: rate_alloc.Block,
+    segment: ebcot.CodeBlockSegment,
 ) !void {
-    var layers: [max_quality_layers]rate_alloc.Truncation = undefined;
-    const layer_count: usize = @intCast(options.layers);
-    if (options.rate_count > 0) {
-        try rate_alloc.allocateFromCompressionRatios(
-            layers[0..layer_count],
-            block,
-            options.rates[0..options.rate_count],
-        );
-    } else {
-        try rate_alloc.allocateEven(layers[0..layer_count], block);
-    }
+    var layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+    try computeLayerTruncations(&layers, options, segment);
 
     try appendU16Be(allocator, out, options.layers);
-    for (layers[0..layer_count]) |layer| {
+    for (layers[0..@as(usize, @intCast(options.layers))]) |layer| {
         try appendU16Be(allocator, out, layer.cumulative_passes);
         try appendU64Be(allocator, out, layer.cumulative_bytes);
     }

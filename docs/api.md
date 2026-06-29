@@ -95,10 +95,9 @@ Notes:
 - The latest private payload is BP8 and is emitted only when
   `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
 - `decodeLosslessTemporary*` decodes normal no-sidecar codestreams for the
-  current single-layer RPCL/RCT/5-3 path by reconstructing T2 block payloads
-  from strict `SOD` packets and inferring continuous MQ/T1 pass metadata from
-  the payload. Debug BP8 sidecar files are still accepted as an oracle/compat
-  path.
+  current RPCL/RCT/5-3 path by reconstructing T2 block payloads from strict
+  `SOD` packets and inferring continuous MQ/T1 pass metadata from the payload.
+  Debug BP8 sidecar files are still accepted as an oracle/compat path.
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.

@@ -3480,6 +3480,43 @@ test "quality-layer rate allocation records truncation metadata without changing
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "multi-layer no-sidecar codestream decodes from strict SOD packets" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        0,   10,  20,
+        30,  40,  50,
+        60,  70,  80,
+        90,  100, 110,
+        120, 130, 140,
+        150, 160, 170,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 3,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 32,
+        .block_height = 32,
+        .layers = 3,
+    });
+    defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(rgb.width, decoded.width);
+    try std.testing.expectEqual(rgb.height, decoded.height);
+    try std.testing.expectEqual(rgb.bit_depth, decoded.bit_depth);
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
 test "RPCL packet plan computes precinct grids per resolution" {
     const precincts = [_]packet_plan.Precinct{
         .{ .width = 4, .height = 4 },

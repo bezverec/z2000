@@ -51,9 +51,9 @@ Tasks:
 - Keep `PLT` sourced from real RPCL packet lengths.
 - Keep the old temporary payload only as an opt-in debug `COM` sidecar.
 - Keep strict RPCL/T2 packet state validation active for the same narrow path.
-- Keep the current no-sidecar strict decode path green for single-layer
-  RPCL/RCT/5-3: strict T2 block catalog, inferred continuous MQ/T1 pass
-  metadata, inverse 5/3, and inverse RCT.
+- Keep the current no-sidecar strict decode path green for RPCL/RCT/5-3:
+  strict T2 block catalog, inferred continuous MQ/T1 pass metadata, quality
+  layers snapped to pass truncation points, inverse 5/3, and inverse RCT.
 - Close remaining packet-header/T1 conformance gaps found by OpenJPEG, Grok,
   and Kakadu smoke tests.
 
