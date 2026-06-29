@@ -136,6 +136,7 @@ pub const TemporaryStats = struct {
     t2_assembled_blocks: u64,
     t2_assembled_bytes: u64,
     t2_assembled_passes: u64,
+    t2_t1_ready_blocks: u64,
     rpcl_shadow_packets: u64,
     rpcl_shadow_bytes: u64,
     payload_bytes: usize,
@@ -595,6 +596,7 @@ pub const StrictPacketHeaderAudit = struct {
     assembled_blocks: u64 = 0,
     assembled_bytes: u64 = 0,
     assembled_passes: u64 = 0,
+    t1_ready_blocks: u64 = 0,
 };
 
 const TlmEntry = struct {
@@ -730,6 +732,11 @@ const StrictRpclBlockAssembly = struct {
     payload: std.ArrayList(u8) = .empty,
     cumulative_passes: u16 = 0,
     cumulative_bytes: u64 = 0,
+    metadata_ready: bool = false,
+    band_index: usize = 0,
+    rect: subband.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    nominal_bitplanes: u8 = 0,
+    encoded_bitplanes: u8 = 0,
 
     fn deinit(self: *StrictRpclBlockAssembly, allocator: std.mem.Allocator) void {
         self.payload.deinit(allocator);
@@ -1128,6 +1135,7 @@ fn analyzeTemporaryPayloadBytes(
         .t2_assembled_blocks = 0,
         .t2_assembled_bytes = 0,
         .t2_assembled_passes = 0,
+        .t2_t1_ready_blocks = 0,
         .rpcl_shadow_packets = 0,
         .rpcl_shadow_bytes = 0,
         .payload_bytes = payload.len,
@@ -1180,6 +1188,7 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
         .t2_assembled_blocks = audit.assembled_blocks,
         .t2_assembled_bytes = audit.assembled_bytes,
         .t2_assembled_passes = audit.assembled_passes,
+        .t2_t1_ready_blocks = audit.t1_ready_blocks,
         .rpcl_shadow_packets = 0,
         .rpcl_shadow_bytes = 0,
         .payload_bytes = 0,
@@ -2082,7 +2091,7 @@ fn auditStrictPacketCatalogHeaders(
         }
 
         const read = try readStrictPacketHeaderForAudit(packet_bytes, entry.packet, active_groups);
-        try collectStrictPacketAuditBlocks(&assemblies[entry.packet.component], active_groups);
+        try collectStrictPacketAuditBlocks(&assemblies[entry.packet.component], active_groups, blocks, header.bit_depth);
         audit.header_decoded_packets += 1;
         audit.header_bytes += read.header_length;
         audit.payload_bytes += read.payload_length;
@@ -2101,6 +2110,7 @@ fn auditStrictPacketCatalogHeaders(
     audit.assembled_blocks = assembly_stats.blocks;
     audit.assembled_bytes = assembly_stats.bytes;
     audit.assembled_passes = assembly_stats.passes;
+    audit.t1_ready_blocks = assembly_stats.t1_ready_blocks;
     return audit;
 }
 
@@ -2178,13 +2188,17 @@ fn readStrictPacketHeaderForAudit(
 fn collectStrictPacketAuditBlocks(
     assembly: *StrictComponentAssembly,
     groups: []const StrictPacketAuditBandGroup,
+    source_blocks: []const subband.CodeBlock,
+    nominal_bitplanes: u8,
 ) !void {
     for (groups) |group| {
         if (group.source_indexes.len != group.decoded.len or group.source_indexes.len != group.payloads.len) {
             return CodestreamError.InvalidCodestream;
         }
         for (group.source_indexes, 0..) |block_index, index| {
-            if (block_index >= assembly.blocks.len) return CodestreamError.InvalidCodestream;
+            if (block_index >= assembly.blocks.len or block_index >= source_blocks.len) {
+                return CodestreamError.InvalidCodestream;
+            }
             const decoded = group.decoded[index];
             if (!decoded.included) {
                 if (group.payloads[index] != null) return CodestreamError.InvalidCodestream;
@@ -2194,6 +2208,18 @@ fn collectStrictPacketAuditBlocks(
             const payload = group.payloads[index] orelse return CodestreamError.InvalidCodestream;
             if (payload.len != decoded.byte_length) return CodestreamError.InvalidCodestream;
             var block = &assembly.blocks[block_index];
+            if (!block.metadata_ready) {
+                if (!decoded.first_inclusion) return CodestreamError.InvalidCodestream;
+                if (decoded.zero_bitplanes > nominal_bitplanes) return CodestreamError.InvalidCodestream;
+                const source = source_blocks[block_index];
+                block.metadata_ready = true;
+                block.band_index = source.band_index;
+                block.rect = source.rect;
+                block.nominal_bitplanes = nominal_bitplanes;
+                block.encoded_bitplanes = nominal_bitplanes - decoded.zero_bitplanes;
+            } else if (decoded.first_inclusion) {
+                return CodestreamError.InvalidCodestream;
+            }
             block.cumulative_passes = std.math.add(u16, block.cumulative_passes, decoded.pass_count) catch return CodestreamError.InvalidCodestream;
             block.cumulative_bytes = try std.math.add(u64, block.cumulative_bytes, decoded.byte_length);
             try block.payload.appendSlice(assembly.allocator, payload);
@@ -2206,6 +2232,7 @@ const StrictAssemblyStats = struct {
     blocks: u64 = 0,
     bytes: u64 = 0,
     passes: u64 = 0,
+    t1_ready_blocks: u64 = 0,
 };
 
 fn strictAssemblyStats(assemblies: [3]StrictComponentAssembly) !StrictAssemblyStats {
@@ -2214,9 +2241,14 @@ fn strictAssemblyStats(assemblies: [3]StrictComponentAssembly) !StrictAssemblySt
         for (assembly.blocks) |block| {
             if (block.cumulative_bytes == 0 and block.cumulative_passes == 0) continue;
             if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+            if (!block.metadata_ready or block.rect.width == 0 or block.rect.height == 0) {
+                return CodestreamError.InvalidCodestream;
+            }
+            if (block.encoded_bitplanes > block.nominal_bitplanes) return CodestreamError.InvalidCodestream;
             stats.blocks += 1;
             stats.bytes = try std.math.add(u64, stats.bytes, block.cumulative_bytes);
             stats.passes = try std.math.add(u64, stats.passes, block.cumulative_passes);
+            stats.t1_ready_blocks += 1;
         }
     }
     return stats;

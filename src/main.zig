@@ -514,7 +514,7 @@ fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void 
     }
     if (stats.t2_audited_packets > 0) {
         std.debug.print(
-            "  T2 header audit: {} packets, present {}, absent {}, geometry-empty {}, headers {} B, payload {} B, included blocks {}, assembled blocks {}, passes {}\n",
+            "  T2 header audit: {} packets, present {}, absent {}, geometry-empty {}, headers {} B, payload {} B, included blocks {}, assembled blocks {}, passes {}, T1-ready {}\n",
             .{
                 stats.t2_audited_packets,
                 stats.t2_present_packets,
@@ -525,6 +525,7 @@ fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void 
                 stats.t2_included_blocks,
                 stats.t2_assembled_blocks,
                 stats.t2_assembled_passes,
+                stats.t2_t1_ready_blocks,
             },
         );
     }
