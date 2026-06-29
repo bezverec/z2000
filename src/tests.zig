@@ -4231,6 +4231,37 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(stats.packet_count, stats.sod_packets);
     try std.testing.expect(stats.sod_packet_bytes > 0);
     try std.testing.expectEqual(@as(u64, 0), stats.rpcl_shadow_packets);
+    var catalog = try codestream.readStrictPacketCatalog(allocator, bytes);
+    defer catalog.deinit();
+    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), catalog.entries.len);
+    try std.testing.expectEqual(@as(usize, @intCast(stats.sod_packet_bytes)), catalog.packet_bytes.len);
+
+    const strict_plan = packet_plan.Plan{
+        .resolution_count = stats.packet_plan_count,
+        .resolutions = stats.packet_plan,
+        .packets = stats.packet_count,
+    };
+    var packet_byte_offset: usize = 0;
+    for (catalog.entries, 0..) |entry, sequence| {
+        try std.testing.expectEqual(@as(u64, @intCast(sequence)), entry.packet.sequence);
+        try std.testing.expectEqual((try packet_plan.rpclPacketAt(strict_plan, 3, stats.layers, entry.packet.sequence)).?, entry.packet);
+        try std.testing.expectEqual(packet_byte_offset, entry.byte_offset);
+        try std.testing.expectEqual(@as(usize, @intCast(entry.byte_length)), catalog.packetBytes(entry).len);
+        packet_byte_offset += entry.byte_length;
+    }
+    try std.testing.expectEqual(catalog.packet_bytes.len, packet_byte_offset);
+
+    var tile_part_packet_start: usize = 0;
+    for (stats.tile_part_plan[0..stats.tile_part_plan_count], 0..) |resolution_value, tile_part_index| {
+        const resolution_index: usize = resolution_value;
+        const packet_count: usize = @intCast(stats.packet_plan[resolution_index].packets);
+        for (catalog.entries[tile_part_packet_start..][0..packet_count]) |entry| {
+            try std.testing.expectEqual(@as(u8, @intCast(tile_part_index)), entry.tile_part_index);
+            try std.testing.expectEqual(resolution_value, entry.packet.resolution);
+        }
+        tile_part_packet_start += packet_count;
+    }
+    try std.testing.expectEqual(catalog.entries.len, tile_part_packet_start);
     try std.testing.expectEqual(@as(usize, 6), countMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expectEqual(@as(usize, 6), try countTilePartHeaderMarker(bytes, codestream.markerValue("plt")));
     const sop_count = try countTilePartPrefixMarker(bytes, codestream.markerValue("sop"));
