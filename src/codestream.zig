@@ -647,6 +647,11 @@ const StrictComponentAssembly = struct {
     }
 };
 
+const StrictRpclImage = struct {
+    image: image.RgbImage,
+    complete: bool,
+};
+
 const RpclBlockIndex = struct {
     allocator: std.mem.Allocator,
     resolution_offsets: [33]usize,
@@ -903,8 +908,12 @@ pub fn decodeLosslessTemporaryWithOptions(
     bytes: []const u8,
     options: DecodeOptions,
 ) !image.RgbImage {
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
     const payload = try temporaryPayload(allocator, bytes);
     defer allocator.free(payload);
+    if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
+        return strict;
+    }
     return decodeTemporaryPayloadWithOptions(allocator, payload, options);
 }
 
@@ -1468,7 +1477,7 @@ fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: 
     if (!std.mem.eql(u8, expected.packet_bytes, actual.packet_bytes)) {
         return CodestreamError.InvalidCodestream;
     }
-    validateStrictRpclT2Packets(allocator, payload, actual) catch |err| switch (err) {
+    var strict = decodeStrictRpclImageFromPackets(allocator, payload, actual, .{}) catch |err| switch (err) {
         CodestreamError.ImageTooLarge,
         CodestreamError.TooManyLevels,
         CodestreamError.InvalidCodestream,
@@ -1477,6 +1486,40 @@ fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: 
         => return err,
         else => return CodestreamError.InvalidCodestream,
     };
+    defer strict.image.deinit();
+
+    if (strict.complete) {
+        var temporary_image = try decodeTemporaryPayloadWithOptions(allocator, payload, .{});
+        defer temporary_image.deinit();
+        try validateRgbImagesEqual(temporary_image, strict.image);
+    }
+}
+
+fn decodeStrictRpclImageWithTemporaryMetadata(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    payload: []const u8,
+    options: DecodeOptions,
+) !?image.RgbImage {
+    var expected = try readRpclPacketStreamFromTemporary(allocator, payload);
+    defer expected.deinit();
+    if (expected.packet_lengths.len == 0) return null;
+
+    var actual = try readStrictSodRpclPacketStream(allocator, bytes);
+    defer actual.deinit();
+    if (!std.mem.eql(u32, expected.packet_lengths, actual.packet_lengths)) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (!std.mem.eql(u8, expected.packet_bytes, actual.packet_bytes)) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var strict = try decodeStrictRpclImageFromPackets(allocator, payload, actual, options);
+    if (!strict.complete) {
+        strict.image.deinit();
+        return null;
+    }
+    return strict.image;
 }
 
 fn readRpclPacketStreamFromTemporary(allocator: std.mem.Allocator, payload: []const u8) !RpclPacketStream {
@@ -1515,10 +1558,15 @@ fn readRpclPacketStreamFromTemporary(allocator: std.mem.Allocator, payload: []co
     };
 }
 
-fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8, actual: RpclPacketStream) !void {
+fn decodeStrictRpclImageFromPackets(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    actual: RpclPacketStream,
+    options: DecodeOptions,
+) !StrictRpclImage {
     var cursor = Cursor.initWithAllocator(allocator, payload);
     const header = try readTemporaryHeader(&cursor);
-    if (header.version < 8) return;
+    if (header.version < 8) return CodestreamError.UnsupportedPayload;
 
     var catalogs: [3]TemporaryComponentRpclCatalog = undefined;
     var initialized_catalogs: usize = 0;
@@ -1627,15 +1675,14 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
     }
     var strict_planes = try reconstructStrictComponentCoefficientPlanes(allocator, header, catalogs, assemblies);
     defer strict_planes.deinit();
-    try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, .{});
+    try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
     var strict_image = try color.inverseRct(allocator, strict_planes);
-    defer strict_image.deinit();
+    errdefer strict_image.deinit();
 
-    if (strictAssembliesComplete(catalogs, assemblies)) {
-        var temporary_image = try decodeTemporaryPayloadWithOptions(allocator, payload, .{});
-        defer temporary_image.deinit();
-        try validateRgbImagesEqual(temporary_image, strict_image);
-    }
+    return .{
+        .image = strict_image,
+        .complete = strictAssembliesComplete(catalogs, assemblies),
+    };
 }
 
 fn readTemporaryComponentRpclCatalog(

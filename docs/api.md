@@ -89,9 +89,9 @@ Notes:
   payloads in `SOD`.
 - The latest private payload is BP8 and is emitted only when
   `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
-- `decodeLosslessTemporary*` only decodes project-private payloads and therefore
-  requires the debug sidecar as its public input path, while strict RPCL/T1
-  validation now reconstructs an internal RGB image through inverse DWT/RCT.
+- `decodeLosslessTemporary*` still requires the debug sidecar metadata, but for
+  complete BP8/RPCL streams it now prefers the RGB image reconstructed from the
+  strict `SOD` packet payload.
 
 ## `src/t2.zig`
 
