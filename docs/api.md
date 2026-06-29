@@ -260,9 +260,8 @@ by oracle tests in the current narrow path. Segmentation-symbol cleanup
 trailers, terminate-all pass-terminated MQ slices, vertical-causal context
 formation, and reset-context continuous MQ behavior are implemented behind
 internal EBCOT code-block style flags. `CodeBlockStyle` now maps all six COD
-style bits explicitly; BYPASS and predictable termination are represented but
-remain explicit unsupported payload modes. Public codestream support still
-fails closed for every nonzero COD style byte until each style has writer,
+style bits explicitly, but public strict codestream support rejects every
+nonzero COD style byte with `UnsupportedPayload` until each style has writer,
 reader, tests, and interop coverage.
 The inferred continuous payload decoder and partial coefficient decode helpers
 accept the same internal style state for future strict T2 audits and

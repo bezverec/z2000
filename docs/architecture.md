@@ -48,8 +48,9 @@ conversion.
 - optional `TLM`;
 - tile-part headers with `SOT`/`SOD`/`EOC`;
 - optional `SOP` and `EPH` marker instances. SOP is enabled by default; EPH is
-  currently opt-in because the narrow OpenJPEG/Kakadu interop path is more
-  stable without it while packet-header boundary handling is hardened;
+  currently opt-in because the independent-decoder interop gate is more stable
+  without it while packet-header/state semantics are hardened for Grok and
+  Kakadu;
 - `PLT` packet-length marker segments;
 - an optional debug private payload sidecar identified by `ZJ2K-CBLK-BP*`,
   stored in chunked `COM` marker segments when explicitly requested.

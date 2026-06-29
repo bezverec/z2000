@@ -34,8 +34,8 @@ This first milestone is intentionally small and honest:
 - swappable pass-stream entropy layer with raw/RLE/bit-RLE auto-selection
 - explicit experimental adaptive arithmetic backend for pass streams
 - EBCOT/MQ code-block segments used as the current RPCL packet payload
-- explicit COD code-block style metadata for all six Part 1 style bits, with
-  unsupported payload modes still failing closed
+- explicit COD code-block style metadata for all six Part 1 style bits, while
+  strict codestream decode still rejects every nonzero style byte fail-closed
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
 
 It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The
@@ -137,17 +137,17 @@ lines we are targeting:
 - `--block 64` maps to Grok `-b 64,64` and Kakadu `Cblk={64,64}`.
 - `--bypass`, `--reset-context`, `--terminate-all`, `--vertical-causal`,
   `--predictable-termination`, and `--segmentation-symbols` are represented as
-  explicit COD code-block style metadata, but still fail closed with
-  `UnsupportedPayload` in the public codestream profile until the matching
-  JPEG2000 Part 1 payload behavior is wired end-to-end. Reset-context,
-  terminate-all, vertical-causal, and segmentation-symbol behavior exist in
-  standalone EBCOT test paths; BYPASS and predictable termination remain
-  explicit unsupported payload modes.
+  explicit COD code-block style metadata, but the public strict codestream
+  profile still rejects every nonzero style byte with `UnsupportedPayload` until
+  the matching JPEG2000 Part 1 payload behavior is wired end-to-end.
+  Reset-context, terminate-all, vertical-causal, and segmentation-symbol
+  behavior exist only in standalone EBCOT test paths; BYPASS and predictable
+  termination remain explicit unsupported payload modes.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is
-  disabled by default for the current OpenJPEG/Kakadu interop path. Use
-  `--eph` only for packet-boundary diagnostics until EPH sequencing is fully
-  hardened.
+  disabled by default for the current independent-decoder interop path. Use
+  `--eph` only for packet-boundary diagnostics until packet header/state
+  semantics are accepted by Grok and Kakadu.
 - `--tlm` writes TLM marker entries for the current tile-part lengths.
 - `--layers N` maps to `Clayers=N`.
 - `--tile-parts R` maps to Kakadu `ORGtparts=R` and Grok `-u R`; L/C/P
@@ -255,6 +255,10 @@ through `tiff-to-jp2` and `decode-temp-jp2`.
 The codestream marker skeleton now writes non-zero `SOT/Psot` values and TLM
 entries for resolution-ordered tile-parts. OpenJPEG `opj_dump` indexes the
 current single-tile archival profile as six tile-parts for six resolutions.
+On the current no-sidecar/no-EPH smoke path, z2000 strict decode and OpenJPEG
+accept the output; Grok and Kakadu still expose packet header/PLT interpretation
+issues, so comparative performance benchmarking is gated until that T2
+conformance gap is closed.
 
 The block payload is now a continuous MQ-backed EBCOT-style segment. BP8 debug
 metadata, when requested, records the same EBCOT/MQ segment bytes and T2 layer
@@ -282,7 +286,7 @@ some stream sizes at too much encode/decode cost. The next compression step
 should be a JPEG2000-style context/MQ backend, not further tuning of the
 generic pass-stream coder.
 
-Latest local profile comparison on the same 2048x2048 RGB TIFF:
+Historical local profile comparison on the same 2048x2048 RGB TIFF:
 
 - Archival profile encode: `z2000` 254.1 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
 - Archival profile decode: `z2000` 294.0 ms, Grok 84.0 ms, OpenJPEG 449.9 ms.

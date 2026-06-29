@@ -41,9 +41,9 @@ encoder before broadening profile coverage.
   rejected until JPX boxes are intentionally implemented.
 - ICC profile preservation: TIFF tag 34675 now roundtrips as a JP2 restricted
   ICC `colr` box and back to TIFF as opaque metadata for common RGB profiles
-  such as eciRGBv2 and Adobe RGB. Next add malformed ICC box/tag rejection
-  coverage and optional LittleCMS-backed conversion after the preservation path
-  has interop coverage.
+  such as eciRGBv2 and Adobe RGB. Malformed ICC box/tag rejection coverage is
+  in place; optional LittleCMS-backed conversion should come only after the
+  preservation path has interop coverage.
 - Profiles: enable ICT, irreversible 9/7, and scalar quantization only after
   the corresponding transform, quantization, T1, and T2 payload behavior exists.
   Until then, continue returning `UnsupportedPayload`.
