@@ -545,6 +545,21 @@ const RpclPacketStream = struct {
     }
 };
 
+const TlmEntry = struct {
+    tile_index: u16,
+    psot: u32,
+};
+
+const TlmIndex = struct {
+    allocator: std.mem.Allocator,
+    entries: []TlmEntry,
+
+    fn deinit(self: *TlmIndex) void {
+        self.allocator.free(self.entries);
+        self.* = undefined;
+    }
+};
+
 const TemporaryRpclBlock = struct {
     band_index: usize,
     rect: subband.Rect,
@@ -2423,15 +2438,21 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     errdefer packet_bytes.deinit(allocator);
 
     const eph_enabled = try mainHeaderUsesEph(bytes);
+    var tlm_index = try readStrictMainHeaderTlmIndex(allocator, bytes);
+    defer if (tlm_index) |*index| index.deinit();
     var cursor: usize = 2;
     cursor = try skipMainHeaderToFirstSot(bytes, cursor);
     var packet_sequence: u16 = 0;
+    var tile_part_index: usize = 0;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         if (marker == @intFromEnum(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            if (tlm_index) |index| {
+                if (tile_part_index != index.entries.len) return CodestreamError.InvalidCodestream;
+            }
             const owned_lengths = try lengths.toOwnedSlice(allocator);
             errdefer allocator.free(owned_lengths);
             const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
@@ -2448,8 +2469,12 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
         if (bytes.len - cursor < 10) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, cursor);
         if (segment_length != 10) return CodestreamError.InvalidCodestream;
+        const tile_index = readU16Be(bytes, cursor + 2);
         const psot = readU32Be(bytes, cursor + 4);
         if (psot == 0) return CodestreamError.UnsupportedPayload;
+        if (tlm_index) |index| {
+            try validateStrictTlmEntry(index.entries, tile_part_index, tile_index, psot);
+        }
         const tile_part_end = try std.math.add(usize, marker_start, psot);
         if (tile_part_end > bytes.len or tile_part_end < cursor + segment_length + 2) {
             return CodestreamError.TruncatedData;
@@ -2473,9 +2498,96 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
             &packet_sequence,
         );
         cursor = tile_part_end;
+        tile_part_index += 1;
     }
 
     return CodestreamError.InvalidCodestream;
+}
+
+fn readStrictMainHeaderTlmIndex(allocator: std.mem.Allocator, bytes: []const u8) !?TlmIndex {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var entries: std.ArrayList(TlmEntry) = .empty;
+    errdefer entries.deinit(allocator);
+    var saw_tlm = false;
+
+    var cursor: usize = 2;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 4) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        cursor += 2;
+        if (marker == @intFromEnum(Marker.sot)) break;
+        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
+            return CodestreamError.InvalidCodestream;
+        }
+
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) {
+            return CodestreamError.TruncatedData;
+        }
+        if (marker == @intFromEnum(Marker.tlm)) {
+            if (saw_tlm) return CodestreamError.UnsupportedPayload;
+            try appendStrictTlmEntries(allocator, &entries, bytes[cursor + 2 .. cursor + segment_length]);
+            saw_tlm = true;
+        }
+        cursor += segment_length;
+    }
+
+    if (!saw_tlm) {
+        entries.deinit(allocator);
+        return null;
+    }
+    const owned_entries = try entries.toOwnedSlice(allocator);
+    return TlmIndex{
+        .allocator = allocator,
+        .entries = owned_entries,
+    };
+}
+
+fn appendStrictTlmEntries(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(TlmEntry),
+    segment: []const u8,
+) !void {
+    if (segment.len < 2) return CodestreamError.InvalidCodestream;
+    const ztlm = segment[0];
+    if (ztlm != 0) return CodestreamError.UnsupportedPayload;
+    const stlm = segment[1];
+    if ((stlm & 0x0f) != 0) return CodestreamError.InvalidCodestream;
+    const tile_index_size = (stlm >> 4) & 0x03;
+    if (tile_index_size == 3) return CodestreamError.InvalidCodestream;
+    const length_size: usize = if (((stlm >> 6) & 0x01) == 0) 2 else 4;
+    const entry_size = @as(usize, tile_index_size) + length_size;
+    const payload = segment[2..];
+    if (entry_size == 0 or payload.len == 0 or payload.len % entry_size != 0) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var cursor: usize = 0;
+    while (cursor < payload.len) : (cursor += entry_size) {
+        const tile_index: u16 = switch (tile_index_size) {
+            0 => 0,
+            1 => payload[cursor],
+            2 => readU16Be(payload, cursor),
+            else => unreachable,
+        };
+        const ptlm_offset = cursor + @as(usize, tile_index_size);
+        const psot: u32 = switch (length_size) {
+            2 => readU16Be(payload, ptlm_offset),
+            4 => readU32Be(payload, ptlm_offset),
+            else => unreachable,
+        };
+        if (psot == 0) return CodestreamError.UnsupportedPayload;
+        try entries.append(allocator, .{ .tile_index = tile_index, .psot = psot });
+    }
+}
+
+fn validateStrictTlmEntry(entries: []const TlmEntry, tile_part_index: usize, tile_index: u16, psot: u32) !void {
+    if (tile_part_index >= entries.len) return CodestreamError.InvalidCodestream;
+    const entry = entries[tile_part_index];
+    if (entry.tile_index != tile_index or entry.psot != psot) return CodestreamError.InvalidCodestream;
 }
 
 fn skipMainHeaderToFirstSot(bytes: []const u8, start: usize) !usize {
