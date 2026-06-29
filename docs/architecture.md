@@ -120,8 +120,9 @@ the matching T1 coefficient decoder: continuous MQ for the single-layer path and
 direct MQ for the current multi-layer path. Layer-truncated blocks now decode
 available complete coding-pass prefixes and keep byte/pass validation as the
 outer T2 guard. The decoded blocks are now scattered back into full component
-coefficient planes with bounds, overlap, and coverage checks; the remaining
-decode integration step is to feed those strict planes into inverse DWT/RCT.
+coefficient planes with bounds, overlap, and coverage checks, then fed through
+inverse DWT/RCT to build an internal strict RGB image. Complete-block strict
+images are compared sample-for-sample against the temporary sidecar decode.
 
 ## Parallelism And Scratch Reuse
 

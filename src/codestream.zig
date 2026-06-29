@@ -905,6 +905,14 @@ pub fn decodeLosslessTemporaryWithOptions(
 ) !image.RgbImage {
     const payload = try temporaryPayload(allocator, bytes);
     defer allocator.free(payload);
+    return decodeTemporaryPayloadWithOptions(allocator, payload, options);
+}
+
+fn decodeTemporaryPayloadWithOptions(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    options: DecodeOptions,
+) !image.RgbImage {
     var cursor = Cursor.initWithAllocator(allocator, payload);
 
     const header = try readTemporaryHeader(&cursor);
@@ -1616,15 +1624,17 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
     if (sequence != header.packet_count or packet_byte_offset != actual.packet_bytes.len) return CodestreamError.InvalidCodestream;
     inline for (0..3) |component| {
         try validateStrictComponentAssembly(catalogs[component].blocks, assemblies[component], header.layers);
-        const reconstructed = try reconstructStrictComponentCoefficients(
-            allocator,
-            header.width,
-            header.height,
-            catalogs[component].blocks,
-            assemblies[component],
-            header.layers,
-        );
-        allocator.free(reconstructed);
+    }
+    var strict_planes = try reconstructStrictComponentCoefficientPlanes(allocator, header, catalogs, assemblies);
+    defer strict_planes.deinit();
+    try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, .{});
+    var strict_image = try color.inverseRct(allocator, strict_planes);
+    defer strict_image.deinit();
+
+    if (strictAssembliesComplete(catalogs, assemblies)) {
+        var temporary_image = try decodeTemporaryPayloadWithOptions(allocator, payload, .{});
+        defer temporary_image.deinit();
+        try validateRgbImagesEqual(temporary_image, strict_image);
     }
 }
 
@@ -2003,6 +2013,75 @@ fn validateStrictDecodedBlock(
         return CodestreamError.InvalidCodestream;
     }
     if (!complete_block and decoded_non_zero > expected.non_zero_count) {
+        return CodestreamError.InvalidCodestream;
+    }
+}
+
+fn reconstructStrictComponentCoefficientPlanes(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalogs: [3]TemporaryComponentRpclCatalog,
+    assemblies: [3]StrictComponentAssembly,
+) !color.RctPlanes {
+    const y = try reconstructStrictComponentCoefficients(
+        allocator,
+        header.width,
+        header.height,
+        catalogs[0].blocks,
+        assemblies[0],
+        header.layers,
+    );
+    errdefer allocator.free(y);
+    const cb = try reconstructStrictComponentCoefficients(
+        allocator,
+        header.width,
+        header.height,
+        catalogs[1].blocks,
+        assemblies[1],
+        header.layers,
+    );
+    errdefer allocator.free(cb);
+    const cr = try reconstructStrictComponentCoefficients(
+        allocator,
+        header.width,
+        header.height,
+        catalogs[2].blocks,
+        assemblies[2],
+        header.layers,
+    );
+    errdefer allocator.free(cr);
+
+    return .{
+        .allocator = allocator,
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .y = y,
+        .cb = cb,
+        .cr = cr,
+    };
+}
+
+fn strictAssembliesComplete(
+    catalogs: [3]TemporaryComponentRpclCatalog,
+    assemblies: [3]StrictComponentAssembly,
+) bool {
+    inline for (0..3) |component| {
+        if (catalogs[component].blocks.len != assemblies[component].blocks.len) return false;
+        for (catalogs[component].blocks, assemblies[component].blocks) |expected, actual| {
+            if (actual.cumulative_passes != expected.passes.len) return false;
+            if (actual.cumulative_bytes != expected.payload.len) return false;
+        }
+    }
+    return true;
+}
+
+fn validateRgbImagesEqual(expected: image.RgbImage, actual: image.RgbImage) !void {
+    if (expected.width != actual.width or
+        expected.height != actual.height or
+        expected.bit_depth != actual.bit_depth or
+        !std.mem.eql(u16, expected.samples, actual.samples))
+    {
         return CodestreamError.InvalidCodestream;
     }
 }
