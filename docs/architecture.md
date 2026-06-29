@@ -42,7 +42,9 @@ oracle/compatibility path.
 - `SIZ`, `COD`, `QCD`;
 - optional `TLM`;
 - tile-part headers with `SOT`/`SOD`/`EOC`;
-- optional `SOP` and `EPH` marker instances;
+- optional `SOP` and `EPH` marker instances. SOP is enabled by default; EPH is
+  currently opt-in because the narrow OpenJPEG/Kakadu interop path is more
+  stable without it while packet-header boundary handling is hardened;
 - `PLT` packet-length marker segments;
 - an optional debug private payload sidecar identified by `ZJ2K-CBLK-BP*`,
   stored in chunked `COM` marker segments when explicitly requested.
@@ -83,6 +85,9 @@ The T1 work is split into two paths:
   templates;
 - style-aware partial coefficient decoding for pass-prefix quality-layer
   validation;
+- explicit internal `CodeBlockStyle` metadata for all six COD style bits, with
+  BYPASS and predictable termination represented but still rejected as
+  unsupported payload modes;
 - MQ encode/decode roundtrip tests;
 - direct MQ emission with scratch-buffer reuse;
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;
@@ -92,18 +97,20 @@ The implementation is still not a complete Part 1 T1 coder. Code-block style
 options such as BYPASS, RESET, TERMALL, vertical causal, predictable
 termination, and segmentation symbols are parsed by the CLI/codestream layer but
 still rejected with `UnsupportedPayload` until their exact payload effect is
-connected end-to-end. Reset-context, vertical-causal, and segmentation-symbol
-payload behavior now exist as standalone EBCOT style test paths; the next T1
-work should continue tightening remaining cleanup edge cases, COD-driven
-termination/other style behavior, and byte-for-byte oracle coverage before the
-options are advertised as supported.
+connected end-to-end. Reset-context, terminate-all, vertical-causal, and
+segmentation-symbol payload behavior now exist as standalone EBCOT style test
+paths; BYPASS and predictable termination remain fail-closed payload modes. The
+next T1 work should continue tightening remaining cleanup edge cases,
+COD-driven termination/other style behavior, and byte-for-byte oracle coverage
+before the options are advertised as supported.
 
 ## T2 Direction
 
 `t2.zig` owns the current T2 building blocks:
 
 - marker-safe packet-header bit IO;
-- tag-tree encoder/decoder;
+- tag-tree encoder/decoder with known-node state so continued packets do not
+  consume duplicate inclusion bits for already proven leaves;
 - code-block packet state;
 - coding pass count and segment length coding;
 - first inclusion and zero bit-plane handling;
@@ -119,8 +126,8 @@ The most recent bridge pieces are:
   blocks and updates writer state.
 - RPCL writer/reader state now tracks layer bounds, next layer, next sequence,
   precinct coordinates, inclusion tag-tree state, zero-bitplane tag-tree state,
-  `numlenbits`, cumulative pass/byte deltas, and strict whole-packet
-  consumption.
+  tag-tree known-node state, `numlenbits`, cumulative pass/byte deltas, and
+  strict whole-packet consumption.
 
 The next integration step is to connect strict T2 packet views to real T1 image
 reconstruction from the EBCOT/MQ payload, then close packet-header differences

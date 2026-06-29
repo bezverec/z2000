@@ -24,6 +24,9 @@ entries are grouped by development milestone rather than semantic version.
 - Tightened strict codestream metadata parsing for the supported packet path:
   SIZ component precision/sign/subsampling, single-tile geometry, COD layer
   count/segment length, and QCD ordering are now validated before T2 audit.
+- Defaulted normal encode to SOP-on and EPH-off for the current independent
+  decoder interop path; explicit `--eph` remains available for packet-boundary
+  diagnostics while EPH sequencing is hardened.
 
 ### Temporary JP2 Payload
 
@@ -71,6 +74,9 @@ entries are grouped by development milestone rather than semantic version.
 - Added standalone EBCOT terminate-all style support, writing pass-terminated
   MQ segments and decoding them through the continuous API when the internal
   style is supplied.
+- Added explicit `CodeBlockStyle` metadata for all six COD code-block style
+  bits. BYPASS and predictable termination are represented but fail closed until
+  their payload behavior is implemented.
 
 ### Quality Layers And Rate Allocation
 
@@ -84,6 +90,9 @@ entries are grouped by development milestone rather than semantic version.
 
 - Added packet-header bit writer/reader with JPEG2000 marker-safe stuffing.
 - Added tag-tree encoder/decoder.
+- Added tag-tree known-node state and rollback so continued packets do not
+  re-consume already proven inclusion/zero-bitplane tag-tree bits after a
+  successful threshold decision.
 - Added code-block packet state, `numlenbits`/segment length state, and zero
   bit-plane handling.
 - Added precinct packet writer/reader tests for first inclusion, continued

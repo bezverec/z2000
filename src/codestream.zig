@@ -240,7 +240,7 @@ pub const LosslessOptions = struct {
     predictable_termination: bool = false,
     segmentation_symbols: bool = false,
     sop: bool = true,
-    eph: bool = true,
+    eph: bool = false,
     tlm: bool = true,
     tile_part_divisions: ?u8 = 'R',
     threads: u8 = 1,
@@ -6106,25 +6106,21 @@ fn codingStyleFlags(options: LosslessOptions) u8 {
 }
 
 fn codeBlockStyle(options: LosslessOptions) u8 {
-    var style: u8 = 0;
-    if (options.bypass) style |= 0x01;
-    if (options.reset_context) style |= 0x02;
-    if (options.terminate_all) style |= 0x04;
-    if (options.vertical_causal) style |= 0x08;
-    if (options.predictable_termination) style |= 0x10;
-    if (options.segmentation_symbols) style |= 0x20;
-    return style;
+    const style = ebcot.CodeBlockStyle{
+        .bypass = options.bypass,
+        .reset_context = options.reset_context,
+        .terminate_all = options.terminate_all,
+        .vertical_causal = options.vertical_causal,
+        .predictable_termination = options.predictable_termination,
+        .segmentation_symbols = options.segmentation_symbols,
+    };
+    return style.toCodByte();
 }
 
 fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
-    if ((style & ~@as(u8, 0x3f)) != 0) return CodestreamError.InvalidCodestream;
-    if ((style & 0x01) != 0 or (style & 0x10) != 0) return CodestreamError.UnsupportedPayload;
-    return .{
-        .reset_context = (style & 0x02) != 0,
-        .terminate_all = (style & 0x04) != 0,
-        .vertical_causal = (style & 0x08) != 0,
-        .segmentation_symbols = (style & 0x20) != 0,
-    };
+    const parsed = ebcot.CodeBlockStyle.fromCodByte(style) orelse return CodestreamError.InvalidCodestream;
+    if (parsed.hasUnsupportedPayloadMode()) return CodestreamError.UnsupportedPayload;
+    return parsed;
 }
 
 fn qcdStyleByte(options: LosslessOptions) u8 {

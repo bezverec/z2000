@@ -119,11 +119,44 @@ pub const CodeBlockSegment = struct {
 };
 
 pub const CodeBlockStyle = struct {
+    bypass: bool = false,
     reset_context: bool = false,
     terminate_all: bool = false,
     vertical_causal: bool = false,
+    predictable_termination: bool = false,
     segmentation_symbols: bool = false,
+
+    pub fn fromCodByte(byte: u8) ?CodeBlockStyle {
+        if ((byte & ~@as(u8, 0x3f)) != 0) return null;
+        return .{
+            .bypass = (byte & 0x01) != 0,
+            .reset_context = (byte & 0x02) != 0,
+            .terminate_all = (byte & 0x04) != 0,
+            .vertical_causal = (byte & 0x08) != 0,
+            .predictable_termination = (byte & 0x10) != 0,
+            .segmentation_symbols = (byte & 0x20) != 0,
+        };
+    }
+
+    pub fn toCodByte(self: CodeBlockStyle) u8 {
+        var byte: u8 = 0;
+        if (self.bypass) byte |= 0x01;
+        if (self.reset_context) byte |= 0x02;
+        if (self.terminate_all) byte |= 0x04;
+        if (self.vertical_causal) byte |= 0x08;
+        if (self.predictable_termination) byte |= 0x10;
+        if (self.segmentation_symbols) byte |= 0x20;
+        return byte;
+    }
+
+    pub fn hasUnsupportedPayloadMode(self: CodeBlockStyle) bool {
+        return self.bypass or self.predictable_termination;
+    }
 };
+
+fn validateImplementedStyle(style: CodeBlockStyle) !void {
+    if (style.hasUnsupportedPayloadMode()) return EbcotError.InvalidBlock;
+}
 
 pub const EncodedBlockView = struct {
     bitplanes: u8,
@@ -319,6 +352,7 @@ pub fn encodeBlockScratchWithStyle(
     rect: subband.Rect,
     style: CodeBlockStyle,
 ) !EncodedBlockView {
+    try validateImplementedStyle(style);
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
@@ -550,6 +584,7 @@ pub fn encodeCodeBlockSegmentDirectScratchWithStyle(
     rect: subband.Rect,
     style: CodeBlockStyle,
 ) !CodeBlockSegment {
+    try validateImplementedStyle(style);
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
@@ -637,6 +672,7 @@ pub fn encodeBlockSymbolsSegmentContinuous(allocator: std.mem.Allocator, block: 
 }
 
 pub fn encodeBlockSymbolsSegmentContinuousWithStyle(allocator: std.mem.Allocator, block: EncodedBlockView, style: CodeBlockStyle) !CodeBlockSegment {
+    try validateImplementedStyle(style);
     if (block.passes.len == 0) {
         const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
         errdefer allocator.free(passes);
@@ -964,6 +1000,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     height: usize,
     style: CodeBlockStyle,
 ) ![]i32 {
+    try validateImplementedStyle(style);
     if (style.terminate_all) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
@@ -1075,6 +1112,7 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
     require_complete: bool,
     style: CodeBlockStyle,
 ) ![]i32 {
+    try validateImplementedStyle(style);
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;

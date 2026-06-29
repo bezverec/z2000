@@ -51,6 +51,9 @@ Important `tiff-to-jp2` options:
 Unsupported progression orders, ICT, 9-7 JP2 output, scalar quantization,
 multi-tile requests, unsupported tile-part divisions, and code-block style
 options whose payload behavior is not implemented should fail closed.
+SOP is enabled by default for the current narrow profile. EPH is available via
+`--eph`, but defaults off while packet-boundary interop with independent
+decoders is being hardened.
 
 ## `src/codestream.zig`
 
@@ -166,9 +169,9 @@ Usage pattern for the new RPCL bridge:
 5. Keep the writer state alive across layers for the same precinct.
 
 The RPCL writer/reader state is intentionally strict: it tracks the configured
-layer count, next layer, next sequence, precinct coordinates, tag-tree lows,
-`numlenbits`, and cumulative pass/byte deltas. `readRpclPacket` consumes exactly
-one packet slice and rejects trailing bytes.
+layer count, next layer, next sequence, precinct coordinates, tag-tree lows and
+known-node state, `numlenbits`, and cumulative pass/byte deltas.
+`readRpclPacket` consumes exactly one packet slice and rejects trailing bytes.
 
 ## `src/packet_plan.zig`
 
@@ -207,6 +210,7 @@ Primary public types:
 - `CodeBlockPassPayload`
 - `EncodedBlock`
 - `CodeBlockSegment`
+- `CodeBlockStyle`
 - `EncodedBlockView`
 - `BlockScratch`
 - `DirectBlockScratch`
@@ -246,12 +250,14 @@ prediction contexts, and refined magnitude-refinement contexts are now covered
 by oracle tests in the current narrow path. Segmentation-symbol cleanup
 trailers, terminate-all pass-terminated MQ slices, vertical-causal context
 formation, and reset-context continuous MQ behavior are implemented behind
-internal EBCOT code-block style flags, but remain fail-closed in the public
-codestream profile until COD style handling is wired through the full
-encoder/reader. The inferred continuous payload decoder and partial coefficient
-decode helpers accept the same internal style state for future strict T2 audits
-and quality-layer prefix validation; inferred decode rejects terminate-all
-payloads because pass byte lengths are required.
+internal EBCOT code-block style flags. `CodeBlockStyle` now maps all six COD
+style bits explicitly; BYPASS and predictable termination are represented but
+remain explicit unsupported payload modes. Public codestream support still
+fails closed until each style has writer, reader, tests, and interop coverage.
+The inferred continuous payload decoder and partial coefficient decode helpers
+accept the same internal style state for future strict T2 audits and
+quality-layer prefix validation; inferred decode rejects terminate-all payloads
+because pass byte lengths are required.
 
 ## `src/rate_alloc.zig`
 

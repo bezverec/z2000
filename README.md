@@ -24,6 +24,8 @@ This first milestone is intentionally small and honest:
 - explicit RPCL packet sequence iterator for single-tile packet ordering
 - T2 packet-header bitstream, tag-tree, coding-pass, and segment-length
   primitives with marker-safe bit stuffing
+- T2 tag-tree known-state tracking so repeated included leaves do not consume
+  duplicate packet-header bits
 - fail-closed validation for standalone RPCL/T2 packet metadata helpers
 - T2 code-block grid mapping from subband block rects to tag-tree leaves
 - quality-layer-to-packet delta mapping for EBCOT code-block segment slices
@@ -32,6 +34,8 @@ This first milestone is intentionally small and honest:
 - swappable pass-stream entropy layer with raw/RLE/bit-RLE auto-selection
 - explicit experimental adaptive arithmetic backend for pass streams
 - EBCOT/MQ code-block segments used as the current RPCL packet payload
+- explicit COD code-block style metadata for all six Part 1 style bits, with
+  unsupported payload modes still failing closed
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
 
 It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The
@@ -124,16 +128,18 @@ lines we are targeting:
   `Cprecincts`.
 - `--block 64` maps to Grok `-b 64,64` and Kakadu `Cblk={64,64}`.
 - `--bypass`, `--reset-context`, `--terminate-all`, `--vertical-causal`,
-  `--predictable-termination`, and `--segmentation-symbols` are parsed but fail
-  closed with `UnsupportedPayload` until the matching JPEG2000 Part 1
-  code-block style behavior is wired through the codestream path. Segmentation
-  symbol payloads, terminate-all pass-terminated MQ slices, vertical-causal
-  context formation, and reset-context continuous MQ behavior are implemented
-  only in standalone EBCOT test paths for now, including inferred
-  continuous-payload decode where possible and partial quality-layer prefix
-  decode.
+  `--predictable-termination`, and `--segmentation-symbols` are represented as
+  explicit COD code-block style metadata, but still fail closed with
+  `UnsupportedPayload` in the public codestream profile until the matching
+  JPEG2000 Part 1 payload behavior is wired end-to-end. Reset-context,
+  terminate-all, vertical-causal, and segmentation-symbol behavior exist in
+  standalone EBCOT test paths; BYPASS and predictable termination remain
+  explicit unsupported payload modes.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
-  `Cuse_eph=yes` at marker/config level.
+  `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is
+  disabled by default for the current OpenJPEG/Kakadu interop path. Use
+  `--eph` only for packet-boundary diagnostics until EPH sequencing is fully
+  hardened.
 - `--tlm` writes TLM marker entries for the current tile-part lengths.
 - `--layers N` maps to `Clayers=N`.
 - `--tile-parts R` maps to Kakadu `ORGtparts=R` and Grok `-u R`; L/C/P
@@ -156,7 +162,7 @@ Archival-style scaffold:
 zig build run -- tiff-to-jp2 example.tif example.jp2 \
   --tile 4096,4096 --progression RPCL --resolutions 6 \
   --precincts "[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]" \
-  --block 64 --layers 1 --tile-parts R --sop --eph
+  --block 64 --layers 1 --tile-parts R --sop --no-eph
 ```
 
 Production-master-style scaffold:
@@ -212,7 +218,7 @@ example:
 ./zig-out/bin/z2000 tiff-to-jp2 bench-rgb-2048.tif bench-ours-profile.jp2 \
   --tile 4096,4096 --progression RPCL --resolutions 6 \
   --precincts "[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]" \
-  --block 64 --layers 1 --tile-parts R --sop --eph --tlm --timings
+  --block 64 --layers 1 --tile-parts R --sop --no-eph --tlm --timings
 ```
 
 Current local baseline on a synthetic uncompressed RGB TIFF 2048x2048 after
@@ -245,6 +251,8 @@ current single-tile archival profile as six tile-parts for six resolutions.
 The block payload is now a continuous MQ-backed EBCOT-style segment. BP8 debug
 metadata, when requested, records the same EBCOT/MQ segment bytes and T2 layer
 deltas so the strict SOD packet stream can be checked against an oracle.
+T2 tag-trees now retain known included-node state across packets, which keeps
+continued-layer packet headers from re-emitting already proven inclusion bits.
 
 `jp2-stats` inspects codestream markers, strict packet headers, and debug
 sidecar metadata when present. On the historical 2048x2048 smoke file it

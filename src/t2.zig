@@ -120,6 +120,7 @@ pub const TagTreeEncoder = struct {
     levels: []TagTreeLevel,
     values: []u32,
     lows: []u32,
+    known: []bool,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -137,7 +138,10 @@ pub const TagTreeEncoder = struct {
         errdefer allocator.free(values);
         const lows = try allocator.alloc(u32, layout.node_count);
         errdefer allocator.free(lows);
+        const known = try allocator.alloc(bool, layout.node_count);
+        errdefer allocator.free(known);
         @memset(lows, 0);
+        @memset(known, false);
         @memcpy(values[0..leaf_values.len], leaf_values);
 
         var level: usize = 1;
@@ -172,6 +176,7 @@ pub const TagTreeEncoder = struct {
             .levels = layout.levels,
             .values = values,
             .lows = lows,
+            .known = known,
         };
     }
 
@@ -179,6 +184,7 @@ pub const TagTreeEncoder = struct {
         self.allocator.free(self.levels);
         self.allocator.free(self.values);
         self.allocator.free(self.lows);
+        self.allocator.free(self.known);
         self.* = undefined;
     }
 
@@ -199,7 +205,10 @@ pub const TagTreeEncoder = struct {
         while (level > 0) {
             level -= 1;
             const index = path[level];
-            if (low > self.lows[index]) {
+            if (self.known[index]) {
+                low = self.lows[index];
+                continue;
+            } else if (low > self.lows[index]) {
                 self.lows[index] = low;
             } else {
                 low = self.lows[index];
@@ -207,6 +216,7 @@ pub const TagTreeEncoder = struct {
             while (low < threshold) {
                 if (low >= self.values[index]) {
                     try writer.writeBit(true);
+                    self.known[index] = true;
                     break;
                 }
                 try writer.writeBit(false);
@@ -223,25 +233,31 @@ pub const TagTreeDecoder = struct {
     height: usize,
     levels: []TagTreeLevel,
     lows: []u32,
+    known: []bool,
 
     pub fn init(allocator: std.mem.Allocator, width: usize, height: usize) !TagTreeDecoder {
         const layout = try makeTagTreeLayout(allocator, width, height);
         errdefer allocator.free(layout.levels);
         const lows = try allocator.alloc(u32, layout.node_count);
         errdefer allocator.free(lows);
+        const known = try allocator.alloc(bool, layout.node_count);
+        errdefer allocator.free(known);
         @memset(lows, 0);
+        @memset(known, false);
         return .{
             .allocator = allocator,
             .width = width,
             .height = height,
             .levels = layout.levels,
             .lows = lows,
+            .known = known,
         };
     }
 
     pub fn deinit(self: *TagTreeDecoder) void {
         self.allocator.free(self.levels);
         self.allocator.free(self.lows);
+        self.allocator.free(self.known);
         self.* = undefined;
     }
 
@@ -262,19 +278,25 @@ pub const TagTreeDecoder = struct {
         while (level > 0) {
             level -= 1;
             const index = path[level];
-            if (low > self.lows[index]) {
+            if (self.known[index]) {
+                low = self.lows[index];
+                continue;
+            } else if (low > self.lows[index]) {
                 self.lows[index] = low;
             } else {
                 low = self.lows[index];
             }
             while (low < threshold) {
-                if (try reader.readBit()) break;
+                if (try reader.readBit()) {
+                    self.known[index] = true;
+                    break;
+                }
                 low += 1;
             }
             self.lows[index] = low;
         }
 
-        return self.lows[path[0]] < threshold;
+        return self.known[path[0]] and self.lows[path[0]] < threshold;
     }
 };
 
@@ -732,6 +754,10 @@ pub const PrecinctPacketReaderState = struct {
         defer allocator.free(saved_inclusion_lows);
         const saved_zero_lows = try allocator.dupe(u32, self.zero_bitplanes.lows);
         defer allocator.free(saved_zero_lows);
+        const saved_inclusion_known = try allocator.dupe(bool, self.inclusion.known);
+        defer allocator.free(saved_inclusion_known);
+        const saved_zero_known = try allocator.dupe(bool, self.zero_bitplanes.known);
+        defer allocator.free(saved_zero_known);
         errdefer {
             self.next_layer = saved_next_layer;
             self.next_sequence = saved_next_sequence;
@@ -740,6 +766,8 @@ pub const PrecinctPacketReaderState = struct {
             @memcpy(self.states, saved_states);
             @memcpy(self.inclusion.lows, saved_inclusion_lows);
             @memcpy(self.zero_bitplanes.lows, saved_zero_lows);
+            @memcpy(self.inclusion.known, saved_inclusion_known);
+            @memcpy(self.zero_bitplanes.known, saved_zero_known);
         }
         const read = try readPrecinctLayerPacket(
             allocator,
@@ -1053,10 +1081,16 @@ pub fn readPrecinctLayerPacket(
     defer allocator.free(saved_inclusion_lows);
     const saved_zero_lows = try allocator.dupe(u32, zero_bitplanes.lows);
     defer allocator.free(saved_zero_lows);
+    const saved_inclusion_known = try allocator.dupe(bool, inclusion.known);
+    defer allocator.free(saved_inclusion_known);
+    const saved_zero_known = try allocator.dupe(bool, zero_bitplanes.known);
+    defer allocator.free(saved_zero_known);
     errdefer {
         @memcpy(states, saved_states);
         @memcpy(inclusion.lows, saved_inclusion_lows);
         @memcpy(zero_bitplanes.lows, saved_zero_lows);
+        @memcpy(inclusion.known, saved_inclusion_known);
+        @memcpy(zero_bitplanes.known, saved_zero_known);
     }
 
     var reader = PacketHeaderReader.init(bytes);

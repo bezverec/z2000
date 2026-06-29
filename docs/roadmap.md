@@ -22,16 +22,19 @@ encoder before broadening profile coverage.
   inferred continuous-payload decode where pass lengths are not required and
   partial quality-layer prefix decode, but public codestream support remains
   fail-closed until COD style handling is end-to-end. The remaining code-block
-  style flags still need full payload behavior. Keep
+  style flags still need full payload behavior; BYPASS and predictable
+  termination are now explicit metadata states but still unsupported payload
+  modes. Keep
   row-mask, stripe-mask, and SIMD-aware block-stats optimization going only when
   byte-for-byte oracle tests continue to pass. Code-block style flags currently
   fail closed until that behavior is connected to the emitted payload.
 - T2 packet state: make include tag-tree state, zero-bitplane tag-tree state,
   `numlenbits`, layer deltas, and packet header state explicit per
   resolution/precinct/component/layer. The RPCL path now tracks layer bounds,
-  sequence, precinct coordinates, whole-packet consumption, and rollback on
-  failed reads; next extend the same discipline when adding LRCP, PCRL, and
-  CPRL, each with matching writer, reader, and tests.
+  sequence, precinct coordinates, tag-tree lows/known-node state, whole-packet
+  consumption, and rollback on failed reads; next extend the same discipline
+  when adding LRCP, PCRL, and CPRL, each with matching writer, reader, and
+  tests.
 - JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
   Start with 8-bit and 16-bit RGB plus sRGB `colr`; keep JPX-only features
@@ -96,7 +99,8 @@ Goal: make T2 packetization strict, inspectable, and ready for more profiles.
 Tasks:
 
 - Add packet parsing from codestream tile-parts.
-- Validate SOP/EPH sequencing.
+- Validate SOP/EPH sequencing. SOP remains default-on; EPH is opt-in until
+  OpenJPEG/Kakadu packet-boundary interop is stable.
 - Validate PLT/TLM consistency against actual packet and tile-part lengths.
 - Keep RPCL as the first supported progression, with bounded per-precinct state
   and whole-packet reader validation.

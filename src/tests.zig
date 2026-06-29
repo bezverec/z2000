@@ -122,6 +122,32 @@ test "T2 tag-tree encoder and decoder preserve threshold decisions" {
     try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
 }
 
+test "T2 tag-tree known leaves do not consume repeated inclusion bits" {
+    const allocator = std.testing.allocator;
+    const leaf_values = [_]u32{0};
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+    var encoder = try t2.TagTreeEncoder.init(allocator, 1, 1, leaf_values[0..]);
+    defer encoder.deinit();
+
+    try encoder.encode(0, 0, 1, &writer);
+    try encoder.encode(0, 0, 1, &writer);
+    try writer.writeBit(true);
+    try writer.finish();
+
+    var reader = t2.PacketHeaderReader.init(bytes.items);
+    var decoder = try t2.TagTreeDecoder.init(allocator, 1, 1);
+    defer decoder.deinit();
+
+    try std.testing.expect(try decoder.decode(0, 0, 1, &reader));
+    try std.testing.expect(try decoder.decode(0, 0, 1, &reader));
+    try std.testing.expect(try reader.readBit());
+    try reader.byteAlign();
+    try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
+}
+
 test "T2 zero bit-plane count bridges T1 block bitplane metadata" {
     try std.testing.expectEqual(@as(u8, 5), try t2.zeroBitPlaneCount(8, 3));
     try std.testing.expectEqual(@as(u8, 0), try t2.zeroBitPlaneCount(8, 8));
@@ -2262,7 +2288,7 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("qcd")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sop")));
-    try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eph")));
+    try std.testing.expect(!codestream.hasMarker(bytes, codestream.markerValue("eph")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("sod")));
     try std.testing.expect(codestream.hasMarker(bytes, codestream.markerValue("eoc")));
     try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
@@ -2289,7 +2315,7 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
     try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
-    try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
+    try std.testing.expectEqual(@as(usize, 0), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
     try std.testing.expectEqual(codestream.markerValue("sot"), readU16BeTest(bytes, sot_index + psot));
 }
 
@@ -2311,7 +2337,7 @@ test "lossless codestream places EPH before non-empty packet payload" {
         .samples = samples,
     };
 
-    const bytes = try codestream.encodeLosslessSkeleton(allocator, rgb, 2);
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .eph = true });
     defer allocator.free(bytes);
 
     try std.testing.expect(try hasNonTrailingEphPacketForTest(bytes));
@@ -2750,6 +2776,36 @@ test "EBCOT cleanup run mode encodes clean four-row stripes" {
     try std.testing.expectEqual(false, top[5].bit);
     try std.testing.expectEqual(@as(usize, 1), top[5].x);
     try std.testing.expectEqual(@as(usize, 3), top[5].y);
+}
+
+test "EBCOT code-block style maps all COD style bits explicitly" {
+    const parsed = ebcot.CodeBlockStyle.fromCodByte(0x3f);
+    try std.testing.expect(parsed != null);
+    const style = parsed.?;
+    try std.testing.expect(style.bypass);
+    try std.testing.expect(style.reset_context);
+    try std.testing.expect(style.terminate_all);
+    try std.testing.expect(style.vertical_causal);
+    try std.testing.expect(style.predictable_termination);
+    try std.testing.expect(style.segmentation_symbols);
+    try std.testing.expect(style.hasUnsupportedPayloadMode());
+    try std.testing.expectEqual(@as(u8, 0x3f), style.toCodByte());
+    try std.testing.expect(ebcot.CodeBlockStyle.fromCodByte(0x40) == null);
+}
+
+test "EBCOT unsupported code-block style payload modes fail closed" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{5};
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = 1, .height = 1 };
+
+    try std.testing.expectError(
+        ebcot.EbcotError.InvalidBlock,
+        ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], 1, rect, .{ .bypass = true }),
+    );
+    try std.testing.expectError(
+        ebcot.EbcotError.InvalidBlock,
+        ebcot.encodeCodeBlockSegmentDirectWithStyle(allocator, plane[0..], 1, rect, .{ .predictable_termination = true }),
+    );
 }
 
 test "EBCOT segmentation symbols append and validate cleanup trailers" {
@@ -4236,6 +4292,7 @@ test "temporary payload records resolution ordered tile-part plan" {
         .block_width = 32,
         .block_height = 32,
         .tile_part_divisions = 'R',
+        .eph = true,
         .emit_temporary_payload_sidecar = true,
     });
     defer allocator.free(bytes);
