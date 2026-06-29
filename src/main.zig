@@ -506,6 +506,18 @@ fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void 
         "  codestream {} bytes, temporary payload {} bytes\n",
         .{ stats.codestream_bytes, stats.payload_bytes },
     );
+    if (stats.sod_packets > 0) {
+        std.debug.print(
+            "  SOD packet stream: {} packets, {} bytes\n",
+            .{ stats.sod_packets, stats.sod_packet_bytes },
+        );
+    }
+    if (stats.rpcl_shadow_packets > 0) {
+        std.debug.print(
+            "  BP8 shadow stream: {} packets, {} bytes\n",
+            .{ stats.rpcl_shadow_packets, stats.rpcl_shadow_bytes },
+        );
+    }
 
     const total = totalComponentStats(stats);
     printComponentStats("total", total);
