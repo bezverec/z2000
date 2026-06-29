@@ -2641,6 +2641,46 @@ test "EBCOT cleanup pass emits top bitplane significance and sign symbols" {
     try std.testing.expectEqual(true, top[3].bit);
 }
 
+test "EBCOT cleanup run mode encodes clean four-row stripes" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{
+        0, 0,
+        0, 0,
+        0, 4,
+        0, 0,
+    };
+
+    var encoded = try ebcot.encodeBlock(allocator, plane[0..], 2, .{ .x = 0, .y = 0, .width = 2, .height = 4 });
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u8, 3), encoded.bitplanes);
+    try std.testing.expectEqual(ebcot.PassKind.cleanup, encoded.passes[0].kind);
+
+    const top = encoded.symbols[encoded.passes[0].first_symbol..][0..encoded.passes[0].symbol_count];
+    try std.testing.expectEqual(@as(usize, 6), top.len);
+    try std.testing.expectEqual(ebcot.SymbolKind.cleanup_aggregation, top[0].kind);
+    try std.testing.expectEqual(ebcot.Context.cleanup_aggregation, top[0].context);
+    try std.testing.expectEqual(false, top[0].bit);
+    try std.testing.expectEqual(@as(usize, 0), top[0].x);
+
+    try std.testing.expectEqual(ebcot.SymbolKind.cleanup_aggregation, top[1].kind);
+    try std.testing.expectEqual(true, top[1].bit);
+    try std.testing.expectEqual(@as(usize, 1), top[1].x);
+    try std.testing.expectEqual(ebcot.SymbolKind.cleanup_run_length, top[2].kind);
+    try std.testing.expectEqual(ebcot.Context.cleanup_run, top[2].context);
+    try std.testing.expectEqual(true, top[2].bit);
+    try std.testing.expectEqual(ebcot.SymbolKind.cleanup_run_length, top[3].kind);
+    try std.testing.expectEqual(false, top[3].bit);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, top[4].kind);
+    try std.testing.expectEqual(false, top[4].bit);
+    try std.testing.expectEqual(@as(usize, 1), top[4].x);
+    try std.testing.expectEqual(@as(usize, 2), top[4].y);
+    try std.testing.expectEqual(ebcot.SymbolKind.zero_coding, top[5].kind);
+    try std.testing.expectEqual(false, top[5].bit);
+    try std.testing.expectEqual(@as(usize, 1), top[5].x);
+    try std.testing.expectEqual(@as(usize, 3), top[5].y);
+}
+
 test "EBCOT sign coding uses neighbor prediction context" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{ -4, -4 };

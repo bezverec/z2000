@@ -66,6 +66,8 @@ The T1 work is split into two paths:
 
 - cleanup, significance, and refinement pass metadata;
 - context selection scaffolding;
+- cleanup run-mode aggregation/run-length symbols for full four-row clean
+  stripes;
 - MQ encode/decode roundtrip tests;
 - direct MQ emission with scratch-buffer reuse;
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;
@@ -75,9 +77,9 @@ The implementation is still not a complete Part 1 T1 coder. Code-block style
 options such as BYPASS, RESET, TERMALL, vertical causal, predictable
 termination, and segmentation symbols are parsed but rejected with
 `UnsupportedPayload` until their exact payload effect is implemented. The next
-T1 work should make cleanup run mode, sign context prediction, refinement
-context selection, and COD-driven termination/reset behavior explicit before
-the options are advertised as supported.
+T1 work should continue tightening sign context prediction, refinement context
+selection, remaining cleanup edge cases, and COD-driven termination/reset
+behavior before the options are advertised as supported.
 
 ## T2 Direction
 

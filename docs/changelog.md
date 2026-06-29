@@ -49,6 +49,8 @@ entries are grouped by development milestone rather than semantic version.
 - Added direct MQ emission for code-block segments to avoid a separate symbol
   oracle on the hot path.
 - Added scratch-buffer reuse for EBCOT direct encoding.
+- Added cleanup pass run-mode symbols for full four-row clean stripes in both
+  the symbol oracle and direct MQ T1 paths, with matching coefficient decode.
 
 ### Quality Layers And Rate Allocation
 

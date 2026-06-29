@@ -157,3 +157,37 @@ Exit criteria:
 
 - Benchmarks are reproducible from documented commands.
 - Performance changes include tests or checks that preserve deterministic output.
+
+## External Implementation Study Notes
+
+Grok and OpenJPEG are useful references for architecture and behavior, not for
+copying code. The current takeaways for z2000 are:
+
+- T1 should treat code-block coding as reusable per-thread state: aligned data
+  buffers, padded flag rows, and per-worker coder/scratch objects reused across
+  blocks. z2000 already has scratch reuse; the next step is to reduce flag clear
+  and neighbor-update work with row/stripe masks while preserving byte-for-byte
+  oracle tests.
+- Cleanup run mode should be implemented as an explicit stripe-level path before
+  further micro-optimizing byte packing. It is a correctness and speed feature:
+  all-clean four-sample stripes avoid per-sample work and emit compact run
+  information.
+- T2 should keep packet progression geometry cached rather than recomputing
+  packet-to-precinct/block mapping in the hot loop. z2000's RPCL index should be
+  extended into a durable packet/progression cache before LRCP/PCRL/CPRL are
+  enabled.
+- Segment length coding should be modeled around terminated pass groups, not
+  only per-layer byte totals. `numlenbits`, pass counts, termination points, and
+  payload byte slices need to remain visible in the internal catalog so COD
+  style flags can be implemented one at a time.
+- Rate allocation should eventually move from even byte/pass splitting toward a
+  PCRD-style slope model. A conservative histogram of pass slopes can later be
+  used to avoid coding passes that are very likely to be discarded, but only
+  after T1 distortion metadata is trustworthy.
+- Decode scheduling can benefit from strict region-of-interest and empty-block
+  skips even before full random-access decode exists. The same block catalog that
+  drives strict T2 validation should expose enough geometry to skip irrelevant
+  or all-zero blocks cheaply.
+- Parallelism should remain deterministic but move toward persistent worker
+  resources: per-thread T1 coders, per-thread DWT buffers, and packet/precinct
+  work queues. Tile-level scheduling belongs after real multi-tile support.

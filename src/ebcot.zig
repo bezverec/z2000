@@ -32,12 +32,16 @@ pub const Context = enum(u8) {
     sign3 = 12,
     sign4 = 13,
     refinement = 14,
+    cleanup_aggregation = 15,
+    cleanup_run = 16,
 };
 
 pub const SymbolKind = enum(u8) {
     zero_coding,
     sign,
     magnitude_refinement,
+    cleanup_aggregation,
+    cleanup_run_length,
 };
 
 pub const Symbol = struct {
@@ -1158,15 +1162,31 @@ fn emitCleanupPass(
 ) !void {
     const first_symbol = symbols.items.len;
 
-    var it = ScanIterator.init(rect.width, rect.height);
-    while (it.next()) |pos| {
-        const index = localIndex(rect.width, pos.x, pos.y);
-        if (significant[index] or visited[index]) continue;
-        try emitZeroCoding(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant);
-        if (isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane)) {
-            try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant);
-            significant[index] = true;
-            became_significant[index] = true;
+    var stripe_y: usize = 0;
+    while (stripe_y < rect.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), rect.height - stripe_y);
+        var x: usize = 0;
+        while (x < rect.width) : (x += 1) {
+            if (stripe_height == 4 and canUseCleanupRunStripe(significant, visited, rect.width, rect.height, x, stripe_y)) {
+                const runlen = cleanupRunLength(plane, stride, rect, x, stripe_y, bitplane);
+                try emitCleanupRunSymbols(allocator, symbols, pass_index, bitplane, x, stripe_y, runlen);
+                if (runlen == 4) continue;
+
+                const y = stripe_y + runlen;
+                try emitSign(allocator, symbols, plane, stride, rect, .{ .x = x, .y = y }, bitplane, pass_index, significant);
+                significant[localIndex(rect.width, x, y)] = true;
+                became_significant[localIndex(rect.width, x, y)] = true;
+
+                var dy = runlen + 1;
+                while (dy < 4) : (dy += 1) {
+                    try emitCleanupSample(allocator, symbols, plane, stride, rect, .{ .x = x, .y = stripe_y + dy }, bitplane, pass_index, significant, visited, became_significant);
+                }
+            } else {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    try emitCleanupSample(allocator, symbols, plane, stride, rect, .{ .x = x, .y = stripe_y + dy }, bitplane, pass_index, significant, visited, became_significant);
+                }
+            }
         }
     }
 
@@ -1204,18 +1224,37 @@ fn decodeCleanupPassSymbols(
 ) !void {
     var symbol_count: usize = 0;
 
-    var it = ScanIterator.init(scratch.width, scratch.height);
-    while (it.next()) |pos| {
-        const index = localIndex(scratch.width, pos.x, pos.y);
-        if (hasSignificantRowDecode(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .visited)) continue;
-        const bit = try decoder.read(mqContextIndex(zeroContext(neighborSignificanceRowsDecode(scratch, pos.x, pos.y))));
-        symbol_count += 1;
-        if (bit) {
-            const sign = signCodingRowsDecode(scratch, pos.x, pos.y);
-            const sign_bit = try decoder.read(mqContextIndex(sign.context));
-            symbol_count += 1;
-            const negative = sign_bit != sign.predicted_negative;
-            markDecodedSignificant(scratch, pos.x, pos.y, bitplane, negative);
+    var stripe_y: usize = 0;
+    while (stripe_y < scratch.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
+        var x: usize = 0;
+        while (x < scratch.width) : (x += 1) {
+            if (stripe_height == 4 and canUseCleanupRunStripeDecode(scratch, x, stripe_y)) {
+                const agg = try decoder.read(mqContextIndex(.cleanup_aggregation));
+                symbol_count += 1;
+                if (!agg) continue;
+
+                const runlen = try readCleanupRunLength(decoder);
+                symbol_count += 2;
+                if (runlen >= 4) return EbcotError.InvalidBlock;
+
+                const y = stripe_y + runlen;
+                const sign = signCodingRowsDecode(scratch, x, y);
+                const sign_bit = try decoder.read(mqContextIndex(sign.context));
+                symbol_count += 1;
+                const negative = sign_bit != sign.predicted_negative;
+                markDecodedSignificant(scratch, x, y, bitplane, negative);
+
+                var dy = runlen + 1;
+                while (dy < 4) : (dy += 1) {
+                    symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane);
+                }
+            } else {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane);
+                }
+            }
         }
     }
 
@@ -1229,21 +1268,177 @@ fn decodeCleanupPassInferred(
 ) !usize {
     var symbol_count: usize = 0;
 
-    var it = ScanIterator.init(scratch.width, scratch.height);
-    while (it.next()) |pos| {
-        const index = localIndex(scratch.width, pos.x, pos.y);
-        if (hasSignificantRowDecode(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .visited)) continue;
-        const bit = try decoder.read(mqContextIndex(zeroContext(neighborSignificanceRowsDecode(scratch, pos.x, pos.y))));
-        symbol_count += 1;
-        if (bit) {
-            const sign = signCodingRowsDecode(scratch, pos.x, pos.y);
-            const sign_bit = try decoder.read(mqContextIndex(sign.context));
-            symbol_count += 1;
-            const negative = sign_bit != sign.predicted_negative;
-            markDecodedSignificant(scratch, pos.x, pos.y, bitplane, negative);
+    var stripe_y: usize = 0;
+    while (stripe_y < scratch.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
+        var x: usize = 0;
+        while (x < scratch.width) : (x += 1) {
+            if (stripe_height == 4 and canUseCleanupRunStripeDecode(scratch, x, stripe_y)) {
+                const agg = try decoder.read(mqContextIndex(.cleanup_aggregation));
+                symbol_count += 1;
+                if (!agg) continue;
+
+                const runlen = try readCleanupRunLength(decoder);
+                symbol_count += 2;
+                if (runlen >= 4) return EbcotError.InvalidBlock;
+
+                const y = stripe_y + runlen;
+                const sign = signCodingRowsDecode(scratch, x, y);
+                const sign_bit = try decoder.read(mqContextIndex(sign.context));
+                symbol_count += 1;
+                const negative = sign_bit != sign.predicted_negative;
+                markDecodedSignificant(scratch, x, y, bitplane, negative);
+
+                var dy = runlen + 1;
+                while (dy < 4) : (dy += 1) {
+                    symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane);
+                }
+            } else {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane);
+                }
+            }
         }
     }
 
+    return symbol_count;
+}
+
+fn emitCleanupSample(
+    allocator: std.mem.Allocator,
+    symbols: *std.ArrayList(Symbol),
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    pos: ScanPos,
+    bitplane: u8,
+    pass_index: u16,
+    significant: []bool,
+    visited: []const bool,
+    became_significant: []bool,
+) !void {
+    const index = localIndex(rect.width, pos.x, pos.y);
+    if (significant[index] or visited[index]) return;
+    try emitZeroCoding(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant);
+    if (isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane)) {
+        try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant);
+        significant[index] = true;
+        became_significant[index] = true;
+    }
+}
+
+fn emitCleanupRunSymbols(
+    allocator: std.mem.Allocator,
+    symbols: *std.ArrayList(Symbol),
+    pass_index: u16,
+    bitplane: u8,
+    x: usize,
+    stripe_y: usize,
+    runlen: usize,
+) !void {
+    try symbols.append(allocator, .{
+        .pass_index = pass_index,
+        .kind = .cleanup_aggregation,
+        .context = .cleanup_aggregation,
+        .bit = runlen != 4,
+        .x = x,
+        .y = stripe_y,
+        .magnitude_bitplane = bitplane,
+    });
+    if (runlen == 4) return;
+    try appendCleanupRunBit(allocator, symbols, pass_index, bitplane, x, stripe_y, runlen >> 1);
+    try appendCleanupRunBit(allocator, symbols, pass_index, bitplane, x, stripe_y, runlen & 1);
+}
+
+fn appendCleanupRunBit(
+    allocator: std.mem.Allocator,
+    symbols: *std.ArrayList(Symbol),
+    pass_index: u16,
+    bitplane: u8,
+    x: usize,
+    stripe_y: usize,
+    value: usize,
+) !void {
+    try symbols.append(allocator, .{
+        .pass_index = pass_index,
+        .kind = .cleanup_run_length,
+        .context = .cleanup_run,
+        .bit = value != 0,
+        .x = x,
+        .y = stripe_y,
+        .magnitude_bitplane = bitplane,
+    });
+}
+
+fn canUseCleanupRunStripe(
+    significant: []const bool,
+    visited: []const bool,
+    width: usize,
+    height: usize,
+    x: usize,
+    stripe_y: usize,
+) bool {
+    var dy: usize = 0;
+    while (dy < 4) : (dy += 1) {
+        const y = stripe_y + dy;
+        const index = localIndex(width, x, y);
+        if (significant[index] or visited[index]) return false;
+        if (neighborSignificance(significant, width, height, x, y) != 0) return false;
+    }
+    return true;
+}
+
+fn cleanupRunLength(
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    stripe_y: usize,
+    bitplane: u8,
+) usize {
+    var dy: usize = 0;
+    while (dy < 4) : (dy += 1) {
+        if (isMagnitudeBitSet(plane[(rect.y + stripe_y + dy) * stride + rect.x + x], bitplane)) return dy;
+    }
+    return 4;
+}
+
+fn canUseCleanupRunStripeDecode(scratch: *const DecodeBlockScratch, x: usize, stripe_y: usize) bool {
+    var dy: usize = 0;
+    while (dy < 4) : (dy += 1) {
+        const y = stripe_y + dy;
+        const index = localIndex(scratch.width, x, y);
+        if (hasSignificantRowDecode(scratch, x, y) or hasFlag(scratch.flags.items, index, .visited)) return false;
+        if (neighborSignificanceRowsDecode(scratch, x, y) != 0) return false;
+    }
+    return true;
+}
+
+fn readCleanupRunLength(decoder: *mq.Decoder) !usize {
+    const hi = try decoder.read(mqContextIndex(.cleanup_run));
+    const lo = try decoder.read(mqContextIndex(.cleanup_run));
+    return (@as(usize, @intFromBool(hi)) << 1) | @intFromBool(lo);
+}
+
+fn decodeCleanupSample(
+    scratch: *DecodeBlockScratch,
+    decoder: *mq.Decoder,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+) !usize {
+    const index = localIndex(scratch.width, x, y);
+    if (hasSignificantRowDecode(scratch, x, y) or hasFlag(scratch.flags.items, index, .visited)) return 0;
+    const bit = try decoder.read(mqContextIndex(zeroContext(neighborSignificanceRowsDecode(scratch, x, y))));
+    var symbol_count: usize = 1;
+    if (bit) {
+        const sign = signCodingRowsDecode(scratch, x, y);
+        const sign_bit = try decoder.read(mqContextIndex(sign.context));
+        symbol_count += 1;
+        const negative = sign_bit != sign.predicted_negative;
+        markDecodedSignificant(scratch, x, y, bitplane, negative);
+    }
     return symbol_count;
 }
 
@@ -1368,26 +1563,97 @@ fn emitDirectCleanupPass(
     encoder.resetAll();
     var symbol_count: usize = 0;
 
-    var it = ScanIterator.init(rect.width, rect.height);
-    while (it.next()) |pos| {
-        const index = localIndex(rect.width, pos.x, pos.y);
-        if (hasSignificantRow(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .visited)) continue;
-        const bit = isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane);
-        try encoder.write(mqContextIndex(zeroContext(neighborSignificanceRows(scratch, pos.x, pos.y))), bit);
-        symbol_count += 1;
-        if (bit) {
-            const sign = signCodingRows(scratch, plane, stride, rect, pos.x, pos.y);
-            const negative = plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0;
-            try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
-            symbol_count += 1;
-            setFlag(scratch.flags.items, index, .significant);
-            setSignificantRow(scratch, pos.x, pos.y);
-            setFlag(scratch.flags.items, index, .became_significant);
+    var stripe_y: usize = 0;
+    while (stripe_y < rect.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), rect.height - stripe_y);
+        var x: usize = 0;
+        while (x < rect.width) : (x += 1) {
+            if (stripe_height == 4 and canUseDirectCleanupRunStripe(scratch, x, stripe_y)) {
+                const runlen = cleanupRunLength(plane, stride, rect, x, stripe_y, bitplane);
+                try encoder.write(mqContextIndex(.cleanup_aggregation), runlen != 4);
+                symbol_count += 1;
+                if (runlen == 4) continue;
+
+                try writeCleanupRunLength(encoder, runlen);
+                symbol_count += 2;
+
+                const y = stripe_y + runlen;
+                try emitDirectSignOnly(scratch, encoder, plane, stride, rect, x, y, bitplane);
+                symbol_count += 1;
+
+                var dy = runlen + 1;
+                while (dy < 4) : (dy += 1) {
+                    symbol_count += try emitDirectCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane);
+                }
+            } else {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    symbol_count += try emitDirectCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane);
+                }
+            }
         }
     }
 
     try appendDirectPass(scratch, .cleanup, bitplane, symbol_count, byte_offset);
     _ = pass_index;
+}
+
+fn canUseDirectCleanupRunStripe(scratch: *const DirectBlockScratch, x: usize, stripe_y: usize) bool {
+    var dy: usize = 0;
+    while (dy < 4) : (dy += 1) {
+        const y = stripe_y + dy;
+        const index = localIndex(scratch.width, x, y);
+        if (hasSignificantRow(scratch, x, y) or hasFlag(scratch.flags.items, index, .visited)) return false;
+        if (neighborSignificanceRows(scratch, x, y) != 0) return false;
+    }
+    return true;
+}
+
+fn writeCleanupRunLength(encoder: *mq.Encoder, runlen: usize) !void {
+    try encoder.write(mqContextIndex(.cleanup_run), ((runlen >> 1) & 1) != 0);
+    try encoder.write(mqContextIndex(.cleanup_run), (runlen & 1) != 0);
+}
+
+fn emitDirectSignOnly(
+    scratch: *DirectBlockScratch,
+    encoder: *mq.Encoder,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+) !void {
+    const index = localIndex(rect.width, x, y);
+    const sign = signCodingRows(scratch, plane, stride, rect, x, y);
+    const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
+    try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+    setFlag(scratch.flags.items, index, .significant);
+    setSignificantRow(scratch, x, y);
+    setFlag(scratch.flags.items, index, .became_significant);
+    _ = bitplane;
+}
+
+fn emitDirectCleanupSample(
+    scratch: *DirectBlockScratch,
+    encoder: *mq.Encoder,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+) !usize {
+    const index = localIndex(rect.width, x, y);
+    if (hasSignificantRow(scratch, x, y) or hasFlag(scratch.flags.items, index, .visited)) return 0;
+    const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
+    try encoder.write(mqContextIndex(zeroContext(neighborSignificanceRows(scratch, x, y))), bit);
+    var symbol_count: usize = 1;
+    if (bit) {
+        try emitDirectSignOnly(scratch, encoder, plane, stride, rect, x, y, bitplane);
+        symbol_count += 1;
+    }
+    return symbol_count;
 }
 
 fn appendDirectPass(
