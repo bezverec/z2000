@@ -55,6 +55,8 @@ entries are grouped by development milestone rather than semantic version.
   contributions, including sign prediction and mixed-neighbor context tests.
 - Added magnitude-refinement context selection for first refinement with and
   without significant neighbors, plus later refinement passes.
+- Added standalone EBCOT segmentation-symbol cleanup trailers behind an
+  internal code-block style flag, with direct MQ roundtrip and corruption tests.
 
 ### Quality Layers And Rate Allocation
 

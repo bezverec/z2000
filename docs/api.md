@@ -243,7 +243,10 @@ The T1 TODO is to bring the direct MQ path closer to JPEG2000 Part 1 by
 finishing remaining cleanup edge cases and real COD style flag behavior before
 advertising those flags as supported. Cleanup run mode, directional sign
 prediction contexts, and refined magnitude-refinement contexts are now covered
-by oracle tests in the current narrow path.
+by oracle tests in the current narrow path. Segmentation-symbol cleanup trailers
+are implemented behind an internal EBCOT code-block style flag, but remain
+fail-closed in the public codestream profile until COD style handling is wired
+through the full encoder/reader.
 
 ## `src/rate_alloc.zig`
 

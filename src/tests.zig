@@ -2681,6 +2681,78 @@ test "EBCOT cleanup run mode encodes clean four-row stripes" {
     try std.testing.expectEqual(@as(usize, 3), top[5].y);
 }
 
+test "EBCOT segmentation symbols append and validate cleanup trailers" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{-4};
+    const style = ebcot.CodeBlockStyle{ .segmentation_symbols = true };
+
+    var encoded = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 1, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, style);
+    defer encoded.deinit(allocator);
+
+    const top = encoded.symbols[encoded.passes[0].first_symbol..][0..encoded.passes[0].symbol_count];
+    try std.testing.expectEqual(@as(usize, 6), top.len);
+    const expected = [_]bool{ true, false, true, false };
+    for (expected, 0..) |bit, offset| {
+        const symbol = top[2 + offset];
+        try std.testing.expectEqual(ebcot.SymbolKind.segmentation_symbol, symbol.kind);
+        try std.testing.expectEqual(ebcot.Context.segmentation_symbol, symbol.context);
+        try std.testing.expectEqual(bit, symbol.bit);
+    }
+}
+
+test "EBCOT segmentation symbols roundtrip direct MQ only when style is enabled" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{
+        4,  0, -2,
+        0,  8, 0,
+        -1, 0, 2,
+    };
+    const style = ebcot.CodeBlockStyle{ .segmentation_symbols = true };
+
+    var block = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 3, .{ .x = 0, .y = 0, .width = 3, .height = 3 }, style);
+    defer block.deinit(allocator);
+
+    var oracle = try ebcot.encodeBlockSymbolsSegment(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer oracle.deinit(allocator);
+
+    var direct = try ebcot.encodeCodeBlockSegmentDirectWithStyle(allocator, plane[0..], 3, .{ .x = 0, .y = 0, .width = 3, .height = 3 }, style);
+    defer direct.deinit(allocator);
+
+    try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, direct.passes);
+    try std.testing.expectEqualSlices(u8, oracle.bytes, direct.bytes);
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsWithStyle(allocator, direct, 3, 3, style);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+
+    try std.testing.expectError(ebcot.EbcotError.InvalidBlock, ebcot.decodeCodeBlockSegmentCoefficients(allocator, direct, 3, 3));
+}
+
+test "EBCOT segmentation symbols reject corrupted cleanup trailer" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{4};
+    const style = ebcot.CodeBlockStyle{ .segmentation_symbols = true };
+
+    var block = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 1, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, style);
+    defer block.deinit(allocator);
+    block.symbols[block.symbols.len - 1].bit = !block.symbols[block.symbols.len - 1].bit;
+
+    var corrupt = try ebcot.encodeBlockSymbolsSegment(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer corrupt.deinit(allocator);
+
+    try std.testing.expectError(ebcot.EbcotError.InvalidBlock, ebcot.decodeCodeBlockSegmentCoefficientsWithStyle(allocator, corrupt, 1, 1, style));
+}
+
 test "EBCOT sign coding uses neighbor prediction context" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{ -4, -4 };

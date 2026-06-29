@@ -69,6 +69,8 @@ The T1 work is split into two paths:
   direct MQ encoder, and coefficient decoder;
 - cleanup run-mode aggregation/run-length symbols for full four-row clean
   stripes;
+- optional segmentation-symbol cleanup trailers in the standalone T1 style
+  test path;
 - MQ encode/decode roundtrip tests;
 - direct MQ emission with scratch-buffer reuse;
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;
@@ -76,11 +78,12 @@ The T1 work is split into two paths:
 
 The implementation is still not a complete Part 1 T1 coder. Code-block style
 options such as BYPASS, RESET, TERMALL, vertical causal, predictable
-termination, and segmentation symbols are parsed but rejected with
-`UnsupportedPayload` until their exact payload effect is implemented. The next
-T1 work should continue tightening remaining cleanup edge cases, COD-driven
-termination/reset behavior, and byte-for-byte oracle coverage before the
-options are advertised as supported.
+termination, and segmentation symbols are parsed by the CLI/codestream layer but
+still rejected with `UnsupportedPayload` until their exact payload effect is
+connected end-to-end. The segmentation-symbol payload behavior now exists as a
+standalone EBCOT style test path; the next T1 work should continue tightening
+remaining cleanup edge cases, COD-driven termination/reset behavior, and
+byte-for-byte oracle coverage before the options are advertised as supported.
 
 ## T2 Direction
 

@@ -36,6 +36,7 @@ pub const Context = enum(u8) {
     refinement_later = 16,
     cleanup_aggregation = 17,
     cleanup_run = 18,
+    segmentation_symbol = 19,
 };
 
 pub const SymbolKind = enum(u8) {
@@ -44,6 +45,7 @@ pub const SymbolKind = enum(u8) {
     magnitude_refinement,
     cleanup_aggregation,
     cleanup_run_length,
+    segmentation_symbol,
 };
 
 pub const Symbol = struct {
@@ -114,6 +116,10 @@ pub const CodeBlockSegment = struct {
             .cumulative_bytes = self.passes[pass_count - 1].cumulative_bytes,
         };
     }
+};
+
+pub const CodeBlockStyle = struct {
+    segmentation_symbols: bool = false,
 };
 
 pub const EncodedBlockView = struct {
@@ -260,16 +266,28 @@ const SignCoding = struct {
     predicted_negative: bool,
 };
 
+const segmentation_symbol_bits = [_]bool{ true, false, true, false };
+
 pub fn encodeBlock(
     allocator: std.mem.Allocator,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
 ) !EncodedBlock {
+    return encodeBlockWithStyle(allocator, plane, stride, rect, .{});
+}
+
+pub fn encodeBlockWithStyle(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !EncodedBlock {
     var scratch = BlockScratch.init(allocator);
     defer scratch.deinit();
 
-    const view = try encodeBlockScratch(&scratch, plane, stride, rect);
+    const view = try encodeBlockScratchWithStyle(&scratch, plane, stride, rect, style);
     const pass_slice = try allocator.dupe(Pass, view.passes);
     errdefer allocator.free(pass_slice);
     const symbol_slice = try allocator.dupe(Symbol, view.symbols);
@@ -287,6 +305,16 @@ pub fn encodeBlockScratch(
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
+) !EncodedBlockView {
+    return encodeBlockScratchWithStyle(scratch, plane, stride, rect, .{});
+}
+
+pub fn encodeBlockScratchWithStyle(
+    scratch: *BlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
 ) !EncodedBlockView {
     scratch.reset();
     try validateBlock(plane, stride, rect);
@@ -332,6 +360,7 @@ pub fn encodeBlockScratch(
                 significant,
                 visited,
                 became_significant,
+                style,
             );
             pass_index += 1;
             continue;
@@ -380,6 +409,7 @@ pub fn encodeBlockScratch(
             significant,
             visited,
             became_significant,
+            style,
         );
         pass_index += 1;
     }
@@ -432,7 +462,17 @@ pub fn encodeCodeBlockSegment(
     stride: usize,
     rect: subband.Rect,
 ) !CodeBlockSegment {
-    var block = try encodeBlock(allocator, plane, stride, rect);
+    return encodeCodeBlockSegmentWithStyle(allocator, plane, stride, rect, .{});
+}
+
+pub fn encodeCodeBlockSegmentWithStyle(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
+    var block = try encodeBlockWithStyle(allocator, plane, stride, rect, style);
     defer block.deinit(allocator);
     return encodeBlockSymbolsSegment(allocator, .{
         .bitplanes = block.bitplanes,
@@ -448,7 +488,17 @@ pub fn encodeCodeBlockSegmentContinuous(
     stride: usize,
     rect: subband.Rect,
 ) !CodeBlockSegment {
-    var block = try encodeBlock(allocator, plane, stride, rect);
+    return encodeCodeBlockSegmentContinuousWithStyle(allocator, plane, stride, rect, .{});
+}
+
+pub fn encodeCodeBlockSegmentContinuousWithStyle(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
+    var block = try encodeBlockWithStyle(allocator, plane, stride, rect, style);
     defer block.deinit(allocator);
     return encodeBlockSymbolsSegmentContinuous(allocator, .{
         .bitplanes = block.bitplanes,
@@ -464,9 +514,19 @@ pub fn encodeCodeBlockSegmentDirect(
     stride: usize,
     rect: subband.Rect,
 ) !CodeBlockSegment {
+    return encodeCodeBlockSegmentDirectWithStyle(allocator, plane, stride, rect, .{});
+}
+
+pub fn encodeCodeBlockSegmentDirectWithStyle(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
     var scratch = DirectBlockScratch.init(allocator);
     defer scratch.deinit();
-    return encodeCodeBlockSegmentDirectScratch(&scratch, plane, stride, rect);
+    return encodeCodeBlockSegmentDirectScratchWithStyle(&scratch, plane, stride, rect, style);
 }
 
 pub fn encodeCodeBlockSegmentDirectScratch(
@@ -474,6 +534,16 @@ pub fn encodeCodeBlockSegmentDirectScratch(
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
+) !CodeBlockSegment {
+    return encodeCodeBlockSegmentDirectScratchWithStyle(scratch, plane, stride, rect, .{});
+}
+
+pub fn encodeCodeBlockSegmentDirectScratchWithStyle(
+    scratch: *DirectBlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
 ) !CodeBlockSegment {
     scratch.reset();
     try validateBlock(plane, stride, rect);
@@ -497,7 +567,7 @@ pub fn encodeCodeBlockSegmentDirectScratch(
 
         if (bitplane == stats.bitplanes - 1) {
             clearFlag(scratch.flags.items, .visited);
-            try emitDirectCleanupPass(scratch, plane, stride, rect, bitplane, pass_index);
+            try emitDirectCleanupPass(scratch, plane, stride, rect, bitplane, pass_index, style);
             pass_index += 1;
             continue;
         }
@@ -509,7 +579,7 @@ pub fn encodeCodeBlockSegmentDirectScratch(
         try emitDirectRefinementPass(scratch, plane, stride, rect, bitplane, pass_index);
         pass_index += 1;
 
-        try emitDirectCleanupPass(scratch, plane, stride, rect, bitplane, pass_index);
+        try emitDirectCleanupPass(scratch, plane, stride, rect, bitplane, pass_index, style);
         pass_index += 1;
     }
 
@@ -696,9 +766,19 @@ pub fn decodeCodeBlockSegmentCoefficients(
     width: usize,
     height: usize,
 ) ![]i32 {
+    return decodeCodeBlockSegmentCoefficientsWithStyle(allocator, segment, width, height, .{});
+}
+
+pub fn decodeCodeBlockSegmentCoefficientsWithStyle(
+    allocator: std.mem.Allocator,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+    style: CodeBlockStyle,
+) ![]i32 {
     var scratch = DecodeBlockScratch.init(allocator);
     defer scratch.deinit();
-    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .direct, true);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .direct, true, style);
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuous(
@@ -707,9 +787,19 @@ pub fn decodeCodeBlockSegmentCoefficientsContinuous(
     width: usize,
     height: usize,
 ) ![]i32 {
+    return decodeCodeBlockSegmentCoefficientsContinuousWithStyle(allocator, segment, width, height, .{});
+}
+
+pub fn decodeCodeBlockSegmentCoefficientsContinuousWithStyle(
+    allocator: std.mem.Allocator,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+    style: CodeBlockStyle,
+) ![]i32 {
     var scratch = DecodeBlockScratch.init(allocator);
     defer scratch.deinit();
-    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .continuous, true);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .continuous, true, style);
 }
 
 pub fn decodeCodeBlockPayloadContinuousInferred(
@@ -733,7 +823,7 @@ pub fn decodeCodeBlockSegmentCoefficientsPartial(
 ) ![]i32 {
     var scratch = DecodeBlockScratch.init(allocator);
     defer scratch.deinit();
-    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .direct, false);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .direct, false, .{});
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuousPartial(
@@ -744,7 +834,7 @@ pub fn decodeCodeBlockSegmentCoefficientsContinuousPartial(
 ) ![]i32 {
     var scratch = DecodeBlockScratch.init(allocator);
     defer scratch.deinit();
-    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .continuous, false);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .continuous, false, .{});
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsScratch(
@@ -753,7 +843,7 @@ pub fn decodeCodeBlockSegmentCoefficientsScratch(
     width: usize,
     height: usize,
 ) ![]i32 {
-    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .direct, true);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .direct, true, .{});
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuousScratch(
@@ -762,7 +852,7 @@ pub fn decodeCodeBlockSegmentCoefficientsContinuousScratch(
     width: usize,
     height: usize,
 ) ![]i32 {
-    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .continuous, true);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .continuous, true, .{});
 }
 
 pub fn decodeCodeBlockPayloadContinuousInferredScratch(
@@ -833,7 +923,7 @@ pub fn decodeCodeBlockSegmentCoefficientsPartialScratch(
     width: usize,
     height: usize,
 ) ![]i32 {
-    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .direct, false);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .direct, false, .{});
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuousPartialScratch(
@@ -842,7 +932,7 @@ pub fn decodeCodeBlockSegmentCoefficientsContinuousPartialScratch(
     width: usize,
     height: usize,
 ) ![]i32 {
-    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .continuous, false);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .continuous, false, .{});
 }
 
 const SegmentMqMode = enum {
@@ -857,6 +947,7 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
     height: usize,
     mode: SegmentMqMode,
     require_complete: bool,
+    style: CodeBlockStyle,
 ) ![]i32 {
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
@@ -907,8 +998,8 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
         if (bitplane == segment.bitplanes - 1) {
             clearFlag(scratch.flags.items, .visited);
             switch (mode) {
-                .direct => try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane),
-                .continuous => try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane),
+                .direct => try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
+                .continuous => try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane, style),
             }
             pass_index += 1;
             continue;
@@ -930,8 +1021,8 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
         if (pass_index >= segment.pass_count) break;
 
         switch (mode) {
-            .direct => try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane),
-            .continuous => try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane),
+            .direct => try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane, style),
+            .continuous => try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane, style),
         }
         pass_index += 1;
     }
@@ -1173,6 +1264,7 @@ fn emitCleanupPass(
     significant: []bool,
     visited: []const bool,
     became_significant: []bool,
+    style: CodeBlockStyle,
 ) !void {
     const first_symbol = symbols.items.len;
 
@@ -1204,6 +1296,10 @@ fn emitCleanupPass(
         }
     }
 
+    if (style.segmentation_symbols) {
+        try emitSegmentationSymbols(allocator, symbols, pass_index, bitplane);
+    }
+
     try appendPass(allocator, passes, .cleanup, bitplane, first_symbol, symbols.items.len);
 }
 
@@ -1212,11 +1308,12 @@ fn decodeCleanupPass(
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
+    style: CodeBlockStyle,
 ) !void {
     try validatePassPayload(pass, bytes, .cleanup, bitplane);
     var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
     defer decoder.deinit();
-    try decodeCleanupPassSymbols(scratch, pass, &decoder, bitplane);
+    try decodeCleanupPassSymbols(scratch, pass, &decoder, bitplane, style);
 }
 
 fn decodeCleanupPassContinuous(
@@ -1225,9 +1322,10 @@ fn decodeCleanupPassContinuous(
     bytes: []const u8,
     decoder: *mq.Decoder,
     bitplane: u8,
+    style: CodeBlockStyle,
 ) !void {
     try validatePassPayload(pass, bytes, .cleanup, bitplane);
-    try decodeCleanupPassSymbols(scratch, pass, decoder, bitplane);
+    try decodeCleanupPassSymbols(scratch, pass, decoder, bitplane, style);
 }
 
 fn decodeCleanupPassSymbols(
@@ -1235,6 +1333,7 @@ fn decodeCleanupPassSymbols(
     pass: CodeBlockPassPayload,
     decoder: *mq.Decoder,
     bitplane: u8,
+    style: CodeBlockStyle,
 ) !void {
     var symbol_count: usize = 0;
 
@@ -1270,6 +1369,10 @@ fn decodeCleanupPassSymbols(
                 }
             }
         }
+    }
+
+    if (style.segmentation_symbols) {
+        symbol_count += try readSegmentationSymbols(decoder);
     }
 
     if (symbol_count != pass.symbol_count) return EbcotError.InvalidBlock;
@@ -1383,6 +1486,38 @@ fn appendCleanupRunBit(
         .y = stripe_y,
         .magnitude_bitplane = bitplane,
     });
+}
+
+fn emitSegmentationSymbols(
+    allocator: std.mem.Allocator,
+    symbols: *std.ArrayList(Symbol),
+    pass_index: u16,
+    bitplane: u8,
+) !void {
+    for (segmentation_symbol_bits, 0..) |bit, index| {
+        try symbols.append(allocator, .{
+            .pass_index = pass_index,
+            .kind = .segmentation_symbol,
+            .context = .segmentation_symbol,
+            .bit = bit,
+            .x = index,
+            .y = 0,
+            .magnitude_bitplane = bitplane,
+        });
+    }
+}
+
+fn writeSegmentationSymbols(encoder: *mq.Encoder) !void {
+    for (segmentation_symbol_bits) |bit| {
+        try encoder.write(mqContextIndex(.segmentation_symbol), bit);
+    }
+}
+
+fn readSegmentationSymbols(decoder: *mq.Decoder) !usize {
+    for (segmentation_symbol_bits) |expected| {
+        if (try decoder.read(mqContextIndex(.segmentation_symbol)) != expected) return EbcotError.InvalidBlock;
+    }
+    return segmentation_symbol_bits.len;
 }
 
 fn canUseCleanupRunStripe(
@@ -1575,6 +1710,7 @@ fn emitDirectCleanupPass(
     rect: subband.Rect,
     bitplane: u8,
     pass_index: u16,
+    style: CodeBlockStyle,
 ) !void {
     const byte_offset = scratch.bytes.items.len;
     const encoder = try scratch.mqEncoder();
@@ -1610,6 +1746,11 @@ fn emitDirectCleanupPass(
                 }
             }
         }
+    }
+
+    if (style.segmentation_symbols) {
+        try writeSegmentationSymbols(encoder);
+        symbol_count += 4;
     }
 
     try appendDirectPass(scratch, .cleanup, bitplane, symbol_count, byte_offset);

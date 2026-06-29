@@ -125,8 +125,10 @@ lines we are targeting:
 - `--block 64` maps to Grok `-b 64,64` and Kakadu `Cblk={64,64}`.
 - `--bypass`, `--reset-context`, `--terminate-all`, `--vertical-causal`,
   `--predictable-termination`, and `--segmentation-symbols` are parsed but fail
-  closed with `UnsupportedPayload` until the T1 payload implements the matching
-  JPEG2000 Part 1 code-block style behavior.
+  closed with `UnsupportedPayload` until the matching JPEG2000 Part 1
+  code-block style behavior is wired through the codestream path. Segmentation
+  symbol payloads are implemented only in the standalone EBCOT test path for
+  now.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level.
 - `--tlm` writes TLM marker entries for the current tile-part lengths.
