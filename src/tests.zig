@@ -2747,6 +2747,44 @@ test "EBCOT continuous MQ coefficient decoder roundtrips a block" {
     try std.testing.expectEqualSlices(i32, plane[0..], decoded);
 }
 
+test "EBCOT continuous MQ partial coefficient decoder accepts pass prefixes" {
+    const allocator = std.testing.allocator;
+    const width = 5;
+    const height = 4;
+    const plane = [_]i32{
+        0, -7,  0,  5, 3,
+        1, 0,   -2, 0, 0,
+        0, 0,   0,  0, -1,
+        9, -12, 0,  4, 0,
+    };
+
+    var block = try ebcot.encodeBlock(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer block.deinit(allocator);
+    var full = try ebcot.encodeBlockSymbolsSegmentContinuous(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer full.deinit(allocator);
+
+    const pass_count: u16 = @min(2, full.pass_count);
+    const byte_length = full.passes[pass_count - 1].cumulative_bytes;
+    const partial = ebcot.CodeBlockSegment{
+        .bitplanes = full.bitplanes,
+        .non_zero_count = full.non_zero_count,
+        .pass_count = pass_count,
+        .byte_length = byte_length,
+        .passes = full.passes[0..pass_count],
+        .bytes = full.bytes[0..@intCast(byte_length)],
+    };
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, partial, width, height);
+    defer allocator.free(decoded);
+    try std.testing.expectEqual(@as(usize, width * height), decoded.len);
+    try std.testing.expect(countNonZeroI32Test(decoded) <= full.non_zero_count);
+}
+
 test "EBCOT direct MQ segment matches symbol oracle" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{
@@ -2830,6 +2868,40 @@ test "EBCOT direct MQ segment reconstructs code-block coefficients" {
     const decoded = try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, width, height);
     defer allocator.free(decoded);
     try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+}
+
+test "EBCOT direct MQ partial coefficient decoder accepts layer truncation points" {
+    const allocator = std.testing.allocator;
+    const width = 5;
+    const height = 5;
+    const plane = [_]i32{
+        0, -7,  0,  5,  3,
+        1, 0,   -2, 0,  0,
+        0, 0,   0,  0,  -1,
+        9, -12, 0,  4,  0,
+        0, 6,   0,  -8, 2,
+    };
+
+    var full = try ebcot.encodeCodeBlockSegmentDirect(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer full.deinit(allocator);
+    try std.testing.expect(full.pass_count >= 3);
+
+    const pass_count: u16 = 2;
+    const byte_length = full.passes[pass_count - 1].cumulative_bytes;
+    const partial = ebcot.CodeBlockSegment{
+        .bitplanes = full.bitplanes,
+        .non_zero_count = full.non_zero_count,
+        .pass_count = pass_count,
+        .byte_length = byte_length,
+        .passes = full.passes[0..pass_count],
+        .bytes = full.bytes[0..@intCast(byte_length)],
+    };
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsPartial(allocator, partial, width, height);
+    defer allocator.free(decoded);
+    try std.testing.expectEqual(@as(usize, width * height), decoded.len);
+    try std.testing.expect(countNonZeroI32Test(decoded) <= full.non_zero_count);
+    try std.testing.expectError(ebcot.EbcotError.InvalidBlock, ebcot.decodeCodeBlockSegmentCoefficients(allocator, partial, width, height));
 }
 
 test "EBCOT direct MQ coefficient decoder handles empty code-blocks" {
@@ -4595,6 +4667,14 @@ fn expectMarkerStuffingIsValid(bytes: []const u8) !void {
             try std.testing.expect((bytes[index] & 0x80) == 0);
         }
     }
+}
+
+fn countNonZeroI32Test(values: []const i32) u32 {
+    var count: u32 = 0;
+    for (values) |value| {
+        if (value != 0) count += 1;
+    }
+    return count;
 }
 
 fn readU16BeTest(bytes: []const u8, offset: usize) u16 {

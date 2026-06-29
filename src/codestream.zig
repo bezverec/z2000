@@ -1992,10 +1992,6 @@ fn validateStrictBlockT1Reconstruction(
     const pass_count: usize = @intCast(actual.cumulative_passes);
     if (pass_count > expected.passes.len) return CodestreamError.InvalidCodestream;
 
-    if (pass_count != expected.passes.len and expected.encoded_bitplanes != 0) {
-        return;
-    }
-
     const segment = ebcot.CodeBlockSegment{
         .bitplanes = expected.encoded_bitplanes,
         .non_zero_count = expected.non_zero_count,
@@ -2004,13 +2000,23 @@ fn validateStrictBlockT1Reconstruction(
         .passes = expected.passes[0..pass_count],
         .bytes = actual.payload.items,
     };
+    const complete_block = pass_count == expected.passes.len;
     const decoded = if (layer_count == 1)
-        try ebcot.decodeCodeBlockSegmentCoefficientsContinuous(allocator, segment, expected.rect.width, expected.rect.height)
+        if (complete_block)
+            try ebcot.decodeCodeBlockSegmentCoefficientsContinuous(allocator, segment, expected.rect.width, expected.rect.height)
+        else
+            try ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, expected.rect.width, expected.rect.height)
+    else if (complete_block)
+        try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height)
     else
-        try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height);
+        try ebcot.decodeCodeBlockSegmentCoefficientsPartial(allocator, segment, expected.rect.width, expected.rect.height);
     defer allocator.free(decoded);
     if (@as(u64, @intCast(decoded.len)) != rectArea(expected.rect)) return CodestreamError.InvalidCodestream;
-    if (pass_count == expected.passes.len and countNonZeroI32(decoded) != expected.non_zero_count) {
+    const decoded_non_zero = countNonZeroI32(decoded);
+    if (complete_block and decoded_non_zero != expected.non_zero_count) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (!complete_block and decoded_non_zero > expected.non_zero_count) {
         return CodestreamError.InvalidCodestream;
     }
 }
