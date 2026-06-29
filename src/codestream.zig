@@ -550,6 +550,13 @@ const TlmEntry = struct {
     psot: u32,
 };
 
+const StrictSotInfo = struct {
+    tile_index: u16,
+    tile_part_index: u8,
+    tile_part_count: u8,
+    psot: u32,
+};
+
 const TlmIndex = struct {
     allocator: std.mem.Allocator,
     entries: []TlmEntry,
@@ -1081,6 +1088,7 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
     var saw_qcd = false;
     var qcd_band_count: usize = 0;
     var tile_part_count: usize = 0;
+    var expected_tile_part_count: ?u8 = null;
 
     var cursor: usize = 2;
     while (cursor < bytes.len) {
@@ -1163,14 +1171,15 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
         if (marker == @intFromEnum(Marker.eoc)) break;
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
         if (bytes.len - scan < 12) return CodestreamError.TruncatedData;
-        const segment_length = readU16Be(bytes, scan + 2);
-        if (segment_length != 10) return CodestreamError.InvalidCodestream;
-        const psot = readU32Be(bytes, scan + 6);
-        if (psot == 0) return CodestreamError.UnsupportedPayload;
-        const tile_part_end = try std.math.add(usize, scan, psot);
+        const sot = try readStrictSotInfo(bytes, scan);
+        try validateStrictSotSequence(sot, tile_part_count, &expected_tile_part_count);
+        const tile_part_end = try std.math.add(usize, scan, sot.psot);
         if (tile_part_end > bytes.len) return CodestreamError.TruncatedData;
         tile_part_count += 1;
         scan = tile_part_end;
+    }
+    if (expected_tile_part_count) |count| {
+        if (tile_part_count != count) return CodestreamError.InvalidCodestream;
     }
 
     const options = LosslessOptions{
@@ -2444,12 +2453,16 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     cursor = try skipMainHeaderToFirstSot(bytes, cursor);
     var packet_sequence: u16 = 0;
     var tile_part_index: usize = 0;
+    var expected_tile_part_count: ?u8 = null;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         if (marker == @intFromEnum(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            if (expected_tile_part_count) |count| {
+                if (tile_part_index != count) return CodestreamError.InvalidCodestream;
+            }
             if (tlm_index) |index| {
                 if (tile_part_index != index.entries.len) return CodestreamError.InvalidCodestream;
             }
@@ -2465,22 +2478,17 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         const marker_start = cursor;
-        cursor += 2;
-        if (bytes.len - cursor < 10) return CodestreamError.TruncatedData;
-        const segment_length = readU16Be(bytes, cursor);
-        if (segment_length != 10) return CodestreamError.InvalidCodestream;
-        const tile_index = readU16Be(bytes, cursor + 2);
-        const psot = readU32Be(bytes, cursor + 4);
-        if (psot == 0) return CodestreamError.UnsupportedPayload;
+        const sot = try readStrictSotInfo(bytes, marker_start);
+        try validateStrictSotSequence(sot, tile_part_index, &expected_tile_part_count);
         if (tlm_index) |index| {
-            try validateStrictTlmEntry(index.entries, tile_part_index, tile_index, psot);
+            try validateStrictTlmEntry(index.entries, tile_part_index, sot.tile_index, sot.psot);
         }
-        const tile_part_end = try std.math.add(usize, marker_start, psot);
-        if (tile_part_end > bytes.len or tile_part_end < cursor + segment_length + 2) {
+        const tile_part_end = try std.math.add(usize, marker_start, sot.psot);
+        if (tile_part_end > bytes.len or tile_part_end < marker_start + 12) {
             return CodestreamError.TruncatedData;
         }
 
-        cursor += segment_length;
+        cursor = marker_start + 12;
         var tile_packet_lengths: std.ArrayList(usize) = .empty;
         defer tile_packet_lengths.deinit(allocator);
         const sod = try readTilePartHeaderMarkers(allocator, bytes, cursor, tile_part_end, &tile_packet_lengths);
@@ -2502,6 +2510,38 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     }
 
     return CodestreamError.InvalidCodestream;
+}
+
+fn readStrictSotInfo(bytes: []const u8, marker_start: usize) !StrictSotInfo {
+    if (bytes.len - marker_start < 12) return CodestreamError.TruncatedData;
+    if (readU16Be(bytes, marker_start) != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+    const segment_length = readU16Be(bytes, marker_start + 2);
+    if (segment_length != 10) return CodestreamError.InvalidCodestream;
+    const psot = readU32Be(bytes, marker_start + 6);
+    if (psot == 0) return CodestreamError.UnsupportedPayload;
+    return .{
+        .tile_index = readU16Be(bytes, marker_start + 4),
+        .psot = psot,
+        .tile_part_index = bytes[marker_start + 10],
+        .tile_part_count = bytes[marker_start + 11],
+    };
+}
+
+fn validateStrictSotSequence(
+    sot: StrictSotInfo,
+    tile_part_index: usize,
+    expected_tile_part_count: *?u8,
+) !void {
+    if (sot.tile_index != 0) return CodestreamError.UnsupportedPayload;
+    if (tile_part_index > std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
+    if (sot.tile_part_index != @as(u8, @intCast(tile_part_index))) return CodestreamError.InvalidCodestream;
+    if (sot.tile_part_count == 0) return CodestreamError.UnsupportedPayload;
+    if (sot.tile_part_count <= sot.tile_part_index) return CodestreamError.InvalidCodestream;
+    if (expected_tile_part_count.*) |count| {
+        if (sot.tile_part_count != count) return CodestreamError.InvalidCodestream;
+    } else {
+        expected_tile_part_count.* = sot.tile_part_count;
+    }
 }
 
 fn readStrictMainHeaderTlmIndex(allocator: std.mem.Allocator, bytes: []const u8) !?TlmIndex {
