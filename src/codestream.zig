@@ -868,7 +868,7 @@ fn encodeLosslessWithOptionsMeasured(
     try appendMarker(allocator, &out, .soc);
     try appendSiz(allocator, &out, rgb, options);
     try appendCod(allocator, &out, levels, options);
-    try appendQcd(allocator, &out, levels, options);
+    try appendQcd(allocator, &out, levels, rgb.bit_depth, options);
     if (options.emit_temporary_payload_sidecar) {
         try appendTemporaryPayloadComments(allocator, &out, tile_payload.items);
     }
@@ -1154,7 +1154,7 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
             saw_cod = true;
         } else if (marker == @intFromEnum(Marker.qcd)) {
             if (saw_qcd) return CodestreamError.InvalidCodestream;
-            qcd_band_count = try validateStrictQcdSegment(segment);
+            qcd_band_count = try validateStrictQcdSegment(segment, bit_depth);
             saw_qcd = true;
         }
         cursor += segment_length;
@@ -1219,8 +1219,9 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
     return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
 }
 
-fn validateStrictQcdSegment(segment: []const u8) !usize {
+fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8) !usize {
     if (segment.len < 2) return CodestreamError.InvalidCodestream;
+    if (bit_depth == 0) return CodestreamError.InvalidCodestream;
     const style = segment[0];
     const quantization_value = style & 0x1f;
     if (quantization_value > @intFromEnum(QuantizationStyle.scalar_expounded)) return CodestreamError.InvalidCodestream;
@@ -1228,8 +1229,9 @@ fn validateStrictQcdSegment(segment: []const u8) !usize {
     if (quantization != .none) return CodestreamError.UnsupportedPayload;
     const guard_bits = style >> 5;
     if (guard_bits != 2) return CodestreamError.UnsupportedPayload;
+    const expected_exponent = try qcdReversibleExponentByte(bit_depth);
     for (segment[1..]) |exponent| {
-        if (exponent != 0x40) return CodestreamError.UnsupportedPayload;
+        if (exponent != expected_exponent) return CodestreamError.UnsupportedPayload;
     }
     return segment.len - 1;
 }
@@ -3279,14 +3281,16 @@ fn appendQcd(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
     levels: u8,
+    bit_depth: u8,
     options: LosslessOptions,
 ) !void {
     const bands = 1 + 3 * @as(u16, levels);
+    const exponent = try qcdReversibleExponentByte(bit_depth);
     try appendMarker(allocator, out, .qcd);
     try appendU16Be(allocator, out, 3 + bands);
     try out.append(allocator, qcdStyleByte(options));
     for (0..bands) |_| {
-        try out.append(allocator, 8 << 3);
+        try out.append(allocator, exponent);
     }
 }
 
@@ -5023,4 +5027,9 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
 
 fn qcdStyleByte(options: LosslessOptions) u8 {
     return (options.guard_bits << 5) | @intFromEnum(options.quantization);
+}
+
+fn qcdReversibleExponentByte(bit_depth: u8) !u8 {
+    if (bit_depth == 0 or bit_depth > 31) return CodestreamError.InvalidCodestream;
+    return bit_depth << 3;
 }
