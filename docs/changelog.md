@@ -27,6 +27,9 @@ entries are grouped by development milestone rather than semantic version.
 - Defaulted normal encode to SOP-on and EPH-off for the current independent
   decoder interop path; explicit `--eph` remains available for packet-boundary
   diagnostics while EPH sequencing is hardened.
+- Documented the planned ICC profile path: first preserve TIFF tag 34675 into a
+  JP2 restricted ICC `colr` box byte-for-byte, then add optional LittleCMS-backed
+  profile conversion later.
 
 ### Temporary JP2 Payload
 
@@ -77,6 +80,9 @@ entries are grouped by development milestone rather than semantic version.
 - Added explicit `CodeBlockStyle` metadata for all six COD code-block style
   bits. BYPASS and predictable termination are represented but fail closed until
   their payload behavior is implemented.
+- Tightened strict COD parsing so every nonzero code-block style byte remains
+  `UnsupportedPayload` until that exact style is wired end-to-end through the
+  writer, reader, tests, and interop gates.
 
 ### Quality Layers And Rate Allocation
 

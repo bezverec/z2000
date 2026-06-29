@@ -126,6 +126,13 @@ features until they are intentionally implemented. The writer applies the same
 basic guard rails for RGB input: non-empty dimensions, 8/16 bit depth, and a
 sample buffer matching `width * height * 3`.
 
+Planned ICC support should be staged as metadata preservation before color
+conversion: read TIFF ICC tag 34675, store an owned profile on the RGB image
+metadata, and write a JP2 restricted ICC `colr` box when present. The first
+implementation should treat eciRGBv2, Adobe RGB, and other RGB ICC profiles as
+opaque payloads and preserve bytes without transforming samples. Profile
+conversion should be a later optional LittleCMS-backed path.
+
 ## `src/t2.zig`
 
 Primary public types:
@@ -253,7 +260,8 @@ formation, and reset-context continuous MQ behavior are implemented behind
 internal EBCOT code-block style flags. `CodeBlockStyle` now maps all six COD
 style bits explicitly; BYPASS and predictable termination are represented but
 remain explicit unsupported payload modes. Public codestream support still
-fails closed until each style has writer, reader, tests, and interop coverage.
+fails closed for every nonzero COD style byte until each style has writer,
+reader, tests, and interop coverage.
 The inferred continuous payload decoder and partial coefficient decode helpers
 accept the same internal style state for future strict T2 audits and
 quality-layer prefix validation; inferred decode rejects terminate-all payloads

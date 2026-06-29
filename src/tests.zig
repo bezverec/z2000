@@ -5286,7 +5286,13 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "zero layers", .offset = 7, .value = 0, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported MCT", .offset = 8, .value = 2, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
-        .{ .label = "unsupported code-block style", .offset = 12, .value = 1, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported BYPASS code-block style", .offset = 12, .value = 0x01, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported RESET code-block style", .offset = 12, .value = 0x02, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported TERMALL code-block style", .offset = 12, .value = 0x04, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported CAUSAL code-block style", .offset = 12, .value = 0x08, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported ERTERM code-block style", .offset = 12, .value = 0x10, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported SEGMARK code-block style", .offset = 12, .value = 0x20, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "reserved code-block style bit", .offset = 12, .value = 0x40, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
     };
 

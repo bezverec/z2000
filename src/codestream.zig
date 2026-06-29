@@ -6119,7 +6119,7 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
 
 fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
     const parsed = ebcot.CodeBlockStyle.fromCodByte(style) orelse return CodestreamError.InvalidCodestream;
-    if (parsed.hasUnsupportedPayloadMode()) return CodestreamError.UnsupportedPayload;
+    if (parsed.toCodByte() != 0) return CodestreamError.UnsupportedPayload;
     return parsed;
 }
 

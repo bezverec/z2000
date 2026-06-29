@@ -99,6 +99,13 @@ uncompressed RGB, chunky/interleaved samples, 8 or 16 bits per channel, strip
 storage. Unsupported compression, planar layout, palette color, CMYK, tiled
 TIFF, floating samples, and multipage handling fail closed.
 
+ICC profile handling is planned in staged slices. The first slice should
+preserve an embedded TIFF ICC profile byte-for-byte into a JP2 restricted ICC
+`colr` box without changing pixel values. This targets common RGB profiles such
+as eciRGBv2 and Adobe RGB as opaque ICC payloads first. Actual color conversion
+between profiles is a later optional LittleCMS-backed step, not part of the
+current narrow TIFF -> JP2 path.
+
 `dng-info` uses the generic TIFF/IFD metadata layer to inspect DNG-style files
 without decoding RAW CFA data. It reports DNG version tags, camera strings, CFA
 metadata, the primary IFD, and SubIFD image summaries. This is the safe staging

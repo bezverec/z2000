@@ -39,6 +39,11 @@ encoder before broadening profile coverage.
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
   Start with 8-bit and 16-bit RGB plus sRGB `colr`; keep JPX-only features
   rejected until JPX boxes are intentionally implemented.
+- ICC profile preservation: add TIFF tag 34675 parsing and JP2 restricted ICC
+  `colr` writing as an opaque metadata-preserve path. Start by carrying common
+  RGB profiles such as eciRGBv2 and Adobe RGB byte-for-byte without changing
+  pixel values. Add optional LittleCMS-backed conversion only after the
+  preservation path has tests and interop coverage.
 - Profiles: enable ICT, irreversible 9/7, and scalar quantization only after
   the corresponding transform, quantization, T1, and T2 payload behavior exists.
   Until then, continue returning `UnsupportedPayload`.
