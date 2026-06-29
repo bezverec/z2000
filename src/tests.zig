@@ -3556,6 +3556,39 @@ test "temporary payload records resolution ordered tile-part plan" {
     );
 }
 
+test "strict metadata rejects resolution tile-part packet-count mismatch" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(bytes);
+
+    const corrupted = try insertZeroLengthPacketIntoFirstPltForTest(allocator, bytes);
+    defer allocator.free(corrupted);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
 test "temporary payload rejects unterminated PLT lengths" {
     const allocator = std.testing.allocator;
     const width = 16;
@@ -4220,6 +4253,74 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u16, 19), readU16BeTest(bytes, qcd + 2));
     try std.testing.expectEqual(@as(u8, 0x40), bytes[qcd + 4]);
     try std.testing.expectEqual(@as(u8, 0x40), bytes[qcd + 5]);
+}
+
+test "lossless 16-bit codestream writes matching QCD exponent" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 257) % 65535));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 509) % 65535));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 1021) % 65535));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 16,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+    });
+    defer allocator.free(bytes);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(u8, 16), stats.bit_depth);
+
+    const qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingMarker;
+    try std.testing.expectEqual(@as(u8, 0x80), bytes[qcd + 5]);
+}
+
+test "strict QCD marker reader rejects exponent that diverges from SIZ bit depth" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+    });
+    defer allocator.free(bytes);
+
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const siz = findMarker(corrupted, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    corrupted[siz + 40] = 15;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
 }
 
 test "strict COD marker reader rejects unsupported coding profile bytes" {
@@ -4958,6 +5059,28 @@ fn wrapTemporaryPayloadForTest(allocator: std.mem.Allocator, payload: []const u8
     return out.toOwnedSlice(allocator);
 }
 
+fn insertZeroLengthPacketIntoFirstPltForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+    const plt = findMarker(bytes, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const plt_length = readU16BeTest(bytes, plt + 2);
+    if (plt_length < 3) return error.InvalidPlt;
+
+    const insert_at = plt + 5;
+    if (insert_at > bytes.len) return error.Truncated;
+
+    var out = try std.ArrayList(u8).initCapacity(allocator, bytes.len + 1);
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..insert_at]);
+    try out.append(allocator, 0);
+    try out.appendSlice(allocator, bytes[insert_at..]);
+
+    writeU16BeTest(out.items, plt + 2, plt_length + 1);
+    writeU32BeTest(out.items, sot + 6, readU32BeTest(bytes, sot + 6) + 1);
+    writeU32BeTest(out.items, tlm + 7, readU32BeTest(bytes, tlm + 7) + 1);
+    return out.toOwnedSlice(allocator);
+}
+
 fn appendPltLengthsForTest(allocator: std.mem.Allocator, out: *std.ArrayList(usize), segment: []const u8) !void {
     if (segment.len == 0) return error.InvalidPlt;
     var length: usize = 0;
@@ -5199,11 +5322,23 @@ fn readU16BeTest(bytes: []const u8, offset: usize) u16 {
     return (@as(u16, bytes[offset]) << 8) | bytes[offset + 1];
 }
 
+fn writeU16BeTest(bytes: []u8, offset: usize, value: u16) void {
+    bytes[offset] = @as(u8, @truncate(value >> 8));
+    bytes[offset + 1] = @as(u8, @truncate(value));
+}
+
 fn readU32BeTest(bytes: []const u8, offset: usize) u32 {
     return (@as(u32, bytes[offset]) << 24) |
         (@as(u32, bytes[offset + 1]) << 16) |
         (@as(u32, bytes[offset + 2]) << 8) |
         bytes[offset + 3];
+}
+
+fn writeU32BeTest(bytes: []u8, offset: usize, value: u32) void {
+    bytes[offset] = @as(u8, @truncate(value >> 24));
+    bytes[offset + 1] = @as(u8, @truncate(value >> 16));
+    bytes[offset + 2] = @as(u8, @truncate(value >> 8));
+    bytes[offset + 3] = @as(u8, @truncate(value));
 }
 
 fn readU64BeTest(bytes: []const u8, offset: usize) u64 {
