@@ -3354,6 +3354,7 @@ fn readTilePartHeaderMarkers(
     packet_lengths: *std.ArrayList(usize),
 ) !usize {
     var cursor = start;
+    var expected_plt_index: u8 = 0;
     while (cursor + 1 < end) {
         const marker = readU16Be(bytes, cursor);
         if (marker == @intFromEnum(Marker.sod)) return cursor;
@@ -3367,7 +3368,9 @@ fn readTilePartHeaderMarkers(
             return CodestreamError.TruncatedData;
         }
         if (marker == @intFromEnum(Marker.plt)) {
-            try appendPltSegmentLengths(allocator, bytes[cursor + 2 .. cursor + segment_length], packet_lengths);
+            try appendPltSegmentLengths(allocator, bytes[cursor + 2 .. cursor + segment_length], expected_plt_index, packet_lengths);
+            if (expected_plt_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
+            expected_plt_index += 1;
         }
         cursor += segment_length;
     }
@@ -3377,10 +3380,11 @@ fn readTilePartHeaderMarkers(
 fn appendPltSegmentLengths(
     allocator: std.mem.Allocator,
     segment: []const u8,
+    expected_index: u8,
     packet_lengths: *std.ArrayList(usize),
 ) !void {
     if (segment.len == 0) return CodestreamError.InvalidCodestream;
-    _ = segment[0];
+    if (segment[0] != expected_index) return CodestreamError.InvalidCodestream;
     var length: usize = 0;
     var pending_length = false;
     for (segment[1..]) |byte| {
