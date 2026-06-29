@@ -79,6 +79,16 @@ pub const EbcotSegmentStats = struct {
     mq_bytes: u64 = 0,
 };
 
+const EbcotSegmentInfo = struct {
+    stats: EbcotSegmentStats = .{},
+    passes: []ebcot.CodeBlockPassPayload = &.{},
+
+    fn deinit(self: *EbcotSegmentInfo, allocator: std.mem.Allocator) void {
+        if (self.passes.len > 0) allocator.free(self.passes);
+        self.* = .{};
+    }
+};
+
 pub const ComponentStats = struct {
     blocks: u64 = 0,
     active_blocks: u64 = 0,
@@ -536,9 +546,12 @@ const RpclPacketStream = struct {
 };
 
 const TemporaryRpclBlock = struct {
+    rect: subband.Rect,
     nominal_bitplanes: u8,
     encoded_bitplanes: u8,
+    non_zero_count: u32,
     layers: [max_quality_layers]t2.LayerTruncation,
+    passes: []ebcot.CodeBlockPassPayload,
     payload: []const u8,
 };
 
@@ -547,6 +560,9 @@ const TemporaryComponentRpclCatalog = struct {
     blocks: []TemporaryRpclBlock,
 
     fn deinit(self: *TemporaryComponentRpclCatalog) void {
+        for (self.blocks) |block| {
+            if (block.passes.len > 0) self.allocator.free(block.passes);
+        }
         self.allocator.free(self.blocks);
         self.* = undefined;
     }
@@ -1599,7 +1615,7 @@ fn validateStrictRpclT2Packets(allocator: std.mem.Allocator, payload: []const u8
     }
     if (sequence != header.packet_count or packet_byte_offset != actual.packet_bytes.len) return CodestreamError.InvalidCodestream;
     inline for (0..3) |component| {
-        try validateStrictComponentAssembly(catalogs[component].blocks, assemblies[component], header.layers);
+        try validateStrictComponentAssembly(allocator, catalogs[component].blocks, assemblies[component], header.layers);
     }
 }
 
@@ -1625,14 +1641,20 @@ fn readTemporaryComponentRpclCatalog(
     }
 
     const blocks = try allocator.alloc(TemporaryRpclBlock, block_count);
-    errdefer allocator.free(blocks);
+    var initialized_blocks: usize = 0;
+    errdefer {
+        for (blocks[0..initialized_blocks]) |block| {
+            if (block.passes.len > 0) allocator.free(block.passes);
+        }
+        allocator.free(blocks);
+    }
     for (blocks) |*block| block.* = undefined;
 
     var block_index: usize = 0;
     while (block_index < block_count) : (block_index += 1) {
         const block_band = try cursor.readU16();
         if (block_band >= band_count) return CodestreamError.InvalidCodestream;
-        _ = try cursor.readRect();
+        const block_rect = try cursor.readRect();
         _ = try cursor.readRect();
         const bitplanes = try cursor.readU8();
         const non_zero_count = try cursor.readU32();
@@ -1641,9 +1663,10 @@ fn readTemporaryComponentRpclCatalog(
         _ = try readEntropyStreamInfo(cursor);
         _ = try readEntropyStreamInfo(cursor);
         _ = try readEntropyStreamInfo(cursor);
-        const ebcot_segment = try readEbcotSegmentInfo(cursor, payload_version, coding_passes);
-        if (payload_version < 7 and ebcot_segment.mq_bytes != 0) return CodestreamError.InvalidCodestream;
-        const payload_len = std.math.cast(usize, ebcot_segment.mq_bytes) orelse return CodestreamError.InvalidCodestream;
+        var ebcot_segment = try readEbcotSegmentInfoWithPasses(allocator, cursor, payload_version, coding_passes);
+        errdefer ebcot_segment.deinit(allocator);
+        if (payload_version < 7 and ebcot_segment.stats.mq_bytes != 0) return CodestreamError.InvalidCodestream;
+        const payload_len = std.math.cast(usize, ebcot_segment.stats.mq_bytes) orelse return CodestreamError.InvalidCodestream;
         const payload = if (payload_version >= 7) try cursor.readBytes(payload_len) else &.{};
 
         var converted_layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
@@ -1654,11 +1677,16 @@ fn readTemporaryComponentRpclCatalog(
             };
         }
         blocks[block_index] = .{
+            .rect = block_rect,
             .nominal_bitplanes = @max(nominal_bitplanes, bitplanes),
             .encoded_bitplanes = bitplanes,
+            .non_zero_count = non_zero_count,
             .layers = converted_layers,
+            .passes = ebcot_segment.passes,
             .payload = payload,
         };
+        ebcot_segment.passes = &.{};
+        initialized_blocks += 1;
     }
 
     return .{
@@ -1934,6 +1962,7 @@ fn collectStrictRpclPacketBlocks(
 }
 
 fn validateStrictComponentAssembly(
+    allocator: std.mem.Allocator,
     catalog: []const TemporaryRpclBlock,
     assembly: StrictComponentAssembly,
     layer_count: u16,
@@ -1950,7 +1979,49 @@ fn validateStrictComponentAssembly(
         if (!std.mem.eql(u8, expected.payload[0..expected_len], actual.payload.items)) {
             return CodestreamError.InvalidCodestream;
         }
+        try validateStrictBlockT1Reconstruction(allocator, expected, actual, layer_count);
     }
+}
+
+fn validateStrictBlockT1Reconstruction(
+    allocator: std.mem.Allocator,
+    expected: TemporaryRpclBlock,
+    actual: StrictRpclBlockAssembly,
+    layer_count: u16,
+) !void {
+    const pass_count: usize = @intCast(actual.cumulative_passes);
+    if (pass_count > expected.passes.len) return CodestreamError.InvalidCodestream;
+
+    if (layer_count == 1 and expected.encoded_bitplanes != 0) {
+        return;
+    }
+
+    if (pass_count != expected.passes.len and expected.encoded_bitplanes != 0) {
+        return;
+    }
+
+    const segment = ebcot.CodeBlockSegment{
+        .bitplanes = expected.encoded_bitplanes,
+        .non_zero_count = expected.non_zero_count,
+        .pass_count = actual.cumulative_passes,
+        .byte_length = actual.cumulative_bytes,
+        .passes = expected.passes[0..pass_count],
+        .bytes = actual.payload.items,
+    };
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height);
+    defer allocator.free(decoded);
+    if (@as(u64, @intCast(decoded.len)) != rectArea(expected.rect)) return CodestreamError.InvalidCodestream;
+    if (pass_count == expected.passes.len and countNonZeroI32(decoded) != expected.non_zero_count) {
+        return CodestreamError.InvalidCodestream;
+    }
+}
+
+fn countNonZeroI32(values: []const i32) u32 {
+    var count: u32 = 0;
+    for (values) |value| {
+        if (value != 0) count += 1;
+    }
+    return count;
 }
 
 fn maxZeroBitplanes(blocks: []const TemporaryRpclBlock, selected: []const usize) u8 {
@@ -2510,6 +2581,16 @@ fn readLayerAllocation(
 }
 
 fn readEbcotSegmentInfo(cursor: *Cursor, payload_version: u8, coding_passes: u16) !EbcotSegmentStats {
+    const info = try readEbcotSegmentInfoWithPasses(null, cursor, payload_version, coding_passes);
+    return info.stats;
+}
+
+fn readEbcotSegmentInfoWithPasses(
+    allocator: ?std.mem.Allocator,
+    cursor: *Cursor,
+    payload_version: u8,
+    coding_passes: u16,
+) !EbcotSegmentInfo {
     if (payload_version < 6) return .{};
 
     const pass_count = try cursor.readU16();
@@ -2521,12 +2602,20 @@ fn readEbcotSegmentInfo(cursor: *Cursor, payload_version: u8, coding_passes: u16
     stats.passes = @as(u64, pass_count);
     stats.mq_bytes = byte_length;
 
+    var passes: []ebcot.CodeBlockPassPayload = &.{};
+    if (allocator) |alloc| {
+        passes = try alloc.alloc(ebcot.CodeBlockPassPayload, pass_count);
+    }
+    errdefer if (allocator) |alloc| {
+        if (passes.len > 0) alloc.free(passes);
+    };
+
     var previous_end: u64 = 0;
     var pass_index: usize = 0;
     while (pass_index < @as(usize, pass_count)) : (pass_index += 1) {
         const kind = try cursor.readU8();
         if (kind > 2) return CodestreamError.InvalidCodestream;
-        _ = try cursor.readU8();
+        const magnitude_bitplane = try cursor.readU8();
         const symbol_count = try cursor.readU32();
         const byte_offset = try cursor.readU64();
         const pass_bytes = try cursor.readU64();
@@ -2538,10 +2627,23 @@ fn readEbcotSegmentInfo(cursor: *Cursor, payload_version: u8, coding_passes: u16
         if (cumulative_bytes > byte_length) return CodestreamError.InvalidCodestream;
         previous_end = cumulative_bytes;
         stats.symbols += @as(u64, symbol_count);
+        if (passes.len > 0) {
+            passes[pass_index] = .{
+                .kind = @enumFromInt(kind),
+                .magnitude_bitplane = magnitude_bitplane,
+                .symbol_count = symbol_count,
+                .byte_offset = @intCast(byte_offset),
+                .byte_length = @intCast(pass_bytes),
+                .cumulative_bytes = cumulative_bytes,
+            };
+        }
     }
     if (previous_end != byte_length) return CodestreamError.InvalidCodestream;
 
-    return stats;
+    return .{
+        .stats = stats,
+        .passes = passes,
+    };
 }
 
 fn skipEbcotSegmentPayload(cursor: *Cursor, payload_version: u8, byte_length: u64) !void {
