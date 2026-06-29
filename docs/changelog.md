@@ -51,6 +51,8 @@ entries are grouped by development milestone rather than semantic version.
 - Added scratch-buffer reuse for EBCOT direct encoding.
 - Added cleanup pass run-mode symbols for full four-row clean stripes in both
   the symbol oracle and direct MQ T1 paths, with matching coefficient decode.
+- Added magnitude-refinement context selection for first refinement with and
+  without significant neighbors, plus later refinement passes.
 
 ### Quality Layers And Rate Allocation
 

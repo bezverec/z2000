@@ -32,8 +32,10 @@ pub const Context = enum(u8) {
     sign3 = 12,
     sign4 = 13,
     refinement = 14,
-    cleanup_aggregation = 15,
-    cleanup_run = 16,
+    refinement_neighbor = 15,
+    refinement_later = 16,
+    cleanup_aggregation = 17,
+    cleanup_run = 18,
 };
 
 pub const SymbolKind = enum(u8) {
@@ -126,6 +128,7 @@ pub const BlockScratch = struct {
     significant: std.ArrayList(bool) = .empty,
     visited: std.ArrayList(bool) = .empty,
     became_significant: std.ArrayList(bool) = .empty,
+    refined: std.ArrayList(bool) = .empty,
     passes: std.ArrayList(Pass) = .empty,
     symbols: std.ArrayList(Symbol) = .empty,
 
@@ -137,6 +140,7 @@ pub const BlockScratch = struct {
         self.significant.deinit(self.allocator);
         self.visited.deinit(self.allocator);
         self.became_significant.deinit(self.allocator);
+        self.refined.deinit(self.allocator);
         self.passes.deinit(self.allocator);
         self.symbols.deinit(self.allocator);
         self.* = undefined;
@@ -151,6 +155,7 @@ pub const BlockScratch = struct {
         try self.significant.resize(self.allocator, area);
         try self.visited.resize(self.allocator, area);
         try self.became_significant.resize(self.allocator, area);
+        try self.refined.resize(self.allocator, area);
     }
 };
 
@@ -158,11 +163,13 @@ const FlagKind = enum {
     significant,
     visited,
     became_significant,
+    refined,
 };
 
 const flag_significant: u8 = 1 << 0;
 const flag_visited: u8 = 1 << 1;
 const flag_became_significant: u8 = 1 << 2;
+const flag_refined: u8 = 1 << 3;
 const zero_context_lut = makeZeroContextLut();
 const sign_context_lut = makeSignContextLut();
 const stats_lanes = simd.i32_lanes;
@@ -300,7 +307,9 @@ pub fn encodeBlockScratch(
     const significant = scratch.significant.items;
     const visited = scratch.visited.items;
     const became_significant = scratch.became_significant.items;
+    const refined = scratch.refined.items;
     @memset(significant, false);
+    @memset(refined, false);
 
     var pass_index: u16 = 0;
     var bitplane_index = bitplanes;
@@ -355,6 +364,7 @@ pub fn encodeBlockScratch(
             pass_index,
             significant,
             became_significant,
+            refined,
         );
         pass_index += 1;
 
@@ -1064,6 +1074,7 @@ fn emitRefinementPass(
     pass_index: u16,
     significant: []const bool,
     became_significant: []const bool,
+    refined: []bool,
 ) !void {
     const first_symbol = symbols.items.len;
 
@@ -1074,12 +1085,13 @@ fn emitRefinementPass(
         try symbols.append(allocator, .{
             .pass_index = pass_index,
             .kind = .magnitude_refinement,
-            .context = .refinement,
+            .context = refinementContext(refined[index], neighborSignificance(significant, rect.width, rect.height, pos.x, pos.y)),
             .bit = isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane),
             .x = pos.x,
             .y = pos.y,
             .magnitude_bitplane = bitplane,
         });
+        refined[index] = true;
     }
 
     try appendPass(allocator, passes, .refinement, bitplane, first_symbol, symbols.items.len);
@@ -1120,8 +1132,9 @@ fn decodeRefinementPassSymbols(
     while (it.next()) |pos| {
         const index = localIndex(scratch.width, pos.x, pos.y);
         if (!hasSignificantRowDecode(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .became_significant)) continue;
-        const bit = try decoder.read(mqContextIndex(.refinement));
+        const bit = try decoder.read(mqContextIndex(refinementContext(hasFlag(scratch.flags.items, index, .refined), neighborSignificanceRowsDecode(scratch, pos.x, pos.y))));
         symbol_count += 1;
+        setFlag(scratch.flags.items, index, .refined);
         if (bit) addMagnitudeBit(scratch, index, bitplane);
     }
 
@@ -1139,8 +1152,9 @@ fn decodeRefinementPassInferred(
     while (it.next()) |pos| {
         const index = localIndex(scratch.width, pos.x, pos.y);
         if (!hasSignificantRowDecode(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .became_significant)) continue;
-        const bit = try decoder.read(mqContextIndex(.refinement));
+        const bit = try decoder.read(mqContextIndex(refinementContext(hasFlag(scratch.flags.items, index, .refined), neighborSignificanceRowsDecode(scratch, pos.x, pos.y))));
         symbol_count += 1;
+        setFlag(scratch.flags.items, index, .refined);
         if (bit) addMagnitudeBit(scratch, index, bitplane);
     }
 
@@ -1542,8 +1556,12 @@ fn emitDirectRefinementPass(
     while (it.next()) |pos| {
         const index = localIndex(rect.width, pos.x, pos.y);
         if (!hasSignificantRow(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .became_significant)) continue;
-        try encoder.write(mqContextIndex(.refinement), isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane));
+        try encoder.write(
+            mqContextIndex(refinementContext(hasFlag(scratch.flags.items, index, .refined), neighborSignificanceRows(scratch, pos.x, pos.y))),
+            isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane),
+        );
         symbol_count += 1;
+        setFlag(scratch.flags.items, index, .refined);
     }
 
     try appendDirectPass(scratch, .refinement, bitplane, symbol_count, byte_offset);
@@ -1815,6 +1833,11 @@ fn zeroContext(neighbors: u4) Context {
     return zero_context_lut[@min(neighbors, 8)];
 }
 
+fn refinementContext(already_refined: bool, neighbors: u4) Context {
+    if (already_refined) return .refinement_later;
+    return if (neighbors == 0) .refinement else .refinement_neighbor;
+}
+
 fn makeZeroContextLut() [9]Context {
     var lut: [9]Context = undefined;
     for (&lut, 0..) |*context, index| {
@@ -1904,6 +1927,7 @@ fn flagMask(kind: FlagKind) u8 {
         .significant => flag_significant,
         .visited => flag_visited,
         .became_significant => flag_became_significant,
+        .refined => flag_refined,
     };
 }
 

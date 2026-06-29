@@ -2726,6 +2726,31 @@ test "EBCOT significance propagation precedes cleanup on lower bitplanes" {
     try std.testing.expectEqual(false, refinement[0].bit);
 }
 
+test "EBCOT refinement context tracks first and later refinements" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{
+        8, 0, 0, 8, 8,
+    };
+
+    var encoded = try ebcot.encodeBlock(allocator, plane[0..], 5, .{ .x = 0, .y = 0, .width = 5, .height = 1 });
+    defer encoded.deinit(allocator);
+
+    const first_refinement = encoded.symbols[encoded.passes[2].first_symbol..][0..encoded.passes[2].symbol_count];
+    try std.testing.expectEqual(@as(usize, 3), first_refinement.len);
+    try std.testing.expectEqual(ebcot.Context.refinement, first_refinement[0].context);
+    try std.testing.expectEqual(@as(usize, 0), first_refinement[0].x);
+    try std.testing.expectEqual(ebcot.Context.refinement_neighbor, first_refinement[1].context);
+    try std.testing.expectEqual(@as(usize, 3), first_refinement[1].x);
+    try std.testing.expectEqual(ebcot.Context.refinement_neighbor, first_refinement[2].context);
+    try std.testing.expectEqual(@as(usize, 4), first_refinement[2].x);
+
+    const second_refinement = encoded.symbols[encoded.passes[5].first_symbol..][0..encoded.passes[5].symbol_count];
+    try std.testing.expectEqual(@as(usize, 3), second_refinement.len);
+    try std.testing.expectEqual(ebcot.Context.refinement_later, second_refinement[0].context);
+    try std.testing.expectEqual(ebcot.Context.refinement_later, second_refinement[1].context);
+    try std.testing.expectEqual(ebcot.Context.refinement_later, second_refinement[2].context);
+}
+
 test "EBCOT symbol oracle scans block stats across vector tails" {
     const allocator = std.testing.allocator;
     const width = 11;
