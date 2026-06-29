@@ -17,10 +17,12 @@ encoder before broadening profile coverage.
 
 - T1/EBCOT: continue tightening the coding pass model after cleanup run mode,
   JPEG2000-style directional sign context/prediction, and more precise
-  refinement contexts. Segmentation symbols now exist in the standalone T1
-  style path, but public codestream support remains fail-closed until COD style
-  handling is end-to-end. Real termination/reset behavior still needs to be
-  driven by COD code-block style flags. Keep
+  refinement contexts. Reset-context, terminate-all, vertical-causal, and
+  segmentation-symbol behavior now exist in standalone T1 style paths, including
+  inferred continuous-payload decode where pass lengths are not required and
+  partial quality-layer prefix decode, but public codestream support remains
+  fail-closed until COD style handling is end-to-end. The remaining code-block
+  style flags still need full payload behavior. Keep
   row-mask, stripe-mask, and SIMD-aware block-stats optimization going only when
   byte-for-byte oracle tests continue to pass. Code-block style flags currently
   fail closed until that behavior is connected to the emitted payload.

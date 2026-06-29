@@ -127,8 +127,11 @@ lines we are targeting:
   `--predictable-termination`, and `--segmentation-symbols` are parsed but fail
   closed with `UnsupportedPayload` until the matching JPEG2000 Part 1
   code-block style behavior is wired through the codestream path. Segmentation
-  symbol payloads are implemented only in the standalone EBCOT test path for
-  now.
+  symbol payloads, terminate-all pass-terminated MQ slices, vertical-causal
+  context formation, and reset-context continuous MQ behavior are implemented
+  only in standalone EBCOT test paths for now, including inferred
+  continuous-payload decode where possible and partial quality-layer prefix
+  decode.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level.
 - `--tlm` writes TLM marker entries for the current tile-part lengths.

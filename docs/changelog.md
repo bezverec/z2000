@@ -57,6 +57,20 @@ entries are grouped by development milestone rather than semantic version.
   without significant neighbors, plus later refinement passes.
 - Added standalone EBCOT segmentation-symbol cleanup trailers behind an
   internal code-block style flag, with direct MQ roundtrip and corruption tests.
+- Added standalone EBCOT reset-context style support for continuous MQ segments,
+  resetting probability states at coding-pass boundaries while preserving the
+  continuous payload stream.
+- Extended inferred continuous MQ/T1 payload decoding to honor the same
+  internal reset-context and segmentation-symbol style state.
+- Added standalone EBCOT vertical-causal context handling, ignoring south
+  neighbors across stripe boundaries in the symbol oracle, direct MQ path, and
+  coefficient decoder.
+- Added style-aware partial coefficient decode helpers for direct and continuous
+  EBCOT segments so quality-layer pass prefixes can be validated with the same
+  internal code-block style state.
+- Added standalone EBCOT terminate-all style support, writing pass-terminated
+  MQ segments and decoding them through the continuous API when the internal
+  style is supplied.
 
 ### Quality Layers And Rate Allocation
 

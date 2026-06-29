@@ -128,8 +128,12 @@ pub const Encoder = struct {
         self.contexts[context].reset();
     }
 
-    pub fn resetAll(self: *Encoder) void {
+    pub fn resetContexts(self: *Encoder) void {
         @memset(self.contexts, .{});
+    }
+
+    pub fn resetAll(self: *Encoder) void {
+        self.resetContexts();
         self.writer.resetRetainingCapacity();
         self.low = 0;
         self.high = max_code;
@@ -245,6 +249,10 @@ pub const Decoder = struct {
     pub fn resetContext(self: *Decoder, context: usize) !void {
         if (context >= self.contexts.len) return MqError.InvalidContext;
         self.contexts[context].reset();
+    }
+
+    pub fn resetContexts(self: *Decoder) void {
+        @memset(self.contexts, .{});
     }
 
     pub fn read(self: *Decoder, context: usize) !bool {

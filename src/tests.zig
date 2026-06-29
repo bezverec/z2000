@@ -3075,6 +3075,143 @@ test "EBCOT continuous MQ coefficient decoder roundtrips a block" {
     try std.testing.expectEqualSlices(i32, plane[0..], decoded);
 }
 
+test "EBCOT continuous MQ reset context style roundtrips only with matching decoder state" {
+    const allocator = std.testing.allocator;
+    const width = 5;
+    const height = 4;
+    const plane = [_]i32{
+        7,  -3,  5, 0, -9,
+        2,  11,  0, 4, -1,
+        -6, 0,   8, 3, 0,
+        1,  -12, 6, 0, 10,
+    };
+    const style = ebcot.CodeBlockStyle{ .reset_context = true };
+
+    var default_segment = try ebcot.encodeCodeBlockSegmentContinuous(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer default_segment.deinit(allocator);
+
+    var reset_segment = try ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height }, style);
+    defer reset_segment.deinit(allocator);
+
+    try std.testing.expectEqual(default_segment.pass_count, reset_segment.pass_count);
+    try std.testing.expect(!std.mem.eql(u8, default_segment.bytes, reset_segment.bytes));
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsContinuousWithStyle(allocator, reset_segment, width, height, style);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+
+    if (ebcot.decodeCodeBlockSegmentCoefficientsContinuous(allocator, reset_segment, width, height)) |decoded_without_reset| {
+        defer allocator.free(decoded_without_reset);
+        try std.testing.expect(!std.mem.eql(i32, plane[0..], decoded_without_reset));
+    } else |_| {}
+}
+
+test "EBCOT inferred continuous decoder honors reset and segmentation style" {
+    const allocator = std.testing.allocator;
+    const width = 4;
+    const height = 4;
+    const plane = [_]i32{
+        9,  0,  -4, 2,
+        0,  7,  0,  -3,
+        5,  -1, 8,  0,
+        -6, 0,  3,  11,
+    };
+    const style = ebcot.CodeBlockStyle{ .reset_context = true, .segmentation_symbols = true };
+
+    var segment = try ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height }, style);
+    defer segment.deinit(allocator);
+
+    const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
+        allocator,
+        segment.bitplanes,
+        segment.pass_count,
+        segment.bytes,
+        width,
+        height,
+        style,
+    );
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+
+    if (ebcot.decodeCodeBlockPayloadContinuousInferred(allocator, segment.bitplanes, segment.pass_count, segment.bytes, width, height)) |decoded_without_style| {
+        defer allocator.free(decoded_without_style);
+        try std.testing.expect(!std.mem.eql(i32, plane[0..], decoded_without_style));
+    } else |_| {}
+}
+
+test "EBCOT vertical causal style ignores south stripe-boundary neighbors" {
+    const allocator = std.testing.allocator;
+    const width = 1;
+    const height = 5;
+    const plane = [_]i32{
+        0,
+        0,
+        0,
+        4,
+        8,
+    };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    const style = ebcot.CodeBlockStyle{ .vertical_causal = true };
+
+    var normal = try ebcot.encodeBlock(allocator, plane[0..], width, rect);
+    defer normal.deinit(allocator);
+    var causal = try ebcot.encodeBlockWithStyle(allocator, plane[0..], width, rect, style);
+    defer causal.deinit(allocator);
+
+    const normal_sig = normal.symbols[normal.passes[1].first_symbol..][0..normal.passes[1].symbol_count];
+    const causal_cleanup = causal.symbols[causal.passes[3].first_symbol..][0..causal.passes[3].symbol_count];
+
+    try std.testing.expectEqual(ebcot.SymbolKind.zero_coding, normal_sig[0].kind);
+    try std.testing.expectEqual(@as(usize, 3), normal_sig[0].y);
+    try std.testing.expectEqual(ebcot.Context.zero1, normal_sig[0].context);
+    try std.testing.expectEqual(true, normal_sig[0].bit);
+
+    try std.testing.expectEqual(ebcot.SymbolKind.cleanup_aggregation, causal_cleanup[0].kind);
+    try std.testing.expectEqual(ebcot.Context.cleanup_aggregation, causal_cleanup[0].context);
+    try std.testing.expectEqual(true, causal_cleanup[0].bit);
+    try std.testing.expectEqual(ebcot.SymbolKind.cleanup_run_length, causal_cleanup[1].kind);
+    try std.testing.expectEqual(true, causal_cleanup[1].bit);
+    try std.testing.expectEqual(ebcot.SymbolKind.cleanup_run_length, causal_cleanup[2].kind);
+    try std.testing.expectEqual(true, causal_cleanup[2].bit);
+    try std.testing.expectEqual(ebcot.SymbolKind.sign, causal_cleanup[3].kind);
+    try std.testing.expectEqual(@as(usize, 3), causal_cleanup[3].y);
+}
+
+test "EBCOT vertical causal direct MQ roundtrips with matching style" {
+    const allocator = std.testing.allocator;
+    const width = 4;
+    const height = 5;
+    const plane = [_]i32{
+        0,  0, 5,  0,
+        3,  0, 0,  -2,
+        0,  4, 0,  0,
+        7,  0, -1, 6,
+        -8, 2, 0,  9,
+    };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    const style = ebcot.CodeBlockStyle{ .vertical_causal = true };
+
+    var block = try ebcot.encodeBlockWithStyle(allocator, plane[0..], width, rect, style);
+    defer block.deinit(allocator);
+    var oracle = try ebcot.encodeBlockSymbolsSegment(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer oracle.deinit(allocator);
+
+    var direct = try ebcot.encodeCodeBlockSegmentDirectWithStyle(allocator, plane[0..], width, rect, style);
+    defer direct.deinit(allocator);
+
+    try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, direct.passes);
+    try std.testing.expectEqualSlices(u8, oracle.bytes, direct.bytes);
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsWithStyle(allocator, direct, width, height, style);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+}
+
 test "EBCOT continuous MQ decoder infers pass metadata from payload" {
     const allocator = std.testing.allocator;
     const width = 5;
@@ -3144,6 +3281,94 @@ test "EBCOT continuous MQ partial coefficient decoder accepts pass prefixes" {
     defer allocator.free(decoded);
     try std.testing.expectEqual(@as(usize, width * height), decoded.len);
     try std.testing.expect(countNonZeroI32Test(decoded) <= full.non_zero_count);
+}
+
+test "EBCOT styled continuous MQ partial decoder accepts pass prefixes" {
+    const allocator = std.testing.allocator;
+    const width = 4;
+    const height = 5;
+    const plane = [_]i32{
+        0,  6,  0,  -3,
+        5,  0,  8,  0,
+        -2, 0,  0,  4,
+        7,  0,  -1, 0,
+        0,  -9, 3,  10,
+    };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    const style = ebcot.CodeBlockStyle{
+        .reset_context = true,
+        .vertical_causal = true,
+        .segmentation_symbols = true,
+    };
+
+    var full = try ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], width, rect, style);
+    defer full.deinit(allocator);
+
+    const pass_count: u16 = @min(2, full.pass_count);
+    const byte_length = full.passes[pass_count - 1].cumulative_bytes;
+    const partial = ebcot.CodeBlockSegment{
+        .bitplanes = full.bitplanes,
+        .non_zero_count = full.non_zero_count,
+        .pass_count = pass_count,
+        .byte_length = byte_length,
+        .passes = full.passes[0..pass_count],
+        .bytes = full.bytes[0..@intCast(byte_length)],
+    };
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartialWithStyle(allocator, partial, width, height, style);
+    defer allocator.free(decoded);
+    try std.testing.expectEqual(@as(usize, width * height), decoded.len);
+    try std.testing.expect(countNonZeroI32Test(decoded) <= full.non_zero_count);
+
+    var scratch = ebcot.DecodeBlockScratch.init(allocator);
+    defer scratch.deinit();
+    const decoded_scratch = try ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartialScratchWithStyle(&scratch, partial, width, height, style);
+    defer allocator.free(decoded_scratch);
+    try std.testing.expectEqualSlices(i32, decoded, decoded_scratch);
+}
+
+test "EBCOT terminate-all style writes and decodes pass-terminated MQ segments" {
+    const allocator = std.testing.allocator;
+    const width = 4;
+    const height = 5;
+    const plane = [_]i32{
+        4,  0,  -5, 2,
+        0,  8,  0,  -3,
+        7,  0,  1,  0,
+        -6, 2,  0,  5,
+        0,  -9, 3,  10,
+    };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    const style = ebcot.CodeBlockStyle{
+        .terminate_all = true,
+        .vertical_causal = true,
+        .segmentation_symbols = true,
+    };
+
+    var block = try ebcot.encodeBlockWithStyle(allocator, plane[0..], width, rect, style);
+    defer block.deinit(allocator);
+    var oracle = try ebcot.encodeBlockSymbolsSegment(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer oracle.deinit(allocator);
+
+    var terminated = try ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], width, rect, style);
+    defer terminated.deinit(allocator);
+
+    try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, terminated.passes);
+    try std.testing.expectEqualSlices(u8, oracle.bytes, terminated.bytes);
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsContinuousWithStyle(allocator, terminated, width, height, style);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+
+    try std.testing.expectError(
+        ebcot.EbcotError.InvalidBlock,
+        ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(allocator, terminated.bitplanes, terminated.pass_count, terminated.bytes, width, height, style),
+    );
 }
 
 test "EBCOT direct MQ segment matches symbol oracle" {

@@ -71,6 +71,18 @@ The T1 work is split into two paths:
   stripes;
 - optional segmentation-symbol cleanup trailers in the standalone T1 style
   test path;
+- optional reset-context behavior in the standalone continuous MQ style path,
+  preserving one payload stream while resetting MQ probability states between
+  coding passes;
+- optional terminate-all behavior in the standalone T1 style path, storing
+  pass-terminated MQ byte slices with explicit pass payload lengths;
+- optional vertical-causal context formation in the standalone T1 style path,
+  ignoring south neighbors across four-row stripe boundaries;
+- inferred continuous MQ/T1 payload decoding with the same internal style state
+  so strict packet audits can validate styled payloads without stored pass
+  templates;
+- style-aware partial coefficient decoding for pass-prefix quality-layer
+  validation;
 - MQ encode/decode roundtrip tests;
 - direct MQ emission with scratch-buffer reuse;
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;
@@ -80,10 +92,11 @@ The implementation is still not a complete Part 1 T1 coder. Code-block style
 options such as BYPASS, RESET, TERMALL, vertical causal, predictable
 termination, and segmentation symbols are parsed by the CLI/codestream layer but
 still rejected with `UnsupportedPayload` until their exact payload effect is
-connected end-to-end. The segmentation-symbol payload behavior now exists as a
-standalone EBCOT style test path; the next T1 work should continue tightening
-remaining cleanup edge cases, COD-driven termination/reset behavior, and
-byte-for-byte oracle coverage before the options are advertised as supported.
+connected end-to-end. Reset-context, vertical-causal, and segmentation-symbol
+payload behavior now exist as standalone EBCOT style test paths; the next T1
+work should continue tightening remaining cleanup edge cases, COD-driven
+termination/other style behavior, and byte-for-byte oracle coverage before the
+options are advertised as supported.
 
 ## T2 Direction
 
