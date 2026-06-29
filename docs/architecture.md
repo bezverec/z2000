@@ -115,6 +115,9 @@ contributions from decoded T2 packets and compares the resulting cumulative
 bytes/pass state against the BP8 EBCOT/MQ catalog. This keeps the next strict
 decode step focused on mapping those assembled block payloads into T1
 coefficient reconstruction.
+The same strict SOD-backed assembly can now be exposed as a block catalog with
+per-component block metadata and owned payload views, so stats and the next T1
+decode step no longer need BP8 just to recover T2 packet state.
 For complete block payloads, validation also runs the assembled bytes through
 the matching T1 coefficient decoder: continuous MQ for the single-layer path and
 direct MQ for the current multi-layer path. Layer-truncated blocks now decode
@@ -146,7 +149,7 @@ These are intentionally not treated as complete yet:
 - ICT and irreversible 9/7 JP2 output;
 - scalar-derived or scalar-expounded JP2 quantization payloads;
 - JPX-only box features;
-- strict ISO packet payload decode;
+- full standalone ISO pixel decode without BP8/T1 oracle metadata;
 - full code-block style bit behavior in T1.
 
 ## Interop Gates

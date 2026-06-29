@@ -4336,6 +4336,36 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     defer catalog.deinit();
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), catalog.entries.len);
     try std.testing.expectEqual(@as(usize, @intCast(stats.sod_packet_bytes)), catalog.packet_bytes.len);
+    var block_catalog = try codestream.readStrictPacketBlockCatalog(allocator, bytes);
+    defer block_catalog.deinit();
+    var strict_catalog_blocks: u64 = 0;
+    var strict_catalog_bytes: u64 = 0;
+    var strict_catalog_passes: u64 = 0;
+    for (0..3) |component| {
+        try std.testing.expect(block_catalog.components[component].len > 0);
+        var component_payload_offset: usize = 0;
+        for (block_catalog.components[component], 0..) |block, block_index| {
+            try std.testing.expectEqual(component_payload_offset, block.payload_offset);
+            try std.testing.expectEqual(@as(usize, @intCast(block.cumulative_bytes)), block.payload_length);
+            try std.testing.expectEqual(block.payload_length, block_catalog.blockPayload(component, block_index).len);
+            component_payload_offset += block.payload_length;
+            if (!block.metadata_ready) {
+                try std.testing.expectEqual(@as(u16, 0), block.cumulative_passes);
+                try std.testing.expectEqual(@as(usize, 0), block.payload_length);
+                continue;
+            }
+            try std.testing.expect(block.rect.width > 0);
+            try std.testing.expect(block.rect.height > 0);
+            try std.testing.expect(block.encoded_bitplanes <= block.nominal_bitplanes);
+            strict_catalog_blocks += 1;
+            strict_catalog_bytes += block.cumulative_bytes;
+            strict_catalog_passes += block.cumulative_passes;
+        }
+        try std.testing.expectEqual(component_payload_offset, block_catalog.payloads[component].len);
+    }
+    try std.testing.expectEqual(stats.t2_assembled_blocks, strict_catalog_blocks);
+    try std.testing.expectEqual(stats.t2_assembled_bytes, strict_catalog_bytes);
+    try std.testing.expectEqual(stats.t2_assembled_passes, strict_catalog_passes);
 
     const strict_plan = packet_plan.Plan{
         .resolution_count = stats.packet_plan_count,

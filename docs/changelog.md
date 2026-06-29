@@ -70,6 +70,9 @@ entries are grouped by development milestone rather than semantic version.
 - Added encoded-block to `LayerPacketBlock` bridge helpers.
 - Added writer-state initialization from encoded blocks, including delayed first
   inclusion tests.
+- Added a strict SOD-backed packet block catalog that reconstructs per-component
+  code-block metadata, cumulative pass/byte counts, and owned payload views
+  without requiring the BP8 debug sidecar.
 
 ### Parallelism And Performance
 

@@ -69,6 +69,8 @@ Primary public types:
 - `ComponentStats`
 - `QualityLayerStats`
 - `EbcotSegmentStats`
+- `StrictPacketBlock`
+- `StrictPacketBlockCatalog`
 
 Primary public functions:
 
@@ -82,6 +84,9 @@ Primary public functions:
 - `markerValue(name)`
 - `firstSotPsot(bytes)`
 - `firstTlmPtlm(bytes)`
+- `readStrictPacketCatalog(allocator, bytes)`
+- `auditStrictPacketHeaders(allocator, bytes)`
+- `readStrictPacketBlockCatalog(allocator, bytes)`
 
 Notes:
 
@@ -92,6 +97,9 @@ Notes:
 - `decodeLosslessTemporary*` still requires the debug sidecar metadata, but for
   complete BP8/RPCL streams it now prefers the RGB image reconstructed from the
   strict `SOD` packet payload.
+- `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
+  metadata and owned payload views from strict `SOD`/PLT/T2 state without
+  requiring private BP8 `COM` payloads.
 
 ## `src/jp2.zig`
 
