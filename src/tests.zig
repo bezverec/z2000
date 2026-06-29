@@ -1876,8 +1876,6 @@ test "TIFF parser reads uncompressed RGB strip with per-component sample format"
 
 test "TIFF parser preserves embedded ICC profile tag" {
     const allocator = std.testing.allocator;
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(allocator);
 
     const entry_count: u16 = 11;
     const bits_offset: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
@@ -1885,36 +1883,31 @@ test "TIFF parser preserves embedded ICC profile tag" {
     const icc_offset: u32 = raster_offset + 6;
     const icc = "eciRGBv2 synthetic ICC";
 
-    try bytes.appendSlice(allocator, "II");
-    try appendU16Le(allocator, &bytes, 42);
-    try appendU32Le(allocator, &bytes, 8);
+    const bytes = try makeRgbTiffWithIccEntryForTest(allocator, 7, icc.len, icc_offset, icc);
+    defer allocator.free(bytes);
 
-    try appendU16Le(allocator, &bytes, entry_count);
-    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
-    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 1);
-    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, bits_offset);
-    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
-    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
-    try appendIfdEntryLe(allocator, &bytes, 273, 4, 1, raster_offset);
-    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
-    try appendIfdEntryLe(allocator, &bytes, 278, 4, 1, 1);
-    try appendIfdEntryLe(allocator, &bytes, 279, 4, 1, 6);
-    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
-    try appendIfdEntryLe(allocator, &bytes, 34675, 7, icc.len, icc_offset);
-    try appendU32Le(allocator, &bytes, 0);
-
-    try appendU16Le(allocator, &bytes, 8);
-    try appendU16Le(allocator, &bytes, 8);
-    try appendU16Le(allocator, &bytes, 8);
-    try bytes.appendSlice(allocator, &.{ 10, 20, 30, 40, 50, 60 });
-    try bytes.appendSlice(allocator, icc);
-
-    var rgb = try tiff.parseRgb(allocator, bytes.items);
+    var rgb = try tiff.parseRgb(allocator, bytes);
     defer rgb.deinit();
 
     try std.testing.expect(rgb.icc_profile != null);
     try std.testing.expectEqualSlices(u8, icc, rgb.icc_profile.?);
     try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, rgb.samples);
+}
+
+test "TIFF parser rejects malformed ICC profile tag" {
+    const allocator = std.testing.allocator;
+
+    const zero_count = try makeRgbTiffWithIccEntryForTest(allocator, 7, 0, 0, "");
+    defer allocator.free(zero_count);
+    try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.parseRgb(allocator, zero_count));
+
+    const unsupported_type = try makeRgbTiffWithIccEntryForTest(allocator, 3, 3, 152, &.{ 1, 2, 3, 4, 5, 6 });
+    defer allocator.free(unsupported_type);
+    try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.parseRgb(allocator, unsupported_type));
+
+    const truncated_offset = try makeRgbTiffWithIccEntryForTest(allocator, 7, 8, 4096, "");
+    defer allocator.free(truncated_offset);
+    try std.testing.expectError(tiff.TiffError.TruncatedData, tiff.parseRgb(allocator, truncated_offset));
 }
 
 test "DNG info parser reads primary IFD metadata and SubIFD summaries" {
@@ -2039,6 +2032,51 @@ test "JP2 wrapper preserves restricted ICC color profile" {
     try std.testing.expectEqual(@as(u8, 0), wrapped[colr_payload.start + 1]);
     try std.testing.expectEqual(@as(u8, 0), wrapped[colr_payload.start + 2]);
     try std.testing.expectEqualSlices(u8, icc, wrapped[colr_payload.start + 3 .. colr_payload.end]);
+}
+
+test "JP2 reader rejects malformed restricted ICC color boxes" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    const icc = try allocator.dupe(u8, "eciRGBv2 synthetic ICC");
+    var rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+        .icc_profile = icc,
+    };
+    defer rgb.deinit();
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    defer allocator.free(wrapped);
+    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+    const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+
+    {
+        const missing_profile = try replaceJp2ChildBoxForTest(allocator, wrapped, jp2h_payload, colr_payload, "colr", &.{ 2, 0, 0 });
+        defer allocator.free(missing_profile);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(missing_profile));
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.extractIccProfile(allocator, missing_profile));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const corrupted_jp2h = try findJp2BoxPayload(corrupted, "jp2h");
+        const corrupted_colr = try findJp2ChildBoxPayload(corrupted, corrupted_jp2h, "colr");
+        corrupted[corrupted_colr.start + 1] = 1;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const corrupted_jp2h = try findJp2BoxPayload(corrupted, "jp2h");
+        const corrupted_colr = try findJp2ChildBoxPayload(corrupted, corrupted_jp2h, "colr");
+        corrupted[corrupted_colr.start + 2] = 1;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
 }
 
 test "JP2 wrapper rejects unsupported RGB input metadata" {
@@ -2417,6 +2455,10 @@ test "lossless codestream places EPH before non-empty packet payload" {
     defer allocator.free(bytes);
 
     try std.testing.expect(try hasNonTrailingEphPacketForTest(bytes));
+    const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expect(audit.packets > 0);
+    try std.testing.expectEqual(audit.packets, audit.header_decoded_packets);
+    try std.testing.expectEqual(audit.packets, @as(u64, @intCast(try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")))));
 }
 
 test "strict RPCL stats handle blocks across precinct grid boundaries once" {
@@ -5368,6 +5410,7 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "unsupported CAUSAL code-block style", .offset = 12, .value = 0x08, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported ERTERM code-block style", .offset = 12, .value = 0x10, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported SEGMARK code-block style", .offset = 12, .value = 0x20, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported combined code-block style", .offset = 12, .value = 0x3f, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "reserved code-block style bit", .offset = 12, .value = 0x40, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
     };
@@ -5615,11 +5658,83 @@ fn insertJp2BoxForTest(
     return out.toOwnedSlice(allocator);
 }
 
+fn replaceJp2ChildBoxForTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    parent: Jp2BoxPayload,
+    child: Jp2BoxPayload,
+    comptime kind: *const [4]u8,
+    payload: []const u8,
+) ![]u8 {
+    const parent_start = parent.start - 8;
+    const parent_end = parent.end;
+    const child_start = child.start - 8;
+    const child_end = child.end;
+    if (parent_start > child_start or child_end > parent_end) return error.InvalidOffset;
+
+    const old_child_len = child_end - child_start;
+    const new_child_len = payload.len + 8;
+    const new_parent_payload_len = parent.end - parent.start - old_child_len + new_child_len;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..parent_start]);
+    try appendU32BeTest(allocator, &out, @as(u32, @intCast(new_parent_payload_len + 8)));
+    try appendU32BeTest(allocator, &out, readU32BeTest(bytes, parent_start + 4));
+    try out.appendSlice(allocator, bytes[parent.start..child_start]);
+    try appendU32BeTest(allocator, &out, @as(u32, @intCast(new_child_len)));
+    try appendU32BeTest(allocator, &out, fourccTest(kind));
+    try out.appendSlice(allocator, payload);
+    try out.appendSlice(allocator, bytes[child_end..parent.end]);
+    try out.appendSlice(allocator, bytes[parent_end..]);
+    return out.toOwnedSlice(allocator);
+}
+
 fn fourccTest(comptime value: *const [4]u8) u32 {
     return (@as(u32, value[0]) << 24) |
         (@as(u32, value[1]) << 16) |
         (@as(u32, value[2]) << 8) |
         @as(u32, value[3]);
+}
+
+fn makeRgbTiffWithIccEntryForTest(
+    allocator: std.mem.Allocator,
+    icc_field_type: u16,
+    icc_count: usize,
+    icc_value_or_offset: u32,
+    icc_payload: []const u8,
+) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+
+    const entry_count: u16 = 11;
+    const bits_offset: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
+    const raster_offset: u32 = bits_offset + 6;
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, 8);
+
+    try appendU16Le(allocator, &bytes, entry_count);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, bits_offset);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 273, 4, 1, raster_offset);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 278, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 279, 4, 1, 6);
+    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 34675, icc_field_type, @as(u32, @intCast(icc_count)), icc_value_or_offset);
+    try appendU32Le(allocator, &bytes, 0);
+
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try bytes.appendSlice(allocator, &.{ 10, 20, 30, 40, 50, 60 });
+    try bytes.appendSlice(allocator, icc_payload);
+
+    return bytes.toOwnedSlice(allocator);
 }
 
 fn appendIfdEntryLe(

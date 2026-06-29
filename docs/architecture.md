@@ -98,16 +98,14 @@ The T1 work is split into two paths:
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;
 - per-pass byte truncation metadata for quality layers.
 
-The implementation is still not a complete Part 1 T1 coder. Code-block style
-options such as BYPASS, RESET, TERMALL, vertical causal, predictable
-termination, and segmentation symbols are parsed by the CLI/codestream layer but
-still rejected with `UnsupportedPayload` until their exact payload effect is
-connected end-to-end. Reset-context, terminate-all, vertical-causal, and
-segmentation-symbol payload behavior now exist as standalone EBCOT style test
-paths; BYPASS and predictable termination remain fail-closed payload modes. The
-next T1 work should continue tightening remaining cleanup edge cases,
-COD-driven termination/other style behavior, and byte-for-byte oracle coverage
-before the options are advertised as supported.
+The implementation is still not a complete Part 1 T1 coder. Strict codestream
+metadata policy is fail-closed: any nonzero COD code-block style byte is rejected
+with `UnsupportedPayload` before packet decode. Reset-context, terminate-all,
+vertical-causal, and segmentation-symbol payload behavior now exist as
+standalone EBCOT style test paths only; they are not public codestream profile
+support yet. The next T1 work should continue tightening remaining cleanup edge
+cases, COD-driven termination/other style behavior, and byte-for-byte oracle
+coverage before any nonzero style byte is accepted in strict codestream decode.
 
 ## T2 Direction
 

@@ -106,6 +106,10 @@ Tasks:
 - Add packet parsing from codestream tile-parts.
 - Validate SOP/EPH sequencing. SOP remains default-on; EPH is opt-in until
   OpenJPEG/Kakadu packet-boundary interop is stable.
+- Keep benchmarking gated on interop: current no-sidecar/no-EPH smoke decodes
+  through z2000 strict path and OpenJPEG, but Grok/Kakadu still report packet
+  header or PLT interpretation failures, so the next fix belongs in ISO T2
+  header/state semantics rather than in performance tuning.
 - Validate PLT/TLM consistency against actual packet and tile-part lengths.
 - Keep RPCL as the first supported progression, with bounded per-precinct state
   and whole-packet reader validation.

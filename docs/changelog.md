@@ -24,6 +24,9 @@ entries are grouped by development milestone rather than semantic version.
 - Tightened strict codestream metadata parsing for the supported packet path:
   SIZ component precision/sign/subsampling, single-tile geometry, COD layer
   count/segment length, and QCD ordering are now validated before T2 audit.
+- Locked strict COD code-block style policy to fail-closed for every nonzero
+  style byte; standalone EBCOT style tests remain internal until their payload
+  behavior is wired through strict codestream decode.
 - Defaulted normal encode to SOP-on and EPH-off for the current independent
   decoder interop path; explicit `--eph` remains available for packet-boundary
   diagnostics while EPH sequencing is hardened.
@@ -31,6 +34,11 @@ entries are grouped by development milestone rather than semantic version.
   image metadata, JP2 wrapping writes a restricted ICC `colr` box, `jp2-info`
   reports ICC presence/size, and `decode-temp-jp2` writes the profile back to
   TIFF without transforming pixel values.
+- Added malformed ICC coverage for zero-length/truncated TIFF profile tags and
+  unsupported restricted-ICC JP2 `colr` box variants.
+- Recorded the current interop gate: no-sidecar/no-EPH output strict-decodes in
+  z2000 and is accepted by OpenJPEG, while Grok/Kakadu still expose packet
+  header/PLT interpretation issues that block fair benchmarking.
 
 ### Temporary JP2 Payload
 
