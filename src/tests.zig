@@ -3878,6 +3878,45 @@ test "temporary payload rejects PLT packet length mismatch" {
     );
 }
 
+test "temporary payload rejects PLT segment index mismatch" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const plt = findMarker(corrupted, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(corrupted, plt + 2);
+    if (segment_length < 3) return error.InvalidPlt;
+    corrupted[plt + 4] = 1;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
 test "temporary payload rejects TLM tile-part length mismatch" {
     const allocator = std.testing.allocator;
     const width = 16;
