@@ -2872,6 +2872,39 @@ test "EBCOT continuous MQ coefficient decoder roundtrips a block" {
     try std.testing.expectEqualSlices(i32, plane[0..], decoded);
 }
 
+test "EBCOT continuous MQ decoder infers pass metadata from payload" {
+    const allocator = std.testing.allocator;
+    const width = 5;
+    const height = 4;
+    const plane = [_]i32{
+        0, -7,  0,  5, 3,
+        1, 0,   -2, 0, 0,
+        0, 0,   0,  0, -1,
+        9, -12, 0,  4, 0,
+    };
+
+    var block = try ebcot.encodeBlock(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer block.deinit(allocator);
+    var segment = try ebcot.encodeBlockSymbolsSegmentContinuous(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer segment.deinit(allocator);
+
+    const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferred(
+        allocator,
+        segment.bitplanes,
+        segment.pass_count,
+        segment.bytes,
+        width,
+        height,
+    );
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+}
+
 test "EBCOT continuous MQ partial coefficient decoder accepts pass prefixes" {
     const allocator = std.testing.allocator;
     const width = 5;

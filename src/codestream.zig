@@ -3064,11 +3064,17 @@ fn decodeStrictBlockCoefficients(
         .bytes = actual.payload.items,
     };
     const complete_block = pass_count == expected.passes.len;
-    return if (layer_count == 1)
-        if (complete_block)
-            ebcot.decodeCodeBlockSegmentCoefficientsContinuous(allocator, segment, expected.rect.width, expected.rect.height)
-        else
-            ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, expected.rect.width, expected.rect.height)
+    return if (layer_count == 1 and complete_block)
+        ebcot.decodeCodeBlockPayloadContinuousInferred(
+            allocator,
+            expected.encoded_bitplanes,
+            actual.cumulative_passes,
+            actual.payload.items,
+            expected.rect.width,
+            expected.rect.height,
+        )
+    else if (layer_count == 1)
+        ebcot.decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, expected.rect.width, expected.rect.height)
     else if (complete_block)
         ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height)
     else

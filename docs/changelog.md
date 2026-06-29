@@ -84,6 +84,9 @@ entries are grouped by development milestone rather than semantic version.
 - Strict main-header and tile-part readers now reject unsupported marker
   segments such as COC, QCC, POC, PPM/PPT, RGN, CRG, PLM, and CAP instead of
   silently skipping payload behavior that is not implemented.
+- Added a metadata-inferred continuous MQ code-block decoder and wired complete
+  single-layer strict RPCL reconstruction to use SOD payload bytes without
+  relying on BP8 per-pass payload tables.
 
 ### Parallelism And Performance
 
