@@ -3091,6 +3091,48 @@ test "temporary lossless codestream roundtrips RGB samples" {
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
+test "temporary lossless decode prefers strict RPCL image over legacy sidecar pixels" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 12;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 13 + 5) % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 17 + 11) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 19 + 23) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+    const payload = try extractTemporaryPayloadCommentForTest(allocator, bytes) orelse return error.MissingPayload;
+    defer allocator.free(payload);
+
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const legacy_payload_byte = try bp8FirstLegacyEntropyPayloadByteOffsetForTest(payload);
+    try xorTemporaryPayloadCommentByteForTest(corrupted, legacy_payload_byte, 0x01);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, corrupted);
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(rgb.width, decoded.width);
+    try std.testing.expectEqual(rgb.height, decoded.height);
+    try std.testing.expectEqual(rgb.bit_depth, decoded.bit_depth);
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
 test "threaded temporary lossless codestream roundtrips RGB samples" {
     const allocator = std.testing.allocator;
     const width = 16;
@@ -4632,6 +4674,72 @@ fn bp8ShadowPacketCountOffsetForTest(payload: []const u8) !usize {
     }
     if (cursor + 16 > payload.len) return error.InvalidPayload;
     return cursor;
+}
+
+fn bp8FirstLegacyEntropyPayloadByteOffsetForTest(payload: []const u8) !usize {
+    var cursor: usize = 0;
+    if (payload.len < "ZJ2K-CBLK-BP8".len or !std.mem.eql(u8, payload[0.."ZJ2K-CBLK-BP8".len], "ZJ2K-CBLK-BP8")) {
+        return error.InvalidPayload;
+    }
+    cursor += "ZJ2K-CBLK-BP8".len;
+    cursor += 4 + 4 + 1 + 1 + 2 + 2 + 1;
+    if (cursor >= payload.len) return error.InvalidPayload;
+    const tile_part_plan_count = payload[cursor];
+    cursor += 1 + tile_part_plan_count;
+    if (cursor >= payload.len) return error.InvalidPayload;
+    const packet_plan_count = payload[cursor];
+    cursor += 1 + @as(usize, packet_plan_count) * 40;
+    if (cursor + 2 > payload.len) return error.InvalidPayload;
+    cursor += 2;
+
+    var component: usize = 0;
+    while (component < 3) : (component += 1) {
+        if (cursor + 7 > payload.len) return error.InvalidPayload;
+        cursor += 1;
+        const band_count = readU16BeTest(payload, cursor);
+        cursor += 2;
+        const block_count = readU32BeTest(payload, cursor);
+        cursor += 4;
+        const band_bytes = @as(usize, band_count) * 18;
+        if (cursor + band_bytes > payload.len) return error.InvalidPayload;
+        cursor += band_bytes;
+
+        var block_index: u32 = 0;
+        while (block_index < block_count) : (block_index += 1) {
+            if (cursor + 41 > payload.len) return error.InvalidPayload;
+            cursor += 2 + 16 + 16 + 1 + 4 + 2;
+            const layer_count = readU16BeTest(payload, cursor);
+            cursor += 2;
+            const layer_bytes = @as(usize, layer_count) * 10;
+            if (cursor + layer_bytes > payload.len) return error.InvalidPayload;
+            cursor += layer_bytes;
+
+            var stream_index: usize = 0;
+            while (stream_index < 3) : (stream_index += 1) {
+                if (cursor + 9 > payload.len) return error.InvalidPayload;
+                cursor += 1;
+                cursor += 4;
+                const encoded_len = readU32BeTest(payload, cursor);
+                cursor += 4;
+                if (cursor + encoded_len > payload.len) return error.InvalidPayload;
+                if (encoded_len > 0) return cursor;
+                cursor += encoded_len;
+            }
+
+            if (cursor + 10 > payload.len) return error.InvalidPayload;
+            const pass_count = readU16BeTest(payload, cursor);
+            cursor += 2;
+            const byte_length = readU64BeTest(payload, cursor);
+            cursor += 8;
+            const pass_bytes = @as(usize, pass_count) * 30;
+            if (cursor + pass_bytes > payload.len) return error.InvalidPayload;
+            cursor += pass_bytes;
+            const mq_bytes = std.math.cast(usize, byte_length) orelse return error.InvalidPayload;
+            if (cursor + mq_bytes > payload.len) return error.InvalidPayload;
+            cursor += mq_bytes;
+        }
+    }
+    return error.MissingPayloadByte;
 }
 
 fn bp8FirstShadowPacketByteOffsetForTest(payload: []const u8) !usize {
