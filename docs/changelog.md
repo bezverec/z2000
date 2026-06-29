@@ -81,6 +81,9 @@ entries are grouped by development milestone rather than semantic version.
 - Fixed RPCL code-block indexing so each block is assigned to one precinct cell
   instead of every intersecting precinct, avoiding duplicate first-inclusion
   state and reducing packet payload size on larger images.
+- Strict main-header and tile-part readers now reject unsupported marker
+  segments such as COC, QCC, POC, PPM/PPT, RGN, CRG, PLM, and CAP instead of
+  silently skipping payload behavior that is not implemented.
 
 ### Parallelism And Performance
 

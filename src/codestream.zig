@@ -21,12 +21,21 @@ pub const CodestreamError = error{
 
 const Marker = enum(u16) {
     soc = 0xff4f,
+    cap = 0xff50,
     siz = 0xff51,
     cod = 0xff52,
+    coc = 0xff53,
     com = 0xff64,
     tlm = 0xff55,
+    plm = 0xff57,
     plt = 0xff58,
     qcd = 0xff5c,
+    qcc = 0xff5d,
+    rgn = 0xff5e,
+    poc = 0xff5f,
+    ppm = 0xff60,
+    ppt = 0xff61,
+    crg = 0xff63,
     sot = 0xff90,
     sop = 0xff91,
     eph = 0xff92,
@@ -1390,6 +1399,12 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
             qcd_band_count = try validateStrictQcdSegment(segment, bit_depth);
             saw_qcd = true;
+        } else if (marker == @intFromEnum(Marker.tlm) or marker == @intFromEnum(Marker.com)) {
+            // TLM and COM are independently parsed/validated where needed.
+        } else if (isUnsupportedMainHeaderMarker(marker)) {
+            return CodestreamError.UnsupportedPayload;
+        } else {
+            return CodestreamError.InvalidCodestream;
         }
         cursor += segment_length;
     }
@@ -1425,6 +1440,36 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .packet_plan_count = plan.resolution_count,
         .packet_plan = plan.resolutions,
         .packet_count = plan.packets,
+    };
+}
+
+fn isUnsupportedMainHeaderMarker(marker: u16) bool {
+    return switch (marker) {
+        @intFromEnum(Marker.cap),
+        @intFromEnum(Marker.coc),
+        @intFromEnum(Marker.plm),
+        @intFromEnum(Marker.qcc),
+        @intFromEnum(Marker.rgn),
+        @intFromEnum(Marker.poc),
+        @intFromEnum(Marker.ppm),
+        @intFromEnum(Marker.crg),
+        => true,
+        else => false,
+    };
+}
+
+fn isUnsupportedTilePartHeaderMarker(marker: u16) bool {
+    return switch (marker) {
+        @intFromEnum(Marker.cod),
+        @intFromEnum(Marker.coc),
+        @intFromEnum(Marker.qcd),
+        @intFromEnum(Marker.qcc),
+        @intFromEnum(Marker.rgn),
+        @intFromEnum(Marker.poc),
+        @intFromEnum(Marker.ppt),
+        @intFromEnum(Marker.com),
+        => true,
+        else => false,
     };
 }
 
@@ -4250,6 +4295,10 @@ fn readTilePartHeaderMarkers(
             try appendPltSegmentLengths(allocator, bytes[cursor + 2 .. cursor + segment_length], expected_plt_index, packet_lengths);
             if (expected_plt_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
             expected_plt_index += 1;
+        } else if (isUnsupportedTilePartHeaderMarker(marker)) {
+            return CodestreamError.UnsupportedPayload;
+        } else {
+            return CodestreamError.InvalidCodestream;
         }
         cursor += segment_length;
     }

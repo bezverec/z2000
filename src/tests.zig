@@ -4719,6 +4719,54 @@ test "strict QCD marker reader rejects unsupported quantization profile bytes" {
     }
 }
 
+test "strict marker reader rejects unsupported main and tile-part marker segments" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(bytes);
+
+    const UnsupportedMarkerCase = struct {
+        label: []const u8,
+        source: u16,
+        replacement: u16,
+    };
+    const cases = [_]UnsupportedMarkerCase{
+        .{ .label = "COC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("coc") },
+        .{ .label = "QCC main marker", .source = codestream.markerValue("qcd"), .replacement = codestream.markerValue("qcc") },
+        .{ .label = "PPT tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("ppt") },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("unsupported marker case failed: {s}\n", .{scenario.label});
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        const marker = findMarker(corrupted, scenario.source) orelse return error.MissingMarker;
+        writeU16BeTest(corrupted, marker, scenario.replacement);
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.auditStrictPacketHeaders(allocator, corrupted),
+        );
+    }
+}
+
 test "unsupported code-block style options fail closed" {
     const allocator = std.testing.allocator;
     const width = 2;
