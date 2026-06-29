@@ -512,6 +512,17 @@ fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void 
             .{ stats.sod_packets, stats.sod_packet_bytes },
         );
     }
+    if (stats.t2_audited_packets > 0) {
+        std.debug.print(
+            "  T2 header audit: {} packets, present {}, absent {}, geometry-empty {}\n",
+            .{
+                stats.t2_audited_packets,
+                stats.t2_present_packets,
+                stats.t2_absent_packets,
+                stats.t2_geometry_empty_packets,
+            },
+        );
+    }
     if (stats.rpcl_shadow_packets > 0) {
         std.debug.print(
             "  BP8 shadow stream: {} packets, {} bytes\n",
