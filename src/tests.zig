@@ -4231,6 +4231,14 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(stats.packet_count, stats.sod_packets);
     try std.testing.expect(stats.sod_packet_bytes > 0);
     try std.testing.expectEqual(@as(u64, 0), stats.rpcl_shadow_packets);
+    try std.testing.expectEqual(stats.packet_count, stats.t2_audited_packets);
+    try std.testing.expectEqual(stats.packet_count, stats.t2_present_packets + stats.t2_absent_packets);
+    try std.testing.expect(stats.t2_present_packets > 0);
+    const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expectEqual(stats.t2_audited_packets, audit.packets);
+    try std.testing.expectEqual(stats.t2_present_packets, audit.present_packets);
+    try std.testing.expectEqual(stats.t2_absent_packets, audit.absent_packets);
+    try std.testing.expectEqual(stats.t2_geometry_empty_packets, audit.geometry_empty_packets);
     var catalog = try codestream.readStrictPacketCatalog(allocator, bytes);
     defer catalog.deinit();
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), catalog.entries.len);
