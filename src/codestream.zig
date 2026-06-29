@@ -133,6 +133,9 @@ pub const TemporaryStats = struct {
     t2_header_bytes: u64,
     t2_payload_bytes: u64,
     t2_included_blocks: u64,
+    t2_assembled_blocks: u64,
+    t2_assembled_bytes: u64,
+    t2_assembled_passes: u64,
     rpcl_shadow_packets: u64,
     rpcl_shadow_bytes: u64,
     payload_bytes: usize,
@@ -589,6 +592,9 @@ pub const StrictPacketHeaderAudit = struct {
     header_bytes: u64 = 0,
     payload_bytes: u64 = 0,
     included_blocks: u64 = 0,
+    assembled_blocks: u64 = 0,
+    assembled_bytes: u64 = 0,
+    assembled_passes: u64 = 0,
 };
 
 const TlmEntry = struct {
@@ -703,15 +709,19 @@ const RpclPacketReaderBandGroup = struct {
 };
 
 const StrictPacketAuditBandGroup = struct {
+    source_indexes: []usize,
     locations: []t2.PacketBlockLocation,
     reader_state: t2.PrecinctPacketReaderState,
     decoded: []t2.DecodedPacketBlock,
+    payloads: []?[]const u8,
     max_zero_bitplanes: u8,
 
     fn deinit(self: *StrictPacketAuditBandGroup, allocator: std.mem.Allocator) void {
+        allocator.free(self.payloads);
         allocator.free(self.decoded);
         self.reader_state.deinit();
         allocator.free(self.locations);
+        allocator.free(self.source_indexes);
         self.* = undefined;
     }
 };
@@ -1115,6 +1125,9 @@ fn analyzeTemporaryPayloadBytes(
         .t2_header_bytes = 0,
         .t2_payload_bytes = 0,
         .t2_included_blocks = 0,
+        .t2_assembled_blocks = 0,
+        .t2_assembled_bytes = 0,
+        .t2_assembled_passes = 0,
         .rpcl_shadow_packets = 0,
         .rpcl_shadow_bytes = 0,
         .payload_bytes = payload.len,
@@ -1164,6 +1177,9 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
         .t2_header_bytes = audit.header_bytes,
         .t2_payload_bytes = audit.payload_bytes,
         .t2_included_blocks = audit.included_blocks,
+        .t2_assembled_blocks = audit.assembled_blocks,
+        .t2_assembled_bytes = audit.assembled_bytes,
+        .t2_assembled_passes = audit.assembled_passes,
         .rpcl_shadow_packets = 0,
         .rpcl_shadow_bytes = 0,
         .payload_bytes = 0,
@@ -2013,6 +2029,16 @@ fn auditStrictPacketCatalogHeaders(
     var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
     defer rpcl_index.deinit();
 
+    var assemblies: [3]StrictComponentAssembly = undefined;
+    var initialized_assemblies: usize = 0;
+    defer {
+        for (assemblies[0..initialized_assemblies]) |*assembly| assembly.deinit();
+    }
+    inline for (0..3) |component| {
+        assemblies[component] = try StrictComponentAssembly.init(allocator, blocks.len);
+        initialized_assemblies += 1;
+    }
+
     var audit = StrictPacketHeaderAudit{};
     var active_groups: []StrictPacketAuditBandGroup = &.{};
     defer {
@@ -2056,6 +2082,7 @@ fn auditStrictPacketCatalogHeaders(
         }
 
         const read = try readStrictPacketHeaderForAudit(packet_bytes, entry.packet, active_groups);
+        try collectStrictPacketAuditBlocks(&assemblies[entry.packet.component], active_groups);
         audit.header_decoded_packets += 1;
         audit.header_bytes += read.header_length;
         audit.payload_bytes += read.payload_length;
@@ -2069,6 +2096,11 @@ fn auditStrictPacketCatalogHeaders(
     if (audit.packets != header.packet_count) return CodestreamError.InvalidCodestream;
     if (audit.present_packets + audit.absent_packets != audit.packets) return CodestreamError.InvalidCodestream;
     if (audit.header_decoded_packets != audit.packets) return CodestreamError.InvalidCodestream;
+    const assembly_stats = try strictAssemblyStats(assemblies);
+    if (assembly_stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
+    audit.assembled_blocks = assembly_stats.blocks;
+    audit.assembled_bytes = assembly_stats.bytes;
+    audit.assembled_passes = assembly_stats.passes;
     return audit;
 }
 
@@ -2118,17 +2150,22 @@ fn readStrictPacketHeaderForAudit(
     const header_length = reader.bytesConsumed();
     var payload_length: u64 = 0;
     var included_blocks: u64 = 0;
+    var cursor = header_length;
     for (groups) |group| {
-        for (group.decoded) |decoded| {
+        if (group.decoded.len != group.payloads.len) return CodestreamError.InvalidCodestream;
+        for (group.decoded, group.payloads) |decoded, *payload| {
+            payload.* = null;
             if (!decoded.included) continue;
+            const byte_length = std.math.cast(usize, decoded.byte_length) orelse return CodestreamError.InvalidCodestream;
+            const end = try std.math.add(usize, cursor, byte_length);
+            if (end > bytes.len) return CodestreamError.TruncatedData;
+            payload.* = bytes[cursor..end];
+            cursor = end;
             payload_length = try std.math.add(u64, payload_length, decoded.byte_length);
             included_blocks += 1;
         }
     }
-    const payload_length_usize = std.math.cast(usize, payload_length) orelse return CodestreamError.InvalidCodestream;
-    if (try std.math.add(usize, header_length, payload_length_usize) != bytes.len) {
-        return CodestreamError.InvalidCodestream;
-    }
+    if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
 
     return .{
         .present = packet_included,
@@ -2136,6 +2173,53 @@ fn readStrictPacketHeaderForAudit(
         .payload_length = payload_length,
         .included_blocks = included_blocks,
     };
+}
+
+fn collectStrictPacketAuditBlocks(
+    assembly: *StrictComponentAssembly,
+    groups: []const StrictPacketAuditBandGroup,
+) !void {
+    for (groups) |group| {
+        if (group.source_indexes.len != group.decoded.len or group.source_indexes.len != group.payloads.len) {
+            return CodestreamError.InvalidCodestream;
+        }
+        for (group.source_indexes, 0..) |block_index, index| {
+            if (block_index >= assembly.blocks.len) return CodestreamError.InvalidCodestream;
+            const decoded = group.decoded[index];
+            if (!decoded.included) {
+                if (group.payloads[index] != null) return CodestreamError.InvalidCodestream;
+                continue;
+            }
+
+            const payload = group.payloads[index] orelse return CodestreamError.InvalidCodestream;
+            if (payload.len != decoded.byte_length) return CodestreamError.InvalidCodestream;
+            var block = &assembly.blocks[block_index];
+            block.cumulative_passes = std.math.add(u16, block.cumulative_passes, decoded.pass_count) catch return CodestreamError.InvalidCodestream;
+            block.cumulative_bytes = try std.math.add(u64, block.cumulative_bytes, decoded.byte_length);
+            try block.payload.appendSlice(assembly.allocator, payload);
+            if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+        }
+    }
+}
+
+const StrictAssemblyStats = struct {
+    blocks: u64 = 0,
+    bytes: u64 = 0,
+    passes: u64 = 0,
+};
+
+fn strictAssemblyStats(assemblies: [3]StrictComponentAssembly) !StrictAssemblyStats {
+    var stats = StrictAssemblyStats{};
+    for (assemblies) |assembly| {
+        for (assembly.blocks) |block| {
+            if (block.cumulative_bytes == 0 and block.cumulative_passes == 0) continue;
+            if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+            stats.blocks += 1;
+            stats.bytes = try std.math.add(u64, stats.bytes, block.cumulative_bytes);
+            stats.passes = try std.math.add(u64, stats.passes, block.cumulative_passes);
+        }
+    }
+    return stats;
 }
 
 fn buildStrictPacketAuditBandGroups(
@@ -2232,18 +2316,21 @@ fn buildStrictPacketAuditBandGroup(
     const leaf_count = try std.math.mul(usize, leaves_x, leaves_y);
     if (leaf_count != selected.len) return CodestreamError.InvalidCodestream;
 
+    const source_indexes = try allocator.alloc(usize, leaf_count);
+    errdefer allocator.free(source_indexes);
     const locations = try allocator.alloc(t2.PacketBlockLocation, leaf_count);
     errdefer allocator.free(locations);
     const filled = try allocator.alloc(bool, leaf_count);
     defer allocator.free(filled);
     @memset(filled, false);
 
-    for (original_locations) |location| {
+    for (original_locations, 0..) |location, source_offset| {
         const local_x = location.leaf_x - min_x;
         const local_y = location.leaf_y - min_y;
         const local_index = local_y * leaves_x + local_x;
         if (local_index >= leaf_count or filled[local_index]) return CodestreamError.InvalidCodestream;
         filled[local_index] = true;
+        source_indexes[local_index] = selected[source_offset];
         locations[local_index] = .{ .leaf_x = local_x, .leaf_y = local_y };
     }
     for (filled) |is_filled| {
@@ -2254,11 +2341,15 @@ fn buildStrictPacketAuditBandGroup(
     errdefer reader_state.deinit();
     const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
     errdefer allocator.free(decoded);
+    const payloads = try allocator.alloc(?[]const u8, leaf_count);
+    errdefer allocator.free(payloads);
 
     return .{
+        .source_indexes = source_indexes,
         .locations = locations,
         .reader_state = reader_state,
         .decoded = decoded,
+        .payloads = payloads,
         .max_zero_bitplanes = nominal_bitplanes,
     };
 }
