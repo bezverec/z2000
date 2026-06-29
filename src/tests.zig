@@ -4242,6 +4242,7 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expect(stats.t2_assembled_blocks > 0);
     try std.testing.expectEqual(stats.t2_payload_bytes, stats.t2_assembled_bytes);
     try std.testing.expect(stats.t2_assembled_passes > 0);
+    try std.testing.expectEqual(stats.t2_assembled_blocks, stats.t2_t1_ready_blocks);
     const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
     try std.testing.expectEqual(stats.t2_audited_packets, audit.packets);
     try std.testing.expectEqual(stats.t2_present_packets, audit.present_packets);
@@ -4254,6 +4255,7 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(stats.t2_assembled_blocks, audit.assembled_blocks);
     try std.testing.expectEqual(stats.t2_assembled_bytes, audit.assembled_bytes);
     try std.testing.expectEqual(stats.t2_assembled_passes, audit.assembled_passes);
+    try std.testing.expectEqual(stats.t2_t1_ready_blocks, audit.t1_ready_blocks);
     var catalog = try codestream.readStrictPacketCatalog(allocator, bytes);
     defer catalog.deinit();
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), catalog.entries.len);
