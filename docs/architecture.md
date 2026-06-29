@@ -117,7 +117,9 @@ decode step focused on mapping those assembled block payloads into T1
 coefficient reconstruction.
 The same strict SOD-backed assembly can now be exposed as a block catalog with
 per-component block metadata and owned payload views, so stats and the next T1
-decode step no longer need BP8 just to recover T2 packet state.
+decode step no longer need BP8 just to recover T2 packet state. When BP8 is
+present, validation also compares that public strict block catalog against the
+BP8 EBCOT catalog for geometry, cumulative pass/byte deltas, and payload bytes.
 For complete block payloads, validation also runs the assembled bytes through
 the matching T1 coefficient decoder: continuous MQ for the single-layer path and
 direct MQ for the current multi-layer path. Layer-truncated blocks now decode

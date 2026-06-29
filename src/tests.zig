@@ -2183,6 +2183,13 @@ test "lossless codestream skeleton contains JPEG2000 markers" {
     try std.testing.expect(stats.sod_packet_bytes > 0);
     try std.testing.expectEqual(@as(u64, 0), stats.rpcl_shadow_packets);
     try std.testing.expectEqual(@as(u64, 0), stats.rpcl_shadow_bytes);
+    var strict_catalog = try codestream.readStrictPacketBlockCatalog(allocator, bytes);
+    defer strict_catalog.deinit();
+    try std.testing.expect(strict_catalog.components[0].len > 0);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, bytes),
+    );
     try std.testing.expectEqual(expected_tile_parts, countMarker(bytes, codestream.markerValue("sot")));
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
     try std.testing.expectEqual(@as(usize, @intCast(stats.packet_count)), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));

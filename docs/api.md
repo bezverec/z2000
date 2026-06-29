@@ -94,9 +94,11 @@ Notes:
   payloads in `SOD`.
 - The latest private payload is BP8 and is emitted only when
   `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
-- `decodeLosslessTemporary*` still requires the debug sidecar metadata, but for
-  complete BP8/RPCL streams it now prefers the RGB image reconstructed from the
-  strict `SOD` packet payload.
+- `decodeLosslessTemporary*` still requires the debug sidecar metadata for pixel
+  reconstruction. Without the sidecar it validates the strict packet block
+  catalog and returns `UnsupportedPayload` until standalone T1 image decode is
+  complete. For complete BP8/RPCL streams it prefers the RGB image reconstructed
+  from the strict `SOD` packet payload.
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.

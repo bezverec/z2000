@@ -73,6 +73,11 @@ entries are grouped by development milestone rather than semantic version.
 - Added a strict SOD-backed packet block catalog that reconstructs per-component
   code-block metadata, cumulative pass/byte counts, and owned payload views
   without requiring the BP8 debug sidecar.
+- Normal no-sidecar decode now validates the strict packet block catalog and
+  fails as `UnsupportedPayload` until standalone T1 image reconstruction is
+  available, instead of treating SOD bytes as a temporary payload.
+- BP8 debug validation now compares the public strict block catalog against the
+  BP8 EBCOT catalog for geometry, cumulative pass/byte deltas, and payload bytes.
 
 ### Parallelism And Performance
 

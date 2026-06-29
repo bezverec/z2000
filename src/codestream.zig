@@ -1077,13 +1077,18 @@ pub fn decodeLosslessTemporaryWithOptions(
     options: DecodeOptions,
 ) !image.RgbImage {
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
-    const payload = try temporaryPayloadRaw(allocator, bytes);
-    defer allocator.free(payload);
-    if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
-        return strict;
+    if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
+        defer allocator.free(payload);
+        if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
+            return strict;
+        }
+        _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+        return decodeTemporaryPayloadWithOptions(allocator, payload, options);
     }
-    _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
-    return decodeTemporaryPayloadWithOptions(allocator, payload, options);
+
+    var strict_catalog = try readStrictPacketBlockCatalog(allocator, bytes);
+    strict_catalog.deinit();
+    return CodestreamError.UnsupportedPayload;
 }
 
 fn decodeTemporaryPayloadWithOptions(
@@ -1748,6 +1753,7 @@ fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: 
     if (!std.mem.eql(u8, expected.packet_bytes, actual.packet_bytes)) {
         return CodestreamError.InvalidCodestream;
     }
+    try validateStrictPacketBlockCatalogMatchesTemporary(allocator, bytes, payload);
     var strict = decodeStrictRpclImageFromPackets(allocator, payload, actual, .{}) catch |err| switch (err) {
         CodestreamError.ImageTooLarge,
         CodestreamError.TooManyLevels,
@@ -1793,6 +1799,72 @@ fn decodeStrictRpclImageWithTemporaryMetadata(
         return null;
     }
     return strict.image;
+}
+
+fn validateStrictPacketBlockCatalogMatchesTemporary(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    payload: []const u8,
+) !void {
+    var cursor = Cursor.initWithAllocator(allocator, payload);
+    const header = try readTemporaryHeader(&cursor);
+    if (header.version < 8) return CodestreamError.UnsupportedPayload;
+
+    const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
+    defer allocator.free(bands);
+
+    var expected: [3]TemporaryComponentRpclCatalog = undefined;
+    var initialized_expected: usize = 0;
+    defer {
+        for (expected[0..initialized_expected]) |*catalog| catalog.deinit();
+    }
+    inline for (0..3) |component| {
+        expected[component] = try readTemporaryComponentRpclCatalog(allocator, &cursor, component, header.version, header.layers, header.bit_depth, bands);
+        initialized_expected += 1;
+    }
+    _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
+    if (!cursor.finished()) return CodestreamError.InvalidCodestream;
+
+    var actual = try readStrictPacketBlockCatalog(allocator, bytes);
+    defer actual.deinit();
+    inline for (0..3) |component| {
+        try validateStrictPacketBlockComponentCatalog(expected[component].blocks, actual, component, header.layers);
+    }
+}
+
+fn validateStrictPacketBlockComponentCatalog(
+    expected: []const TemporaryRpclBlock,
+    actual: StrictPacketBlockCatalog,
+    component: usize,
+    layer_count: u16,
+) !void {
+    if (layer_count == 0 or layer_count > max_quality_layers) return CodestreamError.InvalidCodestream;
+    if (component >= 3 or actual.components[component].len != expected.len) return CodestreamError.InvalidCodestream;
+    const final_layer: usize = @intCast(layer_count - 1);
+    for (expected, actual.components[component], 0..) |expected_block, actual_block, block_index| {
+        const final = expected_block.layers[final_layer];
+        if (actual_block.cumulative_passes != final.cumulative_passes or
+            actual_block.cumulative_bytes != final.cumulative_bytes)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        const payload = actual.blockPayload(component, block_index);
+        const expected_len = std.math.cast(usize, final.cumulative_bytes) orelse return CodestreamError.InvalidCodestream;
+        if (payload.len != expected_len or expected_len > expected_block.payload.len) {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (final.cumulative_passes == 0 and final.cumulative_bytes == 0) {
+            if (payload.len != 0) return CodestreamError.InvalidCodestream;
+            continue;
+        }
+        if (!actual_block.metadata_ready) return CodestreamError.InvalidCodestream;
+        if (actual_block.band_index != expected_block.band_index) return CodestreamError.InvalidCodestream;
+        if (!rectsEqual(actual_block.rect, expected_block.rect)) return CodestreamError.InvalidCodestream;
+        if (actual_block.encoded_bitplanes > actual_block.nominal_bitplanes) return CodestreamError.InvalidCodestream;
+        if (!std.mem.eql(u8, payload, expected_block.payload[0..expected_len])) {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
 }
 
 fn validateStrictMetadataMatchesTemporary(bytes: []const u8, payload: []const u8) !void {
