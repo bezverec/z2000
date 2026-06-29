@@ -15,6 +15,7 @@ TIF2JP2=${TIF2JP2:-tif2jp2}
 VALID2000=${VALID2000:-../valid2000/jp2.py}
 VALID2000_PYTHON=${VALID2000_PYTHON:-python3}
 VALID2000_JPYLYZER_CMD=${VALID2000_JPYLYZER_CMD:-}
+Z2000_THREADS=${Z2000_THREADS:-3}
 
 if command -v "$TIF2JP2" >/dev/null 2>&1; then
   HAVE_TIF2JP2=1
@@ -43,30 +44,35 @@ fi
 
 ./zig-out/bin/z2000 tiff-to-jp2 "$INPUT" bench-ours-profile-timings.jp2 \
   --tile 4096,4096 --progression RPCL --resolutions 6 --precincts "$PRECINCTS" \
-  --block 64 --layers 1 --tile-parts R --bypass --sop --eph --tlm --timings >/dev/null
+  --block 64 --layers 1 --tile-parts R --sop --eph --tlm --threads "$Z2000_THREADS" --timings >/dev/null
+
+./zig-out/bin/z2000 tiff-to-jp2 "$INPUT" bench-ours-profile-sidecar.jp2 \
+  --tile 4096,4096 --progression RPCL --resolutions 6 --precincts "$PRECINCTS" \
+  --block 64 --layers 1 --tile-parts R --sop --eph --tlm --threads "$Z2000_THREADS" \
+  --debug-temp-sidecar >/dev/null
 
 if [ "$HAVE_TIF2JP2" -eq 1 ]; then
   hyperfine --warmup 2 --runs 6 \
-    "./zig-out/bin/z2000 tiff-to-jp2 $INPUT bench-ours-profile.jp2 --tile 4096,4096 --progression RPCL --resolutions 6 --precincts \"$PRECINCTS\" --block 64 --layers 1 --tile-parts R --bypass --sop --eph --tlm" \
+    "./zig-out/bin/z2000 tiff-to-jp2 $INPUT bench-ours-profile.jp2 --tile 4096,4096 --progression RPCL --resolutions 6 --precincts \"$PRECINCTS\" --block 64 --layers 1 --tile-parts R --sop --eph --tlm --threads $Z2000_THREADS" \
     "grk_compress -i $INPUT -o bench-grok-profile.jp2 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -X -M 1 -S -E -u R" \
     "opj_compress -i $INPUT -o bench-openjpeg-profile.jp2 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -TLM -M 1 -SOP -EPH -TP R" \
     "$TIF2JP2 $INPUT -o bench-tif2jp2-profile.jp2 --archival-master-ndk --force --no-dpi-box --no-xmp-dpi"
 else
   hyperfine --warmup 2 --runs 6 \
-    "./zig-out/bin/z2000 tiff-to-jp2 $INPUT bench-ours-profile.jp2 --tile 4096,4096 --progression RPCL --resolutions 6 --precincts \"$PRECINCTS\" --block 64 --layers 1 --tile-parts R --bypass --sop --eph --tlm" \
+    "./zig-out/bin/z2000 tiff-to-jp2 $INPUT bench-ours-profile.jp2 --tile 4096,4096 --progression RPCL --resolutions 6 --precincts \"$PRECINCTS\" --block 64 --layers 1 --tile-parts R --sop --eph --tlm --threads $Z2000_THREADS" \
     "grk_compress -i $INPUT -o bench-grok-profile.jp2 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -X -M 1 -S -E -u R" \
     "opj_compress -i $INPUT -o bench-openjpeg-profile.jp2 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -TLM -M 1 -SOP -EPH -TP R"
 fi
 
 if [ "$HAVE_TIF2JP2" -eq 1 ]; then
   hyperfine --warmup 2 --runs 6 \
-    "./zig-out/bin/z2000 decode-temp-jp2 bench-ours-profile.jp2 bench-ours-profile-decoded.tif" \
+    "./zig-out/bin/z2000 decode-temp-jp2 bench-ours-profile-sidecar.jp2 bench-ours-profile-decoded.tif --threads $Z2000_THREADS" \
     "grk_decompress -i bench-grok-profile.jp2 -o bench-grok-profile-decoded.tif" \
     "opj_decompress -i bench-openjpeg-profile.jp2 -o bench-openjpeg-profile-decoded.tif -quiet" \
     "$TIF2JP2 --decode bench-tif2jp2-profile.jp2 -o bench-tif2jp2-profile-decoded.tif --force"
 else
   hyperfine --warmup 2 --runs 6 \
-    "./zig-out/bin/z2000 decode-temp-jp2 bench-ours-profile.jp2 bench-ours-profile-decoded.tif" \
+    "./zig-out/bin/z2000 decode-temp-jp2 bench-ours-profile-sidecar.jp2 bench-ours-profile-decoded.tif --threads $Z2000_THREADS" \
     "grk_decompress -i bench-grok-profile.jp2 -o bench-grok-profile-decoded.tif" \
     "opj_decompress -i bench-openjpeg-profile.jp2 -o bench-openjpeg-profile-decoded.tif -quiet"
 fi
@@ -105,6 +111,7 @@ hyperfine --warmup 2 --runs 5 \
 if [ "$HAVE_TIF2JP2" -eq 1 ]; then
   ls -lh \
     bench-ours-profile.jp2 \
+    bench-ours-profile-sidecar.jp2 \
     bench-grok-profile.jp2 \
     bench-openjpeg-profile.jp2 \
     bench-tif2jp2-profile.jp2 \
@@ -115,6 +122,7 @@ if [ "$HAVE_TIF2JP2" -eq 1 ]; then
 else
   ls -lh \
     bench-ours-profile.jp2 \
+    bench-ours-profile-sidecar.jp2 \
     bench-grok-profile.jp2 \
     bench-openjpeg-profile.jp2 \
     bench-grok-access.jp2 \
