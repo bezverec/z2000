@@ -684,7 +684,7 @@ pub fn decodeCodeBlockSegmentCoefficients(
 ) ![]i32 {
     var scratch = DecodeBlockScratch.init(allocator);
     defer scratch.deinit();
-    return decodeCodeBlockSegmentCoefficientsScratch(&scratch, segment, width, height);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .direct, true);
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuous(
@@ -695,7 +695,29 @@ pub fn decodeCodeBlockSegmentCoefficientsContinuous(
 ) ![]i32 {
     var scratch = DecodeBlockScratch.init(allocator);
     defer scratch.deinit();
-    return decodeCodeBlockSegmentCoefficientsContinuousScratch(&scratch, segment, width, height);
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .continuous, true);
+}
+
+pub fn decodeCodeBlockSegmentCoefficientsPartial(
+    allocator: std.mem.Allocator,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+) ![]i32 {
+    var scratch = DecodeBlockScratch.init(allocator);
+    defer scratch.deinit();
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .direct, false);
+}
+
+pub fn decodeCodeBlockSegmentCoefficientsContinuousPartial(
+    allocator: std.mem.Allocator,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+) ![]i32 {
+    var scratch = DecodeBlockScratch.init(allocator);
+    defer scratch.deinit();
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(&scratch, segment, width, height, .continuous, false);
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsScratch(
@@ -704,56 +726,7 @@ pub fn decodeCodeBlockSegmentCoefficientsScratch(
     width: usize,
     height: usize,
 ) ![]i32 {
-    if (width == 0 or height == 0) return EbcotError.InvalidBlock;
-    const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
-    if (area > max_codeblock_area) return EbcotError.InvalidBlock;
-    if (segment.pass_count != segment.passes.len) return EbcotError.InvalidBlock;
-    if (segment.byte_length != segment.bytes.len) return EbcotError.InvalidBlock;
-    if (segment.bitplanes == 0) {
-        if (segment.pass_count != 0 or segment.bytes.len != 0) return EbcotError.InvalidBlock;
-        const out = try scratch.allocator.alloc(i32, area);
-        @memset(out, 0);
-        return out;
-    }
-
-    try scratch.ensureBlockState(width, height, area);
-    @memset(scratch.flags.items, 0);
-    @memset(scratch.significant_words.items, 0);
-    @memset(scratch.coeffs.items, 0);
-
-    var expected_passes: u16 = 0;
-    expected_passes += 1;
-    if (segment.bitplanes > 1) expected_passes += @as(u16, segment.bitplanes - 1) * 3;
-    if (segment.pass_count != expected_passes) return EbcotError.InvalidBlock;
-
-    var pass_index: u16 = 0;
-    var bitplane_index = segment.bitplanes;
-    while (bitplane_index > 0) {
-        bitplane_index -= 1;
-        const bitplane: u8 = @intCast(bitplane_index);
-        clearFlag(scratch.flags.items, .became_significant);
-
-        if (bitplane == segment.bitplanes - 1) {
-            clearFlag(scratch.flags.items, .visited);
-            try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane);
-            pass_index += 1;
-            continue;
-        }
-
-        clearFlag(scratch.flags.items, .visited);
-        try decodeSignificancePass(scratch, segment.passes[pass_index], segment.bytes, bitplane);
-        pass_index += 1;
-
-        try decodeRefinementPass(scratch, segment.passes[pass_index], segment.bytes, bitplane);
-        pass_index += 1;
-
-        try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane);
-        pass_index += 1;
-    }
-    if (pass_index != segment.pass_count) return EbcotError.InvalidBlock;
-
-    const out = try scratch.allocator.dupe(i32, scratch.coeffs.items);
-    return out;
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .direct, true);
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuousScratch(
@@ -761,6 +734,40 @@ pub fn decodeCodeBlockSegmentCoefficientsContinuousScratch(
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
+) ![]i32 {
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .continuous, true);
+}
+
+pub fn decodeCodeBlockSegmentCoefficientsPartialScratch(
+    scratch: *DecodeBlockScratch,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+) ![]i32 {
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .direct, false);
+}
+
+pub fn decodeCodeBlockSegmentCoefficientsContinuousPartialScratch(
+    scratch: *DecodeBlockScratch,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+) ![]i32 {
+    return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .continuous, false);
+}
+
+const SegmentMqMode = enum {
+    direct,
+    continuous,
+};
+
+fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
+    scratch: *DecodeBlockScratch,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+    mode: SegmentMqMode,
+    require_complete: bool,
 ) ![]i32 {
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
@@ -779,44 +786,78 @@ pub fn decodeCodeBlockSegmentCoefficientsContinuousScratch(
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.coeffs.items, 0);
 
-    var expected_passes: u16 = 0;
-    expected_passes += 1;
-    if (segment.bitplanes > 1) expected_passes += @as(u16, segment.bitplanes - 1) * 3;
-    if (segment.pass_count != expected_passes) return EbcotError.InvalidBlock;
+    const expected_passes = expectedCodingPasses(segment.bitplanes);
+    if (require_complete) {
+        if (segment.pass_count != expected_passes) return EbcotError.InvalidBlock;
+    } else if (segment.pass_count > expected_passes) {
+        return EbcotError.InvalidBlock;
+    }
+
+    if (segment.pass_count == 0) {
+        const out = try scratch.allocator.dupe(i32, scratch.coeffs.items);
+        return out;
+    }
 
     var total_symbols: usize = 0;
     for (segment.passes) |pass| total_symbols += pass.symbol_count;
-    var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, segment.bytes, total_symbols);
-    defer decoder.deinit();
+    var continuous_decoder: mq.Decoder = undefined;
+    var continuous_decoder_active = false;
+    defer if (continuous_decoder_active) continuous_decoder.deinit();
+    if (mode == .continuous) {
+        continuous_decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, segment.bytes, total_symbols);
+        continuous_decoder_active = true;
+    }
 
     var pass_index: u16 = 0;
     var bitplane_index = segment.bitplanes;
-    while (bitplane_index > 0) {
+    while (bitplane_index > 0 and pass_index < segment.pass_count) {
         bitplane_index -= 1;
         const bitplane: u8 = @intCast(bitplane_index);
         clearFlag(scratch.flags.items, .became_significant);
 
         if (bitplane == segment.bitplanes - 1) {
             clearFlag(scratch.flags.items, .visited);
-            try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &decoder, bitplane);
+            switch (mode) {
+                .direct => try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane),
+                .continuous => try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane),
+            }
             pass_index += 1;
             continue;
         }
 
         clearFlag(scratch.flags.items, .visited);
-        try decodeSignificancePassContinuous(scratch, segment.passes[pass_index], segment.bytes, &decoder, bitplane);
+        switch (mode) {
+            .direct => try decodeSignificancePass(scratch, segment.passes[pass_index], segment.bytes, bitplane),
+            .continuous => try decodeSignificancePassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane),
+        }
         pass_index += 1;
+        if (pass_index >= segment.pass_count) break;
 
-        try decodeRefinementPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &decoder, bitplane);
+        switch (mode) {
+            .direct => try decodeRefinementPass(scratch, segment.passes[pass_index], segment.bytes, bitplane),
+            .continuous => try decodeRefinementPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane),
+        }
         pass_index += 1;
+        if (pass_index >= segment.pass_count) break;
 
-        try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &decoder, bitplane);
+        switch (mode) {
+            .direct => try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane),
+            .continuous => try decodeCleanupPassContinuous(scratch, segment.passes[pass_index], segment.bytes, &continuous_decoder, bitplane),
+        }
         pass_index += 1;
     }
-    if (pass_index != segment.pass_count or decoder.remaining != 0) return EbcotError.InvalidBlock;
+    if (pass_index != segment.pass_count) return EbcotError.InvalidBlock;
+    if (mode == .continuous and continuous_decoder.remaining != 0) return EbcotError.InvalidBlock;
 
     const out = try scratch.allocator.dupe(i32, scratch.coeffs.items);
     return out;
+}
+
+fn expectedCodingPasses(bitplanes: u8) u16 {
+    if (bitplanes == 0) return 0;
+    var expected_passes: u16 = 1;
+    if (bitplanes > 1) expected_passes += @as(u16, bitplanes - 1) * 3;
+    return expected_passes;
 }
 
 fn emitSignificancePass(

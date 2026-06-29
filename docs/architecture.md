@@ -117,8 +117,9 @@ decode step focused on mapping those assembled block payloads into T1
 coefficient reconstruction.
 For complete block payloads, validation also runs the assembled bytes through
 the matching T1 coefficient decoder: continuous MQ for the single-layer path and
-direct MQ for the current multi-layer path. Layer-truncated blocks remain
-byte/pass validated until partial coefficient reconstruction is wired in.
+direct MQ for the current multi-layer path. Layer-truncated blocks now decode
+available complete coding-pass prefixes and keep byte/pass validation as the
+outer T2 guard.
 
 ## Parallelism And Scratch Reuse
 

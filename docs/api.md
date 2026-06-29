@@ -192,12 +192,15 @@ Primary public functions:
 - `encodeBlockSymbolsSegment(allocator, block)`
 - `decodeCodeBlockSegmentBits(allocator, segment, symbols)`
 - `decodeCodeBlockSegmentCoefficients(allocator, segment, width, height)`
+- `decodeCodeBlockSegmentCoefficientsPartial(allocator, segment, width, height)`
+- `decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, width, height)`
 
 `CodeBlockSegment` carries MQ bytes plus per-pass byte offsets and cumulative
 truncation points. It is the bridge from T1 work into T2 packet payloads.
 `decodeCodeBlockSegmentCoefficients` reconstructs a single current-model
 code-block from those MQ pass payloads without using the old private bitplane
-payload; it is the staging primitive for strict ISO packet decode.
+payload; the partial variant decodes complete coding-pass prefixes from quality
+layer truncation points for strict ISO packet validation.
 The symbol oracle and direct MQ path share SIMD-aware block-stat scanning so
 bitplane and non-zero metadata stay aligned across portable, AVX2-width, and
 NEON-width builds.
