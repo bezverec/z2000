@@ -2680,10 +2680,10 @@ test "EBCOT code-block segment records MQ payload truncation points" {
 test "EBCOT continuous MQ segment roundtrips whole code-block payload" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{
-        0,  -7,  0,  5,
-        1,  0,   -2, 0,
-        3,  0,   0,  -6,
-        9,  -12, 0,  4,
+        0, -7,  0,  5,
+        1, 0,   -2, 0,
+        3, 0,   0,  -6,
+        9, -12, 0,  4,
     };
 
     var block = try ebcot.encodeBlock(allocator, plane[0..], 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 });
@@ -2784,6 +2784,40 @@ test "EBCOT direct MQ row masks match oracle across word boundaries" {
     try std.testing.expectEqual(oracle.byte_length, direct.byte_length);
     try std.testing.expectEqualSlices(u8, oracle.bytes, direct.bytes);
     try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, direct.passes);
+}
+
+test "EBCOT direct MQ segment reconstructs code-block coefficients" {
+    const allocator = std.testing.allocator;
+    const width = 5;
+    const height = 5;
+    const plane = [_]i32{
+        0, -7,  0,  5,  3,
+        1, 0,   -2, 0,  0,
+        0, 0,   0,  0,  -1,
+        9, -12, 0,  4,  0,
+        0, 6,   0,  -8, 2,
+    };
+
+    var segment = try ebcot.encodeCodeBlockSegmentDirect(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer segment.deinit(allocator);
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, width, height);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+}
+
+test "EBCOT direct MQ coefficient decoder handles empty code-blocks" {
+    const allocator = std.testing.allocator;
+    const width = 4;
+    const height = 3;
+    const plane = [_]i32{0} ** (width * height);
+
+    var segment = try ebcot.encodeCodeBlockSegmentDirect(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer segment.deinit(allocator);
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, width, height);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
 }
 
 test "EBCOT direct MQ scratch reuses buffers" {
