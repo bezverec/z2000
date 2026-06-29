@@ -557,6 +557,11 @@ const StrictSotInfo = struct {
     psot: u32,
 };
 
+const StrictTilePartPacketPlan = struct {
+    count: usize = 0,
+    packet_counts: [256]usize = [_]usize{0} ** 256,
+};
+
 const TlmIndex = struct {
     allocator: std.mem.Allocator,
     entries: []TlmEntry,
@@ -1042,7 +1047,7 @@ fn analyzeTemporaryPayloadBytes(allocator: std.mem.Allocator, codestream_bytes: 
 }
 
 fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !TemporaryStats {
-    const header = try readStrictCodestreamMetadata(bytes);
+    const header = try readStrictCodestreamMetadata(allocator, bytes);
     var stream = try readStrictSodRpclPacketStream(allocator, bytes);
     defer stream.deinit();
     if (stream.packet_lengths.len != header.packet_count) return CodestreamError.InvalidCodestream;
@@ -1069,7 +1074,7 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
     };
 }
 
-fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
+fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8) !TemporaryHeader {
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
@@ -1087,8 +1092,6 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
     var saw_cod = false;
     var saw_qcd = false;
     var qcd_band_count: usize = 0;
-    var tile_part_count: usize = 0;
-    var expected_tile_part_count: ?u8 = null;
 
     var cursor: usize = 2;
     while (cursor < bytes.len) {
@@ -1164,24 +1167,6 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
     }
     if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
 
-    var scan = cursor;
-    while (scan < bytes.len) {
-        if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
-        const marker = readU16Be(bytes, scan);
-        if (marker == @intFromEnum(Marker.eoc)) break;
-        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
-        if (bytes.len - scan < 12) return CodestreamError.TruncatedData;
-        const sot = try readStrictSotInfo(bytes, scan);
-        try validateStrictSotSequence(sot, tile_part_count, &expected_tile_part_count);
-        const tile_part_end = try std.math.add(usize, scan, sot.psot);
-        if (tile_part_end > bytes.len) return CodestreamError.TruncatedData;
-        tile_part_count += 1;
-        scan = tile_part_end;
-    }
-    if (expected_tile_part_count) |count| {
-        if (tile_part_count != count) return CodestreamError.InvalidCodestream;
-    }
-
     const options = LosslessOptions{
         .levels = levels,
         .layers = layers,
@@ -1191,10 +1176,8 @@ fn readStrictCodestreamMetadata(bytes: []const u8) !TemporaryHeader {
         .precinct_count = if (precinct_count == 0) 1 else precinct_count,
     };
     const plan = try makePacketPlan(width, height, levels, options);
-    const tile_part_plan = if (tile_part_count == @as(usize, levels) + 1)
-        resolutionTilePartPlan(levels)
-    else
-        emptyTilePartPlan();
+    const tile_part_packets = try readStrictTilePartPacketPlan(allocator, bytes, cursor);
+    const tile_part_plan = try validateStrictTilePartPacketPlan(tile_part_packets, plan, levels);
 
     return .{
         .version = 8,
@@ -1600,7 +1583,7 @@ fn decodeStrictRpclImageWithTemporaryMetadata(
 fn validateStrictMetadataMatchesTemporary(bytes: []const u8, payload: []const u8) !void {
     var cursor = Cursor.initWithAllocator(std.heap.page_allocator, payload);
     const temporary = try readTemporaryHeader(&cursor);
-    const strict = try readStrictCodestreamMetadata(bytes);
+    const strict = try readStrictCodestreamMetadata(std.heap.page_allocator, bytes);
 
     if (strict.width != temporary.width or
         strict.height != temporary.height or
@@ -2512,6 +2495,69 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     }
 
     return CodestreamError.InvalidCodestream;
+}
+
+fn readStrictTilePartPacketPlan(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    first_sot: usize,
+) !StrictTilePartPacketPlan {
+    var result = StrictTilePartPacketPlan{};
+    var expected_tile_part_count: ?u8 = null;
+    var scan = first_sot;
+    while (scan < bytes.len) {
+        if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, scan);
+        if (marker == @intFromEnum(Marker.eoc)) {
+            scan += 2;
+            if (scan != bytes.len) return CodestreamError.InvalidCodestream;
+            if (expected_tile_part_count) |count| {
+                if (result.count != @as(usize, count)) return CodestreamError.InvalidCodestream;
+            }
+            return result;
+        }
+        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (result.count == result.packet_counts.len) return CodestreamError.InvalidCodestream;
+
+        const sot = try readStrictSotInfo(bytes, scan);
+        try validateStrictSotSequence(sot, result.count, &expected_tile_part_count);
+        const tile_part_end = try std.math.add(usize, scan, sot.psot);
+        if (tile_part_end > bytes.len or tile_part_end < scan + 12) {
+            return CodestreamError.TruncatedData;
+        }
+
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(allocator);
+        _ = try readTilePartHeaderMarkers(allocator, bytes, scan + 12, tile_part_end, &packet_lengths);
+        if (packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
+        result.packet_counts[result.count] = packet_lengths.items.len;
+        result.count += 1;
+        scan = tile_part_end;
+    }
+
+    return CodestreamError.InvalidCodestream;
+}
+
+fn validateStrictTilePartPacketPlan(
+    tile_parts: StrictTilePartPacketPlan,
+    plan: packet_plan.Plan,
+    levels: u8,
+) !TilePartPlan {
+    if (tile_parts.count == 0) return CodestreamError.InvalidCodestream;
+    if (tile_parts.count == plan.resolution_count) {
+        var resolution: usize = 0;
+        while (resolution < plan.resolution_count) : (resolution += 1) {
+            if (@as(u64, @intCast(tile_parts.packet_counts[resolution])) != plan.resolutions[resolution].packets) {
+                return CodestreamError.InvalidCodestream;
+            }
+        }
+        return resolutionTilePartPlan(levels);
+    }
+    if (tile_parts.count == 1) {
+        if (@as(u64, @intCast(tile_parts.packet_counts[0])) != plan.packets) return CodestreamError.InvalidCodestream;
+        return emptyTilePartPlan();
+    }
+    return CodestreamError.UnsupportedPayload;
 }
 
 fn readStrictSotInfo(bytes: []const u8, marker_start: usize) !StrictSotInfo {
