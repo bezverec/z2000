@@ -90,8 +90,8 @@ Notes:
 - The latest private payload is BP8 and is emitted only when
   `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
 - `decodeLosslessTemporary*` only decodes project-private payloads and therefore
-  requires the debug sidecar until strict reconstructed component planes are
-  wired into inverse DWT/RCT output.
+  requires the debug sidecar as its public input path, while strict RPCL/T1
+  validation now reconstructs an internal RGB image through inverse DWT/RCT.
 
 ## `src/t2.zig`
 
