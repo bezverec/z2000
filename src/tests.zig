@@ -3634,6 +3634,40 @@ test "temporary payload rejects BP8 shadow packet count mismatch" {
     );
 }
 
+test "temporary payload rejects BP8 metadata that diverges from ISO markers" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    try xorTemporaryPayloadCommentByteForTest(corrupted, "ZJ2K-CBLK-BP8".len + 3, 0x01);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
 test "temporary payload rejects SOD packet bytes that diverge from BP8 shadow stream" {
     const allocator = std.testing.allocator;
     const width = 16;

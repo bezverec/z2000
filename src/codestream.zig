@@ -1467,6 +1467,7 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
 }
 
 fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: []const u8, payload: []const u8) !void {
+    try validateStrictMetadataMatchesTemporary(bytes, payload);
     var expected = try readRpclPacketStreamFromTemporary(allocator, payload);
     defer expected.deinit();
     if (expected.packet_lengths.len == 0) {
@@ -1507,6 +1508,7 @@ fn decodeStrictRpclImageWithTemporaryMetadata(
     payload: []const u8,
     options: DecodeOptions,
 ) !?image.RgbImage {
+    try validateStrictMetadataMatchesTemporary(bytes, payload);
     var expected = try readRpclPacketStreamFromTemporary(allocator, payload);
     defer expected.deinit();
     if (expected.packet_lengths.len == 0) return null;
@@ -1526,6 +1528,47 @@ fn decodeStrictRpclImageWithTemporaryMetadata(
         return null;
     }
     return strict.image;
+}
+
+fn validateStrictMetadataMatchesTemporary(bytes: []const u8, payload: []const u8) !void {
+    var cursor = Cursor.initWithAllocator(std.heap.page_allocator, payload);
+    const temporary = try readTemporaryHeader(&cursor);
+    const strict = try readStrictCodestreamMetadata(bytes);
+
+    if (strict.width != temporary.width or
+        strict.height != temporary.height or
+        strict.bit_depth != temporary.bit_depth or
+        strict.levels != temporary.levels or
+        strict.layers != temporary.layers or
+        strict.block_width != temporary.block_width or
+        strict.block_height != temporary.block_height or
+        strict.tile_part_divisions != temporary.tile_part_divisions or
+        strict.tile_part_plan_count != temporary.tile_part_plan_count or
+        strict.packet_plan_count != temporary.packet_plan_count or
+        strict.packet_count != temporary.packet_count)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (!std.mem.eql(u8, strict.tile_part_plan[0..strict.tile_part_plan_count], temporary.tile_part_plan[0..temporary.tile_part_plan_count])) {
+        return CodestreamError.InvalidCodestream;
+    }
+    var resolution_index: usize = 0;
+    while (resolution_index < strict.packet_plan_count) : (resolution_index += 1) {
+        if (!resolutionMetadataEqual(strict.packet_plan[resolution_index], temporary.packet_plan[resolution_index])) {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
+}
+
+fn resolutionMetadataEqual(a: packet_plan.Resolution, b: packet_plan.Resolution) bool {
+    return a.width == b.width and
+        a.height == b.height and
+        a.precinct_width == b.precinct_width and
+        a.precinct_height == b.precinct_height and
+        a.precincts_x == b.precincts_x and
+        a.precincts_y == b.precincts_y and
+        a.precincts == b.precincts and
+        a.packets == b.packets;
 }
 
 fn readRpclPacketStreamFromTemporary(allocator: std.mem.Allocator, payload: []const u8) !RpclPacketStream {
