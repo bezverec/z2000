@@ -1939,6 +1939,30 @@ test "JP2 wrapper records RGB image header" {
     try std.testing.expectEqual(@as(usize, 20), info.codestream_bytes);
 }
 
+test "JP2 wrapper rejects unsupported RGB input metadata" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+
+    const bad_depth = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 12,
+        .samples = samples,
+    };
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, bad_depth, "codestream"));
+
+    const short_samples = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples[0..5],
+    };
+    try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.wrapRgbCodestream(allocator, short_samples, "codestream"));
+}
+
 test "JP2 reader rejects unsupported file type brand" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });

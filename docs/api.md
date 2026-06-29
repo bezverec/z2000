@@ -119,7 +119,9 @@ The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
 sRGB enumerated `colr`, and one contiguous `jp2c` codestream. The reader accepts
 8-bit and 16-bit RGB metadata and rejects JPX-only or non-sRGB color/profile
-features until they are intentionally implemented.
+features until they are intentionally implemented. The writer applies the same
+basic guard rails for RGB input: non-empty dimensions, 8/16 bit depth, and a
+sample buffer matching `width * height * 3`.
 
 ## `src/t2.zig`
 
@@ -216,11 +218,13 @@ Primary public functions:
 - `encodeSymbolsMq(allocator, symbols)`
 - `decodeSymbolBitsMq(allocator, bytes, symbol_count, symbols)`
 - `encodeCodeBlockSegment(allocator, plane, stride, rect)`
+- `encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect)`
 - `encodeCodeBlockSegmentDirect(allocator, plane, stride, rect)`
 - `encodeCodeBlockSegmentDirectScratch(scratch, plane, stride, rect)`
 - `encodeBlockSymbolsSegment(allocator, block)`
 - `decodeCodeBlockSegmentBits(allocator, segment, symbols)`
 - `decodeCodeBlockSegmentCoefficients(allocator, segment, width, height)`
+- `decodeCodeBlockPayloadContinuousInferred(allocator, bitplanes, pass_count, bytes, width, height)`
 - `decodeCodeBlockSegmentCoefficientsPartial(allocator, segment, width, height)`
 - `decodeCodeBlockSegmentCoefficientsContinuousPartial(allocator, segment, width, height)`
 
@@ -230,9 +234,10 @@ truncation points. It is the bridge from T1 work into T2 packet payloads.
 code-block from those MQ pass payloads without using the old private bitplane
 payload; the partial variant decodes complete coding-pass prefixes from quality
 layer truncation points for strict ISO packet validation.
-The symbol oracle and direct MQ path share SIMD-aware block-stat scanning so
-bitplane and non-zero metadata stay aligned across portable, AVX2-width, and
-NEON-width builds.
+The current codestream path uses continuous MQ code-block segments for quality
+layers. The symbol oracle and direct MQ path remain useful test and comparison
+surfaces, and share SIMD-aware block-stat scanning so bitplane and non-zero
+metadata stay aligned across portable, AVX2-width, and NEON-width builds.
 
 The T1 TODO is to bring the direct MQ path closer to JPEG2000 Part 1 by adding
 cleanup run mode, sign prediction contexts, refined magnitude-refinement

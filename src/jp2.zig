@@ -39,6 +39,10 @@ pub fn wrapRgbCodestream(
     if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
         return Jp2Error.ImageTooLarge;
     }
+    if (input.bit_depth != 8 and input.bit_depth != 16) return Jp2Error.UnsupportedProfile;
+    const pixels = try std.math.mul(usize, input.width, input.height);
+    const expected_samples = try std.math.mul(usize, pixels, 3);
+    if (input.samples.len != expected_samples) return Jp2Error.InvalidBox;
     if (codestream.len > std.math.maxInt(u32) - 8) return Jp2Error.CodestreamTooLarge;
 
     var out: std.ArrayList(u8) = .empty;

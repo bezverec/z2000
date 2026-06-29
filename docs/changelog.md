@@ -19,6 +19,8 @@ entries are grouped by development milestone rather than semantic version.
 - Tightened the basic JP2 box reader for the supported `.jp2` profile:
   signature and `ftyp` ordering, `jp2 ` compatibility, RGB `ihdr`, sRGB `colr`,
   and one contiguous codestream are now validated fail-closed.
+- Tightened the JP2 wrapper writer to reject unsupported bit depths and RGB
+  sample buffers that do not match `width * height * 3`.
 - Tightened strict codestream metadata parsing for the supported packet path:
   SIZ component precision/sign/subsampling, single-tile geometry, COD layer
   count/segment length, and QCD ordering are now validated before T2 audit.
@@ -73,9 +75,9 @@ entries are grouped by development milestone rather than semantic version.
 - Added a strict SOD-backed packet block catalog that reconstructs per-component
   code-block metadata, cumulative pass/byte counts, and owned payload views
   without requiring the BP8 debug sidecar.
-- Normal no-sidecar decode now validates the strict packet block catalog and
-  fails as `UnsupportedPayload` until standalone T1 image reconstruction is
-  available, instead of treating SOD bytes as a temporary payload.
+- Normal no-sidecar decode now validates the strict packet block catalog
+  instead of treating SOD bytes as a temporary payload; current T1
+  reconstruction uses that catalog for the RPCL/RCT/5-3 roundtrip.
 - BP8 debug validation now compares the public strict block catalog against the
   BP8 EBCOT catalog for geometry, cumulative pass/byte deltas, and payload bytes.
 - Fixed RPCL code-block indexing so each block is assigned to one precinct cell

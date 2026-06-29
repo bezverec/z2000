@@ -15,7 +15,7 @@ This first milestone is intentionally small and honest:
 - JP2 box-level scaffold writer/parser for RGB metadata
 - reversible RGB color transform (RCT) for the future lossless 5/3 path
 - subband/code-block partitioning plus raw bit-plane block payloads
-- temporary RGB JP2 encode/decode roundtrip back to TIFF
+- narrow RGB JP2 encode/decode roundtrip back to TIFF
 - active code-block bounding boxes for faster sparse block payloads
 - accurate SOT `Psot` tile-part lengths in the marker skeleton
 - TLM marker segments for current tile-part lengths
@@ -28,16 +28,17 @@ This first milestone is intentionally small and honest:
 - T2 code-block grid mapping from subband block rects to tag-tree leaves
 - quality-layer-to-packet delta mapping for EBCOT code-block segment slices
 - standalone T2 precinct layer packet assembly/reader for EBCOT payload slices
-- pass-oriented temporary code-block payloads: significance, refinement, cleanup
+- legacy debug sidecar pass streams: significance, refinement, cleanup
 - swappable pass-stream entropy layer with raw/RLE/bit-RLE auto-selection
 - explicit experimental adaptive arithmetic backend for pass streams
-- standalone EBCOT/MQ shadow code-block segments for future ISO packet payloads
+- EBCOT/MQ code-block segments used as the current RPCL packet payload
+- strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
 
-It is not yet an ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The JP2
-container boxes are now scaffolded, but the `jp2c` payload is still temporary.
-The missing large pieces are complete T2 packet headers with tag-trees, EBCOT
-coding passes, MQ arithmetic coding, and strict ISO-compatible packet payload
-syntax.
+It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The
+current `jp2c` payload is a narrow single-tile RPCL/RCT/5-3 codestream with
+strict packet headers, PLT-backed packet lengths, and MQ-backed code-block
+payloads, but T1 context modeling and external decoder interop still need more
+work before calling the output generally compliant.
 
 ## Build
 
@@ -137,11 +138,11 @@ lines we are targeting:
   generation, JP2 wrapping, and disk write. This is the first pass at deciding
   whether the next optimization should target SIMD compute, scratch-buffer
   reuse/cache locality, or IO.
-- `--threads N` enables deterministic parallelism for the current temporary
+- `--threads N` enables deterministic parallelism for the current TIFF/JP2
   encoder. `N=1` keeps the original single-threaded path; `2..3` parallelizes
   independent Y/Cb/Cr DWT and component payload encoding; `N>3` keeps component
   order stable and parallelizes payload code-block ranges with per-worker
-  scratch buffers. The temporary decoder accepts the same flag for component
+  scratch buffers. The decoder accepts the same flag for component
   payload decode and inverse DWT.
 
 Archival-style scaffold:
@@ -162,18 +163,14 @@ zig build run -- tiff-to-jp2 example.tif example.jp2 \
   --block 64 --layers 12 --tile-parts R --no-sop --no-eph
 ```
 
-These options are currently reflected in the marker skeleton (`SIZ`/`COD`/`QCD`/
-`TLM`/`PLT`) and temporary payload metadata. `--tile-parts R` writes physical
-resolution-ordered tile-parts and records the matching RPCL packet-grid plan in
-temporary payload metadata. BP6 added per-code-block quality-layer truncation
-metadata, rate-allocation targets from `--rates`, and shadow EBCOT/MQ segment
-metadata for stats. BP7 carries the actual EBCOT/MQ bytes, and BP8 adds a shadow
-RPCL packet stream built from normalized code-block leaf locations. The
-temporary decoder still consumes the project-private bitplane payload for
-lossless roundtrip. The BP8 RPCL stream is now the main tile-part packet payload,
-but strict T1 reconstruction and external decoder interop still require more
-work. Code-block style options remain fail-closed until their payload behavior
-is implemented.
+These options are currently reflected in the codestream markers (`SIZ`/`COD`/
+`QCD`/`TLM`/`PLT`) and in the real RPCL packet payload. `--tile-parts R` writes
+physical resolution-ordered tile-parts. Quality layers are encoded as T2 layer
+deltas over one continuous MQ code-block segment, with byte ranges snapped to
+actual coding-pass truncation points. The optional BP8 debug sidecar mirrors the
+same metadata for oracle checks; it is no longer emitted by default or required
+for normal z2000 decode. Code-block style options remain fail-closed until their
+payload behavior is implemented.
 
 ## Performance and Safety Direction
 
@@ -221,39 +218,36 @@ payloads, temporary pass-stream entropy, and resolution-ordered tile-parts:
 - `grk_compress`: 101.5 ms mean, real lossless JP2, 6.3 MB output
 - `opj_compress`: 424.1 ms mean, real lossless JP2, 6.3 MB output
 - `tif2jp2 --archival-master-ndk`: 275.2 ms mean, OpenJPEG FFI wrapper, 6.3 MB output
-- `z2000 decode-temp-jp2`: 286.9 ms mean, temporary project-private payload decoder
+- `z2000 decode-temp-jp2`: 286.9 ms mean, current z2000 JP2 decoder
 - `grk_decompress`: 76.6 ms mean
 - `opj_decompress`: 440.9 ms mean
 - `tif2jp2 --decode`: 224.6 ms mean
 
-The encode comparison is still not fair yet: `z2000` performs TIFF parsing, RCT,
-integer 5/3 DWT, code-block partitioning, bitplane-ordered temporary pass
-writing, JPEG2000 marker emission, shadow EBCOT/MQ segment metadata, and a
-shadow BP8 RPCL packet stream. The main packet payload is still the
-project-private temporary format, so treat the number as the transform/block
-pipeline budget we must preserve while replacing that payload with the real
-packet coder.
+The encode comparison is still not fully fair yet: `z2000` performs TIFF
+parsing, RCT, integer 5/3 DWT, code-block partitioning, JPEG2000 marker
+emission, strict RPCL packet assembly, and MQ-backed code-block payload writing.
+The remaining size and interop gap is mostly T1 model fidelity, not absence of a
+packet stream.
 
-The temporary decoder is lossless for files produced by this project-private
-payload. A 256x256 RGB TIFF generated by `tools/make_bench_tiff.py` roundtrips
-bit-for-bit through `tiff-to-jp2` and `decode-temp-jp2`.
+The current decoder is lossless for z2000-produced narrow RPCL/RCT/5-3 files. A
+256x256 RGB TIFF generated by `tools/make_bench_tiff.py` roundtrips bit-for-bit
+through `tiff-to-jp2` and `decode-temp-jp2`.
 
 The codestream marker skeleton now writes non-zero `SOT/Psot` values and TLM
 entries for resolution-ordered tile-parts. OpenJPEG `opj_dump` indexes the
 current single-tile archival profile as six tile-parts for six resolutions.
 
-The block payload is now split into significance, bitplane-ordered refinement,
-and a cleanup placeholder for the temporary decoder. In parallel, BP8 records
-shadow EBCOT/MQ segment bytes, T2 layer deltas, and a real RPCL packet stream
-so the ISO packet writer can start consuming real code-block contribution
-boundaries.
+The block payload is now a continuous MQ-backed EBCOT-style segment. BP8 debug
+metadata, when requested, records the same EBCOT/MQ segment bytes and T2 layer
+deltas so the strict SOD packet stream can be checked against an oracle.
 
-`jp2-stats` inspects the temporary payload without decoding pixels. On the
-2048x2048 smoke file it reports 3072 code-blocks, all active, 12,183,966
-non-zero coefficients, 2,951,286 encoded significance bytes, 6,686,962 encoded
-refinement bytes, and zero cleanup payload bytes.
+`jp2-stats` inspects codestream markers, strict packet headers, and debug
+sidecar metadata when present. On the historical 2048x2048 smoke file it
+reported 3072 code-blocks, all active, 12,183,966 non-zero coefficients,
+2,951,286 encoded significance bytes, 6,686,962 encoded refinement bytes, and
+zero cleanup payload bytes.
 
-The temporary encoder accepts square code-block experiments through
+The TIFF/JP2 encoder accepts square code-block experiments through
 `tiff-to-jp2 --block N`. On the same smoke file, 64x64 remains the best
 compression point at 9.4 MB. 32x32 encoded faster in one local run
 (`271.7 ms`) but grew to 10 MB; 16x16 grew to 13 MB and slowed encode to
@@ -265,7 +259,7 @@ backend exists and roundtrips in tests, but it is intentionally explicit rather
 than part of auto-selection because the current generic implementation improves
 some stream sizes at too much encode/decode cost. The next compression step
 should be a JPEG2000-style context/MQ backend, not further tuning of the
-temporary generic coder.
+generic pass-stream coder.
 
 Latest local profile comparison on the same 2048x2048 RGB TIFF:
 
@@ -312,10 +306,9 @@ Optimization read from those numbers:
 
 ## Roadmap
 
-1. Promote the BP8 shadow RPCL packet stream from temporary metadata into the
-   main SOD payload and PLT length source.
-2. Replace the shadow EBCOT/MQ segment path with the primary encoder payload.
-3. Replace the temporary decoder with strict ISO packet/header parsing.
-4. Cross-check the narrow RPCL/RCT/5-3 path against independent decoders.
-5. Add real multi-tile payload layout, then tile-parallel scheduling on top of
+1. Tighten T1/EBCOT context modeling and termination behavior for the current
+   continuous MQ payload.
+2. Cross-check the narrow RPCL/RCT/5-3 path against independent decoders.
+3. Close packet/header differences found by OpenJPEG, Grok, and Kakadu.
+4. Add real multi-tile payload layout, then tile-parallel scheduling on top of
    the per-worker scratch-buffer model.

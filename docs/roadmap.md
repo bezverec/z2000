@@ -6,8 +6,8 @@ encoder before broadening profile coverage.
 ## Guiding Rules
 
 - Fail closed when marker options imply payload behavior that is not implemented.
-- Keep the temporary payload roundtrip stable until strict ISO packet payloads
-  can replace it.
+- Keep strict no-sidecar RPCL/RCT/5-3 roundtrip stable; keep the temporary BP8
+  sidecar only as an opt-in oracle/compatibility path.
 - Prefer small independently tested T1/T2 components over large hidden rewrites.
 - Keep benchmarks comparable against Grok, OpenJPEG, and Kakadu.
 - Avoid license contamination: use external implementations only for behavioral
@@ -47,7 +47,7 @@ style behavior, and real packet payload interleaving.
 
 Tasks:
 
-- Keep the promoted BP8 RPCL packet stream as the main tile-part payload.
+- Keep the real RPCL packet stream as the main tile-part payload.
 - Keep `PLT` sourced from real RPCL packet lengths.
 - Keep the old temporary payload only as an opt-in debug `COM` sidecar.
 - Keep strict RPCL/T2 packet state validation active for the same narrow path.
