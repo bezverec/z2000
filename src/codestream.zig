@@ -1244,25 +1244,49 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             return CodestreamError.TruncatedData;
         }
         const segment = bytes[cursor + 2 .. cursor + segment_length];
+        if (!saw_siz and marker != @intFromEnum(Marker.siz)) return CodestreamError.InvalidCodestream;
         if (marker == @intFromEnum(Marker.siz)) {
+            if (saw_siz) return CodestreamError.InvalidCodestream;
             if (segment.len < 36) return CodestreamError.InvalidCodestream;
             const xsiz = readU32Be(segment, 2);
             const ysiz = readU32Be(segment, 6);
             const xosiz = readU32Be(segment, 10);
             const yosiz = readU32Be(segment, 14);
+            const xtsiz = readU32Be(segment, 18);
+            const ytsiz = readU32Be(segment, 22);
+            const xtosiz = readU32Be(segment, 26);
+            const ytosiz = readU32Be(segment, 30);
             if (xsiz <= xosiz or ysiz <= yosiz) return CodestreamError.InvalidCodestream;
             const components = readU16Be(segment, 34);
-            if (components != 3 or segment.len < 36 + @as(usize, components) * 3) return CodestreamError.InvalidCodestream;
+            if (components != 3) return CodestreamError.UnsupportedPayload;
+            if (segment.len != 36 + @as(usize, components) * 3) return CodestreamError.InvalidCodestream;
             width = xsiz - xosiz;
             height = ysiz - yosiz;
+            if (xtsiz == 0 or ytsiz == 0) return CodestreamError.InvalidCodestream;
+            if (xtosiz != xosiz or ytosiz != yosiz) return CodestreamError.UnsupportedPayload;
+            if (xtsiz < width or ytsiz < height) return CodestreamError.UnsupportedPayload;
             bit_depth = (segment[36] & 0x7f) + 1;
+            if (bit_depth != 8 and bit_depth != 16) return CodestreamError.UnsupportedPayload;
+            var component_index: usize = 0;
+            while (component_index < components) : (component_index += 1) {
+                const component_offset = 36 + component_index * 3;
+                const ssiz = segment[component_offset];
+                if ((ssiz & 0x80) != 0) return CodestreamError.UnsupportedPayload;
+                const component_bit_depth = (ssiz & 0x7f) + 1;
+                if (component_bit_depth != bit_depth) return CodestreamError.UnsupportedPayload;
+                if (segment[component_offset + 1] != 1 or segment[component_offset + 2] != 1) {
+                    return CodestreamError.UnsupportedPayload;
+                }
+            }
             saw_siz = true;
         } else if (marker == @intFromEnum(Marker.cod)) {
+            if (!saw_siz or saw_cod) return CodestreamError.InvalidCodestream;
             if (segment.len < 10) return CodestreamError.InvalidCodestream;
             const scod = segment[0];
             if ((scod & ~@as(u8, 0x07)) != 0) return CodestreamError.InvalidCodestream;
             if (segment[1] != @intFromEnum(ProgressionOrder.rpcl)) return CodestreamError.UnsupportedPayload;
             layers = readU16Be(segment, 2);
+            if (layers == 0 or layers > max_quality_layers) return CodestreamError.InvalidCodestream;
             if (segment[4] != @intFromEnum(MultipleComponentTransform.rct)) return CodestreamError.UnsupportedPayload;
             levels = segment[5];
             if (levels > 32) return CodestreamError.TooManyLevels;
@@ -1275,6 +1299,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             if (precinct_count > precincts.len or segment.len < 10 + @as(usize, precinct_count)) {
                 return CodestreamError.InvalidCodestream;
             }
+            if (segment.len != 10 + @as(usize, precinct_count)) return CodestreamError.InvalidCodestream;
             if (precinct_count > 0) {
                 for (segment[10..][0..precinct_count], 0..) |byte, index| {
                     const precinct = PrecinctSize{
@@ -1292,7 +1317,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             }
             saw_cod = true;
         } else if (marker == @intFromEnum(Marker.qcd)) {
-            if (saw_qcd) return CodestreamError.InvalidCodestream;
+            if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
             qcd_band_count = try validateStrictQcdSegment(segment, bit_depth);
             saw_qcd = true;
         }

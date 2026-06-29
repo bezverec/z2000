@@ -1939,6 +1939,81 @@ test "JP2 wrapper records RGB image header" {
     try std.testing.expectEqual(@as(usize, 20), info.codestream_bytes);
 }
 
+test "JP2 reader rejects unsupported file type brand" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    defer allocator.free(wrapped);
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const ftyp_payload = try findJp2BoxPayload(corrupted, "ftyp");
+        @memcpy(corrupted[ftyp_payload.start..][0..4], "jpx ");
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const ftyp_payload = try findJp2BoxPayload(corrupted, "ftyp");
+        @memcpy(corrupted[ftyp_payload.start + 8 ..][0..4], "jpx ");
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
+}
+
+test "JP2 reader rejects unsupported basic RGB profile boxes" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    defer allocator.free(wrapped);
+    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
+        corrupted[ihdr_payload.start + 9] = 1;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
+        corrupted[ihdr_payload.start + 10] = 0xff;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const colr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "colr");
+        corrupted[colr_payload.start + 3] = 17;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(corrupted));
+    }
+}
+
 test "RCT transform matches JPEG2000 reversible equations" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{ 10, 20, 30 });
@@ -4214,6 +4289,7 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
 
     const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
     defer allocator.free(bytes);
+    try std.testing.expect(!codestream.hasMarker(bytes, codestream.markerValue("com")));
 
     const siz = findMarker(bytes, codestream.markerValue("siz")) orelse return error.MissingMarker;
     try std.testing.expectEqual(@as(u32, 4096), readU32BeTest(bytes, siz + 22));
@@ -4356,6 +4432,82 @@ test "lossless 16-bit codestream writes matching QCD exponent" {
     try std.testing.expectEqual(@as(u8, 0x80), bytes[qcd + 5]);
 }
 
+test "strict SIZ marker reader rejects unsupported component layout" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+    });
+    defer allocator.free(bytes);
+
+    const SizCase = struct {
+        label: []const u8,
+        mutate: *const fn ([]u8, usize) void,
+        expected: anyerror,
+    };
+    const cases = [_]SizCase{
+        .{ .label = "multi tile width", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                writeU32BeTest(corrupted, siz + 22, 4);
+            }
+        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "tile origin offset", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                writeU32BeTest(corrupted, siz + 30, 1);
+            }
+        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported component count", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                writeU16BeTest(corrupted, siz + 38, 4);
+            }
+        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "signed component", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                corrupted[siz + 40] = 0x87;
+            }
+        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "mixed precision component", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                corrupted[siz + 43] = 15;
+            }
+        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "subsampled component", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                corrupted[siz + 41] = 2;
+            }
+        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "trailing SIZ payload", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                writeU16BeTest(corrupted, siz + 2, readU16BeTest(corrupted, siz + 2) + 1);
+            }
+        }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("SIZ corruption case failed: {s}\n", .{scenario.label});
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        const siz = findMarker(corrupted, codestream.markerValue("siz")) orelse return error.MissingMarker;
+        scenario.mutate(corrupted, siz);
+        try std.testing.expectError(scenario.expected, codestream.auditStrictPacketHeaders(allocator, corrupted));
+    }
+}
+
 test "strict QCD marker reader rejects exponent that diverges from SIZ bit depth" {
     const allocator = std.testing.allocator;
     const width = 8;
@@ -4421,6 +4573,7 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
     };
     const cases = [_]CodCase{
         .{ .label = "reserved Scod bit", .offset = 4, .value = 0x87, .expected = codestream.CodestreamError.InvalidCodestream },
+        .{ .label = "zero layers", .offset = 7, .value = 0, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported MCT", .offset = 8, .value = 2, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported code-block style", .offset = 12, .value = 1, .expected = codestream.CodestreamError.UnsupportedPayload },
@@ -4433,7 +4586,15 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         defer allocator.free(corrupted);
         const cod = findMarker(corrupted, codestream.markerValue("cod")) orelse return error.MissingMarker;
         corrupted[cod + scenario.offset] = scenario.value;
-        try std.testing.expectError(scenario.expected, codestream.analyzeLosslessTemporary(corrupted));
+        try std.testing.expectError(scenario.expected, codestream.auditStrictPacketHeaders(allocator, corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        const cod = findMarker(corrupted, codestream.markerValue("cod")) orelse return error.MissingMarker;
+        writeU16BeTest(corrupted, cod + 2, readU16BeTest(corrupted, cod + 2) + 1);
+        try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.auditStrictPacketHeaders(allocator, corrupted));
     }
 }
 
@@ -4569,6 +4730,38 @@ test "unsupported JP2 profile marker options fail closed" {
             codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options),
         );
     }
+}
+
+const Jp2BoxPayload = struct {
+    start: usize,
+    end: usize,
+};
+
+fn findJp2BoxPayload(bytes: []const u8, comptime kind: *const [4]u8) !Jp2BoxPayload {
+    return findJp2ChildBoxPayload(bytes, .{ .start = 0, .end = bytes.len }, kind);
+}
+
+fn findJp2ChildBoxPayload(bytes: []const u8, parent: Jp2BoxPayload, comptime kind: *const [4]u8) !Jp2BoxPayload {
+    var cursor = parent.start;
+    while (cursor < parent.end) {
+        if (parent.end - cursor < 8) return error.MissingJp2Box;
+        const length = readU32BeTest(bytes, cursor);
+        if (length < 8) return error.MissingJp2Box;
+        const end = cursor + @as(usize, @intCast(length));
+        if (end > parent.end) return error.MissingJp2Box;
+        if (readU32BeTest(bytes, cursor + 4) == fourccTest(kind)) {
+            return .{ .start = cursor + 8, .end = end };
+        }
+        cursor = end;
+    }
+    return error.MissingJp2Box;
+}
+
+fn fourccTest(comptime value: *const [4]u8) u32 {
+    return (@as(u32, value[0]) << 24) |
+        (@as(u32, value[1]) << 16) |
+        (@as(u32, value[2]) << 8) |
+        @as(u32, value[3]);
 }
 
 fn appendIfdEntryLe(

@@ -93,6 +93,25 @@ Notes:
   complete BP8/RPCL streams it now prefers the RGB image reconstructed from the
   strict `SOD` packet payload.
 
+## `src/jp2.zig`
+
+Primary public types:
+
+- `Jp2Error`
+- `Info`
+
+Primary public functions:
+
+- `wrapRgbCodestream(allocator, input, codestream)`
+- `parseInfo(bytes)`
+- `extractCodestream(bytes)`
+
+The supported box profile is intentionally narrow: signature box first, `ftyp`
+second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
+sRGB enumerated `colr`, and one contiguous `jp2c` codestream. The reader accepts
+8-bit and 16-bit RGB metadata and rejects JPX-only or non-sRGB color/profile
+features until they are intentionally implemented.
+
 ## `src/t2.zig`
 
 Primary public types:

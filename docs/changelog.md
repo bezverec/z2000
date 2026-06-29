@@ -16,6 +16,12 @@ entries are grouped by development milestone rather than semantic version.
 - Distinguished RCT and ICT instead of mapping `ict` to generic MCT enabled.
 - Added tests that reject unsupported LRCP/PCRL/CPRL progression, L/C/P
   tile-parts, ICT, 9-7 JP2, scalar quantization, and multi-tile requests.
+- Tightened the basic JP2 box reader for the supported `.jp2` profile:
+  signature and `ftyp` ordering, `jp2 ` compatibility, RGB `ihdr`, sRGB `colr`,
+  and one contiguous codestream are now validated fail-closed.
+- Tightened strict codestream metadata parsing for the supported packet path:
+  SIZ component precision/sign/subsampling, single-tile geometry, COD layer
+  count/segment length, and QCD ordering are now validated before T2 audit.
 
 ### Temporary JP2 Payload
 
@@ -28,6 +34,8 @@ entries are grouped by development milestone rather than semantic version.
   code-block leaf locations.
 - `jp2-stats` reports block, pass-stream, quality-layer, and EBCOT/MQ segment
   statistics plus shadow RPCL packet counts/bytes.
+- For normal no-sidecar codestreams, `jp2-stats` now relies on strict SOD packet
+  audit data instead of private BP metadata.
 
 ### T1 And MQ
 

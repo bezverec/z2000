@@ -7,6 +7,7 @@ pub const Jp2Error = error{
     InvalidBox,
     MissingRequiredBox,
     UnsupportedColorSpace,
+    UnsupportedProfile,
 };
 
 pub const Info = struct {
@@ -27,6 +28,7 @@ const BoxType = enum(u32) {
 };
 
 const signature_payload = [_]u8{ 0x0d, 0x0a, 0x87, 0x0a };
+const brand_jp2 = fourcc("jp2 ");
 
 pub fn wrapRgbCodestream(
     allocator: std.mem.Allocator,
@@ -84,6 +86,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
     var saw_ftyp = false;
     var saw_jp2h = false;
     var saw_jp2c = false;
+    var box_index: usize = 0;
     var info: Info = .{
         .width = 0,
         .height = 0,
@@ -94,8 +97,11 @@ pub fn parseInfo(bytes: []const u8) !Info {
 
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor);
+        if (box_index == 0 and box.kind != @intFromEnum(BoxType.signature)) return Jp2Error.InvalidBox;
+        if (box_index == 1 and box.kind != @intFromEnum(BoxType.file_type)) return Jp2Error.InvalidBox;
         switch (box.kind) {
             @intFromEnum(BoxType.signature) => {
+                if (box_index != 0 or saw_signature) return Jp2Error.InvalidBox;
                 if (box.payload.len != signature_payload.len or
                     !std.mem.eql(u8, box.payload, signature_payload[0..]))
                 {
@@ -103,17 +109,24 @@ pub fn parseInfo(bytes: []const u8) !Info {
                 }
                 saw_signature = true;
             },
-            @intFromEnum(BoxType.file_type) => saw_ftyp = true,
+            @intFromEnum(BoxType.file_type) => {
+                if (box_index != 1 or saw_ftyp) return Jp2Error.InvalidBox;
+                try validateFileTypeBox(box.payload);
+                saw_ftyp = true;
+            },
             @intFromEnum(BoxType.jp2_header) => {
+                if (!saw_ftyp or saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
                 try parseJp2Header(box.payload, &info);
                 saw_jp2h = true;
             },
             @intFromEnum(BoxType.contiguous_codestream) => {
+                if (!saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
                 info.codestream_bytes = box.payload.len;
                 saw_jp2c = true;
             },
             else => {},
         }
+        box_index += 1;
     }
 
     if (!saw_signature or !saw_ftyp or !saw_jp2h or !saw_jp2c) {
@@ -142,28 +155,61 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var cursor: usize = 0;
     var saw_ihdr = false;
     var saw_colr = false;
+    var box_index: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor);
+        if (box_index == 0 and box.kind != @intFromEnum(BoxType.image_header)) return Jp2Error.InvalidBox;
         switch (box.kind) {
             @intFromEnum(BoxType.image_header) => {
+                if (box_index != 0 or saw_ihdr) return Jp2Error.InvalidBox;
                 if (box.payload.len != 14) return Jp2Error.InvalidBox;
                 info.height = readU32Be(box.payload, 0);
                 info.width = readU32Be(box.payload, 4);
                 info.components = readU16Be(box.payload, 8);
-                info.bits_per_component = box.payload[10] + 1;
+                const bpc = box.payload[10];
+                const compression_type = box.payload[11];
+                const colorspace_unknown = box.payload[12];
+                const intellectual_property = box.payload[13];
+                if (info.width == 0 or info.height == 0) return Jp2Error.InvalidBox;
+                if (compression_type != 7 or colorspace_unknown != 0 or intellectual_property != 0) {
+                    return Jp2Error.UnsupportedProfile;
+                }
+                if ((bpc & 0x80) != 0) return Jp2Error.UnsupportedProfile;
+                info.bits_per_component = bpc + 1;
+                if (info.components != 3 or (info.bits_per_component != 8 and info.bits_per_component != 16)) {
+                    return Jp2Error.UnsupportedColorSpace;
+                }
                 saw_ihdr = true;
             },
             @intFromEnum(BoxType.color) => {
+                if (!saw_ihdr or saw_colr) return Jp2Error.InvalidBox;
                 if (box.payload.len < 7) return Jp2Error.InvalidBox;
                 const method = box.payload[0];
+                const precedence = box.payload[1];
+                const approximation = box.payload[2];
                 const enum_cs = readU32Be(box.payload, 3);
+                if (precedence != 0 or approximation != 0) return Jp2Error.UnsupportedProfile;
                 if (method != 1 or enum_cs != 16) return Jp2Error.UnsupportedColorSpace;
+                if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
                 saw_colr = true;
             },
             else => {},
         }
+        box_index += 1;
     }
     if (!saw_ihdr or !saw_colr) return Jp2Error.MissingRequiredBox;
+}
+
+fn validateFileTypeBox(payload: []const u8) !void {
+    if (payload.len < 8 or (payload.len - 8) % 4 != 0) return Jp2Error.InvalidBox;
+    if (readU32Be(payload, 0) != brand_jp2) return Jp2Error.UnsupportedProfile;
+
+    var compatible = false;
+    var cursor: usize = 8;
+    while (cursor < payload.len) : (cursor += 4) {
+        if (readU32Be(payload, cursor) == brand_jp2) compatible = true;
+    }
+    if (!compatible) return Jp2Error.UnsupportedProfile;
 }
 
 fn nextBox(bytes: []const u8, cursor: *usize) !Box {
@@ -171,6 +217,7 @@ fn nextBox(bytes: []const u8, cursor: *usize) !Box {
     const start = cursor.*;
     const length = readU32Be(bytes, start);
     const kind = readU32Be(bytes, start + 4);
+    if (length == 0 or length == 1) return Jp2Error.UnsupportedProfile;
     if (length < 8) return Jp2Error.InvalidBox;
     const end = try std.math.add(usize, start, length);
     if (end > bytes.len) return Jp2Error.InvalidBox;
