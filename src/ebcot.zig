@@ -213,6 +213,37 @@ pub const DirectBlockScratch = struct {
     }
 };
 
+pub const DecodeBlockScratch = struct {
+    allocator: std.mem.Allocator,
+    flags: std.ArrayList(u8) = .empty,
+    significant_words: std.ArrayList(u64) = .empty,
+    coeffs: std.ArrayList(i32) = .empty,
+    row_words: usize = 0,
+    width: usize = 0,
+    height: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator) DecodeBlockScratch {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *DecodeBlockScratch) void {
+        self.flags.deinit(self.allocator);
+        self.significant_words.deinit(self.allocator);
+        self.coeffs.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn ensureBlockState(self: *DecodeBlockScratch, width: usize, height: usize, area: usize) !void {
+        try self.flags.resize(self.allocator, area);
+        try self.coeffs.resize(self.allocator, area);
+        const row_words = rowWordCount(width);
+        try self.significant_words.resize(self.allocator, try std.math.mul(usize, row_words, height));
+        self.row_words = row_words;
+        self.width = width;
+        self.height = height;
+    }
+};
+
 const SignCoding = struct {
     context: Context,
     predicted_negative: bool,
@@ -645,6 +676,75 @@ pub fn decodeCodeBlockSegmentBitsContinuous(
     return decodeSymbolBitsMq(allocator, segment.bytes, templates.len, templates);
 }
 
+pub fn decodeCodeBlockSegmentCoefficients(
+    allocator: std.mem.Allocator,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+) ![]i32 {
+    var scratch = DecodeBlockScratch.init(allocator);
+    defer scratch.deinit();
+    return decodeCodeBlockSegmentCoefficientsScratch(&scratch, segment, width, height);
+}
+
+pub fn decodeCodeBlockSegmentCoefficientsScratch(
+    scratch: *DecodeBlockScratch,
+    segment: CodeBlockSegment,
+    width: usize,
+    height: usize,
+) ![]i32 {
+    if (width == 0 or height == 0) return EbcotError.InvalidBlock;
+    const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
+    if (area > max_codeblock_area) return EbcotError.InvalidBlock;
+    if (segment.pass_count != segment.passes.len) return EbcotError.InvalidBlock;
+    if (segment.byte_length != segment.bytes.len) return EbcotError.InvalidBlock;
+    if (segment.bitplanes == 0) {
+        if (segment.pass_count != 0 or segment.bytes.len != 0) return EbcotError.InvalidBlock;
+        const out = try scratch.allocator.alloc(i32, area);
+        @memset(out, 0);
+        return out;
+    }
+
+    try scratch.ensureBlockState(width, height, area);
+    @memset(scratch.flags.items, 0);
+    @memset(scratch.significant_words.items, 0);
+    @memset(scratch.coeffs.items, 0);
+
+    var expected_passes: u16 = 0;
+    expected_passes += 1;
+    if (segment.bitplanes > 1) expected_passes += @as(u16, segment.bitplanes - 1) * 3;
+    if (segment.pass_count != expected_passes) return EbcotError.InvalidBlock;
+
+    var pass_index: u16 = 0;
+    var bitplane_index = segment.bitplanes;
+    while (bitplane_index > 0) {
+        bitplane_index -= 1;
+        const bitplane: u8 = @intCast(bitplane_index);
+        clearFlag(scratch.flags.items, .became_significant);
+
+        if (bitplane == segment.bitplanes - 1) {
+            clearFlag(scratch.flags.items, .visited);
+            try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane);
+            pass_index += 1;
+            continue;
+        }
+
+        clearFlag(scratch.flags.items, .visited);
+        try decodeSignificancePass(scratch, segment.passes[pass_index], segment.bytes, bitplane);
+        pass_index += 1;
+
+        try decodeRefinementPass(scratch, segment.passes[pass_index], segment.bytes, bitplane);
+        pass_index += 1;
+
+        try decodeCleanupPass(scratch, segment.passes[pass_index], segment.bytes, bitplane);
+        pass_index += 1;
+    }
+    if (pass_index != segment.pass_count) return EbcotError.InvalidBlock;
+
+    const out = try scratch.allocator.dupe(i32, scratch.coeffs.items);
+    return out;
+}
+
 fn emitSignificancePass(
     allocator: std.mem.Allocator,
     passes: *std.ArrayList(Pass),
@@ -674,6 +774,37 @@ fn emitSignificancePass(
     }
 
     try appendPass(allocator, passes, .significance, bitplane, first_symbol, symbols.items.len);
+}
+
+fn decodeSignificancePass(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    bitplane: u8,
+) !void {
+    try validatePassPayload(pass, bytes, .significance, bitplane);
+    var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
+    defer decoder.deinit();
+    var symbol_count: usize = 0;
+
+    var it = ScanIterator.init(scratch.width, scratch.height);
+    while (it.next()) |pos| {
+        const index = localIndex(scratch.width, pos.x, pos.y);
+        const neighbor_count = neighborSignificanceRowsDecode(scratch, pos.x, pos.y);
+        if (hasSignificantRowDecode(scratch, pos.x, pos.y) or neighbor_count == 0) continue;
+        setFlag(scratch.flags.items, index, .visited);
+        const bit = try decoder.read(mqContextIndex(zeroContext(neighbor_count)));
+        symbol_count += 1;
+        if (bit) {
+            const sign = signCodingRowsDecode(scratch, pos.x, pos.y);
+            const sign_bit = try decoder.read(mqContextIndex(sign.context));
+            symbol_count += 1;
+            const negative = sign_bit != sign.predicted_negative;
+            markDecodedSignificant(scratch, pos.x, pos.y, bitplane, negative);
+        }
+    }
+
+    if (symbol_count != pass.symbol_count) return EbcotError.InvalidBlock;
 }
 
 fn emitRefinementPass(
@@ -708,6 +839,29 @@ fn emitRefinementPass(
     try appendPass(allocator, passes, .refinement, bitplane, first_symbol, symbols.items.len);
 }
 
+fn decodeRefinementPass(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    bitplane: u8,
+) !void {
+    try validatePassPayload(pass, bytes, .refinement, bitplane);
+    var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
+    defer decoder.deinit();
+    var symbol_count: usize = 0;
+
+    var it = ScanIterator.init(scratch.width, scratch.height);
+    while (it.next()) |pos| {
+        const index = localIndex(scratch.width, pos.x, pos.y);
+        if (!hasSignificantRowDecode(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .became_significant)) continue;
+        const bit = try decoder.read(mqContextIndex(.refinement));
+        symbol_count += 1;
+        if (bit) addMagnitudeBit(scratch, index, bitplane);
+    }
+
+    if (symbol_count != pass.symbol_count) return EbcotError.InvalidBlock;
+}
+
 fn emitCleanupPass(
     allocator: std.mem.Allocator,
     passes: *std.ArrayList(Pass),
@@ -736,6 +890,35 @@ fn emitCleanupPass(
     }
 
     try appendPass(allocator, passes, .cleanup, bitplane, first_symbol, symbols.items.len);
+}
+
+fn decodeCleanupPass(
+    scratch: *DecodeBlockScratch,
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    bitplane: u8,
+) !void {
+    try validatePassPayload(pass, bytes, .cleanup, bitplane);
+    var decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, bytes[pass.byte_offset..][0..pass.byte_length], pass.symbol_count);
+    defer decoder.deinit();
+    var symbol_count: usize = 0;
+
+    var it = ScanIterator.init(scratch.width, scratch.height);
+    while (it.next()) |pos| {
+        const index = localIndex(scratch.width, pos.x, pos.y);
+        if (hasSignificantRowDecode(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .visited)) continue;
+        const bit = try decoder.read(mqContextIndex(zeroContext(neighborSignificanceRowsDecode(scratch, pos.x, pos.y))));
+        symbol_count += 1;
+        if (bit) {
+            const sign = signCodingRowsDecode(scratch, pos.x, pos.y);
+            const sign_bit = try decoder.read(mqContextIndex(sign.context));
+            symbol_count += 1;
+            const negative = sign_bit != sign.predicted_negative;
+            markDecodedSignificant(scratch, pos.x, pos.y, bitplane, negative);
+        }
+    }
+
+    if (symbol_count != pass.symbol_count) return EbcotError.InvalidBlock;
 }
 
 fn emitZeroCoding(
@@ -1177,6 +1360,18 @@ fn setSignificantRow(scratch: *DirectBlockScratch, x: usize, y: usize) void {
     scratch.significant_words.items[significantWordIndex(scratch, x, y)] |= significantBit(x);
 }
 
+fn significantWordIndexDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) usize {
+    return y * scratch.row_words + x / 64;
+}
+
+fn hasSignificantRowDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) bool {
+    return (scratch.significant_words.items[significantWordIndexDecode(scratch, x, y)] & significantBit(x)) != 0;
+}
+
+fn setSignificantRowDecode(scratch: *DecodeBlockScratch, x: usize, y: usize) void {
+    scratch.significant_words.items[significantWordIndexDecode(scratch, x, y)] |= significantBit(x);
+}
+
 fn neighborSignificanceRows(scratch: *const DirectBlockScratch, x: usize, y: usize) u4 {
     var count: u4 = 0;
     const min_y = if (y == 0) 0 else y - 1;
@@ -1200,6 +1395,78 @@ fn neighborSignificanceRows(scratch: *const DirectBlockScratch, x: usize, y: usi
         }
     }
     return count;
+}
+
+fn neighborSignificanceRowsDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) u4 {
+    var count: u4 = 0;
+    const min_y = if (y == 0) 0 else y - 1;
+    const max_y = @min(scratch.height - 1, y + 1);
+    const min_x = if (x == 0) 0 else x - 1;
+    const max_x = @min(scratch.width - 1, x + 1);
+    const first_word = min_x / 64;
+    const last_word = max_x / 64;
+
+    var yy = min_y;
+    while (yy <= max_y) : (yy += 1) {
+        const row_start = yy * scratch.row_words;
+        var word = first_word;
+        while (word <= last_word) : (word += 1) {
+            const word_min_x = word * 64;
+            const lo = if (min_x > word_min_x) min_x - word_min_x else 0;
+            const hi = @min(max_x - word_min_x, 63);
+            var mask = bitRangeMask(lo, hi);
+            if (yy == y and word == x / 64) mask &= ~significantBit(x);
+            count += @intCast(@popCount(scratch.significant_words.items[row_start + word] & mask));
+        }
+    }
+    return count;
+}
+
+fn signCodingRowsDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) SignCoding {
+    var score: i8 = 0;
+    if (x > 0 and hasSignificantRowDecode(scratch, x - 1, y)) {
+        score += signContribution(scratch.coeffs.items[localIndex(scratch.width, x - 1, y)]);
+    }
+    if (x + 1 < scratch.width and hasSignificantRowDecode(scratch, x + 1, y)) {
+        score += signContribution(scratch.coeffs.items[localIndex(scratch.width, x + 1, y)]);
+    }
+    if (y > 0 and hasSignificantRowDecode(scratch, x, y - 1)) {
+        score += signContribution(scratch.coeffs.items[localIndex(scratch.width, x, y - 1)]);
+    }
+    if (y + 1 < scratch.height and hasSignificantRowDecode(scratch, x, y + 1)) {
+        score += signContribution(scratch.coeffs.items[localIndex(scratch.width, x, y + 1)]);
+    }
+    return signCodingFromScore(score);
+}
+
+fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitplane: u8, negative: bool) void {
+    const index = localIndex(scratch.width, x, y);
+    const magnitude_bit = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
+    setFlag(scratch.flags.items, index, .significant);
+    setFlag(scratch.flags.items, index, .became_significant);
+    setSignificantRowDecode(scratch, x, y);
+}
+
+fn addMagnitudeBit(scratch: *DecodeBlockScratch, index: usize, bitplane: u8) void {
+    const magnitude_bit = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    if (scratch.coeffs.items[index] < 0) {
+        scratch.coeffs.items[index] -= magnitude_bit;
+    } else {
+        scratch.coeffs.items[index] += magnitude_bit;
+    }
+}
+
+fn validatePassPayload(
+    pass: CodeBlockPassPayload,
+    bytes: []const u8,
+    expected_kind: PassKind,
+    expected_bitplane: u8,
+) !void {
+    if (pass.kind != expected_kind or pass.magnitude_bitplane != expected_bitplane) return EbcotError.InvalidBlock;
+    const byte_end = std.math.add(usize, pass.byte_offset, pass.byte_length) catch return EbcotError.InvalidBlock;
+    if (byte_end > bytes.len) return EbcotError.InvalidBlock;
+    if (pass.cumulative_bytes != byte_end) return EbcotError.InvalidBlock;
 }
 
 fn bitRangeMask(lo: usize, hi: usize) u64 {
