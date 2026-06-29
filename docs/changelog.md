@@ -87,6 +87,9 @@ entries are grouped by development milestone rather than semantic version.
 - Added a metadata-inferred continuous MQ code-block decoder and wired complete
   single-layer strict RPCL reconstruction to use SOD payload bytes without
   relying on BP8 per-pass payload tables.
+- Normal no-sidecar strict decode now reconstructs the current single-layer
+  RPCL/RCT/5-3 path from the strict T2 block catalog, including zero-block
+  geometry derived from codestream subband layout.
 
 ### Parallelism And Performance
 

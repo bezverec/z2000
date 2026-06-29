@@ -1095,9 +1095,10 @@ pub fn decodeLosslessTemporaryWithOptions(
         return decodeTemporaryPayloadWithOptions(allocator, payload, options);
     }
 
+    const header = try readStrictCodestreamMetadata(allocator, bytes);
     var strict_catalog = try readStrictPacketBlockCatalog(allocator, bytes);
-    strict_catalog.deinit();
-    return CodestreamError.UnsupportedPayload;
+    defer strict_catalog.deinit();
+    return decodeStrictRpclImageFromBlockCatalog(allocator, header, strict_catalog, options);
 }
 
 fn decodeTemporaryPayloadWithOptions(
@@ -2266,6 +2267,9 @@ fn assembleStrictPacketCatalogHeaders(
 
     var assemblies = try StrictComponentAssemblySet.init(allocator, blocks.len);
     errdefer assemblies.deinit();
+    inline for (0..3) |component| {
+        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], blocks, header.bit_depth);
+    }
 
     var active_groups: []StrictPacketAuditBandGroup = &.{};
     defer {
@@ -2437,6 +2441,20 @@ fn collectStrictPacketAuditBlocks(
             try block.payload.appendSlice(assembly.allocator, payload);
             if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
         }
+    }
+}
+
+fn initializeStrictAssemblyGeometry(
+    assembly: *StrictComponentAssembly,
+    source_blocks: []const subband.CodeBlock,
+    nominal_bitplanes: u8,
+) !void {
+    if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
+    for (assembly.blocks, source_blocks) |*block, source| {
+        block.band_index = source.band_index;
+        block.rect = source.rect;
+        block.nominal_bitplanes = nominal_bitplanes;
+        block.encoded_bitplanes = 0;
     }
 }
 
@@ -3015,6 +3033,108 @@ fn validateRgbImagesEqual(expected: image.RgbImage, actual: image.RgbImage) !voi
     }
 }
 
+fn decodeStrictRpclImageFromBlockCatalog(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+) !image.RgbImage {
+    if (header.layers != 1) return CodestreamError.UnsupportedPayload;
+
+    var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog);
+    defer strict_planes.deinit();
+    try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
+    return color.inverseRct(allocator, strict_planes);
+}
+
+fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+) !color.RctPlanes {
+    const y = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+        allocator,
+        header.width,
+        header.height,
+        catalog,
+        0,
+    );
+    errdefer allocator.free(y);
+    const cb = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+        allocator,
+        header.width,
+        header.height,
+        catalog,
+        1,
+    );
+    errdefer allocator.free(cb);
+    const cr = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+        allocator,
+        header.width,
+        header.height,
+        catalog,
+        2,
+    );
+    errdefer allocator.free(cr);
+
+    return .{
+        .allocator = allocator,
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .y = y,
+        .cb = cb,
+        .cr = cr,
+    };
+}
+
+fn reconstructStrictComponentCoefficientsFromBlockCatalog(
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    catalog: StrictPacketBlockCatalog,
+    component: usize,
+) ![]i32 {
+    if (component >= 3) return CodestreamError.InvalidCodestream;
+    const pixels = try std.math.mul(usize, width, height);
+    const plane = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(plane);
+    @memset(plane, 0);
+
+    const covered = try allocator.alloc(bool, pixels);
+    defer allocator.free(covered);
+    @memset(covered, false);
+
+    for (catalog.components[component], 0..) |block, block_index| {
+        if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
+        if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) {
+            try markStrictZeroBlockCovered(covered, width, height, block.rect);
+            continue;
+        }
+        if (!block.metadata_ready) return CodestreamError.InvalidCodestream;
+        if (block.encoded_bitplanes > block.nominal_bitplanes) return CodestreamError.InvalidCodestream;
+        const payload = catalog.blockPayload(component, block_index);
+        if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferred(
+            allocator,
+            block.encoded_bitplanes,
+            block.cumulative_passes,
+            payload,
+            block.rect.width,
+            block.rect.height,
+        );
+        defer allocator.free(decoded);
+        try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+    }
+    for (covered) |is_covered| {
+        if (!is_covered) return CodestreamError.InvalidCodestream;
+    }
+
+    return plane;
+}
+
 fn reconstructStrictComponentCoefficients(
     allocator: std.mem.Allocator,
     width: usize,
@@ -3079,6 +3199,28 @@ fn decodeStrictBlockCoefficients(
         ebcot.decodeCodeBlockSegmentCoefficients(allocator, segment, expected.rect.width, expected.rect.height)
     else
         ebcot.decodeCodeBlockSegmentCoefficientsPartial(allocator, segment, expected.rect.width, expected.rect.height);
+}
+
+fn markStrictZeroBlockCovered(
+    covered: []bool,
+    plane_width: usize,
+    plane_height: usize,
+    rect: subband.Rect,
+) !void {
+    const end_x = try std.math.add(usize, rect.x, rect.width);
+    const end_y = try std.math.add(usize, rect.y, rect.height);
+    if (end_x > plane_width or end_y > plane_height) return CodestreamError.InvalidCodestream;
+
+    var y = rect.y;
+    while (y < end_y) : (y += 1) {
+        const row_offset = try std.math.mul(usize, y, plane_width);
+        var x = rect.x;
+        while (x < end_x) : (x += 1) {
+            const index = try std.math.add(usize, row_offset, x);
+            if (index >= covered.len or covered[index]) return CodestreamError.InvalidCodestream;
+            covered[index] = true;
+        }
+    }
 }
 
 fn scatterStrictDecodedBlock(

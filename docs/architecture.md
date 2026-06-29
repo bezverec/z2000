@@ -128,6 +128,10 @@ outer T2 guard. The decoded blocks are now scattered back into full component
 coefficient planes with bounds, overlap, and coverage checks, then fed through
 inverse DWT/RCT. Complete-block BP8/RPCL decodes now return the strict `SOD`
 image, with the temporary sidecar decode retained as a sample-for-sample oracle.
+Normal no-sidecar files on the current single-layer RPCL/RCT/5-3 path also
+decode from the strict block catalog: zero blocks get geometry from the
+codestream-derived subband layout, and included blocks infer continuous MQ/T1
+pass metadata from their SOD payload bytes.
 
 ## Parallelism And Scratch Reuse
 
