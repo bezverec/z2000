@@ -3761,13 +3761,16 @@ fn mainHeaderPacketMarkers(bytes: []const u8) !MainHeaderPacketMarkers {
     return CodestreamError.InvalidCodestream;
 }
 
-fn findMarkerInPacket(bytes: []const u8, start: usize, end: usize, marker: Marker) ?usize {
+fn findUniqueMarkerInPacket(bytes: []const u8, start: usize, end: usize, marker: Marker) !?usize {
     const marker_value = @intFromEnum(marker);
+    var found: ?usize = null;
     var cursor = start;
     while (cursor + 1 < end) : (cursor += 1) {
-        if (readU16Be(bytes, cursor) == marker_value) return cursor;
+        if (readU16Be(bytes, cursor) != marker_value) continue;
+        if (found != null) return CodestreamError.InvalidCodestream;
+        found = cursor;
     }
-    return null;
+    return found;
 }
 
 fn appendStrictSodPackets(
@@ -3826,12 +3829,8 @@ fn appendStrictSodPacketPayload(
         packet_start += 6;
     }
 
-    const eph_offset = if (marker_policy.eph)
-        findMarkerInPacket(bytes, packet_start, packet_end, .eph) orelse return CodestreamError.InvalidCodestream
-    else blk: {
-        if (findMarkerInPacket(bytes, packet_start, packet_end, .eph) != null) return CodestreamError.InvalidCodestream;
-        break :blk null;
-    };
+    const eph_offset = try findUniqueMarkerInPacket(bytes, packet_start, packet_end, .eph);
+    if (marker_policy.eph != (eph_offset != null)) return CodestreamError.InvalidCodestream;
     const payload_len = packet_end - packet_start - (if (eph_offset != null) @as(usize, 2) else 0);
     const payload_len_u32 = std.math.cast(u32, payload_len) orelse return CodestreamError.InvalidCodestream;
     if (eph_offset) |offset| {
