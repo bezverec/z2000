@@ -5205,6 +5205,41 @@ test "strict SOD packet stream rejects missing EPH marker with COD flag" {
     );
 }
 
+test "strict SOD packet stream rejects duplicate EPH marker in one packet" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        10,  20,  30,
+        40,  50,  60,
+        70,  80,  90,
+        100, 110, 120,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .eph = true });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const eph = codestream.markerValue("eph");
+    const duplicate_eph = try firstPacketByteAfterEphForTest(allocator, corrupted);
+    corrupted[duplicate_eph] = @as(u8, @truncate(eph >> 8));
+    corrupted[duplicate_eph + 1] = @as(u8, @truncate(eph));
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
 test "temporary payload omits tile-part plan when tile parts are disabled" {
     const allocator = std.testing.allocator;
     const width = 8;
@@ -6121,6 +6156,73 @@ fn firstSodPayloadOffsetForTest(bytes: []const u8) !usize {
         cursor += header_segment_length;
     }
     return error.MissingSod;
+}
+
+fn firstPacketByteAfterEphForTest(allocator: std.mem.Allocator, bytes: []const u8) !usize {
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+    const plt = codestream.markerValue("plt");
+    const eph = codestream.markerValue("eph");
+
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len and readU16BeTest(bytes, cursor) != sot) {
+        if (readU16BeTest(bytes, cursor) == eoc) return error.MissingSot;
+        cursor += 2;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) return error.Truncated;
+        cursor += segment_length;
+    }
+
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        if (marker_value == eoc) return error.MissingEph;
+        if (marker_value != sot) return error.MissingSot;
+        if (bytes.len - cursor < 14) return error.Truncated;
+
+        const tile_part_start = cursor;
+        const segment_length = readU16BeTest(bytes, cursor + 2);
+        if (segment_length != 10) return error.InvalidSot;
+        const psot = readU32BeTest(bytes, cursor + 6);
+        const tile_part_end = tile_part_start + psot;
+        if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
+        cursor += 12;
+
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(allocator);
+        while (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) != sod) {
+            const tile_header_marker = readU16BeTest(bytes, cursor);
+            cursor += 2;
+            if (tile_part_end - cursor < 2) return error.Truncated;
+            const header_segment_length = readU16BeTest(bytes, cursor);
+            if (header_segment_length < 2 or tile_part_end - cursor < header_segment_length) return error.Truncated;
+            if (tile_header_marker == plt) {
+                try appendPltLengthsForTest(allocator, &packet_lengths, bytes[cursor + 2 .. cursor + header_segment_length]);
+            }
+            cursor += header_segment_length;
+        }
+        if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
+        cursor += 2;
+
+        for (packet_lengths.items) |packet_length| {
+            const packet_start = cursor;
+            const packet_end = packet_start + packet_length;
+            if (packet_end > tile_part_end) return error.Truncated;
+            if (findMarkerInPacketForTest(bytes, packet_start, packet_end, eph)) |offset| {
+                if (offset + 3 < packet_end) return offset + 2;
+                var header_start = packet_start;
+                if (packet_end - header_start >= 2 and readU16BeTest(bytes, header_start) == codestream.markerValue("sop")) {
+                    header_start += 6;
+                }
+                if (offset >= header_start + 2) return offset - 2;
+            }
+            cursor = packet_end;
+        }
+        if (cursor != tile_part_end) return error.InvalidCodestream;
+    }
+
+    return error.MissingEph;
 }
 
 fn skipTemporaryPacketHeader(bytes: []const u8, cursor: *usize, end: usize) !void {
