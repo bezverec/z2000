@@ -3828,8 +3828,10 @@ fn appendStrictSodPacketPayload(
 
     const eph_offset = if (marker_policy.eph)
         findMarkerInPacket(bytes, packet_start, packet_end, .eph) orelse return CodestreamError.InvalidCodestream
-    else
-        null;
+    else blk: {
+        if (findMarkerInPacket(bytes, packet_start, packet_end, .eph) != null) return CodestreamError.InvalidCodestream;
+        break :blk null;
+    };
     const payload_len = packet_end - packet_start - (if (eph_offset != null) @as(usize, 2) else 0);
     const payload_len_u32 = std.math.cast(u32, payload_len) orelse return CodestreamError.InvalidCodestream;
     if (eph_offset) |offset| {
