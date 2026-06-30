@@ -4469,6 +4469,49 @@ test "strict metadata rejects resolution tile-part packet-count mismatch" {
     );
 }
 
+test "strict metadata rejects PLT packet byte-span mismatch" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const plt = findMarker(corrupted, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(corrupted, plt + 2);
+    if (segment_length < 4) return error.InvalidPlt;
+    const last_length_byte = plt + 2 + segment_length - 1;
+    if ((corrupted[last_length_byte] & 0x7f) == 0x7f) {
+        corrupted[last_length_byte] -= 1;
+    } else {
+        corrupted[last_length_byte] += 1;
+    }
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
 test "temporary payload rejects unterminated PLT lengths" {
     const allocator = std.testing.allocator;
     const width = 16;
@@ -5017,6 +5060,77 @@ test "temporary payload strict RPCL decode accepts SOP and EPH disabled" {
     try std.testing.expect(stats.rpcl_shadow_packets > 0);
     try std.testing.expectEqual(@as(usize, 0), try countTilePartPrefixMarker(bytes, codestream.markerValue("sop")));
     try std.testing.expectEqual(@as(usize, 0), try countTilePartPrefixMarker(bytes, codestream.markerValue("eph")));
+}
+
+test "strict SOD packet stream rejects SOP marker without COD flag" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const scod = try codScodOffsetForTest(corrupted);
+    corrupted[scod] &= ~@as(u8, 0x02);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
+test "strict SOD packet stream rejects missing SOP marker with COD flag" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .sop = false,
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const scod = try codScodOffsetForTest(corrupted);
+    corrupted[scod] |= 0x02;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
 }
 
 test "temporary payload omits tile-part plan when tile parts are disabled" {
@@ -5782,6 +5896,14 @@ fn findMarker(bytes: []const u8, marker: u16) ?usize {
         if (value == marker) return i;
     }
     return null;
+}
+
+fn codScodOffsetForTest(bytes: []const u8) !usize {
+    const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    if (bytes.len - cod < 5) return error.Truncated;
+    const segment_length = readU16BeTest(bytes, cod + 2);
+    if (segment_length < 3 or bytes.len - cod - 2 < segment_length) return error.InvalidCod;
+    return cod + 4;
 }
 
 fn countMarker(bytes: []const u8, marker: u16) usize {

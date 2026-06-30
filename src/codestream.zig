@@ -646,6 +646,11 @@ const TlmEntry = struct {
     psot: u32,
 };
 
+const MainHeaderPacketMarkers = struct {
+    sop: bool,
+    eph: bool,
+};
+
 const StrictSotInfo = struct {
     tile_index: u16,
     tile_part_index: u8,
@@ -3341,7 +3346,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
 
-    const eph_enabled = try mainHeaderUsesEph(bytes);
+    const marker_policy = try mainHeaderPacketMarkers(bytes);
     var tlm_index = try readStrictMainHeaderTlmIndex(allocator, bytes);
     defer if (tlm_index) |*index| index.deinit();
     var cursor: usize = 2;
@@ -3386,7 +3391,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
                 cursor,
                 tile_part.end,
                 tile_part.packet_lengths.items,
-                eph_enabled,
+                marker_policy,
                 &packet_sequence,
             );
             cursor = tile_part.end;
@@ -3413,7 +3418,7 @@ fn readStrictSodRpclPacketCatalog(
     errdefer packet_bytes.deinit(allocator);
 
     var iterator = try packet_plan.RpclIterator.init(plan, 3, layers);
-    const eph_enabled = try mainHeaderUsesEph(bytes);
+    const marker_policy = try mainHeaderPacketMarkers(bytes);
     var tlm_index = try readStrictMainHeaderTlmIndex(allocator, bytes);
     defer if (tlm_index) |*index| index.deinit();
     var cursor: usize = 2;
@@ -3462,7 +3467,7 @@ fn readStrictSodRpclPacketCatalog(
                     &cursor,
                     tile_part.end,
                     packet_length,
-                    eph_enabled,
+                    marker_policy,
                     &packet_sequence,
                 );
                 try entries.append(allocator, .{
@@ -3539,6 +3544,7 @@ fn readStrictTilePartHeader(
     var packet_lengths: std.ArrayList(usize) = .empty;
     errdefer packet_lengths.deinit(allocator);
     const sod = try readTilePartHeaderMarkers(allocator, bytes, marker_start + 12, tile_part_end, &packet_lengths);
+    try validateStrictTilePartPacketSpan(sod, tile_part_end, packet_lengths.items);
 
     return .{
         .sot = sot,
@@ -3546,6 +3552,19 @@ fn readStrictTilePartHeader(
         .end = tile_part_end,
         .packet_lengths = packet_lengths,
     };
+}
+
+fn validateStrictTilePartPacketSpan(sod: usize, tile_part_end: usize, packet_lengths: []const usize) !void {
+    if (packet_lengths.len == 0) return;
+    const payload_start = try std.math.add(usize, sod, 2);
+    if (payload_start > tile_part_end) return CodestreamError.TruncatedData;
+
+    var payload_bytes: usize = 0;
+    for (packet_lengths) |packet_length| {
+        if (packet_length == 0) return CodestreamError.InvalidCodestream;
+        payload_bytes = try std.math.add(usize, payload_bytes, packet_length);
+    }
+    if (payload_bytes != tile_part_end - payload_start) return CodestreamError.InvalidCodestream;
 }
 
 fn validateStrictTilePartSequenceFinished(tile_part_count: usize, expected_tile_part_count: ?u8) !void {
@@ -3714,7 +3733,7 @@ fn skipMainHeaderToFirstSot(bytes: []const u8, start: usize) !usize {
     return CodestreamError.InvalidCodestream;
 }
 
-fn mainHeaderUsesEph(bytes: []const u8) !bool {
+fn mainHeaderPacketMarkers(bytes: []const u8) !MainHeaderPacketMarkers {
     var cursor: usize = 2;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
@@ -3732,7 +3751,10 @@ fn mainHeaderUsesEph(bytes: []const u8) !bool {
         const segment = bytes[cursor + 2 .. cursor + segment_length];
         if (marker == @intFromEnum(Marker.cod)) {
             if (segment.len < 1) return CodestreamError.InvalidCodestream;
-            return (segment[0] & 0x04) != 0;
+            return .{
+                .sop = (segment[0] & 0x02) != 0,
+                .eph = (segment[0] & 0x04) != 0,
+            };
         }
         cursor += segment_length;
     }
@@ -3756,7 +3778,7 @@ fn appendStrictSodPackets(
     start: usize,
     end: usize,
     packet_lengths: []const usize,
-    eph_enabled: bool,
+    marker_policy: MainHeaderPacketMarkers,
     packet_sequence: *u16,
 ) !void {
     var cursor = start;
@@ -3768,7 +3790,7 @@ fn appendStrictSodPackets(
             &cursor,
             end,
             packet_length,
-            eph_enabled,
+            marker_policy,
             packet_sequence,
         );
         try lengths.append(allocator, payload_len_u32);
@@ -3783,7 +3805,7 @@ fn appendStrictSodPacketPayload(
     cursor: *usize,
     end: usize,
     framed_packet_length: usize,
-    eph_enabled: bool,
+    marker_policy: MainHeaderPacketMarkers,
     packet_sequence: *u16,
 ) !u32 {
     const frame_start = cursor.*;
@@ -3792,8 +3814,10 @@ fn appendStrictSodPacketPayload(
     if (packet_end > end) return CodestreamError.TruncatedData;
 
     var packet_start = frame_start;
-    if (end - packet_start >= 2 and readU16Be(bytes, packet_start) == @intFromEnum(Marker.sop)) {
-        if (end - packet_start < 6) return CodestreamError.TruncatedData;
+    const has_sop = packet_end - packet_start >= 2 and readU16Be(bytes, packet_start) == @intFromEnum(Marker.sop);
+    if (marker_policy.sop != has_sop) return CodestreamError.InvalidCodestream;
+    if (has_sop) {
+        if (packet_end - packet_start < 6) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, packet_start + 2);
         if (segment_length != 4) return CodestreamError.InvalidCodestream;
         const sequence = readU16Be(bytes, packet_start + 4);
@@ -3802,7 +3826,7 @@ fn appendStrictSodPacketPayload(
         packet_start += 6;
     }
 
-    const eph_offset = if (eph_enabled)
+    const eph_offset = if (marker_policy.eph)
         findMarkerInPacket(bytes, packet_start, packet_end, .eph) orelse return CodestreamError.InvalidCodestream
     else
         null;
