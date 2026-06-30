@@ -5133,6 +5133,78 @@ test "strict SOD packet stream rejects missing SOP marker with COD flag" {
     );
 }
 
+test "strict SOD packet stream rejects EPH marker without COD flag" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .eph = true,
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const scod = try codScodOffsetForTest(corrupted);
+    corrupted[scod] &= ~@as(u8, 0x04);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
+test "strict SOD packet stream rejects missing EPH marker with COD flag" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+        .eph = false,
+    });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const scod = try codScodOffsetForTest(corrupted);
+    corrupted[scod] |= 0x04;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
 test "temporary payload omits tile-part plan when tile parts are disabled" {
     const allocator = std.testing.allocator;
     const width = 8;
