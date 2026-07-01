@@ -3214,6 +3214,7 @@ test "EBCOT code-block segment records MQ payload truncation points" {
     try std.testing.expectEqual(@as(u16, @intCast(block.passes.len)), segment.pass_count);
     try std.testing.expectEqual(@as(u64, @intCast(segment.bytes.len)), segment.byte_length);
     try std.testing.expect(segment.bytes.len > 0);
+    try expectMarkerStuffingIsValid(segment.bytes);
 
     var cumulative_symbols: usize = 0;
     var previous_bytes: u64 = 0;
@@ -3592,6 +3593,7 @@ test "EBCOT terminate-all style writes and decodes pass-terminated MQ segments" 
 
     var terminated = try ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], width, rect, style);
     defer terminated.deinit(allocator);
+    try expectMarkerStuffingIsValid(terminated.bytes);
 
     const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsContinuousWithStyle(allocator, terminated, width, height, style);
     defer allocator.free(decoded);
@@ -3614,6 +3616,7 @@ test "EBCOT terminate-all style writes and decodes pass-terminated MQ segments" 
     defer reset_oracle.deinit(allocator);
     var terminated_reset = try ebcot.encodeCodeBlockSegmentContinuousWithStyle(allocator, plane[0..], width, rect, reset_style);
     defer terminated_reset.deinit(allocator);
+    try expectMarkerStuffingIsValid(terminated_reset.bytes);
 
     try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, reset_oracle.passes, terminated_reset.passes);
     try std.testing.expectEqualSlices(u8, reset_oracle.bytes, terminated_reset.bytes);
@@ -3654,6 +3657,7 @@ test "EBCOT direct MQ segment matches symbol oracle" {
     try std.testing.expectEqual(oracle.byte_length, direct.byte_length);
     try std.testing.expectEqualSlices(u8, oracle.bytes, direct.bytes);
     try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, direct.passes);
+    try expectMarkerStuffingIsValid(direct.bytes);
 }
 
 test "EBCOT direct MQ row masks match oracle across word boundaries" {
@@ -6905,8 +6909,13 @@ fn expectMqBitsEqual(symbols: []const mq.Symbol, bits: []const bool) !void {
 }
 
 fn expectMarkerStuffingIsValid(bytes: []const u8) !void {
+    const sop = codestream.markerValue("sop");
+    const eph = codestream.markerValue("eph");
     var index: usize = 1;
     while (index < bytes.len) : (index += 1) {
+        const pair = readU16BeTest(bytes, index - 1);
+        try std.testing.expect(pair != sop);
+        try std.testing.expect(pair != eph);
         if (bytes[index - 1] == 0xff) {
             try std.testing.expect((bytes[index] & 0x80) == 0);
         }
