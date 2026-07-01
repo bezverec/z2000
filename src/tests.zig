@@ -91,6 +91,17 @@ test "T2 packet header bitstream inserts marker-safe stuff bits after 0xff" {
     try std.testing.expectEqual(out.items.len, reader.bytesConsumed());
 }
 
+test "T2 packet header reader rejects missing stuff bit after 0xff" {
+    var reader = t2.PacketHeaderReader.init(&[_]u8{ 0xff, 0x80 });
+
+    var bit_count: usize = 0;
+    while (bit_count < 8) : (bit_count += 1) {
+        try std.testing.expect(try reader.readBit());
+    }
+
+    try std.testing.expectError(t2.PacketHeaderError.InvalidMarkerStuffing, reader.readBit());
+}
+
 test "T2 tag-tree encoder and decoder preserve threshold decisions" {
     const allocator = std.testing.allocator;
     const leaf_values = [_]u32{
