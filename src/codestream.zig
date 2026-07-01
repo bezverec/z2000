@@ -3817,16 +3817,18 @@ fn appendStrictSodPacketPayload(
     if (packet_end > end) return CodestreamError.TruncatedData;
 
     var packet_start = frame_start;
-    const has_sop = packet_end - packet_start >= 2 and readU16Be(bytes, packet_start) == @intFromEnum(Marker.sop);
-    if (marker_policy.sop != has_sop) return CodestreamError.InvalidCodestream;
-    if (has_sop) {
-        if (packet_end - packet_start < 6) return CodestreamError.TruncatedData;
+    const sop_offset = try findUniqueMarkerInPacket(bytes, frame_start, packet_end, .sop);
+    if (marker_policy.sop) {
+        if (sop_offset != frame_start) return CodestreamError.InvalidCodestream;
+        if (packet_end - frame_start < 6) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, packet_start + 2);
         if (segment_length != 4) return CodestreamError.InvalidCodestream;
         const sequence = readU16Be(bytes, packet_start + 4);
         if (sequence != packet_sequence.*) return CodestreamError.InvalidCodestream;
         packet_sequence.* +%= 1;
         packet_start += 6;
+    } else if (sop_offset != null) {
+        return CodestreamError.InvalidCodestream;
     }
 
     const eph_offset = try findUniqueMarkerInPacket(bytes, packet_start, packet_end, .eph);

@@ -5230,9 +5230,44 @@ test "strict SOD packet stream rejects duplicate EPH marker in one packet" {
     defer allocator.free(corrupted);
 
     const eph = codestream.markerValue("eph");
-    const duplicate_eph = try firstPacketByteAfterEphForTest(allocator, corrupted);
+    const duplicate_eph = try firstPacketByteNearMarkerForTest(allocator, corrupted, eph);
     corrupted[duplicate_eph] = @as(u8, @truncate(eph >> 8));
     corrupted[duplicate_eph + 1] = @as(u8, @truncate(eph));
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
+test "strict SOD packet stream rejects duplicate SOP marker in one packet" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        10,  20,  30,
+        40,  50,  60,
+        70,  80,  90,
+        100, 110, 120,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const sop = codestream.markerValue("sop");
+    const duplicate_sop = try firstPacketByteNearMarkerForTest(allocator, corrupted, sop);
+    corrupted[duplicate_sop] = @as(u8, @truncate(sop >> 8));
+    corrupted[duplicate_sop + 1] = @as(u8, @truncate(sop));
 
     try std.testing.expectError(
         codestream.CodestreamError.InvalidCodestream,
@@ -6158,12 +6193,11 @@ fn firstSodPayloadOffsetForTest(bytes: []const u8) !usize {
     return error.MissingSod;
 }
 
-fn firstPacketByteAfterEphForTest(allocator: std.mem.Allocator, bytes: []const u8) !usize {
+fn firstPacketByteNearMarkerForTest(allocator: std.mem.Allocator, bytes: []const u8, marker: u16) !usize {
     const sot = codestream.markerValue("sot");
     const sod = codestream.markerValue("sod");
     const eoc = codestream.markerValue("eoc");
     const plt = codestream.markerValue("plt");
-    const eph = codestream.markerValue("eph");
 
     var cursor: usize = 2;
     while (cursor + 1 < bytes.len and readU16BeTest(bytes, cursor) != sot) {
@@ -6177,7 +6211,7 @@ fn firstPacketByteAfterEphForTest(allocator: std.mem.Allocator, bytes: []const u
 
     while (cursor + 1 < bytes.len) {
         const marker_value = readU16BeTest(bytes, cursor);
-        if (marker_value == eoc) return error.MissingEph;
+        if (marker_value == eoc) return error.MissingMarker;
         if (marker_value != sot) return error.MissingSot;
         if (bytes.len - cursor < 14) return error.Truncated;
 
@@ -6209,7 +6243,7 @@ fn firstPacketByteAfterEphForTest(allocator: std.mem.Allocator, bytes: []const u
             const packet_start = cursor;
             const packet_end = packet_start + packet_length;
             if (packet_end > tile_part_end) return error.Truncated;
-            if (findMarkerInPacketForTest(bytes, packet_start, packet_end, eph)) |offset| {
+            if (findMarkerInPacketForTest(bytes, packet_start, packet_end, marker)) |offset| {
                 if (offset + 3 < packet_end) return offset + 2;
                 var header_start = packet_start;
                 if (packet_end - header_start >= 2 and readU16BeTest(bytes, header_start) == codestream.markerValue("sop")) {
@@ -6222,7 +6256,7 @@ fn firstPacketByteAfterEphForTest(allocator: std.mem.Allocator, bytes: []const u
         if (cursor != tile_part_end) return error.InvalidCodestream;
     }
 
-    return error.MissingEph;
+    return error.MissingMarker;
 }
 
 fn skipTemporaryPacketHeader(bytes: []const u8, cursor: *usize, end: usize) !void {
