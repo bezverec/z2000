@@ -4554,6 +4554,24 @@ test "temporary payload rejects unterminated PLT lengths" {
     );
 }
 
+test "strict metadata rejects unterminated PLT lengths without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const plt = findMarker(corrupted, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(corrupted, plt + 2);
+    corrupted[plt + 2 + segment_length - 1] = 0x80;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+}
+
 test "temporary payload rejects BP8 shadow packet count mismatch" {
     const allocator = std.testing.allocator;
     const width = 8;
@@ -4874,6 +4892,25 @@ test "temporary payload rejects PLT segment index mismatch" {
     try std.testing.expectError(
         codestream.CodestreamError.InvalidCodestream,
         codestream.analyzeLosslessTemporary(corrupted),
+    );
+}
+
+test "strict metadata rejects PLT segment index mismatch without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const plt = findMarker(corrupted, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(corrupted, plt + 2);
+    if (segment_length < 3) return error.InvalidPlt;
+    corrupted[plt + 4] = 1;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
     );
 }
 
