@@ -4991,6 +4991,44 @@ test "strict metadata rejects TLM tile index mismatch without sidecar" {
     );
 }
 
+test "strict metadata accepts ordered multiple TLM segments without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    const split = try splitFirstTlmSegmentForTest(allocator, bytes, 1);
+    defer allocator.free(split);
+
+    var catalog = try codestream.readStrictPacketCatalog(allocator, split);
+    defer catalog.deinit();
+    try std.testing.expect(catalog.entries.len > 0);
+}
+
+test "strict metadata rejects skipped TLM segment indexes without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    const split = try splitFirstTlmSegmentForTest(allocator, bytes, 1);
+    defer allocator.free(split);
+
+    var corrupted = try allocator.dupe(u8, split);
+    defer allocator.free(corrupted);
+
+    const first_tlm = findMarker(corrupted, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+    const first_segment_length = readU16BeTest(corrupted, first_tlm + 2);
+    const second_tlm = first_tlm + 2 + first_segment_length;
+    if (second_tlm + 5 > corrupted.len or readU16BeTest(corrupted, second_tlm) != codestream.markerValue("tlm")) {
+        return error.MissingMarker;
+    }
+    corrupted[second_tlm + 4] = 2;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+}
+
 test "strict metadata rejects SOT tile-part sequence mismatch without sidecar" {
     const allocator = std.testing.allocator;
     const bytes = try encodeStrictTilePartMetadataFixture(allocator);
@@ -6742,6 +6780,49 @@ fn encodeStrictTilePartMetadataFixture(allocator: std.mem.Allocator) ![]u8 {
         .block_height = 8,
         .tile_part_divisions = 'R',
     });
+}
+
+fn splitFirstTlmSegmentForTest(allocator: std.mem.Allocator, bytes: []const u8, first_entry_count: usize) ![]u8 {
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(bytes, tlm + 2);
+    const segment_end = tlm + 2 + @as(usize, segment_length);
+    if (segment_length < 9 or segment_end > bytes.len) return error.InvalidTlm;
+
+    const segment = bytes[tlm + 4 .. segment_end];
+    const stlm = segment[1];
+    const tile_index_size = (stlm >> 4) & 0x03;
+    if (tile_index_size == 3) return error.InvalidTlm;
+    const length_size: usize = if (((stlm >> 6) & 0x01) == 0) 2 else 4;
+    const entry_size = @as(usize, tile_index_size) + length_size;
+    const payload = segment[2..];
+    if (entry_size == 0 or payload.len % entry_size != 0) return error.InvalidTlm;
+
+    const entry_count = payload.len / entry_size;
+    if (first_entry_count == 0 or first_entry_count >= entry_count) return error.InvalidTlm;
+
+    const split = first_entry_count * entry_size;
+    var out = try std.ArrayList(u8).initCapacity(allocator, bytes.len + 6);
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..tlm]);
+    try appendTlmSegmentForTest(allocator, &out, 0, stlm, payload[0..split]);
+    try appendTlmSegmentForTest(allocator, &out, 1, stlm, payload[split..]);
+    try out.appendSlice(allocator, bytes[segment_end..]);
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendTlmSegmentForTest(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    index: u8,
+    stlm: u8,
+    payload: []const u8,
+) !void {
+    if (payload.len > std.math.maxInt(u16) - 4) return error.InvalidTlm;
+    try appendU16BeTest(allocator, out, codestream.markerValue("tlm"));
+    try appendU16BeTest(allocator, out, @intCast(payload.len + 4));
+    try out.append(allocator, index);
+    try out.append(allocator, stlm);
+    try out.appendSlice(allocator, payload);
 }
 
 fn wrapTemporaryPayloadForTest(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {

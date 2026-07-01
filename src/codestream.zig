@@ -3646,6 +3646,7 @@ fn readStrictMainHeaderTlmIndex(allocator: std.mem.Allocator, bytes: []const u8)
     var entries: std.ArrayList(TlmEntry) = .empty;
     errdefer entries.deinit(allocator);
     var saw_tlm = false;
+    var next_tlm_index: usize = 0;
 
     var cursor: usize = 2;
     while (cursor < bytes.len) {
@@ -3662,9 +3663,9 @@ fn readStrictMainHeaderTlmIndex(allocator: std.mem.Allocator, bytes: []const u8)
             return CodestreamError.TruncatedData;
         }
         if (marker == @intFromEnum(Marker.tlm)) {
-            if (saw_tlm) return CodestreamError.UnsupportedPayload;
-            try appendStrictTlmEntries(allocator, &entries, bytes[cursor + 2 .. cursor + segment_length]);
+            try appendStrictTlmEntries(allocator, &entries, bytes[cursor + 2 .. cursor + segment_length], next_tlm_index);
             saw_tlm = true;
+            next_tlm_index += 1;
         }
         cursor += segment_length;
     }
@@ -3684,10 +3685,13 @@ fn appendStrictTlmEntries(
     allocator: std.mem.Allocator,
     entries: *std.ArrayList(TlmEntry),
     segment: []const u8,
+    expected_index: usize,
 ) !void {
     if (segment.len < 2) return CodestreamError.InvalidCodestream;
     const ztlm = segment[0];
-    if (ztlm != 0) return CodestreamError.UnsupportedPayload;
+    if (expected_index > std.math.maxInt(u8) or ztlm != @as(u8, @intCast(expected_index))) {
+        return CodestreamError.InvalidCodestream;
+    }
     const stlm = segment[1];
     if ((stlm & 0x0f) != 0) return CodestreamError.InvalidCodestream;
     const tile_index_size = (stlm >> 4) & 0x03;
