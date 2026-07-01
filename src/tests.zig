@@ -4918,26 +4918,7 @@ test "temporary payload rejects TLM tile-part length mismatch" {
 
 test "strict metadata rejects TLM tile-part length mismatch without sidecar" {
     const allocator = std.testing.allocator;
-    const width = 16;
-    const height = 16;
-    const samples = try allocator.alloc(u16, width * height * 3);
-    defer allocator.free(samples);
-    @memset(samples, 0);
-
-    const rgb = image.RgbImage{
-        .allocator = allocator,
-        .width = width,
-        .height = height,
-        .bit_depth = 8,
-        .samples = samples,
-    };
-
-    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
-        .levels = 2,
-        .block_width = 8,
-        .block_height = 8,
-        .tile_part_divisions = 'R',
-    });
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
     defer allocator.free(bytes);
 
     var corrupted = try allocator.dupe(u8, bytes);
@@ -4947,6 +4928,59 @@ test "strict metadata rejects TLM tile-part length mismatch without sidecar" {
     const segment_length = readU16BeTest(corrupted, tlm + 2);
     if (segment_length < 9) return error.InvalidTlm;
     corrupted[tlm + 10] ^= 0x01;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+}
+
+test "strict metadata rejects TLM tile index mismatch without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const tlm = findMarker(corrupted, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(corrupted, tlm + 2);
+    if (segment_length < 9) return error.InvalidTlm;
+    corrupted[tlm + 6] = 1;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+}
+
+test "strict metadata rejects SOT tile-part sequence mismatch without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const sot = findMarker(corrupted, codestream.markerValue("sot")) orelse return error.MissingSot;
+    corrupted[sot + 10] = 1;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+}
+
+test "strict metadata rejects inconsistent SOT tile-part count without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const sot = findMarker(corrupted, codestream.markerValue("sot")) orelse return error.MissingSot;
+    corrupted[sot + 11] = 1;
 
     try std.testing.expectError(
         codestream.CodestreamError.InvalidCodestream,
@@ -6648,6 +6682,29 @@ fn xorTemporaryPayloadCommentByteForTest(bytes: []u8, payload_offset: usize, mas
         cursor += segment_length;
     }
     return error.MissingPayloadByte;
+}
+
+fn encodeStrictTilePartMetadataFixture(allocator: std.mem.Allocator) ![]u8 {
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    return codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+    });
 }
 
 fn wrapTemporaryPayloadForTest(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
