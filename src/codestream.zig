@@ -1432,7 +1432,14 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .precinct_count = if (precinct_count == 0) 1 else precinct_count,
     };
     const plan = try makePacketPlan(width, height, levels, options);
-    const tile_part_packets = try readStrictTilePartPacketPlan(allocator, bytes, cursor);
+    var tlm_index = try readStrictMainHeaderTlmIndex(allocator, bytes);
+    defer if (tlm_index) |*index| index.deinit();
+    const tile_part_packets = try readStrictTilePartPacketPlan(
+        allocator,
+        bytes,
+        cursor,
+        if (tlm_index) |index| index.entries else null,
+    );
     const tile_part_plan = try validateStrictTilePartPacketPlan(tile_part_packets, plan, levels);
 
     return .{
@@ -3491,6 +3498,7 @@ fn readStrictTilePartPacketPlan(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     first_sot: usize,
+    tlm_entries: ?[]const TlmEntry,
 ) !StrictTilePartPacketPlan {
     var result = StrictTilePartPacketPlan{};
     var expected_tile_part_count: ?u8 = null;
@@ -3504,13 +3512,16 @@ fn readStrictTilePartPacketPlan(
             if (expected_tile_part_count) |count| {
                 if (result.count != @as(usize, count)) return CodestreamError.InvalidCodestream;
             }
+            if (tlm_entries) |entries| {
+                if (result.count != entries.len) return CodestreamError.InvalidCodestream;
+            }
             return result;
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
         if (result.count == result.packet_counts.len) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, scan, result.count, &expected_tile_part_count, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, scan, result.count, &expected_tile_part_count, tlm_entries);
             defer tile_part.deinit(allocator);
             if (tile_part.packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
             result.packet_counts[result.count] = tile_part.packet_lengths.items.len;
