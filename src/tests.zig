@@ -4914,6 +4914,44 @@ test "strict metadata rejects PLT segment index mismatch without sidecar" {
     );
 }
 
+test "strict metadata accepts ordered multiple PLT segments without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    const split = try splitFirstPltSegmentForTest(allocator, bytes, 1);
+    defer allocator.free(split);
+
+    var catalog = try codestream.readStrictPacketCatalog(allocator, split);
+    defer catalog.deinit();
+    try std.testing.expect(catalog.entries.len > 0);
+}
+
+test "strict metadata rejects skipped PLT segment indexes without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    const split = try splitFirstPltSegmentForTest(allocator, bytes, 1);
+    defer allocator.free(split);
+
+    var corrupted = try allocator.dupe(u8, split);
+    defer allocator.free(corrupted);
+
+    const first_plt = findMarker(corrupted, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const first_segment_length = readU16BeTest(corrupted, first_plt + 2);
+    const second_plt = first_plt + 2 + first_segment_length;
+    if (second_plt + 5 > corrupted.len or readU16BeTest(corrupted, second_plt) != codestream.markerValue("plt")) {
+        return error.MissingMarker;
+    }
+    corrupted[second_plt + 4] = 2;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+}
+
 test "strict metadata accepts tile-part COM marker without sidecar" {
     const allocator = std.testing.allocator;
     const bytes = try encodeStrictTilePartMetadataFixture(allocator);
@@ -6889,6 +6927,61 @@ fn insertTilePartComForTest(allocator: std.mem.Allocator, bytes: []const u8, com
     if (tlm_length < 9 or out.items[tlm + 4] != 0 or out.items[tlm + 5] != 0x50) return error.InvalidTlm;
     writeU32BeTest(out.items, tlm + 7, readU32BeTest(bytes, tlm + 7) + inserted_len);
     return out.toOwnedSlice(allocator);
+}
+
+fn splitFirstPltSegmentForTest(allocator: std.mem.Allocator, bytes: []const u8, first_entry_count: usize) ![]u8 {
+    const sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+    const plt = findMarker(bytes, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const plt_length = readU16BeTest(bytes, plt + 2);
+    const segment_end = plt + 2 + @as(usize, plt_length);
+    if (plt_length < 5 or segment_end > bytes.len) return error.InvalidPlt;
+
+    const segment = bytes[plt + 4 .. segment_end];
+    if (segment[0] != 0) return error.InvalidPlt;
+    const payload = segment[1..];
+    const split = try pltPayloadSplitOffsetForTest(payload, first_entry_count);
+    if (split == 0 or split >= payload.len) return error.InvalidPlt;
+
+    const inserted_len: u32 = 5;
+    var out = try std.ArrayList(u8).initCapacity(allocator, bytes.len + inserted_len);
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..plt]);
+    try appendPltSegmentForTest(allocator, &out, 0, payload[0..split]);
+    try appendPltSegmentForTest(allocator, &out, 1, payload[split..]);
+    try out.appendSlice(allocator, bytes[segment_end..]);
+
+    writeU32BeTest(out.items, sot + 6, readU32BeTest(bytes, sot + 6) + inserted_len);
+    const tlm_length = readU16BeTest(out.items, tlm + 2);
+    if (tlm_length < 9 or out.items[tlm + 4] != 0 or out.items[tlm + 5] != 0x50) return error.InvalidTlm;
+    writeU32BeTest(out.items, tlm + 7, readU32BeTest(bytes, tlm + 7) + inserted_len);
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendPltSegmentForTest(allocator: std.mem.Allocator, out: *std.ArrayList(u8), index: u8, payload: []const u8) !void {
+    if (payload.len == 0 or payload.len > std.math.maxInt(u16) - 3) return error.InvalidPlt;
+    try appendU16BeTest(allocator, out, codestream.markerValue("plt"));
+    try appendU16BeTest(allocator, out, @intCast(payload.len + 3));
+    try out.append(allocator, index);
+    try out.appendSlice(allocator, payload);
+}
+
+fn pltPayloadSplitOffsetForTest(payload: []const u8, entry_count: usize) !usize {
+    if (entry_count == 0) return error.InvalidPlt;
+    var cursor: usize = 0;
+    var entries: usize = 0;
+    while (cursor < payload.len) {
+        while (cursor < payload.len) {
+            const byte = payload[cursor];
+            cursor += 1;
+            if ((byte & 0x80) == 0) break;
+        } else {
+            return error.InvalidPlt;
+        }
+        entries += 1;
+        if (entries == entry_count) return cursor;
+    }
+    return error.InvalidPlt;
 }
 
 fn insertZeroLengthPacketIntoFirstPltForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
