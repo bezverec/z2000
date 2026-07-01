@@ -1485,7 +1485,6 @@ fn isUnsupportedTilePartHeaderMarker(marker: u16) bool {
         @intFromEnum(Marker.rgn),
         @intFromEnum(Marker.poc),
         @intFromEnum(Marker.ppt),
-        @intFromEnum(Marker.com),
         => true,
         else => false,
     };
@@ -4503,6 +4502,8 @@ fn readTilePartHeaderMarkers(
             try appendPltSegmentLengths(allocator, bytes[cursor + 2 .. cursor + segment_length], expected_plt_index, packet_lengths);
             if (expected_plt_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
             expected_plt_index += 1;
+        } else if (marker == @intFromEnum(Marker.com)) {
+            // Tile-part comments are metadata only and do not affect packet spans.
         } else if (isUnsupportedTilePartHeaderMarker(marker)) {
             return CodestreamError.UnsupportedPayload;
         } else {

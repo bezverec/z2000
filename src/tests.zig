@@ -4914,6 +4914,19 @@ test "strict metadata rejects PLT segment index mismatch without sidecar" {
     );
 }
 
+test "strict metadata accepts tile-part COM marker without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    const with_comment = try insertTilePartComForTest(allocator, bytes, "z2000 tile comment");
+    defer allocator.free(with_comment);
+
+    var catalog = try codestream.readStrictPacketCatalog(allocator, with_comment);
+    defer catalog.deinit();
+    try std.testing.expect(catalog.entries.len > 0);
+}
+
 test "temporary payload rejects TLM tile-part length mismatch" {
     const allocator = std.testing.allocator;
     const width = 16;
@@ -6838,6 +6851,43 @@ fn wrapTemporaryPayloadForTest(allocator: std.mem.Allocator, payload: []const u8
     try appendU16BeTest(allocator, &out, codestream.markerValue("sod"));
     try out.appendSlice(allocator, payload);
     try appendU16BeTest(allocator, &out, codestream.markerValue("eoc"));
+    return out.toOwnedSlice(allocator);
+}
+
+fn insertTilePartComForTest(allocator: std.mem.Allocator, bytes: []const u8, comment: []const u8) ![]u8 {
+    const sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+    const psot = readU32BeTest(bytes, sot + 6);
+    const tile_part_end = sot + @as(usize, psot);
+    if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
+
+    var cursor = sot + 12;
+    while (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) != codestream.markerValue("sod")) {
+        cursor += 2;
+        if (tile_part_end - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        if (segment_length < 2 or tile_part_end - cursor < segment_length) return error.Truncated;
+        cursor += segment_length;
+    }
+    if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != codestream.markerValue("sod")) return error.MissingSod;
+
+    if (comment.len > std.math.maxInt(u16) - 4) return error.InvalidCom;
+    const lcom: u16 = @intCast(comment.len + 4);
+    const inserted_len = @as(u32, lcom) + 2;
+
+    var out = try std.ArrayList(u8).initCapacity(allocator, bytes.len + inserted_len);
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..cursor]);
+    try appendU16BeTest(allocator, &out, codestream.markerValue("com"));
+    try appendU16BeTest(allocator, &out, lcom);
+    try appendU16BeTest(allocator, &out, 0);
+    try out.appendSlice(allocator, comment);
+    try out.appendSlice(allocator, bytes[cursor..]);
+
+    writeU32BeTest(out.items, sot + 6, psot + inserted_len);
+    const tlm_length = readU16BeTest(out.items, tlm + 2);
+    if (tlm_length < 9 or out.items[tlm + 4] != 0 or out.items[tlm + 5] != 0x50) return error.InvalidTlm;
+    writeU32BeTest(out.items, tlm + 7, readU32BeTest(bytes, tlm + 7) + inserted_len);
     return out.toOwnedSlice(allocator);
 }
 
