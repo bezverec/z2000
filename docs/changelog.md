@@ -132,6 +132,13 @@ entries are grouped by development milestone rather than semantic version.
 - Strict main-header and tile-part readers now reject unsupported marker
   segments such as COC, QCC, POC, PPM/PPT, RGN, CRG, PLM, and CAP instead of
   silently skipping payload behavior that is not implemented.
+- Tightened strict marker validation for the current no-sidecar path: SOT
+  sequence/count, TLM tile indexes and Psot values, PLT packet spans, SOP/EPH
+  policy and duplicate markers, and packet-header marker stuffing now have
+  explicit regression coverage.
+- Accepted ordered multi-segment TLM and PLT metadata in the strict reader while
+  rejecting skipped marker indexes.
+- Accepted tile-part COM marker segments as metadata before SOD.
 - Added a metadata-inferred continuous MQ code-block decoder and wired complete
   single-layer strict RPCL reconstruction to use SOD payload bytes without
   relying on BP8 per-pass payload tables.

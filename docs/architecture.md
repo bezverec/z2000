@@ -45,13 +45,15 @@ conversion.
 `src/codestream.zig` is currently the integration hub. It writes:
 
 - `SIZ`, `COD`, `QCD`;
-- optional `TLM`;
+- optional `TLM`, including ordered multi-segment TLM in the strict reader;
 - tile-part headers with `SOT`/`SOD`/`EOC`;
 - optional `SOP` and `EPH` marker instances. SOP is enabled by default; EPH is
   currently opt-in because the independent-decoder interop gate is more stable
   without it while packet-header/state semantics are hardened for Grok and
   Kakadu;
-- `PLT` packet-length marker segments;
+- `PLT` packet-length marker segments, including ordered multi-segment PLT in
+  the strict reader;
+- tile-part `COM` comments, accepted as metadata before `SOD`;
 - an optional debug private payload sidecar identified by `ZJ2K-CBLK-BP*`,
   stored in chunked `COM` marker segments when explicitly requested.
 
@@ -160,6 +162,10 @@ strict block catalog: zero blocks get geometry from the codestream-derived
 subband layout, and included blocks infer continuous MQ/T1 pass metadata from
 their SOD payload bytes. Quality layers now use the same continuous MQ segment
 and their T2 byte ranges are snapped to actual coding-pass truncation points.
+The strict marker layer validates SOT tile-part sequence/count, TLM tile indexes
+and Psot values, PLT packet spans and ordered Zplt indexes, SOP/EPH policy and
+duplicates, and packet-header marker stuffing before packet payloads are exposed
+to T1 reconstruction.
 
 ## Parallelism And Scratch Reuse
 
