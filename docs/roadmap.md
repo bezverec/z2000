@@ -116,14 +116,20 @@ Goal: make T2 packetization strict, inspectable, and ready for more profiles.
 
 Tasks:
 
-- Add packet parsing from codestream tile-parts.
-- Validate SOP/EPH sequencing. SOP remains default-on; EPH is opt-in until
-  OpenJPEG/Kakadu packet-boundary interop is stable.
+- Keep packet parsing from codestream tile-parts active in the strict
+  no-sidecar path.
+- Keep SOP/EPH sequencing validation active. SOP remains default-on; EPH is
+  opt-in until OpenJPEG/Kakadu packet-boundary interop is stable.
 - Keep benchmarking gated on interop: current no-sidecar/no-EPH smoke decodes
   through z2000 strict path, OpenJPEG, and Grok without Grok PL marker length
   warnings. Kakadu and valid2000 remain the next external gates before treating
   benchmark comparisons as fully fair.
 - Validate PLT/TLM consistency against actual packet and tile-part lengths.
+  through z2000 strict path and OpenJPEG, but Grok/Kakadu still report packet
+  header or PLT interpretation failures, so the next fix belongs in ISO T2
+  header/state semantics rather than in performance tuning.
+- Keep PLT/TLM consistency validation against actual packet and tile-part
+  lengths, including ordered multi-segment TLM/PLT coverage.
 - Keep RPCL as the first supported progression, with bounded per-precinct state
   and whole-packet reader validation.
 - Add LRCP/PCRL/CPRL only after packet payload ordering is implemented and

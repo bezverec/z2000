@@ -18,8 +18,10 @@ This first milestone is intentionally small and honest:
 - narrow RGB JP2 encode/decode roundtrip back to TIFF
 - active code-block bounding boxes for faster sparse block payloads
 - accurate SOT `Psot` tile-part lengths in the marker skeleton
-- TLM marker segments for current tile-part lengths
-- PLT packet-length marker segments in tile-part headers
+- TLM marker segments for current tile-part lengths, with strict ordered
+  multi-segment validation
+- PLT packet-length marker segments in tile-part headers, with strict ordered
+  multi-segment validation
 - physical resolution-ordered tile-parts for `--tile-parts R`
 - explicit RPCL packet sequence iterator for single-tile packet ordering
 - T2 packet-header bitstream, tag-tree, coding-pass, and segment-length
@@ -62,6 +64,8 @@ This first milestone is intentionally small and honest:
 - explicit COD code-block style metadata for all six Part 1 style bits;
   BYPASS is implemented end to end, the remaining style bits stay fail-closed
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
+- strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
+  `COM` comments
 
 It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder, but
 the narrow single-tile RPCL profiles (lossless RCT/5-3 and lossy ICT/9-7,
@@ -318,6 +322,12 @@ after the RPCL subband precinct projection fix. valid2000 is still an active
 hygiene gate: the local lossless file currently reports an ICC-profile failure
 and a PLT count warning, while the access profile also trips profile-specific
 transform/QCD/layer/tile-size expectations.
+
+Strict marker handling now checks SOT tile-part sequence/count, TLM tile indexes
+and tile-part lengths, PLT packet spans, ordered multi-segment TLM/PLT marker
+indexes, SOP/EPH marker policy from COD, duplicate SOP/EPH markers inside one
+packet frame, and packet-header marker stuffing. Tile-part `COM` markers are
+accepted as metadata before `SOD`.
 
 The block payload is now a continuous MQ-backed EBCOT-style segment. BP8 debug
 metadata, when requested, records the same EBCOT/MQ segment bytes and T2 layer

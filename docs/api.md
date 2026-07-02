@@ -117,6 +117,9 @@ Notes:
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
+- Strict packet catalog parsing validates SOT/TLM/PLT marker accounting,
+  ordered multi-segment TLM/PLT indexes, SOP/EPH marker policy, and packet
+  header marker stuffing for the current supported RPCL/RCT/5-3 profile.
 
 ## `src/jp2.zig`
 
