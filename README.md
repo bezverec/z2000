@@ -18,8 +18,10 @@ This first milestone is intentionally small and honest:
 - narrow RGB JP2 encode/decode roundtrip back to TIFF
 - active code-block bounding boxes for faster sparse block payloads
 - accurate SOT `Psot` tile-part lengths in the marker skeleton
-- TLM marker segments for current tile-part lengths
-- PLT packet-length marker segments in tile-part headers
+- TLM marker segments for current tile-part lengths, with strict ordered
+  multi-segment validation
+- PLT packet-length marker segments in tile-part headers, with strict ordered
+  multi-segment validation
 - physical resolution-ordered tile-parts for `--tile-parts R`
 - explicit RPCL packet sequence iterator for single-tile packet ordering
 - T2 packet-header bitstream, tag-tree, coding-pass, and segment-length
@@ -37,6 +39,8 @@ This first milestone is intentionally small and honest:
 - explicit COD code-block style metadata for all six Part 1 style bits, while
   strict codestream decode still rejects every nonzero style byte fail-closed
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
+- strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
+  `COM` comments
 
 It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The
 current `jp2c` payload is a narrow single-tile RPCL/RCT/5-3 codestream with
@@ -229,11 +233,11 @@ example:
   --block 64 --layers 1 --tile-parts R --sop --no-eph --tlm --timings
 ```
 
-Current local baseline on a synthetic uncompressed RGB TIFF 2048x2048 after
-adding RCT, integer 5/3 DWT, subband partitioning, pass-oriented code-block
-payloads, temporary pass-stream entropy, and resolution-ordered tile-parts:
+Historical local baseline on a synthetic uncompressed RGB TIFF 2048x2048. The
+numbers predate the latest strict marker-validation passes, but remain useful
+as a rough reference until the next benchmark refresh:
 
-- `z2000 tiff-to-jp2`: 152.2 ms mean, marker skeleton + bitplane-ordered pass streams, 9.4 MB output
+- `z2000 tiff-to-jp2`: 152.2 ms mean, early RPCL packet stream, 9.4 MB output
 - `grk_compress`: 101.5 ms mean, real lossless JP2, 6.3 MB output
 - `opj_compress`: 424.1 ms mean, real lossless JP2, 6.3 MB output
 - `tif2jp2 --archival-master-ndk`: 275.2 ms mean, OpenJPEG FFI wrapper, 6.3 MB output
@@ -259,6 +263,12 @@ On the current no-sidecar/no-EPH smoke path, z2000 strict decode and OpenJPEG
 accept the output; Grok and Kakadu still expose packet header/PLT interpretation
 issues, so comparative performance benchmarking is gated until that T2
 conformance gap is closed.
+
+Strict marker handling now checks SOT tile-part sequence/count, TLM tile indexes
+and tile-part lengths, PLT packet spans, ordered multi-segment TLM/PLT marker
+indexes, SOP/EPH marker policy from COD, duplicate SOP/EPH markers inside one
+packet frame, and packet-header marker stuffing. Tile-part `COM` markers are
+accepted as metadata before `SOD`.
 
 The block payload is now a continuous MQ-backed EBCOT-style segment. BP8 debug
 metadata, when requested, records the same EBCOT/MQ segment bytes and T2 layer
