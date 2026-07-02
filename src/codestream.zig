@@ -10,6 +10,7 @@ const rate_alloc = @import("rate_alloc.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
 const wavelet_int = @import("wavelet_int.zig");
+const wavelet = @import("wavelet.zig");
 
 pub const CodestreamError = error{
     ImageTooLarge,
@@ -222,6 +223,10 @@ pub const T1Backend = enum {
     iso_mq,
 };
 
+/// The strict decode path fail-closes on any other QCD guard bit count, so
+/// decode-side Mb derivation can rely on this value.
+const strict_guard_bits: u8 = 2;
+
 pub const LosslessOptions = struct {
     levels: u8 = 5,
     layers: u16 = 1,
@@ -250,7 +255,7 @@ pub const LosslessOptions = struct {
     tile_part_divisions: ?u8 = 'R',
     threads: u8 = 1,
     emit_temporary_payload_sidecar: bool = false,
-    t1_backend: T1Backend = .legacy_mq,
+    t1_backend: T1Backend = .iso_mq,
 
     pub fn precinctForResolution(self: LosslessOptions, resolution: usize) PrecinctSize {
         const count = @as(usize, self.precinct_count);
@@ -288,7 +293,7 @@ fn normalizedEncodePrecinctOptions(options: LosslessOptions, levels: u8) Lossles
 
 pub const DecodeOptions = struct {
     threads: u8 = 1,
-    t1_backend: T1Backend = .legacy_mq,
+    t1_backend: T1Backend = .iso_mq,
 };
 
 pub fn encodeLosslessSkeleton(
@@ -374,6 +379,89 @@ fn forwardComponents53(
 
     try runComponentJobs(DwtJob, &jobs, componentThreadCount(options), dwtWorker);
     return levels;
+}
+
+/// Irreversible path front end: ICT, float 9/7 DWT, then deadzone scalar
+/// quantization into the i32 coefficient planes shared with the reversible
+/// pipeline.
+fn forwardIrreversibleQuantizedPlanes(
+    allocator: std.mem.Allocator,
+    rgb: image.RgbImage,
+    levels: u8,
+    options: LosslessOptions,
+) !color.RctPlanes {
+    _ = options;
+    var ict = try color.forwardIct(allocator, rgb);
+    defer ict.deinit();
+
+    inline for (.{ ict.y, ict.cb, ict.cr }) |plane| {
+        const done = try wavelet.forward2D(allocator, plane, ict.width, ict.height, levels, .irreversible_9_7);
+        if (done != levels) return CodestreamError.InvalidCodestream;
+    }
+
+    const bands = try subband.makeBands(allocator, ict.width, ict.height, levels);
+    defer allocator.free(bands);
+
+    const pixels = try std.math.mul(usize, ict.width, ict.height);
+    const y = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(y);
+    const cb = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(cb);
+    const cr = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(cr);
+
+    for (bands) |band| {
+        const delta = irreversibleBandDelta(
+            rgb.bit_depth,
+            band.kind,
+            try irreversibleBandStepSize(rgb.bit_depth, band.kind, band.level),
+        );
+        quantizeBandRegion(ict.y, y, ict.width, band.rect, delta);
+        quantizeBandRegion(ict.cb, cb, ict.width, band.rect, delta);
+        quantizeBandRegion(ict.cr, cr, ict.width, band.rect, delta);
+    }
+
+    return .{
+        .allocator = allocator,
+        .width = ict.width,
+        .height = ict.height,
+        .bit_depth = rgb.bit_depth,
+        .y = y,
+        .cb = cb,
+        .cr = cr,
+    };
+}
+
+fn quantizeBandRegion(src: []const f32, dst: []i32, stride: usize, rect: subband.Rect, delta: f64) void {
+    var row: usize = 0;
+    while (row < rect.height) : (row += 1) {
+        const base = (rect.y + row) * stride + rect.x;
+        var col: usize = 0;
+        while (col < rect.width) : (col += 1) {
+            const value: f64 = src[base + col];
+            const magnitude = @floor(@abs(value) / delta);
+            const quantized: i32 = @intFromFloat(@min(magnitude, 2147483647.0));
+            dst[base + col] = if (value < 0) -quantized else quantized;
+        }
+    }
+}
+
+fn dequantizeBandRegion(src: []const i32, dst: []f32, stride: usize, rect: subband.Rect, delta: f64) void {
+    var row: usize = 0;
+    while (row < rect.height) : (row += 1) {
+        const base = (rect.y + row) * stride + rect.x;
+        var col: usize = 0;
+        while (col < rect.width) : (col += 1) {
+            const q = src[base + col];
+            if (q == 0) {
+                dst[base + col] = 0;
+                continue;
+            }
+            const magnitude = @as(f64, @floatFromInt(@abs(q))) + 0.5;
+            const value = magnitude * delta;
+            dst[base + col] = @floatCast(if (q < 0) -value else value);
+        }
+    }
 }
 
 fn dwtWorker(job: *DwtJob) void {
@@ -648,6 +736,8 @@ pub const StrictPacketBlock = struct {
     cumulative_bytes: u64,
     payload_offset: usize,
     payload_length: usize,
+    segment_count: u8 = 0,
+    segment_lengths: [ebcot.max_block_segments]u64 = [_]u64{0} ** ebcot.max_block_segments,
 };
 
 pub const StrictPacketBlockCatalog = struct {
@@ -813,6 +903,17 @@ const StrictRpclBlockAssembly = struct {
     nominal_bitplanes: u8 = 0,
     encoded_bitplanes: u8 = 0,
     code_block_style: ebcot.CodeBlockStyle = .{},
+    segment_count: u8 = 0,
+    segment_lengths: [ebcot.max_block_segments]u64 = [_]u64{0} ** ebcot.max_block_segments,
+
+    fn appendSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock) !void {
+        var index: u8 = 0;
+        while (index < decoded.segment_count) : (index += 1) {
+            if (self.segment_count >= ebcot.max_block_segments) return CodestreamError.InvalidCodestream;
+            self.segment_lengths[self.segment_count] = decoded.segment_lengths[index];
+            self.segment_count += 1;
+        }
+    }
 
     fn deinit(self: *StrictRpclBlockAssembly, allocator: std.mem.Allocator) void {
         self.payload.deinit(allocator);
@@ -970,7 +1071,13 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
             job.result = CodestreamError.InvalidCodestream;
             return;
         }
-        const block_nominal_bitplanes = subbandNominalBitplanes(job.nominal_bitplanes, job.bands[block.band_index].kind) catch |err| {
+        const block_nominal_bitplanes = bandNominalBitplanesForTransform(
+            job.nominal_bitplanes,
+            job.bands[block.band_index].kind,
+            job.bands[block.band_index].level,
+            job.options.transform,
+            job.options.guard_bits,
+        ) catch |err| {
             job.result = err;
             return;
         };
@@ -1044,13 +1151,20 @@ fn encodeLosslessWithOptionsMeasured(
     try validateRates(options);
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
 
+    const levels = actualDwtLevels(rgb.width, rgb.height, options.levels);
     const color_start = monotonicNs();
-    var planes = try color.forwardRct(allocator, rgb);
+    var planes = switch (options.transform) {
+        .reversible_5_3 => try color.forwardRct(allocator, rgb),
+        .irreversible_9_7 => try forwardIrreversibleQuantizedPlanes(allocator, rgb, levels, options),
+    };
     defer planes.deinit();
     if (timings) |t| t.color_transform_ns = elapsedNs(color_start);
 
     const wavelet_start = monotonicNs();
-    const levels = try forwardComponents53(allocator, &planes, options);
+    if (options.transform == .reversible_5_3) {
+        const dwt_levels = try forwardComponents53(allocator, &planes, options);
+        if (dwt_levels != levels) return CodestreamError.InvalidCodestream;
+    }
     if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
 
     const encode_options = normalizedEncodePrecinctOptions(options, levels);
@@ -1355,6 +1469,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var block_width: u16 = 0;
     var block_height: u16 = 0;
     var parsed_code_block_style = ebcot.CodeBlockStyle{};
+    var parsed_transform: WaveletTransform = .reversible_5_3;
     var precincts = defaultPrecincts();
     var precinct_count: u8 = 0;
     var saw_siz = false;
@@ -1427,7 +1542,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             block_height = try codeBlockSizeFromCodExponent(segment[7]);
             try validateBlockSize(block_width, block_height);
             parsed_code_block_style = try parseCodeBlockStyleByte(segment[8]);
-            if (segment[9] != @intFromEnum(WaveletTransform.reversible_5_3)) return CodestreamError.UnsupportedPayload;
+            parsed_transform = switch (segment[9]) {
+                @intFromEnum(WaveletTransform.irreversible_9_7) => .irreversible_9_7,
+                @intFromEnum(WaveletTransform.reversible_5_3) => .reversible_5_3,
+                else => return CodestreamError.InvalidCodestream,
+            };
             precinct_count = if ((scod & 0x01) != 0) levels + 1 else 0;
             if (precinct_count > precincts.len or segment.len < 10 + @as(usize, precinct_count)) {
                 return CodestreamError.InvalidCodestream;
@@ -1451,7 +1570,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             saw_cod = true;
         } else if (marker == @intFromEnum(Marker.qcd)) {
             if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
-            qcd_band_count = try validateStrictQcdSegment(segment, bit_depth, levels);
+            qcd_band_count = try validateStrictQcdSegment(segment, bit_depth, levels, parsed_transform);
             saw_qcd = true;
         } else if (marker == @intFromEnum(Marker.tlm) or marker == @intFromEnum(Marker.com)) {
             // TLM and COM are independently parsed/validated where needed.
@@ -1493,6 +1612,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .bit_depth = bit_depth,
         .levels = levels,
         .layers = layers,
+        .transform = parsed_transform,
         .code_block_style = parsed_code_block_style,
         .block_width = block_width,
         .block_height = block_height,
@@ -1539,18 +1659,33 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
     return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
 }
 
-fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8) !usize {
+fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, transform: WaveletTransform) !usize {
     if (segment.len < 2) return CodestreamError.InvalidCodestream;
     if (bit_depth == 0) return CodestreamError.InvalidCodestream;
     const bands = 1 + 3 * @as(usize, levels);
-    if (segment.len != 1 + bands) return CodestreamError.InvalidCodestream;
     const style = segment[0];
     const quantization_value = style & 0x1f;
     if (quantization_value > @intFromEnum(QuantizationStyle.scalar_expounded)) return CodestreamError.InvalidCodestream;
     const quantization: QuantizationStyle = @enumFromInt(quantization_value);
-    if (quantization != .none) return CodestreamError.UnsupportedPayload;
     const guard_bits = style >> 5;
-    if (guard_bits != 2) return CodestreamError.UnsupportedPayload;
+    if (guard_bits != strict_guard_bits) return CodestreamError.UnsupportedPayload;
+
+    if (transform == .irreversible_9_7) {
+        if (quantization != .scalar_expounded) return CodestreamError.UnsupportedPayload;
+        if (segment.len != 1 + 2 * bands) return CodestreamError.InvalidCodestream;
+        var cursor: usize = 1;
+        try validateStrictQcdScalarValue(segment, &cursor, bit_depth, .ll, levels);
+        var level: u8 = levels;
+        while (level > 0) : (level -= 1) {
+            inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
+                try validateStrictQcdScalarValue(segment, &cursor, bit_depth, kind, level);
+            }
+        }
+        return bands;
+    }
+
+    if (quantization != .none) return CodestreamError.UnsupportedPayload;
+    if (segment.len != 1 + bands) return CodestreamError.InvalidCodestream;
 
     var cursor: usize = 1;
     if (segment[cursor] != try qcdReversibleExponentByteForBand(bit_depth, .ll)) {
@@ -1567,6 +1702,19 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8) !usi
         }
     }
     return bands;
+}
+
+fn validateStrictQcdScalarValue(
+    segment: []const u8,
+    cursor: *usize,
+    bit_depth: u8,
+    kind: subband.Kind,
+    band_level: u8,
+) !void {
+    const step = try irreversibleBandStepSize(bit_depth, kind, band_level);
+    const expected = (@as(u16, step.exponent) << 11) | step.mantissa;
+    if (readU16Be(segment, cursor.*) != expected) return CodestreamError.UnsupportedPayload;
+    cursor.* += 2;
 }
 
 pub fn hasMarker(bytes: []const u8, marker: u16) bool {
@@ -2277,7 +2425,7 @@ fn readTemporaryComponentRpclCatalog(
         const block_rect = try cursor.readRect();
         _ = try cursor.readRect();
         const bitplanes = try cursor.readU8();
-        const block_nominal_bitplanes = try subbandNominalBitplanes(nominal_bitplanes, expected_bands[block_band].kind);
+        const block_nominal_bitplanes = try subbandNominalBitplanes(nominal_bitplanes, expected_bands[block_band].kind, strict_guard_bits);
         const non_zero_count = try cursor.readU32();
         const coding_passes = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
         const layers = try readLayerAllocation(cursor, payload_version, layer_count, coding_passes);
@@ -2381,7 +2529,7 @@ fn assembleStrictPacketCatalogHeaders(
     var assemblies = try StrictComponentAssemblySet.init(allocator, blocks.len);
     errdefer assemblies.deinit();
     inline for (0..3) |component| {
-        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], bands, blocks, header.bit_depth, header.code_block_style);
+        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], bands, blocks, header.bit_depth, header.transform, header.code_block_style);
     }
 
     var active_groups: []StrictPacketAuditBandGroup = &.{};
@@ -2407,6 +2555,8 @@ fn assembleStrictPacketCatalogHeaders(
                     selected,
                     header.layers,
                     header.bit_depth,
+                    header.transform,
+                    header.code_block_style.bypass,
                 );
             }
         } else if (selected.len > 0 and active_groups.len == 0) {
@@ -2468,6 +2618,7 @@ fn readStrictPacketHeaderForAudit(
                 packet.layer,
                 group.locations,
                 group.max_zero_bitplanes,
+                group.reader_state.bypass,
                 group.decoded,
             ) catch return CodestreamError.InvalidCodestream;
         }
@@ -2554,6 +2705,7 @@ fn collectStrictPacketAuditBlocks(
                 block.encoded_bitplanes = inferred_bitplanes;
                 block.nominal_bitplanes = @max(block.nominal_bitplanes, block.encoded_bitplanes);
             }
+            try block.appendSegmentLengths(decoded);
             try block.payload.appendSlice(assembly.allocator, payload);
             if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
         }
@@ -2565,6 +2717,7 @@ fn initializeStrictAssemblyGeometry(
     bands: []const subband.Band,
     source_blocks: []const subband.CodeBlock,
     bit_depth: u8,
+    transform: WaveletTransform,
     code_block_style: ebcot.CodeBlockStyle,
 ) !void {
     if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
@@ -2572,7 +2725,13 @@ fn initializeStrictAssemblyGeometry(
         if (source.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         block.band_index = source.band_index;
         block.rect = source.rect;
-        block.nominal_bitplanes = try subbandNominalBitplanes(bit_depth, bands[source.band_index].kind);
+        block.nominal_bitplanes = try bandNominalBitplanesForTransform(
+            bit_depth,
+            bands[source.band_index].kind,
+            bands[source.band_index].level,
+            transform,
+            strict_guard_bits,
+        );
         block.encoded_bitplanes = 0;
         block.code_block_style = codeBlockStyleForBand(code_block_style, bands[source.band_index].kind);
     }
@@ -2652,6 +2811,8 @@ fn strictPacketBlockCatalogFromAssemblies(
                 .cumulative_bytes = source.cumulative_bytes,
                 .payload_offset = payload_offset,
                 .payload_length = payload_length,
+                .segment_count = source.segment_count,
+                .segment_lengths = source.segment_lengths,
             };
             payload_offset += payload_length;
         }
@@ -2670,6 +2831,8 @@ fn buildStrictPacketAuditBandGroups(
     selected: []const usize,
     layer_count: u16,
     bit_depth: u8,
+    transform: WaveletTransform,
+    bypass: bool,
 ) ![]StrictPacketAuditBandGroup {
     var groups: std.ArrayList(StrictPacketAuditBandGroup) = .empty;
     errdefer {
@@ -2699,6 +2862,8 @@ fn buildStrictPacketAuditBandGroups(
             band_index,
             layer_count,
             bit_depth,
+            transform,
+            bypass,
         ));
         cursor = end;
     }
@@ -2716,6 +2881,8 @@ fn buildStrictPacketAuditBandGroup(
     band_index: usize,
     layer_count: u16,
     bit_depth: u8,
+    transform: WaveletTransform,
+    bypass: bool,
 ) !StrictPacketAuditBandGroup {
     if (selected.len == 0) return CodestreamError.InvalidCodestream;
     const grid = try t2.CodeBlockGrid.init(
@@ -2778,6 +2945,7 @@ fn buildStrictPacketAuditBandGroup(
 
     var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, leaves_x, leaves_y, leaf_count, layer_count);
     errdefer reader_state.deinit();
+    reader_state.bypass = bypass;
     const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
     errdefer allocator.free(decoded);
     const payloads = try allocator.alloc(?[]const u8, leaf_count);
@@ -2789,7 +2957,7 @@ fn buildStrictPacketAuditBandGroup(
         .reader_state = reader_state,
         .decoded = decoded,
         .payloads = payloads,
-        .max_zero_bitplanes = try subbandNominalBitplanes(bit_depth, band.kind),
+        .max_zero_bitplanes = try bandNominalBitplanesForTransform(bit_depth, band.kind, band.level, transform, strict_guard_bits),
     };
 }
 
@@ -2957,6 +3125,7 @@ fn readRpclPacketForBandGroups(
                 packet.layer,
                 group.locations,
                 group.max_zero_bitplanes,
+                group.reader_state.bypass,
                 group.decoded,
             );
         }
@@ -3025,6 +3194,7 @@ fn collectStrictRpclPacketBlocks(
             var block = &assembly.blocks[block_index];
             block.cumulative_passes = std.math.add(u16, block.cumulative_passes, decoded.pass_count) catch return CodestreamError.InvalidCodestream;
             block.cumulative_bytes = try std.math.add(u64, block.cumulative_bytes, decoded.byte_length);
+            try block.appendSegmentLengths(decoded);
             try block.payload.appendSlice(assembly.allocator, payload);
             if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
         }
@@ -3167,8 +3337,85 @@ fn decodeStrictRpclImageFromBlockCatalog(
 ) !image.RgbImage {
     var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog, options);
     defer strict_planes.deinit();
+    if (header.transform == .irreversible_9_7) {
+        return decodeIrreversibleImageFromQuantizedPlanes(allocator, header, strict_planes);
+    }
     try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
     return color.inverseRct(allocator, strict_planes);
+}
+
+/// Irreversible path back end: dequantize the assembled i32 coefficient
+/// planes, run the float 9/7 inverse DWT, and undo the ICT.
+fn decodeIrreversibleImageFromQuantizedPlanes(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    quantized: color.RctPlanes,
+) !image.RgbImage {
+    const pixels = try std.math.mul(usize, header.width, header.height);
+    if (quantized.y.len != pixels or quantized.cb.len != pixels or quantized.cr.len != pixels) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
+    defer allocator.free(bands);
+
+    const y_f = try allocator.alloc(f32, pixels);
+    defer allocator.free(y_f);
+    const cb_f = try allocator.alloc(f32, pixels);
+    defer allocator.free(cb_f);
+    const cr_f = try allocator.alloc(f32, pixels);
+    defer allocator.free(cr_f);
+
+    for (bands) |band| {
+        const delta = irreversibleBandDelta(
+            header.bit_depth,
+            band.kind,
+            try irreversibleBandStepSize(header.bit_depth, band.kind, band.level),
+        );
+        dequantizeBandRegion(quantized.y, y_f, header.width, band.rect, delta);
+        dequantizeBandRegion(quantized.cb, cb_f, header.width, band.rect, delta);
+        dequantizeBandRegion(quantized.cr, cr_f, header.width, band.rect, delta);
+    }
+
+    inline for (.{ y_f, cb_f, cr_f }) |plane| {
+        try wavelet.inverse2D(allocator, plane, header.width, header.height, header.levels, .irreversible_9_7);
+    }
+
+    const ict = color.IctPlanes{
+        .allocator = allocator,
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .y = y_f,
+        .cb = cb_f,
+        .cr = cr_f,
+    };
+    return color.inverseIct(allocator, ict);
+}
+
+const StrictComponentDecodeJob = struct {
+    width: usize,
+    height: usize,
+    catalog: *const StrictPacketBlockCatalog,
+    component: usize,
+    options: DecodeOptions,
+    plane: ?[]i32 = null,
+    result: anyerror!void = {},
+};
+
+fn strictComponentDecodeWorker(job: *StrictComponentDecodeJob) void {
+    job.plane = reconstructStrictComponentCoefficientsFromBlockCatalog(
+        std.heap.smp_allocator,
+        job.width,
+        job.height,
+        job.catalog.*,
+        job.component,
+        job.options,
+    ) catch |err| {
+        job.result = err;
+        return;
+    };
+    job.result = {};
 }
 
 fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
@@ -3177,6 +3424,50 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
 ) !color.RctPlanes {
+    if (componentThreadCountFor(options.threads) >= 2) {
+        var jobs: [3]StrictComponentDecodeJob = undefined;
+        for (&jobs, 0..) |*job, component| {
+            job.* = .{
+                .width = header.width,
+                .height = header.height,
+                .catalog = &catalog,
+                .component = component,
+                .options = options,
+            };
+        }
+        errdefer for (&jobs) |*job| {
+            if (job.plane) |plane| std.heap.smp_allocator.free(plane);
+        };
+        try runComponentJobs(StrictComponentDecodeJob, &jobs, componentThreadCountFor(options.threads), strictComponentDecodeWorker);
+
+        // Copy worker planes into caller-owned buffers so RctPlanes frees
+        // with the caller allocator.
+        const pixels = try std.math.mul(usize, header.width, header.height);
+        const y = try allocator.alloc(i32, pixels);
+        errdefer allocator.free(y);
+        const cb = try allocator.alloc(i32, pixels);
+        errdefer allocator.free(cb);
+        const cr = try allocator.alloc(i32, pixels);
+        errdefer allocator.free(cr);
+        const targets = [3][]i32{ y, cb, cr };
+        for (&jobs, targets) |*job, target| {
+            const plane = job.plane orelse return CodestreamError.InvalidCodestream;
+            if (plane.len != target.len) return CodestreamError.InvalidCodestream;
+            @memcpy(target, plane);
+            std.heap.smp_allocator.free(plane);
+            job.plane = null;
+        }
+        return .{
+            .allocator = allocator,
+            .width = header.width,
+            .height = header.height,
+            .bit_depth = header.bit_depth,
+            .y = y,
+            .cb = cb,
+            .cr = cr,
+        };
+    }
+
     const y = try reconstructStrictComponentCoefficientsFromBlockCatalog(
         allocator,
         header.width,
@@ -3234,6 +3525,11 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
     defer allocator.free(covered);
     @memset(covered, false);
 
+    // One reusable T1 scratch per component keeps the hot decode loop free
+    // of per-block allocations.
+    var scratch = ebcot.DecodeBlockScratch.init(allocator);
+    defer scratch.deinit();
+
     for (catalog.components[component], 0..) |block, block_index| {
         if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
         if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) {
@@ -3246,7 +3542,19 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
         if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
             return CodestreamError.InvalidCodestream;
         }
-        const decoded = switch (options.t1_backend) {
+        const decoded = if (block.code_block_style.bypass) blk: {
+            if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
+            break :blk try ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
+                &scratch,
+                block.encoded_bitplanes,
+                block.cumulative_passes,
+                payload,
+                block.segment_lengths[0..block.segment_count],
+                block.rect.width,
+                block.rect.height,
+                block.code_block_style,
+            );
+        } else switch (options.t1_backend) {
             .legacy_mq => try ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
                 allocator,
                 block.encoded_bitplanes,
@@ -3256,8 +3564,8 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
                 block.rect.height,
                 block.code_block_style,
             ),
-            .iso_mq => try ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqWithStyle(
-                allocator,
+            .iso_mq => try ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
+                &scratch,
                 block.encoded_bitplanes,
                 block.cumulative_passes,
                 payload,
@@ -3333,6 +3641,7 @@ fn decodeStrictBlockCoefficients(
     };
     const complete_block = pass_count == expected.passes.len;
     _ = layer_count;
+    if (actual.code_block_style.bypass) return CodestreamError.UnsupportedPayload;
     if (complete_block and !actual.code_block_style.terminate_all) {
         return switch (options.t1_backend) {
             .legacy_mq => ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
@@ -4132,6 +4441,7 @@ const TemporaryHeader = struct {
     bit_depth: u8,
     levels: u8,
     layers: u16,
+    transform: WaveletTransform = .reversible_5_3,
     code_block_style: ebcot.CodeBlockStyle = .{},
     block_width: u16,
     block_height: u16,
@@ -4521,7 +4831,9 @@ fn appendCod(
     try out.append(allocator, codingStyleFlags(options));
     try out.append(allocator, @intFromEnum(options.progression));
     try appendU16Be(allocator, out, options.layers);
-    try out.append(allocator, @intFromEnum(options.mct));
+    // ISO A.6.1 SGcod: the MCT field is 0 (none) or 1 (transform used); RCT
+    // vs ICT follows from the wavelet transform byte.
+    try out.append(allocator, if (options.mct == .none) @as(u8, 0) else 1);
     try out.append(allocator, levels);
     try out.append(allocator, codeBlockExponent(options.block_width));
     try out.append(allocator, codeBlockExponent(options.block_height));
@@ -4544,6 +4856,18 @@ fn appendQcd(
 ) !void {
     const bands = 1 + 3 * @as(u16, levels);
     try appendMarker(allocator, out, .qcd);
+    if (options.transform == .irreversible_9_7) {
+        try appendU16Be(allocator, out, 3 + 2 * bands);
+        try out.append(allocator, qcdStyleByte(options));
+        try appendQcdScalarValue(allocator, out, bit_depth, .ll, levels);
+        var level: u8 = levels;
+        while (level > 0) : (level -= 1) {
+            inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
+                try appendQcdScalarValue(allocator, out, bit_depth, kind, level);
+            }
+        }
+        return;
+    }
     try appendU16Be(allocator, out, 3 + bands);
     try out.append(allocator, qcdStyleByte(options));
     try out.append(allocator, try qcdReversibleExponentByteForBand(bit_depth, .ll));
@@ -4553,6 +4877,18 @@ fn appendQcd(
             try out.append(allocator, try qcdReversibleExponentByteForBand(bit_depth, kind));
         }
     }
+}
+
+fn appendQcdScalarValue(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    bit_depth: u8,
+    kind: subband.Kind,
+    band_level: u8,
+) !void {
+    const step = try irreversibleBandStepSize(bit_depth, kind, band_level);
+    const value = (@as(u16, step.exponent) << 11) | step.mantissa;
+    try appendU16Be(allocator, out, value);
 }
 
 fn skipPacketBoundaryMarkers(bytes: []const u8, start: usize, end: usize) !usize {
@@ -5202,7 +5538,13 @@ fn buildComponentRpclShadowCatalog(
     defer ebcot_scratch.deinit();
     for (blocks, 0..) |block, index| {
         if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
-        const block_nominal_bitplanes = try subbandNominalBitplanes(nominal_bitplanes, bands[block.band_index].kind);
+        const block_nominal_bitplanes = try bandNominalBitplanesForTransform(
+            nominal_bitplanes,
+            bands[block.band_index].kind,
+            bands[block.band_index].level,
+            options.transform,
+            options.guard_bits,
+        );
         catalog_blocks[index] = try buildRpclShadowBlock(
             allocator,
             &bitplane_scratch,
@@ -5289,8 +5631,26 @@ fn buildRpclShadowBlock(
     options: LosslessOptions,
     include_bitplane_payload: bool,
 ) !RpclShadowBlock {
-    _ = ebcot_scratch;
-    var segment = try encodeCodeBlockSegmentForOptions(allocator, plane, stride, rect, band_kind, options);
+    var segment = switch (options.t1_backend) {
+        .legacy_mq => try ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect),
+        // Hot path: direct ISO MQ encoding with per-worker scratch reuse, no
+        // symbol materialization. Produces the same bytes as the symbol-based
+        // encoder pair (covered by tests).
+        .iso_mq => try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
+            ebcot_scratch,
+            plane,
+            stride,
+            rect,
+            codeBlockStyleForBand(.{
+                .bypass = options.bypass,
+                .reset_context = options.reset_context,
+                .terminate_all = options.terminate_all,
+                .vertical_causal = options.vertical_causal,
+                .predictable_termination = options.predictable_termination,
+                .segmentation_symbols = options.segmentation_symbols,
+            }, band_kind),
+        ),
+    };
     errdefer segment.deinit(allocator);
 
     var bitplane_passes: ?bitplane.EncodedBlockPasses = null;
@@ -5315,6 +5675,7 @@ fn buildRpclShadowBlock(
             .encoded_bitplanes = segment.bitplanes,
             .layers = &.{},
             .payload = segment.bytes,
+            .segments = segment.segments orelse &.{},
         },
     };
 }
@@ -5330,7 +5691,7 @@ fn encodeCodeBlockSegmentForOptions(
     return switch (options.t1_backend) {
         .legacy_mq => ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect),
         .iso_mq => blk: {
-            var block = try ebcot.encodeBlockWithStyle(allocator, plane, stride, rect, .{
+            const style = ebcot.CodeBlockStyle{
                 .band_kind = band_kind,
                 .bypass = options.bypass,
                 .reset_context = options.reset_context,
@@ -5338,14 +5699,19 @@ fn encodeCodeBlockSegmentForOptions(
                 .vertical_causal = options.vertical_causal,
                 .predictable_termination = options.predictable_termination,
                 .segmentation_symbols = options.segmentation_symbols,
-            });
+            };
+            var block = try ebcot.encodeBlockWithStyle(allocator, plane, stride, rect, style);
             defer block.deinit(allocator);
-            break :blk ebcot.encodeBlockSymbolsSegmentIsoMqContinuous(allocator, .{
+            const view = ebcot.EncodedBlockView{
                 .bitplanes = block.bitplanes,
                 .non_zero_count = block.non_zero_count,
                 .passes = block.passes,
                 .symbols = block.symbols,
-            });
+            };
+            break :blk if (style.bypass)
+                ebcot.encodeBlockSymbolsSegmentIsoMqBypass(allocator, view, style)
+            else
+                ebcot.encodeBlockSymbolsSegmentIsoMqContinuous(allocator, view);
         },
     };
 }
@@ -5416,6 +5782,31 @@ fn normalizedLayerTruncation(
             .cumulative_passes = segment.pass_count,
             .cumulative_bytes = segment.byte_length,
         };
+    }
+
+    if (segment.segments) |segments| {
+        // BYPASS payloads consist of independently terminated codeword
+        // segments; quality layers may only truncate on segment boundaries,
+        // so snap the requested pass count down to the nearest boundary.
+        var cumulative_passes: u16 = 0;
+        var cumulative_bytes: u64 = 0;
+        var best = previous;
+        for (segments) |span| {
+            cumulative_passes = std.math.add(u16, cumulative_passes, span.pass_count) catch
+                return CodestreamError.InvalidCodestream;
+            cumulative_bytes = try std.math.add(u64, cumulative_bytes, span.byte_length);
+            if (cumulative_passes > requested_passes) break;
+            if (cumulative_passes > previous.cumulative_passes and
+                cumulative_bytes > previous.cumulative_bytes and
+                cumulative_bytes < segment.byte_length)
+            {
+                best = .{
+                    .cumulative_passes = cumulative_passes,
+                    .cumulative_bytes = cumulative_bytes,
+                };
+            }
+        }
+        return best;
     }
 
     var passes = @min(requested_passes, segment.pass_count);
@@ -5727,6 +6118,21 @@ fn prepareRpclPacketGroup(
             block.previous,
             block.current,
         );
+        if (block.segments.len > 0 and packet_blocks[index].included) {
+            var segment_passes: u16 = 0;
+            var segment_bytes: u64 = 0;
+            for (block.segments) |segment| {
+                segment_passes = std.math.add(u16, segment_passes, segment.pass_count) catch
+                    return CodestreamError.InvalidCodestream;
+                segment_bytes = try std.math.add(u64, segment_bytes, segment.byte_length);
+            }
+            if (segment_passes != packet_blocks[index].pass_count or
+                segment_bytes != packet_blocks[index].byte_length)
+            {
+                return CodestreamError.InvalidCodestream;
+            }
+            packet_blocks[index].segments = block.segments;
+        }
         payload_slices[index] = try t2.layerPayloadSlice(block.payload, block.previous, block.current);
         if (packet_blocks[index].included) {
             if (payload_slices[index].len != packet_blocks[index].byte_length) return CodestreamError.InvalidCodestream;
@@ -6278,11 +6684,18 @@ fn validateTilePartDivisions(value: ?u8) !void {
 
 fn validateCodingPath(options: LosslessOptions) !void {
     if (options.progression != .rpcl) return CodestreamError.UnsupportedPayload;
-    if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
-    if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
-    if (options.quantization != .none) return CodestreamError.UnsupportedPayload;
-    if (options.bypass or
-        options.reset_context or
+    switch (options.transform) {
+        .reversible_5_3 => {
+            if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
+            if (options.quantization != .none) return CodestreamError.UnsupportedPayload;
+        },
+        .irreversible_9_7 => {
+            if (options.mct != .ict) return CodestreamError.UnsupportedPayload;
+            if (options.quantization != .scalar_expounded) return CodestreamError.UnsupportedPayload;
+            if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
+        },
+    }
+    if (options.reset_context or
         options.terminate_all or
         options.vertical_causal or
         options.predictable_termination or
@@ -6290,7 +6703,13 @@ fn validateCodingPath(options: LosslessOptions) !void {
     {
         return CodestreamError.UnsupportedPayload;
     }
-    if (options.guard_bits > 7) return CodestreamError.InvalidCodestream;
+    if (options.bypass) {
+        // BYPASS requires the ISO MQ backend; quality layers and rates are
+        // supported with truncation points snapped to segment boundaries.
+        if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
+        if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
+    }
+    if (options.guard_bits == 0 or options.guard_bits > 7) return CodestreamError.InvalidCodestream;
 }
 
 fn isValidBlockEdge(value: u16) bool {
@@ -6340,7 +6759,9 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
 
 fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
     const parsed = ebcot.CodeBlockStyle.fromCodByte(style) orelse return CodestreamError.InvalidCodestream;
-    if (parsed.toCodByte() != 0) return CodestreamError.UnsupportedPayload;
+    // BYPASS (0x01) is implemented end-to-end; the remaining style bits stay
+    // fail-closed until their payload behavior is wired.
+    if ((parsed.toCodByte() & ~@as(u8, 0x01)) != 0) return CodestreamError.UnsupportedPayload;
     return parsed;
 }
 
@@ -6349,13 +6770,26 @@ fn qcdStyleByte(options: LosslessOptions) u8 {
 }
 
 fn qcdReversibleExponentByteForBand(bit_depth: u8, kind: subband.Kind) !u8 {
-    return (try subbandNominalBitplanes(bit_depth, kind)) << 3;
+    return (try subbandExponent(bit_depth, kind)) << 3;
 }
 
-fn subbandNominalBitplanes(bit_depth: u8, kind: subband.Kind) !u8 {
+/// QCD subband exponent epsilon_b for the reversible no-quantization path.
+fn subbandExponent(bit_depth: u8, kind: subband.Kind) !u8 {
     const gain = subbandGain(kind);
     if (bit_depth == 0 or bit_depth > 31 - gain) return CodestreamError.InvalidCodestream;
     return bit_depth + gain;
+}
+
+/// ISO/IEC 15444-1 E-2: Mb = G + epsilon_b - 1, where epsilon_b is the QCD
+/// subband exponent (bit_depth + gain for the reversible no-quantization
+/// path) and G is the guard bit count. Zero-bitplane tag-tree values must be
+/// relative to this Mb, or independent decoders reconstruct shifted
+/// magnitudes.
+fn subbandNominalBitplanes(bit_depth: u8, kind: subband.Kind, guard_bits: u8) !u8 {
+    if (guard_bits == 0) return CodestreamError.InvalidCodestream;
+    const total = @as(u16, try subbandExponent(bit_depth, kind)) + guard_bits - 1;
+    if (total > 31) return CodestreamError.InvalidCodestream;
+    return @intCast(total);
 }
 
 fn subbandGain(kind: subband.Kind) u8 {
@@ -6364,4 +6798,81 @@ fn subbandGain(kind: subband.Kind) u8 {
         .hl, .lh => 1,
         .hh => 2,
     };
+}
+
+/// L2 norms of the 9/7 synthesis basis per orientation and decomposition
+/// level, matching OpenJPEG's opj_dwt_norms_real so default quantization step
+/// sizes line up with the reference encoder.
+const dwt97_norms = [4][10]f64{
+    .{ 1.000, 1.965, 4.177, 8.403, 16.90, 33.84, 67.69, 135.3, 270.6, 540.9 },
+    .{ 2.022, 3.989, 8.355, 17.04, 34.27, 68.63, 137.3, 274.6, 549.0, 549.0 },
+    .{ 2.022, 3.989, 8.355, 17.04, 34.27, 68.63, 137.3, 274.6, 549.0, 549.0 },
+    .{ 2.080, 3.865, 8.307, 17.18, 34.71, 69.59, 139.3, 278.6, 557.2, 557.2 },
+};
+
+pub const BandStepSize = struct {
+    exponent: u8,
+    mantissa: u16,
+};
+
+fn dwt97Norm(level: usize, orient: usize) f64 {
+    const clamped = if (orient == 0) @min(level, 9) else @min(level, 8);
+    return dwt97_norms[orient][clamped];
+}
+
+/// Default scalar-expounded step size for the irreversible 9/7 path,
+/// mirroring OpenJPEG's opj_dwt_calc_explicit_stepsizes with qmfbid == 0
+/// (gain 0 for every band).
+fn irreversibleBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8) !BandStepSize {
+    // z2000 band levels count down from the total level count; OpenJPEG's
+    // "level" is the decomposition depth of the band.
+    const opj_level: usize = if (kind == .ll) band_level else @as(usize, band_level) - 1;
+    const orient: usize = switch (kind) {
+        .ll => 0,
+        .hl => 1,
+        .lh => 2,
+        .hh => 3,
+    };
+    const stepsize = 1.0 / dwt97Norm(opj_level, orient);
+    const fixed: i32 = @intFromFloat(@floor(stepsize * 8192.0));
+    if (fixed <= 0) return CodestreamError.InvalidCodestream;
+    const log2_fixed: i32 = @as(i32, std.math.log2_int(u32, @intCast(fixed)));
+    const p = log2_fixed - 13;
+    const n = 11 - log2_fixed;
+    const mant: u16 = @intCast((if (n < 0)
+        fixed >> @intCast(-n)
+    else
+        fixed << @intCast(n)) & 0x7ff);
+    const expn = @as(i32, bit_depth) - p;
+    if (expn <= 0 or expn > 31) return CodestreamError.InvalidCodestream;
+    return .{ .exponent = @intCast(expn), .mantissa = mant };
+}
+
+/// Reconstruction step size delta_b from an (exponent, mantissa) pair per
+/// ISO/IEC 15444-1 E-3 with R_b = bit_depth + Table E-1 subband gain (E-4).
+/// The encoder-side (epsilon, mu) derivation folds the gain out again, so the
+/// wire values match OpenJPEG while the effective step includes the gain.
+fn irreversibleBandDelta(bit_depth: u8, kind: subband.Kind, step: BandStepSize) f64 {
+    const rb = @as(i32, bit_depth) + @as(i32, subbandGain(kind));
+    const exponent_diff = rb - @as(i32, step.exponent);
+    const base = std.math.pow(f64, 2.0, @floatFromInt(exponent_diff));
+    return base * (1.0 + @as(f64, @floatFromInt(step.mantissa)) / 2048.0);
+}
+
+/// Mb for a band under either coding path: guard + epsilon_b - 1.
+fn bandNominalBitplanesForTransform(
+    bit_depth: u8,
+    kind: subband.Kind,
+    band_level: u8,
+    transform: WaveletTransform,
+    guard_bits: u8,
+) !u8 {
+    if (guard_bits == 0) return CodestreamError.InvalidCodestream;
+    const epsilon: u16 = switch (transform) {
+        .reversible_5_3 => try subbandExponent(bit_depth, kind),
+        .irreversible_9_7 => (try irreversibleBandStepSize(bit_depth, kind, band_level)).exponent,
+    };
+    const total = epsilon + @as(u16, guard_bits) - 1;
+    if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
+    return @intCast(total);
 }

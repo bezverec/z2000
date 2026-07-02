@@ -393,6 +393,8 @@ test "T2 block packet header roundtrips first inclusion metadata" {
         0,
         false,
         8,
+        false,
+        0,
     );
     try reader.byteAlign();
     try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
@@ -451,6 +453,8 @@ test "T2 block packet header roundtrips continued block metadata" {
         0,
         true,
         8,
+        false,
+        0,
     );
     try reader.byteAlign();
     try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
@@ -528,6 +532,7 @@ test "T2 precinct packet header roundtrips first and continued layers" {
         0,
         locations[0..],
         8,
+        false,
         decoded[0..],
     ));
     try first_reader.byteAlign();
@@ -553,6 +558,7 @@ test "T2 precinct packet header roundtrips first and continued layers" {
         1,
         locations[0..],
         8,
+        false,
         decoded[0..],
     ));
     try second_reader.byteAlign();
@@ -1078,6 +1084,7 @@ test "T2 single block packet header carries EBCOT layer payload deltas" {
         0,
         &[_]t2.PacketBlockLocation{.{ .leaf_x = 0, .leaf_y = 0 }},
         8,
+        false,
         decoded[0..],
     ));
     try reader.byteAlign();
@@ -1107,6 +1114,7 @@ test "T2 single block packet header carries EBCOT layer payload deltas" {
         1,
         &[_]t2.PacketBlockLocation{.{ .leaf_x = 0, .leaf_y = 0 }},
         8,
+        false,
         decoded[0..],
     ));
     try reader.byteAlign();
@@ -1263,6 +1271,7 @@ test "T2 precinct layer packet assembles multiple EBCOT payload slices" {
         0,
         locations[0..],
         8,
+        false,
         decoded[0..],
         payloads[0..],
     );
@@ -1287,6 +1296,7 @@ test "T2 precinct layer packet assembles multiple EBCOT payload slices" {
         1,
         locations[0..],
         8,
+        false,
         decoded[0..],
         payloads[0..],
     );
@@ -1373,6 +1383,7 @@ test "T2 precinct layer reader rolls back state on truncated payload" {
             0,
             &[_]t2.PacketBlockLocation{.{ .leaf_x = 0, .leaf_y = 0 }},
             8,
+            false,
             decoded[0..],
             payloads[0..],
         ),
@@ -2400,7 +2411,9 @@ test "RCT transform matches JPEG2000 reversible equations" {
     var planes = try color.forwardRct(allocator, rgb);
     defer planes.deinit();
 
-    try std.testing.expectEqual(@as(i32, 20), planes.y[0]);
+    // Y carries the ISO B.1.1 DC level shift (-2^(Ssiz-1)); Cb/Cr are
+    // component differences, so the shift cancels there.
+    try std.testing.expectEqual(@as(i32, 20 - 128), planes.y[0]);
     try std.testing.expectEqual(@as(i32, 10), planes.cb[0]);
     try std.testing.expectEqual(@as(i32, -10), planes.cr[0]);
 
@@ -3225,17 +3238,19 @@ test "EBCOT zero coding context follows subband orientation" {
 
     var ll = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 2, rect, .{ .band_kind = .ll });
     defer ll.deinit(allocator);
-    var lh = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 2, rect, .{ .band_kind = .lh });
-    defer lh.deinit(allocator);
+    var hl = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 2, rect, .{ .band_kind = .hl });
+    defer hl.deinit(allocator);
     var hh = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 2, rect, .{ .band_kind = .hh });
     defer hh.deinit(allocator);
 
     const ll_sig = ll.symbols[ll.passes[1].first_symbol..][0..ll.passes[1].symbol_count];
-    const lh_sig = lh.symbols[lh.passes[1].first_symbol..][0..lh.passes[1].symbol_count];
+    const hl_sig = hl.symbols[hl.passes[1].first_symbol..][0..hl.passes[1].symbol_count];
     const hh_sig = hh.symbols[hh.passes[1].first_symbol..][0..hh.passes[1].symbol_count];
 
+    // ISO Table D.1: HL swaps H/V neighbor roles; LL and LH share the plain
+    // table.
     try std.testing.expectEqual(ebcot.Context.zero5, ll_sig[0].context);
-    try std.testing.expectEqual(ebcot.Context.zero3, lh_sig[0].context);
+    try std.testing.expectEqual(ebcot.Context.zero3, hl_sig[0].context);
     try std.testing.expectEqual(ebcot.Context.zero1, hh_sig[0].context);
 }
 
@@ -4572,7 +4587,10 @@ test "ISO MQ no-sidecar codestream decodes from strict SOD packets" {
         .samples = samples,
     };
 
-    const legacy = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    const legacy = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .t1_backend = .legacy_mq,
+    });
     defer allocator.free(legacy);
     const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
         .levels = 2,
@@ -4628,6 +4646,322 @@ test "ISO MQ debug sidecar validates against strict SOD packets" {
     var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .t1_backend = .iso_mq });
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
+test "irreversible 9/7 ICT codestream roundtrips within lossy tolerance" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = row * width + col;
+            samples[i * 3 + 0] = @intCast((col * 4) % 256);
+            samples[i * 3 + 1] = @intCast((row * 4) % 256);
+            samples[i * 3 + 2] = @intCast((col * 2 + row * 2) % 256);
+        }
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+    });
+    defer allocator.free(bytes);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(rgb.width, decoded.width);
+    try std.testing.expectEqual(rgb.height, decoded.height);
+
+    var max_diff: i32 = 0;
+    var sum_sq: u64 = 0;
+    for (samples, decoded.samples) |expected, actual| {
+        const diff = @as(i32, expected) - @as(i32, actual);
+        max_diff = @max(max_diff, @as(i32, @intCast(@abs(diff))));
+        sum_sq += @as(u64, @intCast(diff * diff));
+    }
+    // Default step sizes follow the OpenJPEG explicit table, so the smooth
+    // gradient should reconstruct within a few code values.
+    try std.testing.expect(max_diff <= 8);
+    const mse = @as(f64, @floatFromInt(sum_sq)) / @as(f64, @floatFromInt(samples.len));
+    try std.testing.expect(mse < 4.0);
+}
+
+test "lossy options fail closed for inconsistent combinations" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .transform = .irreversible_9_7,
+        .mct = .rct,
+        .quantization = .scalar_expounded,
+    }));
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .none,
+    }));
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .transform = .reversible_5_3,
+        .mct = .ict,
+        .quantization = .none,
+    }));
+}
+
+test "direct ISO segment encoder matches the symbol-based encoder byte for byte" {
+    const allocator = std.testing.allocator;
+    const w = 32;
+    const h = 32;
+    var plane: [w * h]i32 = undefined;
+
+    var scratch = ebcot.DirectBlockScratch.init(allocator);
+    defer scratch.deinit();
+
+    var seed: u32 = 77;
+    const kinds = [_]subband.Kind{ .ll, .hl, .lh, .hh };
+    const bypass_modes = [_]bool{ false, true };
+    for (kinds) |kind| {
+        for (bypass_modes) |bypass| {
+            for (&plane) |*value| {
+                seed = seed *% 1664525 +% 1013904223;
+                const magnitude: i32 = @intCast((seed >> 7) & 0x3ff);
+                value.* = if ((seed & 1) == 1) -magnitude else magnitude;
+            }
+            const style = ebcot.CodeBlockStyle{ .band_kind = kind, .bypass = bypass };
+            const rect = subband.Rect{ .x = 0, .y = 0, .width = w, .height = h };
+
+            var block = try ebcot.encodeBlockWithStyle(allocator, &plane, w, rect, style);
+            defer block.deinit(allocator);
+            const view = ebcot.EncodedBlockView{
+                .bitplanes = block.bitplanes,
+                .non_zero_count = block.non_zero_count,
+                .passes = block.passes,
+                .symbols = block.symbols,
+            };
+            var expected = if (bypass)
+                try ebcot.encodeBlockSymbolsSegmentIsoMqBypass(allocator, view, style)
+            else
+                try ebcot.encodeBlockSymbolsSegmentIsoMqContinuous(allocator, view);
+            defer expected.deinit(allocator);
+
+            var actual = try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(&scratch, &plane, w, rect, style);
+            defer actual.deinit(allocator);
+
+            try std.testing.expectEqual(expected.bitplanes, actual.bitplanes);
+            try std.testing.expectEqual(expected.pass_count, actual.pass_count);
+            try std.testing.expectEqualSlices(u8, expected.bytes, actual.bytes);
+            if (bypass) {
+                const expected_segments = expected.segments orelse return error.TestUnexpectedResult;
+                const actual_segments = actual.segments orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqualSlices(ebcot.SegmentSpan, expected_segments, actual_segments);
+            } else {
+                try std.testing.expectEqual(@as(?[]ebcot.SegmentSpan, null), actual.segments);
+            }
+        }
+    }
+}
+
+test "rate-driven layers work on the irreversible 9/7 path" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = row * width + col;
+            samples[i * 3 + 0] = @intCast((col * 4) % 256);
+            samples[i * 3 + 1] = @intCast((row * 4) % 256);
+            samples[i * 3 + 2] = @intCast((col * 2 + row * 2) % 256);
+        }
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = codestream.LosslessOptions{
+        .levels = 3,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+        .bypass = true,
+    };
+    const rates = [_]f64{ 100, 50, 20, 8 };
+    @memcpy(options.rates[0..rates.len], &rates);
+    options.rate_count = rates.len;
+    options.layers = rates.len;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(u16, 4), stats.layers);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
+    defer decoded.deinit();
+    var max_diff: i32 = 0;
+    for (samples, decoded.samples) |expected, actual| {
+        const diff = @as(i32, expected) - @as(i32, actual);
+        max_diff = @max(max_diff, @as(i32, @intCast(@abs(diff))));
+    }
+    try std.testing.expect(max_diff <= 8);
+}
+
+test "multi-layer BYPASS codestream roundtrips losslessly (NDK MC style)" {
+    const allocator = std.testing.allocator;
+    const width = 96;
+    const height = 96;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    var seed: u32 = 777;
+    for (samples) |*sample| {
+        seed = seed *% 1664525 +% 1013904223;
+        sample.* = @intCast((seed >> 16) & 0xff);
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    // Plain 12 layers with even pass allocation snapped to segment ends.
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+        .layers = 12,
+        .bypass = true,
+    });
+    defer allocator.free(bytes);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(u16, 12), stats.layers);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+
+    // Rate-driven layering (NDK MC style compression ratios) with bypass.
+    var rated_options = codestream.LosslessOptions{
+        .levels = 3,
+        .bypass = true,
+    };
+    const ndk_rates = [_]f64{ 362, 256, 181, 128, 90, 64, 45, 32, 22, 16, 11, 8 };
+    @memcpy(rated_options.rates[0..ndk_rates.len], &ndk_rates);
+    rated_options.rate_count = ndk_rates.len;
+    rated_options.layers = ndk_rates.len;
+
+    const rated = try codestream.encodeLosslessWithOptions(allocator, rgb, rated_options);
+    defer allocator.free(rated);
+    var rated_decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, rated, .{});
+    defer rated_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, rated_decoded.samples);
+}
+
+test "BYPASS codestream roundtrips losslessly through strict SOD packets" {
+    const allocator = std.testing.allocator;
+    const width = 96;
+    const height = 96;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    var seed: u32 = 424242;
+    for (samples) |*sample| {
+        seed = seed *% 1664525 +% 1013904223;
+        sample.* = @intCast((seed >> 16) & 0xff);
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+        .bypass = true,
+    });
+    defer allocator.free(bytes);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+
+    // The same content without bypass must produce a different codestream
+    // (COD style byte plus segment layout).
+    const plain = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+    });
+    defer allocator.free(plain);
+    try std.testing.expect(!std.mem.eql(u8, bytes, plain));
+}
+
+test "BYPASS T1 segments roundtrip through the segment coder pair" {
+    const allocator = std.testing.allocator;
+    const w = 32;
+    const h = 32;
+    var plane: [w * h]i32 = undefined;
+    var seed: u32 = 12345;
+    for (&plane) |*value| {
+        seed = seed *% 1664525 +% 1013904223;
+        const magnitude: i32 = @intCast((seed >> 8) & 0x1ff);
+        value.* = if ((seed & 1) == 1) -magnitude else magnitude;
+    }
+
+    const style = ebcot.CodeBlockStyle{ .band_kind = .hh, .bypass = true };
+    var block = try ebcot.encodeBlockWithStyle(allocator, &plane, w, .{ .x = 0, .y = 0, .width = w, .height = h }, style);
+    defer block.deinit(allocator);
+    var segment = try ebcot.encodeBlockSymbolsSegmentIsoMqBypass(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    }, style);
+    defer segment.deinit(allocator);
+
+    const segments = segment.segments orelse return error.TestUnexpectedResult;
+    try std.testing.expect(segments.len > 1);
+    var lengths: [ebcot.max_block_segments]u64 = undefined;
+    for (segments, 0..) |span, index| lengths[index] = span.byte_length;
+
+    var scratch = ebcot.DecodeBlockScratch.init(allocator);
+    defer scratch.deinit();
+    const decoded = try ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
+        &scratch,
+        segment.bitplanes,
+        segment.pass_count,
+        segment.bytes,
+        lengths[0..segments.len],
+        w,
+        h,
+        style,
+    );
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, &plane, decoded);
 }
 
 test "ISO MQ multi-layer codestream decodes from strict SOD packets" {
@@ -6334,7 +6668,6 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "zero layers", .offset = 7, .value = 0, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported MCT", .offset = 8, .value = 2, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
-        .{ .label = "unsupported BYPASS code-block style", .offset = 12, .value = 0x01, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported RESET code-block style", .offset = 12, .value = 0x02, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported TERMALL code-block style", .offset = 12, .value = 0x04, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported CAUSAL code-block style", .offset = 12, .value = 0x08, .expected = codestream.CodestreamError.UnsupportedPayload },
@@ -6482,7 +6815,7 @@ test "unsupported code-block style options fail closed" {
         options: codestream.LosslessOptions,
     };
     const cases = [_]UnsupportedCase{
-        .{ .label = "BYPASS", .options = .{ .bypass = true } },
+        .{ .label = "BYPASS+legacy", .options = .{ .bypass = true, .t1_backend = .legacy_mq } },
         .{ .label = "RESET", .options = .{ .reset_context = true } },
         .{ .label = "TERMALL", .options = .{ .terminate_all = true } },
         .{ .label = "CAUSAL", .options = .{ .vertical_causal = true } },

@@ -27,7 +27,8 @@ const dwt97_alpha: f32 = -1.586134342059924;
 const dwt97_beta: f32 = -0.052980118572961;
 const dwt97_gamma: f32 = 0.882911075530934;
 const dwt97_delta: f32 = 0.443506852043971;
-const dwt97_k: f32 = 1.1496043988602418;
+// ISO/IEC 15444-1 F.4.8.2 / OpenJPEG: lowpass scales by 1/K, highpass by K.
+const dwt97_k: f32 = 1.230174104914001;
 const dwt97_inv_k: f32 = 1.0 / dwt97_k;
 const F32PairVector = @Vector(simd.f32_pair_lanes, f32);
 
@@ -54,16 +55,18 @@ pub fn forward2D(
     var done: u8 = 0;
 
     while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
-        for (0..cur_height) |row| {
-            for (0..cur_width) |col| line[col] = data[row * width + col];
-            forward1D(line[0..cur_width], scratch[0..cur_width], wavelet);
-            for (0..cur_width) |col| data[row * width + col] = line[col];
-        }
-
+        // ISO/IEC 15444-1 F.4.8: forward transform filters vertically first,
+        // then horizontally, matching independent codecs.
         for (0..cur_width) |col| {
             for (0..cur_height) |row| line[row] = data[row * width + col];
             forward1D(line[0..cur_height], scratch[0..cur_height], wavelet);
             for (0..cur_height) |row| data[row * width + col] = line[row];
+        }
+
+        for (0..cur_height) |row| {
+            for (0..cur_width) |col| line[col] = data[row * width + col];
+            forward1D(line[0..cur_width], scratch[0..cur_width], wavelet);
+            for (0..cur_width) |col| data[row * width + col] = line[col];
         }
 
         cur_width = lowCount(cur_width);
@@ -108,16 +111,17 @@ pub fn inverse2D(
         level -= 1;
         const shape = shapes[level];
 
-        for (0..shape.width) |col| {
-            for (0..shape.height) |row| line[row] = data[row * width + col];
-            inverse1D(line[0..shape.height], scratch[0..shape.height], wavelet);
-            for (0..shape.height) |row| data[row * width + col] = line[row];
-        }
-
+        // Mirror of the ISO forward order: horizontal first, then vertical.
         for (0..shape.height) |row| {
             for (0..shape.width) |col| line[col] = data[row * width + col];
             inverse1D(line[0..shape.width], scratch[0..shape.width], wavelet);
             for (0..shape.width) |col| data[row * width + col] = line[col];
+        }
+
+        for (0..shape.width) |col| {
+            for (0..shape.height) |row| line[row] = data[row * width + col];
+            inverse1D(line[0..shape.height], scratch[0..shape.height], wavelet);
+            for (0..shape.height) |row| data[row * width + col] = line[row];
         }
     }
 }
@@ -182,7 +186,7 @@ fn forward97(data: []f32, scratch: []f32) void {
     liftOdd(data, dwt97_gamma);
     liftEven(data, dwt97_delta);
 
-    scaleEvenOdd(data, dwt97_k, dwt97_inv_k);
+    scaleEvenOdd(data, dwt97_inv_k, dwt97_k);
 
     packEvenOdd(data, scratch);
 }
@@ -190,7 +194,7 @@ fn forward97(data: []f32, scratch: []f32) void {
 fn inverse97(data: []f32, scratch: []f32) void {
     unpackEvenOdd(data, scratch);
 
-    scaleEvenOdd(data, dwt97_inv_k, dwt97_k);
+    scaleEvenOdd(data, dwt97_k, dwt97_inv_k);
 
     liftEven(data, -dwt97_delta);
     liftOdd(data, -dwt97_gamma);

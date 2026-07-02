@@ -1,6 +1,7 @@
 const std = @import("std");
 const packet_plan = @import("packet_plan.zig");
 const subband = @import("subband.zig");
+const ebcot = @import("ebcot.zig");
 
 pub const PacketHeaderError = error{
     InvalidPacketHeader,
@@ -8,6 +9,35 @@ pub const PacketHeaderError = error{
     InvalidMarkerStuffing,
     TruncatedHeader,
 };
+
+pub const SegmentSpan = ebcot.SegmentSpan;
+pub const max_block_segments = ebcot.max_block_segments;
+
+/// Split the coding passes a packet contributes to one code-block into
+/// terminated codeword segments for BYPASS mode. Absolute pass positions
+/// determine the boundaries: passes 0..9 form the first MQ segment, then raw
+/// (significance + refinement) pairs alternate with single MQ cleanup passes
+/// (ISO B.10.7.2 / opj_t2_init_seg).
+pub fn bypassSegmentPassCounts(first_pass: u16, new_passes: u16, out: *[max_block_segments]u16) !u8 {
+    var count: u8 = 0;
+    var pass = first_pass;
+    var remaining = new_passes;
+    while (remaining > 0) {
+        if (count >= max_block_segments) return PacketHeaderError.InvalidPacketHeader;
+        const capacity: u16 = if (pass < 10)
+            10 - pass
+        else switch ((pass - 10) % 3) {
+            0 => 2,
+            else => 1,
+        };
+        const take = @min(remaining, capacity);
+        out[count] = take;
+        count += 1;
+        pass += take;
+        remaining -= take;
+    }
+    return count;
+}
 
 const TagTreeLevel = struct {
     start: usize,
@@ -437,7 +467,67 @@ pub const SegmentLengthState = struct {
         if (bits > 63) return PacketHeaderError.InvalidPacketHeader;
         return @intCast(bits);
     }
+
+    /// Multi-segment length signalling (ISO B.10.7.2): one shared Lblock
+    /// increment comma code, then one length per terminated segment coded
+    /// with lblock + floor(log2(segment passes)) bits.
+    pub fn writeSegments(
+        self: *SegmentLengthState,
+        writer: *PacketHeaderWriter,
+        segments: []const SegmentSpan,
+    ) !void {
+        if (segments.len == 0) return PacketHeaderError.InvalidPacketHeader;
+        var increment: u16 = 0;
+        for (segments) |segment| {
+            if (segment.byte_length == 0) return PacketHeaderError.InvalidPacketHeader;
+            const extra_bits = try passCountLengthBits(segment.pass_count);
+            const available = @as(u16, self.lblock) + @as(u16, extra_bits);
+            const needed = bitsToRepresent(segment.byte_length);
+            if (needed > available) increment = @max(increment, needed - available);
+        }
+        if (@as(u16, self.lblock) + increment > 63) return PacketHeaderError.InvalidPacketHeader;
+        var written: u16 = 0;
+        while (written < increment) : (written += 1) {
+            try writer.writeBit(true);
+        }
+        try writer.writeBit(false);
+        self.lblock += @intCast(increment);
+        for (segments) |segment| {
+            const extra_bits = try passCountLengthBits(segment.pass_count);
+            try writer.writeBits(segment.byte_length, try self.lengthBitCount(extra_bits));
+        }
+    }
+
+    /// Multi-segment read mirror of writeSegments; span_pass_counts carries
+    /// the per-segment pass counts derived from the coding mode.
+    pub fn readSegments(
+        self: *SegmentLengthState,
+        reader: *PacketHeaderReader,
+        span_pass_counts: []const u16,
+        out_lengths: []u64,
+    ) !u64 {
+        if (span_pass_counts.len == 0 or out_lengths.len < span_pass_counts.len) {
+            return PacketHeaderError.InvalidPacketHeader;
+        }
+        while (try reader.readBit()) {
+            if (self.lblock == 63) return PacketHeaderError.InvalidPacketHeader;
+            self.lblock += 1;
+        }
+        var total: u64 = 0;
+        for (span_pass_counts, 0..) |pass_count, index| {
+            const extra_bits = try passCountLengthBits(pass_count);
+            const length = try reader.readBits(try self.lengthBitCount(extra_bits));
+            out_lengths[index] = length;
+            total = try std.math.add(u64, total, length);
+        }
+        return total;
+    }
 };
+
+fn bitsToRepresent(value: u64) u16 {
+    if (value == 0) return 1;
+    return @intCast(64 - @clz(value));
+}
 
 pub const PacketBlock = struct {
     leaf_x: usize,
@@ -447,6 +537,9 @@ pub const PacketBlock = struct {
     zero_bitplanes: u8 = 0,
     pass_count: u16 = 0,
     byte_length: u64 = 0,
+    /// Terminated codeword segments contributed by this packet (BYPASS);
+    /// empty means one continuous segment.
+    segments: []const SegmentSpan = &.{},
 };
 
 pub const PacketBlockLocation = struct {
@@ -526,6 +619,10 @@ pub const DecodedPacketBlock = struct {
     zero_bitplanes: u8,
     pass_count: u16,
     byte_length: u64,
+    /// Per-segment byte lengths when the code-block uses BYPASS-style
+    /// terminated segments; segment_count == 0 means one continuous segment.
+    segment_count: u8 = 0,
+    segment_lengths: [max_block_segments]u64 = [_]u64{0} ** max_block_segments,
 };
 
 pub const LayerTruncation = struct {
@@ -547,6 +644,7 @@ pub const LayerPacketBlock = struct {
     previous: LayerTruncation,
     current: LayerTruncation,
     payload: []const u8,
+    segments: []const SegmentSpan = &.{},
 };
 
 pub const EncodedLayerBlock = struct {
@@ -555,6 +653,7 @@ pub const EncodedLayerBlock = struct {
     encoded_bitplanes: u8,
     layers: []const LayerTruncation,
     payload: []const u8,
+    segments: []const SegmentSpan = &.{},
 };
 
 pub const WrittenPacket = struct {
@@ -701,6 +800,7 @@ pub const PrecinctPacketReaderState = struct {
     next_sequence: ?u64 = null,
     precinct_x: ?u32 = null,
     precinct_y: ?u32 = null,
+    bypass: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, leaves_x: usize, leaves_y: usize, block_count: usize) !PrecinctPacketReaderState {
         var inclusion = try TagTreeDecoder.init(allocator, leaves_x, leaves_y);
@@ -779,6 +879,7 @@ pub const PrecinctPacketReaderState = struct {
             packet.layer,
             locations,
             max_zero_bitplanes,
+            self.bypass,
             decoded,
             payloads,
         );
@@ -1001,17 +1102,54 @@ pub fn collectRpclCodeBlockIndexes(
 
 pub fn layerPacketBlockFor(encoded: EncodedLayerBlock, layer_index: usize) !LayerPacketBlock {
     if (layer_index >= encoded.layers.len) return PacketHeaderError.InvalidPacketHeader;
+    const previous: LayerTruncation = if (layer_index == 0)
+        .{ .cumulative_passes = 0, .cumulative_bytes = 0 }
+    else
+        encoded.layers[layer_index - 1];
+    const current = encoded.layers[layer_index];
     return .{
         .location = encoded.location,
         .nominal_bitplanes = encoded.nominal_bitplanes,
         .encoded_bitplanes = encoded.encoded_bitplanes,
-        .previous = if (layer_index == 0)
-            .{ .cumulative_passes = 0, .cumulative_bytes = 0 }
-        else
-            encoded.layers[layer_index - 1],
-        .current = encoded.layers[layer_index],
+        .previous = previous,
+        .current = current,
         .payload = encoded.payload,
+        .segments = if (encoded.segments.len > 0)
+            try sliceSegmentsForLayer(encoded.segments, previous, current)
+        else
+            &.{},
     };
+}
+
+/// Slice a block's terminated-segment table down to the segments a layer
+/// contributes. Both layer boundaries must sit exactly on segment
+/// boundaries (guaranteed by the segment-snapping rate allocation).
+fn sliceSegmentsForLayer(
+    segments: []const SegmentSpan,
+    previous: LayerTruncation,
+    current: LayerTruncation,
+) ![]const SegmentSpan {
+    var cumulative_passes: u16 = 0;
+    var cumulative_bytes: u64 = 0;
+    var start: usize = 0;
+    while (start < segments.len and cumulative_passes < previous.cumulative_passes) : (start += 1) {
+        cumulative_passes = std.math.add(u16, cumulative_passes, segments[start].pass_count) catch
+            return PacketHeaderError.InvalidPacketHeader;
+        cumulative_bytes = try std.math.add(u64, cumulative_bytes, segments[start].byte_length);
+    }
+    if (cumulative_passes != previous.cumulative_passes or cumulative_bytes != previous.cumulative_bytes) {
+        return PacketHeaderError.InvalidPacketHeader;
+    }
+    var end = start;
+    while (end < segments.len and cumulative_passes < current.cumulative_passes) : (end += 1) {
+        cumulative_passes = std.math.add(u16, cumulative_passes, segments[end].pass_count) catch
+            return PacketHeaderError.InvalidPacketHeader;
+        cumulative_bytes = try std.math.add(u64, cumulative_bytes, segments[end].byte_length);
+    }
+    if (cumulative_passes != current.cumulative_passes or cumulative_bytes != current.cumulative_bytes) {
+        return PacketHeaderError.InvalidPacketHeader;
+    }
+    return segments[start..end];
 }
 
 pub fn layerPacketBlocksForIndexes(
@@ -1086,6 +1224,21 @@ pub fn appendPrecinctLayerPacket(
             block.previous,
             block.current,
         );
+        if (block.segments.len > 0 and packet_blocks[index].included) {
+            var segment_passes: u16 = 0;
+            var segment_bytes: u64 = 0;
+            for (block.segments) |segment| {
+                segment_passes = std.math.add(u16, segment_passes, segment.pass_count) catch
+                    return PacketHeaderError.InvalidPacketHeader;
+                segment_bytes = try std.math.add(u64, segment_bytes, segment.byte_length);
+            }
+            if (segment_passes != packet_blocks[index].pass_count or
+                segment_bytes != packet_blocks[index].byte_length)
+            {
+                return PacketHeaderError.InvalidPacketHeader;
+            }
+            packet_blocks[index].segments = block.segments;
+        }
         payload_slices[index] = try layerPayloadSlice(block.payload, block.previous, block.current);
         if (packet_blocks[index].included) {
             if (payload_slices[index].len != packet_blocks[index].byte_length) {
@@ -1134,6 +1287,7 @@ pub fn readPrecinctLayerPacket(
     layer: u32,
     locations: []const PacketBlockLocation,
     max_zero_bitplanes: u8,
+    bypass: bool,
     decoded: []DecodedPacketBlock,
     payloads: []?[]const u8,
 ) !ReadPacket {
@@ -1166,6 +1320,7 @@ pub fn readPrecinctLayerPacket(
         layer,
         locations,
         max_zero_bitplanes,
+        bypass,
         decoded,
     );
     try reader.byteAlign();
@@ -1213,7 +1368,11 @@ pub fn writeCodeBlockPacketHeader(
     }
 
     try writeCodingPassCount(writer, block.pass_count);
-    try length_state.write(writer, block.pass_count, block.byte_length);
+    if (block.segments.len > 1) {
+        try length_state.writeSegments(writer, block.segments);
+    } else {
+        try length_state.write(writer, block.pass_count, block.byte_length);
+    }
 }
 
 pub fn writePrecinctPacketHeader(
@@ -1295,6 +1454,8 @@ pub fn readCodeBlockPacketHeader(
     leaf_y: usize,
     previously_included: bool,
     max_zero_bitplanes: u8,
+    bypass: bool,
+    first_pass: u16,
 ) !DecodedPacketBlock {
     const included = if (previously_included)
         try reader.readBit()
@@ -1317,6 +1478,26 @@ pub fn readCodeBlockPacketHeader(
     else
         0;
     const pass_count = try readCodingPassCount(reader);
+
+    if (bypass) {
+        var span_passes: [max_block_segments]u16 = undefined;
+        const segment_count = try bypassSegmentPassCounts(first_pass, pass_count, &span_passes);
+        var block = DecodedPacketBlock{
+            .included = true,
+            .first_inclusion = first_inclusion,
+            .zero_bitplanes = zeros,
+            .pass_count = pass_count,
+            .byte_length = 0,
+            .segment_count = segment_count,
+        };
+        block.byte_length = try length_state.readSegments(
+            reader,
+            span_passes[0..segment_count],
+            block.segment_lengths[0..segment_count],
+        );
+        return block;
+    }
+
     const byte_length = try length_state.read(reader, pass_count);
 
     return .{
@@ -1336,6 +1517,7 @@ pub fn readPrecinctPacketHeader(
     layer: u32,
     locations: []const PacketBlockLocation,
     max_zero_bitplanes: u8,
+    bypass: bool,
     decoded: []DecodedPacketBlock,
 ) !bool {
     if (states.len != locations.len or decoded.len != locations.len) {
@@ -1364,6 +1546,7 @@ pub fn readPrecinctPacketHeader(
         layer,
         locations,
         max_zero_bitplanes,
+        bypass,
         decoded,
     );
 
@@ -1378,6 +1561,7 @@ pub fn readPrecinctPacketHeaderBody(
     layer: u32,
     locations: []const PacketBlockLocation,
     max_zero_bitplanes: u8,
+    bypass: bool,
     decoded: []DecodedPacketBlock,
 ) !void {
     if (states.len != locations.len or decoded.len != locations.len) {
@@ -1395,6 +1579,8 @@ pub fn readPrecinctPacketHeaderBody(
             location.leaf_y,
             states[index].included,
             max_zero_bitplanes,
+            bypass,
+            states[index].cumulative_passes,
         );
         if (decoded[index].included) {
             if (!states[index].included) {

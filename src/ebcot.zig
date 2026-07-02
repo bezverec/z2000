@@ -95,6 +95,11 @@ pub const EncodedBlock = struct {
     }
 };
 
+pub const SegmentSpan = struct {
+    pass_count: u16,
+    byte_length: u64,
+};
+
 pub const CodeBlockSegment = struct {
     bitplanes: u8,
     non_zero_count: u32,
@@ -102,10 +107,14 @@ pub const CodeBlockSegment = struct {
     byte_length: u64,
     passes: []CodeBlockPassPayload,
     bytes: []u8,
+    /// Terminated codeword segment table for BYPASS-style multi-segment
+    /// payloads; null means one continuous segment.
+    segments: ?[]SegmentSpan = null,
 
     pub fn deinit(self: *CodeBlockSegment, allocator: std.mem.Allocator) void {
         allocator.free(self.passes);
         allocator.free(self.bytes);
+        if (self.segments) |segments| allocator.free(segments);
         self.* = undefined;
     }
 
@@ -152,12 +161,38 @@ pub const CodeBlockStyle = struct {
     }
 
     pub fn hasUnsupportedPayloadMode(self: CodeBlockStyle) bool {
-        return self.bypass or self.predictable_termination;
+        return self.predictable_termination;
     }
 };
 
+/// Legacy single-segment coders do not understand BYPASS payload layout, so
+/// they keep rejecting it; only the bypass-aware segment coders accept it.
 fn validateImplementedStyle(style: CodeBlockStyle) !void {
+    if (style.hasUnsupportedPayloadMode() or style.bypass) return EbcotError.InvalidBlock;
+}
+
+fn validateImplementedStyleAllowBypass(style: CodeBlockStyle) !void {
     if (style.hasUnsupportedPayloadMode()) return EbcotError.InvalidBlock;
+}
+
+/// ISO/IEC 15444-1 D.6 (arithmetic coder bypass): significance and
+/// refinement passes below the fourth most significant bitplane are raw.
+pub fn passIsRaw(style: CodeBlockStyle, bitplanes: u8, bitplane: u8, kind: PassKind) bool {
+    if (!style.bypass or kind == .cleanup) return false;
+    return @as(u16, bitplane) + 4 < bitplanes;
+}
+
+/// Codeword segment termination points in BYPASS mode (without predictable
+/// termination / termall): the cleanup pass of the fourth most significant
+/// bitplane ends the initial MQ segment, afterwards every refinement pass
+/// ends a raw segment and every cleanup pass ends an MQ segment.
+fn passEndsBypassSegment(style: CodeBlockStyle, bitplanes: u8, bitplane: u8, kind: PassKind) bool {
+    if (!style.bypass) return false;
+    if (kind == .cleanup and @as(u16, bitplane) + 4 == bitplanes) return true;
+    if (@as(u16, bitplane) + 4 < bitplanes) {
+        return kind == .refinement or kind == .cleanup;
+    }
+    return false;
 }
 
 pub const EncodedBlockView = struct {
@@ -227,6 +262,113 @@ const NeighborCounts = struct {
 
 const zero_context_lut = makeZeroContextLut();
 const sign_context_lut = makeSignContextLut();
+
+// ---------------------------------------------------------------------------
+// Incremental neighborhood flag words (openjpeg-style): one u16 per sample in
+// a (width + 2) x (height + 2) grid whose border absorbs edge updates. When a
+// sample becomes significant it pushes its significance (and sign for the
+// four direct neighbors) into the neighbors' words, so context selection in
+// the hot T1 loops is a table lookup instead of a neighborhood recomputation.
+// ---------------------------------------------------------------------------
+const nbf_sig_n: u16 = 1 << 0;
+const nbf_sig_s: u16 = 1 << 1;
+const nbf_sig_e: u16 = 1 << 2;
+const nbf_sig_w: u16 = 1 << 3;
+const nbf_sig_ne: u16 = 1 << 4;
+const nbf_sig_nw: u16 = 1 << 5;
+const nbf_sig_se: u16 = 1 << 6;
+const nbf_sig_sw: u16 = 1 << 7;
+const nbf_sgn_n: u16 = 1 << 8;
+const nbf_sgn_s: u16 = 1 << 9;
+const nbf_sgn_e: u16 = 1 << 10;
+const nbf_sgn_w: u16 = 1 << 11;
+const nbf_sig_self: u16 = 1 << 12;
+const nbf_visit: u16 = 1 << 13;
+const nbf_refine: u16 = 1 << 14;
+const nbf_sig8: u16 = 0x00ff;
+/// Vertical causal mode hides the row below the current stripe: mask the
+/// south / south-east / south-west significance and the south sign.
+const nbf_causal_mask: u16 = ~(nbf_sig_s | nbf_sig_se | nbf_sig_sw | nbf_sgn_s);
+
+fn nbfStride(width: usize) usize {
+    return width + 2;
+}
+
+fn nbfIndex(stride: usize, x: usize, y: usize) usize {
+    return (y + 1) * stride + (x + 1);
+}
+
+/// Push a newly significant sample's state into its neighbors' flag words.
+fn nbfMarkSignificant(flags: []u16, stride: usize, x: usize, y: usize, negative: bool) void {
+    const p = nbfIndex(stride, x, y);
+    flags[p] |= nbf_sig_self;
+    flags[p - stride] |= nbf_sig_s;
+    flags[p + stride] |= nbf_sig_n;
+    flags[p - 1] |= nbf_sig_e;
+    flags[p + 1] |= nbf_sig_w;
+    flags[p - stride - 1] |= nbf_sig_se;
+    flags[p - stride + 1] |= nbf_sig_sw;
+    flags[p + stride - 1] |= nbf_sig_ne;
+    flags[p + stride + 1] |= nbf_sig_nw;
+    if (negative) {
+        flags[p - stride] |= nbf_sgn_s;
+        flags[p + stride] |= nbf_sgn_n;
+        flags[p - 1] |= nbf_sgn_e;
+        flags[p + 1] |= nbf_sgn_w;
+    }
+}
+
+fn nbfClearVisit(flags: []u16) void {
+    for (flags) |*word| word.* &= ~nbf_visit;
+}
+
+fn nbfBit(pattern: usize, comptime mask: u16) u4 {
+    return @intFromBool((pattern & mask) != 0);
+}
+
+/// Zero-coding contexts per band orientation indexed by the eight neighbor
+/// significance bits; generated from the reference zeroContextFromCounts.
+const nbf_zc_lut = makeNbfZcLut();
+
+fn makeNbfZcLut() [4][256]Context {
+    @setEvalBranchQuota(100000);
+    var lut: [4][256]Context = undefined;
+    for (0..4) |band| {
+        const kind: subband.Kind = @enumFromInt(band);
+        for (0..256) |pattern| {
+            const counts = NeighborCounts{
+                .horizontal = nbfBit(pattern, nbf_sig_e) + nbfBit(pattern, nbf_sig_w),
+                .vertical = nbfBit(pattern, nbf_sig_n) + nbfBit(pattern, nbf_sig_s),
+                .diagonal = nbfBit(pattern, nbf_sig_ne) + nbfBit(pattern, nbf_sig_nw) +
+                    nbfBit(pattern, nbf_sig_se) + nbfBit(pattern, nbf_sig_sw),
+            };
+            lut[band][pattern] = zeroContextFromCounts(counts, kind);
+        }
+    }
+    return lut;
+}
+
+/// Sign-coding context and prediction indexed by the four direct neighbors'
+/// significance and sign bits; generated from signCodingFromContributions.
+const nbf_sc_lut = makeNbfScLut();
+
+fn makeNbfScLut() [256]SignCoding {
+    @setEvalBranchQuota(100000);
+    var lut: [256]SignCoding = undefined;
+    for (0..256) |pattern| {
+        const n: i8 = if ((pattern & 0x01) != 0) (if ((pattern & 0x10) != 0) -1 else 1) else 0;
+        const s: i8 = if ((pattern & 0x02) != 0) (if ((pattern & 0x20) != 0) -1 else 1) else 0;
+        const e: i8 = if ((pattern & 0x04) != 0) (if ((pattern & 0x40) != 0) -1 else 1) else 0;
+        const w: i8 = if ((pattern & 0x08) != 0) (if ((pattern & 0x80) != 0) -1 else 1) else 0;
+        lut[pattern] = signCodingFromContributions(e + w, n + s);
+    }
+    return lut;
+}
+
+/// Low nibble: significance of N, S, E, W; high nibble: their signs.
+fn nbfScIndex(word: u16) u8 {
+    return @intCast((word & 0x0f) | ((word >> 4) & 0xf0));
+}
 const stats_lanes = simd.i32_lanes;
 const StatsVector = @Vector(stats_lanes, i32);
 const StatsMaskVector = @Vector(stats_lanes, u32);
@@ -243,7 +385,12 @@ pub const DirectBlockScratch = struct {
     height: usize = 0,
     pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty,
     bytes: std.ArrayList(u8) = .empty,
+    segments: std.ArrayList(SegmentSpan) = .empty,
+    nb_flags: std.ArrayList(u16) = .empty,
+    nb_stride: usize = 0,
     encoder: ?mq.Encoder = null,
+    iso_encoder: ?mq_iso.Encoder = null,
+    raw_writer: ?RawBitWriter = null,
 
     pub fn init(allocator: std.mem.Allocator) DirectBlockScratch {
         return .{ .allocator = allocator };
@@ -251,16 +398,32 @@ pub const DirectBlockScratch = struct {
 
     pub fn deinit(self: *DirectBlockScratch) void {
         if (self.encoder) |*encoder| encoder.deinit();
+        if (self.iso_encoder) |*encoder| encoder.deinit();
+        if (self.raw_writer) |*writer| writer.deinit();
         self.flags.deinit(self.allocator);
         self.significant_words.deinit(self.allocator);
         self.pass_payloads.deinit(self.allocator);
         self.bytes.deinit(self.allocator);
+        self.segments.deinit(self.allocator);
+        self.nb_flags.deinit(self.allocator);
         self.* = undefined;
     }
 
     fn reset(self: *DirectBlockScratch) void {
         self.pass_payloads.clearRetainingCapacity();
         self.bytes.clearRetainingCapacity();
+        self.segments.clearRetainingCapacity();
+    }
+
+    fn isoMqEncoder(self: *DirectBlockScratch) !*mq_iso.Encoder {
+        if (self.iso_encoder) |*encoder| return encoder;
+        self.iso_encoder = try mq_iso.Encoder.init(self.allocator, mq_context_count);
+        return &self.iso_encoder.?;
+    }
+
+    fn rawBitWriter(self: *DirectBlockScratch) *RawBitWriter {
+        if (self.raw_writer == null) self.raw_writer = RawBitWriter.init(self.allocator);
+        return &self.raw_writer.?;
     }
 
     fn ensureBlockState(self: *DirectBlockScratch, width: usize, height: usize, area: usize) !void {
@@ -270,6 +433,8 @@ pub const DirectBlockScratch = struct {
         self.row_words = row_words;
         self.width = width;
         self.height = height;
+        self.nb_stride = nbfStride(width);
+        try self.nb_flags.resize(self.allocator, try std.math.mul(usize, self.nb_stride, height + 2));
     }
 
     fn mqEncoder(self: *DirectBlockScratch) !*mq.Encoder {
@@ -287,16 +452,34 @@ pub const DecodeBlockScratch = struct {
     row_words: usize = 0,
     width: usize = 0,
     height: usize = 0,
+    nb_flags: std.ArrayList(u16) = .empty,
+    nb_stride: usize = 0,
+    iso_decoder: ?mq_iso.Decoder = null,
 
     pub fn init(allocator: std.mem.Allocator) DecodeBlockScratch {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *DecodeBlockScratch) void {
+        if (self.iso_decoder) |*decoder| decoder.deinit();
         self.flags.deinit(self.allocator);
         self.significant_words.deinit(self.allocator);
         self.coeffs.deinit(self.allocator);
+        self.nb_flags.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// Reusable ISO MQ decoder: INITDEC on the given segment and reset the
+    /// JPEG2000 context states, without reallocating the context array.
+    fn isoMqDecoder(self: *DecodeBlockScratch, bytes: []const u8) !*mq_iso.Decoder {
+        if (self.iso_decoder) |*decoder| {
+            decoder.reinitStream(bytes);
+            try decoder.resetJpeg2000Contexts();
+            return decoder;
+        }
+        self.iso_decoder = try mq_iso.Decoder.init(self.allocator, mq_context_count, bytes);
+        try self.iso_decoder.?.resetJpeg2000Contexts();
+        return &self.iso_decoder.?;
     }
 
     fn ensureBlockState(self: *DecodeBlockScratch, width: usize, height: usize, area: usize) !void {
@@ -307,6 +490,8 @@ pub const DecodeBlockScratch = struct {
         self.row_words = row_words;
         self.width = width;
         self.height = height;
+        self.nb_stride = nbfStride(width);
+        try self.nb_flags.resize(self.allocator, try std.math.mul(usize, self.nb_stride, height + 2));
     }
 };
 
@@ -365,7 +550,7 @@ pub fn encodeBlockScratchWithStyle(
     rect: subband.Rect,
     style: CodeBlockStyle,
 ) !EncodedBlockView {
-    try validateImplementedStyle(style);
+    try validateImplementedStyleAllowBypass(style);
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
@@ -430,6 +615,7 @@ pub fn encodeBlockScratchWithStyle(
             visited,
             became_significant,
             style,
+            passIsRaw(style, bitplanes, bitplane, .significance),
         );
         pass_index += 1;
 
@@ -640,6 +826,7 @@ pub fn encodeCodeBlockSegmentDirectScratchWithStyle(
     try scratch.ensureBlockState(rect.width, rect.height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
 
     var pass_index: u16 = 0;
     var bitplane_index = stats.bitplanes;
@@ -820,6 +1007,216 @@ pub fn encodeBlockSymbolsSegmentIsoMqContinuous(allocator: std.mem.Allocator, bl
         .byte_length = @intCast(encoded.len),
         .passes = pass_slice,
         .bytes = encoded,
+    };
+}
+
+/// ISO/IEC 15444-1 D.6 raw (bypass) bit writer: bits are packed MSB first,
+/// and a byte following 0xff only carries seven payload bits (its msb is a
+/// stuffed zero).
+const RawBitWriter = struct {
+    allocator: std.mem.Allocator,
+    buffer: std.ArrayList(u8) = .empty,
+    byte: u8 = 0,
+    remaining: u8 = 8,
+
+    fn init(allocator: std.mem.Allocator) RawBitWriter {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *RawBitWriter) void {
+        self.buffer.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn reset(self: *RawBitWriter) void {
+        self.buffer.clearRetainingCapacity();
+        self.byte = 0;
+        self.remaining = 8;
+    }
+
+    fn writeBit(self: *RawBitWriter, bit: bool) !void {
+        self.remaining -= 1;
+        if (bit) self.byte |= @as(u8, 1) << @intCast(self.remaining);
+        if (self.remaining == 0) {
+            try self.buffer.append(self.allocator, self.byte);
+            self.remaining = if (self.byte == 0xff) 7 else 8;
+            self.byte = 0;
+        }
+    }
+
+    /// Segment termination mirroring opj_mqc_bypass_flush_enc without
+    /// predictable termination: pad pending bits with an alternating 0,1
+    /// sequence; a pending stuffed-only byte after 0xff drops the 0xff.
+    fn finish(self: *RawBitWriter) ![]u8 {
+        if (self.remaining < 7 or (self.remaining == 7 and lastByteIsNotFf(self.buffer.items))) {
+            var bit_value: u8 = 0;
+            while (self.remaining > 0) {
+                self.remaining -= 1;
+                self.byte |= bit_value << @intCast(self.remaining);
+                bit_value = 1 - bit_value;
+            }
+            try self.buffer.append(self.allocator, self.byte);
+        } else if (self.remaining == 7 and self.buffer.items.len > 0 and
+            self.buffer.items[self.buffer.items.len - 1] == 0xff)
+        {
+            _ = self.buffer.pop();
+        }
+        return self.buffer.toOwnedSlice(self.allocator);
+    }
+};
+
+fn lastByteIsNotFf(bytes: []const u8) bool {
+    return bytes.len == 0 or bytes[bytes.len - 1] != 0xff;
+}
+
+/// Raw (bypass) segment bit reader; bytes past the segment read as 0xff,
+/// matching opj_mqc_raw_decode.
+const RawBitReader = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+    byte: u8 = 0,
+    remaining: u8 = 0,
+
+    fn init(bytes: []const u8) RawBitReader {
+        return .{ .bytes = bytes };
+    }
+
+    fn byteAt(self: RawBitReader, index: usize) u8 {
+        if (index < self.bytes.len) return self.bytes[index];
+        return 0xff;
+    }
+
+    fn readBit(self: *RawBitReader) bool {
+        if (self.remaining == 0) {
+            if (self.byte == 0xff) {
+                const next = self.byteAt(self.pos);
+                if (next > 0x8f) {
+                    self.byte = 0xff;
+                    self.remaining = 8;
+                } else {
+                    self.byte = next;
+                    self.pos += 1;
+                    self.remaining = 7;
+                }
+            } else {
+                self.byte = self.byteAt(self.pos);
+                self.pos += 1;
+                self.remaining = 8;
+            }
+        }
+        self.remaining -= 1;
+        return ((self.byte >> @intCast(self.remaining)) & 1) != 0;
+    }
+};
+
+/// Multi-segment BYPASS encoder: one MQ segment for the first ten passes,
+/// then alternating raw (significance + refinement) and MQ (cleanup)
+/// segments, each independently terminated (ISO D.6 / opj_t1_enc_is_term_pass
+/// without termall or predictable termination).
+pub fn encodeBlockSymbolsSegmentIsoMqBypass(
+    allocator: std.mem.Allocator,
+    block: EncodedBlockView,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
+    try validateImplementedStyleAllowBypass(style);
+    if (!style.bypass or style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (block.passes.len == 0) {
+        const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
+        errdefer allocator.free(passes);
+        const bytes = try allocator.dupe(u8, &.{});
+        return .{
+            .bitplanes = block.bitplanes,
+            .non_zero_count = block.non_zero_count,
+            .pass_count = 0,
+            .byte_length = 0,
+            .passes = passes,
+            .bytes = bytes,
+        };
+    }
+
+    var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
+    errdefer pass_payloads.deinit(allocator);
+    var segments: std.ArrayList(SegmentSpan) = .empty;
+    errdefer segments.deinit(allocator);
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+
+    var encoder = try mq_iso.Encoder.init(allocator, mq_context_count);
+    defer encoder.deinit();
+    try encoder.resetJpeg2000Contexts();
+    var raw = RawBitWriter.init(allocator);
+    defer raw.deinit();
+
+    var symbol_offset: usize = 0;
+    var segment_start_bytes: u64 = 0;
+    var segment_pass_count: u16 = 0;
+    var segment_is_raw = false;
+    for (block.passes, 0..) |pass, ordinal| {
+        if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
+        const is_raw = passIsRaw(style, block.bitplanes, pass.magnitude_bitplane, pass.kind);
+        if (segment_pass_count == 0) {
+            segment_is_raw = is_raw;
+        } else if (is_raw != segment_is_raw) {
+            return EbcotError.InvalidBlock;
+        }
+        const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
+        if (is_raw) {
+            for (pass_symbols) |symbol| try raw.writeBit(symbol.bit);
+        } else {
+            for (pass_symbols) |symbol| {
+                try encoder.write(mqContextIndex(symbol.context), symbol.bit);
+            }
+        }
+        symbol_offset += pass.symbol_count;
+        segment_pass_count += 1;
+
+        const running: u64 = segment_start_bytes +
+            (if (is_raw) @as(u64, raw.buffer.items.len) else @as(u64, encoder.emittedByteCount()));
+        try pass_payloads.append(allocator, .{
+            .kind = pass.kind,
+            .magnitude_bitplane = pass.magnitude_bitplane,
+            .symbol_count = pass.symbol_count,
+            .byte_offset = @intCast(segment_start_bytes),
+            .byte_length = @intCast(running - segment_start_bytes),
+            .cumulative_bytes = running,
+        });
+
+        const last_pass = ordinal + 1 == block.passes.len;
+        if (last_pass or passEndsBypassSegment(style, block.bitplanes, pass.magnitude_bitplane, pass.kind)) {
+            const encoded = if (segment_is_raw) try raw.finish() else try encoder.finish();
+            defer allocator.free(encoded);
+            try bytes.appendSlice(allocator, encoded);
+            try segments.append(allocator, .{
+                .pass_count = segment_pass_count,
+                .byte_length = @intCast(encoded.len),
+            });
+            const cumulative: u64 = @intCast(bytes.items.len);
+            const fixup = &pass_payloads.items[pass_payloads.items.len - 1];
+            fixup.byte_length = cumulative - fixup.byte_offset;
+            fixup.cumulative_bytes = cumulative;
+            segment_start_bytes = cumulative;
+            segment_pass_count = 0;
+            if (!last_pass) {
+                if (segment_is_raw) raw.reset() else encoder.resetStream();
+            }
+        }
+    }
+    if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
+
+    const pass_slice = try pass_payloads.toOwnedSlice(allocator);
+    errdefer allocator.free(pass_slice);
+    const segment_slice = try segments.toOwnedSlice(allocator);
+    errdefer allocator.free(segment_slice);
+    const byte_slice = try bytes.toOwnedSlice(allocator);
+
+    return .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .pass_count = @intCast(pass_slice.len),
+        .byte_length = @intCast(byte_slice.len),
+        .passes = pass_slice,
+        .bytes = byte_slice,
+        .segments = segment_slice,
     };
 }
 
@@ -1231,6 +1628,7 @@ pub fn decodeCodeBlockSegmentCoefficientsIsoMqScratchWithStyle(
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
     var pass_index: u16 = 0;
@@ -1302,6 +1700,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
     const max_symbols = try inferredMaxSymbols(area, pass_count, bitplanes, style);
@@ -1314,17 +1713,15 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     while (bitplane_index > 0 and pass_index < pass_count) {
         bitplane_index -= 1;
         const bitplane: u8 = @intCast(bitplane_index);
-        clearFlag(scratch.flags.items, .became_significant);
+        nbfClearVisit(scratch.nb_flags.items);
 
         if (bitplane == bitplanes - 1) {
-            clearFlag(scratch.flags.items, .visited);
             resetInferredContinuousPassContexts(style, &decoder, pass_index);
             decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeCleanupPassInferred(scratch, &decoder, bitplane, style));
             pass_index += 1;
             continue;
         }
 
-        clearFlag(scratch.flags.items, .visited);
         resetInferredContinuousPassContexts(style, &decoder, pass_index);
         decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeSignificancePassInferred(scratch, &decoder, bitplane, style));
         pass_index += 1;
@@ -1371,11 +1768,10 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
-    var decoder = try mq_iso.Decoder.init(scratch.allocator, mq_context_count, bytes);
-    defer decoder.deinit();
-    try decoder.resetJpeg2000Contexts();
+    const decoder = try scratch.isoMqDecoder(bytes);
 
     var decoded_symbols: usize = 0;
     var pass_index: u16 = 0;
@@ -1383,34 +1779,222 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
     while (bitplane_index > 0 and pass_index < pass_count) {
         bitplane_index -= 1;
         const bitplane: u8 = @intCast(bitplane_index);
-        clearFlag(scratch.flags.items, .became_significant);
+        nbfClearVisit(scratch.nb_flags.items);
 
         if (bitplane == bitplanes - 1) {
-            clearFlag(scratch.flags.items, .visited);
-            resetInferredContinuousPassContexts(style, &decoder, pass_index);
-            decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeCleanupPassInferred(scratch, &decoder, bitplane, style));
+            resetInferredContinuousPassContexts(style, decoder, pass_index);
+            decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeCleanupPassInferred(scratch, decoder, bitplane, style));
             pass_index += 1;
             continue;
         }
 
-        clearFlag(scratch.flags.items, .visited);
-        resetInferredContinuousPassContexts(style, &decoder, pass_index);
-        decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeSignificancePassInferred(scratch, &decoder, bitplane, style));
+        resetInferredContinuousPassContexts(style, decoder, pass_index);
+        decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeSignificancePassInferred(scratch, decoder, bitplane, style));
         pass_index += 1;
         if (pass_index >= pass_count) break;
 
-        resetInferredContinuousPassContexts(style, &decoder, pass_index);
-        decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeRefinementPassInferred(scratch, &decoder, bitplane, style));
+        resetInferredContinuousPassContexts(style, decoder, pass_index);
+        decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeRefinementPassInferred(scratch, decoder, bitplane, style));
         pass_index += 1;
         if (pass_index >= pass_count) break;
 
-        resetInferredContinuousPassContexts(style, &decoder, pass_index);
-        decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeCleanupPassInferred(scratch, &decoder, bitplane, style));
+        resetInferredContinuousPassContexts(style, decoder, pass_index);
+        decoded_symbols = try std.math.add(usize, decoded_symbols, try decodeCleanupPassInferred(scratch, decoder, bitplane, style));
         pass_index += 1;
     }
     if (pass_index != pass_count or decoded_symbols == 0) return EbcotError.InvalidBlock;
 
     return scratch.allocator.dupe(i32, scratch.coeffs.items);
+}
+
+pub const max_block_segments = 64;
+
+/// Expected pass counts per terminated codeword segment in BYPASS mode:
+/// ten MQ passes first, then raw (significance + refinement) pairs
+/// alternating with single MQ cleanup passes.
+pub fn bypassSegmentPassCounts(bitplanes: u8, pass_count: u16, out: *[max_block_segments]u16) !u8 {
+    if (pass_count == 0) return 0;
+    if (bitplanes < 5) {
+        out[0] = pass_count;
+        return 1;
+    }
+    var count: u8 = 0;
+    var remaining = pass_count;
+    out[count] = @min(remaining, 10);
+    remaining -= out[count];
+    count += 1;
+    var next_raw = true;
+    while (remaining > 0) {
+        if (count >= max_block_segments) return EbcotError.InvalidBlock;
+        const span: u16 = if (next_raw) @min(remaining, 2) else 1;
+        out[count] = span;
+        remaining -= span;
+        count += 1;
+        next_raw = !next_raw;
+    }
+    return count;
+}
+
+/// Strict decoder for BYPASS multi-segment code-block payloads. MQ contexts
+/// persist across MQ segments; every segment is independently terminated and
+/// its byte length comes from the packet header.
+pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
+    scratch: *DecodeBlockScratch,
+    bitplanes: u8,
+    pass_count: u16,
+    bytes: []const u8,
+    segment_lengths: []const u64,
+    width: usize,
+    height: usize,
+    style: CodeBlockStyle,
+) ![]i32 {
+    try validateImplementedStyleAllowBypass(style);
+    if (!style.bypass or style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (width == 0 or height == 0) return EbcotError.InvalidBlock;
+    const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
+    if (area > max_codeblock_area) return EbcotError.InvalidBlock;
+    if (bitplanes == 0) {
+        if (pass_count != 0 or bytes.len != 0 or segment_lengths.len != 0) return EbcotError.InvalidBlock;
+        const out = try scratch.allocator.alloc(i32, area);
+        @memset(out, 0);
+        return out;
+    }
+
+    const expected_passes = expectedCodingPasses(bitplanes);
+    if (pass_count != expected_passes) return EbcotError.InvalidBlock;
+
+    var seg_passes: [max_block_segments]u16 = undefined;
+    const seg_count = try bypassSegmentPassCounts(bitplanes, pass_count, &seg_passes);
+    if (segment_lengths.len != seg_count) return EbcotError.InvalidBlock;
+    var total_bytes: u64 = 0;
+    for (segment_lengths) |len| total_bytes = try std.math.add(u64, total_bytes, len);
+    if (total_bytes != bytes.len) return EbcotError.InvalidBlock;
+
+    try scratch.ensureBlockState(width, height, area);
+    @memset(scratch.flags.items, 0);
+    @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
+    @memset(scratch.coeffs.items, 0);
+
+    var mq_decoder: ?*mq_iso.Decoder = null;
+    var raw_reader = RawBitReader.init(&.{});
+
+    var seg_index: usize = 0;
+    var seg_offset: usize = 0;
+    var seg_passes_left: u16 = 0;
+    var seg_is_raw = false;
+
+    var pass_index: u16 = 0;
+    var bitplane_index = bitplanes;
+    while (bitplane_index > 0 and pass_index < pass_count) {
+        bitplane_index -= 1;
+        const bitplane: u8 = @intCast(bitplane_index);
+        nbfClearVisit(scratch.nb_flags.items);
+
+        const kinds: [3]PassKind = if (bitplane == bitplanes - 1)
+            .{ .cleanup, .cleanup, .cleanup }
+        else
+            .{ .significance, .refinement, .cleanup };
+        const passes_this_bitplane: u16 = if (bitplane == bitplanes - 1) 1 else 3;
+
+        var kind_index: u16 = 0;
+        while (kind_index < passes_this_bitplane and pass_index < pass_count) : (kind_index += 1) {
+            const kind = kinds[kind_index];
+            const is_raw = passIsRaw(style, bitplanes, bitplane, kind);
+
+            if (seg_passes_left == 0) {
+                if (seg_index >= seg_count) return EbcotError.InvalidBlock;
+                const len = std.math.cast(usize, segment_lengths[seg_index]) orelse return EbcotError.InvalidBlock;
+                const seg_end = try std.math.add(usize, seg_offset, len);
+                if (seg_end > bytes.len) return EbcotError.InvalidBlock;
+                const slice = bytes[seg_offset..seg_end];
+                seg_is_raw = is_raw;
+                if (is_raw) {
+                    raw_reader = RawBitReader.init(slice);
+                } else if (mq_decoder) |d| {
+                    // Later MQ segments keep the adaptive contexts and only
+                    // restart the codeword register.
+                    d.reinitStream(slice);
+                } else {
+                    mq_decoder = try scratch.isoMqDecoder(slice);
+                }
+                seg_passes_left = seg_passes[seg_index];
+                seg_offset = seg_end;
+                seg_index += 1;
+            }
+            if (is_raw != seg_is_raw) return EbcotError.InvalidBlock;
+
+            switch (kind) {
+                .significance => {
+                    if (is_raw) {
+                        try decodeSignificancePassRaw(scratch, &raw_reader, bitplane, style);
+                    } else {
+                        _ = try decodeSignificancePassInferred(scratch, mq_decoder.?, bitplane, style);
+                    }
+                },
+                .refinement => {
+                    if (is_raw) {
+                        try decodeRefinementPassRaw(scratch, &raw_reader, bitplane, style);
+                    } else {
+                        _ = try decodeRefinementPassInferred(scratch, mq_decoder.?, bitplane, style);
+                    }
+                },
+                .cleanup => {
+                    if (is_raw) return EbcotError.InvalidBlock;
+                    _ = try decodeCleanupPassInferred(scratch, mq_decoder.?, bitplane, style);
+                },
+            }
+            pass_index += 1;
+            seg_passes_left -= 1;
+        }
+    }
+    if (pass_index != pass_count or seg_index != seg_count or seg_passes_left != 0) {
+        return EbcotError.InvalidBlock;
+    }
+
+    return scratch.allocator.dupe(i32, scratch.coeffs.items);
+}
+
+fn decodeSignificancePassRaw(
+    scratch: *DecodeBlockScratch,
+    reader: *RawBitReader,
+    bitplane: u8,
+    style: CodeBlockStyle,
+) !void {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    var it = ScanIterator.init(scratch.width, scratch.height);
+    while (it.next()) |pos| {
+        const p = nbfIndex(nbs, pos.x, pos.y);
+        const causal = style.vertical_causal and (pos.y & 3) == 3;
+        const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+        if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+        flags[p] |= nbf_visit;
+        if (reader.readBit()) {
+            const negative = reader.readBit();
+            markDecodedSignificant(scratch, pos.x, pos.y, bitplane, negative);
+        }
+    }
+}
+
+fn decodeRefinementPassRaw(
+    scratch: *DecodeBlockScratch,
+    reader: *RawBitReader,
+    bitplane: u8,
+    style: CodeBlockStyle,
+) !void {
+    _ = style;
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    var it = ScanIterator.init(scratch.width, scratch.height);
+    while (it.next()) |pos| {
+        const p = nbfIndex(nbs, pos.x, pos.y);
+        const f = flags[p];
+        if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+        const bit = reader.readBit();
+        flags[p] |= nbf_refine;
+        if (bit) addMagnitudeBit(scratch, localIndex(scratch.width, pos.x, pos.y), bitplane);
+    }
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsPartialScratch(
@@ -1481,6 +2065,7 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
     const expected_passes = expectedCodingPasses(segment.bitplanes);
@@ -1611,6 +2196,7 @@ fn emitSignificancePass(
     visited: []bool,
     became_significant: []bool,
     style: CodeBlockStyle,
+    raw_signs: bool,
 ) !void {
     const first_symbol = symbols.items.len;
 
@@ -1621,7 +2207,7 @@ fn emitSignificancePass(
         visited[index] = true;
         try emitZeroCoding(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant, style);
         if (isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane)) {
-            try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant, style);
+            try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant, style, raw_signs);
             significant[index] = true;
             became_significant[index] = true;
         }
@@ -1712,28 +2298,65 @@ fn decodeSignificancePassSymbols(
     if (symbol_count != pass.symbol_count) return EbcotError.InvalidBlock;
 }
 
+fn stripeHasSignificanceDecode(scratch: *const DecodeBlockScratch, stripe_y: usize, stripe_height: usize) bool {
+    const first_row = if (stripe_y == 0) 0 else stripe_y - 1;
+    const last_row = @min(scratch.height - 1, stripe_y + stripe_height);
+    var acc: u64 = 0;
+    var row = first_row;
+    while (row <= last_row) : (row += 1) {
+        const base = row * scratch.row_words;
+        for (scratch.significant_words.items[base..][0..scratch.row_words]) |word| acc |= word;
+    }
+    return acc != 0;
+}
+
+fn stripeRowsSignificantDecode(scratch: *const DecodeBlockScratch, stripe_y: usize, stripe_height: usize) bool {
+    var acc: u64 = 0;
+    var row = stripe_y;
+    while (row < stripe_y + stripe_height) : (row += 1) {
+        const base = row * scratch.row_words;
+        for (scratch.significant_words.items[base..][0..scratch.row_words]) |word| acc |= word;
+    }
+    return acc != 0;
+}
+
 fn decodeSignificancePassInferred(
     scratch: *DecodeBlockScratch,
     decoder: anytype,
     bitplane: u8,
     style: CodeBlockStyle,
 ) !usize {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    const band: usize = @intFromEnum(style.band_kind);
     var symbol_count: usize = 0;
 
-    var it = ScanIterator.init(scratch.width, scratch.height);
-    while (it.next()) |pos| {
-        const index = localIndex(scratch.width, pos.x, pos.y);
-        const neighbor_count = neighborSignificanceRowsDecode(scratch, pos.x, pos.y, style);
-        if (hasSignificantRowDecode(scratch, pos.x, pos.y) or neighbor_count == 0) continue;
-        setFlag(scratch.flags.items, index, .visited);
-        const bit = try decoder.read(mqContextIndex(zeroContextRowsDecode(scratch, pos.x, pos.y, style)));
-        symbol_count += 1;
-        if (bit) {
-            const sign = signCodingRowsDecode(scratch, pos.x, pos.y, style);
-            const sign_bit = try decoder.read(mqContextIndex(sign.context));
-            symbol_count += 1;
-            const negative = sign_bit != sign.predicted_negative;
-            markDecodedSignificant(scratch, pos.x, pos.y, bitplane, negative);
+    var stripe_y: usize = 0;
+    while (stripe_y < scratch.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
+        // Mirrors the encoder stripe skip: an all-zero neighborhood window
+        // means the significance pass cannot code anything in this stripe.
+        if (!stripeHasSignificanceDecode(scratch, stripe_y, stripe_height)) continue;
+        var x: usize = 0;
+        while (x < scratch.width) : (x += 1) {
+            var dy: usize = 0;
+            while (dy < stripe_height) : (dy += 1) {
+                const y = stripe_y + dy;
+                const p = nbfIndex(nbs, x, y);
+                const causal = style.vertical_causal and dy == 3;
+                const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                flags[p] |= nbf_visit;
+                const bit = try decoder.read(mqContextIndex(nbf_zc_lut[band][f & nbf_sig8]));
+                symbol_count += 1;
+                if (bit) {
+                    const sign = nbf_sc_lut[nbfScIndex(f)];
+                    const sign_bit = try decoder.read(mqContextIndex(sign.context));
+                    symbol_count += 1;
+                    const negative = sign_bit != sign.predicted_negative;
+                    markDecodedSignificant(scratch, x, y, bitplane, negative);
+                }
+            }
         }
     }
 
@@ -1856,16 +2479,36 @@ fn decodeRefinementPassInferred(
     bitplane: u8,
     style: CodeBlockStyle,
 ) !usize {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
     var symbol_count: usize = 0;
 
-    var it = ScanIterator.init(scratch.width, scratch.height);
-    while (it.next()) |pos| {
-        const index = localIndex(scratch.width, pos.x, pos.y);
-        if (!hasSignificantRowDecode(scratch, pos.x, pos.y) or hasFlag(scratch.flags.items, index, .became_significant)) continue;
-        const bit = try decoder.read(mqContextIndex(refinementContext(hasFlag(scratch.flags.items, index, .refined), neighborSignificanceRowsDecode(scratch, pos.x, pos.y, style))));
-        symbol_count += 1;
-        setFlag(scratch.flags.items, index, .refined);
-        if (bit) addMagnitudeBit(scratch, index, bitplane);
+    var stripe_y: usize = 0;
+    while (stripe_y < scratch.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
+        // Nothing significant inside the stripe rows means nothing refines.
+        if (!stripeRowsSignificantDecode(scratch, stripe_y, stripe_height)) continue;
+        var x: usize = 0;
+        while (x < scratch.width) : (x += 1) {
+            var dy: usize = 0;
+            while (dy < stripe_height) : (dy += 1) {
+                const y = stripe_y + dy;
+                const p = nbfIndex(nbs, x, y);
+                const causal = style.vertical_causal and dy == 3;
+                const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+                const context: Context = if ((f & nbf_refine) != 0)
+                    .refinement_later
+                else if ((f & nbf_sig8) != 0)
+                    .refinement_neighbor
+                else
+                    .refinement;
+                const bit = try decoder.read(mqContextIndex(context));
+                symbol_count += 1;
+                flags[p] |= nbf_refine;
+                if (bit) addMagnitudeBit(scratch, localIndex(scratch.width, x, y), bitplane);
+            }
+        }
     }
 
     return symbol_count;
@@ -1898,7 +2541,7 @@ fn emitCleanupPass(
                 if (runlen == 4) continue;
 
                 const y = stripe_y + runlen;
-                try emitSign(allocator, symbols, plane, stride, rect, .{ .x = x, .y = y }, bitplane, pass_index, significant, style);
+                try emitSign(allocator, symbols, plane, stride, rect, .{ .x = x, .y = y }, bitplane, pass_index, significant, style, false);
                 significant[localIndex(rect.width, x, y)] = true;
                 became_significant[localIndex(rect.width, x, y)] = true;
 
@@ -2031,6 +2674,8 @@ fn decodeCleanupPassInferred(
     bitplane: u8,
     style: CodeBlockStyle,
 ) !usize {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
     var symbol_count: usize = 0;
 
     var stripe_y: usize = 0;
@@ -2038,7 +2683,7 @@ fn decodeCleanupPassInferred(
         const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
         var x: usize = 0;
         while (x < scratch.width) : (x += 1) {
-            if (stripe_height == 4 and canUseCleanupRunStripeDecode(scratch, x, stripe_y, style)) {
+            if (stripe_height == 4 and nbfCanUseRunStripe(flags, nbs, x, stripe_y, style)) {
                 const agg = try decoder.read(mqContextIndex(.cleanup_aggregation));
                 symbol_count += 1;
                 if (!agg) continue;
@@ -2047,21 +2692,26 @@ fn decodeCleanupPassInferred(
                 symbol_count += 2;
                 if (runlen >= 4) return EbcotError.InvalidBlock;
 
-                const y = stripe_y + runlen;
-                const sign = signCodingRowsDecode(scratch, x, y, style);
-                const sign_bit = try decoder.read(mqContextIndex(sign.context));
-                symbol_count += 1;
-                const negative = sign_bit != sign.predicted_negative;
-                markDecodedSignificant(scratch, x, y, bitplane, negative);
+                {
+                    const y = stripe_y + runlen;
+                    const p = nbfIndex(nbs, x, y);
+                    const causal = style.vertical_causal and runlen == 3;
+                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                    const sign = nbf_sc_lut[nbfScIndex(f)];
+                    const sign_bit = try decoder.read(mqContextIndex(sign.context));
+                    symbol_count += 1;
+                    const negative = sign_bit != sign.predicted_negative;
+                    markDecodedSignificant(scratch, x, y, bitplane, negative);
+                }
 
                 var dy = runlen + 1;
                 while (dy < 4) : (dy += 1) {
-                    symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
+                    symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style, dy == 3);
                 }
             } else {
                 var dy: usize = 0;
                 while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
+                    symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style, dy == 3);
                 }
             }
         }
@@ -2092,7 +2742,7 @@ fn emitCleanupSample(
     if (significant[index] or visited[index]) return;
     try emitZeroCoding(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant, style);
     if (isMagnitudeBitSet(plane[(rect.y + pos.y) * stride + rect.x + pos.x], bitplane)) {
-        try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant, style);
+        try emitSign(allocator, symbols, plane, stride, rect, pos, bitplane, pass_index, significant, style, false);
         significant[index] = true;
         became_significant[index] = true;
     }
@@ -2160,7 +2810,7 @@ fn emitSegmentationSymbols(
     }
 }
 
-fn writeSegmentationSymbols(encoder: *mq.Encoder) !void {
+fn writeSegmentationSymbols(encoder: anytype) !void {
     for (segmentation_symbol_bits) |bit| {
         try encoder.write(mqContextIndex(.cleanup_run), bit);
     }
@@ -2224,6 +2874,33 @@ fn readCleanupRunLength(decoder: anytype) !usize {
     return (@as(usize, @intFromBool(hi)) << 1) | @intFromBool(lo);
 }
 
+fn nbfDecodeCleanupSample(
+    scratch: *DecodeBlockScratch,
+    decoder: anytype,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+    style: CodeBlockStyle,
+    causal_row: bool,
+) !usize {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    const p = nbfIndex(nbs, x, y);
+    const causal = style.vertical_causal and causal_row;
+    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+    if ((f & (nbf_sig_self | nbf_visit)) != 0) return 0;
+    const bit = try decoder.read(mqContextIndex(nbf_zc_lut[@intFromEnum(style.band_kind)][f & nbf_sig8]));
+    var symbol_count: usize = 1;
+    if (bit) {
+        const sign = nbf_sc_lut[nbfScIndex(f)];
+        const sign_bit = try decoder.read(mqContextIndex(sign.context));
+        symbol_count += 1;
+        const negative = sign_bit != sign.predicted_negative;
+        markDecodedSignificant(scratch, x, y, bitplane, negative);
+    }
+    return symbol_count;
+}
+
 fn decodeCleanupSample(
     scratch: *DecodeBlockScratch,
     decoder: anytype,
@@ -2280,14 +2957,17 @@ fn emitSign(
     pass_index: u16,
     significant: []const bool,
     style: CodeBlockStyle,
+    raw: bool,
 ) !void {
     const coding = signCoding(plane, stride, rect, pos.x, pos.y, significant, style);
     const negative = plane[(rect.y + pos.y) * stride + rect.x + pos.x] < 0;
+    // In raw (bypass) passes the sign is coded directly with no prediction:
+    // 1 means negative (ISO D.6, opj_t1_dec_sigpass_step_raw).
     try symbols.append(allocator, .{
         .pass_index = pass_index,
         .kind = .sign,
         .context = coding.context,
-        .bit = negative != coding.predicted_negative,
+        .bit = if (raw) negative else negative != coding.predicted_negative,
         .x = pos.x,
         .y = pos.y,
         .magnitude_bitplane = bitplane,
@@ -2427,14 +3107,14 @@ fn canUseDirectCleanupRunStripe(scratch: *const DirectBlockScratch, x: usize, st
     return true;
 }
 
-fn writeCleanupRunLength(encoder: *mq.Encoder, runlen: usize) !void {
+fn writeCleanupRunLength(encoder: anytype, runlen: usize) !void {
     try encoder.write(mqContextIndex(.cleanup_run), ((runlen >> 1) & 1) != 0);
     try encoder.write(mqContextIndex(.cleanup_run), (runlen & 1) != 0);
 }
 
 fn emitDirectSignOnly(
     scratch: *DirectBlockScratch,
-    encoder: *mq.Encoder,
+    encoder: anytype,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
@@ -2455,7 +3135,7 @@ fn emitDirectSignOnly(
 
 fn emitDirectCleanupSample(
     scratch: *DirectBlockScratch,
-    encoder: *mq.Encoder,
+    encoder: anytype,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
@@ -2493,6 +3173,376 @@ fn appendDirectPass(
         .byte_length = encoded_len,
         .cumulative_bytes = @intCast(scratch.bytes.items.len),
     });
+}
+
+/// Hot-path ISO MQ block encoder: writes coefficients straight into the ISO
+/// MQ coder (plus raw BYPASS segments) using the reusable direct scratch, so
+/// no per-block Symbol list or allocator churn is left on the default
+/// encoding path. Produces the same codeword segments as the symbol-based
+/// encodeBlockSymbolsSegmentIsoMqContinuous / ...IsoMqBypass pair.
+pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
+    scratch: *DirectBlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
+    try validateImplementedStyleAllowBypass(style);
+    if (style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    scratch.reset();
+    try validateBlock(plane, stride, rect);
+
+    const stats = blockStats(plane, stride, rect);
+    if (stats.bitplanes == 0) {
+        return ownedSegmentFromDirectIsoScratch(scratch, 0, 0, style.bypass);
+    }
+    const bitplanes = stats.bitplanes;
+
+    const area = try blockArea(rect);
+    try scratch.ensureBlockState(rect.width, rect.height, area);
+    @memset(scratch.flags.items, 0);
+    @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
+
+    const iso = try scratch.isoMqEncoder();
+    iso.resetStream();
+    try iso.resetJpeg2000Contexts();
+    const raw = scratch.rawBitWriter();
+    raw.reset();
+
+    var segment_start_bytes: u64 = 0;
+    var previous_running: u64 = 0;
+    var segment_pass_count: u16 = 0;
+    var segment_is_raw = false;
+    var pass_index: u16 = 0;
+    const total_passes = expectedCodingPasses(bitplanes);
+
+    var bitplane_index = bitplanes;
+    while (bitplane_index > 0) {
+        bitplane_index -= 1;
+        const bitplane: u8 = @intCast(bitplane_index);
+        nbfClearVisit(scratch.nb_flags.items);
+
+        const kinds: [3]PassKind = if (bitplane == bitplanes - 1)
+            .{ .cleanup, .cleanup, .cleanup }
+        else
+            .{ .significance, .refinement, .cleanup };
+        const passes_this_bitplane: u16 = if (bitplane == bitplanes - 1) 1 else 3;
+
+        var kind_index: u16 = 0;
+        while (kind_index < passes_this_bitplane) : (kind_index += 1) {
+            const kind = kinds[kind_index];
+            const is_raw = passIsRaw(style, bitplanes, bitplane, kind);
+            if (segment_pass_count == 0) segment_is_raw = is_raw;
+            if (is_raw != segment_is_raw) return EbcotError.InvalidBlock;
+
+            const symbol_count: usize = switch (kind) {
+                .significance => if (is_raw)
+                    try emitDirectIsoSignificancePass(scratch, raw, plane, stride, rect, bitplane, style, true)
+                else
+                    try emitDirectIsoSignificancePass(scratch, iso, plane, stride, rect, bitplane, style, false),
+                .refinement => if (is_raw)
+                    try emitDirectIsoRefinementPass(scratch, raw, plane, stride, rect, bitplane, style)
+                else
+                    try emitDirectIsoRefinementPass(scratch, iso, plane, stride, rect, bitplane, style),
+                .cleanup => try emitDirectIsoCleanupPass(scratch, iso, plane, stride, rect, bitplane, style),
+            };
+
+            segment_pass_count += 1;
+            pass_index += 1;
+            const running: u64 = segment_start_bytes +
+                (if (is_raw) @as(u64, raw.buffer.items.len) else @as(u64, iso.emittedByteCount()));
+            try scratch.pass_payloads.append(scratch.allocator, .{
+                .kind = kind,
+                .magnitude_bitplane = bitplane,
+                .symbol_count = symbol_count,
+                .byte_offset = @intCast(previous_running),
+                .byte_length = @intCast(running - previous_running),
+                .cumulative_bytes = running,
+            });
+            previous_running = running;
+
+            const last_pass = pass_index == total_passes;
+            if (last_pass or passEndsBypassSegment(style, bitplanes, bitplane, kind)) {
+                const encoded = if (segment_is_raw) try raw.finish() else try iso.finish();
+                defer scratch.allocator.free(encoded);
+                try scratch.bytes.appendSlice(scratch.allocator, encoded);
+                try scratch.segments.append(scratch.allocator, .{
+                    .pass_count = segment_pass_count,
+                    .byte_length = @intCast(encoded.len),
+                });
+                const cumulative: u64 = @intCast(scratch.bytes.items.len);
+                const fixup = &scratch.pass_payloads.items[scratch.pass_payloads.items.len - 1];
+                fixup.byte_length = cumulative - fixup.byte_offset;
+                fixup.cumulative_bytes = cumulative;
+                segment_start_bytes = cumulative;
+                previous_running = cumulative;
+                segment_pass_count = 0;
+                if (!last_pass) {
+                    if (segment_is_raw) raw.reset() else iso.resetStream();
+                }
+            }
+        }
+    }
+    if (pass_index != total_passes or segment_pass_count != 0) return EbcotError.InvalidBlock;
+
+    return ownedSegmentFromDirectIsoScratch(scratch, bitplanes, stats.non_zero_count, style.bypass);
+}
+
+fn ownedSegmentFromDirectIsoScratch(
+    scratch: *DirectBlockScratch,
+    bitplanes: u8,
+    non_zero_count: u32,
+    keep_segments: bool,
+) !CodeBlockSegment {
+    const pass_slice = try scratch.allocator.dupe(CodeBlockPassPayload, scratch.pass_payloads.items);
+    errdefer scratch.allocator.free(pass_slice);
+    const byte_slice = try scratch.allocator.dupe(u8, scratch.bytes.items);
+    errdefer scratch.allocator.free(byte_slice);
+    const segment_slice: ?[]SegmentSpan = if (keep_segments)
+        try scratch.allocator.dupe(SegmentSpan, scratch.segments.items)
+    else
+        null;
+
+    return .{
+        .bitplanes = bitplanes,
+        .non_zero_count = non_zero_count,
+        .pass_count = @intCast(pass_slice.len),
+        .byte_length = @intCast(byte_slice.len),
+        .passes = pass_slice,
+        .bytes = byte_slice,
+        .segments = segment_slice,
+    };
+}
+
+/// True when any sample in rows [stripe_y - 1, stripe_y + stripe_height] is
+/// significant; a stripe with an all-zero neighborhood window can be skipped
+/// entirely by the significance pass.
+fn stripeHasSignificance(scratch: *const DirectBlockScratch, stripe_y: usize, stripe_height: usize) bool {
+    const first_row = if (stripe_y == 0) 0 else stripe_y - 1;
+    const last_row = @min(scratch.height - 1, stripe_y + stripe_height);
+    var acc: u64 = 0;
+    var row = first_row;
+    while (row <= last_row) : (row += 1) {
+        const base = row * scratch.row_words;
+        for (scratch.significant_words.items[base..][0..scratch.row_words]) |word| acc |= word;
+    }
+    return acc != 0;
+}
+
+/// True when any sample inside the stripe rows themselves is significant.
+fn stripeRowsSignificant(scratch: *const DirectBlockScratch, stripe_y: usize, stripe_height: usize) bool {
+    var acc: u64 = 0;
+    var row = stripe_y;
+    while (row < stripe_y + stripe_height) : (row += 1) {
+        const base = row * scratch.row_words;
+        for (scratch.significant_words.items[base..][0..scratch.row_words]) |word| acc |= word;
+    }
+    return acc != 0;
+}
+
+fn emitDirectIsoSignificancePass(
+    scratch: *DirectBlockScratch,
+    encoder: anytype,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    bitplane: u8,
+    style: CodeBlockStyle,
+    comptime raw: bool,
+) !usize {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    const band: usize = @intFromEnum(style.band_kind);
+    var symbol_count: usize = 0;
+    var stripe_y: usize = 0;
+    while (stripe_y < rect.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), rect.height - stripe_y);
+        // No significance anywhere near this stripe means no sample can have
+        // a significant neighborhood, so the whole stripe is skipped.
+        if (!stripeHasSignificance(scratch, stripe_y, stripe_height)) continue;
+        var x: usize = 0;
+        while (x < rect.width) : (x += 1) {
+            var dy: usize = 0;
+            while (dy < stripe_height) : (dy += 1) {
+                const y = stripe_y + dy;
+                const p = nbfIndex(nbs, x, y);
+                const causal = style.vertical_causal and dy == 3;
+                const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                flags[p] |= nbf_visit;
+                const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
+                if (raw) {
+                    try encoder.writeBit(bit);
+                } else {
+                    try encoder.write(mqContextIndex(nbf_zc_lut[band][f & nbf_sig8]), bit);
+                }
+                symbol_count += 1;
+                if (bit) {
+                    const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
+                    if (raw) {
+                        try encoder.writeBit(negative);
+                    } else {
+                        const sign = nbf_sc_lut[nbfScIndex(f)];
+                        try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+                    }
+                    symbol_count += 1;
+                    nbfMarkSignificant(flags, nbs, x, y, negative);
+                    setSignificantRow(scratch, x, y);
+                }
+            }
+        }
+    }
+    return symbol_count;
+}
+
+fn emitDirectIsoRefinementPass(
+    scratch: *DirectBlockScratch,
+    encoder: anytype,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    bitplane: u8,
+    style: CodeBlockStyle,
+) !usize {
+    const raw = comptime @TypeOf(encoder) == *RawBitWriter;
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    var symbol_count: usize = 0;
+    var stripe_y: usize = 0;
+    while (stripe_y < rect.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), rect.height - stripe_y);
+        // Nothing significant inside the stripe rows means nothing to refine.
+        if (!stripeRowsSignificant(scratch, stripe_y, stripe_height)) continue;
+        var x: usize = 0;
+        while (x < rect.width) : (x += 1) {
+            var dy: usize = 0;
+            while (dy < stripe_height) : (dy += 1) {
+                const y = stripe_y + dy;
+                const p = nbfIndex(nbs, x, y);
+                const causal = style.vertical_causal and dy == 3;
+                const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+                const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
+                if (raw) {
+                    try encoder.writeBit(bit);
+                } else {
+                    const context: Context = if ((f & nbf_refine) != 0)
+                        .refinement_later
+                    else if ((f & nbf_sig8) != 0)
+                        .refinement_neighbor
+                    else
+                        .refinement;
+                    try encoder.write(mqContextIndex(context), bit);
+                }
+                symbol_count += 1;
+                flags[p] |= nbf_refine;
+            }
+        }
+    }
+    return symbol_count;
+}
+
+fn emitDirectIsoCleanupPass(
+    scratch: *DirectBlockScratch,
+    encoder: *mq_iso.Encoder,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    bitplane: u8,
+    style: CodeBlockStyle,
+) !usize {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    var symbol_count: usize = 0;
+    var stripe_y: usize = 0;
+    while (stripe_y < rect.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), rect.height - stripe_y);
+        var x: usize = 0;
+        while (x < rect.width) : (x += 1) {
+            if (stripe_height == 4 and nbfCanUseRunStripe(flags, nbs, x, stripe_y, style)) {
+                const runlen = cleanupRunLength(plane, stride, rect, x, stripe_y, bitplane);
+                try encoder.write(mqContextIndex(.cleanup_aggregation), runlen != 4);
+                symbol_count += 1;
+                if (runlen == 4) continue;
+
+                try writeCleanupRunLength(encoder, runlen);
+                symbol_count += 2;
+
+                {
+                    const y = stripe_y + runlen;
+                    const p = nbfIndex(nbs, x, y);
+                    const causal = style.vertical_causal and runlen == 3;
+                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                    const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
+                    const sign = nbf_sc_lut[nbfScIndex(f)];
+                    try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+                    symbol_count += 1;
+                    nbfMarkSignificant(flags, nbs, x, y, negative);
+                    setSignificantRow(scratch, x, y);
+                }
+
+                var dy = runlen + 1;
+                while (dy < 4) : (dy += 1) {
+                    symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style, dy == 3);
+                }
+            } else {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style, dy == 3);
+                }
+            }
+        }
+    }
+
+    if (style.segmentation_symbols) {
+        try writeSegmentationSymbols(encoder);
+        symbol_count += 4;
+    }
+    return symbol_count;
+}
+
+fn nbfCanUseRunStripe(flags: []const u16, nbs: usize, x: usize, stripe_y: usize, style: CodeBlockStyle) bool {
+    var dy: usize = 0;
+    while (dy < 4) : (dy += 1) {
+        const p = nbfIndex(nbs, x, stripe_y + dy);
+        const causal = style.vertical_causal and dy == 3;
+        const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+        if ((f & (nbf_sig8 | nbf_sig_self | nbf_visit)) != 0) return false;
+    }
+    return true;
+}
+
+fn nbfEmitCleanupSample(
+    scratch: *DirectBlockScratch,
+    encoder: *mq_iso.Encoder,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+    style: CodeBlockStyle,
+    causal_row: bool,
+) !usize {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    const p = nbfIndex(nbs, x, y);
+    const causal = style.vertical_causal and causal_row;
+    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+    if ((f & (nbf_sig_self | nbf_visit)) != 0) return 0;
+    const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
+    try encoder.write(mqContextIndex(nbf_zc_lut[@intFromEnum(style.band_kind)][f & nbf_sig8]), bit);
+    var symbol_count: usize = 1;
+    if (bit) {
+        const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
+        const sign = nbf_sc_lut[nbfScIndex(f)];
+        try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+        symbol_count += 1;
+        nbfMarkSignificant(flags, nbs, x, y, negative);
+        setSignificantRow(scratch, x, y);
+    }
+    return symbol_count;
 }
 
 fn appendPass(
@@ -2654,7 +3704,10 @@ fn zeroContextFromCounts(counts: NeighborCounts, band_kind: subband.Kind) Contex
     const d = counts.diagonal;
 
     switch (band_kind) {
-        .lh => {
+        // ISO/IEC 15444-1 Table D.1: the HL (horizontally high-pass) subband
+        // swaps the roles of horizontal and vertical neighbor sums; LL and LH
+        // share the plain table.
+        .hl => {
             const tmp = h;
             h = v;
             v = tmp;
@@ -2671,7 +3724,7 @@ fn zeroContextFromCounts(counts: NeighborCounts, band_kind: subband.Kind) Contex
                 8;
             return zero_context_lut[index];
         },
-        .ll, .hl => {},
+        .ll, .lh => {},
     }
 
     const index: usize = if (h == 0)
@@ -3002,6 +4055,7 @@ fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitp
     setFlag(scratch.flags.items, index, .significant);
     setFlag(scratch.flags.items, index, .became_significant);
     setSignificantRowDecode(scratch, x, y);
+    nbfMarkSignificant(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
 }
 
 fn addMagnitudeBit(scratch: *DecodeBlockScratch, index: usize, bitplane: u8) void {

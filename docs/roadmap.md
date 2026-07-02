@@ -26,13 +26,12 @@ interop gate.
   segmentation-symbol behavior now exist in standalone T1 style paths, including
   inferred continuous-payload decode where pass lengths are not required and
   partial quality-layer prefix decode, but public codestream support remains
-  fail-closed until COD style handling is end-to-end. The remaining code-block
-  style flags still need full payload behavior; BYPASS and predictable
-  termination are now explicit metadata states but still unsupported payload
-  modes. Keep
-  row-mask, stripe-mask, and SIMD-aware block-stats optimization going only when
-  byte-for-byte oracle tests continue to pass. Code-block style flags currently
-  fail closed until that behavior is connected to the emitted payload.
+  fail-closed until COD style handling is end-to-end. BYPASS is now the first
+  public nonzero COD style bit wired through packet payloads; reset-context,
+  terminate-all, vertical-causal, predictable termination, and segmentation
+  symbols remain internal or fail-closed. Keep row-mask, stripe-mask,
+  flag-word, and SIMD-aware T1 optimization going only when byte-for-byte
+  oracle tests continue to pass.
 - T2 packet state: make include tag-tree state, zero-bitplane tag-tree state,
   `numlenbits`, layer deltas, and packet header state explicit per
   resolution/precinct/component/layer. The RPCL path now tracks layer bounds,
@@ -49,14 +48,21 @@ interop gate.
   such as eciRGBv2 and Adobe RGB. Malformed ICC box/tag rejection coverage is
   in place; optional LittleCMS-backed conversion should come only after the
   preservation path has interop coverage.
-- Profiles: enable ICT, irreversible 9/7, and scalar quantization only after
-  the corresponding transform, quantization, T1, and T2 payload behavior exists.
-  Until then, continue returning `UnsupportedPayload`.
+- Profiles: ICT, irreversible 9/7, scalar-expounded QCD, and BYPASS are now
+  supported for the narrow single-tile RPCL path. Keep scalar-derived
+  quantization, `--mct none`, unsupported style bits, and multi-tile profile
+  variants fail-closed until they have payload behavior and interop coverage.
+- Rate allocation: current `--rates` support is byte-target based and can
+  produce larger/higher-PSNR access files than Grok/OpenJPEG for the same
+  nominal ladder. Add PCRD-style distortion metadata before treating access
+  benchmarks as equivalent.
 - Multi-tile: introduce a real tile grid, per-tile DWT, per-tile packet state,
   and tile-part scheduling before allowing tile sizes smaller than the image.
 - Interop gate: for each major phase, keep OpenJPEG/Grok/Kakadu checks for
   encode/decode roundtrip, marker conformance, output size, strict reader
   validation, and single-thread plus multi-thread encode/decode benchmarks.
+  valid2000 currently still reports ICC/PLT and access-profile policy issues,
+  so keep it as an explicit hygiene gate rather than a passed gate.
 
 ## Phase 1: Finish The Narrow Lossless RPCL Path
 
@@ -149,21 +155,26 @@ Exit criteria:
 
 ## Phase 5: Irreversible And Lossy Paths
 
-Goal: add ICT, 9/7, and scalar quantization as actual payload behavior.
+Goal: harden ICT, 9/7, scalar quantization, and rate allocation beyond the
+first supported single-tile path.
 
 Tasks:
 
-- Implement a JP2 irreversible RGB path with ICT.
-- Connect 9/7 DWT into the TIFF/JP2 pipeline.
-- Implement scalar-derived and scalar-expounded quantization in marker and
-  payload behavior.
-- Add rate-control tests that compare quality layers and decoded error bounds.
+- Keep the JP2 irreversible RGB path with ICT and 9/7 covered by OpenJPEG/Grok
+  decode checks.
+- Harden scalar-expounded quantization marker and inverse-quantization behavior
+  against malformed QCD/QCC-style inputs.
+- Add scalar-derived support only when marker behavior and payload decode are
+  both covered.
+- Add PCRD-style rate-control tests that compare quality layers, output bytes,
+  and decoded error bounds against Grok/OpenJPEG on shared corpora.
 
 Exit criteria:
 
-- `--mct ict`, `--transform 9-7`, and scalar quantization no longer fail closed
-  for supported profiles.
-- Decoded output is validated with independent decoders.
+- `--mct ict`, `--transform 9-7`, and `--qstyle scalar-expounded` stay green
+  across z2000, OpenJPEG, Grok, and the local strict reader.
+- Access-profile output size and quality are close enough to Grok/OpenJPEG to
+  make benchmark comparisons fair.
 
 ## Phase 6: Performance Work
 

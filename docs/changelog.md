@@ -15,7 +15,8 @@ entries are grouped by development milestone rather than semantic version.
   exists.
 - Distinguished RCT and ICT instead of mapping `ict` to generic MCT enabled.
 - Added tests that reject unsupported LRCP/PCRL/CPRL progression, L/C/P
-  tile-parts, ICT, 9-7 JP2, scalar quantization, and multi-tile requests.
+  tile-parts, scalar-derived quantization, invalid ICT/9-7 combinations, and
+  multi-tile requests.
 - Tightened the basic JP2 box reader for the supported `.jp2` profile:
   signature and `ftyp` ordering, `jp2 ` compatibility, RGB `ihdr`, sRGB `colr`,
   and one contiguous codestream are now validated fail-closed.
@@ -39,6 +40,9 @@ entries are grouped by development milestone rather than semantic version.
 - Recorded the current interop gate: no-sidecar/no-EPH output strict-decodes in
   z2000 and is accepted losslessly by OpenJPEG and Grok; Grok no longer reports
   PL marker length warnings after RPCL subband precinct projection was fixed.
+- Added the first public irreversible profile path: ICT, ISO-scaled 9/7,
+  scalar-expounded QCD, deadzone quantization, and inverse quantization for the
+  narrow single-tile RPCL profile.
 
 ### Temporary JP2 Payload
 
@@ -87,8 +91,9 @@ entries are grouped by development milestone rather than semantic version.
   MQ segments and decoding them through the continuous API when the internal
   style is supplied.
 - Added explicit `CodeBlockStyle` metadata for all six COD code-block style
-  bits. BYPASS and predictable termination are represented but fail closed until
-  their payload behavior is implemented.
+  bits. BYPASS is now wired through public codestream payloads for the ISO-MQ
+  backend; the other style bits remain fail-closed until their payload behavior
+  is implemented end to end.
 - Tightened strict COD parsing so every nonzero code-block style byte remains
   `UnsupportedPayload` until that exact style is wired end-to-end through the
   writer, reader, tests, and interop gates.
@@ -100,6 +105,9 @@ entries are grouped by development milestone rather than semantic version.
 - Added compression-ratio target mapping.
 - Stored per-code-block cumulative pass and byte truncation points.
 - Connected layer truncation metadata to T2 packet delta helpers.
+- Connected `--rates` to public quality-layer counts. Current allocation is
+  byte-target based, so access-profile output can be larger and higher-PSNR
+  than Grok/OpenJPEG for the same nominal compression-ratio ladder.
 
 ### T2 Packet Work
 
@@ -157,6 +165,12 @@ entries are grouped by development milestone rather than semantic version.
   and disk write.
 - Ran comparative local benchmarks against Grok, OpenJPEG, and Kakadu where
   available.
+- Added `tools/bench_compare.sh` and `tools/compare_tiff.py` for local macOS
+  benchmark and pixel-check workflows.
+- Updated the ISO scorecard after local OpenJPEG/Grok/valid2000 checks: narrow
+  RGB lossless JP2 target is now estimated at 83/100 and the broader Part 1
+  codec family at 37/100. valid2000 still reports ICC/PLT and access-profile
+  policy failures, so it remains a gate rather than a pass.
 
 ### Documentation
 

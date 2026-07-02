@@ -61,8 +61,8 @@ pub const Encoder = struct {
     }
 
     pub fn write(self: *Encoder, context_index: usize, bit: bool) !void {
-        if (context_index >= self.contexts.len) return IsoMqError.InvalidContext;
-        const context = &self.contexts[context_index];
+        std.debug.assert(context_index < self.contexts.len);
+        const context = &self.contexts.ptr[context_index];
         const state = mq.state_table[context.state];
 
         self.a -= state.qe;
@@ -227,6 +227,19 @@ pub const Decoder = struct {
         self.* = undefined;
     }
 
+    /// Re-run INITDEC on a new terminated codeword segment while keeping the
+    /// adaptive context states (BYPASS-style segment restart).
+    pub fn reinitStream(self: *Decoder, bytes: []const u8) void {
+        self.bytes = bytes;
+        self.pos = 0;
+        self.a = 0x8000;
+        self.ct = 0;
+        self.c = @as(u32, if (bytes.len == 0) 0xff else bytes[0]) << 16;
+        self.byteIn();
+        self.c <<= 7;
+        self.ct -= 7;
+    }
+
     pub fn resetContexts(self: *Decoder) void {
         @memset(self.contexts, .{});
     }
@@ -236,8 +249,8 @@ pub const Decoder = struct {
     }
 
     pub fn read(self: *Decoder, context_index: usize) !bool {
-        if (context_index >= self.contexts.len) return IsoMqError.InvalidContext;
-        const context = &self.contexts[context_index];
+        std.debug.assert(context_index < self.contexts.len);
+        const context = &self.contexts.ptr[context_index];
         const state = mq.state_table[context.state];
 
         self.a -= state.qe;
