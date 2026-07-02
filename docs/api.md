@@ -39,21 +39,32 @@ Important `tiff-to-jp2` options:
 - `--block N`
 - `--layers N`
 - `--rates R1,R2,...`
-- `--mct rct`
-- `--transform 5-3`
-- `--qstyle none`
+- `--mct rct|ict`
+- `--transform 5-3|9-7`
+- `--qstyle none|scalar-expounded`
 - `--tile-parts none|R`
 - `--sop`, `--eph`, `--tlm`
+- `--t1-backend iso-mq|legacy-mq`
+- `--bypass`
 - `--threads N`
 - `--debug-temp-sidecar`
 - `--timings`
 
-Unsupported progression orders, ICT, 9-7 JP2 output, scalar quantization,
-multi-tile requests, unsupported tile-part divisions, and code-block style
-options whose payload behavior is not implemented should fail closed.
-SOP is enabled by default for the current narrow profile. EPH is available via
-`--eph`, but defaults off while packet-boundary interop with independent
-decoders is being hardened.
+Supported public JP2 profiles are still narrow:
+
+- lossless RGB: `--mct rct --transform 5-3 --qstyle none`
+- irreversible RGB: `--mct ict --transform 9-7 --qstyle scalar-expounded`
+- RPCL progression, one full-image tile, optional resolution tile-parts, and
+  8/16-bit chunky RGB TIFF input
+- `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
+  segments and packet-header segment length accounting
+
+Unsupported progression orders, scalar-derived quantization, `--mct none`,
+multi-tile requests, unsupported tile-part divisions, and code-block style bits
+other than BYPASS should fail closed. SOP is enabled by default for the current
+narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok smoke tests
+cover the common no-EPH and archival EPH paths, while valid2000 remains a
+separate policy/conformance gate.
 
 ## `src/codestream.zig`
 
@@ -94,13 +105,15 @@ Primary public functions:
 Notes:
 
 - `encodeLosslessWithOptions` writes JPEG2000 markers with strict RPCL packet
-  payloads in `SOD`.
+  payloads in `SOD`. Despite the historical name, it now covers both the
+  reversible RCT/5-3 path and the irreversible ICT/9-7/scalar-expounded path.
 - The latest private payload is BP8 and is emitted only when
   `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
 - `decodeLosslessTemporary*` decodes normal no-sidecar codestreams for the
-  current RPCL/RCT/5-3 path by reconstructing T2 block payloads from strict
-  `SOD` packets and inferring continuous MQ/T1 pass metadata from the payload.
-  Debug BP8 sidecar files are still accepted as an oracle/compat path.
+  current RPCL/RCT/5-3 and ICT/9-7 paths by reconstructing T2 block payloads
+  from strict `SOD` packets and inferring continuous MQ/T1 pass metadata from
+  the payload. Debug BP8 sidecar files are still accepted as an oracle/compat
+  path for the reversible profile.
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
@@ -255,17 +268,16 @@ layers. The symbol oracle and direct MQ path remain useful test and comparison
 surfaces, and share SIMD-aware block-stat scanning so bitplane and non-zero
 metadata stay aligned across portable, AVX2-width, and NEON-width builds.
 
-The T1 TODO is to bring the direct MQ path closer to JPEG2000 Part 1 by
-finishing remaining cleanup edge cases and real COD style flag behavior before
-advertising those flags as supported. Cleanup run mode, directional sign
-prediction contexts, and refined magnitude-refinement contexts are now covered
-by oracle tests in the current narrow path. Segmentation-symbol cleanup
+The direct ISO-MQ path is the default T1 backend. Cleanup run mode, directional
+sign prediction contexts, refined magnitude-refinement contexts, direct MQ
+emission, BYPASS raw segments, and terminated codeword segment metadata are
+covered by oracle tests in the current narrow path. Segmentation-symbol cleanup
 trailers, terminate-all pass-terminated MQ slices, vertical-causal context
 formation, and reset-context continuous MQ behavior are implemented behind
-internal EBCOT code-block style flags. `CodeBlockStyle` now maps all six COD
-style bits explicitly, but public strict codestream support rejects every
-nonzero COD style byte with `UnsupportedPayload` until each style has writer,
-reader, tests, and interop coverage.
+internal EBCOT code-block style flags, but public strict codestream support
+rejects those style bits with `UnsupportedPayload` until each style has writer,
+reader, tests, and interop coverage. BYPASS is the one public nonzero COD style
+bit currently wired end to end.
 The inferred continuous payload decoder and partial coefficient decode helpers
 accept the same internal style state for future strict T2 audits and
 quality-layer prefix validation; inferred decode rejects terminate-all payloads

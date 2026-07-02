@@ -37,7 +37,7 @@ pub fn forwardRct(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes 
     const cr = try allocator.alloc(i32, pixels);
     errdefer allocator.free(cr);
 
-    forwardRctVector(rgb.samples, y, cb, cr, pixels);
+    forwardRctVector(rgb.samples, y, cb, cr, pixels, try dcLevelShift(rgb.bit_depth));
 
     return .{
         .allocator = allocator,
@@ -78,12 +78,16 @@ const RctShiftVector = @Vector(rct_lanes, u5);
 const rct_shift_1: RctShiftVector = @splat(1);
 const rct_shift_2: RctShiftVector = @splat(2);
 
-fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels: usize) void {
+fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels: usize, level_shift: i32) void {
+    // ISO/IEC 15444-1 B.1.1 DC level shift: unsigned samples are shifted by
+    // 2^(Ssiz-1) before the component transform. Cb/Cr are component
+    // differences, so the shift cancels there; only Y needs it.
+    const shift_vec: RctVector = @splat(level_shift);
     var i: usize = 0;
     while (i + rct_lanes <= pixels) : (i += rct_lanes) {
         const rgb = loadRgbVector(samples, i);
         const two_g = rgb.g << rct_shift_1;
-        const y_vec = floorQuarterVector(rgb.r + two_g + rgb.b);
+        const y_vec = floorQuarterVector(rgb.r + two_g + rgb.b) - shift_vec;
         const cb_vec = rgb.b - rgb.g;
         const cr_vec = rgb.r - rgb.g;
         y[i..][0..rct_lanes].* = @as([rct_lanes]i32, y_vec);
@@ -95,7 +99,7 @@ fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels
         const r = @as(i32, samples[i * 3]);
         const g = @as(i32, samples[i * 3 + 1]);
         const b = @as(i32, samples[i * 3 + 2]);
-        y[i] = floorQuarter(r + 2 * g + b);
+        y[i] = floorQuarter(r + 2 * g + b) - level_shift;
         cb[i] = b - g;
         cr[i] = r - g;
     }
@@ -104,10 +108,12 @@ fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels
 fn inverseRctVector(samples: []u16, planes: RctPlanes, pixels: usize, max_sample: i32) !void {
     const zero: RctVector = @splat(0);
     const max: RctVector = @splat(max_sample);
+    const level_shift = try dcLevelShift(planes.bit_depth);
+    const shift_vec: RctVector = @splat(level_shift);
 
     var i: usize = 0;
     while (i + rct_lanes <= pixels) : (i += rct_lanes) {
-        const y: RctVector = planes.y[i..][0..rct_lanes].*;
+        const y: RctVector = @as(RctVector, planes.y[i..][0..rct_lanes].*) + shift_vec;
         const cb: RctVector = planes.cb[i..][0..rct_lanes].*;
         const cr: RctVector = planes.cr[i..][0..rct_lanes].*;
         const g = y - floorQuarterVector(cb + cr);
@@ -122,7 +128,7 @@ fn inverseRctVector(samples: []u16, planes: RctPlanes, pixels: usize, max_sample
     }
 
     while (i < pixels) : (i += 1) {
-        const g = planes.y[i] - floorQuarter(planes.cb[i] + planes.cr[i]);
+        const g = planes.y[i] + level_shift - floorQuarter(planes.cb[i] + planes.cr[i]);
         const r = planes.cr[i] + g;
         const b = planes.cb[i] + g;
 
@@ -166,9 +172,107 @@ fn storeRgbVector(samples: []u16, pixel_index: usize, r: RctVector, g: RctVector
     }
 }
 
+pub const IctPlanes = struct {
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    y: []f32,
+    cb: []f32,
+    cr: []f32,
+
+    pub fn deinit(self: *IctPlanes) void {
+        self.allocator.free(self.y);
+        self.allocator.free(self.cb);
+        self.allocator.free(self.cr);
+        self.* = undefined;
+    }
+};
+
+/// ISO/IEC 15444-1 G.3: irreversible component transform on DC level shifted
+/// samples.
+pub fn forwardIct(allocator: std.mem.Allocator, rgb: image.RgbImage) !IctPlanes {
+    if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
+    const pixels = try std.math.mul(usize, rgb.width, rgb.height);
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
+    const shift: f32 = @floatFromInt(try dcLevelShift(rgb.bit_depth));
+
+    const y = try allocator.alloc(f32, pixels);
+    errdefer allocator.free(y);
+    const cb = try allocator.alloc(f32, pixels);
+    errdefer allocator.free(cb);
+    const cr = try allocator.alloc(f32, pixels);
+    errdefer allocator.free(cr);
+
+    for (0..pixels) |i| {
+        const r = @as(f32, @floatFromInt(rgb.samples[i * 3])) - shift;
+        const g = @as(f32, @floatFromInt(rgb.samples[i * 3 + 1])) - shift;
+        const b = @as(f32, @floatFromInt(rgb.samples[i * 3 + 2])) - shift;
+        y[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+        cb[i] = -0.16875 * r - 0.331260 * g + 0.5 * b;
+        cr[i] = 0.5 * r - 0.41869 * g - 0.08131 * b;
+    }
+
+    return .{
+        .allocator = allocator,
+        .width = rgb.width,
+        .height = rgb.height,
+        .bit_depth = rgb.bit_depth,
+        .y = y,
+        .cb = cb,
+        .cr = cr,
+    };
+}
+
+pub fn inverseIct(allocator: std.mem.Allocator, planes: IctPlanes) !image.RgbImage {
+    const pixels = try std.math.mul(usize, planes.width, planes.height);
+    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
+        return ColorError.InvalidImage;
+    }
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    const max_sample = try maxSample(planes.bit_depth);
+    const shift: f32 = @floatFromInt(try dcLevelShift(planes.bit_depth));
+
+    const samples = try allocator.alloc(u16, sample_count);
+    errdefer allocator.free(samples);
+
+    for (0..pixels) |i| {
+        const y = planes.y[i];
+        const cb = planes.cb[i];
+        const cr = planes.cr[i];
+        const r = y + 1.402 * cr;
+        const g = y - 0.34413 * cb - 0.71414 * cr;
+        const b = y + 1.772 * cb;
+        samples[i * 3] = clampToSample(r + shift, max_sample);
+        samples[i * 3 + 1] = clampToSample(g + shift, max_sample);
+        samples[i * 3 + 2] = clampToSample(b + shift, max_sample);
+    }
+
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = planes.bit_depth,
+        .samples = samples,
+    };
+}
+
+fn clampToSample(value: f32, max_sample: i32) u16 {
+    if (std.math.isNan(value)) return 0;
+    const max_f: f32 = @floatFromInt(max_sample);
+    const clamped = std.math.clamp(@round(value), 0.0, max_f);
+    return @intFromFloat(clamped);
+}
+
 fn maxSample(bit_depth: u8) !i32 {
     if (bit_depth == 0 or bit_depth > 16) return ColorError.InvalidImage;
     return (@as(i32, 1) << @as(u5, @intCast(bit_depth))) - 1;
+}
+
+fn dcLevelShift(bit_depth: u8) !i32 {
+    if (bit_depth == 0 or bit_depth > 16) return ColorError.InvalidImage;
+    return @as(i32, 1) << @as(u5, @intCast(bit_depth - 1));
 }
 
 fn floorQuarter(value: i32) i32 {

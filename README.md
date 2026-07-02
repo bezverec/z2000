@@ -36,21 +36,45 @@ This first milestone is intentionally small and honest:
 - swappable pass-stream entropy layer with raw/RLE/bit-RLE auto-selection
 - explicit experimental adaptive arithmetic backend for pass streams
 - EBCOT/MQ code-block segments used as the current RPCL packet payload
-- explicit COD code-block style metadata for all six Part 1 style bits, while
-  strict codestream decode still rejects every nonzero style byte fail-closed
+- ISO Annex C MQ coder with band-oriented T1 contexts as the default T1
+  backend (`--t1-backend iso-mq`); the experimental range-coder backend
+  remains available as `--t1-backend legacy-mq`
+- verified OpenJPEG lossless interop: `tiff-to-jp2` output (8- and 16-bit RGB,
+  multi-layer, archival precinct/tile-part profiles) decodes bit-for-bit in
+  current OpenJPEG smoke tests after fixing four ISO conformance gaps:
+  zero-bitplane signalling now uses Mb = guard + exponent - 1 (E-2), RCT
+  applies the B.1.1 DC level shift on Y, the ZC context orientation swap moved
+  from LH to HL (Table D.1), and the forward 5/3 DWT filters vertically before
+  horizontally (F.4.8) so floor-rounding matches independent codecs
+- irreversible lossy pipeline for `tiff-to-jp2 --transform 9-7 --mct ict
+  --qstyle scalar-expounded`: float ICT (G.3), ISO-scaled 9/7 lifting
+  (K = 1.230174105), deadzone scalar quantization with OpenJPEG-compatible
+  explicit step sizes, QCD scalar-expounded signalling, and E.1 inverse
+  quantization with Table E-1 gains; OpenJPEG decodes the output at the same
+  PSNR as the z2000 decoder for 8- and 16-bit RGB
+- arithmetic coder BYPASS (`--bypass`, COD style 0x01) end to end: raw
+  significance/refinement passes below the fourth bitplane (D.6), terminated
+  MQ/raw codeword segments, and multi-segment packet-header lengths
+  (B.10.7.2); OpenJPEG decodes bypass output losslessly. Quality layers and
+  `--rates` work with BYPASS by snapping layer truncation points to codeword
+  segment boundaries, and rate-driven layers also apply to the irreversible
+  9/7 path. Current rate allocation is byte-target based rather than
+  distortion/PCRD based, so 1:8 access files can be larger and higher-PSNR
+  than Grok/OpenJPEG outputs for the same nominal rate ladder.
+- explicit COD code-block style metadata for all six Part 1 style bits;
+  BYPASS is implemented end to end, the remaining style bits stay fail-closed
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
 - strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
   `COM` comments
 
-It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder. The
-current `jp2c` payload is a narrow single-tile RPCL/RCT/5-3 codestream with
-strict packet headers, PLT-backed packet lengths, and MQ-backed code-block
-payloads, but T1 context modeling and external decoder interop still need more
-work before calling the output generally compliant.
+It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder, but
+the narrow single-tile RPCL profiles (lossless RCT/5-3 and lossy ICT/9-7,
+with or without BYPASS and quality layers) decode losslessly/pixel-identical
+in OpenJPEG; Kakadu remains the next external gate.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-02, the narrow RGB lossless JP2 target is estimated at 79/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 30/100.
+2026-07-02, the narrow RGB lossless JP2 target is estimated at 83/100, while
+the broader JPEG2000 Part 1 codec family is estimated at 37/100.
 
 ## Build
 
@@ -129,28 +153,29 @@ lines we are targeting:
   the image fail closed until multi-tile encoding exists.
 - `--progression RPCL` maps to Grok `-p RPCL` and Kakadu `Corder=RPCL`; other
   progression orders fail closed until matching payload packetization exists.
-- `--mct rct` maps to COD multiple component transform 1. The current supported
-  path is RCT for reversible lossless RGB; `--mct ict` and `--mct none` fail
-  closed until those tile pipelines exist.
-- `--transform 5-3` maps to COD wavelet transform 1. `--transform 9-7` parses
-  but fails closed until the TIFF/JP2 path has a real irreversible ICT/9-7
-  pipeline.
-- `--qstyle none` and `--guard-bits 2` map to QCD `Sqcd`. Scalar-derived and
-  scalar-expounded quantization parse but fail closed until lossy quantization
-  is implemented for JP2 output.
+- `--mct rct` maps to COD multiple component transform 1 with the reversible
+  5/3 path; `--mct ict` selects the irreversible ICT and requires
+  `--transform 9-7 --qstyle scalar-expounded`. `--mct none` fails closed.
+- `--transform 5-3` maps to COD wavelet transform 1 (lossless RCT path).
+  `--transform 9-7` maps to COD wavelet transform 0 and enables the
+  irreversible ICT/9-7/scalar-quantization pipeline.
+- `--qstyle none` and `--guard-bits 2` map to QCD `Sqcd` on the lossless path.
+  `--qstyle scalar-expounded` is the lossy default quantization with
+  OpenJPEG-compatible explicit step sizes; scalar-derived still fails closed.
 - `--resolutions 6` maps to Grok `-n 6`; it is equivalent to `--levels 5`
   and Kakadu `Clevels=5`.
 - `--precincts "[256,256],[256,256],[128,128]"` maps to Grok `-c` and Kakadu
   `Cprecincts`.
 - `--block 64` maps to Grok `-b 64,64` and Kakadu `Cblk={64,64}`.
-- `--bypass`, `--reset-context`, `--terminate-all`, `--vertical-causal`,
+- `--bypass` (Grok `-M 1`, Kakadu `Cmodes=BYPASS`) is implemented end to end
+  for single-layer codestreams with the ISO MQ backend, including raw
+  segment termination and multi-segment packet-header lengths.
+  `--reset-context`, `--terminate-all`, `--vertical-causal`,
   `--predictable-termination`, and `--segmentation-symbols` are represented as
-  explicit COD code-block style metadata, but the public strict codestream
-  profile still rejects every nonzero style byte with `UnsupportedPayload` until
-  the matching JPEG2000 Part 1 payload behavior is wired end-to-end.
-  Reset-context, terminate-all, vertical-causal, and segmentation-symbol
-  behavior exist only in standalone EBCOT test paths; BYPASS and predictable
-  termination remain explicit unsupported payload modes.
+  explicit COD code-block style metadata, but the strict codestream profile
+  still rejects those style bits with `UnsupportedPayload` until their payload
+  behavior is wired end-to-end; they exist only in standalone EBCOT test
+  paths.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is
   disabled by default for the current independent-decoder interop path. Use
@@ -199,6 +224,38 @@ same metadata for oracle checks; it is no longer emitted by default or required
 for normal z2000 decode. Code-block style options remain fail-closed until their
 payload behavior is implemented.
 
+## Performance Notes (current pass)
+
+- The default ISO MQ encode path is now direct: code-blocks stream straight
+  into the ISO MQ coder (and raw BYPASS segments) from per-worker scratch,
+  with no per-block Symbol materialization or allocator churn. A test pins
+  the direct output byte-for-byte to the symbol-based reference coders.
+- Significance and refinement passes skip whole 4-row stripes whose
+  neighborhood window carries no significance (encode and decode); this is
+  content-dependent and helps most on smooth imagery.
+- Strict no-sidecar decode now runs component-parallel with `--threads`,
+  reuses one T1 scratch and one ISO MQ decoder per component, and skips
+  context-index bounds checks in the hot MQ loops (debug asserts remain).
+- T1 neighborhood state is now incremental (openjpeg-style flag words): one
+  u16 per sample in a bordered grid carries the eight neighbor significance
+  bits, four neighbor signs, and self/visit/refine state, updated when a
+  sample becomes significant. Zero-coding contexts come from comptime LUTs
+  (4 x 256) generated from the reference context functions, sign coding from
+  a 256-entry LUT, so contexts stay provably identical to the symbol-based
+  coders (byte-equality test). Vertical causal mode is a mask on the stripe's
+  last row.
+- macOS/Apple M4 baseline on the synthetic 2048x2048 RGB TIFF, archival
+  lossless profile with BYPASS, RPCL, six resolutions, SOP/EPH/TLM, and ten
+  threads: z2000 encode 180 ms vs Grok 107 ms and OpenJPEG 103 ms; output size
+  is effectively identical (6,636,048 B vs 6,635,206 B / 6,635,203 B), and
+  `tiffcmp` confirms lossless self/cross decode. z2000 decode remains the
+  larger gap: 262 ms at ten threads vs Grok 77 ms and OpenJPEG 116 ms.
+- On a 1024x1024 single-tile access-style ICT/9-7 run with the NDK 12-layer
+  rate ladder, z2000 encode is close in wall time (65 ms vs Grok 57 ms and
+  OpenJPEG 46 ms) but produces a much larger, higher-quality file
+  (1,288,181 B and about 52.6 dB PSNR vs about 393 kB for Grok/OpenJPEG).
+  This is a rate-allocation issue, not a transform/interoperability gate.
+
 ## Performance and Safety Direction
 
 - Keep parsers bounds-checked and allocation-limited.
@@ -237,24 +294,20 @@ example:
   --block 64 --layers 1 --tile-parts R --sop --no-eph --tlm --timings
 ```
 
-Historical local baseline on a synthetic uncompressed RGB TIFF 2048x2048. The
-numbers predate the latest strict marker-validation passes, but remain useful
-as a rough reference until the next benchmark refresh:
+Current local baseline on macOS/Apple M4 for a synthetic uncompressed RGB TIFF
+2048x2048, archival lossless RPCL profile, BYPASS, SOP/EPH/TLM, and ten
+threads:
 
-- `z2000 tiff-to-jp2`: 152.2 ms mean, early RPCL packet stream, 9.4 MB output
-- `grk_compress`: 101.5 ms mean, real lossless JP2, 6.3 MB output
-- `opj_compress`: 424.1 ms mean, real lossless JP2, 6.3 MB output
-- `tif2jp2 --archival-master-ndk`: 275.2 ms mean, OpenJPEG FFI wrapper, 6.3 MB output
-- `z2000 decode-temp-jp2`: 286.9 ms mean, current z2000 JP2 decoder
-- `grk_decompress`: 76.6 ms mean
-- `opj_decompress`: 440.9 ms mean
-- `tif2jp2 --decode`: 224.6 ms mean
+- `z2000 tiff-to-jp2`: 180.3 ms mean, 6,636,048 B output.
+- `grk_compress`: 106.7 ms mean, 6,635,206 B output.
+- `opj_compress`: 103.1 ms mean, 6,635,203 B output.
+- `z2000 decode-temp-jp2`: 261.9 ms mean at ten threads.
+- `grk_decompress`: 77.8 ms mean on its own file, 77.1 ms on z2000 output.
+- `opj_decompress`: 117.5 ms mean on its own file, 116.4 ms on z2000 output.
 
-The encode comparison is still not fully fair yet: `z2000` performs TIFF
-parsing, RCT, integer 5/3 DWT, code-block partitioning, JPEG2000 marker
-emission, strict RPCL packet assembly, and MQ-backed code-block payload writing.
-The remaining size and interop gap is mostly T1 model fidelity, not absence of a
-packet stream.
+The encode comparison is now much fairer for the narrow archival profile:
+z2000 writes real strict RPCL packets and EBCOT/MQ payloads with byte size close
+to Grok/OpenJPEG. Decode hot paths remain the largest performance gap.
 
 The current decoder is lossless for z2000-produced narrow RPCL/RCT/5-3 files. A
 256x256 RGB TIFF generated by `tools/make_bench_tiff.py` roundtrips bit-for-bit
@@ -263,11 +316,12 @@ through `tiff-to-jp2` and `decode-temp-jp2`.
 The codestream marker skeleton now writes non-zero `SOT/Psot` values and TLM
 entries for resolution-ordered tile-parts. OpenJPEG `opj_dump` indexes the
 current single-tile archival profile as six tile-parts for six resolutions.
-On the current no-sidecar/no-EPH smoke path, z2000 strict decode, OpenJPEG, and
-Grok accept the output losslessly. Grok no longer reports PL marker length
-warnings after the RPCL subband precinct projection fix. Kakadu and valid2000
-remain the next external gates before treating comparative benchmarks as fully
-fair.
+On the current no-sidecar smoke path, z2000 strict decode, OpenJPEG, and Grok
+accept the output losslessly. Grok no longer reports PL marker length warnings
+after the RPCL subband precinct projection fix. valid2000 is still an active
+hygiene gate: the local lossless file currently reports an ICC-profile failure
+and a PLT count warning, while the access profile also trips profile-specific
+transform/QCD/layer/tile-size expectations.
 
 Strict marker handling now checks SOT tile-part sequence/count, TLM tile indexes
 and tile-part lengths, PLT packet spans, ordered multi-segment TLM/PLT marker
@@ -303,7 +357,8 @@ some stream sizes at too much encode/decode cost. The next compression step
 should be a JPEG2000-style context/MQ backend, not further tuning of the
 generic pass-stream coder.
 
-Historical local profile comparison on the same 2048x2048 RGB TIFF:
+Historical local profile comparison on the same 2048x2048 RGB TIFF before the
+current ISO-MQ/BYPASS work:
 
 - Archival profile encode: `z2000` 254.1 ms, Grok 115.6 ms, OpenJPEG 424.2 ms.
 - Archival profile decode: `z2000` 294.0 ms, Grok 84.0 ms, OpenJPEG 449.9 ms.
@@ -348,9 +403,37 @@ Optimization read from those numbers:
 
 ## Roadmap
 
-1. Tighten remaining T1/EBCOT cleanup edge cases and COD-driven termination
-   behavior for the current continuous MQ payload.
-2. Cross-check the narrow RPCL/RCT/5-3 path against independent decoders.
-3. Close packet/header differences found by OpenJPEG, Grok, and Kakadu.
-4. Add real multi-tile payload layout, then tile-parallel scheduling on top of
+Features:
+
+1. Real multi-tile payload layout, then tile-parallel scheduling on top of
    the per-worker scratch-buffer model.
+2. Kakadu/valid2000 cross-checks on the full profile matrix; current local
+   valid2000 logs still flag ICC/PLT and access-profile policy issues.
+3. Distortion-aware rate allocation (PCRD-style) so early quality layers
+   carry more PSNR than the current byte-even/ratio split.
+
+Performance (current lossless encode gap vs OpenJPEG/Grok ~1.7x on the M4
+2048x2048 archival benchmark; decode gap is larger and should come first;
+ordered by expected win per effort):
+
+1. MQ coder fast path: preallocated pointer-bumped output instead of
+   ArrayList appends in BYTEOUT, and an inlined MPS-without-renorm branch in
+   encode/decode (the single most common case). Mirrors opj's macro design;
+   biggest remaining single-thread item on both sides.
+2. Packed column flag words (opj 2.x layout): one u32 per 4-sample column
+   carrying the whole 3x6 sigma window plus per-sample visit/refine, so a
+   column costs one load instead of four u16 loads; enables single-word RLC
+   and membership tests. Larger rewrite of the flag-words layer.
+3. Block/precinct-level thread pool: component-level parallelism caps at 3x;
+   a work-stealing pool over code-blocks (encode already splits ranges,
+   decode does not) should push 4-8 core scaling toward linear, including
+   the serial packet-assembly tail.
+4. DWT 5/3 horizontal pass SIMD (vertical is vectorized; horizontal lifting
+   is scalar) plus cache blocking - DWT is ~15% of encode after the T1 work.
+5. Word-granular stripe skipping: skip 64-column chunks inside a stripe via
+   the existing significance row masks, not just whole stripes; helps smooth
+   imagery more than the noise benchmark shows.
+6. Lossy path SIMD: dequant + float 9/7 inverse currently scalar per band;
+   NEON f32x4 lifting mirrors the integer path.
+7. Allocator: per-worker arenas for shadow-block payload copies to cut the
+   remaining allocator churn and peak RSS on large tiles.

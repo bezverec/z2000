@@ -80,11 +80,15 @@ pub fn forward53WithWorkspace(
     var cur_height = height;
     var done: u8 = 0;
     while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        // ISO/IEC 15444-1 F.4.8: the forward 2D transform filters vertically
+        // first, then horizontally. The 5/3 lifting steps use floor
+        // operations, so the direction order changes coefficients by +-1 and
+        // must match independent codecs.
+        forward53Columns(data, width, cur_width, cur_height, scratch);
+
         for (0..cur_height) |row| {
             forward53Line(rowSlice(data, width, row, cur_width), scratch[0..cur_width]);
         }
-
-        forward53Columns(data, width, cur_width, cur_height, scratch);
 
         cur_width = lowCount(cur_width);
         cur_height = lowCount(cur_height);
@@ -143,11 +147,13 @@ pub fn inverse53WithWorkspace(
         level -= 1;
         const shape = shapes[level];
 
-        inverse53Columns(data, width, shape.width, shape.height, scratch);
-
+        // Mirror of the ISO forward order (vertical then horizontal): the
+        // inverse runs horizontally first, then vertically (F.3.8 2D_SR).
         for (0..shape.height) |row| {
             inverse53Line(rowSlice(data, width, row, shape.width), scratch[0..shape.width]);
         }
+
+        inverse53Columns(data, width, shape.width, shape.height, scratch);
     }
 }
 
