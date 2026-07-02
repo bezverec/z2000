@@ -9,6 +9,7 @@ const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const jp2 = @import("jp2.zig");
 const mq = @import("mq.zig");
+const mq_iso = @import("mq_iso.zig");
 const packet_plan = @import("packet_plan.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const simd = @import("simd.zig");
@@ -68,6 +69,107 @@ test "T2 packet header presence bit matches temporary envelope bytes" {
     try std.testing.expectEqual(@as(usize, 1), cursor);
     try std.testing.expect(try t2.readPacketPresenceHeader(out.items, &cursor, out.items.len));
     try std.testing.expectEqual(out.items.len, cursor);
+}
+
+test "ISO MQ encoder flushes an empty code-block segment" {
+    const allocator = std.testing.allocator;
+    var encoder = try mq_iso.Encoder.init(allocator, 1);
+    defer encoder.deinit();
+
+    const bytes = try encoder.finish();
+    defer allocator.free(bytes);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xff, 0x7f }, bytes);
+}
+
+test "ISO MQ encoder byteout keeps marker prefixes stuffed" {
+    const allocator = std.testing.allocator;
+    var encoder = try mq_iso.Encoder.init(allocator, 1);
+    defer encoder.deinit();
+
+    var index: usize = 0;
+    while (index < 512) : (index += 1) {
+        try encoder.write(0, index % 3 == 0);
+    }
+    const bytes = try encoder.finish();
+    defer allocator.free(bytes);
+
+    var byte_index: usize = 1;
+    while (byte_index < bytes.len) : (byte_index += 1) {
+        if (bytes[byte_index - 1] == 0xff) {
+            try std.testing.expect((bytes[byte_index] & 0x80) == 0);
+        }
+    }
+}
+
+test "ISO MQ encoder resetStream preserves deterministic output" {
+    const allocator = std.testing.allocator;
+    var encoder = try mq_iso.Encoder.init(allocator, 2);
+    defer encoder.deinit();
+
+    for (0..64) |index| {
+        try encoder.write(index % 2, index % 5 == 0);
+    }
+    const first = try encoder.finish();
+    defer allocator.free(first);
+
+    encoder.resetStream();
+    encoder.resetContexts();
+    for (0..64) |index| {
+        try encoder.write(index % 2, index % 5 == 0);
+    }
+    const second = try encoder.finish();
+    defer allocator.free(second);
+
+    try std.testing.expectEqualSlices(u8, first, second);
+}
+
+test "ISO MQ decoder roundtrips encoded decisions" {
+    const allocator = std.testing.allocator;
+    var encoder = try mq_iso.Encoder.init(allocator, 4);
+    defer encoder.deinit();
+
+    var contexts: [96]usize = undefined;
+    var bits: [96]bool = undefined;
+    for (0..contexts.len) |index| {
+        contexts[index] = (index * 3 + index / 5) % 4;
+        bits[index] = ((index * 11 + 7) % 17) < 6;
+        try encoder.write(contexts[index], bits[index]);
+    }
+    const bytes = try encoder.finish();
+    defer allocator.free(bytes);
+
+    var decoder = try mq_iso.Decoder.init(allocator, 4, bytes);
+    defer decoder.deinit();
+    for (contexts, bits) |context, bit| {
+        try std.testing.expectEqual(bit, try decoder.read(context));
+    }
+}
+
+test "ISO MQ decoder context reset mirrors encoder reset" {
+    const allocator = std.testing.allocator;
+    var encoder = try mq_iso.Encoder.init(allocator, 2);
+    defer encoder.deinit();
+
+    for (0..32) |index| {
+        try encoder.write(index % 2, index % 7 == 0);
+    }
+    encoder.resetContexts();
+    for (0..32) |index| {
+        try encoder.write(index % 2, index % 5 == 0);
+    }
+    const bytes = try encoder.finish();
+    defer allocator.free(bytes);
+
+    var decoder = try mq_iso.Decoder.init(allocator, 2, bytes);
+    defer decoder.deinit();
+    for (0..32) |index| {
+        try std.testing.expectEqual(index % 7 == 0, try decoder.read(index % 2));
+    }
+    decoder.resetContexts();
+    for (0..32) |index| {
+        try std.testing.expectEqual(index % 5 == 0, try decoder.read(index % 2));
+    }
 }
 
 test "T2 packet header bitstream inserts marker-safe stuff bits after 0xff" {
@@ -168,6 +270,20 @@ test "T2 zero bit-plane count bridges T1 block bitplane metadata" {
 test "T2 coding pass count coder roundtrips ISO packet header ranges" {
     const allocator = std.testing.allocator;
     const pass_counts = [_]u16{ 1, 2, 3, 5, 6, 36, 37, 164 };
+    const Vector = struct {
+        passes: u16,
+        bytes: []const u8,
+    };
+    const vectors = [_]Vector{
+        .{ .passes = 1, .bytes = &.{0x00} },
+        .{ .passes = 2, .bytes = &.{0x80} },
+        .{ .passes = 3, .bytes = &.{0xc0} },
+        .{ .passes = 5, .bytes = &.{0xe0} },
+        .{ .passes = 6, .bytes = &.{ 0xf0, 0x00 } },
+        .{ .passes = 36, .bytes = &.{ 0xff, 0x00 } },
+        .{ .passes = 37, .bytes = &.{ 0xff, 0x40, 0x00 } },
+        .{ .passes = 164, .bytes = &.{ 0xff, 0x7f, 0x80 } },
+    };
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(allocator);
@@ -185,6 +301,14 @@ test "T2 coding pass count coder roundtrips ISO packet header ranges" {
     try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
     try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, t2.writeCodingPassCount(&writer, 0));
     try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, t2.writeCodingPassCount(&writer, 165));
+
+    for (vectors) |vector| {
+        bytes.clearRetainingCapacity();
+        var vector_writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+        try t2.writeCodingPassCount(&vector_writer, vector.passes);
+        try vector_writer.finish();
+        try std.testing.expectEqualSlices(u8, vector.bytes, bytes.items);
+    }
 }
 
 test "T2 segment length coder preserves Lblock state" {
@@ -2951,7 +3075,7 @@ test "EBCOT segmentation symbols append and validate cleanup trailers" {
     for (expected, 0..) |bit, offset| {
         const symbol = top[2 + offset];
         try std.testing.expectEqual(ebcot.SymbolKind.segmentation_symbol, symbol.kind);
-        try std.testing.expectEqual(ebcot.Context.segmentation_symbol, symbol.context);
+        try std.testing.expectEqual(ebcot.Context.cleanup_run, symbol.context);
         try std.testing.expectEqual(bit, symbol.bit);
     }
 }
@@ -3083,7 +3207,7 @@ test "EBCOT significance propagation precedes cleanup on lower bitplanes" {
     try std.testing.expectEqual(ebcot.SymbolKind.zero_coding, sig[0].kind);
     try std.testing.expectEqual(true, sig[0].bit);
     try std.testing.expectEqual(@as(usize, 1), sig[0].x);
-    try std.testing.expectEqual(ebcot.Context.zero1, sig[0].context);
+    try std.testing.expectEqual(ebcot.Context.zero5, sig[0].context);
     try std.testing.expectEqual(ebcot.SymbolKind.sign, sig[1].kind);
     try std.testing.expectEqual(false, sig[1].bit);
 
@@ -3092,6 +3216,27 @@ test "EBCOT significance propagation precedes cleanup on lower bitplanes" {
     try std.testing.expectEqual(ebcot.SymbolKind.magnitude_refinement, refinement[0].kind);
     try std.testing.expectEqual(@as(usize, 0), refinement[0].x);
     try std.testing.expectEqual(false, refinement[0].bit);
+}
+
+test "EBCOT zero coding context follows subband orientation" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{ 4, 2 };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = 2, .height = 1 };
+
+    var ll = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 2, rect, .{ .band_kind = .ll });
+    defer ll.deinit(allocator);
+    var lh = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 2, rect, .{ .band_kind = .lh });
+    defer lh.deinit(allocator);
+    var hh = try ebcot.encodeBlockWithStyle(allocator, plane[0..], 2, rect, .{ .band_kind = .hh });
+    defer hh.deinit(allocator);
+
+    const ll_sig = ll.symbols[ll.passes[1].first_symbol..][0..ll.passes[1].symbol_count];
+    const lh_sig = lh.symbols[lh.passes[1].first_symbol..][0..lh.passes[1].symbol_count];
+    const hh_sig = hh.symbols[hh.passes[1].first_symbol..][0..hh.passes[1].symbol_count];
+
+    try std.testing.expectEqual(ebcot.Context.zero5, ll_sig[0].context);
+    try std.testing.expectEqual(ebcot.Context.zero3, lh_sig[0].context);
+    try std.testing.expectEqual(ebcot.Context.zero1, hh_sig[0].context);
 }
 
 test "EBCOT refinement context tracks first and later refinements" {
@@ -3420,7 +3565,7 @@ test "EBCOT vertical causal style ignores south stripe-boundary neighbors" {
 
     try std.testing.expectEqual(ebcot.SymbolKind.zero_coding, normal_sig[0].kind);
     try std.testing.expectEqual(@as(usize, 3), normal_sig[0].y);
-    try std.testing.expectEqual(ebcot.Context.zero1, normal_sig[0].context);
+    try std.testing.expectEqual(ebcot.Context.zero3, normal_sig[0].context);
     try std.testing.expectEqual(true, normal_sig[0].bit);
 
     try std.testing.expectEqual(ebcot.SymbolKind.cleanup_aggregation, causal_cleanup[0].kind);
@@ -3669,6 +3814,201 @@ test "EBCOT direct MQ segment matches symbol oracle" {
     try std.testing.expectEqualSlices(u8, oracle.bytes, direct.bytes);
     try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, oracle.passes, direct.passes);
     try expectMarkerStuffingIsValid(direct.bytes);
+}
+
+test "EBCOT ISO MQ symbol segment preserves pass metadata" {
+    const allocator = std.testing.allocator;
+    const plane = [_]i32{
+        0, -7,  0,  5,  3,
+        1, 0,   -2, 0,  0,
+        0, 0,   0,  0,  -1,
+        9, -12, 0,  4,  0,
+        0, 6,   0,  -8, 2,
+    };
+
+    var block = try ebcot.encodeBlock(allocator, plane[0..], 5, .{ .x = 0, .y = 0, .width = 5, .height = 5 });
+    defer block.deinit(allocator);
+    var oracle = try ebcot.encodeBlockSymbolsSegment(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer oracle.deinit(allocator);
+
+    var iso = try ebcot.encodeBlockSymbolsSegmentIsoMq(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer iso.deinit(allocator);
+
+    try std.testing.expectEqual(oracle.bitplanes, iso.bitplanes);
+    try std.testing.expectEqual(oracle.non_zero_count, iso.non_zero_count);
+    try std.testing.expectEqual(oracle.pass_count, iso.pass_count);
+    try std.testing.expectEqual(iso.byte_length, iso.bytes.len);
+    try std.testing.expect(iso.bytes.len > 0);
+    try std.testing.expect(!std.mem.eql(u8, oracle.bytes, iso.bytes));
+    try expectMarkerStuffingIsValid(iso.bytes);
+    for (oracle.passes, iso.passes) |expected, actual| {
+        try std.testing.expectEqual(expected.kind, actual.kind);
+        try std.testing.expectEqual(expected.magnitude_bitplane, actual.magnitude_bitplane);
+        try std.testing.expectEqual(expected.symbol_count, actual.symbol_count);
+        try std.testing.expectEqual(actual.byte_offset + actual.byte_length, actual.cumulative_bytes);
+        if (actual.byte_length > 0) {
+            try std.testing.expect(iso.bytes[actual.cumulative_bytes - 1] != 0xff);
+        }
+    }
+}
+
+test "EBCOT ISO MQ symbol segment decodes original decisions" {
+    const allocator = std.testing.allocator;
+    const width = 6;
+    const height = 6;
+    const plane = [_]i32{
+        0, 0,  -3,  0,  12, 0,
+        7, 0,  0,   -2, 0,  5,
+        0, 9,  0,   0,  -6, 0,
+        4, 0,  -11, 0,  0,  1,
+        0, -8, 0,   3,  0,  0,
+        6, 0,  2,   0,  -5, 10,
+    };
+
+    var block = try ebcot.encodeBlock(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer block.deinit(allocator);
+    var iso = try ebcot.encodeBlockSymbolsSegmentIsoMq(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer iso.deinit(allocator);
+
+    const bits = try ebcot.decodeCodeBlockSegmentBitsIsoMq(allocator, iso, block.symbols);
+    defer allocator.free(bits);
+    try std.testing.expectEqual(block.symbols.len, bits.len);
+    for (block.symbols, bits) |symbol, bit| {
+        try std.testing.expectEqual(symbol.bit, bit);
+    }
+}
+
+test "EBCOT ISO MQ symbol segment reconstructs code-block coefficients" {
+    const allocator = std.testing.allocator;
+    const width = 6;
+    const height = 6;
+    const plane = [_]i32{
+        0, 0,  -3,  0,  12, 0,
+        7, 0,  0,   -2, 0,  5,
+        0, 9,  0,   0,  -6, 0,
+        4, 0,  -11, 0,  0,  1,
+        0, -8, 0,   3,  0,  0,
+        6, 0,  2,   0,  -5, 10,
+    };
+
+    var block = try ebcot.encodeBlock(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer block.deinit(allocator);
+    var iso = try ebcot.encodeBlockSymbolsSegmentIsoMq(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer iso.deinit(allocator);
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsIsoMq(allocator, iso, width, height);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+}
+
+test "EBCOT continuous ISO MQ segment reconstructs code-block coefficients" {
+    const allocator = std.testing.allocator;
+    const width = 6;
+    const height = 6;
+    const plane = [_]i32{
+        0, 0,  -3,  0,  12, 0,
+        7, 0,  0,   -2, 0,  5,
+        0, 9,  0,   0,  -6, 0,
+        4, 0,  -11, 0,  0,  1,
+        0, -8, 0,   3,  0,  0,
+        6, 0,  2,   0,  -5, 10,
+    };
+
+    var block = try ebcot.encodeBlock(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
+    defer block.deinit(allocator);
+    var iso = try ebcot.encodeBlockSymbolsSegmentIsoMqContinuous(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer iso.deinit(allocator);
+
+    const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqWithStyle(
+        allocator,
+        iso.bitplanes,
+        iso.pass_count,
+        iso.bytes,
+        width,
+        height,
+        .{},
+    );
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+    try std.testing.expectEqual(iso.byte_length, iso.bytes.len);
+    try std.testing.expect(iso.bytes.len > 0);
+}
+
+test "EBCOT ISO MQ coefficient decode honors vertical causal and segmentation symbols" {
+    const allocator = std.testing.allocator;
+    const width = 5;
+    const height = 7;
+    const plane = [_]i32{
+        0, 4,  0,  -6, 0,
+        8, 0,  2,  0,  -1,
+        0, 0,  -9, 0,  3,
+        5, 0,  0,  -7, 0,
+        0, -2, 6,  0,  0,
+        1, 0,  0,  10, -4,
+        0, 7,  0,  0,  -8,
+    };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    const style = ebcot.CodeBlockStyle{
+        .vertical_causal = true,
+        .segmentation_symbols = true,
+    };
+
+    var block = try ebcot.encodeBlockWithStyle(allocator, plane[0..], width, rect, style);
+    defer block.deinit(allocator);
+    var iso = try ebcot.encodeBlockSymbolsSegmentIsoMq(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer iso.deinit(allocator);
+
+    const decoded = try ebcot.decodeCodeBlockSegmentCoefficientsIsoMqWithStyle(allocator, iso, width, height, style);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(i32, plane[0..], decoded);
+}
+
+test "EBCOT ISO MQ empty symbol segment stays empty" {
+    const allocator = std.testing.allocator;
+    var iso = try ebcot.encodeBlockSymbolsSegmentIsoMq(allocator, .{
+        .bitplanes = 0,
+        .non_zero_count = 0,
+        .passes = &.{},
+        .symbols = &.{},
+    });
+    defer iso.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u8, 0), iso.bitplanes);
+    try std.testing.expectEqual(@as(u32, 0), iso.non_zero_count);
+    try std.testing.expectEqual(@as(u16, 0), iso.pass_count);
+    try std.testing.expectEqual(@as(u64, 0), iso.byte_length);
+    try std.testing.expectEqual(@as(usize, 0), iso.passes.len);
+    try std.testing.expectEqual(@as(usize, 0), iso.bytes.len);
 }
 
 test "EBCOT direct MQ row masks match oracle across word boundaries" {
@@ -4209,6 +4549,83 @@ test "multi-layer no-sidecar codestream decodes from strict SOD packets" {
     try std.testing.expectEqual(rgb.width, decoded.width);
     try std.testing.expectEqual(rgb.height, decoded.height);
     try std.testing.expectEqual(rgb.bit_depth, decoded.bit_depth);
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
+test "ISO MQ no-sidecar codestream decodes from strict SOD packets" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 17 + 3) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 11 + 29) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 5 + 71) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const legacy = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(legacy);
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .t1_backend = .iso_mq,
+    });
+    defer allocator.free(bytes);
+    try std.testing.expect(!std.mem.eql(u8, legacy, bytes));
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .t1_backend = .iso_mq });
+    defer decoded.deinit();
+    try std.testing.expectEqual(rgb.width, decoded.width);
+    try std.testing.expectEqual(rgb.height, decoded.height);
+    try std.testing.expectEqual(rgb.bit_depth, decoded.bit_depth);
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
+test "ISO MQ multi-layer codestream decodes from strict SOD packets" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 19 + 7) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 13 + 41) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 3 + 97) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .layers = 3,
+        .t1_backend = .iso_mq,
+    });
+    defer allocator.free(bytes);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(u16, 3), stats.layers);
+    const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expect(audit.payload_bytes > 0);
+    try std.testing.expect(audit.assembled_blocks > 0);
+    try std.testing.expect(audit.assembled_passes > 0);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .t1_backend = .iso_mq });
+    defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
@@ -5682,12 +6099,12 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     try std.testing.expectEqual(@as(u8, 4), bytes[cod + 11]);
     try std.testing.expectEqual(@as(u8, 0), bytes[cod + 12]);
     try std.testing.expectEqual(@as(u8, 1), bytes[cod + 13]);
-    try std.testing.expectEqual(@as(u8, 0x88), bytes[cod + 14]);
-    try std.testing.expectEqual(@as(u8, 0x88), bytes[cod + 15]);
+    try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 14]);
+    try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 15]);
     try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 16]);
     try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 17]);
-    try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 18]);
-    try std.testing.expectEqual(@as(u8, 0x77), bytes[cod + 19]);
+    try std.testing.expectEqual(@as(u8, 0x88), bytes[cod + 18]);
+    try std.testing.expectEqual(@as(u8, 0x88), bytes[cod + 19]);
 
     const qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingMarker;
     try std.testing.expectEqual(@as(u16, 19), readU16BeTest(bytes, qcd + 2));
