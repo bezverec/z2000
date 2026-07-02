@@ -377,13 +377,13 @@ pub fn writeCodingPassCount(writer: *PacketHeaderWriter, pass_count: u16) !void 
     } else if (pass_count == 2) {
         try writer.writeBits(0b10, 2);
     } else if (pass_count <= 5) {
-        try writer.writeBits(0b110, 3);
+        try writer.writeBits(0b11, 2);
         try writer.writeBits(pass_count - 3, 2);
     } else if (pass_count <= 36) {
-        try writer.writeBits(0b1110, 4);
+        try writer.writeBits(0b1111, 4);
         try writer.writeBits(pass_count - 6, 5);
     } else {
-        try writer.writeBits(0b11110, 5);
+        try writer.writeBits(0b111111111, 9);
         try writer.writeBits(pass_count - 37, 7);
     }
 }
@@ -391,10 +391,11 @@ pub fn writeCodingPassCount(writer: *PacketHeaderWriter, pass_count: u16) !void 
 pub fn readCodingPassCount(reader: *PacketHeaderReader) !u16 {
     if (!try reader.readBit()) return 1;
     if (!try reader.readBit()) return 2;
-    if (!try reader.readBit()) return @as(u16, 3) + @as(u16, @intCast(try reader.readBits(2)));
-    if (!try reader.readBit()) return @as(u16, 6) + @as(u16, @intCast(try reader.readBits(5)));
-    if (!try reader.readBit()) return @as(u16, 37) + @as(u16, @intCast(try reader.readBits(7)));
-    return PacketHeaderError.InvalidPacketHeader;
+    const small = try reader.readBits(2);
+    if (small != 3) return @as(u16, 3) + @as(u16, @intCast(small));
+    const medium = try reader.readBits(5);
+    if (medium != 31) return @as(u16, 6) + @as(u16, @intCast(medium));
+    return @as(u16, 37) + @as(u16, @intCast(try reader.readBits(7)));
 }
 
 pub const SegmentLengthState = struct {

@@ -217,6 +217,11 @@ pub const QuantizationStyle = enum(u5) {
     }
 };
 
+pub const T1Backend = enum {
+    legacy_mq,
+    iso_mq,
+};
+
 pub const LosslessOptions = struct {
     levels: u8 = 5,
     layers: u16 = 1,
@@ -245,6 +250,7 @@ pub const LosslessOptions = struct {
     tile_part_divisions: ?u8 = 'R',
     threads: u8 = 1,
     emit_temporary_payload_sidecar: bool = false,
+    t1_backend: T1Backend = .legacy_mq,
 
     pub fn precinctForResolution(self: LosslessOptions, resolution: usize) PrecinctSize {
         const count = @as(usize, self.precinct_count);
@@ -261,8 +267,28 @@ pub const EncodeTimings = struct {
     marker_ns: u64 = 0,
 };
 
+fn normalizedEncodePrecinctOptions(options: LosslessOptions, levels: u8) LosslessOptions {
+    var normalized = options;
+    if (options.precinct_count == 0) return normalized;
+
+    const resolution_count = @as(usize, levels) + 1;
+    const option_count = @as(usize, options.precinct_count);
+    var resolution: usize = 0;
+    while (resolution < resolution_count) : (resolution += 1) {
+        const cli_resolution = @as(usize, levels) - resolution;
+        const source = if (cli_resolution < option_count)
+            cli_resolution
+        else
+            option_count - 1;
+        normalized.precincts[resolution] = options.precincts[source];
+    }
+    normalized.precinct_count = @intCast(resolution_count);
+    return normalized;
+}
+
 pub const DecodeOptions = struct {
     threads: u8 = 1,
+    t1_backend: T1Backend = .legacy_mq,
 };
 
 pub fn encodeLosslessSkeleton(
@@ -475,6 +501,7 @@ const ComponentPayloadJob = struct {
 const ComponentCatalogJob = struct {
     plane: []const i32,
     stride: usize,
+    bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
     nominal_bitplanes: u8,
     options: LosslessOptions,
@@ -495,6 +522,7 @@ const ComponentCatalogBlockJob = struct {
     allocator: std.mem.Allocator,
     plane: []const i32,
     stride: usize,
+    bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
     catalog_blocks: []RpclShadowBlock,
     nominal_bitplanes: u8,
@@ -913,6 +941,7 @@ fn componentCatalogWorker(job: *ComponentCatalogJob) void {
         std.heap.smp_allocator,
         job.plane,
         job.stride,
+        job.bands,
         job.blocks,
         job.nominal_bitplanes,
         job.options,
@@ -937,6 +966,10 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
     defer ebcot_scratch.deinit();
 
     for (job.blocks, 0..) |block, index| {
+        if (block.band_index >= job.bands.len) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
         job.catalog_blocks[index] = buildRpclShadowBlock(
             job.allocator,
             &bitplane_scratch,
@@ -944,6 +977,7 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
             job.plane,
             job.stride,
             block.rect,
+            job.bands[block.band_index].kind,
             job.nominal_bitplanes,
             job.options,
             job.include_bitplane_payload,
@@ -1015,12 +1049,14 @@ fn encodeLosslessWithOptionsMeasured(
     const levels = try forwardComponents53(allocator, &planes, options);
     if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
 
+    const encode_options = normalizedEncodePrecinctOptions(options, levels);
+
     var tile_payload: std.ArrayList(u8) = .empty;
     defer tile_payload.deinit(allocator);
     var rpcl_stream: RpclPacketStream = .{};
     defer rpcl_stream.deinit();
     const payload_start = monotonicNs();
-    try appendTemporaryPayload(allocator, &tile_payload, planes, levels, options, &rpcl_stream);
+    try appendTemporaryPayload(allocator, &tile_payload, planes, levels, encode_options, &rpcl_stream);
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
 
     var out: std.ArrayList(u8) = .empty;
@@ -1028,44 +1064,44 @@ fn encodeLosslessWithOptionsMeasured(
 
     const marker_start = monotonicNs();
     try appendMarker(allocator, &out, .soc);
-    try appendSiz(allocator, &out, rgb, options);
-    try appendCod(allocator, &out, levels, options);
-    try appendQcd(allocator, &out, levels, rgb.bit_depth, options);
-    if (options.emit_temporary_payload_sidecar) {
+    try appendSiz(allocator, &out, rgb, encode_options);
+    try appendCod(allocator, &out, levels, encode_options);
+    try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+    if (encode_options.emit_temporary_payload_sidecar) {
         try appendTemporaryPayloadComments(allocator, &out, tile_payload.items);
     }
-    const packets = try makePacketPlan(rgb.width, rgb.height, levels, options);
+    const packets = try makePacketPlan(rgb.width, rgb.height, levels, encode_options);
     if (rpcl_stream.packet_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
     if (rpcl_stream.packet_header_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
-    const tile_parts = tilePartCountForOptions(levels, options);
+    const tile_parts = tilePartCountForOptions(levels, encode_options);
     var psots: [33]u32 = undefined;
     var tile_part_payload_bytes: [33]usize = undefined;
     var tile_part_index: usize = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
-        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, options);
+        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
         const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
-        tile_part_payload_bytes[tile_part_index] = try rpclPacketPayloadByteCount(options, packet_lengths);
-        const plt_bytes = try pltBytesForRpclPacketLengths(options, packet_lengths);
+        tile_part_payload_bytes[tile_part_index] = try rpclPacketPayloadByteCount(encode_options, packet_lengths);
+        const plt_bytes = try pltBytesForRpclPacketLengths(encode_options, packet_lengths);
         const tile_part_bytes = try std.math.add(usize, plt_bytes, tile_part_payload_bytes[tile_part_index]);
         psots[tile_part_index] = try std.math.add(u32, 14, @as(u32, @intCast(tile_part_bytes)));
     }
 
-    if (options.tlm) try appendTlm(allocator, &out, psots[0..tile_parts]);
+    if (encode_options.tlm) try appendTlm(allocator, &out, psots[0..tile_parts]);
     var packet_sequence: u16 = 0;
     tile_part_index = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
-        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, options);
+        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
         const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
         const packet_header_lengths = rpcl_stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
         const packet_bytes_start = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start);
         const packet_bytes_end = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start + packet_range.count);
         try appendSot(allocator, &out, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
-        try appendPltFromRpclPacketLengths(allocator, &out, options, packet_lengths);
+        try appendPltFromRpclPacketLengths(allocator, &out, encode_options, packet_lengths);
         try appendMarker(allocator, &out, .sod);
         try appendRpclPackets(
             allocator,
             &out,
-            options,
+            encode_options,
             packet_lengths,
             packet_header_lengths,
             rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
@@ -2123,7 +2159,7 @@ fn decodeStrictRpclImageFromPackets(
     inline for (0..3) |component| {
         try validateStrictComponentAssembly(catalogs[component].blocks, assemblies[component], header.layers);
     }
-    var strict_planes = try reconstructStrictComponentCoefficientPlanes(allocator, header, catalogs, assemblies);
+    var strict_planes = try reconstructStrictComponentCoefficientPlanes(allocator, header, catalogs, assemblies, options);
     defer strict_planes.deinit();
     try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
     var strict_image = try color.inverseRct(allocator, strict_planes);
@@ -2284,7 +2320,7 @@ fn assembleStrictPacketCatalogHeaders(
     var assemblies = try StrictComponentAssemblySet.init(allocator, blocks.len);
     errdefer assemblies.deinit();
     inline for (0..3) |component| {
-        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], blocks, header.bit_depth, header.code_block_style);
+        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], bands, blocks, header.bit_depth, header.code_block_style);
     }
 
     var active_groups: []StrictPacketAuditBandGroup = &.{};
@@ -2467,17 +2503,19 @@ fn collectStrictPacketAuditBlocks(
 
 fn initializeStrictAssemblyGeometry(
     assembly: *StrictComponentAssembly,
+    bands: []const subband.Band,
     source_blocks: []const subband.CodeBlock,
     nominal_bitplanes: u8,
     code_block_style: ebcot.CodeBlockStyle,
 ) !void {
     if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
     for (assembly.blocks, source_blocks) |*block, source| {
+        if (source.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         block.band_index = source.band_index;
         block.rect = source.rect;
         block.nominal_bitplanes = nominal_bitplanes;
         block.encoded_bitplanes = 0;
-        block.code_block_style = code_block_style;
+        block.code_block_style = codeBlockStyleForBand(code_block_style, bands[source.band_index].kind);
     }
 }
 
@@ -2510,6 +2548,12 @@ fn strictAssemblyStats(assemblies: [3]StrictComponentAssembly) !StrictAssemblySt
 fn inferredBitplanesForCodingPassPrefix(pass_count: u16) u8 {
     if (pass_count == 0) return 0;
     return @intCast(1 + (@as(u16, pass_count - 1) + 2) / 3);
+}
+
+fn codeBlockStyleForBand(style: ebcot.CodeBlockStyle, band_kind: subband.Kind) ebcot.CodeBlockStyle {
+    var out = style;
+    out.band_kind = band_kind;
+    return out;
 }
 
 fn strictPacketBlockCatalogFromAssemblies(
@@ -2998,6 +3042,7 @@ fn reconstructStrictComponentCoefficientPlanes(
     header: TemporaryHeader,
     catalogs: [3]TemporaryComponentRpclCatalog,
     assemblies: [3]StrictComponentAssembly,
+    options: DecodeOptions,
 ) !color.RctPlanes {
     const y = try reconstructStrictComponentCoefficients(
         allocator,
@@ -3006,6 +3051,7 @@ fn reconstructStrictComponentCoefficientPlanes(
         catalogs[0].blocks,
         assemblies[0],
         header.layers,
+        options,
     );
     errdefer allocator.free(y);
     const cb = try reconstructStrictComponentCoefficients(
@@ -3015,6 +3061,7 @@ fn reconstructStrictComponentCoefficientPlanes(
         catalogs[1].blocks,
         assemblies[1],
         header.layers,
+        options,
     );
     errdefer allocator.free(cb);
     const cr = try reconstructStrictComponentCoefficients(
@@ -3024,6 +3071,7 @@ fn reconstructStrictComponentCoefficientPlanes(
         catalogs[2].blocks,
         assemblies[2],
         header.layers,
+        options,
     );
     errdefer allocator.free(cr);
 
@@ -3068,7 +3116,7 @@ fn decodeStrictRpclImageFromBlockCatalog(
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
 ) !image.RgbImage {
-    var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog);
+    var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog, options);
     defer strict_planes.deinit();
     try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
     return color.inverseRct(allocator, strict_planes);
@@ -3078,6 +3126,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
 ) !color.RctPlanes {
     const y = try reconstructStrictComponentCoefficientsFromBlockCatalog(
         allocator,
@@ -3085,6 +3134,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
         header.height,
         catalog,
         0,
+        options,
     );
     errdefer allocator.free(y);
     const cb = try reconstructStrictComponentCoefficientsFromBlockCatalog(
@@ -3093,6 +3143,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
         header.height,
         catalog,
         1,
+        options,
     );
     errdefer allocator.free(cb);
     const cr = try reconstructStrictComponentCoefficientsFromBlockCatalog(
@@ -3101,6 +3152,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
         header.height,
         catalog,
         2,
+        options,
     );
     errdefer allocator.free(cr);
 
@@ -3121,6 +3173,7 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
     height: usize,
     catalog: StrictPacketBlockCatalog,
     component: usize,
+    options: DecodeOptions,
 ) ![]i32 {
     if (component >= 3) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
@@ -3144,15 +3197,26 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
         if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
             return CodestreamError.InvalidCodestream;
         }
-        const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
-            allocator,
-            block.encoded_bitplanes,
-            block.cumulative_passes,
-            payload,
-            block.rect.width,
-            block.rect.height,
-            block.code_block_style,
-        );
+        const decoded = switch (options.t1_backend) {
+            .legacy_mq => try ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
+                allocator,
+                block.encoded_bitplanes,
+                block.cumulative_passes,
+                payload,
+                block.rect.width,
+                block.rect.height,
+                block.code_block_style,
+            ),
+            .iso_mq => try ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqWithStyle(
+                allocator,
+                block.encoded_bitplanes,
+                block.cumulative_passes,
+                payload,
+                block.rect.width,
+                block.rect.height,
+                block.code_block_style,
+            ),
+        };
         defer allocator.free(decoded);
         try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
     }
@@ -3170,6 +3234,7 @@ fn reconstructStrictComponentCoefficients(
     catalog: []const TemporaryRpclBlock,
     assembly: StrictComponentAssembly,
     layer_count: u16,
+    options: DecodeOptions,
 ) ![]i32 {
     if (catalog.len != assembly.blocks.len) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
@@ -3182,7 +3247,7 @@ fn reconstructStrictComponentCoefficients(
     @memset(covered, false);
 
     for (catalog, assembly.blocks) |expected, actual| {
-        const decoded = try decodeStrictBlockCoefficients(allocator, expected, actual, layer_count);
+        const decoded = try decodeStrictBlockCoefficients(allocator, expected, actual, layer_count, options);
         defer allocator.free(decoded);
         try validateStrictDecodedBlock(expected, actual, decoded);
         try scatterStrictDecodedBlock(plane, covered, width, height, expected.rect, decoded);
@@ -3199,6 +3264,7 @@ fn decodeStrictBlockCoefficients(
     expected: TemporaryRpclBlock,
     actual: StrictRpclBlockAssembly,
     layer_count: u16,
+    options: DecodeOptions,
 ) ![]i32 {
     const pass_count: usize = @intCast(actual.cumulative_passes);
     if (pass_count > expected.passes.len) return CodestreamError.InvalidCodestream;
@@ -3214,15 +3280,26 @@ fn decodeStrictBlockCoefficients(
     const complete_block = pass_count == expected.passes.len;
     _ = layer_count;
     if (complete_block and !actual.code_block_style.terminate_all) {
-        return ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
-            allocator,
-            expected.encoded_bitplanes,
-            actual.cumulative_passes,
-            actual.payload.items,
-            expected.rect.width,
-            expected.rect.height,
-            actual.code_block_style,
-        );
+        return switch (options.t1_backend) {
+            .legacy_mq => ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
+                allocator,
+                expected.encoded_bitplanes,
+                actual.cumulative_passes,
+                actual.payload.items,
+                expected.rect.width,
+                expected.rect.height,
+                actual.code_block_style,
+            ),
+            .iso_mq => ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqWithStyle(
+                allocator,
+                expected.encoded_bitplanes,
+                actual.cumulative_passes,
+                actual.payload.items,
+                expected.rect.width,
+                expected.rect.height,
+                actual.code_block_style,
+            ),
+        };
     }
     return if (complete_block)
         ebcot.decodeCodeBlockSegmentCoefficientsContinuousWithStyle(allocator, segment, expected.rect.width, expected.rect.height, actual.code_block_style)
@@ -4807,7 +4884,7 @@ fn appendTemporaryPayload(
     const blocks = try subband.makeCodeBlocks(allocator, bands, options.block_width, options.block_height);
     defer allocator.free(blocks);
 
-    var catalogs = try buildComponentRpclShadowCatalogs(allocator, planes, blocks, options, options.emit_temporary_payload_sidecar);
+    var catalogs = try buildComponentRpclShadowCatalogs(allocator, planes, bands, blocks, options, options.emit_temporary_payload_sidecar);
     defer {
         for (&catalogs) |*catalog| catalog.deinit();
     }
@@ -4984,6 +5061,7 @@ fn buildRpclBlockIndex(
 fn buildComponentRpclShadowCatalogs(
     allocator: std.mem.Allocator,
     planes: color.RctPlanes,
+    bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
     options: LosslessOptions,
     include_bitplane_payload: bool,
@@ -4994,18 +5072,18 @@ fn buildComponentRpclShadowCatalogs(
         errdefer {
             for (catalogs[0..initialized]) |*catalog| catalog.deinit();
         }
-        catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.y, planes.width, blocks, planes.bit_depth, options, include_bitplane_payload);
+        catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.y, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload);
         initialized += 1;
-        catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.cb, planes.width, blocks, planes.bit_depth, options, include_bitplane_payload);
+        catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.cb, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload);
         initialized += 1;
-        catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.cr, planes.width, blocks, planes.bit_depth, options, include_bitplane_payload);
+        catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.cr, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload);
         return catalogs;
     }
 
     var jobs = [_]ComponentCatalogJob{
-        .{ .plane = planes.y, .stride = planes.width, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
-        .{ .plane = planes.cb, .stride = planes.width, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
-        .{ .plane = planes.cr, .stride = planes.width, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+        .{ .plane = planes.y, .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+        .{ .plane = planes.cb, .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+        .{ .plane = planes.cr, .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
     };
     defer for (&jobs) |*job| job.deinit();
 
@@ -5023,6 +5101,7 @@ fn buildComponentRpclShadowCatalog(
     allocator: std.mem.Allocator,
     plane: []const i32,
     stride: usize,
+    bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
     nominal_bitplanes: u8,
     options: LosslessOptions,
@@ -5042,6 +5121,7 @@ fn buildComponentRpclShadowCatalog(
             allocator,
             plane,
             stride,
+            bands,
             blocks,
             catalog_blocks,
             nominal_bitplanes,
@@ -5060,6 +5140,7 @@ fn buildComponentRpclShadowCatalog(
     var ebcot_scratch = ebcot.DirectBlockScratch.init(allocator);
     defer ebcot_scratch.deinit();
     for (blocks, 0..) |block, index| {
+        if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         catalog_blocks[index] = try buildRpclShadowBlock(
             allocator,
             &bitplane_scratch,
@@ -5067,6 +5148,7 @@ fn buildComponentRpclShadowCatalog(
             plane,
             stride,
             block.rect,
+            bands[block.band_index].kind,
             nominal_bitplanes,
             options,
             include_bitplane_payload,
@@ -5086,6 +5168,7 @@ fn buildComponentRpclShadowCatalogBlocksParallel(
     allocator: std.mem.Allocator,
     plane: []const i32,
     stride: usize,
+    bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
     catalog_blocks: []RpclShadowBlock,
     nominal_bitplanes: u8,
@@ -5104,6 +5187,7 @@ fn buildComponentRpclShadowCatalogBlocksParallel(
             .allocator = allocator,
             .plane = plane,
             .stride = stride,
+            .bands = bands,
             .blocks = blocks[start..end],
             .catalog_blocks = catalog_blocks[start..end],
             .nominal_bitplanes = nominal_bitplanes,
@@ -5138,12 +5222,13 @@ fn buildRpclShadowBlock(
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
+    band_kind: subband.Kind,
     nominal_bitplanes: u8,
     options: LosslessOptions,
     include_bitplane_payload: bool,
 ) !RpclShadowBlock {
     _ = ebcot_scratch;
-    var segment = try ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect);
+    var segment = try encodeCodeBlockSegmentForOptions(allocator, plane, stride, rect, band_kind, options);
     errdefer segment.deinit(allocator);
 
     var bitplane_passes: ?bitplane.EncodedBlockPasses = null;
@@ -5168,6 +5253,37 @@ fn buildRpclShadowBlock(
             .encoded_bitplanes = segment.bitplanes,
             .layers = &.{},
             .payload = segment.bytes,
+        },
+    };
+}
+
+fn encodeCodeBlockSegmentForOptions(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    band_kind: subband.Kind,
+    options: LosslessOptions,
+) !ebcot.CodeBlockSegment {
+    return switch (options.t1_backend) {
+        .legacy_mq => ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect),
+        .iso_mq => blk: {
+            var block = try ebcot.encodeBlockWithStyle(allocator, plane, stride, rect, .{
+                .band_kind = band_kind,
+                .bypass = options.bypass,
+                .reset_context = options.reset_context,
+                .terminate_all = options.terminate_all,
+                .vertical_causal = options.vertical_causal,
+                .predictable_termination = options.predictable_termination,
+                .segmentation_symbols = options.segmentation_symbols,
+            });
+            defer block.deinit(allocator);
+            break :blk ebcot.encodeBlockSymbolsSegmentIsoMqContinuous(allocator, .{
+                .bitplanes = block.bitplanes,
+                .non_zero_count = block.non_zero_count,
+                .passes = block.passes,
+                .symbols = block.symbols,
+            });
         },
     };
 }
