@@ -651,7 +651,7 @@ test "T2 RPCL code-block selector maps resolution precincts to block indexes" {
     };
     const low_high_indexes = try t2.collectRpclCodeBlockIndexes(allocator, plan, low_high_packet, levels, bands, blocks);
     defer allocator.free(low_high_indexes);
-    try std.testing.expectEqualSlices(usize, &[_]usize{3}, low_high_indexes);
+    try std.testing.expectEqualSlices(usize, &[_]usize{ 2, 3, 5 }, low_high_indexes);
 
     const edge_packet = packet_plan.Packet{
         .sequence = 78,
@@ -664,7 +664,7 @@ test "T2 RPCL code-block selector maps resolution precincts to block indexes" {
     };
     const edge_indexes = try t2.collectRpclCodeBlockIndexes(allocator, plan, edge_packet, levels, bands, blocks);
     defer allocator.free(edge_indexes);
-    try std.testing.expectEqualSlices(usize, &[_]usize{14}, edge_indexes);
+    try std.testing.expectEqualSlices(usize, &[_]usize{}, edge_indexes);
 
     try std.testing.expectEqual(@as(u8, 0), try t2.bandResolutionIndex(levels, bands[0]));
     try std.testing.expectEqual(@as(u8, 1), try t2.bandResolutionIndex(levels, bands[1]));
@@ -4590,6 +4590,46 @@ test "ISO MQ no-sidecar codestream decodes from strict SOD packets" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "ISO MQ debug sidecar validates against strict SOD packets" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 23 + 9) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 7 + 53) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 29 + 101) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .t1_backend = .iso_mq,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") != null);
+
+    const stats = try codestream.analyzeLosslessTemporaryWithOptions(bytes, .{ .t1_backend = .iso_mq });
+    try std.testing.expectEqual(rgb.width, stats.width);
+    try std.testing.expectEqual(rgb.height, stats.height);
+    try std.testing.expectEqual(@as(u64, 0), stats.t2_absent_packets);
+    try std.testing.expect(stats.sod_packet_bytes > 0);
+    try std.testing.expectEqual(stats.sod_packet_bytes, stats.rpcl_shadow_bytes);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .t1_backend = .iso_mq });
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
 test "ISO MQ multi-layer codestream decodes from strict SOD packets" {
     const allocator = std.testing.allocator;
     const width = 64;
@@ -6109,7 +6149,11 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     const qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingMarker;
     try std.testing.expectEqual(@as(u16, 19), readU16BeTest(bytes, qcd + 2));
     try std.testing.expectEqual(@as(u8, 0x40), bytes[qcd + 4]);
-    try std.testing.expectEqual(@as(u8, 0x40), bytes[qcd + 5]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0x40, 0x48, 0x48, 0x50, 0x48, 0x48, 0x50,
+        0x48, 0x48, 0x50, 0x48, 0x48, 0x50, 0x48,
+        0x48, 0x50,
+    }, bytes[qcd + 5 .. qcd + 21]);
 }
 
 test "lossless 16-bit codestream writes matching QCD exponent" {
@@ -6143,7 +6187,7 @@ test "lossless 16-bit codestream writes matching QCD exponent" {
     try std.testing.expectEqual(@as(u8, 16), stats.bit_depth);
 
     const qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingMarker;
-    try std.testing.expectEqual(@as(u8, 0x80), bytes[qcd + 5]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x80, 0x88, 0x88, 0x90 }, bytes[qcd + 5 .. qcd + 9]);
 }
 
 test "strict SIZ marker reader rejects unsupported component layout" {

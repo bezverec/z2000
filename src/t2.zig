@@ -903,6 +903,67 @@ pub fn codeBlockPacketRect(block: subband.CodeBlock) !packet_plan.Rect {
     };
 }
 
+fn codeBlockSubbandPacketRect(band: subband.Band, block: subband.CodeBlock) !packet_plan.Rect {
+    if (block.rect.x < band.rect.x or block.rect.y < band.rect.y) return PacketHeaderError.InvalidPacketHeader;
+    const local_x = block.rect.x - band.rect.x;
+    const local_y = block.rect.y - band.rect.y;
+    if (local_x + block.rect.width > band.rect.width or local_y + block.rect.height > band.rect.height) {
+        return PacketHeaderError.InvalidPacketHeader;
+    }
+    return .{
+        .x = std.math.cast(u32, local_x) orelse return PacketHeaderError.InvalidPacketHeader,
+        .y = std.math.cast(u32, local_y) orelse return PacketHeaderError.InvalidPacketHeader,
+        .width = std.math.cast(u32, block.rect.width) orelse return PacketHeaderError.InvalidPacketHeader,
+        .height = std.math.cast(u32, block.rect.height) orelse return PacketHeaderError.InvalidPacketHeader,
+    };
+}
+
+fn bandPrecinctRect(plan: packet_plan.Plan, packet: packet_plan.Packet, band: subband.Band) !packet_plan.Rect {
+    const precinct = try packet_plan.precinctRect(plan, packet.resolution, packet.precinct_index);
+    if (band.kind == .ll) return precinct;
+    const x_range = subbandAxisRange(precinct.x, precinct.x + precinct.width, bandUsesHighX(band.kind));
+    const y_range = subbandAxisRange(precinct.y, precinct.y + precinct.height, bandUsesHighY(band.kind));
+    const width = std.math.cast(u32, band.rect.width) orelse return PacketHeaderError.InvalidPacketHeader;
+    const height = std.math.cast(u32, band.rect.height) orelse return PacketHeaderError.InvalidPacketHeader;
+    const start_x = @min(x_range.start, width);
+    const end_x = @min(x_range.end, width);
+    const start_y = @min(y_range.start, height);
+    const end_y = @min(y_range.end, height);
+    if (end_x < start_x or end_y < start_y) return PacketHeaderError.InvalidPacketHeader;
+    return .{
+        .x = start_x,
+        .y = start_y,
+        .width = end_x - start_x,
+        .height = end_y - start_y,
+    };
+}
+
+const AxisRange = struct {
+    start: u32,
+    end: u32,
+};
+
+fn subbandAxisRange(start: u32, end: u32, high: bool) AxisRange {
+    return if (high)
+        .{ .start = start / 2, .end = end / 2 }
+    else
+        .{ .start = (start + 1) / 2, .end = (end + 1) / 2 };
+}
+
+fn bandUsesHighX(kind: subband.Kind) bool {
+    return switch (kind) {
+        .ll, .lh => false,
+        .hl, .hh => true,
+    };
+}
+
+fn bandUsesHighY(kind: subband.Kind) bool {
+    return switch (kind) {
+        .ll, .hl => false,
+        .lh, .hh => true,
+    };
+}
+
 pub fn codeBlockIntersectsRpclPacket(
     plan: packet_plan.Plan,
     packet: packet_plan.Packet,
@@ -911,9 +972,11 @@ pub fn codeBlockIntersectsRpclPacket(
     block: subband.CodeBlock,
 ) !bool {
     if (block.band_index >= bands.len) return PacketHeaderError.InvalidPacketHeader;
-    if (try bandResolutionIndex(levels, bands[block.band_index]) != packet.resolution) return false;
-    const precinct = try packet_plan.precinctRect(plan, packet.resolution, packet.precinct_index);
-    return packet_plan.rectsIntersect(precinct, try codeBlockPacketRect(block));
+    const band = bands[block.band_index];
+    if (try bandResolutionIndex(levels, band) != packet.resolution) return false;
+    const precinct = try bandPrecinctRect(plan, packet, band);
+    if (precinct.width == 0 or precinct.height == 0) return false;
+    return packet_plan.rectsIntersect(precinct, try codeBlockSubbandPacketRect(band, block));
 }
 
 pub fn collectRpclCodeBlockIndexes(
