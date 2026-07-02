@@ -37,8 +37,8 @@ entries are grouped by development milestone rather than semantic version.
 - Added malformed ICC coverage for zero-length/truncated TIFF profile tags and
   unsupported restricted-ICC JP2 `colr` box variants.
 - Recorded the current interop gate: no-sidecar/no-EPH output strict-decodes in
-  z2000 and is accepted by OpenJPEG, while Grok/Kakadu still expose packet
-  header/PLT interpretation issues that block fair benchmarking.
+  z2000 and is accepted losslessly by OpenJPEG and Grok; Grok no longer reports
+  PL marker length warnings after RPCL subband precinct projection was fixed.
 
 ### Temporary JP2 Payload
 
@@ -126,9 +126,15 @@ entries are grouped by development milestone rather than semantic version.
   reconstruction uses that catalog for the RPCL/RCT/5-3 roundtrip.
 - BP8 debug validation now compares the public strict block catalog against the
   BP8 EBCOT catalog for geometry, cumulative pass/byte deltas, and payload bytes.
+- ISO-MQ BP8 debug validation now uses the same strict SOD packet block catalog
+  as normal no-sidecar decode for image reconstruction, while keeping byte-for-
+  byte BP8 shadow-stream checks as the diagnostic oracle.
 - Fixed RPCL code-block indexing so each block is assigned to one precinct cell
   instead of every intersecting precinct, avoiding duplicate first-inclusion
   state and reducing packet payload size on larger images.
+- Fixed RPCL high-pass precinct projection so packet code-block selection uses
+  subband-local low/high coordinates instead of transformed-plane offsets,
+  aligning PLT packet lengths with Grok's packet parser.
 - Strict main-header and tile-part readers now reject unsupported marker
   segments such as COC, QCC, POC, PPM/PPT, RGN, CRG, PLM, and CAP instead of
   silently skipping payload behavior that is not implemented.
@@ -158,6 +164,8 @@ entries are grouped by development milestone rather than semantic version.
 - Added `docs/changelog.md`.
 - Added `docs/roadmap.md`.
 - Added `docs/api.md`.
+- Added `docs/iso_coverage.md` to track estimated progress toward the narrow
+  RGB lossless JP2 target and the broader JPEG2000 Part 1 codec family.
 
 ## Initial Milestone
 

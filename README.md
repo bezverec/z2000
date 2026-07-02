@@ -44,6 +44,10 @@ strict packet headers, PLT-backed packet lengths, and MQ-backed code-block
 payloads, but T1 context modeling and external decoder interop still need more
 work before calling the output generally compliant.
 
+The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
+2026-07-02, the narrow RGB lossless JP2 target is estimated at 79/100, while
+the broader JPEG2000 Part 1 codec family is estimated at 30/100.
+
 ## Build
 
 ```sh
@@ -255,14 +259,17 @@ through `tiff-to-jp2` and `decode-temp-jp2`.
 The codestream marker skeleton now writes non-zero `SOT/Psot` values and TLM
 entries for resolution-ordered tile-parts. OpenJPEG `opj_dump` indexes the
 current single-tile archival profile as six tile-parts for six resolutions.
-On the current no-sidecar/no-EPH smoke path, z2000 strict decode and OpenJPEG
-accept the output; Grok and Kakadu still expose packet header/PLT interpretation
-issues, so comparative performance benchmarking is gated until that T2
-conformance gap is closed.
+On the current no-sidecar/no-EPH smoke path, z2000 strict decode, OpenJPEG, and
+Grok accept the output losslessly. Grok no longer reports PL marker length
+warnings after the RPCL subband precinct projection fix. Kakadu and valid2000
+remain the next external gates before treating comparative benchmarks as fully
+fair.
 
 The block payload is now a continuous MQ-backed EBCOT-style segment. BP8 debug
 metadata, when requested, records the same EBCOT/MQ segment bytes and T2 layer
 deltas so the strict SOD packet stream can be checked against an oracle.
+`jp2-stats --t1-backend iso-mq` now validates ISO-MQ debug sidecars through the
+same strict SOD packet block catalog used by normal no-sidecar decode.
 T2 tag-trees now retain known included-node state across packets, which keeps
 continued-layer packet headers from re-emitting already proven inclusion bits.
 

@@ -3,6 +3,11 @@
 The roadmap is organized around reaching a narrow, honest JPEG2000 Part 1
 encoder before broadening profile coverage.
 
+Quantified ISO readiness is tracked in `docs/iso_coverage.md`. Keep that
+scorecard in sync with this roadmap whenever a feature moves from fail-closed
+metadata to tested payload behavior or when an independent decoder changes the
+interop gate.
+
 ## Guiding Rules
 
 - Fail closed when marker options imply payload behavior that is not implemented.
@@ -67,6 +72,8 @@ Tasks:
 - Keep the current no-sidecar strict decode path green for RPCL/RCT/5-3:
   strict T2 block catalog, inferred continuous MQ/T1 pass metadata, quality
   layers snapped to pass truncation points, inverse 5/3, and inverse RCT.
+- Keep ISO-MQ debug sidecar validation on the same strict SOD reconstruction
+  path after BP8 metadata and shadow-stream bytes are checked.
 - Close remaining packet-header/T1 conformance gaps found by OpenJPEG, Grok,
   and Kakadu smoke tests.
 
@@ -107,9 +114,9 @@ Tasks:
 - Validate SOP/EPH sequencing. SOP remains default-on; EPH is opt-in until
   OpenJPEG/Kakadu packet-boundary interop is stable.
 - Keep benchmarking gated on interop: current no-sidecar/no-EPH smoke decodes
-  through z2000 strict path and OpenJPEG, but Grok/Kakadu still report packet
-  header or PLT interpretation failures, so the next fix belongs in ISO T2
-  header/state semantics rather than in performance tuning.
+  through z2000 strict path, OpenJPEG, and Grok without Grok PL marker length
+  warnings. Kakadu and valid2000 remain the next external gates before treating
+  benchmark comparisons as fully fair.
 - Validate PLT/TLM consistency against actual packet and tile-part lengths.
 - Keep RPCL as the first supported progression, with bounded per-precinct state
   and whole-packet reader validation.

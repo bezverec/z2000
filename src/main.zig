@@ -410,9 +410,22 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
 }
 
 fn jp2StatsCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len != 1) {
+    if (args.len < 1) {
         usage();
         return error.InvalidCommand;
+    }
+
+    var options = codestream.DecodeOptions{};
+    var index: usize = 1;
+    while (index < args.len) {
+        if (std.mem.eql(u8, args[index], "--t1-backend")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.t1_backend = try parseT1Backend(args[index]);
+        } else {
+            return error.UnknownOption;
+        }
+        index += 1;
     }
 
     const max_file_size = 1024 * 1024 * 1024;
@@ -425,7 +438,7 @@ fn jp2StatsCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
     defer allocator.free(bytes);
 
     const j2k = try jp2.extractCodestream(bytes);
-    const stats = try codestream.analyzeLosslessTemporary(j2k);
+    const stats = try codestream.analyzeLosslessTemporaryWithOptions(j2k, options);
     printTemporaryStats(args[0], stats);
 }
 
@@ -914,7 +927,7 @@ fn usage() void {
         \\  z2000 dng-info <input.dng>
         \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
         \\  z2000 jp2-info <input.jp2>
-        \\  z2000 jp2-stats <input.jp2>
+        \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq]
         \\
         \\Notes:

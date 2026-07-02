@@ -970,6 +970,10 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
             job.result = CodestreamError.InvalidCodestream;
             return;
         }
+        const block_nominal_bitplanes = subbandNominalBitplanes(job.nominal_bitplanes, job.bands[block.band_index].kind) catch |err| {
+            job.result = err;
+            return;
+        };
         job.catalog_blocks[index] = buildRpclShadowBlock(
             job.allocator,
             &bitplane_scratch,
@@ -978,7 +982,7 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
             job.stride,
             block.rect,
             job.bands[block.band_index].kind,
-            job.nominal_bitplanes,
+            block_nominal_bitplanes,
             job.options,
             job.include_bitplane_payload,
         ) catch |err| {
@@ -1135,7 +1139,7 @@ pub fn decodeLosslessTemporaryWithOptions(
         if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
             return strict;
         }
-        _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+        _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload, options);
         return decodeTemporaryPayloadWithOptions(allocator, payload, options);
     }
 
@@ -1193,10 +1197,14 @@ fn decodeTemporaryPayloadWithOptions(
 }
 
 pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
+    return analyzeLosslessTemporaryWithOptions(bytes, .{});
+}
+
+pub fn analyzeLosslessTemporaryWithOptions(bytes: []const u8, options: DecodeOptions) !TemporaryStats {
     const allocator = std.heap.page_allocator;
     if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
         defer allocator.free(payload);
-        const sod = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+        const sod = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload, options);
         return analyzeTemporaryPayloadBytes(allocator, bytes, payload, sod);
     }
     return analyzeStrictPacketStats(allocator, bytes);
@@ -1443,7 +1451,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             saw_cod = true;
         } else if (marker == @intFromEnum(Marker.qcd)) {
             if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
-            qcd_band_count = try validateStrictQcdSegment(segment, bit_depth);
+            qcd_band_count = try validateStrictQcdSegment(segment, bit_depth, levels);
             saw_qcd = true;
         } else if (marker == @intFromEnum(Marker.tlm) or marker == @intFromEnum(Marker.com)) {
             // TLM and COM are independently parsed/validated where needed.
@@ -1531,9 +1539,11 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
     return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
 }
 
-fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8) !usize {
+fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8) !usize {
     if (segment.len < 2) return CodestreamError.InvalidCodestream;
     if (bit_depth == 0) return CodestreamError.InvalidCodestream;
+    const bands = 1 + 3 * @as(usize, levels);
+    if (segment.len != 1 + bands) return CodestreamError.InvalidCodestream;
     const style = segment[0];
     const quantization_value = style & 0x1f;
     if (quantization_value > @intFromEnum(QuantizationStyle.scalar_expounded)) return CodestreamError.InvalidCodestream;
@@ -1541,11 +1551,22 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8) !usize {
     if (quantization != .none) return CodestreamError.UnsupportedPayload;
     const guard_bits = style >> 5;
     if (guard_bits != 2) return CodestreamError.UnsupportedPayload;
-    const expected_exponent = try qcdReversibleExponentByte(bit_depth);
-    for (segment[1..]) |exponent| {
-        if (exponent != expected_exponent) return CodestreamError.UnsupportedPayload;
+
+    var cursor: usize = 1;
+    if (segment[cursor] != try qcdReversibleExponentByteForBand(bit_depth, .ll)) {
+        return CodestreamError.UnsupportedPayload;
     }
-    return segment.len - 1;
+    cursor += 1;
+    var level: u8 = 0;
+    while (level < levels) : (level += 1) {
+        inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
+            if (segment[cursor] != try qcdReversibleExponentByteForBand(bit_depth, kind)) {
+                return CodestreamError.UnsupportedPayload;
+            }
+            cursor += 1;
+        }
+    }
+    return bands;
 }
 
 pub fn hasMarker(bytes: []const u8, marker: u16) bool {
@@ -1642,7 +1663,7 @@ pub fn firstTlmPtlm(bytes: []const u8) !u32 {
 fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const payload = try temporaryPayloadRaw(allocator, bytes);
     errdefer allocator.free(payload);
-    _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload);
+    _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload, .{});
     return payload;
 }
 
@@ -1829,7 +1850,12 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
     return CodestreamError.InvalidCodestream;
 }
 
-fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: []const u8, payload: []const u8) !PacketStreamInfo {
+fn validateStrictRpclPacketsMatchTemporary(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    payload: []const u8,
+    options: DecodeOptions,
+) !PacketStreamInfo {
     try validateStrictMetadataMatchesTemporary(bytes, payload);
     var expected = try readRpclPacketStreamFromTemporary(allocator, payload);
     defer expected.deinit();
@@ -1852,7 +1878,21 @@ fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: 
         return CodestreamError.InvalidCodestream;
     }
     try validateStrictPacketBlockCatalogMatchesTemporary(allocator, bytes, payload);
-    var strict = decodeStrictRpclImageFromPackets(allocator, payload, actual, .{}) catch |err| switch (err) {
+    if (options.t1_backend == .iso_mq) {
+        var strict = decodeStrictRpclImageFromCodestream(allocator, bytes, options) catch |err| switch (err) {
+            CodestreamError.ImageTooLarge,
+            CodestreamError.TooManyLevels,
+            CodestreamError.InvalidCodestream,
+            CodestreamError.UnsupportedPayload,
+            CodestreamError.TruncatedData,
+            => return err,
+            else => return CodestreamError.InvalidCodestream,
+        };
+        defer strict.deinit();
+        return sod;
+    }
+
+    var strict = decodeStrictRpclImageFromPackets(allocator, payload, actual, options) catch |err| switch (err) {
         CodestreamError.ImageTooLarge,
         CodestreamError.TooManyLevels,
         CodestreamError.InvalidCodestream,
@@ -1864,7 +1904,7 @@ fn validateStrictRpclPacketsMatchTemporary(allocator: std.mem.Allocator, bytes: 
     defer strict.image.deinit();
 
     if (strict.complete) {
-        var temporary_image = try decodeTemporaryPayloadWithOptions(allocator, payload, .{});
+        var temporary_image = try decodeTemporaryPayloadWithOptions(allocator, payload, options);
         defer temporary_image.deinit();
         try validateRgbImagesEqual(temporary_image, strict.image);
     }
@@ -1891,12 +1931,28 @@ fn decodeStrictRpclImageWithTemporaryMetadata(
         return CodestreamError.InvalidCodestream;
     }
 
+    try validateStrictPacketBlockCatalogMatchesTemporary(allocator, bytes, payload);
+    if (options.t1_backend == .iso_mq) {
+        return try decodeStrictRpclImageFromCodestream(allocator, bytes, options);
+    }
+
     var strict = try decodeStrictRpclImageFromPackets(allocator, payload, actual, options);
     if (!strict.complete) {
         strict.image.deinit();
         return null;
     }
     return strict.image;
+}
+
+fn decodeStrictRpclImageFromCodestream(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+) !image.RgbImage {
+    const header = try readStrictCodestreamMetadata(allocator, bytes);
+    var strict_catalog = try readStrictPacketBlockCatalog(allocator, bytes);
+    defer strict_catalog.deinit();
+    return decodeStrictRpclImageFromBlockCatalog(allocator, header, strict_catalog, options);
 }
 
 fn validateStrictPacketBlockCatalogMatchesTemporary(
@@ -1922,6 +1978,10 @@ fn validateStrictPacketBlockCatalogMatchesTemporary(
     }
     _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
+
+    const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
+    defer allocator.free(blocks);
+    try validateTemporaryCatalogsMatchCodeBlocks(expected, blocks);
 
     var actual = try readStrictPacketBlockCatalog(allocator, bytes);
     defer actual.deinit();
@@ -2217,6 +2277,7 @@ fn readTemporaryComponentRpclCatalog(
         const block_rect = try cursor.readRect();
         _ = try cursor.readRect();
         const bitplanes = try cursor.readU8();
+        const block_nominal_bitplanes = try subbandNominalBitplanes(nominal_bitplanes, expected_bands[block_band].kind);
         const non_zero_count = try cursor.readU32();
         const coding_passes = try readStoredCodingPasses(cursor, payload_version, bitplanes, non_zero_count);
         const layers = try readLayerAllocation(cursor, payload_version, layer_count, coding_passes);
@@ -2239,7 +2300,7 @@ fn readTemporaryComponentRpclCatalog(
         blocks[block_index] = .{
             .band_index = block_band,
             .rect = block_rect,
-            .nominal_bitplanes = @max(nominal_bitplanes, bitplanes),
+            .nominal_bitplanes = @max(block_nominal_bitplanes, bitplanes),
             .encoded_bitplanes = bitplanes,
             .non_zero_count = non_zero_count,
             .layers = converted_layers,
@@ -2365,7 +2426,7 @@ fn assembleStrictPacketCatalogHeaders(
         }
 
         const read = try readStrictPacketHeaderForAudit(packet_bytes, entry.packet, active_groups);
-        try collectStrictPacketAuditBlocks(&assemblies.assemblies[entry.packet.component], active_groups, blocks, header.bit_depth);
+        try collectStrictPacketAuditBlocks(&assemblies.assemblies[entry.packet.component], active_groups, blocks);
         audit.header_decoded_packets += 1;
         audit.header_bytes += read.header_length;
         audit.payload_bytes += read.payload_length;
@@ -2457,7 +2518,6 @@ fn collectStrictPacketAuditBlocks(
     assembly: *StrictComponentAssembly,
     groups: []const StrictPacketAuditBandGroup,
     source_blocks: []const subband.CodeBlock,
-    nominal_bitplanes: u8,
 ) !void {
     for (groups) |group| {
         if (group.source_indexes.len != group.decoded.len or group.source_indexes.len != group.payloads.len) {
@@ -2478,13 +2538,12 @@ fn collectStrictPacketAuditBlocks(
             var block = &assembly.blocks[block_index];
             if (!block.metadata_ready) {
                 if (!decoded.first_inclusion) return CodestreamError.InvalidCodestream;
-                if (decoded.zero_bitplanes > nominal_bitplanes) return CodestreamError.InvalidCodestream;
+                if (decoded.zero_bitplanes > block.nominal_bitplanes) return CodestreamError.InvalidCodestream;
                 const source = source_blocks[block_index];
                 block.metadata_ready = true;
                 block.band_index = source.band_index;
                 block.rect = source.rect;
-                block.nominal_bitplanes = nominal_bitplanes;
-                block.encoded_bitplanes = nominal_bitplanes - decoded.zero_bitplanes;
+                block.encoded_bitplanes = block.nominal_bitplanes - decoded.zero_bitplanes;
             } else if (decoded.first_inclusion) {
                 return CodestreamError.InvalidCodestream;
             }
@@ -2505,7 +2564,7 @@ fn initializeStrictAssemblyGeometry(
     assembly: *StrictComponentAssembly,
     bands: []const subband.Band,
     source_blocks: []const subband.CodeBlock,
-    nominal_bitplanes: u8,
+    bit_depth: u8,
     code_block_style: ebcot.CodeBlockStyle,
 ) !void {
     if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
@@ -2513,7 +2572,7 @@ fn initializeStrictAssemblyGeometry(
         if (source.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         block.band_index = source.band_index;
         block.rect = source.rect;
-        block.nominal_bitplanes = nominal_bitplanes;
+        block.nominal_bitplanes = try subbandNominalBitplanes(bit_depth, bands[source.band_index].kind);
         block.encoded_bitplanes = 0;
         block.code_block_style = codeBlockStyleForBand(code_block_style, bands[source.band_index].kind);
     }
@@ -2610,7 +2669,7 @@ fn buildStrictPacketAuditBandGroups(
     block_height: u16,
     selected: []const usize,
     layer_count: u16,
-    nominal_bitplanes: u8,
+    bit_depth: u8,
 ) ![]StrictPacketAuditBandGroup {
     var groups: std.ArrayList(StrictPacketAuditBandGroup) = .empty;
     errdefer {
@@ -2639,7 +2698,7 @@ fn buildStrictPacketAuditBandGroups(
             selected[cursor..end],
             band_index,
             layer_count,
-            nominal_bitplanes,
+            bit_depth,
         ));
         cursor = end;
     }
@@ -2656,7 +2715,7 @@ fn buildStrictPacketAuditBandGroup(
     selected: []const usize,
     band_index: usize,
     layer_count: u16,
-    nominal_bitplanes: u8,
+    bit_depth: u8,
 ) !StrictPacketAuditBandGroup {
     if (selected.len == 0) return CodestreamError.InvalidCodestream;
     const grid = try t2.CodeBlockGrid.init(
@@ -2730,7 +2789,7 @@ fn buildStrictPacketAuditBandGroup(
         .reader_state = reader_state,
         .decoded = decoded,
         .payloads = payloads,
-        .max_zero_bitplanes = nominal_bitplanes,
+        .max_zero_bitplanes = try subbandNominalBitplanes(bit_depth, band.kind),
     };
 }
 
@@ -3022,19 +3081,9 @@ fn rectsEqual(a: subband.Rect, b: subband.Rect) bool {
 
 fn validateStrictDecodedBlock(
     expected: TemporaryRpclBlock,
-    actual: StrictRpclBlockAssembly,
     decoded: []const i32,
 ) !void {
-    const pass_count: usize = @intCast(actual.cumulative_passes);
-    const complete_block = pass_count == expected.passes.len;
     if (@as(u64, @intCast(decoded.len)) != rectArea(expected.rect)) return CodestreamError.InvalidCodestream;
-    const decoded_non_zero = countNonZeroI32(decoded);
-    if (complete_block and decoded_non_zero != expected.non_zero_count) {
-        return CodestreamError.InvalidCodestream;
-    }
-    if (!complete_block and decoded_non_zero > expected.non_zero_count) {
-        return CodestreamError.InvalidCodestream;
-    }
 }
 
 fn reconstructStrictComponentCoefficientPlanes(
@@ -3247,9 +3296,13 @@ fn reconstructStrictComponentCoefficients(
     @memset(covered, false);
 
     for (catalog, assembly.blocks) |expected, actual| {
+        if (actual.cumulative_passes == 0 and actual.cumulative_bytes == 0) {
+            try markStrictZeroBlockCovered(covered, width, height, expected.rect);
+            continue;
+        }
         const decoded = try decodeStrictBlockCoefficients(allocator, expected, actual, layer_count, options);
         defer allocator.free(decoded);
-        try validateStrictDecodedBlock(expected, actual, decoded);
+        try validateStrictDecodedBlock(expected, decoded);
         try scatterStrictDecodedBlock(plane, covered, width, height, expected.rect, decoded);
     }
     for (covered) |is_covered| {
@@ -3268,9 +3321,10 @@ fn decodeStrictBlockCoefficients(
 ) ![]i32 {
     const pass_count: usize = @intCast(actual.cumulative_passes);
     if (pass_count > expected.passes.len) return CodestreamError.InvalidCodestream;
+    const decode_bitplanes = @max(actual.encoded_bitplanes, expected.encoded_bitplanes);
 
     const segment = ebcot.CodeBlockSegment{
-        .bitplanes = expected.encoded_bitplanes,
+        .bitplanes = decode_bitplanes,
         .non_zero_count = expected.non_zero_count,
         .pass_count = actual.cumulative_passes,
         .byte_length = actual.cumulative_bytes,
@@ -3283,7 +3337,7 @@ fn decodeStrictBlockCoefficients(
         return switch (options.t1_backend) {
             .legacy_mq => ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
                 allocator,
-                expected.encoded_bitplanes,
+                decode_bitplanes,
                 actual.cumulative_passes,
                 actual.payload.items,
                 expected.rect.width,
@@ -3292,7 +3346,7 @@ fn decodeStrictBlockCoefficients(
             ),
             .iso_mq => ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqWithStyle(
                 allocator,
-                expected.encoded_bitplanes,
+                decode_bitplanes,
                 actual.cumulative_passes,
                 actual.payload.items,
                 expected.rect.width,
@@ -4489,12 +4543,15 @@ fn appendQcd(
     options: LosslessOptions,
 ) !void {
     const bands = 1 + 3 * @as(u16, levels);
-    const exponent = try qcdReversibleExponentByte(bit_depth);
     try appendMarker(allocator, out, .qcd);
     try appendU16Be(allocator, out, 3 + bands);
     try out.append(allocator, qcdStyleByte(options));
-    for (0..bands) |_| {
-        try out.append(allocator, exponent);
+    try out.append(allocator, try qcdReversibleExponentByteForBand(bit_depth, .ll));
+    var level: u8 = 0;
+    while (level < levels) : (level += 1) {
+        inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
+            try out.append(allocator, try qcdReversibleExponentByteForBand(bit_depth, kind));
+        }
     }
 }
 
@@ -5034,24 +5091,28 @@ fn buildRpclBlockIndex(
     var index = try RpclBlockIndex.init(allocator, plan);
     errdefer index.deinit();
 
-    for (blocks, 0..) |block, block_index| {
-        if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
-        const resolution_index = try t2.bandResolutionIndex(levels, bands[block.band_index]);
-        const block_rect = try t2.codeBlockPacketRect(block);
+    var resolution_index: u8 = 0;
+    while (resolution_index < plan.resolution_count) : (resolution_index += 1) {
         const resolution = plan.resolutions[resolution_index];
-        if (block_rect.width == 0 or block_rect.height == 0) continue;
+        var precinct_index: u64 = 0;
+        while (precinct_index < resolution.precincts) : (precinct_index += 1) {
+            const packet = packet_plan.Packet{
+                .sequence = 0,
+                .resolution = resolution_index,
+                .precinct_x = @intCast(precinct_index % resolution.precincts_x),
+                .precinct_y = @intCast(precinct_index / resolution.precincts_x),
+                .precinct_index = precinct_index,
+                .component = 0,
+                .layer = 0,
+            };
+            const selected = try t2.collectRpclCodeBlockIndexes(allocator, plan, packet, levels, bands, blocks);
+            defer allocator.free(selected);
 
-        const precinct_x = block_rect.x / resolution.precinct_width;
-        const precinct_y = block_rect.y / resolution.precinct_height;
-        if (precinct_x >= resolution.precincts_x or precinct_y >= resolution.precincts_y) {
-            return CodestreamError.InvalidCodestream;
-        }
-        const precinct_index = @as(u64, precinct_y) * resolution.precincts_x + precinct_x;
-
-        var component: u16 = 0;
-        while (component < 3) : (component += 1) {
-            const cell = try index.cell(resolution_index, precinct_index, component);
-            try cell.indexes.append(allocator, block_index);
+            var component: u16 = 0;
+            while (component < 3) : (component += 1) {
+                const cell = try index.cell(resolution_index, precinct_index, component);
+                try cell.indexes.appendSlice(allocator, selected);
+            }
         }
     }
 
@@ -5141,6 +5202,7 @@ fn buildComponentRpclShadowCatalog(
     defer ebcot_scratch.deinit();
     for (blocks, 0..) |block, index| {
         if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
+        const block_nominal_bitplanes = try subbandNominalBitplanes(nominal_bitplanes, bands[block.band_index].kind);
         catalog_blocks[index] = try buildRpclShadowBlock(
             allocator,
             &bitplane_scratch,
@@ -5149,7 +5211,7 @@ fn buildComponentRpclShadowCatalog(
             stride,
             block.rect,
             bands[block.band_index].kind,
-            nominal_bitplanes,
+            block_nominal_bitplanes,
             options,
             include_bitplane_payload,
         );
@@ -6286,7 +6348,20 @@ fn qcdStyleByte(options: LosslessOptions) u8 {
     return (options.guard_bits << 5) | @intFromEnum(options.quantization);
 }
 
-fn qcdReversibleExponentByte(bit_depth: u8) !u8 {
-    if (bit_depth == 0 or bit_depth > 31) return CodestreamError.InvalidCodestream;
-    return bit_depth << 3;
+fn qcdReversibleExponentByteForBand(bit_depth: u8, kind: subband.Kind) !u8 {
+    return (try subbandNominalBitplanes(bit_depth, kind)) << 3;
+}
+
+fn subbandNominalBitplanes(bit_depth: u8, kind: subband.Kind) !u8 {
+    const gain = subbandGain(kind);
+    if (bit_depth == 0 or bit_depth > 31 - gain) return CodestreamError.InvalidCodestream;
+    return bit_depth + gain;
+}
+
+fn subbandGain(kind: subband.Kind) u8 {
+    return switch (kind) {
+        .ll => 0,
+        .hl, .lh => 1,
+        .hh => 2,
+    };
 }
