@@ -14,6 +14,8 @@ pub const Encoder = struct {
     allocator: std.mem.Allocator,
     contexts: []Context,
     bytes: std.ArrayList(u8) = .empty,
+    output: ?*std.ArrayList(u8) = null,
+    output_start: usize = 0,
     a: u32 = 0x8000,
     c: u32 = 0,
     ct: u8 = 12,
@@ -44,7 +46,19 @@ pub const Encoder = struct {
     }
 
     pub fn resetStream(self: *Encoder) void {
+        self.output = null;
+        self.output_start = 0;
         self.bytes.clearRetainingCapacity();
+        self.resetCoderState();
+    }
+
+    pub fn resetStreamInto(self: *Encoder, output: *std.ArrayList(u8)) void {
+        self.output = output;
+        self.output_start = output.items.len;
+        self.resetCoderState();
+    }
+
+    fn resetCoderState(self: *Encoder) void {
         self.a = 0x8000;
         self.c = 0;
         self.ct = 12;
@@ -57,7 +71,7 @@ pub const Encoder = struct {
     }
 
     pub fn emittedByteCount(self: Encoder) usize {
-        return self.bytes.items.len;
+        return self.activeByteCount();
     }
 
     pub fn write(self: *Encoder, context_index: usize, bit: bool) !void {
@@ -65,7 +79,14 @@ pub const Encoder = struct {
         const context = &self.contexts.ptr[context_index];
         const state = mq.state_table[context.state];
 
-        self.a -= state.qe;
+        const next_a = self.a - state.qe;
+        if (bit == context.mps and (next_a & 0x8000) != 0) {
+            self.a = next_a;
+            self.c += state.qe;
+            return;
+        }
+
+        self.a = next_a;
         if (bit == context.mps) {
             if ((self.a & 0x8000) == 0) {
                 if (self.a < state.qe) {
@@ -91,15 +112,28 @@ pub const Encoder = struct {
     }
 
     pub fn finish(self: *Encoder) ![]u8 {
+        std.debug.assert(self.output == null);
+        try self.finishActiveStream();
+        return self.bytes.toOwnedSlice(self.allocator);
+    }
+
+    pub fn finishInto(self: *Encoder, output: *std.ArrayList(u8)) !usize {
+        std.debug.assert(self.output == output);
+        const start = self.output_start;
+        try self.finishActiveStream();
+        return output.items.len - start;
+    }
+
+    fn finishActiveStream(self: *Encoder) !void {
         self.setBits();
         self.c <<= @intCast(self.ct);
         try self.byteOut();
         self.c <<= @intCast(self.ct);
         try self.byteOut();
-        if (self.bytes.items.len > 0 and self.bytes.items[self.bytes.items.len - 1] == 0xff) {
-            _ = self.bytes.pop();
+        const bytes = self.activeBytes();
+        if (bytes.items.len > self.output_start and bytes.items[bytes.items.len - 1] == 0xff) {
+            _ = bytes.pop();
         }
-        return self.bytes.toOwnedSlice(self.allocator);
     }
 
     fn renormalize(self: *Encoder) !void {
@@ -146,20 +180,40 @@ pub const Encoder = struct {
     }
 
     fn previousByte(self: Encoder) u8 {
-        if (self.bytes.items.len == 0) return self.fake_previous;
-        return self.bytes.items[self.bytes.items.len - 1];
+        const bytes = self.activeBytesConst();
+        if (bytes.items.len == self.output_start) return self.fake_previous;
+        return bytes.items[bytes.items.len - 1];
     }
 
     fn incrementPreviousByte(self: *Encoder) void {
-        if (self.bytes.items.len == 0) {
+        const bytes = self.activeBytes();
+        if (bytes.items.len == self.output_start) {
             self.fake_previous +%= 1;
         } else {
-            self.bytes.items[self.bytes.items.len - 1] +%= 1;
+            bytes.items[bytes.items.len - 1] +%= 1;
         }
     }
 
     fn appendByte(self: *Encoder, byte: u8) !void {
-        try self.bytes.append(self.allocator, byte);
+        const bytes = self.activeBytes();
+        if (bytes.items.len < bytes.capacity) {
+            bytes.appendAssumeCapacity(byte);
+        } else {
+            try bytes.append(self.allocator, byte);
+        }
+    }
+
+    fn activeBytes(self: *Encoder) *std.ArrayList(u8) {
+        return self.output orelse &self.bytes;
+    }
+
+    fn activeBytesConst(self: Encoder) *const std.ArrayList(u8) {
+        return self.output orelse &self.bytes;
+    }
+
+    fn activeByteCount(self: Encoder) usize {
+        const bytes = self.activeBytesConst();
+        return bytes.items.len - self.output_start;
     }
 };
 
@@ -253,7 +307,14 @@ pub const Decoder = struct {
         const context = &self.contexts.ptr[context_index];
         const state = mq.state_table[context.state];
 
-        self.a -= state.qe;
+        const next_a = self.a - state.qe;
+        if ((self.c >> 16) >= state.qe and (next_a & 0x8000) != 0) {
+            self.a = next_a;
+            self.c -= @as(u32, state.qe) << 16;
+            return context.mps;
+        }
+
+        self.a = next_a;
         if ((self.c >> 16) < state.qe) {
             const bit = self.exchangeLps(context, state);
             self.renormalize();

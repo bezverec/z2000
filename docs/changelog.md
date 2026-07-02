@@ -178,6 +178,10 @@ entries are grouped by development milestone rather than semantic version.
   RGB lossless JP2 target is now estimated at 83/100 and the broader Part 1
   codec family at 37/100. valid2000 still reports ICC/PLT and access-profile
   policy failures, so it remains a gate rather than a pass.
+- Started the MQ fast-path optimization: direct ISO-MQ block encoding now
+  finalizes codeword segments into the reusable per-worker payload buffer
+  instead of returning a temporary owned slice, and the common MPS/no-renorm
+  branch is split out in the ISO MQ encoder/decoder.
 
 ### Documentation
 

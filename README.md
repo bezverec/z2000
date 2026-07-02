@@ -230,6 +230,10 @@ payload behavior is implemented.
   into the ISO MQ coder (and raw BYPASS segments) from per-worker scratch,
   with no per-block Symbol materialization or allocator churn. A test pins
   the direct output byte-for-byte to the symbol-based reference coders.
+- ISO MQ codeword segments can now finish directly into the reusable
+  per-worker payload buffer, avoiding a temporary owned slice and second copy
+  in the default direct T1 path. The MQ encoder/decoder also has an explicit
+  fast branch for the common MPS-without-renormalization case.
 - Significance and refinement passes skip whole 4-row stripes whose
   neighborhood window carries no significance (encode and decode); this is
   content-dependent and helps most on smooth imagery.
@@ -416,10 +420,11 @@ Performance (current lossless encode gap vs OpenJPEG/Grok ~1.7x on the M4
 2048x2048 archival benchmark; decode gap is larger and should come first;
 ordered by expected win per effort):
 
-1. MQ coder fast path: preallocated pointer-bumped output instead of
-   ArrayList appends in BYTEOUT, and an inlined MPS-without-renorm branch in
-   encode/decode (the single most common case). Mirrors opj's macro design;
-   biggest remaining single-thread item on both sides.
+1. Continue MQ coder fast-path work: the direct T1 path now finishes ISO-MQ
+   codeword segments into the reusable payload buffer and has an explicit
+   MPS-without-renorm branch. Remaining work is to remove more per-byte
+   `ArrayList` checks from BYTEOUT, apply the same discipline to raw BYPASS
+   output, and keep decode-side state/cache behavior tight.
 2. Packed column flag words (opj 2.x layout): one u32 per 4-sample column
    carrying the whole 3x6 sigma window plus per-sample visit/refine, so a
    column costs one load instead of four u16 loads; enables single-word RLC

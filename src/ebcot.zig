@@ -3204,8 +3204,9 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
 
+    try scratch.bytes.ensureUnusedCapacity(scratch.allocator, estimatedIsoMqByteCapacity(area, bitplanes));
     const iso = try scratch.isoMqEncoder();
-    iso.resetStream();
+    iso.resetStreamInto(&scratch.bytes);
     try iso.resetJpeg2000Contexts();
     const raw = scratch.rawBitWriter();
     raw.reset();
@@ -3264,12 +3265,15 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
 
             const last_pass = pass_index == total_passes;
             if (last_pass or passEndsBypassSegment(style, bitplanes, bitplane, kind)) {
-                const encoded = if (segment_is_raw) try raw.finish() else try iso.finish();
-                defer scratch.allocator.free(encoded);
-                try scratch.bytes.appendSlice(scratch.allocator, encoded);
+                const encoded_len = if (segment_is_raw) blk: {
+                    const encoded = try raw.finish();
+                    defer scratch.allocator.free(encoded);
+                    try scratch.bytes.appendSlice(scratch.allocator, encoded);
+                    break :blk encoded.len;
+                } else try iso.finishInto(&scratch.bytes);
                 try scratch.segments.append(scratch.allocator, .{
                     .pass_count = segment_pass_count,
-                    .byte_length = @intCast(encoded.len),
+                    .byte_length = @intCast(encoded_len),
                 });
                 const cumulative: u64 = @intCast(scratch.bytes.items.len);
                 const fixup = &scratch.pass_payloads.items[scratch.pass_payloads.items.len - 1];
@@ -3279,7 +3283,8 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
                 previous_running = cumulative;
                 segment_pass_count = 0;
                 if (!last_pass) {
-                    if (segment_is_raw) raw.reset() else iso.resetStream();
+                    raw.reset();
+                    iso.resetStreamInto(&scratch.bytes);
                 }
             }
         }
@@ -3287,6 +3292,11 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
     if (pass_index != total_passes or segment_pass_count != 0) return EbcotError.InvalidBlock;
 
     return ownedSegmentFromDirectIsoScratch(scratch, bitplanes, stats.non_zero_count, style.bypass);
+}
+
+fn estimatedIsoMqByteCapacity(area: usize, bitplanes: u8) usize {
+    const symbol_bound = area * @as(usize, bitplanes) * 4;
+    return symbol_bound + 64;
 }
 
 fn ownedSegmentFromDirectIsoScratch(
