@@ -14,6 +14,13 @@ const LevelShape = struct {
 const vertical_lanes = simd.i32_lanes;
 const VerticalVector = @Vector(vertical_lanes, i32);
 const ShiftVector = @Vector(vertical_lanes, u5);
+const horizontal_lanes = simd.i32_lanes;
+const horizontal_pair_lanes = horizontal_lanes * 2;
+const HorizontalVector = @Vector(horizontal_lanes, i32);
+const HorizontalPairVector = @Vector(horizontal_pair_lanes, i32);
+const HorizontalShiftVector = @Vector(horizontal_lanes, u5);
+const horizontal_even_mask = makeHorizontalEvenMask();
+const horizontal_interleave_mask = makeHorizontalInterleaveMask();
 
 pub const Workspace = struct {
     allocator: std.mem.Allocator,
@@ -166,14 +173,21 @@ fn forward53Line(data: []i32, scratch: []i32) void {
     if (data.len < 2) return;
 
     var i: usize = 1;
+    while (i + 1 + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
+        forward53PredictHorizontalGroup(data, i);
+    }
     while (i < data.len) : (i += 2) {
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
         data[i] -= floorHalf(data[i - 1] + right);
     }
 
-    i = 0;
+    data[0] += floorQuarterBiased(data[1] + data[1]);
+    i = 2;
+    while (i + 1 + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
+        forward53UpdateHorizontalGroup(data, i);
+    }
     while (i < data.len) : (i += 2) {
-        const left = if (i > 0) data[i - 1] else data[1];
+        const left = data[i - 1];
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
         data[i] += floorQuarterBiased(left + right);
     }
@@ -369,14 +383,21 @@ fn inverse53Line(data: []i32, scratch: []i32) void {
     if (data.len < 2) return;
     unpackEvenOdd(data, scratch);
 
-    var i: usize = 0;
+    data[0] -= floorQuarterBiased(data[1] + data[1]);
+    var i: usize = 2;
+    while (i + 1 + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
+        inverse53UpdateHorizontalGroup(data, i);
+    }
     while (i < data.len) : (i += 2) {
-        const left = if (i > 0) data[i - 1] else data[1];
+        const left = data[i - 1];
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
         data[i] -= floorQuarterBiased(left + right);
     }
 
     i = 1;
+    while (i + 1 + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
+        inverse53PredictHorizontalGroup(data, i);
+    }
     while (i < data.len) : (i += 2) {
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
         data[i] += floorHalf(data[i - 1] + right);
@@ -397,6 +418,14 @@ fn floorHalfVector(value: VerticalVector) VerticalVector {
 
 fn floorQuarterBiasedVector(value: VerticalVector) VerticalVector {
     return (value + @as(VerticalVector, @splat(2))) >> @as(ShiftVector, @splat(2));
+}
+
+fn floorHalfHorizontal(value: HorizontalVector) HorizontalVector {
+    return value >> @as(HorizontalShiftVector, @splat(1));
+}
+
+fn floorQuarterBiasedHorizontal(value: HorizontalVector) HorizontalVector {
+    return (value + @as(HorizontalVector, @splat(2))) >> @as(HorizontalShiftVector, @splat(2));
 }
 
 fn loadVector(data: []const i32, stride: usize, row: usize, col: usize) VerticalVector {
@@ -420,12 +449,20 @@ fn packEvenOdd(data: []i32, scratch: []i32) void {
 
     var out: usize = 0;
     var i: usize = 0;
+    while (i + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
+        storeHorizontal(scratch, out, evenHorizontalSamples(loadHorizontalPair(data, i)));
+        out += horizontal_lanes;
+    }
     while (i < data.len) : (i += 2) {
         scratch[out] = data[i];
         out += 1;
     }
 
     i = 1;
+    while (i + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
+        storeHorizontal(scratch, out, evenHorizontalSamples(loadHorizontalPair(data, i)));
+        out += horizontal_lanes;
+    }
     while (i < data.len) : (i += 2) {
         scratch[out] = data[i];
         out += 1;
@@ -438,15 +475,23 @@ fn unpackEvenOdd(data: []i32, scratch: []i32) void {
     if (data.len <= 2) return;
 
     const lows = lowCount(data.len);
-    var i: usize = 0;
-    var packed_index: usize = 0;
+    const highs = data.len / 2;
+    var pair: usize = 0;
+    while (pair + horizontal_lanes <= highs) : (pair += horizontal_lanes) {
+        const low = loadHorizontal(data, pair);
+        const high = loadHorizontal(data, lows + pair);
+        storeHorizontalPair(scratch, pair * 2, interleaveHorizontal(low, high));
+    }
+
+    var i = pair * 2;
+    var packed_index = pair;
     while (i < data.len) : (i += 2) {
         scratch[i] = data[packed_index];
         packed_index += 1;
     }
 
-    i = 1;
-    packed_index = lows;
+    i = pair * 2 + 1;
+    packed_index = lows + pair;
     while (i < data.len) : (i += 2) {
         scratch[i] = data[packed_index];
         packed_index += 1;
@@ -457,4 +502,77 @@ fn unpackEvenOdd(data: []i32, scratch: []i32) void {
 
 fn lowCount(n: usize) usize {
     return (n + 1) / 2;
+}
+
+fn makeHorizontalEvenMask() [horizontal_lanes]i32 {
+    var mask: [horizontal_lanes]i32 = undefined;
+    for (&mask, 0..) |*entry, index| {
+        entry.* = @intCast(index * 2);
+    }
+    return mask;
+}
+
+fn makeHorizontalInterleaveMask() [horizontal_pair_lanes]i32 {
+    var mask: [horizontal_pair_lanes]i32 = undefined;
+    for (0..horizontal_lanes) |index| {
+        mask[index * 2] = @intCast(index);
+        mask[index * 2 + 1] = -@as(i32, @intCast(index + 1));
+    }
+    return mask;
+}
+
+inline fn loadHorizontal(data: []const i32, index: usize) HorizontalVector {
+    return data[index..][0..horizontal_lanes].*;
+}
+
+inline fn storeHorizontal(data: []i32, index: usize, value: HorizontalVector) void {
+    data[index..][0..horizontal_lanes].* = value;
+}
+
+inline fn loadHorizontalPair(data: []const i32, index: usize) HorizontalPairVector {
+    return data[index..][0..horizontal_pair_lanes].*;
+}
+
+inline fn storeHorizontalPair(data: []i32, index: usize, value: HorizontalPairVector) void {
+    data[index..][0..horizontal_pair_lanes].* = value;
+}
+
+inline fn evenHorizontalSamples(value: HorizontalPairVector) HorizontalVector {
+    return @shuffle(i32, value, undefined, horizontal_even_mask);
+}
+
+inline fn interleaveHorizontal(low: HorizontalVector, high: HorizontalVector) HorizontalPairVector {
+    return @shuffle(i32, low, high, horizontal_interleave_mask);
+}
+
+inline fn forward53PredictHorizontalGroup(data: []i32, odd_index: usize) void {
+    const left = evenHorizontalSamples(loadHorizontalPair(data, odd_index - 1));
+    const odd = evenHorizontalSamples(loadHorizontalPair(data, odd_index));
+    const right = evenHorizontalSamples(loadHorizontalPair(data, odd_index + 1));
+    const updated = odd - floorHalfHorizontal(left + right);
+    storeHorizontalPair(data, odd_index - 1, interleaveHorizontal(left, updated));
+}
+
+inline fn forward53UpdateHorizontalGroup(data: []i32, even_index: usize) void {
+    const even = evenHorizontalSamples(loadHorizontalPair(data, even_index));
+    const left = evenHorizontalSamples(loadHorizontalPair(data, even_index - 1));
+    const right = evenHorizontalSamples(loadHorizontalPair(data, even_index + 1));
+    const updated = even + floorQuarterBiasedHorizontal(left + right);
+    storeHorizontalPair(data, even_index, interleaveHorizontal(updated, right));
+}
+
+inline fn inverse53UpdateHorizontalGroup(data: []i32, even_index: usize) void {
+    const even = evenHorizontalSamples(loadHorizontalPair(data, even_index));
+    const left = evenHorizontalSamples(loadHorizontalPair(data, even_index - 1));
+    const right = evenHorizontalSamples(loadHorizontalPair(data, even_index + 1));
+    const updated = even - floorQuarterBiasedHorizontal(left + right);
+    storeHorizontalPair(data, even_index, interleaveHorizontal(updated, right));
+}
+
+inline fn inverse53PredictHorizontalGroup(data: []i32, odd_index: usize) void {
+    const left = evenHorizontalSamples(loadHorizontalPair(data, odd_index - 1));
+    const odd = evenHorizontalSamples(loadHorizontalPair(data, odd_index));
+    const right = evenHorizontalSamples(loadHorizontalPair(data, odd_index + 1));
+    const updated = odd + floorHalfHorizontal(left + right);
+    storeHorizontalPair(data, odd_index - 1, interleaveHorizontal(left, updated));
 }

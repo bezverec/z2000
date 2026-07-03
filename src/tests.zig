@@ -204,6 +204,42 @@ test "ISO MQ decoder context reset mirrors encoder reset" {
     }
 }
 
+test "ISO MQ decoder reinitStream resets cached byte state" {
+    const allocator = std.testing.allocator;
+    var first_encoder = try mq_iso.Encoder.init(allocator, 3);
+    defer first_encoder.deinit();
+    var second_encoder = try mq_iso.Encoder.init(allocator, 3);
+    defer second_encoder.deinit();
+
+    var contexts: [96]usize = undefined;
+    var first_bits: [96]bool = undefined;
+    var second_bits: [96]bool = undefined;
+    for (0..contexts.len) |index| {
+        contexts[index] = (index * 5 + index / 7) % 3;
+        first_bits[index] = ((index * 11 + 3) % 23) < 9;
+        second_bits[index] = ((index * 17 + 1) % 29) < 11;
+        try first_encoder.write(contexts[index], first_bits[index]);
+        try second_encoder.write(contexts[index], second_bits[index]);
+    }
+
+    const first_bytes = try first_encoder.finish();
+    defer allocator.free(first_bytes);
+    const second_bytes = try second_encoder.finish();
+    defer allocator.free(second_bytes);
+
+    var decoder = try mq_iso.Decoder.init(allocator, 3, first_bytes);
+    defer decoder.deinit();
+    for (contexts, first_bits) |context, bit| {
+        try std.testing.expectEqual(bit, try decoder.read(context));
+    }
+
+    decoder.resetContexts();
+    decoder.reinitStream(second_bytes);
+    for (contexts, second_bits) |context, bit| {
+        try std.testing.expectEqual(bit, try decoder.read(context));
+    }
+}
+
 test "T2 packet header bitstream inserts marker-safe stuff bits after 0xff" {
     const allocator = std.testing.allocator;
     var out = std.ArrayList(u8).empty;
@@ -2849,6 +2885,38 @@ test "integer 5/3 DWT roundtrips small odd and even dimensions" {
                 try wavelet_int.inverse53WithWorkspace(&workspace, data, width, height, levels);
                 try std.testing.expectEqualSlices(i32, original, data);
             }
+        }
+    }
+}
+
+test "integer 5/3 DWT roundtrips horizontal vector groups" {
+    const allocator = std.testing.allocator;
+    const min_width: usize = simd.i32_lanes * 2 + 2;
+    const max_width: usize = min_width + 5;
+
+    var width = min_width;
+    while (width <= max_width) : (width += 1) {
+        for (3..7) |height| {
+            const pixels = width * height;
+            const original = try allocator.alloc(i32, pixels);
+            defer allocator.free(original);
+            const data = try allocator.alloc(i32, pixels);
+            defer allocator.free(data);
+
+            var seed: u32 = @intCast(width * 65537 + height * 257);
+            for (original, 0..) |*sample, index| {
+                seed = seed *% 1103515245 +% 12345;
+                sample.* = @as(i32, @intCast((seed >> 15) & 0x7ff)) - 1024 +
+                    @as(i32, @intCast(index % 17)) - 8;
+            }
+            @memcpy(data, original);
+
+            var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+            defer workspace.deinit();
+
+            const levels = try wavelet_int.forward53WithWorkspace(&workspace, data, width, height, 6);
+            try wavelet_int.inverse53WithWorkspace(&workspace, data, width, height, levels);
+            try std.testing.expectEqualSlices(i32, original, data);
         }
     }
 }

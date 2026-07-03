@@ -884,6 +884,11 @@ fn nbfT1SignificanceDecisionFromWord(word: u16, style: CodeBlockStyle, causal_ro
     };
 }
 
+inline fn nbfT1ZeroContextFromWord(word: u16, style: CodeBlockStyle, causal_row: bool) Context {
+    const f = if (causal_row) word & nbf_causal_mask else word;
+    return nbf_zc_lut[@intFromEnum(style.band_kind)][f & nbf_sig8];
+}
+
 inline fn nbfT1SignificanceCandidateFromWord(word: u16, causal_row: bool) bool {
     const f = if (causal_row) word & nbf_causal_mask else word;
     return (f & nbf_sig_self) == 0 and (f & nbf_visit) == 0 and (f & nbf_sig8) != 0;
@@ -943,6 +948,25 @@ inline fn directT1SignificanceDecision(scratch: *const DirectBlockScratch, x: us
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             std.debug.assert(expected.candidate == actual.candidate);
             std.debug.assert(expected.zero_context == actual.zero_context);
+        }
+        if (comptime use_packed_t1_context_flags) return actual;
+    }
+    return expected;
+}
+
+inline fn directT1ZeroContext(scratch: *const DirectBlockScratch, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) Context {
+    const ci = y & 3;
+    const causal_row = style.vertical_causal and ci == 3;
+    const expected = nbfT1ZeroContextFromWord(sample_flags, style, causal_row);
+    if (comptime maintain_packed_t1_context_flags) {
+        const actual = packedZeroContext(
+            scratch.packed_t1_flags.items[pcfIndex(scratch.width, x, y)],
+            ci,
+            style.band_kind,
+            causal_row,
+        );
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            std.debug.assert(expected == actual);
         }
         if (comptime use_packed_t1_context_flags) return actual;
     }
@@ -1022,6 +1046,25 @@ inline fn decodeT1SignificanceDecision(scratch: *const DecodeBlockScratch, x: us
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             std.debug.assert(expected.candidate == actual.candidate);
             std.debug.assert(expected.zero_context == actual.zero_context);
+        }
+        if (comptime use_packed_t1_context_flags) return actual;
+    }
+    return expected;
+}
+
+inline fn decodeT1ZeroContext(scratch: *const DecodeBlockScratch, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) Context {
+    const ci = y & 3;
+    const causal_row = style.vertical_causal and ci == 3;
+    const expected = nbfT1ZeroContextFromWord(sample_flags, style, causal_row);
+    if (comptime maintain_packed_t1_context_flags) {
+        const actual = packedZeroContext(
+            scratch.packed_t1_flags.items[pcfIndex(scratch.width, x, y)],
+            ci,
+            style.band_kind,
+            causal_row,
+        );
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            std.debug.assert(expected == actual);
         }
         if (comptime use_packed_t1_context_flags) return actual;
     }
@@ -3774,11 +3817,11 @@ fn decodeSignificancePassInferred(
                     const y = stripe_y + dy;
                     const p = nbfIndex(nbs, x, y);
                     const sample_flags = flags[p];
-                    const decision = decodeT1SignificanceDecision(scratch, x, y, sample_flags, style);
-                    if (!decision.candidate) continue;
+                    if (!decodeT1SignificanceCandidate(scratch, x, y, sample_flags, style)) continue;
                     flags[p] |= nbf_visit;
                     decodeMarkPackedT1Visited(scratch, x, y);
-                    const bit = try mqRead(decoder, mqContextIndex(decision.zero_context));
+                    const zero_context = decodeT1ZeroContext(scratch, x, y, sample_flags, style);
+                    const bit = try mqRead(decoder, mqContextIndex(zero_context));
                     symbol_count += 1;
                     if (bit) {
                         const sign = decodeT1SignCoding(scratch, x, y, sample_flags, style);
@@ -4418,6 +4461,7 @@ fn nbfDecodeCleanupSample(
 ) !usize {
     const sample = scratch.nb_flags.items[nbfIndex(scratch.nb_stride, x, y)];
     if ((sample & (nbf_sig_self | nbf_visit)) != 0) return 0;
+    // Cleanup codes every insignificant, unvisited sample; zero0 is valid.
     const decision = decodeT1SignificanceDecision(scratch, x, y, sample, style);
     const bit = try mqRead(decoder, mqContextIndex(decision.zero_context));
     var symbol_count: usize = 1;
@@ -5027,13 +5071,13 @@ fn emitDirectIsoSignificancePass(
                             setSignificantRow(scratch, x, y);
                         }
                     } else {
-                        const decision = directT1SignificanceDecision(scratch, x, y, sample_flags, style);
-                        if (!decision.candidate) continue;
+                        if (!directT1SignificanceCandidate(scratch, x, y, sample_flags, style)) continue;
                         flags[p] |= nbf_visit;
                         directMarkPackedT1Visited(scratch, x, y);
                         const coeff = plane[(rect.y + y) * stride + rect.x + x];
                         const bit = isMagnitudeBitSet(coeff, bitplane);
-                        try encoder.write(mqContextIndex(decision.zero_context), bit);
+                        const zero_context = directT1ZeroContext(scratch, x, y, sample_flags, style);
+                        try encoder.write(mqContextIndex(zero_context), bit);
                         symbol_count += 1;
                         if (bit) {
                             const negative = coeff < 0;
@@ -5185,6 +5229,7 @@ fn nbfEmitCleanupSample(
     const p = nbfIndex(nbs, x, y);
     if ((flags[p] & (nbf_sig_self | nbf_visit)) != 0) return 0;
     const sample_flags = flags[p];
+    // Cleanup codes every insignificant, unvisited sample; zero0 is valid.
     const decision = directT1SignificanceDecision(scratch, x, y, sample_flags, style);
     const coeff = plane[(rect.y + y) * stride + rect.x + x];
     const bit = isMagnitudeBitSet(coeff, bitplane);
