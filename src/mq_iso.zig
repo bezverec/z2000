@@ -16,6 +16,23 @@ pub const DecodeBranchStats = struct {
 const Context = struct {
     state: u8 = 0,
     mps: bool = false,
+    qe: u16 = mq.state_table[0].qe,
+    nmps: u8 = mq.state_table[0].nmps,
+    nlps: u8 = mq.state_table[0].nlps,
+    switch_mps: bool = mq.state_table[0].switch_mps,
+
+    inline fn reset(self: *Context) void {
+        self.* = .{};
+    }
+
+    inline fn setState(self: *Context, state_index: u8) void {
+        const row = mq.state_table[state_index];
+        self.state = state_index;
+        self.qe = row.qe;
+        self.nmps = row.nmps;
+        self.nlps = row.nlps;
+        self.switch_mps = row.switch_mps;
+    }
 };
 
 pub const Encoder = struct {
@@ -32,7 +49,7 @@ pub const Encoder = struct {
     pub fn init(allocator: std.mem.Allocator, context_count: usize) !Encoder {
         if (context_count == 0) return IsoMqError.InvalidContext;
         const contexts = try allocator.alloc(Context, context_count);
-        @memset(contexts, .{});
+        resetContextSlice(contexts);
         return .{
             .allocator = allocator,
             .contexts = contexts,
@@ -46,7 +63,7 @@ pub const Encoder = struct {
     }
 
     pub fn resetContexts(self: *Encoder) void {
-        @memset(self.contexts, .{});
+        resetContextSlice(self.contexts);
     }
 
     pub fn resetJpeg2000Contexts(self: *Encoder) !void {
@@ -85,36 +102,36 @@ pub const Encoder = struct {
     pub fn write(self: *Encoder, context_index: usize, bit: bool) !void {
         std.debug.assert(context_index < self.contexts.len);
         const context = &self.contexts.ptr[context_index];
-        const state = mq.state_table[context.state];
+        const qe = context.qe;
 
-        const next_a = self.a - state.qe;
+        const next_a = self.a - qe;
         if (bit == context.mps and (next_a & 0x8000) != 0) {
             self.a = next_a;
-            self.c += state.qe;
+            self.c += qe;
             return;
         }
 
         self.a = next_a;
         if (bit == context.mps) {
             if ((self.a & 0x8000) == 0) {
-                if (self.a < state.qe) {
-                    self.a = state.qe;
+                if (self.a < qe) {
+                    self.a = qe;
                 } else {
-                    self.c += state.qe;
+                    self.c += qe;
                 }
-                context.state = state.nmps;
+                context.setState(context.nmps);
                 try self.renormalize();
             } else {
-                self.c += state.qe;
+                self.c += qe;
             }
         } else {
-            if (self.a < state.qe) {
-                self.c += state.qe;
+            if (self.a < qe) {
+                self.c += qe;
             } else {
-                self.a = state.qe;
+                self.a = qe;
             }
-            if (state.switch_mps) context.mps = !context.mps;
-            context.state = state.nlps;
+            if (context.switch_mps) context.mps = !context.mps;
+            context.setState(context.nlps);
             try self.renormalize();
         }
     }
@@ -248,7 +265,7 @@ pub const Decoder = struct {
     fn initWithFirstByteShift(allocator: std.mem.Allocator, context_count: usize, bytes: []const u8, first_byte_shift: u5) !Decoder {
         if (context_count == 0) return IsoMqError.InvalidContext;
         const contexts = try allocator.alloc(Context, context_count);
-        @memset(contexts, .{});
+        resetContextSlice(contexts);
 
         var decoder = Decoder{
             .allocator = allocator,
@@ -265,7 +282,7 @@ pub const Decoder = struct {
     fn initAfterStuffedPreviousByte(allocator: std.mem.Allocator, context_count: usize, bytes: []const u8) !Decoder {
         if (context_count == 0) return IsoMqError.InvalidContext;
         const contexts = try allocator.alloc(Context, context_count);
-        @memset(contexts, .{});
+        resetContextSlice(contexts);
 
         const first = if (bytes.len == 0) 0xff else bytes[0];
         var decoder = Decoder{
@@ -305,7 +322,7 @@ pub const Decoder = struct {
     }
 
     pub fn resetContexts(self: *Decoder) void {
-        @memset(self.contexts, .{});
+        resetContextSlice(self.contexts);
     }
 
     pub fn resetJpeg2000Contexts(self: *Decoder) !void {
@@ -321,26 +338,26 @@ pub const Decoder = struct {
     pub inline fn readUnchecked(self: *Decoder, context_index: usize) bool {
         std.debug.assert(context_index < self.contexts.len);
         const context = &self.contexts.ptr[context_index];
-        const state = mq.state_table[context.state];
+        const qe = context.qe;
 
-        const next_a = self.a - state.qe;
+        const next_a = self.a - qe;
         const c_high = self.c >> 16;
-        if (c_high >= state.qe and (next_a & 0x8000) != 0) {
+        if (c_high >= qe and (next_a & 0x8000) != 0) {
             self.a = next_a;
-            self.c -= @as(u32, state.qe) << 16;
+            self.c -= @as(u32, qe) << 16;
             return context.mps;
         }
 
         self.a = next_a;
-        if (c_high < state.qe) {
-            const bit = self.exchangeLps(context, state);
+        if (c_high < qe) {
+            const bit = self.exchangeLps(context, qe);
             self.renormalize();
             return bit;
         }
 
-        self.c -= @as(u32, state.qe) << 16;
+        self.c -= @as(u32, qe) << 16;
         if ((self.a & 0x8000) == 0) {
-            const bit = self.exchangeMps(context, state);
+            const bit = self.exchangeMps(context, qe);
             self.renormalize();
             return bit;
         }
@@ -352,66 +369,67 @@ pub const Decoder = struct {
     pub inline fn readProfiled(self: *Decoder, context_index: usize, stats: *DecodeBranchStats) bool {
         std.debug.assert(context_index < self.contexts.len);
         const context = &self.contexts.ptr[context_index];
-        const state = mq.state_table[context.state];
+        const qe = context.qe;
 
-        const next_a = self.a - state.qe;
+        const next_a = self.a - qe;
         const c_high = self.c >> 16;
-        if (c_high >= state.qe and (next_a & 0x8000) != 0) {
+        if (c_high >= qe and (next_a & 0x8000) != 0) {
             stats.fast_mps += 1;
             self.a = next_a;
-            self.c -= @as(u32, state.qe) << 16;
+            self.c -= @as(u32, qe) << 16;
             return context.mps;
         }
 
         self.a = next_a;
-        if (c_high < state.qe) {
+        if (c_high < qe) {
             stats.lps += 1;
-            const bit = self.exchangeLps(context, state);
+            const bit = self.exchangeLps(context, qe);
             self.renormalizeProfiled(stats);
             return bit;
         }
 
-        self.c -= @as(u32, state.qe) << 16;
+        self.c -= @as(u32, qe) << 16;
         if ((self.a & 0x8000) == 0) {
             stats.renorm_mps += 1;
-            const bit = self.exchangeMps(context, state);
+            const bit = self.exchangeMps(context, qe);
             self.renormalizeProfiled(stats);
             return bit;
         }
         return context.mps;
     }
 
-    inline fn exchangeLps(self: *Decoder, context: *Context, state: mq.State) bool {
-        const lps_is_current_mps = self.a < state.qe;
-        self.a = state.qe;
+    inline fn exchangeLps(self: *Decoder, context: *Context, qe: u16) bool {
+        const lps_is_current_mps = self.a < qe;
+        self.a = qe;
         if (lps_is_current_mps) {
-            context.state = state.nmps;
+            context.setState(context.nmps);
             return context.mps;
         }
 
         const bit = !context.mps;
-        if (state.switch_mps) context.mps = !context.mps;
-        context.state = state.nlps;
+        if (context.switch_mps) context.mps = !context.mps;
+        context.setState(context.nlps);
         return bit;
     }
 
-    inline fn exchangeMps(self: *Decoder, context: *Context, state: mq.State) bool {
-        if (self.a < state.qe) {
+    inline fn exchangeMps(self: *Decoder, context: *Context, qe: u16) bool {
+        if (self.a < qe) {
             const bit = !context.mps;
-            if (state.switch_mps) context.mps = !context.mps;
-            context.state = state.nlps;
+            if (context.switch_mps) context.mps = !context.mps;
+            context.setState(context.nlps);
             return bit;
         }
-        context.state = state.nmps;
+        context.setState(context.nmps);
         return context.mps;
     }
 
     inline fn renormalize(self: *Decoder) void {
         while (self.a < 0x8000) {
             if (self.ct == 0) self.byteIn();
-            self.a <<= 1;
-            self.c <<= 1;
-            self.ct -= 1;
+            const shift = self.renormalizeShift();
+            self.a <<= shift;
+            self.c <<= shift;
+            self.ct -= shift;
         }
     }
 
@@ -421,11 +439,18 @@ pub const Decoder = struct {
                 stats.byte_in += 1;
                 self.byteIn();
             }
-            stats.renorm_shifts += 1;
-            self.a <<= 1;
-            self.c <<= 1;
-            self.ct -= 1;
+            const shift = self.renormalizeShift();
+            stats.renorm_shifts += shift;
+            self.a <<= shift;
+            self.c <<= shift;
+            self.ct -= shift;
         }
+    }
+
+    inline fn renormalizeShift(self: Decoder) u5 {
+        std.debug.assert(self.a != 0);
+        const needed: u8 = @intCast(@clz(self.a) - 16);
+        return @intCast(@min(needed, self.ct));
     }
 
     inline fn byteIn(self: *Decoder) void {
@@ -450,10 +475,14 @@ pub const Decoder = struct {
     }
 };
 
+fn resetContextSlice(contexts: []Context) void {
+    for (contexts) |*context| context.reset();
+}
+
 fn resetJpeg2000ContextSlice(contexts: []Context) void {
-    @memset(contexts, .{});
-    if (contexts.len > 0) contexts[0].state = 4;
-    if (contexts.len > 17) contexts[17].state = 3;
-    if (contexts.len > 18) contexts[18].state = 46;
-    if (contexts.len > 19) contexts[19].state = 46;
+    resetContextSlice(contexts);
+    if (contexts.len > 0) contexts[0].setState(4);
+    if (contexts.len > 17) contexts[17].setState(3);
+    if (contexts.len > 18) contexts[18].setState(46);
+    if (contexts.len > 19) contexts[19].setState(46);
 }

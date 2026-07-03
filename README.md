@@ -73,8 +73,8 @@ with or without BYPASS and quality layers) decode losslessly/pixel-identical
 in OpenJPEG; Kakadu remains the next external gate.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-02, the narrow RGB lossless JP2 target is estimated at 83/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 37/100.
+2026-07-03, the narrow RGB lossless JP2 target is estimated at 83/100, while
+the broader JPEG2000 Part 1 codec family is estimated at 38/100.
 
 ## Build
 
@@ -84,8 +84,11 @@ zig build test
 ```
 
 SIMD lane selection is centralized in `src/simd.zig`. Native AArch64 targets use
-an explicit NEON-128 4xi32 policy for portable `@Vector` kernels, x86_64 AVX2
-builds use 8xi32, and x86_64 AVX-512F builds use 16xi32 for wider block scans.
+an explicit NEON-128 policy for portable `@Vector` kernels, x86_64 AVX2 builds
+use 8-wide vectors, and x86_64 AVX-512F builds use 16xi32 for wider block scans.
+Integer RCT/5-3 kernels and the irreversible ICT float path share this policy:
+ICT uses f32 vectors, giving a modern NEON/AVX-family equivalent of the old
+packed-float 3DNow-style idea without relying on obsolete x86-only opcodes.
 Cross-compile checks used during development:
 
 ```sh
@@ -242,10 +245,19 @@ payload behavior is implemented.
   in the default direct T1 path. Raw BYPASS segments use the same direct
   payload sink, and MQ BYTEOUT keeps that sink local through the carry/marker
   path. The MQ encoder/decoder also has an explicit fast branch for the common
-  MPS-without-renormalization case.
+  MPS-without-renormalization case, cached context transition rows, and a
+  batched CLZ-based decoder renormalization loop.
 - Significance and refinement passes skip whole 4-row stripes whose
   neighborhood window carries no significance (encode and decode); this is
   content-dependent and helps most on smooth imagery.
+- TIFF output now reserves exact file capacity and fills the raster slice
+  directly, using SIMD validation/narrowing for 8-bit samples and native
+  little-endian byte copies for 16-bit samples while removing per-sample
+  fallible appends from the decode write path.
+- TIFF input widens 8-bit samples into the internal `u16` RGB buffer with the
+  shared portable SIMD lane policy, leaving scalar tails for non-multiple strip
+  lengths. Little-endian 16-bit TIFF strip reads use a native byte-copy fast
+  path with scalar fallback for big-endian data.
 - The same T1 passes now also skip 64-column row-mask chunks inside active
   stripes when their local significance window is empty. This keeps the code
   on the existing row-word model while moving toward the packed-column flag
@@ -543,10 +555,12 @@ decode is still the larger gap; ordered by expected win per effort):
    refinement, cleanup/RLC, and raw BYPASS passes. MQ branch counters now split
    fast MPS no-renormalization, LPS, MPS renormalization, renormalization
    shifts, and byte-in calls.
-2. MQ decoder fast path: the first slice routes ISO MQ T1 reads through an
-   inline unchecked decoder read while keeping debug assertions and the checked
-   legacy MQ path. Next consider a pointer-bumped input window for the decoder
-   state and narrower context update helpers for LPS/renorm-MPS branches.
+2. MQ decoder fast path: ISO MQ T1 reads now use an inline unchecked decoder
+   read, cached context transition rows instead of a per-symbol state-table
+   lookup, and CLZ-batched renormalization while keeping debug assertions and
+   the checked legacy MQ path. Next consider a pointer-bumped input window for
+   the decoder state and narrower context update helpers for LPS/renorm-MPS
+   branches.
 3. Block/precinct-level decode scheduling: strict decode now uses block-level
    workers and dynamic next-block scheduling above the component-thread cap.
    The ISO MQ/BYPASS strict paths also scatter from scratch-owned coefficient
@@ -561,9 +575,15 @@ decode is still the larger gap; ordered by expected win per effort):
 5. DWT 5/3 horizontal SIMD and cache blocking: the vertical path is already
    vectorized, while horizontal lifting remains scalar. This is likely a clean
    encode/decode win after the T1 decode bottleneck is better understood.
-6. PCRD-style rate allocation: not primarily a speed item, but necessary for
+6. TIFF I/O strip handling: decode write now uses exact-capacity direct raster
+   slice fills with SIMD 8-bit narrowing and native 16-bit byte copies, while
+   encode read uses SIMD 8-bit widening and native little-endian 16-bit byte
+   copies. Multi-strip RGB parser coverage is in place; the remaining low-risk
+   I/O pass is broader strip/write policy and deciding whether a streaming
+   writer is cleaner than building one contiguous output buffer.
+7. PCRD-style rate allocation: not primarily a speed item, but necessary for
    fair access-copy comparisons and smaller quality-layer outputs.
-7. Lossy path SIMD: dequant + float 9/7 inverse currently scalar per band;
+8. Lossy path SIMD: dequant + float 9/7 inverse currently scalar per band;
    NEON f32x4 lifting mirrors the integer path.
-8. Allocator: per-worker arenas for shadow-block payload copies to cut the
+9. Allocator: per-worker arenas for shadow-block payload copies to cut the
    remaining allocator churn and peak RSS on large tiles.

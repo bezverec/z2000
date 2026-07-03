@@ -1,5 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const image = @import("image.zig");
+const simd = @import("simd.zig");
 
 pub const TiffError = error{
     InvalidHeader,
@@ -18,6 +20,9 @@ pub const TiffError = error{
 const max_file_size = 1024 * 1024 * 1024;
 const max_pixels = 268_435_456;
 const max_icc_profile_bytes = 16 * 1024 * 1024;
+const sample_lanes = simd.i32_lanes;
+const SampleU8Vector = @Vector(sample_lanes, u8);
+const SampleU16Vector = @Vector(sample_lanes, u16);
 
 const Endian = enum {
     little,
@@ -70,9 +75,11 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
     const bits_offset: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
     const raster_offset: u32 = bits_offset + 6;
     const icc_offset: u32 = try std.math.add(u32, raster_offset, @as(u32, @intCast(raster_bytes)));
+    const total_bytes = try std.math.add(usize, @as(usize, icc_offset), if (icc_profile) |profile| profile.len else 0);
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, total_bytes);
 
     try out.appendSlice(allocator, "II");
     try appendU16Le(allocator, &out, 42);
@@ -96,19 +103,51 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
     try appendU16Le(allocator, &out, rgb.bit_depth);
     try appendU16Le(allocator, &out, rgb.bit_depth);
 
-    if (rgb.bit_depth == 8) {
-        for (rgb.samples) |sample| {
-            if (sample > 255) return TiffError.InvalidTagValue;
-            try out.append(allocator, @as(u8, @intCast(sample)));
-        }
-    } else {
-        for (rgb.samples) |sample| {
-            try appendU16Le(allocator, &out, sample);
-        }
-    }
+    appendRasterLe(&out, rgb.samples, rgb.bit_depth) catch |err| switch (err) {
+        error.InvalidTagValue => return TiffError.InvalidTagValue,
+    };
     if (icc_profile) |profile| try out.appendSlice(allocator, profile);
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.items });
+}
+
+fn appendRasterLe(out: *std.ArrayList(u8), samples: []const u16, bit_depth: u8) error{InvalidTagValue}!void {
+    const start = out.items.len;
+    errdefer out.items.len = start;
+
+    if (bit_depth == 8) {
+        std.debug.assert(out.capacity >= start + samples.len);
+        out.items.len = start + samples.len;
+        const raster = out.items[start..][0..samples.len];
+        var index: usize = 0;
+        const max_value: SampleU16Vector = @splat(255);
+        while (index + sample_lanes <= samples.len) : (index += sample_lanes) {
+            const values: SampleU16Vector = samples[index..][0..sample_lanes].*;
+            if (@reduce(.Or, values > max_value)) return error.InvalidTagValue;
+            raster[index..][0..sample_lanes].* = @as(SampleU8Vector, @intCast(values));
+        }
+        while (index < samples.len) : (index += 1) {
+            const sample = samples[index];
+            if (sample > 255) return error.InvalidTagValue;
+            raster[index] = @intCast(sample);
+        }
+        return;
+    }
+
+    const raster_len = samples.len * 2;
+    std.debug.assert(out.capacity >= start + raster_len);
+    out.items.len = start + raster_len;
+    const raster = out.items[start..][0..raster_len];
+    if (comptime builtin.target.cpu.arch.endian() == .little) {
+        @memcpy(raster, std.mem.sliceAsBytes(samples));
+        return;
+    }
+
+    for (samples, 0..) |sample, index| {
+        const offset = index * 2;
+        raster[offset] = @truncate(sample);
+        raster[offset + 1] = @truncate(sample >> 8);
+    }
 }
 
 pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage {
@@ -222,16 +261,9 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
         if (strip_bytes.len % bytes_per_sample != 0) return TiffError.InvalidTagValue;
 
         if (bits[0] == 8) {
-            for (strip_bytes) |value| {
-                samples[sample_index] = value;
-                sample_index += 1;
-            }
+            sample_index = widenU8Samples(samples, sample_index, strip_bytes);
         } else {
-            var cursor: usize = 0;
-            while (cursor < strip_bytes.len) : (cursor += 2) {
-                samples[sample_index] = readU16(strip_bytes, cursor, endian);
-                sample_index += 1;
-            }
+            sample_index = readU16Samples(samples, sample_index, strip_bytes, endian);
         }
     }
 
@@ -248,6 +280,36 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
         .samples = samples,
         .icc_profile = icc_profile,
     };
+}
+
+fn widenU8Samples(out: []u16, start: usize, bytes: []const u8) usize {
+    var index: usize = 0;
+    while (index + sample_lanes <= bytes.len) : (index += sample_lanes) {
+        const packed_bytes: SampleU8Vector = bytes[index..][0..sample_lanes].*;
+        out[start + index ..][0..sample_lanes].* = @as(SampleU16Vector, @intCast(packed_bytes));
+    }
+    while (index < bytes.len) : (index += 1) {
+        out[start + index] = bytes[index];
+    }
+    return start + bytes.len;
+}
+
+fn readU16Samples(out: []u16, start: usize, bytes: []const u8, endian: Endian) usize {
+    const sample_count = bytes.len / 2;
+    if (comptime builtin.target.cpu.arch.endian() == .little) {
+        if (endian == .little) {
+            @memcpy(std.mem.sliceAsBytes(out[start..][0..sample_count]), bytes);
+            return start + sample_count;
+        }
+    }
+
+    var cursor: usize = 0;
+    var sample_index = start;
+    while (cursor < bytes.len) : (cursor += 2) {
+        out[sample_index] = readU16(bytes, cursor, endian);
+        sample_index += 1;
+    }
+    return sample_index;
 }
 
 const ValueRef = struct {

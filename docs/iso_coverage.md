@@ -8,12 +8,12 @@ interop or strict-reader check when the feature is externally visible.
 
 ## Current Snapshot
 
-Last updated: 2026-07-02.
+Last updated: 2026-07-03.
 
 | Target | Score | Meaning |
 | --- | ---: | --- |
 | Narrow RGB lossless JP2 target | 83 / 100 | Single-tile RGB TIFF 6.0 to JP2, RCT, reversible 5/3, RPCL, BYPASS, one or more quality layers, PLT/TLM, strict z2000 decode, and independent decoder smoke acceptance. |
-| Full JPEG2000 Part 1 codec family | 37 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
+| Full JPEG2000 Part 1 codec family | 38 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
 
 The narrow target is intentionally much closer than the full-codec target. It
 measures the practical archival path we are building first. The full-codec
@@ -44,11 +44,11 @@ exist.
 | Core codestream syntax | 15 | 8 | More marker variants, component/tile layouts, progression and style combinations. |
 | Lossless encode profiles | 15 | 7 | Multi-tile images, more progressions, remaining code-block style bits, stronger rate/layer allocation. |
 | Lossless decode profiles | 15 | 4 | Independent arbitrary JP2/J2K input, multi-tile decode, more progression orders, more marker combinations. |
-| Lossy encode/decode | 15 | 3 | ICT/9-7/scalar-expounded exists for the narrow single-tile path, but rate allocation, scalar-derived, arbitrary decode, and broader error-bound validation remain missing. |
+| Lossy encode/decode | 15 | 4 | ICT/9-7/scalar-expounded exists for the narrow single-tile path, rate-driven layers are covered locally, and ICT now has SIMD vector/tail tests. Rate allocation, scalar-derived, arbitrary decode, and broader error-bound validation remain missing. |
 | T1 completeness | 15 | 5 | BYPASS is public; reset-context, terminate-all, vertical-causal, predictable termination, segmentation symbols, and more termination rules still need public profile coverage. |
 | T2 completeness | 10 | 5 | LRCP/PCRL/CPRL/CPRL ordering, packet parser breadth, tile-part divisions beyond none/R. |
 | Interop and conformance gates | 5 | 3 | Reproducible OpenJPEG/Grok matrix exists locally; Kakadu, valid2000 pass criteria, malformed corpus, and fuzzing remain incomplete. |
-| **Total** | **100** | **37** |  |
+| **Total** | **100** | **38** |  |
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more

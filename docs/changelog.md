@@ -22,6 +22,44 @@ entries are grouped by development milestone rather than semantic version.
   profiled fast-MPS increment, documenting that profiled and unchecked decode
   transitions must stay in sync, and adding a test that profiled decode matches
   unchecked decisions while branch counters account for every symbol.
+- Cached the ISO MQ state-table row inside each adaptive context, removing the
+  per-symbol `state -> state_table[state]` lookup from the encoder and decoder
+  hot loops while keeping the state index for diagnostics and reset parity.
+- Batched ISO MQ decoder renormalization with a CLZ-derived shift count instead
+  of shifting one bit per loop iteration; profiling still reports the logical
+  number of renormalization bit shifts.
+- Re-ran a short macOS 2048x2048 archival decode benchmark after the MQ context
+  cache pass (`hyperfine --runs 5`, ten z2000 threads): z2000 decode of its
+  current output measured 173.3 ms, Grok 85.6 ms on the same JP2, and OpenJPEG
+  523.1 ms; `tiffcmp` confirmed pixel-lossless output for all three decoders.
+- Reduced TIFF write overhead by reserving the exact output capacity and
+  filling the 8/16-bit raster slice directly instead of issuing fallible
+  appends per sample. The 8-bit output path now validates and narrows `u16`
+  samples with the shared portable SIMD lane policy, while 16-bit output uses
+  a native little-endian byte copy with an explicit big-endian fallback. A
+  decode timing run on the 2048x2048 macOS sample showed the TIFF write phase
+  at about 9 ms; the same output remained pixel-identical by `tiffcmp`.
+- Vectorized TIFF 8-bit sample widening with the shared portable SIMD lane
+  policy. A profiled encode pass on the 2048x2048 macOS sample reported TIFF
+  read at 9.0 ms while preserving the existing RGB parser tests.
+- Added a native little-endian byte-copy fast path for 16-bit TIFF strip reads
+  with a scalar fallback for big-endian input/targets, plus a parser test that
+  pins little-endian 16-bit RGB sample order.
+- Added a big-endian 16-bit RGB TIFF parser test to pin the scalar endian
+  conversion fallback used outside the native little-endian fast path.
+- Added TIFF parser coverage for inline `SHORT` `StripOffsets` and
+  `StripByteCounts` tags, matching another legal TIFF 6.0 encoding of small
+  strip metadata.
+- Added TIFF parser coverage for RGB data split across multiple strips, pinning
+  offset/count array handling and sample-order continuity across strip
+  boundaries.
+- Added negative TIFF strip metadata coverage for mismatched `StripByteCounts`
+  totals and truncated strip payload offsets.
+- Added a public TIFF writer/reader roundtrip test for the optimized 8-bit and
+  16-bit raster paths, plus negative coverage that the 8-bit SIMD narrowing
+  path rejects out-of-range `u16` samples instead of truncating them.
+- Tightened the TIFF raster append helper to restore the previous output
+  length on validation failure.
 - Added the first ISO MQ decoder fast-path slice: `mq_iso.Decoder` now exposes
   an inline unchecked read path, and EBCOT T1 decode dispatches ISO MQ reads
   through it while preserving the checked legacy MQ path.
@@ -40,6 +78,9 @@ entries are grouped by development milestone rather than semantic version.
 - Reused the loaded coefficient value inside direct T1 significance and
   cleanup encode paths, avoiding duplicate plane indexing when the same sample
   needs both magnitude-bit and sign tests.
+- Vectorized the irreversible ICT color transform with the shared portable SIMD
+  lane policy: f32 lanes map to NEON-128 on AArch64 and AVX-family widths on
+  x86_64 builds, with scalar tails covered for non-multiple pixel counts.
 - Switched strict block-level decode workers from static contiguous block ranges
   to an atomic next-block scheduler so uneven code-block payloads balance better
   across decode threads.
