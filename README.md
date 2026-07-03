@@ -193,13 +193,15 @@ lines we are targeting:
   color transform, block payload work, wrapping, and disk write. On
   `decode-temp-jp2` the strict ISO path also splits metadata parsing, T2 packet
   catalog construction, T1 block payload reconstruction, inverse DWT, and
-  inverse MCT. It also reports a T1 pass profile for the ISO MQ/BYPASS decoder:
-  MQ significance, refinement, cleanup/RLC, and raw BYPASS pass CPU-sum,
-  pass count, and symbol count across workers. The MQ profile also separates
-  fast MPS reads, LPS reads, MPS reads needing renormalization, renormalization
-  shifts, and byte-in calls. This is the first pass at deciding whether the
-  next optimization should target MQ decode, SIMD compute, scratch-buffer
-  reuse/cache locality, or IO.
+  inverse MCT. The packet catalog line includes scan/header/finalize subphases,
+  and strict block payload timing includes worker balance counters for max/avg
+  job wall time, decoded blocks, and payload bytes. It also reports a T1 pass
+  profile for the ISO MQ/BYPASS decoder: MQ significance, refinement,
+  cleanup/RLC, and raw BYPASS pass CPU-sum, pass count, and symbol count across
+  workers. The MQ profile also separates fast MPS reads, LPS reads, MPS reads
+  needing renormalization, renormalization shifts, and byte-in calls. This is
+  the first pass at deciding whether the next optimization should target MQ
+  decode, SIMD compute, scratch-buffer reuse/cache locality, or IO.
 - `--threads N` enables deterministic parallelism for the current TIFF/JP2
   encoder. `N=1` keeps the original single-threaded path; `2..3` parallelizes
   independent Y/Cb/Cr DWT and component payload encoding; `N>3` keeps component

@@ -356,12 +356,9 @@ pub const Decoder = struct {
         }
 
         self.c -= @as(u32, qe) << 16;
-        if ((self.a & 0x8000) == 0) {
-            const bit = self.exchangeMps(context, qe);
-            self.renormalize();
-            return bit;
-        }
-        return context.mps;
+        const bit = self.exchangeMps(context, qe);
+        self.renormalize();
+        return bit;
     }
 
     // Keep this branch layout in sync with readUnchecked. The final MPS path
@@ -389,13 +386,10 @@ pub const Decoder = struct {
         }
 
         self.c -= @as(u32, qe) << 16;
-        if ((self.a & 0x8000) == 0) {
-            stats.renorm_mps += 1;
-            const bit = self.exchangeMps(context, qe);
-            self.renormalizeProfiled(stats);
-            return bit;
-        }
-        return context.mps;
+        stats.renorm_mps += 1;
+        const bit = self.exchangeMps(context, qe);
+        self.renormalizeProfiled(stats);
+        return bit;
     }
 
     inline fn exchangeLps(self: *Decoder, context: *Context, qe: u16) bool {

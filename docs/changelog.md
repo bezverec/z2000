@@ -12,9 +12,39 @@ entries are grouped by development milestone rather than semantic version.
   read, codestream extraction, metadata parsing, T2 packet catalog construction,
   T1 block payload reconstruction, inverse DWT, inverse MCT, ICC extraction,
   and TIFF write.
+- Split strict packet-catalog timing into scan, packet-header assembly, and
+  final block-catalog materialization phases.
+- Reduced packet-header assembly allocation churn by filling strict and legacy
+  reader band-group block maps directly instead of allocating temporary
+  location and occupancy buffers for each layer-zero packet.
+- Reduced strict SOD packet scan overhead by pre-reserving the packet byte
+  buffer per tile-part and by scanning only possible marker prefix bytes while
+  validating unexpected SOP/EPH markers.
+- Reduced strict packet-header assembly staging by appending decoded packet
+  payloads directly into component assemblies instead of first storing temporary
+  payload slices per audit band group.
+- Skipped unnecessary decoded-block clearing for absent strict packets; the
+  strict audit path now validates the absent packet length and returns before
+  touching per-block temporary decode storage.
+- Folded strict block-catalog validation/stat collection into final catalog
+  construction, removing a separate assembly-wide pass from the serial finalize
+  phase.
+- Reused the validated per-tile-part packet payload byte count for strict SOD
+  buffer reservation and span checks instead of summing PLT lengths again.
+- Moved strict packet-reader band-group lists to fixed three-slot stack storage;
+  legacy packet-reader lists are pre-sized to the same JPEG2000 bound and both
+  paths reject malformed geometry that would exceed it.
+- Skipped scratch pack/unpack copies for two-sample horizontal 5/3 DWT rows,
+  where even/odd layout is already unchanged.
+- Removed the unreachable non-renormalizing tail from ISO MQ decode MPS slow
+  paths; after the fast-MPS and LPS tests, the remaining MPS case necessarily
+  renormalizes.
 - Added pass-level T1 decode profiling for the strict ISO MQ/BYPASS path:
   significance, refinement, cleanup/RLC, and raw BYPASS passes now report
   CPU-sum timing, pass counts, and symbol counts across decode workers.
+- Added strict block-payload worker balance counters to `decode-temp-jp2
+  --timings`, reporting worker-job count plus max/average wall time, decoded
+  blocks, and payload bytes.
 - Added optional ISO MQ branch counters to the T1 decode timing profile:
   fast MPS, LPS, MPS-with-renormalization, renormalization shifts, and byte-in
   counts are aggregated per pass type without affecting non-profiled decode.
