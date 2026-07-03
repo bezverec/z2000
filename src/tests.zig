@@ -2521,6 +2521,36 @@ test "integer 5/3 DWT workspace roundtrips signed component plane" {
     try std.testing.expectEqualSlices(i32, original[0..], data[0..]);
 }
 
+test "integer 5/3 DWT roundtrips small odd and even dimensions" {
+    const allocator = std.testing.allocator;
+    for (1..18) |width| {
+        for (1..14) |height| {
+            {
+                const pixels = width * height;
+                const original = try allocator.alloc(i32, pixels);
+                defer allocator.free(original);
+                const data = try allocator.alloc(i32, pixels);
+                defer allocator.free(data);
+
+                var seed: u32 = @intCast(width * 4099 + height * 9173);
+                for (original, 0..) |*sample, index| {
+                    seed = seed *% 1664525 +% 1013904223;
+                    const signed = @as(i32, @intCast((seed >> 17) & 0x1ff)) - 256;
+                    sample.* = signed + @as(i32, @intCast(index % 29)) - 14;
+                }
+                @memcpy(data, original);
+
+                var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+                defer workspace.deinit();
+
+                const levels = try wavelet_int.forward53WithWorkspace(&workspace, data, width, height, 6);
+                try wavelet_int.inverse53WithWorkspace(&workspace, data, width, height, levels);
+                try std.testing.expectEqualSlices(i32, original, data);
+            }
+        }
+    }
+}
+
 test "lossless codestream skeleton contains JPEG2000 markers" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
@@ -4403,6 +4433,52 @@ test "threaded temporary lossless codestream roundtrips RGB samples" {
     defer decoded.deinit();
 
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
+test "strict no-sidecar decode uses block-level workers above component thread cap" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 40;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    var seed: u32 = 0x20002000;
+    for (0..width * height) |i| {
+        seed = seed *% 1664525 +% 1013904223;
+        samples[i * 3 + 0] = @as(u16, @intCast((seed >> 16) & 0xff));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 13 + 17) & 0xff));
+        samples[i * 3 + 2] = @as(u16, @intCast(((i / width) * 19 + i) & 0xff));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .threads = 1,
+        .emit_temporary_payload_sidecar = false,
+    });
+    defer allocator.free(bytes);
+
+    const thread_counts = [_]u8{ 4, 6 };
+    for (thread_counts) |threads| {
+        var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{
+            .threads = threads,
+            .t1_backend = .iso_mq,
+        });
+        defer decoded.deinit();
+
+        try std.testing.expectEqual(rgb.width, decoded.width);
+        try std.testing.expectEqual(rgb.height, decoded.height);
+        try std.testing.expectEqual(rgb.bit_depth, decoded.bit_depth);
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    }
 }
 
 test "temporary codestream analyzer reports block and stream stats" {
