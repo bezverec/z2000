@@ -2052,6 +2052,237 @@ test "TIFF parser reads uncompressed RGB strip with per-component sample format"
     try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, rgb.samples);
 }
 
+test "TIFF parser accepts SHORT strip offset and byte count tags" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, 8);
+
+    try appendU16Le(allocator, &bytes, 10);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, 134);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 273, 3, 1, 146);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 339, 3, 3, 140);
+    try appendIfdEntryLe(allocator, &bytes, 279, 3, 1, 6);
+    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
+    try appendU32Le(allocator, &bytes, 0);
+
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 1);
+    try bytes.appendSlice(allocator, &.{ 10, 20, 30, 40, 50, 60 });
+
+    var rgb = try tiff.parseRgb(allocator, bytes.items);
+    defer rgb.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), rgb.width);
+    try std.testing.expectEqual(@as(usize, 1), rgb.height);
+    try std.testing.expectEqual(@as(u8, 8), rgb.bit_depth);
+    try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, rgb.samples);
+}
+
+test "TIFF parser reads little-endian 16-bit RGB strip" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, 8);
+
+    try appendU16Le(allocator, &bytes, 10);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, 134);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 273, 4, 1, 146);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 339, 3, 3, 140);
+    try appendIfdEntryLe(allocator, &bytes, 279, 4, 1, 12);
+    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
+    try appendU32Le(allocator, &bytes, 0);
+
+    try appendU16Le(allocator, &bytes, 16);
+    try appendU16Le(allocator, &bytes, 16);
+    try appendU16Le(allocator, &bytes, 16);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 0x0101);
+    try appendU16Le(allocator, &bytes, 0x0203);
+    try appendU16Le(allocator, &bytes, 0x0405);
+    try appendU16Le(allocator, &bytes, 0x1001);
+    try appendU16Le(allocator, &bytes, 0x2003);
+    try appendU16Le(allocator, &bytes, 0x4005);
+
+    var rgb = try tiff.parseRgb(allocator, bytes.items);
+    defer rgb.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), rgb.width);
+    try std.testing.expectEqual(@as(usize, 1), rgb.height);
+    try std.testing.expectEqual(@as(u8, 16), rgb.bit_depth);
+    try std.testing.expectEqualSlices(u16, &.{ 0x0101, 0x0203, 0x0405, 0x1001, 0x2003, 0x4005 }, rgb.samples);
+}
+
+test "TIFF parser reads big-endian 16-bit RGB strip" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    try bytes.appendSlice(allocator, "MM");
+    try appendU16BeTest(allocator, &bytes, 42);
+    try appendU32BeTest(allocator, &bytes, 8);
+
+    try appendU16BeTest(allocator, &bytes, 10);
+    try appendIfdEntryBeTest(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryBeTest(allocator, &bytes, 257, 4, 1, 1);
+    try appendIfdEntryBeTest(allocator, &bytes, 258, 3, 3, 134);
+    try appendIfdEntryBeTest(allocator, &bytes, 259, 3, 1, @as(u32, 1) << 16);
+    try appendIfdEntryBeTest(allocator, &bytes, 262, 3, 1, @as(u32, 2) << 16);
+    try appendIfdEntryBeTest(allocator, &bytes, 273, 4, 1, 146);
+    try appendIfdEntryBeTest(allocator, &bytes, 277, 3, 1, @as(u32, 3) << 16);
+    try appendIfdEntryBeTest(allocator, &bytes, 339, 3, 3, 140);
+    try appendIfdEntryBeTest(allocator, &bytes, 279, 4, 1, 12);
+    try appendIfdEntryBeTest(allocator, &bytes, 284, 3, 1, @as(u32, 1) << 16);
+    try appendU32BeTest(allocator, &bytes, 0);
+
+    try appendU16BeTest(allocator, &bytes, 16);
+    try appendU16BeTest(allocator, &bytes, 16);
+    try appendU16BeTest(allocator, &bytes, 16);
+    try appendU16BeTest(allocator, &bytes, 1);
+    try appendU16BeTest(allocator, &bytes, 1);
+    try appendU16BeTest(allocator, &bytes, 1);
+    try appendU16BeTest(allocator, &bytes, 0x0101);
+    try appendU16BeTest(allocator, &bytes, 0x0203);
+    try appendU16BeTest(allocator, &bytes, 0x0405);
+    try appendU16BeTest(allocator, &bytes, 0x1001);
+    try appendU16BeTest(allocator, &bytes, 0x2003);
+    try appendU16BeTest(allocator, &bytes, 0x4005);
+
+    var rgb = try tiff.parseRgb(allocator, bytes.items);
+    defer rgb.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), rgb.width);
+    try std.testing.expectEqual(@as(usize, 1), rgb.height);
+    try std.testing.expectEqual(@as(u8, 16), rgb.bit_depth);
+    try std.testing.expectEqualSlices(u16, &.{ 0x0101, 0x0203, 0x0405, 0x1001, 0x2003, 0x4005 }, rgb.samples);
+}
+
+test "TIFF parser reads RGB data split across multiple strips" {
+    const allocator = std.testing.allocator;
+    const bytes = try makeRgbTwoStripTiffForTest(allocator, 6, 6, 168, true);
+    defer allocator.free(bytes);
+
+    var rgb = try tiff.parseRgb(allocator, bytes);
+    defer rgb.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), rgb.width);
+    try std.testing.expectEqual(@as(usize, 2), rgb.height);
+    try std.testing.expectEqual(@as(u8, 8), rgb.bit_depth);
+    try std.testing.expectEqualSlices(u16, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, rgb.samples);
+}
+
+test "TIFF parser rejects malformed multi-strip metadata" {
+    const allocator = std.testing.allocator;
+
+    const mismatched_counts = try makeRgbTwoStripTiffForTest(allocator, 6, 5, 168, true);
+    defer allocator.free(mismatched_counts);
+    try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.parseRgb(allocator, mismatched_counts));
+
+    const truncated_second_strip = try makeRgbTwoStripTiffForTest(allocator, 6, 6, 4096, false);
+    defer allocator.free(truncated_second_strip);
+    try std.testing.expectError(tiff.TiffError.TruncatedData, tiff.parseRgb(allocator, truncated_second_strip));
+}
+
+test "TIFF writer roundtrips optimized 8-bit and 16-bit raster paths" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [2][96]u8 = undefined;
+    const path8 = try std.fmt.bufPrint(&path_buffer[0], ".zig-cache/tmp/{s}/rgb8.tif", .{tmp.sub_path});
+    const path16 = try std.fmt.bufPrint(&path_buffer[1], ".zig-cache/tmp/{s}/rgb16.tif", .{tmp.sub_path});
+
+    const samples8 = try allocator.dupe(u16, &.{
+        0,   1,   255,
+        17,  33,  65,
+        129, 193, 251,
+        3,   5,   8,
+    });
+    defer allocator.free(samples8);
+
+    const rgb8 = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples8,
+    };
+
+    try tiff.writeRgb(io, allocator, rgb8, path8);
+    var decoded8 = try tiff.readRgb(io, allocator, path8);
+    defer decoded8.deinit();
+    try std.testing.expectEqual(@as(u8, 8), decoded8.bit_depth);
+    try std.testing.expectEqualSlices(u16, samples8, decoded8.samples);
+
+    const samples16 = try allocator.dupe(u16, &.{
+        0x0000, 0x0001, 0xffff,
+        0x0102, 0x0304, 0x0506,
+        0x1001, 0x2002, 0x3003,
+        0xabcd, 0xbeef, 0xff00,
+    });
+    defer allocator.free(samples16);
+
+    const rgb16 = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 16,
+        .samples = samples16,
+    };
+
+    try tiff.writeRgb(io, allocator, rgb16, path16);
+    var decoded16 = try tiff.readRgb(io, allocator, path16);
+    defer decoded16.deinit();
+    try std.testing.expectEqual(@as(u8, 16), decoded16.bit_depth);
+    try std.testing.expectEqualSlices(u16, samples16, decoded16.samples);
+}
+
+test "TIFF writer rejects out-of-range 8-bit samples before narrowing" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/invalid-rgb8.tif", .{tmp.sub_path});
+
+    const samples = try allocator.dupe(u16, &.{ 0, 1, 256 });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 1,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.writeRgb(io, allocator, rgb, path));
+}
+
 test "TIFF parser preserves embedded ICC profile tag" {
     const allocator = std.testing.allocator;
 
@@ -2510,6 +2741,40 @@ test "RCT transform roundtrips vector block and tail" {
     defer reconstructed.deinit();
 
     try std.testing.expectEqualSlices(u16, rgb.samples, reconstructed.samples);
+}
+
+test "ICT transform roundtrips vector block and tail within tolerance" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{
+        0,   1,   2,
+        3,   5,   8,
+        13,  21,  34,
+        55,  89,  144,
+        233, 144, 55,
+        17,  203, 91,
+        250, 12,  127,
+    });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 7,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var planes = try color.forwardIct(allocator, rgb);
+    defer planes.deinit();
+
+    var reconstructed = try color.inverseIct(allocator, planes);
+    defer reconstructed.deinit();
+
+    var max_diff: u16 = 0;
+    for (rgb.samples, reconstructed.samples) |expected, actual| {
+        max_diff = @max(max_diff, if (expected > actual) expected - actual else actual - expected);
+    }
+    try std.testing.expect(max_diff <= 2);
 }
 
 test "integer 5/3 DWT roundtrips signed component plane" {
@@ -7136,6 +7401,66 @@ fn makeRgbTiffWithIccEntryForTest(
     return bytes.toOwnedSlice(allocator);
 }
 
+fn makeRgbTwoStripTiffForTest(
+    allocator: std.mem.Allocator,
+    first_strip_count: u32,
+    second_strip_count: u32,
+    second_strip_offset: u32,
+    include_second_payload: bool,
+) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+
+    const bits_offset: u32 = 134;
+    const strip_offsets_offset: u32 = 140;
+    const strip_counts_offset: u32 = 148;
+    const sample_format_offset: u32 = 156;
+    const first_strip_offset: u32 = 162;
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, 8);
+
+    try appendU16Le(allocator, &bytes, 10);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, bits_offset);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 273, 4, 2, strip_offsets_offset);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 339, 3, 3, sample_format_offset);
+    try appendIfdEntryLe(allocator, &bytes, 279, 4, 2, strip_counts_offset);
+    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
+    try appendU32Le(allocator, &bytes, 0);
+
+    try std.testing.expectEqual(@as(usize, bits_offset), bytes.items.len);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+
+    try std.testing.expectEqual(@as(usize, strip_offsets_offset), bytes.items.len);
+    try appendU32Le(allocator, &bytes, first_strip_offset);
+    try appendU32Le(allocator, &bytes, second_strip_offset);
+
+    try std.testing.expectEqual(@as(usize, strip_counts_offset), bytes.items.len);
+    try appendU32Le(allocator, &bytes, first_strip_count);
+    try appendU32Le(allocator, &bytes, second_strip_count);
+
+    try std.testing.expectEqual(@as(usize, sample_format_offset), bytes.items.len);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 1);
+    try appendU16Le(allocator, &bytes, 1);
+
+    try std.testing.expectEqual(@as(usize, first_strip_offset), bytes.items.len);
+    try bytes.appendSlice(allocator, &.{ 1, 2, 3, 4, 5, 6 });
+    if (include_second_payload) {
+        try bytes.appendSlice(allocator, &.{ 7, 8, 9, 10, 11, 12 });
+    }
+
+    return bytes.toOwnedSlice(allocator);
+}
+
 fn appendIfdEntryLe(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -7148,6 +7473,20 @@ fn appendIfdEntryLe(
     try appendU16Le(allocator, out, field_type);
     try appendU32Le(allocator, out, count);
     try appendU32Le(allocator, out, value);
+}
+
+fn appendIfdEntryBeTest(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    tag: u16,
+    field_type: u16,
+    count: u32,
+    value: u32,
+) !void {
+    try appendU16BeTest(allocator, out, tag);
+    try appendU16BeTest(allocator, out, field_type);
+    try appendU32BeTest(allocator, out, count);
+    try appendU32BeTest(allocator, out, value);
 }
 
 fn appendU16Le(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16) !void {

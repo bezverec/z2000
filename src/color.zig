@@ -77,6 +77,8 @@ const RctVector = @Vector(rct_lanes, i32);
 const RctShiftVector = @Vector(rct_lanes, u5);
 const rct_shift_1: RctShiftVector = @splat(1);
 const rct_shift_2: RctShiftVector = @splat(2);
+const ict_lanes = simd.i32_lanes;
+const IctVector = @Vector(ict_lanes, f32);
 
 fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels: usize, level_shift: i32) void {
     // ISO/IEC 15444-1 B.1.1 DC level shift: unsigned samples are shifted by
@@ -205,14 +207,7 @@ pub fn forwardIct(allocator: std.mem.Allocator, rgb: image.RgbImage) !IctPlanes 
     const cr = try allocator.alloc(f32, pixels);
     errdefer allocator.free(cr);
 
-    for (0..pixels) |i| {
-        const r = @as(f32, @floatFromInt(rgb.samples[i * 3])) - shift;
-        const g = @as(f32, @floatFromInt(rgb.samples[i * 3 + 1])) - shift;
-        const b = @as(f32, @floatFromInt(rgb.samples[i * 3 + 2])) - shift;
-        y[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-        cb[i] = -0.16875 * r - 0.331260 * g + 0.5 * b;
-        cr[i] = 0.5 * r - 0.41869 * g - 0.08131 * b;
-    }
+    forwardIctVector(rgb.samples, y, cb, cr, pixels, shift);
 
     return .{
         .allocator = allocator,
@@ -237,7 +232,65 @@ pub fn inverseIct(allocator: std.mem.Allocator, planes: IctPlanes) !image.RgbIma
     const samples = try allocator.alloc(u16, sample_count);
     errdefer allocator.free(samples);
 
-    for (0..pixels) |i| {
+    inverseIctVector(samples, planes, pixels, shift, max_sample);
+
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = planes.bit_depth,
+        .samples = samples,
+    };
+}
+
+fn forwardIctVector(samples: []const u16, y: []f32, cb: []f32, cr: []f32, pixels: usize, shift: f32) void {
+    const shift_vec: IctVector = @splat(shift);
+    const y_r: IctVector = @splat(0.299);
+    const y_g: IctVector = @splat(0.587);
+    const y_b: IctVector = @splat(0.114);
+    const cb_r: IctVector = @splat(-0.16875);
+    const cb_g: IctVector = @splat(-0.331260);
+    const cr_g: IctVector = @splat(0.41869);
+    const cr_b: IctVector = @splat(0.08131);
+    const half: IctVector = @splat(0.5);
+
+    var i: usize = 0;
+    while (i + ict_lanes <= pixels) : (i += ict_lanes) {
+        const rgb = loadIctRgbVector(samples, i, shift_vec);
+        y[i..][0..ict_lanes].* = @as([ict_lanes]f32, y_r * rgb.r + y_g * rgb.g + y_b * rgb.b);
+        cb[i..][0..ict_lanes].* = @as([ict_lanes]f32, cb_r * rgb.r + cb_g * rgb.g + half * rgb.b);
+        cr[i..][0..ict_lanes].* = @as([ict_lanes]f32, half * rgb.r - cr_g * rgb.g - cr_b * rgb.b);
+    }
+
+    while (i < pixels) : (i += 1) {
+        const r = @as(f32, @floatFromInt(samples[i * 3])) - shift;
+        const g = @as(f32, @floatFromInt(samples[i * 3 + 1])) - shift;
+        const b = @as(f32, @floatFromInt(samples[i * 3 + 2])) - shift;
+        y[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+        cb[i] = -0.16875 * r - 0.331260 * g + 0.5 * b;
+        cr[i] = 0.5 * r - 0.41869 * g - 0.08131 * b;
+    }
+}
+
+fn inverseIctVector(samples: []u16, planes: IctPlanes, pixels: usize, shift: f32, max_sample: i32) void {
+    const shift_vec: IctVector = @splat(shift);
+    const cr_to_r: IctVector = @splat(1.402);
+    const cb_to_g: IctVector = @splat(0.34413);
+    const cr_to_g: IctVector = @splat(0.71414);
+    const cb_to_b: IctVector = @splat(1.772);
+
+    var i: usize = 0;
+    while (i + ict_lanes <= pixels) : (i += ict_lanes) {
+        const y_vec: IctVector = planes.y[i..][0..ict_lanes].*;
+        const cb_vec: IctVector = planes.cb[i..][0..ict_lanes].*;
+        const cr_vec: IctVector = planes.cr[i..][0..ict_lanes].*;
+        const r = y_vec + cr_to_r * cr_vec + shift_vec;
+        const g = y_vec - cb_to_g * cb_vec - cr_to_g * cr_vec + shift_vec;
+        const b = y_vec + cb_to_b * cb_vec + shift_vec;
+        storeIctRgbVector(samples, i, r, g, b, max_sample);
+    }
+
+    while (i < pixels) : (i += 1) {
         const y = planes.y[i];
         const cb = planes.cb[i];
         const cr = planes.cr[i];
@@ -248,14 +301,34 @@ pub fn inverseIct(allocator: std.mem.Allocator, planes: IctPlanes) !image.RgbIma
         samples[i * 3 + 1] = clampToSample(g + shift, max_sample);
         samples[i * 3 + 2] = clampToSample(b + shift, max_sample);
     }
+}
 
-    return .{
-        .allocator = allocator,
-        .width = planes.width,
-        .height = planes.height,
-        .bit_depth = planes.bit_depth,
-        .samples = samples,
-    };
+const IctRgbVector = struct {
+    r: IctVector,
+    g: IctVector,
+    b: IctVector,
+};
+
+fn loadIctRgbVector(samples: []const u16, pixel_index: usize, shift: IctVector) IctRgbVector {
+    var r: IctVector = @splat(0);
+    var g: IctVector = @splat(0);
+    var b: IctVector = @splat(0);
+    inline for (0..ict_lanes) |lane| {
+        const base = (pixel_index + lane) * 3;
+        r[lane] = @as(f32, @floatFromInt(samples[base]));
+        g[lane] = @as(f32, @floatFromInt(samples[base + 1]));
+        b[lane] = @as(f32, @floatFromInt(samples[base + 2]));
+    }
+    return .{ .r = r - shift, .g = g - shift, .b = b - shift };
+}
+
+fn storeIctRgbVector(samples: []u16, pixel_index: usize, r: IctVector, g: IctVector, b: IctVector, max_sample: i32) void {
+    inline for (0..ict_lanes) |lane| {
+        const base = (pixel_index + lane) * 3;
+        samples[base] = clampToSample(r[lane], max_sample);
+        samples[base + 1] = clampToSample(g[lane], max_sample);
+        samples[base + 2] = clampToSample(b[lane], max_sample);
+    }
 }
 
 fn clampToSample(value: f32, max_sample: i32) u16 {
