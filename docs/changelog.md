@@ -44,6 +44,15 @@ entries are grouped by development milestone rather than semantic version.
   as a smaller serial Amdahl term, and the next highest-leverage work is T1/MQ
   CPU cost, narrow packed-flag subpaths, horizontal 5/3 SIMD, and multi-tile
   scheduling.
+- Split strict T1 significance candidate checks from zero-context lookup in the
+  direct encode and inferred decode hot paths, so non-candidate samples avoid
+  the extra context-table work while packed shadow parity checks remain active.
+- Cached the current ISO MQ decoder byte across `byteIn()` calls, reducing
+  repeated slice indexing in the renormalization path while preserving
+  `reinitStream` segment restart behavior.
+- Added portable SIMD shuffles to the horizontal integer 5/3 row lifting and
+  pack/unpack steps, covering the repeated interior predict/update groups and
+  low/high rearrangement used by both forward and inverse DWT.
 - Added pass-level T1 decode profiling for the strict ISO MQ/BYPASS path:
   significance, refinement, cleanup/RLC, and raw BYPASS passes now report
   CPU-sum timing, pass counts, and symbol counts across decode workers.

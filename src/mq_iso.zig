@@ -249,6 +249,7 @@ pub const Decoder = struct {
     contexts: []Context,
     bytes: []const u8,
     pos: usize = 0,
+    current_byte: u8 = 0xff,
     a: u32 = 0x8000,
     c: u32 = 0,
     ct: u8 = 0,
@@ -266,12 +267,14 @@ pub const Decoder = struct {
         if (context_count == 0) return IsoMqError.InvalidContext;
         const contexts = try allocator.alloc(Context, context_count);
         resetContextSlice(contexts);
+        const first = firstByte(bytes);
 
         var decoder = Decoder{
             .allocator = allocator,
             .contexts = contexts,
             .bytes = bytes,
-            .c = @as(u32, if (bytes.len == 0) 0xff else bytes[0]) << first_byte_shift,
+            .current_byte = first,
+            .c = @as(u32, first) << first_byte_shift,
         };
         decoder.byteIn();
         decoder.c <<= 7;
@@ -289,6 +292,7 @@ pub const Decoder = struct {
             .allocator = allocator,
             .contexts = contexts,
             .bytes = bytes,
+            .current_byte = first,
             .c = @as(u32, 0xff) << 16,
         };
         if (first > 0x8f) {
@@ -313,9 +317,10 @@ pub const Decoder = struct {
     pub fn reinitStream(self: *Decoder, bytes: []const u8) void {
         self.bytes = bytes;
         self.pos = 0;
+        self.current_byte = firstByte(bytes);
         self.a = 0x8000;
         self.ct = 0;
-        self.c = @as(u32, if (bytes.len == 0) 0xff else bytes[0]) << 16;
+        self.c = @as(u32, self.current_byte) << 16;
         self.byteIn();
         self.c <<= 7;
         self.ct -= 7;
@@ -448,7 +453,7 @@ pub const Decoder = struct {
     }
 
     inline fn byteIn(self: *Decoder) void {
-        const current = if (self.pos < self.bytes.len) self.bytes[self.pos] else 0xff;
+        const current = self.current_byte;
         const next_index = self.pos + 1;
         const next = if (next_index < self.bytes.len) self.bytes[next_index] else 0xff;
         if (current == 0xff) {
@@ -457,6 +462,7 @@ pub const Decoder = struct {
                 self.ct = 8;
             } else {
                 self.pos += 1;
+                self.current_byte = next;
                 self.c += @as(u32, next) << 9;
                 self.ct = 7;
             }
@@ -464,10 +470,15 @@ pub const Decoder = struct {
         }
 
         self.pos += 1;
+        self.current_byte = next;
         self.c += @as(u32, next) << 8;
         self.ct = 8;
     }
 };
+
+inline fn firstByte(bytes: []const u8) u8 {
+    return if (bytes.len == 0) 0xff else bytes[0];
+}
 
 fn resetContextSlice(contexts: []Context) void {
     for (contexts) |*context| context.reset();
