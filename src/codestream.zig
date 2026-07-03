@@ -3394,27 +3394,115 @@ fn decodeIrreversibleImageFromQuantizedPlanes(
 }
 
 const StrictComponentDecodeJob = struct {
+    allocator: std.mem.Allocator,
     width: usize,
     height: usize,
     catalog: *const StrictPacketBlockCatalog,
     component: usize,
     options: DecodeOptions,
-    plane: ?[]i32 = null,
+    plane: []i32,
+    result: anyerror!void = {},
+};
+
+const StrictBlockDecodeJob = struct {
+    width: usize,
+    height: usize,
+    catalog: *const StrictPacketBlockCatalog,
+    component: usize,
+    block_start: usize,
+    blocks: []const StrictPacketBlock,
+    options: DecodeOptions,
+    plane: []i32,
     result: anyerror!void = {},
 };
 
 fn strictComponentDecodeWorker(job: *StrictComponentDecodeJob) void {
-    job.plane = reconstructStrictComponentCoefficientsFromBlockCatalog(
-        std.heap.smp_allocator,
+    fillStrictComponentCoefficientsFromBlockCatalog(
+        job.allocator,
         job.width,
         job.height,
         job.catalog.*,
         job.component,
         job.options,
+        job.plane,
     ) catch |err| {
         job.result = err;
         return;
     };
+    job.result = {};
+}
+
+fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
+    var scratch = ebcot.DecodeBlockScratch.init(std.heap.smp_allocator);
+    defer scratch.deinit();
+
+    for (job.blocks, 0..) |block, local_index| {
+        if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) continue;
+        if (!block.metadata_ready) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+        if (block.encoded_bitplanes > block.nominal_bitplanes) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+        const block_index = job.block_start + local_index;
+        const payload = job.catalog.blockPayload(job.component, block_index);
+        if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+        const decoded = if (block.code_block_style.bypass) blk: {
+            if (job.options.t1_backend != .iso_mq) {
+                job.result = CodestreamError.UnsupportedPayload;
+                return;
+            }
+            break :blk ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
+                &scratch,
+                block.encoded_bitplanes,
+                block.cumulative_passes,
+                payload,
+                block.segment_lengths[0..block.segment_count],
+                block.rect.width,
+                block.rect.height,
+                block.code_block_style,
+            ) catch |err| {
+                job.result = err;
+                return;
+            };
+        } else switch (job.options.t1_backend) {
+            .legacy_mq => ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
+                std.heap.smp_allocator,
+                block.encoded_bitplanes,
+                block.cumulative_passes,
+                payload,
+                block.rect.width,
+                block.rect.height,
+                block.code_block_style,
+            ) catch |err| {
+                job.result = err;
+                return;
+            },
+            .iso_mq => ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
+                &scratch,
+                block.encoded_bitplanes,
+                block.cumulative_passes,
+                payload,
+                block.rect.width,
+                block.rect.height,
+                block.code_block_style,
+            ) catch |err| {
+                job.result = err;
+                return;
+            },
+        };
+        scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
+            std.heap.smp_allocator.free(decoded);
+            job.result = err;
+            return;
+        };
+        std.heap.smp_allocator.free(decoded);
+    }
     job.result = {};
 }
 
@@ -3424,24 +3512,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
 ) !color.RctPlanes {
-    if (componentThreadCountFor(options.threads) >= 2) {
-        var jobs: [3]StrictComponentDecodeJob = undefined;
-        for (&jobs, 0..) |*job, component| {
-            job.* = .{
-                .width = header.width,
-                .height = header.height,
-                .catalog = &catalog,
-                .component = component,
-                .options = options,
-            };
-        }
-        errdefer for (&jobs) |*job| {
-            if (job.plane) |plane| std.heap.smp_allocator.free(plane);
-        };
-        try runComponentJobs(StrictComponentDecodeJob, &jobs, componentThreadCountFor(options.threads), strictComponentDecodeWorker);
-
-        // Copy worker planes into caller-owned buffers so RctPlanes frees
-        // with the caller allocator.
+    if (options.threads <= 3 and componentThreadCountFor(options.threads) >= 2) {
         const pixels = try std.math.mul(usize, header.width, header.height);
         const y = try allocator.alloc(i32, pixels);
         errdefer allocator.free(y);
@@ -3450,13 +3521,21 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
         const cr = try allocator.alloc(i32, pixels);
         errdefer allocator.free(cr);
         const targets = [3][]i32{ y, cb, cr };
-        for (&jobs, targets) |*job, target| {
-            const plane = job.plane orelse return CodestreamError.InvalidCodestream;
-            if (plane.len != target.len) return CodestreamError.InvalidCodestream;
-            @memcpy(target, plane);
-            std.heap.smp_allocator.free(plane);
-            job.plane = null;
+
+        var jobs: [3]StrictComponentDecodeJob = undefined;
+        for (&jobs, 0..) |*job, component| {
+            job.* = .{
+                .allocator = std.heap.smp_allocator,
+                .width = header.width,
+                .height = header.height,
+                .catalog = &catalog,
+                .component = component,
+                .options = options,
+                .plane = targets[component],
+            };
         }
+        try runComponentJobs(StrictComponentDecodeJob, &jobs, componentThreadCountFor(options.threads), strictComponentDecodeWorker);
+
         return .{
             .allocator = allocator,
             .width = header.width,
@@ -3519,18 +3598,52 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
     const pixels = try std.math.mul(usize, width, height);
     const plane = try allocator.alloc(i32, pixels);
     errdefer allocator.free(plane);
+    try fillStrictComponentCoefficientsFromBlockCatalog(allocator, width, height, catalog, component, options, plane);
+    return plane;
+}
+
+fn fillStrictComponentCoefficientsFromBlockCatalog(
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    catalog: StrictPacketBlockCatalog,
+    component: usize,
+    options: DecodeOptions,
+    plane: []i32,
+) !void {
+    if (component >= 3) return CodestreamError.InvalidCodestream;
+    const pixels = try std.math.mul(usize, width, height);
+    if (plane.len != pixels) return CodestreamError.InvalidCodestream;
     @memset(plane, 0);
 
     const covered = try allocator.alloc(bool, pixels);
     defer allocator.free(covered);
     @memset(covered, false);
 
+    const blocks = catalog.components[component];
+    const worker_count = strictDecodeBlockThreadCount(options, blocks.len);
+    if (worker_count > 1) {
+        try validateStrictBlockCatalogCoverage(width, height, blocks, covered);
+        try reconstructStrictComponentBlocksParallel(
+            allocator,
+            width,
+            height,
+            catalog,
+            component,
+            blocks,
+            options,
+            plane,
+            worker_count,
+        );
+        return;
+    }
+
     // One reusable T1 scratch per component keeps the hot decode loop free
     // of per-block allocations.
     var scratch = ebcot.DecodeBlockScratch.init(allocator);
     defer scratch.deinit();
 
-    for (catalog.components[component], 0..) |block, block_index| {
+    for (blocks, 0..) |block, block_index| {
         if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
         if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) {
             try markStrictZeroBlockCovered(covered, width, height, block.rect);
@@ -3574,14 +3687,79 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
                 block.code_block_style,
             ),
         };
-        defer allocator.free(decoded);
+        errdefer allocator.free(decoded);
         try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+        allocator.free(decoded);
     }
     for (covered) |is_covered| {
         if (!is_covered) return CodestreamError.InvalidCodestream;
     }
+}
 
-    return plane;
+fn strictDecodeBlockThreadCount(options: DecodeOptions, block_count: usize) usize {
+    if (options.threads <= 3 or block_count < 2) return 1;
+    return @min(@as(usize, options.threads), block_count);
+}
+
+fn validateStrictBlockCatalogCoverage(
+    width: usize,
+    height: usize,
+    blocks: []const StrictPacketBlock,
+    covered: []bool,
+) !void {
+    @memset(covered, false);
+    for (blocks) |block| {
+        if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
+        try markStrictZeroBlockCovered(covered, width, height, block.rect);
+    }
+    for (covered) |is_covered| {
+        if (!is_covered) return CodestreamError.InvalidCodestream;
+    }
+}
+
+fn reconstructStrictComponentBlocksParallel(
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    catalog: StrictPacketBlockCatalog,
+    component: usize,
+    blocks: []const StrictPacketBlock,
+    options: DecodeOptions,
+    plane: []i32,
+    worker_count: usize,
+) !void {
+    var jobs = try allocator.alloc(StrictBlockDecodeJob, worker_count);
+    defer allocator.free(jobs);
+    for (jobs, 0..) |*job, index| {
+        const start = blockRangeBoundary(blocks.len, worker_count, index);
+        const end = blockRangeBoundary(blocks.len, worker_count, index + 1);
+        job.* = .{
+            .width = width,
+            .height = height,
+            .catalog = &catalog,
+            .component = component,
+            .block_start = start,
+            .blocks = blocks[start..end],
+            .options = options,
+            .plane = plane,
+        };
+    }
+
+    const spawn_count = worker_count - 1;
+    var threads = try allocator.alloc(std.Thread, spawn_count);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < spawn_count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, strictBlockDecodeWorker, .{&jobs[spawned]}) catch |err| {
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+
+    strictBlockDecodeWorker(&jobs[spawn_count]);
+    for (threads[0..spawned]) |thread| thread.join();
+
+    for (jobs) |job| try job.result;
 }
 
 fn reconstructStrictComponentCoefficients(
@@ -3683,12 +3861,13 @@ fn markStrictZeroBlockCovered(
     var y = rect.y;
     while (y < end_y) : (y += 1) {
         const row_offset = try std.math.mul(usize, y, plane_width);
-        var x = rect.x;
-        while (x < end_x) : (x += 1) {
-            const index = try std.math.add(usize, row_offset, x);
-            if (index >= covered.len or covered[index]) return CodestreamError.InvalidCodestream;
-            covered[index] = true;
+        const row_start = try std.math.add(usize, row_offset, rect.x);
+        const row_end = try std.math.add(usize, row_offset, end_x);
+        if (row_end > covered.len) return CodestreamError.InvalidCodestream;
+        for (covered[row_start..row_end]) |is_covered| {
+            if (is_covered) return CodestreamError.InvalidCodestream;
         }
+        @memset(covered[row_start..row_end], true);
     }
 }
 
@@ -3710,14 +3889,44 @@ fn scatterStrictDecodedBlock(
     var y = rect.y;
     while (y < end_y) : (y += 1) {
         const row_offset = try std.math.mul(usize, y, plane_width);
-        var x = rect.x;
-        while (x < end_x) : (x += 1) {
-            const index = try std.math.add(usize, row_offset, x);
-            if (index >= plane.len or covered[index]) return CodestreamError.InvalidCodestream;
-            plane[index] = decoded[source];
-            covered[index] = true;
-            source += 1;
+        const row_start = try std.math.add(usize, row_offset, rect.x);
+        const row_end = try std.math.add(usize, row_offset, end_x);
+        if (row_end > plane.len or row_end > covered.len) return CodestreamError.InvalidCodestream;
+        const source_end = try std.math.add(usize, source, rect.width);
+        if (source_end > decoded.len) return CodestreamError.InvalidCodestream;
+        for (covered[row_start..row_end]) |is_covered| {
+            if (is_covered) return CodestreamError.InvalidCodestream;
         }
+        @memcpy(plane[row_start..row_end], decoded[source..source_end]);
+        @memset(covered[row_start..row_end], true);
+        source = source_end;
+    }
+    if (source != decoded.len) return CodestreamError.InvalidCodestream;
+}
+
+fn scatterStrictDecodedBlockUnchecked(
+    plane: []i32,
+    plane_width: usize,
+    plane_height: usize,
+    rect: subband.Rect,
+    decoded: []const i32,
+) !void {
+    if (decoded.len != rectArea(rect)) return CodestreamError.InvalidCodestream;
+    const end_x = try std.math.add(usize, rect.x, rect.width);
+    const end_y = try std.math.add(usize, rect.y, rect.height);
+    if (end_x > plane_width or end_y > plane_height) return CodestreamError.InvalidCodestream;
+
+    var source: usize = 0;
+    var y = rect.y;
+    while (y < end_y) : (y += 1) {
+        const row_offset = try std.math.mul(usize, y, plane_width);
+        const row_start = try std.math.add(usize, row_offset, rect.x);
+        const row_end = try std.math.add(usize, row_offset, end_x);
+        if (row_end > plane.len) return CodestreamError.InvalidCodestream;
+        const source_end = try std.math.add(usize, source, rect.width);
+        if (source_end > decoded.len) return CodestreamError.InvalidCodestream;
+        @memcpy(plane[row_start..row_end], decoded[source..source_end]);
+        source = source_end;
     }
     if (source != decoded.len) return CodestreamError.InvalidCodestream;
 }

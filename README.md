@@ -251,6 +251,15 @@ payload behavior is implemented.
   Silicon and wider AVX-family vectors on matching x86 targets.
 - Integer inverse 5/3 unpack now separates low/high samples with branchless
   even/odd loops for both horizontal rows and strided vertical columns.
+- Strict no-sidecar decode can now use block-level workers inside each
+  component when `--threads` exceeds the old three-component cap; block
+  coverage is validated before worker scatter so parallel writes stay
+  disjoint.
+- The component-parallel strict decode path now writes directly into the final
+  Y/Cb/Cr planes, avoiding the previous worker-owned plane allocation and
+  full-plane copy back to the caller allocator.
+- Strict decode scatters reconstructed code-block rows with slice copies and
+  row coverage updates instead of per-sample destination index arithmetic.
 - Strict no-sidecar decode now runs component-parallel with `--threads`,
   reuses one T1 scratch and one ISO MQ decoder per component, and skips
   context-index bounds checks in the hot MQ loops (debug asserts remain).

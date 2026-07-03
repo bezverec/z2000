@@ -195,6 +195,14 @@ entries are grouped by development milestone rather than semantic version.
   lane policy already used elsewhere in T1 scratch cleanup.
 - Removed per-sample parity branches from integer inverse 5/3 unpacking by
   splitting low/high samples into separate even/odd loops for rows and columns.
+- Added block-level strict decode workers for `--threads > 3`: each component
+  validates block coverage first, then partitions code-block decoding across
+  worker-local `DecodeBlockScratch` instances and scatters into disjoint rects.
+- Removed the extra worker-owned plane allocation/copy from the
+  component-parallel strict decode path; workers now fill preallocated final
+  Y/Cb/Cr planes while keeping temporary scratch state local.
+- Changed strict decode scatter/coverage updates to operate row-by-row with
+  slice copies and row coverage fills instead of per-sample destination writes.
 
 ### Documentation
 
