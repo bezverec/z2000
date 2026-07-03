@@ -5,6 +5,59 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Performance Instrumentation
+
+- Added `decode-temp-jp2 --timings` and a public `DecodeTimings` profiling API
+  for the supported strict JP2 decode path. The breakdown now separates JP2
+  read, codestream extraction, metadata parsing, T2 packet catalog construction,
+  T1 block payload reconstruction, inverse DWT, inverse MCT, ICC extraction,
+  and TIFF write.
+- Added pass-level T1 decode profiling for the strict ISO MQ/BYPASS path:
+  significance, refinement, cleanup/RLC, and raw BYPASS passes now report
+  CPU-sum timing, pass counts, and symbol counts across decode workers.
+- Added optional ISO MQ branch counters to the T1 decode timing profile:
+  fast MPS, LPS, MPS-with-renormalization, renormalization shifts, and byte-in
+  counts are aggregated per pass type without affecting non-profiled decode.
+- Tightened ISO MQ branch-counter accounting by removing an unreachable
+  profiled fast-MPS increment, documenting that profiled and unchecked decode
+  transitions must stay in sync, and adding a test that profiled decode matches
+  unchecked decisions while branch counters account for every symbol.
+- Added the first ISO MQ decoder fast-path slice: `mq_iso.Decoder` now exposes
+  an inline unchecked read path, and EBCOT T1 decode dispatches ISO MQ reads
+  through it while preserving the checked legacy MQ path.
+- Kept the ISO MQ branch-counter wrapper out of the default hot loop: T1 pass
+  dispatch hoists the per-block profiling flag once, then uses the unchecked
+  decoder directly unless timing collection asks for detailed branch counters.
+- Narrowed the direct T1 encode/decode decision helpers: significance and
+  cleanup paths now compute sign coding only after a newly significant sample
+  is known, MQ refinement computes only its membership and context, and raw
+  BYPASS significance/refinement use even smaller membership predicates.
+  Debug and ReleaseSafe builds still assert parity against the packed T1
+  shadow state.
+- Marked the tiny T1 index, row-mask, flag, and magnitude-bit helpers inline so
+  the direct encode/decode loops keep those arithmetic operations local to the
+  sample hot path.
+- Reused the loaded coefficient value inside direct T1 significance and
+  cleanup encode paths, avoiding duplicate plane indexing when the same sample
+  needs both magnitude-bit and sign tests.
+- Switched strict block-level decode workers from static contiguous block ranges
+  to an atomic next-block scheduler so uneven code-block payloads balance better
+  across decode threads.
+- Added scratch-owned borrowed coefficient decode helpers for the strict ISO MQ
+  and BYPASS paths, removing the per-code-block dupe/free cycle before
+  scattering coefficients into the final component plane.
+- Consolidated strict packet-catalog main-header scanning for COD/TLM/SOT,
+  avoided a duplicate metadata parse when building strict block catalogs, and
+  preallocated packet catalog entries from the RPCL packet plan. The strict
+  metadata parser now also validates TLM entries during its existing main-header
+  scan instead of running a second TLM-only pass, and the main decode path now
+  reuses its already-parsed strict metadata when constructing the block catalog.
+- Reduced strict SOD packet marker scanning from separate SOP and EPH searches
+  to one pass that still rejects unexpected SOP markers and duplicate EPH
+  markers while preserving EPH-before-payload packets.
+- Kept legacy debug sidecar timing coarse while exposing the ISO/T2/T1 path
+  phases needed for the next MQ decoder optimization pass.
+
 ### JPEG2000 Profile Handling
 
 - Added fail-closed profile option handling for unsupported marker/payload

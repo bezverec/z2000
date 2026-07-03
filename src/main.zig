@@ -449,6 +449,7 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     }
 
     var options = codestream.DecodeOptions{};
+    var show_timings = false;
     var index: usize = 2;
     while (index < args.len) {
         if (std.mem.eql(u8, args[index], "--threads")) {
@@ -459,13 +460,17 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.t1_backend = try parseT1Backend(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--timings")) {
+            show_timings = true;
         } else {
             return error.UnknownOption;
         }
         index += 1;
     }
 
+    var command_timings = DecodeTempJp2Timings{};
     const max_file_size = 1024 * 1024 * 1024;
+    const read_start = monotonicNs();
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
         io,
         args[0],
@@ -473,20 +478,44 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         .limited(max_file_size),
     );
     defer allocator.free(bytes);
+    command_timings.jp2_read_ns = elapsedNs(read_start);
 
+    const extract_start = monotonicNs();
     const j2k = try jp2.extractCodestream(bytes);
-    var rgb = try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options);
+    command_timings.codestream_extract_ns = elapsedNs(extract_start);
+
+    var decode_timings = codestream.DecodeTimings{};
+    const decode_start = monotonicNs();
+    var rgb = if (show_timings)
+        try codestream.decodeLosslessTemporaryWithOptionsProfiled(allocator, j2k, options, &decode_timings)
+    else
+        try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options);
     defer rgb.deinit();
+    command_timings.codestream_decode_ns = elapsedNs(decode_start);
+
+    const icc_start = monotonicNs();
     if (try jp2.extractIccProfile(allocator, bytes)) |profile| {
         if (rgb.icc_profile) |existing| allocator.free(existing);
         rgb.icc_profile = profile;
     }
+    command_timings.icc_extract_ns = elapsedNs(icc_start);
 
+    const write_start = monotonicNs();
     try tiff.writeRgb(io, allocator, rgb, args[1]);
+    command_timings.tiff_write_ns = elapsedNs(write_start);
+    command_timings.total_ns = command_timings.jp2_read_ns +
+        command_timings.codestream_extract_ns +
+        command_timings.codestream_decode_ns +
+        command_timings.icc_extract_ns +
+        command_timings.tiff_write_ns;
+
     std.debug.print(
         "decoded temporary JP2 payload {s} -> {s} ({}x{}, {} bits/channel, threads {})\n",
         .{ args[0], args[1], rgb.width, rgb.height, rgb.bit_depth, options.threads },
     );
+    if (show_timings) {
+        printDecodeTempJp2Timings(command_timings, decode_timings);
+    }
 }
 
 fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void {
@@ -686,6 +715,15 @@ const TiffToJp2Timings = struct {
     write_ns: u64 = 0,
 };
 
+const DecodeTempJp2Timings = struct {
+    total_ns: u64 = 0,
+    jp2_read_ns: u64 = 0,
+    codestream_extract_ns: u64 = 0,
+    codestream_decode_ns: u64 = 0,
+    icc_extract_ns: u64 = 0,
+    tiff_write_ns: u64 = 0,
+};
+
 fn printTiffToJp2Timings(command: TiffToJp2Timings, encode: codestream.EncodeTimings) void {
     const total = command.total_ns;
     std.debug.print("timings:\n", .{});
@@ -700,10 +738,73 @@ fn printTiffToJp2Timings(command: TiffToJp2Timings, encode: codestream.EncodeTim
     printTiming("disk write", command.write_ns, total);
 }
 
+fn printDecodeTempJp2Timings(command: DecodeTempJp2Timings, decode: codestream.DecodeTimings) void {
+    const total = command.total_ns;
+    std.debug.print("timings:\n", .{});
+    printTiming("total", total, total);
+    printTiming("JP2 read", command.jp2_read_ns, total);
+    printTiming("codestream box", command.codestream_extract_ns, total);
+    printTiming("codestream", command.codestream_decode_ns, total);
+    printTiming("  sidecar/legacy", decode.sidecar_or_legacy_ns, total);
+    printTiming("  metadata", decode.metadata_ns, total);
+    printTiming("  packet catalog", decode.packet_catalog_ns, total);
+    printTiming("  block payload", decode.block_payload_ns, total);
+    printTiming("  inverse DWT", decode.wavelet_ns, total);
+    printTiming("  inverse MCT", decode.color_transform_ns, total);
+    printDecodeT1PassProfile(decode);
+    printTiming("ICC extract", command.icc_extract_ns, total);
+    printTiming("TIFF write", command.tiff_write_ns, total);
+}
+
+fn printDecodeT1PassProfile(decode: codestream.DecodeTimings) void {
+    const stats = decode.t1_pass_stats;
+    if (!hasDecodeT1PassProfile(stats)) return;
+    std.debug.print("  T1 pass profile (CPU-sum across workers):\n", .{});
+    printPassTiming("MQ significance", stats.mq_ns[0], stats.mq_passes[0], stats.mq_symbols[0]);
+    printMqBranchStats("  branches", stats, 0);
+    printPassTiming("MQ refinement", stats.mq_ns[1], stats.mq_passes[1], stats.mq_symbols[1]);
+    printMqBranchStats("  branches", stats, 1);
+    printPassTiming("MQ cleanup/RLC", stats.mq_ns[2], stats.mq_passes[2], stats.mq_symbols[2]);
+    printMqBranchStats("  branches", stats, 2);
+    printPassTiming("RAW significance", stats.raw_ns[0], stats.raw_passes[0], stats.raw_symbols[0]);
+    printPassTiming("RAW refinement", stats.raw_ns[1], stats.raw_passes[1], stats.raw_symbols[1]);
+}
+
+fn hasDecodeT1PassProfile(stats: anytype) bool {
+    inline for (0..3) |index| {
+        if (stats.mq_passes[index] != 0 or stats.raw_passes[index] != 0) return true;
+    }
+    return false;
+}
+
 fn printTiming(label: []const u8, ns: u64, total_ns: u64) void {
     std.debug.print(
         "  {s:<18} {d:>9.3} ms {d:>6.2}%\n",
         .{ label, nsToMs(ns), percentOf(ns, total_ns) },
+    );
+}
+
+fn printPassTiming(label: []const u8, ns: u64, passes: u64, symbols: u64) void {
+    if (passes == 0 and symbols == 0 and ns == 0) return;
+    std.debug.print(
+        "    {s:<16} {d:>9.3} ms passes {d:>7} symbols {d:>12}\n",
+        .{ label, nsToMs(ns), passes, symbols },
+    );
+}
+
+fn printMqBranchStats(label: []const u8, stats: anytype, index: usize) void {
+    const total = stats.mq_fast_mps[index] + stats.mq_lps[index] + stats.mq_renorm_mps[index];
+    if (total == 0 and stats.mq_renorm_shifts[index] == 0 and stats.mq_byte_in[index] == 0) return;
+    std.debug.print(
+        "      {s:<14} fast {d:>12} lps {d:>10} renorm-mps {d:>10} shifts {d:>10} byte-in {d:>8}\n",
+        .{
+            label,
+            stats.mq_fast_mps[index],
+            stats.mq_lps[index],
+            stats.mq_renorm_mps[index],
+            stats.mq_renorm_shifts[index],
+            stats.mq_byte_in[index],
+        },
     );
 }
 
@@ -928,7 +1029,7 @@ fn usage() void {
         \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--block N] [--progression RPCL] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
-        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq]
+        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq] [--timings]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.
