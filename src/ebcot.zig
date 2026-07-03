@@ -319,7 +319,19 @@ fn nbfMarkSignificant(flags: []u16, stride: usize, x: usize, y: usize, negative:
 }
 
 fn nbfClearVisit(flags: []u16) void {
-    for (flags) |*word| word.* &= ~nbf_visit;
+    const mask_vec: NbfClearVector = @splat(~nbf_visit);
+    var index: usize = 0;
+    while (index + nbf_clear_lanes <= flags.len) : (index += nbf_clear_lanes) {
+        nbfClearVisitChunk(flags[index..][0..nbf_clear_lanes], mask_vec);
+    }
+    while (index < flags.len) : (index += 1) {
+        flags[index] &= ~nbf_visit;
+    }
+}
+
+fn nbfClearVisitChunk(values: *[nbf_clear_lanes]u16, mask: NbfClearVector) void {
+    const chunk: NbfClearVector = values.*;
+    values.* = chunk & mask;
 }
 
 fn nbfBit(pattern: usize, comptime mask: u16) u4 {
@@ -375,6 +387,8 @@ const StatsMaskVector = @Vector(stats_lanes, u32);
 const stats_lane_masks = makeStatsLaneMasks();
 const flag_clear_lanes = simd.i32_lanes * @sizeOf(i32);
 const FlagClearVector = @Vector(flag_clear_lanes, u8);
+const nbf_clear_lanes = simd.i32_lanes * (@sizeOf(i32) / @sizeOf(u16));
+const NbfClearVector = @Vector(nbf_clear_lanes, u16);
 
 pub const DirectBlockScratch = struct {
     allocator: std.mem.Allocator,
@@ -1016,6 +1030,8 @@ pub fn encodeBlockSymbolsSegmentIsoMqContinuous(allocator: std.mem.Allocator, bl
 const RawBitWriter = struct {
     allocator: std.mem.Allocator,
     buffer: std.ArrayList(u8) = .empty,
+    output: ?*std.ArrayList(u8) = null,
+    output_start: usize = 0,
     byte: u8 = 0,
     remaining: u8 = 8,
 
@@ -1029,7 +1045,19 @@ const RawBitWriter = struct {
     }
 
     fn reset(self: *RawBitWriter) void {
+        self.output = null;
+        self.output_start = 0;
         self.buffer.clearRetainingCapacity();
+        self.resetState();
+    }
+
+    fn resetInto(self: *RawBitWriter, output: *std.ArrayList(u8)) void {
+        self.output = output;
+        self.output_start = output.items.len;
+        self.resetState();
+    }
+
+    fn resetState(self: *RawBitWriter) void {
         self.byte = 0;
         self.remaining = 8;
     }
@@ -1038,7 +1066,7 @@ const RawBitWriter = struct {
         self.remaining -= 1;
         if (bit) self.byte |= @as(u8, 1) << @intCast(self.remaining);
         if (self.remaining == 0) {
-            try self.buffer.append(self.allocator, self.byte);
+            try self.appendByte(self.byte);
             self.remaining = if (self.byte == 0xff) 7 else 8;
             self.byte = 0;
         }
@@ -1048,26 +1076,65 @@ const RawBitWriter = struct {
     /// predictable termination: pad pending bits with an alternating 0,1
     /// sequence; a pending stuffed-only byte after 0xff drops the 0xff.
     fn finish(self: *RawBitWriter) ![]u8 {
-        if (self.remaining < 7 or (self.remaining == 7 and lastByteIsNotFf(self.buffer.items))) {
+        std.debug.assert(self.output == null);
+        try self.finishActiveStream();
+        return self.buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn finishInto(self: *RawBitWriter, output: *std.ArrayList(u8)) !usize {
+        std.debug.assert(self.output == output);
+        const start = self.output_start;
+        try self.finishActiveStream();
+        return output.items.len - start;
+    }
+
+    fn finishActiveStream(self: *RawBitWriter) !void {
+        if (self.remaining < 7 or (self.remaining == 7 and self.lastActiveByteIsNotFf())) {
             var bit_value: u8 = 0;
             while (self.remaining > 0) {
                 self.remaining -= 1;
                 self.byte |= bit_value << @intCast(self.remaining);
                 bit_value = 1 - bit_value;
             }
-            try self.buffer.append(self.allocator, self.byte);
-        } else if (self.remaining == 7 and self.buffer.items.len > 0 and
-            self.buffer.items[self.buffer.items.len - 1] == 0xff)
+            try self.appendByte(self.byte);
+        } else if (self.remaining == 7 and self.activeByteCount() > 0 and
+            !self.lastActiveByteIsNotFf())
         {
-            _ = self.buffer.pop();
+            _ = self.activeBytes().pop();
         }
-        return self.buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn emittedByteCount(self: RawBitWriter) usize {
+        return self.activeByteCount();
+    }
+
+    fn appendByte(self: *RawBitWriter, value: u8) !void {
+        const bytes = self.activeBytes();
+        if (bytes.items.len < bytes.capacity) {
+            bytes.appendAssumeCapacity(value);
+        } else {
+            try bytes.append(self.allocator, value);
+        }
+    }
+
+    fn activeBytes(self: *RawBitWriter) *std.ArrayList(u8) {
+        return self.output orelse &self.buffer;
+    }
+
+    fn activeBytesConst(self: RawBitWriter) *const std.ArrayList(u8) {
+        return self.output orelse &self.buffer;
+    }
+
+    fn activeByteCount(self: RawBitWriter) usize {
+        const bytes = self.activeBytesConst();
+        return bytes.items.len - self.output_start;
+    }
+
+    fn lastActiveByteIsNotFf(self: RawBitWriter) bool {
+        const bytes = self.activeBytesConst().items;
+        return bytes.len == self.output_start or bytes[bytes.len - 1] != 0xff;
     }
 };
-
-fn lastByteIsNotFf(bytes: []const u8) bool {
-    return bytes.len == 0 or bytes[bytes.len - 1] != 0xff;
-}
 
 /// Raw (bypass) segment bit reader; bytes past the segment read as 0xff,
 /// matching opj_mqc_raw_decode.
@@ -1698,7 +1765,6 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     if (pass_count != expected_passes) return EbcotError.InvalidBlock;
 
     try scratch.ensureBlockState(width, height, area);
-    @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
@@ -1766,7 +1832,6 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
     if (pass_count != expected_passes) return EbcotError.InvalidBlock;
 
     try scratch.ensureBlockState(width, height, area);
-    @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
@@ -1963,16 +2028,26 @@ fn decodeSignificancePassRaw(
 ) !void {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    var it = ScanIterator.init(scratch.width, scratch.height);
-    while (it.next()) |pos| {
-        const p = nbfIndex(nbs, pos.x, pos.y);
-        const causal = style.vertical_causal and (pos.y & 3) == 3;
-        const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-        if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
-        flags[p] |= nbf_visit;
-        if (reader.readBit()) {
-            const negative = reader.readBit();
-            markDecodedSignificant(scratch, pos.x, pos.y, bitplane, negative);
+    var stripe_y: usize = 0;
+    while (stripe_y < scratch.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
+        var x: usize = 0;
+        while (x < scratch.width) : (x += 1) {
+            var p = nbfIndex(nbs, x, stripe_y);
+            var dy: usize = 0;
+            while (dy < stripe_height) : (dy += 1) {
+                const y = stripe_y + dy;
+                const sample_flags_index = p;
+                p += nbs;
+                const causal = style.vertical_causal and dy == 3;
+                const f = if (causal) flags[sample_flags_index] & nbf_causal_mask else flags[sample_flags_index];
+                if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                flags[sample_flags_index] |= nbf_visit;
+                if (reader.readBit()) {
+                    const negative = reader.readBit();
+                    markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+                }
+            }
         }
     }
 }
@@ -1986,14 +2061,26 @@ fn decodeRefinementPassRaw(
     _ = style;
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    var it = ScanIterator.init(scratch.width, scratch.height);
-    while (it.next()) |pos| {
-        const p = nbfIndex(nbs, pos.x, pos.y);
-        const f = flags[p];
-        if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
-        const bit = reader.readBit();
-        flags[p] |= nbf_refine;
-        if (bit) addMagnitudeBit(scratch, localIndex(scratch.width, pos.x, pos.y), bitplane);
+    var stripe_y: usize = 0;
+    while (stripe_y < scratch.height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
+        var x: usize = 0;
+        while (x < scratch.width) : (x += 1) {
+            var p = nbfIndex(nbs, x, stripe_y);
+            var coeff_index = localIndex(scratch.width, x, stripe_y);
+            var dy: usize = 0;
+            while (dy < stripe_height) : (dy += 1) {
+                const sample_flags_index = p;
+                const sample_coeff_index = coeff_index;
+                p += nbs;
+                coeff_index += scratch.width;
+                const f = flags[sample_flags_index];
+                if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+                const bit = reader.readBit();
+                flags[sample_flags_index] |= nbf_refine;
+                if (bit) addMagnitudeBit(scratch, sample_coeff_index, bitplane);
+            }
+        }
     }
 }
 
@@ -2354,7 +2441,7 @@ fn decodeSignificancePassInferred(
                     const sign_bit = try decoder.read(mqContextIndex(sign.context));
                     symbol_count += 1;
                     const negative = sign_bit != sign.predicted_negative;
-                    markDecodedSignificant(scratch, x, y, bitplane, negative);
+                    markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
                 }
             }
         }
@@ -2701,7 +2788,7 @@ fn decodeCleanupPassInferred(
                     const sign_bit = try decoder.read(mqContextIndex(sign.context));
                     symbol_count += 1;
                     const negative = sign_bit != sign.predicted_negative;
-                    markDecodedSignificant(scratch, x, y, bitplane, negative);
+                    markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
                 }
 
                 var dy = runlen + 1;
@@ -2896,7 +2983,7 @@ fn nbfDecodeCleanupSample(
         const sign_bit = try decoder.read(mqContextIndex(sign.context));
         symbol_count += 1;
         const negative = sign_bit != sign.predicted_negative;
-        markDecodedSignificant(scratch, x, y, bitplane, negative);
+        markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
     }
     return symbol_count;
 }
@@ -3200,7 +3287,6 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
 
     const area = try blockArea(rect);
     try scratch.ensureBlockState(rect.width, rect.height, area);
-    @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
 
@@ -3209,7 +3295,7 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
     iso.resetStreamInto(&scratch.bytes);
     try iso.resetJpeg2000Contexts();
     const raw = scratch.rawBitWriter();
-    raw.reset();
+    raw.resetInto(&scratch.bytes);
 
     var segment_start_bytes: u64 = 0;
     var previous_running: u64 = 0;
@@ -3252,7 +3338,7 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
             segment_pass_count += 1;
             pass_index += 1;
             const running: u64 = segment_start_bytes +
-                (if (is_raw) @as(u64, raw.buffer.items.len) else @as(u64, iso.emittedByteCount()));
+                (if (is_raw) @as(u64, raw.emittedByteCount()) else @as(u64, iso.emittedByteCount()));
             try scratch.pass_payloads.append(scratch.allocator, .{
                 .kind = kind,
                 .magnitude_bitplane = bitplane,
@@ -3265,12 +3351,10 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
 
             const last_pass = pass_index == total_passes;
             if (last_pass or passEndsBypassSegment(style, bitplanes, bitplane, kind)) {
-                const encoded_len = if (segment_is_raw) blk: {
-                    const encoded = try raw.finish();
-                    defer scratch.allocator.free(encoded);
-                    try scratch.bytes.appendSlice(scratch.allocator, encoded);
-                    break :blk encoded.len;
-                } else try iso.finishInto(&scratch.bytes);
+                const encoded_len = if (segment_is_raw)
+                    try raw.finishInto(&scratch.bytes)
+                else
+                    try iso.finishInto(&scratch.bytes);
                 try scratch.segments.append(scratch.allocator, .{
                     .pass_count = segment_pass_count,
                     .byte_length = @intCast(encoded_len),
@@ -3283,7 +3367,7 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
                 previous_running = cumulative;
                 segment_pass_count = 0;
                 if (!last_pass) {
-                    raw.reset();
+                    raw.resetInto(&scratch.bytes);
                     iso.resetStreamInto(&scratch.bytes);
                 }
             }
@@ -4064,6 +4148,14 @@ fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitp
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setFlag(scratch.flags.items, index, .significant);
     setFlag(scratch.flags.items, index, .became_significant);
+    setSignificantRowDecode(scratch, x, y);
+    nbfMarkSignificant(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
+}
+
+fn markDecodedSignificantNbf(scratch: *DecodeBlockScratch, x: usize, y: usize, bitplane: u8, negative: bool) void {
+    const index = localIndex(scratch.width, x, y);
+    const magnitude_bit = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
     nbfMarkSignificant(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
 }

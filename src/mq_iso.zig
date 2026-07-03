@@ -152,41 +152,40 @@ pub const Encoder = struct {
     }
 
     fn byteOut(self: *Encoder) !void {
-        if (self.previousByte() == 0xff) {
-            try self.appendByte(@truncate(self.c >> 20));
+        const bytes = self.activeBytes();
+        if (self.previousByteFrom(bytes) == 0xff) {
+            try self.appendByteTo(bytes, @truncate(self.c >> 20));
             self.c &= 0x000f_ffff;
             self.ct = 7;
             return;
         }
 
         if ((self.c & 0x0800_0000) == 0) {
-            try self.appendByte(@truncate(self.c >> 19));
+            try self.appendByteTo(bytes, @truncate(self.c >> 19));
             self.c &= 0x0007_ffff;
             self.ct = 8;
             return;
         }
 
-        self.incrementPreviousByte();
-        if (self.previousByte() == 0xff) {
+        self.incrementPreviousByteIn(bytes);
+        if (self.previousByteFrom(bytes) == 0xff) {
             self.c &= 0x07ff_ffff;
-            try self.appendByte(@truncate(self.c >> 20));
+            try self.appendByteTo(bytes, @truncate(self.c >> 20));
             self.c &= 0x000f_ffff;
             self.ct = 7;
         } else {
-            try self.appendByte(@truncate(self.c >> 19));
+            try self.appendByteTo(bytes, @truncate(self.c >> 19));
             self.c &= 0x0007_ffff;
             self.ct = 8;
         }
     }
 
-    fn previousByte(self: Encoder) u8 {
-        const bytes = self.activeBytesConst();
+    fn previousByteFrom(self: Encoder, bytes: *const std.ArrayList(u8)) u8 {
         if (bytes.items.len == self.output_start) return self.fake_previous;
         return bytes.items[bytes.items.len - 1];
     }
 
-    fn incrementPreviousByte(self: *Encoder) void {
-        const bytes = self.activeBytes();
+    fn incrementPreviousByteIn(self: *Encoder, bytes: *std.ArrayList(u8)) void {
         if (bytes.items.len == self.output_start) {
             self.fake_previous +%= 1;
         } else {
@@ -195,7 +194,10 @@ pub const Encoder = struct {
     }
 
     fn appendByte(self: *Encoder, byte: u8) !void {
-        const bytes = self.activeBytes();
+        try self.appendByteTo(self.activeBytes(), byte);
+    }
+
+    fn appendByteTo(self: *Encoder, bytes: *std.ArrayList(u8), byte: u8) !void {
         if (bytes.items.len < bytes.capacity) {
             bytes.appendAssumeCapacity(byte);
         } else {
@@ -365,8 +367,9 @@ pub const Decoder = struct {
     }
 
     fn byteIn(self: *Decoder) void {
-        const current = self.byteAt(self.pos);
-        const next = self.byteAt(self.pos + 1);
+        const current = if (self.pos < self.bytes.len) self.bytes[self.pos] else 0xff;
+        const next_index = self.pos + 1;
+        const next = if (next_index < self.bytes.len) self.bytes[next_index] else 0xff;
         if (current == 0xff) {
             if (next > 0x8f) {
                 self.c += 0xff00;
@@ -382,11 +385,6 @@ pub const Decoder = struct {
         self.pos += 1;
         self.c += @as(u32, next) << 8;
         self.ct = 8;
-    }
-
-    fn byteAt(self: Decoder, index: usize) u8 {
-        if (index < self.bytes.len) return self.bytes[index];
-        return 0xff;
     }
 };
 

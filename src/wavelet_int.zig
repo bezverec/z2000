@@ -285,20 +285,18 @@ fn inverse53Columns(data: []i32, stride: usize, width: usize, height: usize, scr
 
 fn inverse53ColumnVector(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
     const lows = lowCount(height);
-    var low: usize = 0;
-    var high: usize = lows;
     var row: usize = 0;
-    while (row < height) : (row += 1) {
-        const packed_row = if ((row & 1) == 0) blk: {
-            const value = low;
-            low += 1;
-            break :blk value;
-        } else blk: {
-            const value = high;
-            high += 1;
-            break :blk value;
-        };
+    var packed_row: usize = 0;
+    while (row < height) : (row += 2) {
         storeScratchVector(scratch, row, loadVector(data, stride, packed_row, col));
+        packed_row += 1;
+    }
+
+    row = 1;
+    packed_row = lows;
+    while (row < height) : (row += 2) {
+        storeScratchVector(scratch, row, loadVector(data, stride, packed_row, col));
+        packed_row += 1;
     }
 
     row = 0;
@@ -334,20 +332,18 @@ fn inverse53ColumnVector(data: []i32, stride: usize, col: usize, height: usize, 
 
 fn inverse53ColumnScalar(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
     const lows = lowCount(height);
-    var low: usize = 0;
-    var high: usize = lows;
     var row: usize = 0;
-    while (row < height) : (row += 1) {
-        const packed_row = if ((row & 1) == 0) blk: {
-            const value = low;
-            low += 1;
-            break :blk value;
-        } else blk: {
-            const value = high;
-            high += 1;
-            break :blk value;
-        };
+    var packed_row: usize = 0;
+    while (row < height) : (row += 2) {
         scratch[row] = data[packed_row * stride + col];
+        packed_row += 1;
+    }
+
+    row = 1;
+    packed_row = lows;
+    while (row < height) : (row += 2) {
+        scratch[row] = data[packed_row * stride + col];
+        packed_row += 1;
     }
 
     row = 0;
@@ -438,16 +434,18 @@ fn packEvenOdd(data: []i32, scratch: []i32) void {
 
 fn unpackEvenOdd(data: []i32, scratch: []i32) void {
     const lows = lowCount(data.len);
-    var low: usize = 0;
-    var high: usize = lows;
-    for (0..data.len) |i| {
-        if (i % 2 == 0) {
-            scratch[i] = data[low];
-            low += 1;
-        } else {
-            scratch[i] = data[high];
-            high += 1;
-        }
+    var i: usize = 0;
+    var packed_index: usize = 0;
+    while (i < data.len) : (i += 2) {
+        scratch[i] = data[packed_index];
+        packed_index += 1;
+    }
+
+    i = 1;
+    packed_index = lows;
+    while (i < data.len) : (i += 2) {
+        scratch[i] = data[packed_index];
+        packed_index += 1;
     }
 
     @memcpy(data, scratch[0..data.len]);

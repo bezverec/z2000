@@ -232,11 +232,25 @@ payload behavior is implemented.
   the direct output byte-for-byte to the symbol-based reference coders.
 - ISO MQ codeword segments can now finish directly into the reusable
   per-worker payload buffer, avoiding a temporary owned slice and second copy
-  in the default direct T1 path. The MQ encoder/decoder also has an explicit
-  fast branch for the common MPS-without-renormalization case.
+  in the default direct T1 path. Raw BYPASS segments use the same direct
+  payload sink, and MQ BYTEOUT keeps that sink local through the carry/marker
+  path. The MQ encoder/decoder also has an explicit fast branch for the common
+  MPS-without-renormalization case.
 - Significance and refinement passes skip whole 4-row stripes whose
   neighborhood window carries no significance (encode and decode); this is
   content-dependent and helps most on smooth imagery.
+- Continuous ISO/NBF decode no longer mirrors significant samples into the
+  legacy per-sample `u8` flag array; it updates only coefficients,
+  row-significance words, and packed neighborhood flags.
+- Raw BYPASS significance/refinement decode now uses the same direct
+  stripe/x/dy scan loops as the inferred ISO/NBF passes instead of the generic
+  scan iterator, with packed-flag and coefficient indices advanced
+  incrementally through each stripe column.
+- Packed-neighborhood visit-bit clearing now uses the same portable SIMD lane
+  policy as the existing flag clears, mapping to NEON-width vectors on Apple
+  Silicon and wider AVX-family vectors on matching x86 targets.
+- Integer inverse 5/3 unpack now separates low/high samples with branchless
+  even/odd loops for both horizontal rows and strided vertical columns.
 - Strict no-sidecar decode now runs component-parallel with `--threads`,
   reuses one T1 scratch and one ISO MQ decoder per component, and skips
   context-index bounds checks in the hot MQ loops (debug asserts remain).
@@ -421,10 +435,10 @@ Performance (current lossless encode gap vs OpenJPEG/Grok ~1.7x on the M4
 ordered by expected win per effort):
 
 1. Continue MQ coder fast-path work: the direct T1 path now finishes ISO-MQ
-   codeword segments into the reusable payload buffer and has an explicit
-   MPS-without-renorm branch. Remaining work is to remove more per-byte
-   `ArrayList` checks from BYTEOUT, apply the same discipline to raw BYPASS
-   output, and keep decode-side state/cache behavior tight.
+   and raw BYPASS codeword segments into the reusable payload buffer and has
+   an explicit MPS-without-renorm branch. BYTEOUT also keeps the active sink
+   local through marker stuffing and carry propagation. Remaining work is to
+   keep decode-side state/cache behavior tight.
 2. Packed column flag words (opj 2.x layout): one u32 per 4-sample column
    carrying the whole 3x6 sigma window plus per-sample visit/refine, so a
    column costs one load instead of four u16 loads; enables single-word RLC
