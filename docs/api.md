@@ -78,6 +78,7 @@ Primary public types:
 - `QuantizationStyle`
 - `LosslessOptions`
 - `EncodeTimings`
+- `DecodeTimings`
 - `DecodeOptions`
 - `TemporaryStats`
 - `ComponentStats`
@@ -117,6 +118,12 @@ Notes:
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
+- `DecodeTimings` reports the strict decode split for metadata, packet catalog,
+  T1 block payload, inverse DWT, and inverse MCT. The packet catalog timing is
+  further split into SOD/PLT scan, packet-header assembly, and final block
+  catalog materialization; strict block-payload timing also includes worker
+  balance counters for max/average job wall time, decoded block count, and
+  payload bytes.
 - Strict packet catalog parsing validates SOT/TLM/PLT marker accounting,
   ordered multi-segment TLM/PLT indexes, SOP/EPH marker policy, and packet
   header marker stuffing for the current supported RPCL/RCT/5-3 profile.

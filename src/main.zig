@@ -748,12 +748,43 @@ fn printDecodeTempJp2Timings(command: DecodeTempJp2Timings, decode: codestream.D
     printTiming("  sidecar/legacy", decode.sidecar_or_legacy_ns, total);
     printTiming("  metadata", decode.metadata_ns, total);
     printTiming("  packet catalog", decode.packet_catalog_ns, total);
+    printDecodePacketCatalogProfile(decode, total);
     printTiming("  block payload", decode.block_payload_ns, total);
+    printDecodeBlockWorkerProfile(decode);
     printTiming("  inverse DWT", decode.wavelet_ns, total);
     printTiming("  inverse MCT", decode.color_transform_ns, total);
     printDecodeT1PassProfile(decode);
     printTiming("ICC extract", command.icc_extract_ns, total);
     printTiming("TIFF write", command.tiff_write_ns, total);
+}
+
+fn printDecodePacketCatalogProfile(decode: codestream.DecodeTimings, total: u64) void {
+    if (decode.packet_catalog_scan_ns == 0 and
+        decode.packet_catalog_header_ns == 0 and
+        decode.packet_catalog_finalize_ns == 0) return;
+    printTiming("    scan", decode.packet_catalog_scan_ns, total);
+    printTiming("    headers", decode.packet_catalog_header_ns, total);
+    printTiming("    finalize", decode.packet_catalog_finalize_ns, total);
+}
+
+fn printDecodeBlockWorkerProfile(decode: codestream.DecodeTimings) void {
+    if (decode.block_worker_jobs == 0) return;
+    const jobs_f = @as(f64, @floatFromInt(decode.block_worker_jobs));
+    const avg_ns = @as(f64, @floatFromInt(decode.block_worker_ns_sum)) / jobs_f;
+    const avg_blocks = @as(f64, @floatFromInt(decode.block_worker_blocks_sum)) / jobs_f;
+    const avg_payload = @as(f64, @floatFromInt(decode.block_worker_payload_sum)) / jobs_f;
+    std.debug.print(
+        "    workers jobs {d:>3} max/avg wall {d:>7.3}/{d:>7.3} ms blocks {d:>5}/{d:>7.1} payload {d:>7.1}/{d:>7.1} KiB\n",
+        .{
+            decode.block_worker_jobs,
+            nsToMs(decode.block_worker_ns_max),
+            avg_ns / 1_000_000.0,
+            decode.block_worker_blocks_max,
+            avg_blocks,
+            kibOf(decode.block_worker_payload_max),
+            avg_payload / 1024.0,
+        },
+    );
 }
 
 fn printDecodeT1PassProfile(decode: codestream.DecodeTimings) void {
@@ -810,6 +841,10 @@ fn printMqBranchStats(label: []const u8, stats: anytype, index: usize) void {
 
 fn nsToMs(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+}
+
+fn kibOf(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / 1024.0;
 }
 
 fn percentOf(ns: u64, total_ns: u64) f64 {

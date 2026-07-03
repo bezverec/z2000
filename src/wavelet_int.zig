@@ -416,6 +416,8 @@ fn storeScratchVector(scratch: []i32, row: usize, value: VerticalVector) void {
 }
 
 fn packEvenOdd(data: []i32, scratch: []i32) void {
+    if (data.len <= 2) return;
+
     var out: usize = 0;
     var i: usize = 0;
     while (i < data.len) : (i += 2) {
@@ -433,6 +435,8 @@ fn packEvenOdd(data: []i32, scratch: []i32) void {
 }
 
 fn unpackEvenOdd(data: []i32, scratch: []i32) void {
+    if (data.len <= 2) return;
+
     const lows = lowCount(data.len);
     var i: usize = 0;
     var packed_index: usize = 0;
