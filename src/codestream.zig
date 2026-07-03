@@ -296,6 +296,17 @@ pub const DecodeOptions = struct {
     t1_backend: T1Backend = .iso_mq,
 };
 
+pub const DecodeTimings = struct {
+    total_ns: u64 = 0,
+    sidecar_or_legacy_ns: u64 = 0,
+    metadata_ns: u64 = 0,
+    packet_catalog_ns: u64 = 0,
+    block_payload_ns: u64 = 0,
+    wavelet_ns: u64 = 0,
+    color_transform_ns: u64 = 0,
+    t1_pass_stats: ebcot.DecodePassStats = .{},
+};
+
 pub fn encodeLosslessSkeleton(
     allocator: std.mem.Allocator,
     rgb: image.RgbImage,
@@ -793,12 +804,14 @@ const StrictTilePartHeader = struct {
     }
 };
 
-const TlmIndex = struct {
+const StrictMainHeaderIndex = struct {
     allocator: std.mem.Allocator,
-    entries: []TlmEntry,
+    first_sot: usize,
+    packet_markers: MainHeaderPacketMarkers,
+    tlm_entries: ?[]TlmEntry = null,
 
-    fn deinit(self: *TlmIndex) void {
-        self.allocator.free(self.entries);
+    fn deinit(self: *StrictMainHeaderIndex) void {
+        if (self.tlm_entries) |entries| self.allocator.free(entries);
         self.* = undefined;
     }
 };
@@ -1247,20 +1260,53 @@ pub fn decodeLosslessTemporaryWithOptions(
     bytes: []const u8,
     options: DecodeOptions,
 ) !image.RgbImage {
+    return decodeLosslessTemporaryWithOptionsMeasured(allocator, bytes, options, null);
+}
+
+pub fn decodeLosslessTemporaryWithOptionsProfiled(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    timings: *DecodeTimings,
+) !image.RgbImage {
+    timings.* = .{};
+    return decodeLosslessTemporaryWithOptionsMeasured(allocator, bytes, options, timings);
+}
+
+fn decodeLosslessTemporaryWithOptionsMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !image.RgbImage {
+    const total_start = monotonicNs();
+    defer {
+        if (timings) |t| t.total_ns = elapsedNs(total_start);
+    }
+
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
     if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
         defer allocator.free(payload);
+        const sidecar_start = monotonicNs();
         if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
+            if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
             return strict;
         }
         _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload, options);
-        return decodeTemporaryPayloadWithOptions(allocator, payload, options);
+        if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
+        return decodeTemporaryPayloadWithOptionsMeasured(allocator, payload, options, timings);
     }
 
+    const metadata_start = monotonicNs();
     const header = try readStrictCodestreamMetadata(allocator, bytes);
-    var strict_catalog = try readStrictPacketBlockCatalog(allocator, bytes);
+    if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+
+    const catalog_start = monotonicNs();
+    var strict_catalog = try readStrictPacketBlockCatalogWithHeader(allocator, bytes, header);
     defer strict_catalog.deinit();
-    return decodeStrictRpclImageFromBlockCatalog(allocator, header, strict_catalog, options);
+    if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
+
+    return decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, strict_catalog, options, timings);
 }
 
 fn decodeTemporaryPayloadWithOptions(
@@ -1268,6 +1314,16 @@ fn decodeTemporaryPayloadWithOptions(
     payload: []const u8,
     options: DecodeOptions,
 ) !image.RgbImage {
+    return decodeTemporaryPayloadWithOptionsMeasured(allocator, payload, options, null);
+}
+
+fn decodeTemporaryPayloadWithOptionsMeasured(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !image.RgbImage {
+    const legacy_start = monotonicNs();
     var cursor = Cursor.initWithAllocator(allocator, payload);
 
     const header = try readTemporaryHeader(&cursor);
@@ -1293,8 +1349,11 @@ fn decodeTemporaryPayloadWithOptions(
     try readComponentPayloads(&cursor, y, cb, cr, width, header.version, header.layers, options);
     _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
+    if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(legacy_start);
 
+    const wavelet_start = monotonicNs();
     try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, options);
+    if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     var planes = color.RctPlanes{
         .allocator = allocator,
@@ -1307,6 +1366,10 @@ fn decodeTemporaryPayloadWithOptions(
     };
     defer planes.deinit();
 
+    const color_start = monotonicNs();
+    defer {
+        if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
+    }
     return color.inverseRct(allocator, planes);
 }
 
@@ -1431,20 +1494,36 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
 
 pub fn readStrictPacketCatalog(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketCatalog {
     const header = try readStrictCodestreamMetadata(allocator, bytes);
+    return readStrictPacketCatalogWithHeader(allocator, bytes, header);
+}
+
+fn readStrictPacketCatalogWithHeader(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+) !StrictPacketCatalog {
     const plan = temporaryPacketPlan(header);
     return readStrictSodRpclPacketCatalog(allocator, bytes, plan, header.layers);
 }
 
 pub fn auditStrictPacketHeaders(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketHeaderAudit {
     const header = try readStrictCodestreamMetadata(allocator, bytes);
-    var catalog = try readStrictPacketCatalog(allocator, bytes);
+    var catalog = try readStrictPacketCatalogWithHeader(allocator, bytes, header);
     defer catalog.deinit();
     return auditStrictPacketCatalogHeaders(allocator, header, catalog);
 }
 
 pub fn readStrictPacketBlockCatalog(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketBlockCatalog {
     const header = try readStrictCodestreamMetadata(allocator, bytes);
-    var catalog = try readStrictPacketCatalog(allocator, bytes);
+    return readStrictPacketBlockCatalogWithHeader(allocator, bytes, header);
+}
+
+fn readStrictPacketBlockCatalogWithHeader(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+) !StrictPacketBlockCatalog {
+    var catalog = try readStrictPacketCatalogWithHeader(allocator, bytes, header);
     defer catalog.deinit();
 
     var audit = StrictPacketHeaderAudit{};
@@ -1476,6 +1555,10 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var saw_cod = false;
     var saw_qcd = false;
     var qcd_band_count: usize = 0;
+    var tlm_entries: std.ArrayList(TlmEntry) = .empty;
+    defer tlm_entries.deinit(allocator);
+    var saw_tlm = false;
+    var next_tlm_index: usize = 0;
 
     var cursor: usize = 2;
     while (cursor < bytes.len) {
@@ -1572,8 +1655,12 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
             qcd_band_count = try validateStrictQcdSegment(segment, bit_depth, levels, parsed_transform);
             saw_qcd = true;
-        } else if (marker == @intFromEnum(Marker.tlm) or marker == @intFromEnum(Marker.com)) {
-            // TLM and COM are independently parsed/validated where needed.
+        } else if (marker == @intFromEnum(Marker.tlm)) {
+            try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
+            saw_tlm = true;
+            next_tlm_index += 1;
+        } else if (marker == @intFromEnum(Marker.com)) {
+            // COM is ignored by the restricted decoder profile.
         } else if (isUnsupportedMainHeaderMarker(marker)) {
             return CodestreamError.UnsupportedPayload;
         } else {
@@ -1595,13 +1682,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .precinct_count = if (precinct_count == 0) 1 else precinct_count,
     };
     const plan = try makePacketPlan(width, height, levels, options);
-    var tlm_index = try readStrictMainHeaderTlmIndex(allocator, bytes);
-    defer if (tlm_index) |*index| index.deinit();
     const tile_part_packets = try readStrictTilePartPacketPlan(
         allocator,
         bytes,
         cursor,
-        if (tlm_index) |index| index.entries else null,
+        if (saw_tlm) tlm_entries.items else null,
     );
     const tile_part_plan = try validateStrictTilePartPacketPlan(tile_part_packets, plan, levels);
 
@@ -3335,12 +3420,33 @@ fn decodeStrictRpclImageFromBlockCatalog(
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
 ) !image.RgbImage {
-    var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog, options);
+    return decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, catalog, options, null);
+}
+
+fn decodeStrictRpclImageFromBlockCatalogMeasured(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !image.RgbImage {
+    const payload_start = monotonicNs();
+    var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog, options, if (timings) |t| &t.t1_pass_stats else null);
     defer strict_planes.deinit();
+    if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
+
     if (header.transform == .irreversible_9_7) {
-        return decodeIrreversibleImageFromQuantizedPlanes(allocator, header, strict_planes);
+        return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, strict_planes, timings);
     }
+
+    const wavelet_start = monotonicNs();
     try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
+    if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
+
+    const color_start = monotonicNs();
+    defer {
+        if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
+    }
     return color.inverseRct(allocator, strict_planes);
 }
 
@@ -3350,6 +3456,15 @@ fn decodeIrreversibleImageFromQuantizedPlanes(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     quantized: color.RctPlanes,
+) !image.RgbImage {
+    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, null);
+}
+
+fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    quantized: color.RctPlanes,
+    timings: ?*DecodeTimings,
 ) !image.RgbImage {
     const pixels = try std.math.mul(usize, header.width, header.height);
     if (quantized.y.len != pixels or quantized.cb.len != pixels or quantized.cr.len != pixels) {
@@ -3366,6 +3481,7 @@ fn decodeIrreversibleImageFromQuantizedPlanes(
     const cr_f = try allocator.alloc(f32, pixels);
     defer allocator.free(cr_f);
 
+    const wavelet_start = monotonicNs();
     for (bands) |band| {
         const delta = irreversibleBandDelta(
             header.bit_depth,
@@ -3380,6 +3496,7 @@ fn decodeIrreversibleImageFromQuantizedPlanes(
     inline for (.{ y_f, cb_f, cr_f }) |plane| {
         try wavelet.inverse2D(allocator, plane, header.width, header.height, header.levels, .irreversible_9_7);
     }
+    if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     const ict = color.IctPlanes{
         .allocator = allocator,
@@ -3390,6 +3507,10 @@ fn decodeIrreversibleImageFromQuantizedPlanes(
         .cb = cb_f,
         .cr = cr_f,
     };
+    const color_start = monotonicNs();
+    defer {
+        if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
+    }
     return color.inverseIct(allocator, ict);
 }
 
@@ -3401,6 +3522,7 @@ const StrictComponentDecodeJob = struct {
     component: usize,
     options: DecodeOptions,
     plane: []i32,
+    t1_stats: ebcot.DecodePassStats = .{},
     result: anyerror!void = {},
 };
 
@@ -3409,10 +3531,11 @@ const StrictBlockDecodeJob = struct {
     height: usize,
     catalog: *const StrictPacketBlockCatalog,
     component: usize,
-    block_start: usize,
+    next_block: *std.atomic.Value(usize),
     blocks: []const StrictPacketBlock,
     options: DecodeOptions,
     plane: []i32,
+    t1_stats: ebcot.DecodePassStats = .{},
     result: anyerror!void = {},
 };
 
@@ -3425,6 +3548,7 @@ fn strictComponentDecodeWorker(job: *StrictComponentDecodeJob) void {
         job.component,
         job.options,
         job.plane,
+        &job.t1_stats,
     ) catch |err| {
         job.result = err;
         return;
@@ -3436,7 +3560,10 @@ fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
     var scratch = ebcot.DecodeBlockScratch.init(std.heap.smp_allocator);
     defer scratch.deinit();
 
-    for (job.blocks, 0..) |block, local_index| {
+    while (true) {
+        const block_index = job.next_block.fetchAdd(1, .monotonic);
+        if (block_index >= job.blocks.len) break;
+        const block = job.blocks[block_index];
         if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) continue;
         if (!block.metadata_ready) {
             job.result = CodestreamError.InvalidCodestream;
@@ -3446,18 +3573,17 @@ fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
             job.result = CodestreamError.InvalidCodestream;
             return;
         }
-        const block_index = job.block_start + local_index;
         const payload = job.catalog.blockPayload(job.component, block_index);
         if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
             job.result = CodestreamError.InvalidCodestream;
             return;
         }
-        const decoded = if (block.code_block_style.bypass) blk: {
+        if (block.code_block_style.bypass) {
             if (job.options.t1_backend != .iso_mq) {
                 job.result = CodestreamError.UnsupportedPayload;
                 return;
             }
-            break :blk ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
+            const decoded = ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
                 &scratch,
                 block.encoded_bitplanes,
                 block.cumulative_passes,
@@ -3466,42 +3592,59 @@ fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
                 block.rect.width,
                 block.rect.height,
                 block.code_block_style,
+                &job.t1_stats,
             ) catch |err| {
                 job.result = err;
                 return;
             };
-        } else switch (job.options.t1_backend) {
-            .legacy_mq => ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
-                std.heap.smp_allocator,
-                block.encoded_bitplanes,
-                block.cumulative_passes,
-                payload,
-                block.rect.width,
-                block.rect.height,
-                block.code_block_style,
-            ) catch |err| {
+            scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
                 job.result = err;
                 return;
+            };
+            continue;
+        }
+
+        switch (job.options.t1_backend) {
+            .legacy_mq => {
+                const decoded = ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
+                    std.heap.smp_allocator,
+                    block.encoded_bitplanes,
+                    block.cumulative_passes,
+                    payload,
+                    block.rect.width,
+                    block.rect.height,
+                    block.code_block_style,
+                ) catch |err| {
+                    job.result = err;
+                    return;
+                };
+                scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
+                    std.heap.smp_allocator.free(decoded);
+                    job.result = err;
+                    return;
+                };
+                std.heap.smp_allocator.free(decoded);
             },
-            .iso_mq => ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
-                &scratch,
-                block.encoded_bitplanes,
-                block.cumulative_passes,
-                payload,
-                block.rect.width,
-                block.rect.height,
-                block.code_block_style,
-            ) catch |err| {
-                job.result = err;
-                return;
+            .iso_mq => {
+                const decoded = ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorrowed(
+                    &scratch,
+                    block.encoded_bitplanes,
+                    block.cumulative_passes,
+                    payload,
+                    block.rect.width,
+                    block.rect.height,
+                    block.code_block_style,
+                    &job.t1_stats,
+                ) catch |err| {
+                    job.result = err;
+                    return;
+                };
+                scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
+                    job.result = err;
+                    return;
+                };
             },
-        };
-        scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
-            std.heap.smp_allocator.free(decoded);
-            job.result = err;
-            return;
-        };
-        std.heap.smp_allocator.free(decoded);
+        }
     }
     job.result = {};
 }
@@ -3511,6 +3654,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     header: TemporaryHeader,
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
+    t1_stats: ?*ebcot.DecodePassStats,
 ) !color.RctPlanes {
     if (options.threads <= 3 and componentThreadCountFor(options.threads) >= 2) {
         const pixels = try std.math.mul(usize, header.width, header.height);
@@ -3535,6 +3679,9 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
             };
         }
         try runComponentJobs(StrictComponentDecodeJob, &jobs, componentThreadCountFor(options.threads), strictComponentDecodeWorker);
+        if (t1_stats) |stats| {
+            for (jobs) |job| stats.merge(job.t1_stats);
+        }
 
         return .{
             .allocator = allocator,
@@ -3554,6 +3701,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
         catalog,
         0,
         options,
+        t1_stats,
     );
     errdefer allocator.free(y);
     const cb = try reconstructStrictComponentCoefficientsFromBlockCatalog(
@@ -3563,6 +3711,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
         catalog,
         1,
         options,
+        t1_stats,
     );
     errdefer allocator.free(cb);
     const cr = try reconstructStrictComponentCoefficientsFromBlockCatalog(
@@ -3572,6 +3721,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
         catalog,
         2,
         options,
+        t1_stats,
     );
     errdefer allocator.free(cr);
 
@@ -3593,12 +3743,13 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
     catalog: StrictPacketBlockCatalog,
     component: usize,
     options: DecodeOptions,
+    t1_stats: ?*ebcot.DecodePassStats,
 ) ![]i32 {
     if (component >= 3) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
     const plane = try allocator.alloc(i32, pixels);
     errdefer allocator.free(plane);
-    try fillStrictComponentCoefficientsFromBlockCatalog(allocator, width, height, catalog, component, options, plane);
+    try fillStrictComponentCoefficientsFromBlockCatalog(allocator, width, height, catalog, component, options, plane, t1_stats);
     return plane;
 }
 
@@ -3610,6 +3761,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     component: usize,
     options: DecodeOptions,
     plane: []i32,
+    t1_stats: ?*ebcot.DecodePassStats,
 ) !void {
     if (component >= 3) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
@@ -3630,6 +3782,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
             options,
             plane,
             worker_count,
+            t1_stats,
         );
         return;
     }
@@ -3655,9 +3808,9 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
             return CodestreamError.InvalidCodestream;
         }
-        const decoded = if (block.code_block_style.bypass) blk: {
+        if (block.code_block_style.bypass) {
             if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
-            break :blk try ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
+            const decoded = try ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
                 &scratch,
                 block.encoded_bitplanes,
                 block.cumulative_passes,
@@ -3666,30 +3819,41 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
                 block.rect.width,
                 block.rect.height,
                 block.code_block_style,
+                t1_stats,
             );
-        } else switch (options.t1_backend) {
-            .legacy_mq => try ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
-                allocator,
-                block.encoded_bitplanes,
-                block.cumulative_passes,
-                payload,
-                block.rect.width,
-                block.rect.height,
-                block.code_block_style,
-            ),
-            .iso_mq => try ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
-                &scratch,
-                block.encoded_bitplanes,
-                block.cumulative_passes,
-                payload,
-                block.rect.width,
-                block.rect.height,
-                block.code_block_style,
-            ),
-        };
-        errdefer allocator.free(decoded);
-        try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
-        allocator.free(decoded);
+            try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+            continue;
+        }
+
+        switch (options.t1_backend) {
+            .legacy_mq => {
+                const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
+                    allocator,
+                    block.encoded_bitplanes,
+                    block.cumulative_passes,
+                    payload,
+                    block.rect.width,
+                    block.rect.height,
+                    block.code_block_style,
+                );
+                errdefer allocator.free(decoded);
+                try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+                allocator.free(decoded);
+            },
+            .iso_mq => {
+                const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorrowed(
+                    &scratch,
+                    block.encoded_bitplanes,
+                    block.cumulative_passes,
+                    payload,
+                    block.rect.width,
+                    block.rect.height,
+                    block.code_block_style,
+                    t1_stats,
+                );
+                try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+            },
+        }
     }
     for (covered) |is_covered| {
         if (!is_covered) return CodestreamError.InvalidCodestream;
@@ -3785,19 +3949,19 @@ fn reconstructStrictComponentBlocksParallel(
     options: DecodeOptions,
     plane: []i32,
     worker_count: usize,
+    t1_stats: ?*ebcot.DecodePassStats,
 ) !void {
     var jobs = try allocator.alloc(StrictBlockDecodeJob, worker_count);
     defer allocator.free(jobs);
-    for (jobs, 0..) |*job, index| {
-        const start = blockRangeBoundary(blocks.len, worker_count, index);
-        const end = blockRangeBoundary(blocks.len, worker_count, index + 1);
+    var next_block = std.atomic.Value(usize).init(0);
+    for (jobs) |*job| {
         job.* = .{
             .width = width,
             .height = height,
             .catalog = &catalog,
             .component = component,
-            .block_start = start,
-            .blocks = blocks[start..end],
+            .next_block = &next_block,
+            .blocks = blocks,
             .options = options,
             .plane = plane,
         };
@@ -3818,6 +3982,9 @@ fn reconstructStrictComponentBlocksParallel(
     for (threads[0..spawned]) |thread| thread.join();
 
     for (jobs) |job| try job.result;
+    if (t1_stats) |stats| {
+        for (jobs) |job| stats.merge(job.t1_stats);
+    }
 }
 
 fn reconstructStrictComponentCoefficients(
@@ -4059,11 +4226,9 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
 
-    const marker_policy = try mainHeaderPacketMarkers(bytes);
-    var tlm_index = try readStrictMainHeaderTlmIndex(allocator, bytes);
-    defer if (tlm_index) |*index| index.deinit();
-    var cursor: usize = 2;
-    cursor = try skipMainHeaderToFirstSot(bytes, cursor);
+    var main_header = try readStrictMainHeaderIndex(allocator, bytes);
+    defer main_header.deinit();
+    var cursor = main_header.first_sot;
     var packet_sequence: u16 = 0;
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
@@ -4076,8 +4241,8 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
             if (expected_tile_part_count) |count| {
                 if (tile_part_index != count) return CodestreamError.InvalidCodestream;
             }
-            if (tlm_index) |index| {
-                if (tile_part_index != index.entries.len) return CodestreamError.InvalidCodestream;
+            if (main_header.tlm_entries) |tlm_slice| {
+                if (tile_part_index != tlm_slice.len) return CodestreamError.InvalidCodestream;
             }
             const owned_lengths = try lengths.toOwnedSlice(allocator);
             errdefer allocator.free(owned_lengths);
@@ -4090,7 +4255,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
-        const entries = if (tlm_index) |index| index.entries else null;
+        const entries = if (main_header.tlm_entries) |tlm_slice| tlm_slice else null;
         {
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries);
             defer tile_part.deinit(allocator);
@@ -4104,7 +4269,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
                 cursor,
                 tile_part.end,
                 tile_part.packet_lengths.items,
-                marker_policy,
+                main_header.packet_markers,
                 &packet_sequence,
             );
             cursor = tile_part.end;
@@ -4127,15 +4292,15 @@ fn readStrictSodRpclPacketCatalog(
 
     var entries: std.ArrayList(StrictPacketEntry) = .empty;
     errdefer entries.deinit(allocator);
+    const packet_capacity = std.math.cast(usize, plan.packets) orelse return CodestreamError.InvalidCodestream;
+    try entries.ensureTotalCapacity(allocator, packet_capacity);
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
 
     var iterator = try packet_plan.RpclIterator.init(plan, 3, layers);
-    const marker_policy = try mainHeaderPacketMarkers(bytes);
-    var tlm_index = try readStrictMainHeaderTlmIndex(allocator, bytes);
-    defer if (tlm_index) |*index| index.deinit();
-    var cursor: usize = 2;
-    cursor = try skipMainHeaderToFirstSot(bytes, cursor);
+    var main_header = try readStrictMainHeaderIndex(allocator, bytes);
+    defer main_header.deinit();
+    var cursor = main_header.first_sot;
     var packet_sequence: u16 = 0;
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
@@ -4148,8 +4313,8 @@ fn readStrictSodRpclPacketCatalog(
             if (expected_tile_part_count) |count| {
                 if (tile_part_index != count) return CodestreamError.InvalidCodestream;
             }
-            if (tlm_index) |index| {
-                if (tile_part_index != index.entries.len) return CodestreamError.InvalidCodestream;
+            if (main_header.tlm_entries) |tlm_slice| {
+                if (tile_part_index != tlm_slice.len) return CodestreamError.InvalidCodestream;
             }
             if (@as(u64, @intCast(entries.items.len)) != plan.packets) return CodestreamError.InvalidCodestream;
 
@@ -4164,7 +4329,7 @@ fn readStrictSodRpclPacketCatalog(
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
-        const tlm_entries = if (tlm_index) |index| index.entries else null;
+        const tlm_entries = if (main_header.tlm_entries) |tlm_slice| tlm_slice else null;
         {
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries);
             defer tile_part.deinit(allocator);
@@ -4180,7 +4345,7 @@ fn readStrictSodRpclPacketCatalog(
                     &cursor,
                     tile_part.end,
                     packet_length,
-                    marker_policy,
+                    main_header.packet_markers,
                     &packet_sequence,
                 );
                 try entries.append(allocator, .{
@@ -4344,7 +4509,7 @@ fn validateStrictSotSequence(
     }
 }
 
-fn readStrictMainHeaderTlmIndex(allocator: std.mem.Allocator, bytes: []const u8) !?TlmIndex {
+fn readStrictMainHeaderIndex(allocator: std.mem.Allocator, bytes: []const u8) !StrictMainHeaderIndex {
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
@@ -4353,13 +4518,23 @@ fn readStrictMainHeaderTlmIndex(allocator: std.mem.Allocator, bytes: []const u8)
     errdefer entries.deinit(allocator);
     var saw_tlm = false;
     var next_tlm_index: usize = 0;
+    var packet_markers: ?MainHeaderPacketMarkers = null;
 
     var cursor: usize = 2;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 4) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         cursor += 2;
-        if (marker == @intFromEnum(Marker.sot)) break;
+        if (marker == @intFromEnum(Marker.sot)) {
+            const markers = packet_markers orelse return CodestreamError.InvalidCodestream;
+            const owned_entries = if (saw_tlm) try entries.toOwnedSlice(allocator) else null;
+            return .{
+                .allocator = allocator,
+                .first_sot = cursor - 2,
+                .packet_markers = markers,
+                .tlm_entries = owned_entries,
+            };
+        }
         if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
             return CodestreamError.InvalidCodestream;
         }
@@ -4368,23 +4543,21 @@ fn readStrictMainHeaderTlmIndex(allocator: std.mem.Allocator, bytes: []const u8)
         if (segment_length < 2 or bytes.len - cursor < segment_length) {
             return CodestreamError.TruncatedData;
         }
-        if (marker == @intFromEnum(Marker.tlm)) {
-            try appendStrictTlmEntries(allocator, &entries, bytes[cursor + 2 .. cursor + segment_length], next_tlm_index);
+        const segment = bytes[cursor + 2 .. cursor + segment_length];
+        if (marker == @intFromEnum(Marker.cod)) {
+            if (packet_markers != null or segment.len < 1) return CodestreamError.InvalidCodestream;
+            packet_markers = .{
+                .sop = (segment[0] & 0x02) != 0,
+                .eph = (segment[0] & 0x04) != 0,
+            };
+        } else if (marker == @intFromEnum(Marker.tlm)) {
+            try appendStrictTlmEntries(allocator, &entries, segment, next_tlm_index);
             saw_tlm = true;
             next_tlm_index += 1;
         }
         cursor += segment_length;
     }
-
-    if (!saw_tlm) {
-        entries.deinit(allocator);
-        return null;
-    }
-    const owned_entries = try entries.toOwnedSlice(allocator);
-    return TlmIndex{
-        .allocator = allocator,
-        .entries = owned_entries,
-    };
+    return CodestreamError.InvalidCodestream;
 }
 
 fn appendStrictTlmEntries(
@@ -4434,64 +4607,18 @@ fn validateStrictTlmEntry(entries: []const TlmEntry, tile_part_index: usize, til
     if (entry.tile_index != tile_index or entry.psot != psot) return CodestreamError.InvalidCodestream;
 }
 
-fn skipMainHeaderToFirstSot(bytes: []const u8, start: usize) !usize {
-    var cursor = start;
-    while (cursor < bytes.len) {
-        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
-        const marker = readU16Be(bytes, cursor);
-        cursor += 2;
-        if (marker == @intFromEnum(Marker.sot)) return cursor - 2;
-        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
-            return CodestreamError.InvalidCodestream;
-        }
-        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
-        const segment_length = readU16Be(bytes, cursor);
-        if (segment_length < 2 or bytes.len - cursor < segment_length) {
-            return CodestreamError.TruncatedData;
-        }
-        cursor += segment_length;
-    }
-    return CodestreamError.InvalidCodestream;
-}
-
-fn mainHeaderPacketMarkers(bytes: []const u8) !MainHeaderPacketMarkers {
-    var cursor: usize = 2;
-    while (cursor < bytes.len) {
-        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
-        const marker = readU16Be(bytes, cursor);
-        cursor += 2;
-        if (marker == @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
-        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
-            return CodestreamError.InvalidCodestream;
-        }
-        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
-        const segment_length = readU16Be(bytes, cursor);
-        if (segment_length < 2 or bytes.len - cursor < segment_length) {
-            return CodestreamError.TruncatedData;
-        }
-        const segment = bytes[cursor + 2 .. cursor + segment_length];
-        if (marker == @intFromEnum(Marker.cod)) {
-            if (segment.len < 1) return CodestreamError.InvalidCodestream;
-            return .{
-                .sop = (segment[0] & 0x02) != 0,
-                .eph = (segment[0] & 0x04) != 0,
-            };
-        }
-        cursor += segment_length;
-    }
-    return CodestreamError.InvalidCodestream;
-}
-
-fn findUniqueMarkerInPacket(bytes: []const u8, start: usize, end: usize, marker: Marker) !?usize {
-    const marker_value = @intFromEnum(marker);
-    var found: ?usize = null;
+fn packetEphOffsetRejectingSop(bytes: []const u8, start: usize, end: usize) !?usize {
+    var eph_offset: ?usize = null;
     var cursor = start;
     while (cursor + 1 < end) : (cursor += 1) {
-        if (readU16Be(bytes, cursor) != marker_value) continue;
-        if (found != null) return CodestreamError.InvalidCodestream;
-        found = cursor;
+        const marker = readU16Be(bytes, cursor);
+        if (marker == @intFromEnum(Marker.sop)) return CodestreamError.InvalidCodestream;
+        if (marker == @intFromEnum(Marker.eph)) {
+            if (eph_offset != null) return CodestreamError.InvalidCodestream;
+            eph_offset = cursor;
+        }
     }
-    return found;
+    return eph_offset;
 }
 
 fn appendStrictSodPackets(
@@ -4538,22 +4665,20 @@ fn appendStrictSodPacketPayload(
     if (packet_end > end) return CodestreamError.TruncatedData;
 
     var packet_start = frame_start;
-    const sop_offset = try findUniqueMarkerInPacket(bytes, frame_start, packet_end, .sop);
     if (marker_policy.sop) {
-        if (sop_offset != frame_start) return CodestreamError.InvalidCodestream;
         if (packet_end - frame_start < 6) return CodestreamError.TruncatedData;
+        if (readU16Be(bytes, frame_start) != @intFromEnum(Marker.sop)) return CodestreamError.InvalidCodestream;
         const segment_length = readU16Be(bytes, packet_start + 2);
         if (segment_length != 4) return CodestreamError.InvalidCodestream;
         const sequence = readU16Be(bytes, packet_start + 4);
         if (sequence != packet_sequence.*) return CodestreamError.InvalidCodestream;
         packet_sequence.* +%= 1;
         packet_start += 6;
-    } else if (sop_offset != null) {
-        return CodestreamError.InvalidCodestream;
     }
 
-    const eph_offset = try findUniqueMarkerInPacket(bytes, packet_start, packet_end, .eph);
+    const eph_offset = try packetEphOffsetRejectingSop(bytes, packet_start, packet_end);
     if (marker_policy.eph != (eph_offset != null)) return CodestreamError.InvalidCodestream;
+
     const payload_len = packet_end - packet_start - (if (eph_offset != null) @as(usize, 2) else 0);
     const payload_len_u32 = std.math.cast(u32, payload_len) orelse return CodestreamError.InvalidCodestream;
     if (eph_offset) |offset| {

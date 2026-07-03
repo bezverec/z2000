@@ -5,6 +5,14 @@ pub const IsoMqError = error{
     InvalidContext,
 };
 
+pub const DecodeBranchStats = struct {
+    fast_mps: u64 = 0,
+    lps: u64 = 0,
+    renorm_mps: u64 = 0,
+    renorm_shifts: u64 = 0,
+    byte_in: u64 = 0,
+};
+
 const Context = struct {
     state: u8 = 0,
     mps: bool = false,
@@ -304,20 +312,27 @@ pub const Decoder = struct {
         resetJpeg2000ContextSlice(self.contexts);
     }
 
-    pub fn read(self: *Decoder, context_index: usize) !bool {
+    pub inline fn read(self: *Decoder, context_index: usize) !bool {
+        return self.readUnchecked(context_index);
+    }
+
+    // Keep this branch layout in sync with readProfiled. The profiled variant
+    // only adds counters around the same ISO MQ decode transitions.
+    pub inline fn readUnchecked(self: *Decoder, context_index: usize) bool {
         std.debug.assert(context_index < self.contexts.len);
         const context = &self.contexts.ptr[context_index];
         const state = mq.state_table[context.state];
 
         const next_a = self.a - state.qe;
-        if ((self.c >> 16) >= state.qe and (next_a & 0x8000) != 0) {
+        const c_high = self.c >> 16;
+        if (c_high >= state.qe and (next_a & 0x8000) != 0) {
             self.a = next_a;
             self.c -= @as(u32, state.qe) << 16;
             return context.mps;
         }
 
         self.a = next_a;
-        if ((self.c >> 16) < state.qe) {
+        if (c_high < state.qe) {
             const bit = self.exchangeLps(context, state);
             self.renormalize();
             return bit;
@@ -332,7 +347,41 @@ pub const Decoder = struct {
         return context.mps;
     }
 
-    fn exchangeLps(self: *Decoder, context: *Context, state: mq.State) bool {
+    // Keep this branch layout in sync with readUnchecked. The final MPS path
+    // after the fast check is necessarily a renormalizing MPS transition.
+    pub inline fn readProfiled(self: *Decoder, context_index: usize, stats: *DecodeBranchStats) bool {
+        std.debug.assert(context_index < self.contexts.len);
+        const context = &self.contexts.ptr[context_index];
+        const state = mq.state_table[context.state];
+
+        const next_a = self.a - state.qe;
+        const c_high = self.c >> 16;
+        if (c_high >= state.qe and (next_a & 0x8000) != 0) {
+            stats.fast_mps += 1;
+            self.a = next_a;
+            self.c -= @as(u32, state.qe) << 16;
+            return context.mps;
+        }
+
+        self.a = next_a;
+        if (c_high < state.qe) {
+            stats.lps += 1;
+            const bit = self.exchangeLps(context, state);
+            self.renormalizeProfiled(stats);
+            return bit;
+        }
+
+        self.c -= @as(u32, state.qe) << 16;
+        if ((self.a & 0x8000) == 0) {
+            stats.renorm_mps += 1;
+            const bit = self.exchangeMps(context, state);
+            self.renormalizeProfiled(stats);
+            return bit;
+        }
+        return context.mps;
+    }
+
+    inline fn exchangeLps(self: *Decoder, context: *Context, state: mq.State) bool {
         const lps_is_current_mps = self.a < state.qe;
         self.a = state.qe;
         if (lps_is_current_mps) {
@@ -346,7 +395,7 @@ pub const Decoder = struct {
         return bit;
     }
 
-    fn exchangeMps(self: *Decoder, context: *Context, state: mq.State) bool {
+    inline fn exchangeMps(self: *Decoder, context: *Context, state: mq.State) bool {
         if (self.a < state.qe) {
             const bit = !context.mps;
             if (state.switch_mps) context.mps = !context.mps;
@@ -357,7 +406,7 @@ pub const Decoder = struct {
         return context.mps;
     }
 
-    fn renormalize(self: *Decoder) void {
+    inline fn renormalize(self: *Decoder) void {
         while (self.a < 0x8000) {
             if (self.ct == 0) self.byteIn();
             self.a <<= 1;
@@ -366,7 +415,20 @@ pub const Decoder = struct {
         }
     }
 
-    fn byteIn(self: *Decoder) void {
+    inline fn renormalizeProfiled(self: *Decoder, stats: *DecodeBranchStats) void {
+        while (self.a < 0x8000) {
+            if (self.ct == 0) {
+                stats.byte_in += 1;
+                self.byteIn();
+            }
+            stats.renorm_shifts += 1;
+            self.a <<= 1;
+            self.c <<= 1;
+            self.ct -= 1;
+        }
+    }
+
+    inline fn byteIn(self: *Decoder) void {
         const current = if (self.pos < self.bytes.len) self.bytes[self.pos] else 0xff;
         const next_index = self.pos + 1;
         const next = if (next_index < self.bytes.len) self.bytes[next_index] else 0xff;

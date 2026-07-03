@@ -146,6 +146,38 @@ test "ISO MQ decoder roundtrips encoded decisions" {
     }
 }
 
+test "ISO MQ profiled decoder matches unchecked decisions and accounts branches" {
+    const allocator = std.testing.allocator;
+    var encoder = try mq_iso.Encoder.init(allocator, 5);
+    defer encoder.deinit();
+
+    var contexts: [160]usize = undefined;
+    var bits: [160]bool = undefined;
+    for (0..contexts.len) |index| {
+        contexts[index] = (index * 7 + index / 3) % 5;
+        bits[index] = ((index * 13 + 5) % 19) < 8;
+        try encoder.write(contexts[index], bits[index]);
+    }
+    const bytes = try encoder.finish();
+    defer allocator.free(bytes);
+
+    var unchecked = try mq_iso.Decoder.init(allocator, 5, bytes);
+    defer unchecked.deinit();
+    var profiled = try mq_iso.Decoder.init(allocator, 5, bytes);
+    defer profiled.deinit();
+
+    var stats = mq_iso.DecodeBranchStats{};
+    for (contexts, bits) |context, bit| {
+        try std.testing.expectEqual(bit, unchecked.readUnchecked(context));
+        try std.testing.expectEqual(bit, profiled.readProfiled(context, &stats));
+    }
+
+    try std.testing.expectEqual(
+        @as(u64, contexts.len),
+        stats.fast_mps + stats.lps + stats.renorm_mps,
+    );
+}
+
 test "ISO MQ decoder context reset mirrors encoder reset" {
     const allocator = std.testing.allocator;
     var encoder = try mq_iso.Encoder.init(allocator, 2);
