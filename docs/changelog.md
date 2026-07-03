@@ -201,6 +201,26 @@ entries are grouped by development milestone rather than semantic version.
 - Added block-level strict decode workers for `--threads > 3`: each component
   validates block coverage first, then partitions code-block decoding across
   worker-local `DecodeBlockScratch` instances and scatters into disjoint rects.
+- Changed the parallel strict decode coverage audit from a full per-pixel bool
+  map to row-granular `u64` bitsets, reducing temporary RAM and validation
+  memory traffic before worker scatter.
+- Tightened RPCL packet assembly by preparing packet blocks directly from the
+  cached encoded block table instead of allocating an intermediate
+  `LayerPacketBlock` slice for every packet group/layer.
+- Kept the small per-packet prepared group table on the stack for RPCL packet
+  assembly, avoiding another heap allocation in the T2 hot path.
+- Removed the now-redundant identity index table from encode-side RPCL band
+  groups; encoded blocks are already stored in local tag-tree order.
+- Removed the per-packet-group payload-slice array from RPCL assembly; payload
+  slices are derived directly from encoded layer truncation points when needed.
+- Applied the same payload-slice elision to the shared T2
+  `appendPrecinctLayerPacket` helper, keeping only the packet-block array
+  needed by the header writer.
+- Removed the generic `appendRpclPacketForIndexes` `LayerPacketBlock` staging
+  allocation; indexed RPCL helpers now prepare packet blocks directly from
+  encoded layer blocks before writing payload bytes.
+- Centralized T2 `LayerPacketBlock` to `PacketBlock` preparation so segment
+  length validation is shared by precinct and indexed RPCL packet writers.
 - Removed the extra worker-owned plane allocation/copy from the
   component-parallel strict decode path; workers now fill preallocated final
   Y/Cb/Cr planes while keeping temporary scratch state local.
