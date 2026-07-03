@@ -39,6 +39,11 @@ entries are grouped by development milestone rather than semantic version.
 - Removed the unreachable non-renormalizing tail from ISO MQ decode MPS slow
   paths; after the fast-MPS and LPS tests, the remaining MPS case necessarily
   renormalizes.
+- Updated the optimization roadmap after strict T2 profiling and MQ/DWT hygiene:
+  LPT-by-payload scheduling is no longer prioritized, packet catalog is tracked
+  as a smaller serial Amdahl term, and the next highest-leverage work is T1/MQ
+  CPU cost, narrow packed-flag subpaths, horizontal 5/3 SIMD, and multi-tile
+  scheduling.
 - Added pass-level T1 decode profiling for the strict ISO MQ/BYPASS path:
   significance, refinement, cleanup/RLC, and raw BYPASS passes now report
   CPU-sum timing, pass counts, and symbol counts across decode workers.
