@@ -5199,7 +5199,7 @@ fn appendPltSegmentLengths(
     expected_index: u8,
     packet_lengths: *std.ArrayList(usize),
 ) !void {
-    if (segment.len == 0) return CodestreamError.InvalidCodestream;
+    if (segment.len < 2) return CodestreamError.InvalidCodestream;
     if (segment[0] != expected_index) return CodestreamError.InvalidCodestream;
     var length: usize = 0;
     var pending_length = false;

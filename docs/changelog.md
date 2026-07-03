@@ -193,6 +193,9 @@ entries are grouped by development milestone rather than semantic version.
   each stripe column.
 - Vectorized packed-neighborhood visit-bit clearing with the portable SIMD
   lane policy already used elsewhere in T1 scratch cleanup.
+- Added word-granular T1 range skipping inside active 4-row stripes: inferred
+  ISO-MQ and raw BYPASS significance/refinement passes now skip 64-column
+  chunks whose row-significance window proves they cannot emit symbols.
 - Removed per-sample parity branches from integer inverse 5/3 unpacking by
   splitting low/high samples into separate even/odd loops for rows and columns.
 - Added block-level strict decode workers for `--threads > 3`: each component
@@ -203,6 +206,11 @@ entries are grouped by development milestone rather than semantic version.
   Y/Cb/Cr planes while keeping temporary scratch state local.
 - Changed strict decode scatter/coverage updates to operate row-by-row with
   slice copies and row coverage fills instead of per-sample destination writes.
+- Tightened strict PLT parsing so a PLT marker segment that carries only an
+  index byte and no packet lengths is rejected, with a malformed-codestream
+  regression test that keeps SOT/TLM framing internally consistent.
+- Added matching strict TLM malformed coverage for a TLM segment with `Ztlm`
+  and `Stlm` but no tile-part entry payload.
 
 ### Documentation
 
