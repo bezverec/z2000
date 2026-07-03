@@ -191,9 +191,25 @@ Tasks:
 - Benchmark single-thread and multi-thread encode/decode after each major T1/T2
   change.
 - Keep SIMD abstraction portable across AVX2 and NEON.
-- Optimize bitplane packing, significance emission, and MQ hot paths.
+- Prioritize strict decode T1/MQ absolute CPU work: context update helpers,
+  byte-in locality, flag book-keeping, and remaining per-symbol branch cost.
+- Keep packed T1 experiments narrow and byte-exact; the full guarded packed
+  context-word path is currently slower, so prefer smaller RLC/ZC/SC subpaths
+  before replacing the u16 flag layer.
+- Add horizontal 5/3 DWT SIMD and cache blocking after T1/MQ profiling, then
+  extend DWT scheduling inside components rather than relying only on the
+  three-component split.
+- Treat the strict packet catalog as a measured serial Amdahl term. Recent scan,
+  header, and finalize reductions keep it near 9-10 ms on the current smoke
+  file; further T2 work should be justified by larger-image or multi-tile
+  profiles unless it also improves ISO correctness.
+- Avoid more block-order scheduling experiments until worker-balance counters
+  show a real tail; the tested LPT-by-payload ordering was slower than the
+  atomic next-block scheduler.
 - Improve IO and memory locality for large TIFF inputs.
 - Track output size separately from speed.
+- Use real multi-tile support as the route to Grok-like many-core scaling once
+  the single-tile T1/DWT costs are lower.
 
 Exit criteria:
 

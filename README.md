@@ -548,44 +548,58 @@ Features:
 3. Distortion-aware rate allocation (PCRD-style) so early quality layers
    carry more PSNR than the current byte-even/ratio split.
 
-Performance (current lossless encode is close to Grok on the M4 benchmark, but
-decode is still the larger gap; ordered by expected win per effort):
+Performance (decode remains the larger Grok gap; ordered by current expected
+win per effort after the strict T2 profiling pass):
 
-1. Decode-side MQ instrumentation: the CLI now has coarse decode timings for
-   metadata, T2 packet catalog, T1 block payload reconstruction, inverse DWT,
-   and inverse MCT, plus pass-level CPU-sum counters for ISO MQ significance,
-   refinement, cleanup/RLC, and raw BYPASS passes. MQ branch counters now split
-   fast MPS no-renormalization, LPS, MPS renormalization, renormalization
-   shifts, and byte-in calls.
-2. MQ decoder fast path: ISO MQ T1 reads now use an inline unchecked decoder
-   read, cached context transition rows instead of a per-symbol state-table
-   lookup, and CLZ-batched renormalization while keeping debug assertions and
-   the checked legacy MQ path. Next consider a pointer-bumped input window for
-   the decoder state and narrower context update helpers for LPS/renorm-MPS
-   branches.
-3. Block/precinct-level decode scheduling: strict decode now uses block-level
-   workers and dynamic next-block scheduling above the component-thread cap.
-   The ISO MQ/BYPASS strict paths also scatter from scratch-owned coefficient
-   buffers instead of duplicating and freeing each decoded code-block. Grok is
-   still much faster, so next audit the serial packet/catalog walk, final
-   scatter, and remaining per-worker scratch reuse.
-4. Packed T1 retry only after profiling: the `-Dpacked-t1-context-flags=true`
-   build is correct but currently slower (about 242 ms encode and 226 ms decode
-   at ten threads). Future experiments should reduce maintenance cost first:
-   try RLC-only reads from the full packed word, lazy stripe rebuilds, or
-   partial ZC/SC lookup without maintaining every MU/PI/CHI bit eagerly.
-5. DWT 5/3 horizontal SIMD and cache blocking: the vertical path is already
-   vectorized, while horizontal lifting remains scalar. This is likely a clean
-   encode/decode win after the T1 decode bottleneck is better understood.
-6. TIFF I/O strip handling: decode write now uses exact-capacity direct raster
+1. T1/MQ absolute CPU work: strict decode timing still puts most wall time in
+   block payload reconstruction. The useful wins so far are inline unchecked
+   ISO MQ reads, cached context transition rows, CLZ-batched renormalization,
+   worker-local `DecodeBlockScratch`, direct scatter, and removal of an
+   unreachable MQ MPS slow-path branch. Next, profile instructions rather than
+   only phase time, then target flag book-keeping, context lookup/update
+   helpers, byte-in locality, and any remaining per-symbol branches that survive
+   in the MQ significance/refinement/cleanup profiles.
+2. T1 scan/flag layout, but only with byte-equality gates: the guarded
+   OpenJPEG-style packed T1 context-word build is correct but slower on the
+   local profile, so do not flip it wholesale. Future attempts should be
+   narrower: RLC-only reads from full packed words, lazy stripe/word rebuilds,
+   partial ZC/SC lookup from packed sigma/sign windows, or word-granular smooth
+   stripe skipping. Keep the u16 path until a packed subpath is faster and
+   byte-identical.
+3. Horizontal 5/3 DWT SIMD and better DWT scheduling: vertical integer 5/3 is
+   vectorized, but horizontal lifting is still scalar apart from small no-op
+   pack/unpack skips. A portable NEON/AVX `@Vector` row kernel, row-pair
+   processing, and cache blocking should help both encode and decode. Longer
+   term, split inverse DWT work inside a component instead of only across the
+   three components.
+4. Packet catalog remains a serial Amdahl term, but it is no longer the first
+   lever. The strict catalog timing now exposes scan/header/finalize, reuses
+   validated PLT byte totals, avoids temporary payload slice staging, keeps
+   strict band groups on stack storage, and usually sits around 9-10 ms on the
+   2048 lossless decode smoke file. Next T2 work should focus on correctness
+   and future multi-progression caching unless a new benchmark shows catalog
+   growth with larger images or more tile-parts.
+5. Parallel efficiency: block-level decode uses an atomic next-block scheduler
+   and worker balance counters. A tested LPT-by-payload ordering experiment was
+   slower, and current max/average worker wall times do not show a dominant
+   serial tail. Further gains likely require persistent worker resources,
+   larger work units with less scheduling overhead, DWT row-band parallelism,
+   or true tile-level scheduling rather than more block reordering.
+6. Multi-tile architecture: this is the structural route past Grok on many
+   cores. Single-tile z2000 can parallelize T1 blocks and some component work,
+   but catalog, DWT/MCT tails, and whole-image memory flow remain serial enough
+   to cap scaling. Real tile grids, per-tile DWT/T1/T2 state, and tile-part
+   work queues are the path to linear many-core behavior.
+7. TIFF I/O strip handling: decode write uses exact-capacity direct raster
    slice fills with SIMD 8-bit narrowing and native 16-bit byte copies, while
    encode read uses SIMD 8-bit widening and native little-endian 16-bit byte
-   copies. Multi-strip RGB parser coverage is in place; the remaining low-risk
-   I/O pass is broader strip/write policy and deciding whether a streaming
-   writer is cleaner than building one contiguous output buffer.
-7. PCRD-style rate allocation: not primarily a speed item, but necessary for
+   copies. The remaining low-risk I/O work is broader strip/write policy and
+   deciding whether streaming TIFF output is cleaner than one contiguous buffer.
+8. PCRD-style rate allocation: not primarily a speed item, but necessary for
    fair access-copy comparisons and smaller quality-layer outputs.
-8. Lossy path SIMD: dequant + float 9/7 inverse currently scalar per band;
-   NEON f32x4 lifting mirrors the integer path.
-9. Allocator: per-worker arenas for shadow-block payload copies to cut the
-   remaining allocator churn and peak RSS on large tiles.
+9. Lossy path SIMD and quantization: dequantization and float 9/7 lifting remain
+   scalar per band. NEON f32x4 and AVX f32 lanes should mirror the integer
+   kernels once the lossless decode bottleneck is less dominant.
+10. Allocator/RSS hygiene: per-worker arenas and high-water scratch retention
+   should be considered for large tiles, but recent strict decode changes have
+   already removed several short-lived packet-catalog allocations.
