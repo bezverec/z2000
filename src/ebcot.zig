@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options.zig");
 const mq = @import("mq.zig");
 const mq_iso = @import("mq_iso.zig");
 const simd = @import("simd.zig");
@@ -381,6 +383,931 @@ fn makeNbfScLut() [256]SignCoding {
 fn nbfScIndex(word: u16) u8 {
     return @intCast((word & 0x0f) | ((word >> 4) & 0xf0));
 }
+
+// Full packed T1 context-word scaffold: one OpenJPEG-style u32 per code-block
+// column and four-row stripe. The active hot path still uses u16 neighborhood
+// words; Debug and ReleaseSafe maintain this buffer as shadow state and assert
+// parity at T1 loop boundaries.
+const use_packed_t1_context_flags = build_options.packed_t1_context_flags;
+const debug_check_packed_t1_context_flags = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+const maintain_packed_t1_context_flags = use_packed_t1_context_flags or debug_check_packed_t1_context_flags;
+
+fn pcfStripeCount(height: usize) usize {
+    return (height + 3) / 4;
+}
+
+fn pcfIndex(width: usize, x: usize, y: usize) usize {
+    return (y / 4) * width + x;
+}
+
+fn directCanUseRunStripeFast(scratch: *const DirectBlockScratch, x: usize, stripe_y: usize, style: CodeBlockStyle) bool {
+    const expected = nbfCanUseRunStripe(scratch.nb_flags.items, scratch.nb_stride, x, stripe_y, style);
+    if (comptime use_packed_t1_context_flags) {
+        return packedT1CanUseRunStripeChecked(
+            scratch.packed_t1_flags.items,
+            scratch.width,
+            scratch.nb_flags.items,
+            scratch.nb_stride,
+            x,
+            stripe_y,
+            style,
+        );
+    }
+    if (comptime maintain_packed_t1_context_flags) {
+        const actual = packedT1CanUseRunStripeChecked(
+            scratch.packed_t1_flags.items,
+            scratch.width,
+            scratch.nb_flags.items,
+            scratch.nb_stride,
+            x,
+            stripe_y,
+            style,
+        );
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) std.debug.assert(expected == actual);
+    }
+    return expected;
+}
+
+fn decodeCanUseRunStripeFast(scratch: *const DecodeBlockScratch, x: usize, stripe_y: usize, style: CodeBlockStyle) bool {
+    const expected = nbfCanUseRunStripe(scratch.nb_flags.items, scratch.nb_stride, x, stripe_y, style);
+    if (comptime use_packed_t1_context_flags) {
+        return packedT1CanUseRunStripeChecked(
+            scratch.packed_t1_flags.items,
+            scratch.width,
+            scratch.nb_flags.items,
+            scratch.nb_stride,
+            x,
+            stripe_y,
+            style,
+        );
+    }
+    if (comptime maintain_packed_t1_context_flags) {
+        const actual = packedT1CanUseRunStripeChecked(
+            scratch.packed_t1_flags.items,
+            scratch.width,
+            scratch.nb_flags.items,
+            scratch.nb_stride,
+            x,
+            stripe_y,
+            style,
+        );
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) std.debug.assert(expected == actual);
+    }
+    return expected;
+}
+
+const packed_sigma_nw: u32 = 1 << 0;
+const packed_sigma_n: u32 = 1 << 1;
+const packed_sigma_ne: u32 = 1 << 2;
+const packed_sigma_w: u32 = 1 << 3;
+const packed_sigma_this: u32 = 1 << 4;
+const packed_sigma_e: u32 = 1 << 5;
+const packed_sigma_sw: u32 = 1 << 6;
+const packed_sigma_s: u32 = 1 << 7;
+const packed_sigma_se: u32 = 1 << 8;
+const packed_sigma_neighbors: u32 = packed_sigma_nw | packed_sigma_n | packed_sigma_ne |
+    packed_sigma_w | packed_sigma_e | packed_sigma_sw | packed_sigma_s | packed_sigma_se;
+const packed_sigma_causal_neighbors: u32 = packed_sigma_neighbors & ~(packed_sigma_sw | packed_sigma_s | packed_sigma_se);
+const packed_chi_0: u32 = 1 << 18;
+const packed_chi_1: u32 = 1 << 19;
+const packed_chi_2: u32 = 1 << 22;
+const packed_chi_3: u32 = 1 << 25;
+const packed_chi_4: u32 = 1 << 28;
+const packed_chi_5: u32 = 1 << 31;
+const packed_chi_bits = [_]u32{
+    packed_chi_0,
+    packed_chi_1,
+    packed_chi_2,
+    packed_chi_3,
+    packed_chi_4,
+    packed_chi_5,
+};
+const packed_mu_0: u32 = 1 << 20;
+const packed_pi_0: u32 = 1 << 21;
+const packed_mu_bits = [_]u32{
+    packed_mu_0,
+    1 << 23,
+    1 << 26,
+    1 << 29,
+};
+const packed_pi_bits = [_]u32{
+    packed_pi_0,
+    1 << 24,
+    1 << 27,
+    1 << 30,
+};
+const packed_pi_mask: u32 = packed_pi_bits[0] | packed_pi_bits[1] | packed_pi_bits[2] | packed_pi_bits[3];
+
+fn packedSigmaWindowFromNbf(word: u16) u32 {
+    var out: u32 = 0;
+    if ((word & nbf_sig_nw) != 0) out |= packed_sigma_nw;
+    if ((word & nbf_sig_n) != 0) out |= packed_sigma_n;
+    if ((word & nbf_sig_ne) != 0) out |= packed_sigma_ne;
+    if ((word & nbf_sig_w) != 0) out |= packed_sigma_w;
+    if ((word & nbf_sig_self) != 0) out |= packed_sigma_this;
+    if ((word & nbf_sig_e) != 0) out |= packed_sigma_e;
+    if ((word & nbf_sig_sw) != 0) out |= packed_sigma_sw;
+    if ((word & nbf_sig_s) != 0) out |= packed_sigma_s;
+    if ((word & nbf_sig_se) != 0) out |= packed_sigma_se;
+    return out;
+}
+
+fn packedSigmaColumnFromNbf(nb_flags: []const u16, nb_stride: usize, x: usize, stripe_y: usize, height: usize) u32 {
+    const stripe_height = @min(@as(usize, 4), height - stripe_y);
+    var word: u32 = 0;
+    var ci: usize = 0;
+    while (ci < stripe_height) : (ci += 1) {
+        const y = stripe_y + ci;
+        word |= packedSigmaWindowFromNbf(nb_flags[nbfIndex(nb_stride, x, y)]) << @as(u5, @intCast(3 * ci));
+    }
+    return word;
+}
+
+fn packedSigmaNbfPattern(word: u32, ci: usize) u16 {
+    const window = (word >> @as(u5, @intCast(3 * ci))) & packed_sigma_neighbors;
+    return packedSigmaWindowToNbfPattern(window);
+}
+
+fn packedSigmaNbfPatternCausal(word: u32, ci: usize, causal_row: bool) u16 {
+    const shifted = word >> @as(u5, @intCast(3 * ci));
+    const window = shifted & if (causal_row) packed_sigma_causal_neighbors else packed_sigma_neighbors;
+    return packedSigmaWindowToNbfPattern(window);
+}
+
+fn packedSigmaWindowToNbfPattern(window: u32) u16 {
+    var out: u16 = 0;
+    if ((window & packed_sigma_nw) != 0) out |= nbf_sig_nw;
+    if ((window & packed_sigma_n) != 0) out |= nbf_sig_n;
+    if ((window & packed_sigma_ne) != 0) out |= nbf_sig_ne;
+    if ((window & packed_sigma_w) != 0) out |= nbf_sig_w;
+    if ((window & packed_sigma_e) != 0) out |= nbf_sig_e;
+    if ((window & packed_sigma_sw) != 0) out |= nbf_sig_sw;
+    if ((window & packed_sigma_s) != 0) out |= nbf_sig_s;
+    if ((window & packed_sigma_se) != 0) out |= nbf_sig_se;
+    return out;
+}
+
+fn nbfSelfNegative(nb_flags: []const u16, nb_stride: usize, width: usize, height: usize, x: usize, y: usize) bool {
+    if (x > 0 and (nb_flags[nbfIndex(nb_stride, x - 1, y)] & nbf_sgn_e) != 0) return true;
+    if (x + 1 < width and (nb_flags[nbfIndex(nb_stride, x + 1, y)] & nbf_sgn_w) != 0) return true;
+    if (y > 0 and (nb_flags[nbfIndex(nb_stride, x, y - 1)] & nbf_sgn_s) != 0) return true;
+    if (y + 1 < height and (nb_flags[nbfIndex(nb_stride, x, y + 1)] & nbf_sgn_n) != 0) return true;
+    return false;
+}
+
+fn packedChiColumnFromNbf(nb_flags: []const u16, nb_stride: usize, width: usize, height: usize, x: usize, stripe_y: usize) u32 {
+    var word: u32 = 0;
+    var row: usize = 0;
+    while (row < packed_chi_bits.len) : (row += 1) {
+        if (stripe_y + row == 0) continue;
+        const y = stripe_y + row - 1;
+        if (y >= height) continue;
+        if (nbfSelfNegative(nb_flags, nb_stride, width, height, x, y)) {
+            word |= packed_chi_bits[row];
+        }
+    }
+    return word;
+}
+
+fn packedMuPiColumnFromNbf(nb_flags: []const u16, nb_stride: usize, x: usize, stripe_y: usize, height: usize) u32 {
+    const stripe_height = @min(@as(usize, 4), height - stripe_y);
+    var word: u32 = 0;
+    var ci: usize = 0;
+    while (ci < stripe_height) : (ci += 1) {
+        const sample = nb_flags[nbfIndex(nb_stride, x, stripe_y + ci)];
+        if ((sample & nbf_refine) != 0) word |= packed_mu_bits[ci];
+        if ((sample & nbf_visit) != 0) word |= packed_pi_bits[ci];
+    }
+    return word;
+}
+
+fn packedColumnFromNbf(nb_flags: []const u16, nb_stride: usize, width: usize, height: usize, x: usize, stripe_y: usize) u32 {
+    return packedSigmaColumnFromNbf(nb_flags, nb_stride, x, stripe_y, height) |
+        packedChiColumnFromNbf(nb_flags, nb_stride, width, height, x, stripe_y) |
+        packedMuPiColumnFromNbf(nb_flags, nb_stride, x, stripe_y, height);
+}
+
+fn packedT1RebuildFromNbf(out: []u32, nb_flags: []const u16, nb_stride: usize, width: usize, height: usize) void {
+    var stripe_y: usize = 0;
+    while (stripe_y < height) : (stripe_y += 4) {
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            out[pcfIndex(width, x, stripe_y)] = packedColumnFromNbf(nb_flags, nb_stride, width, height, x, stripe_y);
+        }
+    }
+}
+
+fn packedSigmaBitForSource(target_x: usize, target_y: usize, source_x: usize, source_y: usize) u32 {
+    if (source_y < target_y) {
+        if (source_x < target_x) return packed_sigma_nw;
+        if (source_x == target_x) return packed_sigma_n;
+        return packed_sigma_ne;
+    }
+    if (source_y == target_y) {
+        if (source_x < target_x) return packed_sigma_w;
+        if (source_x == target_x) return packed_sigma_this;
+        return packed_sigma_e;
+    }
+    if (source_x < target_x) return packed_sigma_sw;
+    if (source_x == target_x) return packed_sigma_s;
+    return packed_sigma_se;
+}
+
+fn packedT1SetSigma(flags: []u32, width: usize, target_x: usize, target_y: usize, sigma_bit: u32) void {
+    const shift: u5 = @intCast(3 * (target_y & 3));
+    flags[pcfIndex(width, target_x, target_y)] |= sigma_bit << shift;
+}
+
+fn packedT1SetChiInStripe(flags: []u32, width: usize, x: usize, y: usize, stripe_y: usize) void {
+    const row = if (stripe_y > y) 0 else y - stripe_y + 1;
+    std.debug.assert(row < packed_chi_bits.len);
+    flags[pcfIndex(width, x, stripe_y)] |= packed_chi_bits[row];
+}
+
+fn packedT1SetChiForSample(flags: []u32, width: usize, height: usize, x: usize, y: usize) void {
+    const base_stripe_y = y & ~@as(usize, 3);
+    packedT1SetChiInStripe(flags, width, x, y, base_stripe_y);
+    if ((y & 3) == 0 and base_stripe_y >= 4) {
+        packedT1SetChiInStripe(flags, width, x, y, base_stripe_y - 4);
+    }
+    if ((y & 3) == 3 and base_stripe_y + 4 < height) {
+        packedT1SetChiInStripe(flags, width, x, y, base_stripe_y + 4);
+    }
+}
+
+fn packedT1MarkSignificant(flags: []u32, width: usize, height: usize, x: usize, y: usize, negative: bool) void {
+    const min_y = if (y == 0) 0 else y - 1;
+    const max_y = @min(height - 1, y + 1);
+    const min_x = if (x == 0) 0 else x - 1;
+    const max_x = @min(width - 1, x + 1);
+
+    var yy = min_y;
+    while (yy <= max_y) : (yy += 1) {
+        var xx = min_x;
+        while (xx <= max_x) : (xx += 1) {
+            packedT1SetSigma(flags, width, xx, yy, packedSigmaBitForSource(xx, yy, x, y));
+        }
+    }
+
+    if (!negative) return;
+    if (x > 0 or x + 1 < width or y > 0 or y + 1 < height) {
+        packedT1SetChiForSample(flags, width, height, x, y);
+    }
+}
+
+fn packedT1MarkVisited(flags: []u32, width: usize, x: usize, y: usize) void {
+    flags[pcfIndex(width, x, y)] |= packed_pi_bits[y & 3];
+}
+
+fn packedT1MarkRefined(flags: []u32, width: usize, x: usize, y: usize) void {
+    flags[pcfIndex(width, x, y)] |= packed_mu_bits[y & 3];
+}
+
+fn packedT1ClearVisited(flags: []u32) void {
+    for (flags) |*word| {
+        word.* &= ~packed_pi_mask;
+    }
+}
+
+fn directClearNbfVisit(scratch: *DirectBlockScratch) void {
+    nbfClearVisit(scratch.nb_flags.items);
+    if (comptime maintain_packed_t1_context_flags) packedT1ClearVisited(scratch.packed_t1_flags.items);
+}
+
+fn decodeClearNbfVisit(scratch: *DecodeBlockScratch) void {
+    nbfClearVisit(scratch.nb_flags.items);
+    if (comptime maintain_packed_t1_context_flags) packedT1ClearVisited(scratch.packed_t1_flags.items);
+}
+
+fn directMarkPackedT1Visited(scratch: *DirectBlockScratch, x: usize, y: usize) void {
+    if (comptime maintain_packed_t1_context_flags) packedT1MarkVisited(scratch.packed_t1_flags.items, scratch.width, x, y);
+}
+
+fn decodeMarkPackedT1Visited(scratch: *DecodeBlockScratch, x: usize, y: usize) void {
+    if (comptime maintain_packed_t1_context_flags) packedT1MarkVisited(scratch.packed_t1_flags.items, scratch.width, x, y);
+}
+
+fn directMarkPackedT1Refined(scratch: *DirectBlockScratch, x: usize, y: usize) void {
+    if (comptime maintain_packed_t1_context_flags) packedT1MarkRefined(scratch.packed_t1_flags.items, scratch.width, x, y);
+}
+
+fn decodeMarkPackedT1Refined(scratch: *DecodeBlockScratch, x: usize, y: usize) void {
+    if (comptime maintain_packed_t1_context_flags) packedT1MarkRefined(scratch.packed_t1_flags.items, scratch.width, x, y);
+}
+
+fn directMarkPackedT1Significant(scratch: *DirectBlockScratch, x: usize, y: usize, negative: bool) void {
+    if (comptime maintain_packed_t1_context_flags) packedT1MarkSignificant(scratch.packed_t1_flags.items, scratch.width, scratch.height, x, y, negative);
+}
+
+fn decodeMarkPackedT1Significant(scratch: *DecodeBlockScratch, x: usize, y: usize, negative: bool) void {
+    if (comptime maintain_packed_t1_context_flags) packedT1MarkSignificant(scratch.packed_t1_flags.items, scratch.width, scratch.height, x, y, negative);
+}
+
+fn packedScOpenJpegIndex(fx: u32, prev_fx: u32, next_fx: u32, ci: usize) u8 {
+    const shift: u5 = @intCast(3 * ci);
+    var lu: u32 = (fx >> shift) & (packed_sigma_n | packed_sigma_w | packed_sigma_e | packed_sigma_s);
+    lu |= (prev_fx >> @as(u5, @intCast(19 + 3 * ci))) & (1 << 0);
+    lu |= (next_fx >> @as(u5, @intCast(17 + 3 * ci))) & (1 << 2);
+    if (ci == 0) {
+        lu |= (fx >> 14) & (1 << 4);
+    } else {
+        lu |= (fx >> @as(u5, @intCast(15 + 3 * (ci - 1)))) & (1 << 4);
+    }
+    lu |= (fx >> @as(u5, @intCast(16 + 3 * ci))) & (1 << 6);
+    return @intCast(lu);
+}
+
+fn packedScNbfIndex(fx: u32, prev_fx: u32, next_fx: u32, ci: usize) u8 {
+    const lu = packedScOpenJpegIndex(fx, prev_fx, next_fx, ci);
+    var out: u8 = 0;
+    if ((lu & (1 << 1)) != 0) out |= 1 << 0; // significant north
+    if ((lu & (1 << 7)) != 0) out |= 1 << 1; // significant south
+    if ((lu & (1 << 5)) != 0) out |= 1 << 2; // significant east
+    if ((lu & (1 << 3)) != 0) out |= 1 << 3; // significant west
+    if ((lu & (1 << 4)) != 0) out |= 1 << 4; // negative north
+    if ((lu & (1 << 6)) != 0) out |= 1 << 5; // negative south
+    if ((lu & (1 << 2)) != 0) out |= 1 << 6; // negative east
+    if ((lu & (1 << 0)) != 0) out |= 1 << 7; // negative west
+    return out;
+}
+
+fn packedScNbfIndexCausal(fx: u32, prev_fx: u32, next_fx: u32, ci: usize, causal_row: bool) u8 {
+    var index = packedScNbfIndex(fx, prev_fx, next_fx, ci);
+    if (causal_row) {
+        index &= ~@as(u8, (1 << 1) | (1 << 5));
+    }
+    return index;
+}
+
+fn packedZeroContext(word: u32, ci: usize, band_kind: subband.Kind, causal_row: bool) Context {
+    return nbf_zc_lut[@intFromEnum(band_kind)][packedSigmaNbfPatternCausal(word, ci, causal_row)];
+}
+
+fn packedSignCoding(fx: u32, prev_fx: u32, next_fx: u32, ci: usize, causal_row: bool) SignCoding {
+    return nbf_sc_lut[packedScNbfIndexCausal(fx, prev_fx, next_fx, ci, causal_row)];
+}
+
+const PackedT1Decision = struct {
+    zero_context: Context,
+    sign: SignCoding,
+    significance_candidate: bool,
+    refinement_candidate: bool,
+    refinement_context: Context,
+};
+
+fn packedT1DecisionFromColumns(
+    flags: []const u32,
+    width: usize,
+    x: usize,
+    stripe_y: usize,
+    ci: usize,
+    style: CodeBlockStyle,
+) PackedT1Decision {
+    const fx = flags[pcfIndex(width, x, stripe_y)];
+    const prev_fx = if (x == 0) 0 else flags[pcfIndex(width, x - 1, stripe_y)];
+    const next_fx = if (x + 1 == width) 0 else flags[pcfIndex(width, x + 1, stripe_y)];
+    const causal_row = style.vertical_causal and ci == 3;
+    return .{
+        .zero_context = packedZeroContext(fx, ci, style.band_kind, causal_row),
+        .sign = packedSignCoding(fx, prev_fx, next_fx, ci, causal_row),
+        .significance_candidate = packedSignificanceCandidateCausal(fx, ci, causal_row),
+        .refinement_candidate = packedRefinementCandidate(fx, ci),
+        .refinement_context = packedRefinementContextCausal(fx, ci, causal_row),
+    };
+}
+
+fn nbfT1DecisionFromWord(word: u16, style: CodeBlockStyle, causal_row: bool) PackedT1Decision {
+    const f = if (causal_row) word & nbf_causal_mask else word;
+    const pattern = f & nbf_sig8;
+    return .{
+        .zero_context = nbf_zc_lut[@intFromEnum(style.band_kind)][pattern],
+        .sign = nbf_sc_lut[nbfScIndex(f)],
+        .significance_candidate = (f & nbf_sig_self) == 0 and (f & nbf_visit) == 0 and pattern != 0,
+        .refinement_candidate = (f & nbf_sig_self) != 0 and (f & nbf_visit) == 0,
+        .refinement_context = refinementContext((f & nbf_refine) != 0, @intCast(@popCount(pattern))),
+    };
+}
+
+fn packedT1DecisionEquals(a: PackedT1Decision, b: PackedT1Decision) bool {
+    return a.zero_context == b.zero_context and
+        std.meta.eql(a.sign, b.sign) and
+        a.significance_candidate == b.significance_candidate and
+        a.refinement_candidate == b.refinement_candidate and
+        a.refinement_context == b.refinement_context;
+}
+
+fn directT1Decision(scratch: *const DirectBlockScratch, x: usize, y: usize, style: CodeBlockStyle) PackedT1Decision {
+    const ci = y & 3;
+    const stripe_y = y & ~@as(usize, 3);
+    const causal_row = style.vertical_causal and ci == 3;
+    const expected = nbfT1DecisionFromWord(scratch.nb_flags.items[nbfIndex(scratch.nb_stride, x, y)], style, causal_row);
+    if (comptime maintain_packed_t1_context_flags) {
+        const actual = packedT1DecisionFromColumns(scratch.packed_t1_flags.items, scratch.width, x, stripe_y, ci, style);
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            std.debug.assert(packedT1DecisionEquals(expected, actual));
+        }
+        if (comptime use_packed_t1_context_flags) return actual;
+    }
+    return expected;
+}
+
+fn decodeT1Decision(scratch: *const DecodeBlockScratch, x: usize, y: usize, style: CodeBlockStyle) PackedT1Decision {
+    const ci = y & 3;
+    const stripe_y = y & ~@as(usize, 3);
+    const causal_row = style.vertical_causal and ci == 3;
+    const expected = nbfT1DecisionFromWord(scratch.nb_flags.items[nbfIndex(scratch.nb_stride, x, y)], style, causal_row);
+    if (comptime maintain_packed_t1_context_flags) {
+        const actual = packedT1DecisionFromColumns(scratch.packed_t1_flags.items, scratch.width, x, stripe_y, ci, style);
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            std.debug.assert(packedT1DecisionEquals(expected, actual));
+        }
+        if (comptime use_packed_t1_context_flags) return actual;
+    }
+    return expected;
+}
+
+fn expectPackedT1DecisionMatchesNbf(
+    packed_flags: []const u32,
+    nb_flags: []const u16,
+    nb_stride: usize,
+    width: usize,
+    x: usize,
+    y: usize,
+    style: CodeBlockStyle,
+) !void {
+    const ci = y & 3;
+    const causal_row = style.vertical_causal and ci == 3;
+    const expected = nbfT1DecisionFromWord(nb_flags[nbfIndex(nb_stride, x, y)], style, causal_row);
+    const actual = packedT1DecisionFromColumns(packed_flags, width, x, y & ~@as(usize, 3), ci, style);
+    try std.testing.expectEqual(expected.zero_context, actual.zero_context);
+    try std.testing.expectEqual(expected.sign, actual.sign);
+    try std.testing.expectEqual(expected.significance_candidate, actual.significance_candidate);
+    try std.testing.expectEqual(expected.refinement_candidate, actual.refinement_candidate);
+    try std.testing.expectEqual(expected.refinement_context, actual.refinement_context);
+}
+
+fn packedT1CanUseRunStripe(flags: []const u32, width: usize, x: usize, stripe_y: usize, style: CodeBlockStyle) bool {
+    const word = flags[pcfIndex(width, x, stripe_y)];
+    var ci: usize = 0;
+    while (ci < 4) : (ci += 1) {
+        const shifted = word >> @as(u5, @intCast(3 * ci));
+        const neighbors = shifted & if (style.vertical_causal and ci == 3)
+            packed_sigma_causal_neighbors
+        else
+            packed_sigma_neighbors;
+        if ((shifted & (packed_sigma_this | packed_pi_0)) != 0 or neighbors != 0) return false;
+    }
+    return true;
+}
+
+fn packedT1CanUseRunStripeChecked(
+    packed_flags: []const u32,
+    width: usize,
+    nb_flags: []const u16,
+    nb_stride: usize,
+    x: usize,
+    stripe_y: usize,
+    style: CodeBlockStyle,
+) bool {
+    const packed_clean = packedT1CanUseRunStripe(packed_flags, width, x, stripe_y, style);
+    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        std.debug.assert(packed_clean == nbfCanUseRunStripe(nb_flags, nb_stride, x, stripe_y, style));
+    }
+    return packed_clean;
+}
+
+fn packedSignificanceCandidate(word: u32, ci: usize) bool {
+    return packedSignificanceCandidateCausal(word, ci, false);
+}
+
+fn packedSignificanceCandidateCausal(word: u32, ci: usize, causal_row: bool) bool {
+    const shifted = word >> @as(u5, @intCast(3 * ci));
+    const neighbors = shifted & if (causal_row) packed_sigma_causal_neighbors else packed_sigma_neighbors;
+    return (shifted & (packed_sigma_this | packed_pi_0)) == 0 and
+        neighbors != 0;
+}
+
+fn packedRefinementCandidate(word: u32, ci: usize) bool {
+    const shifted = word >> @as(u5, @intCast(3 * ci));
+    return (shifted & (packed_sigma_this | packed_pi_0)) == packed_sigma_this;
+}
+
+fn packedRefinementContext(word: u32, ci: usize) Context {
+    return packedRefinementContextCausal(word, ci, false);
+}
+
+fn packedRefinementContextCausal(word: u32, ci: usize, causal_row: bool) Context {
+    const shifted = word >> @as(u5, @intCast(3 * ci));
+    if ((shifted & packed_mu_0) != 0) return .refinement_later;
+    const neighbors = shifted & if (causal_row) packed_sigma_causal_neighbors else packed_sigma_neighbors;
+    return if (neighbors != 0) .refinement_neighbor else .refinement;
+}
+
+test "EBCOT OpenJPEG-style packed sigma windows match zero-coding contexts" {
+    const allocator = std.testing.allocator;
+    const width = 6;
+    const height = 8;
+    const nb_stride = nbfStride(width);
+    const nb_flags = try allocator.alloc(u16, nb_stride * (height + 2));
+    defer allocator.free(nb_flags);
+    @memset(nb_flags, 0);
+
+    nbfMarkSignificant(nb_flags, nb_stride, 1, 1, false);
+    nbfMarkSignificant(nb_flags, nb_stride, 3, 2, true);
+    nbfMarkSignificant(nb_flags, nb_stride, 4, 6, false);
+
+    var stripe_y: usize = 0;
+    while (stripe_y < height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), height - stripe_y);
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            const packed_word = packedSigmaColumnFromNbf(nb_flags, nb_stride, x, stripe_y, height);
+            var ci: usize = 0;
+            while (ci < stripe_height) : (ci += 1) {
+                const y = stripe_y + ci;
+                const nbf_pattern = nb_flags[nbfIndex(nb_stride, x, y)] & nbf_sig8;
+                const packed_pattern = packedSigmaNbfPattern(packed_word, ci);
+                try std.testing.expectEqual(nbf_pattern, packed_pattern);
+                for (0..4) |band| {
+                    try std.testing.expectEqual(nbf_zc_lut[band][nbf_pattern], nbf_zc_lut[band][packed_pattern]);
+                }
+            }
+        }
+    }
+}
+
+test "EBCOT OpenJPEG-style packed sign windows match sign-coding contexts" {
+    const allocator = std.testing.allocator;
+    const width = 7;
+    const height = 8;
+    const nb_stride = nbfStride(width);
+    const nb_flags = try allocator.alloc(u16, nb_stride * (height + 2));
+    defer allocator.free(nb_flags);
+    @memset(nb_flags, 0);
+
+    nbfMarkSignificant(nb_flags, nb_stride, 1, 1, false);
+    nbfMarkSignificant(nb_flags, nb_stride, 3, 2, true);
+    nbfMarkSignificant(nb_flags, nb_stride, 4, 3, false);
+    nbfMarkSignificant(nb_flags, nb_stride, 5, 6, true);
+
+    var stripe_y: usize = 0;
+    while (stripe_y < height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), height - stripe_y);
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            const fx = packedColumnFromNbf(nb_flags, nb_stride, width, height, x, stripe_y);
+            const prev_fx = if (x == 0) 0 else packedColumnFromNbf(nb_flags, nb_stride, width, height, x - 1, stripe_y);
+            const next_fx = if (x + 1 == width) 0 else packedColumnFromNbf(nb_flags, nb_stride, width, height, x + 1, stripe_y);
+            var ci: usize = 0;
+            while (ci < stripe_height) : (ci += 1) {
+                const y = stripe_y + ci;
+                const nbf_index = nbfScIndex(nb_flags[nbfIndex(nb_stride, x, y)]);
+                const packed_index = packedScNbfIndex(fx, prev_fx, next_fx, ci);
+                try std.testing.expectEqual(nbf_index, packed_index);
+                try std.testing.expectEqual(nbf_sc_lut[nbf_index], nbf_sc_lut[packed_index]);
+            }
+        }
+    }
+}
+
+test "EBCOT OpenJPEG-style packed PI MU bits match pass membership" {
+    const allocator = std.testing.allocator;
+    const width = 7;
+    const height = 8;
+    const nb_stride = nbfStride(width);
+    const nb_flags = try allocator.alloc(u16, nb_stride * (height + 2));
+    defer allocator.free(nb_flags);
+    @memset(nb_flags, 0);
+
+    nbfMarkSignificant(nb_flags, nb_stride, 1, 1, false);
+    nbfMarkSignificant(nb_flags, nb_stride, 3, 2, true);
+    nbfMarkSignificant(nb_flags, nb_stride, 4, 3, false);
+    nbfMarkSignificant(nb_flags, nb_stride, 5, 6, true);
+    nb_flags[nbfIndex(nb_stride, 2, 1)] |= nbf_visit;
+    nb_flags[nbfIndex(nb_stride, 3, 2)] |= nbf_refine;
+    nb_flags[nbfIndex(nb_stride, 5, 6)] |= nbf_refine | nbf_visit;
+
+    var stripe_y: usize = 0;
+    while (stripe_y < height) : (stripe_y += 4) {
+        const stripe_height = @min(@as(usize, 4), height - stripe_y);
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            const packed_word = packedColumnFromNbf(nb_flags, nb_stride, width, height, x, stripe_y);
+            var ci: usize = 0;
+            while (ci < stripe_height) : (ci += 1) {
+                const y = stripe_y + ci;
+                const sample = nb_flags[nbfIndex(nb_stride, x, y)];
+                const sig_candidate = (sample & nbf_sig_self) == 0 and
+                    (sample & nbf_visit) == 0 and
+                    (sample & nbf_sig8) != 0;
+                const ref_candidate = (sample & nbf_sig_self) != 0 and
+                    (sample & nbf_visit) == 0;
+                try std.testing.expectEqual(sig_candidate, packedSignificanceCandidate(packed_word, ci));
+                try std.testing.expectEqual(ref_candidate, packedRefinementCandidate(packed_word, ci));
+                try std.testing.expectEqual(
+                    refinementContext((sample & nbf_refine) != 0, @intCast(@popCount(sample & nbf_sig8))),
+                    packedRefinementContext(packed_word, ci),
+                );
+            }
+        }
+    }
+}
+
+test "EBCOT OpenJPEG-style packed incremental updates match rebuild" {
+    const allocator = std.testing.allocator;
+    const width = 7;
+    const height = 9;
+    const nb_stride = nbfStride(width);
+    const nb_flags = try allocator.alloc(u16, nb_stride * (height + 2));
+    defer allocator.free(nb_flags);
+    @memset(nb_flags, 0);
+
+    const packed_flags = try allocator.alloc(u32, width * pcfStripeCount(height));
+    defer allocator.free(packed_flags);
+    @memset(packed_flags, 0);
+
+    const rebuilt_flags = try allocator.alloc(u32, width * pcfStripeCount(height));
+    defer allocator.free(rebuilt_flags);
+
+    const SigOp = struct {
+        x: usize,
+        y: usize,
+        negative: bool,
+    };
+    const sig_ops = [_]SigOp{
+        .{ .x = 0, .y = 0, .negative = false },
+        .{ .x = 2, .y = 3, .negative = true },
+        .{ .x = 4, .y = 4, .negative = true },
+        .{ .x = 6, .y = 8, .negative = true },
+        .{ .x = 3, .y = 6, .negative = false },
+    };
+
+    for (sig_ops) |op| {
+        nbfMarkSignificant(nb_flags, nb_stride, op.x, op.y, op.negative);
+        packedT1MarkSignificant(packed_flags, width, height, op.x, op.y, op.negative);
+        packedT1RebuildFromNbf(rebuilt_flags, nb_flags, nb_stride, width, height);
+        try std.testing.expectEqualSlices(u32, rebuilt_flags, packed_flags);
+    }
+
+    nb_flags[nbfIndex(nb_stride, 2, 3)] |= nbf_visit;
+    packedT1MarkVisited(packed_flags, width, 2, 3);
+    packedT1RebuildFromNbf(rebuilt_flags, nb_flags, nb_stride, width, height);
+    try std.testing.expectEqualSlices(u32, rebuilt_flags, packed_flags);
+
+    nb_flags[nbfIndex(nb_stride, 4, 4)] |= nbf_refine;
+    packedT1MarkRefined(packed_flags, width, 4, 4);
+    packedT1RebuildFromNbf(rebuilt_flags, nb_flags, nb_stride, width, height);
+    try std.testing.expectEqualSlices(u32, rebuilt_flags, packed_flags);
+
+    nb_flags[nbfIndex(nb_stride, 6, 8)] |= nbf_visit | nbf_refine;
+    packedT1MarkVisited(packed_flags, width, 6, 8);
+    packedT1MarkRefined(packed_flags, width, 6, 8);
+    packedT1RebuildFromNbf(rebuilt_flags, nb_flags, nb_stride, width, height);
+    try std.testing.expectEqualSlices(u32, rebuilt_flags, packed_flags);
+}
+
+test "EBCOT OpenJPEG-style packed context helpers match u16 flags" {
+    const allocator = std.testing.allocator;
+    const width = 7;
+    const height = 9;
+    const nb_stride = nbfStride(width);
+    const nb_flags = try allocator.alloc(u16, nb_stride * (height + 2));
+    defer allocator.free(nb_flags);
+    @memset(nb_flags, 0);
+
+    const packed_flags = try allocator.alloc(u32, width * pcfStripeCount(height));
+    defer allocator.free(packed_flags);
+    @memset(packed_flags, 0);
+
+    const SigOp = struct {
+        x: usize,
+        y: usize,
+        negative: bool,
+    };
+    const sig_ops = [_]SigOp{
+        .{ .x = 0, .y = 0, .negative = true },
+        .{ .x = 2, .y = 2, .negative = false },
+        .{ .x = 3, .y = 3, .negative = true },
+        .{ .x = 4, .y = 4, .negative = true },
+        .{ .x = 6, .y = 8, .negative = false },
+    };
+    for (sig_ops) |op| {
+        nbfMarkSignificant(nb_flags, nb_stride, op.x, op.y, op.negative);
+        packedT1MarkSignificant(packed_flags, width, height, op.x, op.y, op.negative);
+    }
+
+    nb_flags[nbfIndex(nb_stride, 1, 1)] |= nbf_visit;
+    packedT1MarkVisited(packed_flags, width, 1, 1);
+    nb_flags[nbfIndex(nb_stride, 4, 4)] |= nbf_refine;
+    packedT1MarkRefined(packed_flags, width, 4, 4);
+    nb_flags[nbfIndex(nb_stride, 6, 8)] |= nbf_visit | nbf_refine;
+    packedT1MarkVisited(packed_flags, width, 6, 8);
+    packedT1MarkRefined(packed_flags, width, 6, 8);
+
+    const styles = [_]CodeBlockStyle{
+        .{ .band_kind = .ll },
+        .{ .band_kind = .lh },
+        .{ .band_kind = .hl },
+        .{ .band_kind = .hh },
+        .{ .band_kind = .ll, .vertical_causal = true },
+        .{ .band_kind = .lh, .vertical_causal = true },
+        .{ .band_kind = .hl, .vertical_causal = true },
+        .{ .band_kind = .hh, .vertical_causal = true },
+    };
+
+    for (styles) |style| {
+        var stripe_y: usize = 0;
+        while (stripe_y < height) : (stripe_y += 4) {
+            const stripe_height = @min(@as(usize, 4), height - stripe_y);
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                var ci: usize = 0;
+                while (ci < stripe_height) : (ci += 1) {
+                    const y = stripe_y + ci;
+                    try expectPackedT1DecisionMatchesNbf(packed_flags, nb_flags, nb_stride, width, x, y, style);
+                }
+            }
+        }
+    }
+}
+
+test "EBCOT packed T1 decision helpers survive dense edge state" {
+    const allocator = std.testing.allocator;
+    const width = 9;
+    const height = 10;
+    const nb_stride = nbfStride(width);
+    const nb_flags = try allocator.alloc(u16, nb_stride * (height + 2));
+    defer allocator.free(nb_flags);
+    @memset(nb_flags, 0);
+
+    const packed_flags = try allocator.alloc(u32, width * pcfStripeCount(height));
+    defer allocator.free(packed_flags);
+    @memset(packed_flags, 0);
+
+    const SigOp = struct {
+        x: usize,
+        y: usize,
+        negative: bool,
+    };
+    const sig_ops = [_]SigOp{
+        .{ .x = 0, .y = 1, .negative = true },
+        .{ .x = 1, .y = 3, .negative = false },
+        .{ .x = 2, .y = 4, .negative = true },
+        .{ .x = 4, .y = 3, .negative = true },
+        .{ .x = 5, .y = 5, .negative = false },
+        .{ .x = 7, .y = 7, .negative = true },
+        .{ .x = 8, .y = 8, .negative = false },
+    };
+    for (sig_ops) |op| {
+        nbfMarkSignificant(nb_flags, nb_stride, op.x, op.y, op.negative);
+        packedT1MarkSignificant(packed_flags, width, height, op.x, op.y, op.negative);
+    }
+
+    const FlagOp = struct {
+        x: usize,
+        y: usize,
+        visit: bool = false,
+        refine: bool = false,
+    };
+    const flag_ops = [_]FlagOp{
+        .{ .x = 0, .y = 0, .visit = true },
+        .{ .x = 1, .y = 3, .refine = true },
+        .{ .x = 2, .y = 4, .visit = true, .refine = true },
+        .{ .x = 4, .y = 3, .visit = true },
+        .{ .x = 7, .y = 7, .refine = true },
+        .{ .x = 8, .y = 9, .visit = true, .refine = true },
+    };
+    for (flag_ops) |op| {
+        const p = nbfIndex(nb_stride, op.x, op.y);
+        if (op.visit) {
+            nb_flags[p] |= nbf_visit;
+            packedT1MarkVisited(packed_flags, width, op.x, op.y);
+        }
+        if (op.refine) {
+            nb_flags[p] |= nbf_refine;
+            packedT1MarkRefined(packed_flags, width, op.x, op.y);
+        }
+    }
+
+    const rebuilt_flags = try allocator.alloc(u32, width * pcfStripeCount(height));
+    defer allocator.free(rebuilt_flags);
+    packedT1RebuildFromNbf(rebuilt_flags, nb_flags, nb_stride, width, height);
+    try std.testing.expectEqualSlices(u32, rebuilt_flags, packed_flags);
+
+    const styles = [_]CodeBlockStyle{
+        .{ .band_kind = .ll },
+        .{ .band_kind = .lh },
+        .{ .band_kind = .hl },
+        .{ .band_kind = .hh },
+        .{ .band_kind = .ll, .vertical_causal = true },
+        .{ .band_kind = .lh, .vertical_causal = true },
+        .{ .band_kind = .hl, .vertical_causal = true },
+        .{ .band_kind = .hh, .vertical_causal = true },
+    };
+
+    for (styles) |style| {
+        var y: usize = 0;
+        while (y < height) : (y += 1) {
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                try expectPackedT1DecisionMatchesNbf(packed_flags, nb_flags, nb_stride, width, x, y, style);
+            }
+        }
+    }
+}
+
+test "EBCOT packed T1 cleanup-run candidates match u16 flags" {
+    const allocator = std.testing.allocator;
+    const width = 7;
+    const height = 8;
+    const nb_stride = nbfStride(width);
+    const nb_flags = try allocator.alloc(u16, nb_stride * (height + 2));
+    defer allocator.free(nb_flags);
+    @memset(nb_flags, 0);
+
+    const packed_flags = try allocator.alloc(u32, width * pcfStripeCount(height));
+    defer allocator.free(packed_flags);
+    @memset(packed_flags, 0);
+
+    var stripe_y: usize = 0;
+    while (stripe_y < height) : (stripe_y += 4) {
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            try std.testing.expect(packedT1CanUseRunStripeChecked(packed_flags, width, nb_flags, nb_stride, x, stripe_y, .{}));
+        }
+    }
+
+    nbfMarkSignificant(nb_flags, nb_stride, 1, 1, false);
+    packedT1MarkSignificant(packed_flags, width, height, 1, 1, false);
+    nbfMarkSignificant(nb_flags, nb_stride, 4, 5, true);
+    packedT1MarkSignificant(packed_flags, width, height, 4, 5, true);
+    nb_flags[nbfIndex(nb_stride, 6, 7)] |= nbf_visit;
+    packedT1MarkVisited(packed_flags, width, 6, 7);
+
+    stripe_y = 0;
+    while (stripe_y < height) : (stripe_y += 4) {
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            const expected = nbfCanUseRunStripe(nb_flags, nb_stride, x, stripe_y, .{});
+            const actual = packedT1CanUseRunStripeChecked(packed_flags, width, nb_flags, nb_stride, x, stripe_y, .{});
+            try std.testing.expectEqual(expected, actual);
+        }
+    }
+
+    @memset(nb_flags, 0);
+    @memset(packed_flags, 0);
+    nbfMarkSignificant(nb_flags, nb_stride, 3, 4, false);
+    packedT1MarkSignificant(packed_flags, width, height, 3, 4, false);
+    try std.testing.expect(!packedT1CanUseRunStripeChecked(packed_flags, width, nb_flags, nb_stride, 3, 0, .{}));
+    try std.testing.expect(packedT1CanUseRunStripeChecked(
+        packed_flags,
+        width,
+        nb_flags,
+        nb_stride,
+        3,
+        0,
+        .{ .vertical_causal = true },
+    ));
+}
+
+test "EBCOT packed T1 clear visited matches u16 visit clear" {
+    const allocator = std.testing.allocator;
+    const width = 6;
+    const height = 8;
+    const nb_stride = nbfStride(width);
+    const nb_flags = try allocator.alloc(u16, nb_stride * (height + 2));
+    defer allocator.free(nb_flags);
+    @memset(nb_flags, 0);
+
+    const packed_flags = try allocator.alloc(u32, width * pcfStripeCount(height));
+    defer allocator.free(packed_flags);
+    @memset(packed_flags, 0);
+
+    nbfMarkSignificant(nb_flags, nb_stride, 1, 1, true);
+    nbfMarkSignificant(nb_flags, nb_stride, 4, 6, false);
+    packedT1MarkSignificant(packed_flags, width, height, 1, 1, true);
+    packedT1MarkSignificant(packed_flags, width, height, 4, 6, false);
+
+    const visited = [_]struct { x: usize, y: usize }{
+        .{ .x = 0, .y = 0 },
+        .{ .x = 1, .y = 1 },
+        .{ .x = 3, .y = 4 },
+        .{ .x = 5, .y = 7 },
+    };
+    for (visited) |sample| {
+        nb_flags[nbfIndex(nb_stride, sample.x, sample.y)] |= nbf_visit;
+        packedT1MarkVisited(packed_flags, width, sample.x, sample.y);
+    }
+
+    nbfClearVisit(nb_flags);
+    packedT1ClearVisited(packed_flags);
+
+    const rebuilt_flags = try allocator.alloc(u32, width * pcfStripeCount(height));
+    defer allocator.free(rebuilt_flags);
+    packedT1RebuildFromNbf(rebuilt_flags, nb_flags, nb_stride, width, height);
+    try std.testing.expectEqualSlices(u32, rebuilt_flags, packed_flags);
+}
+
 const stats_lanes = simd.i32_lanes;
 const StatsVector = @Vector(stats_lanes, i32);
 const StatsMaskVector = @Vector(stats_lanes, u32);
@@ -403,6 +1330,7 @@ pub const DirectBlockScratch = struct {
     segments: std.ArrayList(SegmentSpan) = .empty,
     nb_flags: std.ArrayList(u16) = .empty,
     nb_stride: usize = 0,
+    packed_t1_flags: std.ArrayList(u32) = .empty,
     encoder: ?mq.Encoder = null,
     iso_encoder: ?mq_iso.Encoder = null,
     raw_writer: ?RawBitWriter = null,
@@ -421,6 +1349,7 @@ pub const DirectBlockScratch = struct {
         self.bytes.deinit(self.allocator);
         self.segments.deinit(self.allocator);
         self.nb_flags.deinit(self.allocator);
+        self.packed_t1_flags.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -450,6 +1379,9 @@ pub const DirectBlockScratch = struct {
         self.height = height;
         self.nb_stride = nbfStride(width);
         try self.nb_flags.resize(self.allocator, try std.math.mul(usize, self.nb_stride, height + 2));
+        if (comptime maintain_packed_t1_context_flags) {
+            try self.packed_t1_flags.resize(self.allocator, try std.math.mul(usize, width, pcfStripeCount(height)));
+        }
     }
 
     fn mqEncoder(self: *DirectBlockScratch) !*mq.Encoder {
@@ -469,6 +1401,7 @@ pub const DecodeBlockScratch = struct {
     height: usize = 0,
     nb_flags: std.ArrayList(u16) = .empty,
     nb_stride: usize = 0,
+    packed_t1_flags: std.ArrayList(u32) = .empty,
     iso_decoder: ?mq_iso.Decoder = null,
 
     pub fn init(allocator: std.mem.Allocator) DecodeBlockScratch {
@@ -481,6 +1414,7 @@ pub const DecodeBlockScratch = struct {
         self.significant_words.deinit(self.allocator);
         self.coeffs.deinit(self.allocator);
         self.nb_flags.deinit(self.allocator);
+        self.packed_t1_flags.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -507,6 +1441,9 @@ pub const DecodeBlockScratch = struct {
         self.height = height;
         self.nb_stride = nbfStride(width);
         try self.nb_flags.resize(self.allocator, try std.math.mul(usize, self.nb_stride, height + 2));
+        if (comptime maintain_packed_t1_context_flags) {
+            try self.packed_t1_flags.resize(self.allocator, try std.math.mul(usize, width, pcfStripeCount(height)));
+        }
     }
 };
 
@@ -842,6 +1779,7 @@ pub fn encodeCodeBlockSegmentDirectScratchWithStyle(
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
 
     var pass_index: u16 = 0;
     var bitplane_index = stats.bitplanes;
@@ -1697,6 +2635,7 @@ pub fn decodeCodeBlockSegmentCoefficientsIsoMqScratchWithStyle(
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
     var pass_index: u16 = 0;
@@ -1768,6 +2707,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
     const max_symbols = try inferredMaxSymbols(area, pass_count, bitplanes, style);
@@ -1780,7 +2720,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     while (bitplane_index > 0 and pass_index < pass_count) {
         bitplane_index -= 1;
         const bitplane: u8 = @intCast(bitplane_index);
-        nbfClearVisit(scratch.nb_flags.items);
+        decodeClearNbfVisit(scratch);
 
         if (bitplane == bitplanes - 1) {
             resetInferredContinuousPassContexts(style, &decoder, pass_index);
@@ -1835,6 +2775,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
     const decoder = try scratch.isoMqDecoder(bytes);
@@ -1845,7 +2786,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
     while (bitplane_index > 0 and pass_index < pass_count) {
         bitplane_index -= 1;
         const bitplane: u8 = @intCast(bitplane_index);
-        nbfClearVisit(scratch.nb_flags.items);
+        decodeClearNbfVisit(scratch);
 
         if (bitplane == bitplanes - 1) {
             resetInferredContinuousPassContexts(style, decoder, pass_index);
@@ -1940,6 +2881,7 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
     var mq_decoder: ?*mq_iso.Decoder = null;
@@ -1955,7 +2897,7 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
     while (bitplane_index > 0 and pass_index < pass_count) {
         bitplane_index -= 1;
         const bitplane: u8 = @intCast(bitplane_index);
-        nbfClearVisit(scratch.nb_flags.items);
+        decodeClearNbfVisit(scratch);
 
         const kinds: [3]PassKind = if (bitplane == bitplanes - 1)
             .{ .cleanup, .cleanup, .cleanup }
@@ -2046,10 +2988,10 @@ fn decodeSignificancePassRaw(
                     const y = stripe_y + dy;
                     const sample_flags_index = p;
                     p += nbs;
-                    const causal = style.vertical_causal and dy == 3;
-                    const f = if (causal) flags[sample_flags_index] & nbf_causal_mask else flags[sample_flags_index];
-                    if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                    const decision = decodeT1Decision(scratch, x, y, style);
+                    if (!decision.significance_candidate) continue;
                     flags[sample_flags_index] |= nbf_visit;
+                    decodeMarkPackedT1Visited(scratch, x, y);
                     if (reader.readBit()) {
                         const negative = reader.readBit();
                         markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
@@ -2066,7 +3008,6 @@ fn decodeRefinementPassRaw(
     bitplane: u8,
     style: CodeBlockStyle,
 ) !void {
-    _ = style;
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
     var stripe_y: usize = 0;
@@ -2088,10 +3029,11 @@ fn decodeRefinementPassRaw(
                     const sample_coeff_index = coeff_index;
                     p += nbs;
                     coeff_index += scratch.width;
-                    const f = flags[sample_flags_index];
-                    if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+                    const decision = decodeT1Decision(scratch, x, stripe_y + dy, style);
+                    if (!decision.refinement_candidate) continue;
                     const bit = reader.readBit();
                     flags[sample_flags_index] |= nbf_refine;
+                    decodeMarkPackedT1Refined(scratch, x, stripe_y + dy);
                     if (bit) addMagnitudeBit(scratch, sample_coeff_index, bitplane);
                 }
             }
@@ -2168,6 +3110,7 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
     @memset(scratch.coeffs.items, 0);
 
     const expected_passes = expectedCodingPasses(segment.bitplanes);
@@ -2467,7 +3410,6 @@ fn decodeSignificancePassInferred(
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    const band: usize = @intFromEnum(style.band_kind);
     var symbol_count: usize = 0;
 
     var stripe_y: usize = 0;
@@ -2488,17 +3430,16 @@ fn decodeSignificancePassInferred(
                 while (dy < stripe_height) : (dy += 1) {
                     const y = stripe_y + dy;
                     const p = nbfIndex(nbs, x, y);
-                    const causal = style.vertical_causal and dy == 3;
-                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                    if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                    const decision = decodeT1Decision(scratch, x, y, style);
+                    if (!decision.significance_candidate) continue;
                     flags[p] |= nbf_visit;
-                    const bit = try decoder.read(mqContextIndex(nbf_zc_lut[band][f & nbf_sig8]));
+                    decodeMarkPackedT1Visited(scratch, x, y);
+                    const bit = try decoder.read(mqContextIndex(decision.zero_context));
                     symbol_count += 1;
                     if (bit) {
-                        const sign = nbf_sc_lut[nbfScIndex(f)];
-                        const sign_bit = try decoder.read(mqContextIndex(sign.context));
+                        const sign_bit = try decoder.read(mqContextIndex(decision.sign.context));
                         symbol_count += 1;
-                        const negative = sign_bit != sign.predicted_negative;
+                        const negative = sign_bit != decision.sign.predicted_negative;
                         markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
                     }
                 }
@@ -2646,18 +3587,12 @@ fn decodeRefinementPassInferred(
                 while (dy < stripe_height) : (dy += 1) {
                     const y = stripe_y + dy;
                     const p = nbfIndex(nbs, x, y);
-                    const causal = style.vertical_causal and dy == 3;
-                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                    if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
-                    const context: Context = if ((f & nbf_refine) != 0)
-                        .refinement_later
-                    else if ((f & nbf_sig8) != 0)
-                        .refinement_neighbor
-                    else
-                        .refinement;
-                    const bit = try decoder.read(mqContextIndex(context));
+                    const decision = decodeT1Decision(scratch, x, y, style);
+                    if (!decision.refinement_candidate) continue;
+                    const bit = try decoder.read(mqContextIndex(decision.refinement_context));
                     symbol_count += 1;
                     flags[p] |= nbf_refine;
+                    decodeMarkPackedT1Refined(scratch, x, y);
                     if (bit) addMagnitudeBit(scratch, localIndex(scratch.width, x, y), bitplane);
                 }
             }
@@ -2827,8 +3762,6 @@ fn decodeCleanupPassInferred(
     bitplane: u8,
     style: CodeBlockStyle,
 ) !usize {
-    const flags = scratch.nb_flags.items;
-    const nbs = scratch.nb_stride;
     var symbol_count: usize = 0;
 
     var stripe_y: usize = 0;
@@ -2836,7 +3769,7 @@ fn decodeCleanupPassInferred(
         const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
         var x: usize = 0;
         while (x < scratch.width) : (x += 1) {
-            if (stripe_height == 4 and nbfCanUseRunStripe(flags, nbs, x, stripe_y, style)) {
+            if (stripe_height == 4 and decodeCanUseRunStripeFast(scratch, x, stripe_y, style)) {
                 const agg = try decoder.read(mqContextIndex(.cleanup_aggregation));
                 symbol_count += 1;
                 if (!agg) continue;
@@ -2847,24 +3780,21 @@ fn decodeCleanupPassInferred(
 
                 {
                     const y = stripe_y + runlen;
-                    const p = nbfIndex(nbs, x, y);
-                    const causal = style.vertical_causal and runlen == 3;
-                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                    const sign = nbf_sc_lut[nbfScIndex(f)];
-                    const sign_bit = try decoder.read(mqContextIndex(sign.context));
+                    const decision = decodeT1Decision(scratch, x, y, style);
+                    const sign_bit = try decoder.read(mqContextIndex(decision.sign.context));
                     symbol_count += 1;
-                    const negative = sign_bit != sign.predicted_negative;
+                    const negative = sign_bit != decision.sign.predicted_negative;
                     markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
                 }
 
                 var dy = runlen + 1;
                 while (dy < 4) : (dy += 1) {
-                    symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style, dy == 3);
+                    symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
                 }
             } else {
                 var dy: usize = 0;
                 while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style, dy == 3);
+                    symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
                 }
             }
         }
@@ -3034,21 +3964,16 @@ fn nbfDecodeCleanupSample(
     y: usize,
     bitplane: u8,
     style: CodeBlockStyle,
-    causal_row: bool,
 ) !usize {
-    const flags = scratch.nb_flags.items;
-    const nbs = scratch.nb_stride;
-    const p = nbfIndex(nbs, x, y);
-    const causal = style.vertical_causal and causal_row;
-    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-    if ((f & (nbf_sig_self | nbf_visit)) != 0) return 0;
-    const bit = try decoder.read(mqContextIndex(nbf_zc_lut[@intFromEnum(style.band_kind)][f & nbf_sig8]));
+    const sample = scratch.nb_flags.items[nbfIndex(scratch.nb_stride, x, y)];
+    if ((sample & (nbf_sig_self | nbf_visit)) != 0) return 0;
+    const decision = decodeT1Decision(scratch, x, y, style);
+    const bit = try decoder.read(mqContextIndex(decision.zero_context));
     var symbol_count: usize = 1;
     if (bit) {
-        const sign = nbf_sc_lut[nbfScIndex(f)];
-        const sign_bit = try decoder.read(mqContextIndex(sign.context));
+        const sign_bit = try decoder.read(mqContextIndex(decision.sign.context));
         symbol_count += 1;
-        const negative = sign_bit != sign.predicted_negative;
+        const negative = sign_bit != decision.sign.predicted_negative;
         markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
     }
     return symbol_count;
@@ -3355,6 +4280,7 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
     try scratch.ensureBlockState(rect.width, rect.height, area);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
 
     try scratch.bytes.ensureUnusedCapacity(scratch.allocator, estimatedIsoMqByteCapacity(area, bitplanes));
     const iso = try scratch.isoMqEncoder();
@@ -3374,7 +4300,7 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
     while (bitplane_index > 0) {
         bitplane_index -= 1;
         const bitplane: u8 = @intCast(bitplane_index);
-        nbfClearVisit(scratch.nb_flags.items);
+        directClearNbfVisit(scratch);
 
         const kinds: [3]PassKind = if (bitplane == bitplanes - 1)
             .{ .cleanup, .cleanup, .cleanup }
@@ -3612,7 +4538,6 @@ fn emitDirectIsoSignificancePass(
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    const band: usize = @intFromEnum(style.band_kind);
     var symbol_count: usize = 0;
     var stripe_y: usize = 0;
     while (stripe_y < rect.height) : (stripe_y += 4) {
@@ -3632,15 +4557,15 @@ fn emitDirectIsoSignificancePass(
                 while (dy < stripe_height) : (dy += 1) {
                     const y = stripe_y + dy;
                     const p = nbfIndex(nbs, x, y);
-                    const causal = style.vertical_causal and dy == 3;
-                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                    if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                    const decision = directT1Decision(scratch, x, y, style);
+                    if (!decision.significance_candidate) continue;
                     flags[p] |= nbf_visit;
+                    directMarkPackedT1Visited(scratch, x, y);
                     const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
                     if (raw) {
                         try encoder.writeBit(bit);
                     } else {
-                        try encoder.write(mqContextIndex(nbf_zc_lut[band][f & nbf_sig8]), bit);
+                        try encoder.write(mqContextIndex(decision.zero_context), bit);
                     }
                     symbol_count += 1;
                     if (bit) {
@@ -3648,11 +4573,11 @@ fn emitDirectIsoSignificancePass(
                         if (raw) {
                             try encoder.writeBit(negative);
                         } else {
-                            const sign = nbf_sc_lut[nbfScIndex(f)];
-                            try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+                            try encoder.write(mqContextIndex(decision.sign.context), negative != decision.sign.predicted_negative);
                         }
                         symbol_count += 1;
                         nbfMarkSignificant(flags, nbs, x, y, negative);
+                        directMarkPackedT1Significant(scratch, x, y, negative);
                         setSignificantRow(scratch, x, y);
                     }
                 }
@@ -3692,23 +4617,17 @@ fn emitDirectIsoRefinementPass(
                 while (dy < stripe_height) : (dy += 1) {
                     const y = stripe_y + dy;
                     const p = nbfIndex(nbs, x, y);
-                    const causal = style.vertical_causal and dy == 3;
-                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                    if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+                    const decision = directT1Decision(scratch, x, y, style);
+                    if (!decision.refinement_candidate) continue;
                     const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
                     if (raw) {
                         try encoder.writeBit(bit);
                     } else {
-                        const context: Context = if ((f & nbf_refine) != 0)
-                            .refinement_later
-                        else if ((f & nbf_sig8) != 0)
-                            .refinement_neighbor
-                        else
-                            .refinement;
-                        try encoder.write(mqContextIndex(context), bit);
+                        try encoder.write(mqContextIndex(decision.refinement_context), bit);
                     }
                     symbol_count += 1;
                     flags[p] |= nbf_refine;
+                    directMarkPackedT1Refined(scratch, x, y);
                 }
             }
         }
@@ -3733,7 +4652,7 @@ fn emitDirectIsoCleanupPass(
         const stripe_height = @min(@as(usize, 4), rect.height - stripe_y);
         var x: usize = 0;
         while (x < rect.width) : (x += 1) {
-            if (stripe_height == 4 and nbfCanUseRunStripe(flags, nbs, x, stripe_y, style)) {
+            if (stripe_height == 4 and directCanUseRunStripeFast(scratch, x, stripe_y, style)) {
                 const runlen = cleanupRunLength(plane, stride, rect, x, stripe_y, bitplane);
                 try encoder.write(mqContextIndex(.cleanup_aggregation), runlen != 4);
                 symbol_count += 1;
@@ -3744,25 +4663,23 @@ fn emitDirectIsoCleanupPass(
 
                 {
                     const y = stripe_y + runlen;
-                    const p = nbfIndex(nbs, x, y);
-                    const causal = style.vertical_causal and runlen == 3;
-                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                    const decision = directT1Decision(scratch, x, y, style);
                     const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
-                    const sign = nbf_sc_lut[nbfScIndex(f)];
-                    try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+                    try encoder.write(mqContextIndex(decision.sign.context), negative != decision.sign.predicted_negative);
                     symbol_count += 1;
                     nbfMarkSignificant(flags, nbs, x, y, negative);
+                    directMarkPackedT1Significant(scratch, x, y, negative);
                     setSignificantRow(scratch, x, y);
                 }
 
                 var dy = runlen + 1;
                 while (dy < 4) : (dy += 1) {
-                    symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style, dy == 3);
+                    symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
                 }
             } else {
                 var dy: usize = 0;
                 while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style, dy == 3);
+                    symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
                 }
             }
         }
@@ -3796,23 +4713,21 @@ fn nbfEmitCleanupSample(
     y: usize,
     bitplane: u8,
     style: CodeBlockStyle,
-    causal_row: bool,
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
     const p = nbfIndex(nbs, x, y);
-    const causal = style.vertical_causal and causal_row;
-    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-    if ((f & (nbf_sig_self | nbf_visit)) != 0) return 0;
+    if ((flags[p] & (nbf_sig_self | nbf_visit)) != 0) return 0;
+    const decision = directT1Decision(scratch, x, y, style);
     const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
-    try encoder.write(mqContextIndex(nbf_zc_lut[@intFromEnum(style.band_kind)][f & nbf_sig8]), bit);
+    try encoder.write(mqContextIndex(decision.zero_context), bit);
     var symbol_count: usize = 1;
     if (bit) {
         const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
-        const sign = nbf_sc_lut[nbfScIndex(f)];
-        try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+        try encoder.write(mqContextIndex(decision.sign.context), negative != decision.sign.predicted_negative);
         symbol_count += 1;
         nbfMarkSignificant(flags, nbs, x, y, negative);
+        directMarkPackedT1Significant(scratch, x, y, negative);
         setSignificantRow(scratch, x, y);
     }
     return symbol_count;
@@ -4329,6 +5244,7 @@ fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitp
     setFlag(scratch.flags.items, index, .became_significant);
     setSignificantRowDecode(scratch, x, y);
     nbfMarkSignificant(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
+    decodeMarkPackedT1Significant(scratch, x, y, negative);
 }
 
 fn markDecodedSignificantNbf(scratch: *DecodeBlockScratch, x: usize, y: usize, bitplane: u8, negative: bool) void {
@@ -4337,6 +5253,7 @@ fn markDecodedSignificantNbf(scratch: *DecodeBlockScratch, x: usize, y: usize, b
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
     nbfMarkSignificant(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
+    decodeMarkPackedT1Significant(scratch, x, y, negative);
 }
 
 fn addMagnitudeBit(scratch: *DecodeBlockScratch, index: usize, bitplane: u8) void {
