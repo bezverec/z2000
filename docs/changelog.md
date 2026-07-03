@@ -58,6 +58,9 @@ entries are grouped by development milestone rather than semantic version.
 - Added a public TIFF writer/reader roundtrip test for the optimized 8-bit and
   16-bit raster paths, plus negative coverage that the 8-bit SIMD narrowing
   path rejects out-of-range `u16` samples instead of truncating them.
+- Tightened SIMD coverage so the TIFF 8-bit overflow test enters the vector
+  narrowing branch and the ICT roundtrip test exercises vector-body plus scalar
+  tail paths across NEON, AVX2, and AVX-512 lane widths.
 - Tightened the TIFF raster append helper to restore the previous output
   length on validation failure.
 - Added the first ISO MQ decoder fast-path slice: `mq_iso.Decoder` now exposes

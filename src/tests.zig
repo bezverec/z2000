@@ -2269,12 +2269,19 @@ test "TIFF writer rejects out-of-range 8-bit samples before narrowing" {
     var path_buffer: [96]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/invalid-rgb8.tif", .{tmp.sub_path});
 
-    const samples = try allocator.dupe(u16, &.{ 0, 1, 256 });
+    const samples = try allocator.dupe(u16, &.{
+        0,  1,   2,
+        3,  256, 5,
+        6,  7,   8,
+        9,  10,  11,
+        12, 13,  14,
+        15, 16,  17,
+    });
     defer allocator.free(samples);
 
     const rgb = image.RgbImage{
         .allocator = allocator,
-        .width = 1,
+        .width = 6,
         .height = 1,
         .bit_depth = 8,
         .samples = samples,
@@ -2745,20 +2752,18 @@ test "RCT transform roundtrips vector block and tail" {
 
 test "ICT transform roundtrips vector block and tail within tolerance" {
     const allocator = std.testing.allocator;
-    const samples = try allocator.dupe(u16, &.{
-        0,   1,   2,
-        3,   5,   8,
-        13,  21,  34,
-        55,  89,  144,
-        233, 144, 55,
-        17,  203, 91,
-        250, 12,  127,
-    });
+    const width = 20;
+    const samples = try allocator.alloc(u16, width * 3);
     defer allocator.free(samples);
+    for (0..width) |x| {
+        samples[x * 3 + 0] = @intCast((x * 13 + 7) % 256);
+        samples[x * 3 + 1] = @intCast((x * 29 + 11) % 256);
+        samples[x * 3 + 2] = @intCast((x * 47 + 19) % 256);
+    }
 
     const rgb = image.RgbImage{
         .allocator = allocator,
-        .width = 7,
+        .width = width,
         .height = 1,
         .bit_depth = 8,
         .samples = samples,
