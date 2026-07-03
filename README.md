@@ -243,6 +243,60 @@ payload behavior is implemented.
   stripes when their local significance window is empty. This keeps the code
   on the existing row-word model while moving toward the packed-column flag
   layout used by mature JPEG2000 codecs.
+- The earlier RLC-only packed-column cleanup-run cache was removed after it
+  regressed the 2048 RGB lossless profile. The remaining packed scaffold uses
+  the full OpenJPEG-style T1 context-word layout, while the active ReleaseFast
+  path stays on `u16` neighborhood words until the shared ZC/SC/RLC path is
+  ready to benchmark.
+- The packed-column scaffold mirrors OpenJPEG's `3 * ci`
+  sigma/sign-window layout and has unit tests proving zero-coding and
+  sign-coding context parity with the current u16 neighborhood flags.
+- PI/MU bits are covered as well, so the scaffold now proves significance-pass
+  membership, refinement-pass membership, and refinement context parity before
+  the packed layout is enabled on the hot path.
+- Incremental packed-word updates are covered against full rebuilds across
+  block edges and 4-row stripe boundaries, including sigma, CHI, PI, and MU
+  bits. This keeps the next ZC/SC hot-path migration testable before flipping
+  any runtime guard.
+- Packed ZC, SC, significance, and refinement helper contexts are tested
+  against the existing `u16` flag path for all subbands and vertical-causal
+  rows, giving the eventual hot-path switch a narrow equivalence surface.
+- The full packed T1 context-word buffer has its own disabled guard, so ZC/SC
+  migration can proceed without reviving the measured-slower RLC-only cache.
+- Packed T1 decision helpers now centralize ZC/SC/significance/refinement
+  parity checks and include dense edge/stripe-boundary stress coverage.
+- The disabled packed T1 context path is wired into the same visit, refine,
+  significance, and per-bitplane visit-clear lifecycle as `nb_flags`, with
+  unit coverage for PI-bit clearing against a full rebuild.
+- NBF/ISO significance, refinement, and cleanup loops now select
+  ZC/SC/refinement decisions through the shared T1 decision helpers. With the
+  packed guard disabled this still uses the `u16` path; with it enabled, debug
+  builds assert packed-vs-`u16` parity at the loop boundary.
+- Debug and ReleaseSafe builds now maintain the packed T1 context buffer as a
+  shadow state and assert decision parity in the normal T1 loops, while
+  ReleaseFast keeps the shadow path compiled out unless explicitly enabled.
+- The experimental packed T1 hot path can be built with
+  `zig build -Dpacked-t1-context-flags=true`; it is intended for correctness
+  checks and comparative benchmarks before becoming the default.
+- Cleanup-run eligibility has a parity-checked helper over the full
+  OpenJPEG-style packed T1 words, including PI blocking and vertical-causal
+  stripe-boundary behavior.
+- Encode/decode cleanup loops now route their future packed cleanup-run choice
+  through scratch-aware helpers: default builds still use `u16` flags, while a
+  future packed T1 guard flip will share the same context-word buffer used for
+  ZC/SC/refinement decisions.
+- Decode cleanup-run sign coding now also goes through the shared T1 decision
+  helper after the runlength, removing the last local sign-context calculation
+  from that path and extending packed shadow parity to the RLC decode corner.
+- Debug and ReleaseSafe cleanup-run eligibility now assert the full packed T1
+  context-word result against the active `u16` decision in the real encode and
+  decode RLC loops. ReleaseFast still compiles this shadow assertion out unless
+  the packed T1 guard is explicitly enabled.
+- Cleanup sample helpers now rely on the shared T1 decision helpers for
+  vertical-causal handling instead of carrying a separate `causal_row` argument.
+- The obsolete RLC-only cache and scratch storage have been removed, leaving a
+  single packed T1 migration target and fewer inactive branches in the encode
+  and decode cleanup paths.
 - Continuous ISO/NBF decode no longer mirrors significant samples into the
   legacy per-sample `u8` flag array; it updates only coefficients,
   row-significance words, and packed neighborhood flags.
@@ -329,14 +383,28 @@ example:
 
 Current local baseline on macOS/Apple M4 for a synthetic uncompressed RGB TIFF
 2048x2048, archival lossless RPCL profile, BYPASS, SOP/EPH/TLM, and ten
-threads:
+threads (`RUNS=3 THREADS=10 sh tools/bench_compare.sh
+.bench/macos-analysis/rgb-2048.tif`, 2026-07-03):
 
-- `z2000 tiff-to-jp2`: 180.3 ms mean, 6,636,048 B output.
-- `grk_compress`: 106.7 ms mean, 6,635,206 B output.
-- `opj_compress`: 103.1 ms mean, 6,635,203 B output.
-- `z2000 decode-temp-jp2`: 261.9 ms mean at ten threads.
-- `grk_decompress`: 77.8 ms mean on its own file, 77.1 ms on z2000 output.
-- `opj_decompress`: 117.5 ms mean on its own file, 116.4 ms on z2000 output.
+- `z2000 tiff-to-jp2 --threads 10`: 169.3 ms mean, 6,636,048 B output.
+- `z2000 tiff-to-jp2` single-thread: 602.6 ms mean.
+- `grk_compress`: 109.9 ms mean, 6,635,206 B output.
+- `opj_compress`: 419.8 ms mean, 6,635,203 B output.
+- `z2000 decode-temp-jp2 --threads 10`: 185.5 ms mean.
+- `z2000 decode-temp-jp2` single-thread: 620.1 ms mean.
+- `grk_decompress`: 78.0 ms mean on its own file, 77.8 ms on z2000 output.
+- `opj_decompress`: 442.6 ms mean on its own file, 444.6 ms on z2000 output.
+
+`tiffcmp` confirms the z2000 single-thread/ten-thread decode and
+Grok/OpenJPEG decodes of z2000 output are pixel-lossless; external decoders may
+add TIFF orientation metadata or different strip layouts. The optional Python
+pixel checker was skipped in this run because Pillow was not installed.
+
+The same benchmark script accepts `ZIG_BUILD_FLAGS`; for example
+`ZIG_BUILD_FLAGS="-Dpacked-t1-context-flags=true"` builds the experimental
+packed T1 hot path before timing. On the same input that path is currently a
+regression despite producing lossless output: z2000 encode t10 241.9 ms,
+decode t10 226.3 ms, encode t1 918.1 ms, and decode t1 837.2 ms.
 
 The encode comparison is now much fairer for the narrow archival profile:
 z2000 writes real strict RPCL packets and EBCOT/MQ payloads with byte size close
@@ -453,29 +521,30 @@ Features:
 3. Distortion-aware rate allocation (PCRD-style) so early quality layers
    carry more PSNR than the current byte-even/ratio split.
 
-Performance (current lossless encode gap vs OpenJPEG/Grok ~1.7x on the M4
-2048x2048 archival benchmark; decode gap is larger and should come first;
-ordered by expected win per effort):
+Performance (current lossless encode is close to Grok on the M4 benchmark, but
+decode is still the larger gap; ordered by expected win per effort):
 
-1. Continue MQ coder fast-path work: the direct T1 path now finishes ISO-MQ
-   and raw BYPASS codeword segments into the reusable payload buffer and has
-   an explicit MPS-without-renorm branch. BYTEOUT also keeps the active sink
-   local through marker stuffing and carry propagation. Remaining work is to
-   keep decode-side state/cache behavior tight.
-2. Packed column flag words (opj 2.x layout): one u32 per 4-sample column
-   carrying the whole 3x6 sigma window plus per-sample visit/refine, so a
-   column costs one load instead of four u16 loads; enables single-word RLC
-   and membership tests. Larger rewrite of the flag-words layer.
-3. Block/precinct-level thread pool: component-level parallelism caps at 3x;
-   a work-stealing pool over code-blocks (encode already splits ranges,
-   decode does not) should push 4-8 core scaling toward linear, including
-   the serial packet-assembly tail.
-4. DWT 5/3 horizontal pass SIMD (vertical is vectorized; horizontal lifting
-   is scalar) plus cache blocking - DWT is ~15% of encode after the T1 work.
-5. Word-granular stripe skipping: skip 64-column chunks inside a stripe via
-   the existing significance row masks, not just whole stripes; helps smooth
-   imagery more than the noise benchmark shows.
-6. Lossy path SIMD: dequant + float 9/7 inverse currently scalar per band;
+1. Decode-side T1/MQ instrumentation: add optional counters/timers for
+   significance, refinement, cleanup/RLC, raw BYPASS, and MQ read time. The
+   next optimization should be driven by where the 185 ms strict decode spends
+   time, not by another blind packed-flag rewrite.
+2. MQ decoder fast path: keep the MPS-without-renormalization branch hot,
+   reduce byte-in/marker-path work, and keep context index checks out of the
+   ReleaseFast loop while preserving debug assertions.
+3. Block/precinct-level decode scheduling: component-level parallelism still
+   leaves a large decode gap versus Grok. Audit the serial packet/catalog walk,
+   code-block job partitioning, final scatter, and per-worker scratch reuse.
+4. Packed T1 retry only after profiling: the `-Dpacked-t1-context-flags=true`
+   build is correct but currently slower (about 242 ms encode and 226 ms decode
+   at ten threads). Future experiments should reduce maintenance cost first:
+   try RLC-only reads from the full packed word, lazy stripe rebuilds, or
+   partial ZC/SC lookup without maintaining every MU/PI/CHI bit eagerly.
+5. DWT 5/3 horizontal SIMD and cache blocking: the vertical path is already
+   vectorized, while horizontal lifting remains scalar. This is likely a clean
+   encode/decode win after the T1 decode bottleneck is better understood.
+6. PCRD-style rate allocation: not primarily a speed item, but necessary for
+   fair access-copy comparisons and smaller quality-layer outputs.
+7. Lossy path SIMD: dequant + float 9/7 inverse currently scalar per band;
    NEON f32x4 lifting mirrors the integer path.
-7. Allocator: per-worker arenas for shadow-block payload copies to cut the
+8. Allocator: per-worker arenas for shadow-block payload copies to cut the
    remaining allocator churn and peak RSS on large tiles.

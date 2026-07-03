@@ -7,6 +7,7 @@ set -eu
 INPUT=${1:-bench-rgb-2048.tif}
 RUNS=${RUNS:-8}
 THREADS=${Z2000_THREADS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}
+ZIG_BUILD_FLAGS=${ZIG_BUILD_FLAGS:-}
 PRECINCTS='[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]'
 
 if [ ! -f "$INPUT" ]; then
@@ -17,10 +18,10 @@ for tool in hyperfine grk_compress grk_decompress opj_compress opj_decompress; d
   command -v "$tool" >/dev/null 2>&1 || { echo "missing: $tool" >&2; exit 1; }
 done
 
-zig build -Doptimize=ReleaseFast >/dev/null
+zig build -Doptimize=ReleaseFast $ZIG_BUILD_FLAGS >/dev/null
 Z=./zig-out/bin/z2000
 
-echo "== host: $(uname -m), threads=$THREADS, input=$INPUT =="
+echo "== host: $(uname -m), threads=$THREADS, input=$INPUT, zig_flags=${ZIG_BUILD_FLAGS:-default} =="
 
 echo
 echo "== ENCODE (archival profile parity: RPCL, 6 res, precincts, 64x64, SOP+EPH+TLM, bypass) =="
