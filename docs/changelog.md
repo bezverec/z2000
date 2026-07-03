@@ -178,6 +178,23 @@ entries are grouped by development milestone rather than semantic version.
   RGB lossless JP2 target is now estimated at 83/100 and the broader Part 1
   codec family at 37/100. valid2000 still reports ICC/PLT and access-profile
   policy failures, so it remains a gate rather than a pass.
+- Started the MQ fast-path optimization: direct ISO-MQ block encoding now
+  finalizes codeword segments into the reusable per-worker payload buffer
+  instead of returning a temporary owned slice. Raw BYPASS segments now use
+  the same direct payload sink, MQ BYTEOUT keeps that active sink local through
+  carry/marker handling, and the common MPS/no-renorm branch is split out in
+  the ISO MQ encoder/decoder.
+- Tightened continuous ISO/NBF decode state updates so inferred and BYPASS
+  decode paths stop writing legacy per-sample `u8` flags when the packed
+  neighborhood flags already carry the required significance/refinement state.
+- Replaced generic scan-iterator use in raw BYPASS significance/refinement
+  decode with direct stripe/x/dy loops matching the inferred ISO/NBF pass
+  walkers, advancing packed-flag and coefficient indices incrementally inside
+  each stripe column.
+- Vectorized packed-neighborhood visit-bit clearing with the portable SIMD
+  lane policy already used elsewhere in T1 scratch cleanup.
+- Removed per-sample parity branches from integer inverse 5/3 unpacking by
+  splitting low/high samples into separate even/odd loops for rows and columns.
 
 ### Documentation
 
