@@ -5830,6 +5830,20 @@ test "strict metadata rejects skipped PLT segment indexes without sidecar" {
     );
 }
 
+test "strict metadata rejects empty PLT segment without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    const corrupted = try replaceFirstPltWithEmptySegmentForTest(allocator, bytes);
+    defer allocator.free(corrupted);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+}
+
 test "strict metadata accepts tile-part COM marker without sidecar" {
     const allocator = std.testing.allocator;
     const bytes = try encodeStrictTilePartMetadataFixture(allocator);
@@ -5951,6 +5965,20 @@ test "strict metadata rejects skipped TLM segment indexes without sidecar" {
         return error.MissingMarker;
     }
     corrupted[second_tlm + 4] = 2;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+}
+
+test "strict metadata rejects empty TLM segment without sidecar" {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeStrictTilePartMetadataFixture(allocator);
+    defer allocator.free(bytes);
+
+    const corrupted = try replaceFirstTlmWithEmptySegmentForTest(allocator, bytes);
+    defer allocator.free(corrupted);
 
     try std.testing.expectError(
         codestream.CodestreamError.InvalidCodestream,
@@ -7757,6 +7785,23 @@ fn appendTlmSegmentForTest(
     try out.appendSlice(allocator, payload);
 }
 
+fn replaceFirstTlmWithEmptySegmentForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+    const segment_length = readU16BeTest(bytes, tlm + 2);
+    const segment_end = tlm + 2 + @as(usize, segment_length);
+    if (segment_length < 6 or segment_end > bytes.len) return error.InvalidTlm;
+
+    const segment = bytes[tlm + 4 .. segment_end];
+    const stlm = segment[1];
+
+    var out = try std.ArrayList(u8).initCapacity(allocator, bytes.len - (segment_length - 4));
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..tlm]);
+    try appendTlmSegmentForTest(allocator, &out, 0, stlm, &.{});
+    try out.appendSlice(allocator, bytes[segment_end..]);
+    return out.toOwnedSlice(allocator);
+}
+
 fn wrapTemporaryPayloadForTest(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -7884,6 +7929,34 @@ fn insertZeroLengthPacketIntoFirstPltForTest(allocator: std.mem.Allocator, bytes
     writeU16BeTest(out.items, plt + 2, plt_length + 1);
     writeU32BeTest(out.items, sot + 6, readU32BeTest(bytes, sot + 6) + 1);
     writeU32BeTest(out.items, tlm + 7, readU32BeTest(bytes, tlm + 7) + 1);
+    return out.toOwnedSlice(allocator);
+}
+
+fn replaceFirstPltWithEmptySegmentForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+    const plt = findMarker(bytes, codestream.markerValue("plt")) orelse return error.MissingMarker;
+    const plt_length = readU16BeTest(bytes, plt + 2);
+    const segment_end = plt + 2 + @as(usize, plt_length);
+    if (plt_length < 5 or segment_end > bytes.len) return error.InvalidPlt;
+
+    const old_total = 2 + @as(usize, plt_length);
+    const new_total: usize = 5;
+    if (old_total <= new_total) return error.InvalidPlt;
+    const removed: u32 = @intCast(old_total - new_total);
+
+    var out = try std.ArrayList(u8).initCapacity(allocator, bytes.len - removed);
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..plt]);
+    try appendU16BeTest(allocator, &out, codestream.markerValue("plt"));
+    try appendU16BeTest(allocator, &out, 3);
+    try out.append(allocator, 0);
+    try out.appendSlice(allocator, bytes[segment_end..]);
+
+    writeU32BeTest(out.items, sot + 6, readU32BeTest(bytes, sot + 6) - removed);
+    const tlm_length = readU16BeTest(out.items, tlm + 2);
+    if (tlm_length < 9 or out.items[tlm + 4] != 0 or out.items[tlm + 5] != 0x50) return error.InvalidTlm;
+    writeU32BeTest(out.items, tlm + 7, readU32BeTest(bytes, tlm + 7) - removed);
     return out.toOwnedSlice(allocator);
 }
 

@@ -389,6 +389,7 @@ const flag_clear_lanes = simd.i32_lanes * @sizeOf(i32);
 const FlagClearVector = @Vector(flag_clear_lanes, u8);
 const nbf_clear_lanes = simd.i32_lanes * (@sizeOf(i32) / @sizeOf(u16));
 const NbfClearVector = @Vector(nbf_clear_lanes, u16);
+const significant_word_bits = 64;
 
 pub const DirectBlockScratch = struct {
     allocator: std.mem.Allocator,
@@ -2032,20 +2033,27 @@ fn decodeSignificancePassRaw(
     while (stripe_y < scratch.height) : (stripe_y += 4) {
         const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
         var x: usize = 0;
-        while (x < scratch.width) : (x += 1) {
-            var p = nbfIndex(nbs, x, stripe_y);
-            var dy: usize = 0;
-            while (dy < stripe_height) : (dy += 1) {
-                const y = stripe_y + dy;
-                const sample_flags_index = p;
-                p += nbs;
-                const causal = style.vertical_causal and dy == 3;
-                const f = if (causal) flags[sample_flags_index] & nbf_causal_mask else flags[sample_flags_index];
-                if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
-                flags[sample_flags_index] |= nbf_visit;
-                if (reader.readBit()) {
-                    const negative = reader.readBit();
-                    markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+        while (x < scratch.width) {
+            const x_end = @min(x + significant_word_bits, scratch.width);
+            if (!stripeHasSignificanceDecodeRange(scratch, stripe_y, stripe_height, x, x_end)) {
+                x = x_end;
+                continue;
+            }
+            while (x < x_end) : (x += 1) {
+                var p = nbfIndex(nbs, x, stripe_y);
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    const y = stripe_y + dy;
+                    const sample_flags_index = p;
+                    p += nbs;
+                    const causal = style.vertical_causal and dy == 3;
+                    const f = if (causal) flags[sample_flags_index] & nbf_causal_mask else flags[sample_flags_index];
+                    if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                    flags[sample_flags_index] |= nbf_visit;
+                    if (reader.readBit()) {
+                        const negative = reader.readBit();
+                        markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+                    }
                 }
             }
         }
@@ -2065,20 +2073,27 @@ fn decodeRefinementPassRaw(
     while (stripe_y < scratch.height) : (stripe_y += 4) {
         const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
         var x: usize = 0;
-        while (x < scratch.width) : (x += 1) {
-            var p = nbfIndex(nbs, x, stripe_y);
-            var coeff_index = localIndex(scratch.width, x, stripe_y);
-            var dy: usize = 0;
-            while (dy < stripe_height) : (dy += 1) {
-                const sample_flags_index = p;
-                const sample_coeff_index = coeff_index;
-                p += nbs;
-                coeff_index += scratch.width;
-                const f = flags[sample_flags_index];
-                if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
-                const bit = reader.readBit();
-                flags[sample_flags_index] |= nbf_refine;
-                if (bit) addMagnitudeBit(scratch, sample_coeff_index, bitplane);
+        while (x < scratch.width) {
+            const x_end = @min(x + significant_word_bits, scratch.width);
+            if (!stripeRowsSignificantDecodeRange(scratch, stripe_y, stripe_height, x, x_end)) {
+                x = x_end;
+                continue;
+            }
+            while (x < x_end) : (x += 1) {
+                var p = nbfIndex(nbs, x, stripe_y);
+                var coeff_index = localIndex(scratch.width, x, stripe_y);
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    const sample_flags_index = p;
+                    const sample_coeff_index = coeff_index;
+                    p += nbs;
+                    coeff_index += scratch.width;
+                    const f = flags[sample_flags_index];
+                    if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+                    const bit = reader.readBit();
+                    flags[sample_flags_index] |= nbf_refine;
+                    if (bit) addMagnitudeBit(scratch, sample_coeff_index, bitplane);
+                }
             }
         }
     }
@@ -2397,6 +2412,25 @@ fn stripeHasSignificanceDecode(scratch: *const DecodeBlockScratch, stripe_y: usi
     return acc != 0;
 }
 
+fn stripeHasSignificanceDecodeRange(
+    scratch: *const DecodeBlockScratch,
+    stripe_y: usize,
+    stripe_height: usize,
+    x_begin: usize,
+    x_end: usize,
+) bool {
+    return stripeHasSignificanceRange(
+        scratch.significant_words.items,
+        scratch.row_words,
+        scratch.width,
+        scratch.height,
+        stripe_y,
+        stripe_height,
+        x_begin,
+        x_end,
+    );
+}
+
 fn stripeRowsSignificantDecode(scratch: *const DecodeBlockScratch, stripe_y: usize, stripe_height: usize) bool {
     var acc: u64 = 0;
     var row = stripe_y;
@@ -2405,6 +2439,24 @@ fn stripeRowsSignificantDecode(scratch: *const DecodeBlockScratch, stripe_y: usi
         for (scratch.significant_words.items[base..][0..scratch.row_words]) |word| acc |= word;
     }
     return acc != 0;
+}
+
+fn stripeRowsSignificantDecodeRange(
+    scratch: *const DecodeBlockScratch,
+    stripe_y: usize,
+    stripe_height: usize,
+    x_begin: usize,
+    x_end: usize,
+) bool {
+    return stripeRowsSignificantRange(
+        scratch.significant_words.items,
+        scratch.row_words,
+        scratch.width,
+        stripe_y,
+        stripe_height,
+        x_begin,
+        x_end,
+    );
 }
 
 fn decodeSignificancePassInferred(
@@ -2425,23 +2477,30 @@ fn decodeSignificancePassInferred(
         // means the significance pass cannot code anything in this stripe.
         if (!stripeHasSignificanceDecode(scratch, stripe_y, stripe_height)) continue;
         var x: usize = 0;
-        while (x < scratch.width) : (x += 1) {
-            var dy: usize = 0;
-            while (dy < stripe_height) : (dy += 1) {
-                const y = stripe_y + dy;
-                const p = nbfIndex(nbs, x, y);
-                const causal = style.vertical_causal and dy == 3;
-                const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
-                flags[p] |= nbf_visit;
-                const bit = try decoder.read(mqContextIndex(nbf_zc_lut[band][f & nbf_sig8]));
-                symbol_count += 1;
-                if (bit) {
-                    const sign = nbf_sc_lut[nbfScIndex(f)];
-                    const sign_bit = try decoder.read(mqContextIndex(sign.context));
+        while (x < scratch.width) {
+            const x_end = @min(x + significant_word_bits, scratch.width);
+            if (!stripeHasSignificanceDecodeRange(scratch, stripe_y, stripe_height, x, x_end)) {
+                x = x_end;
+                continue;
+            }
+            while (x < x_end) : (x += 1) {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    const y = stripe_y + dy;
+                    const p = nbfIndex(nbs, x, y);
+                    const causal = style.vertical_causal and dy == 3;
+                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                    if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                    flags[p] |= nbf_visit;
+                    const bit = try decoder.read(mqContextIndex(nbf_zc_lut[band][f & nbf_sig8]));
                     symbol_count += 1;
-                    const negative = sign_bit != sign.predicted_negative;
-                    markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+                    if (bit) {
+                        const sign = nbf_sc_lut[nbfScIndex(f)];
+                        const sign_bit = try decoder.read(mqContextIndex(sign.context));
+                        symbol_count += 1;
+                        const negative = sign_bit != sign.predicted_negative;
+                        markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+                    }
                 }
             }
         }
@@ -2576,24 +2635,31 @@ fn decodeRefinementPassInferred(
         // Nothing significant inside the stripe rows means nothing refines.
         if (!stripeRowsSignificantDecode(scratch, stripe_y, stripe_height)) continue;
         var x: usize = 0;
-        while (x < scratch.width) : (x += 1) {
-            var dy: usize = 0;
-            while (dy < stripe_height) : (dy += 1) {
-                const y = stripe_y + dy;
-                const p = nbfIndex(nbs, x, y);
-                const causal = style.vertical_causal and dy == 3;
-                const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
-                const context: Context = if ((f & nbf_refine) != 0)
-                    .refinement_later
-                else if ((f & nbf_sig8) != 0)
-                    .refinement_neighbor
-                else
-                    .refinement;
-                const bit = try decoder.read(mqContextIndex(context));
-                symbol_count += 1;
-                flags[p] |= nbf_refine;
-                if (bit) addMagnitudeBit(scratch, localIndex(scratch.width, x, y), bitplane);
+        while (x < scratch.width) {
+            const x_end = @min(x + significant_word_bits, scratch.width);
+            if (!stripeRowsSignificantDecodeRange(scratch, stripe_y, stripe_height, x, x_end)) {
+                x = x_end;
+                continue;
+            }
+            while (x < x_end) : (x += 1) {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    const y = stripe_y + dy;
+                    const p = nbfIndex(nbs, x, y);
+                    const causal = style.vertical_causal and dy == 3;
+                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                    if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+                    const context: Context = if ((f & nbf_refine) != 0)
+                        .refinement_later
+                    else if ((f & nbf_sig8) != 0)
+                        .refinement_neighbor
+                    else
+                        .refinement;
+                    const bit = try decoder.read(mqContextIndex(context));
+                    symbol_count += 1;
+                    flags[p] |= nbf_refine;
+                    if (bit) addMagnitudeBit(scratch, localIndex(scratch.width, x, y), bitplane);
+                }
             }
         }
     }
@@ -3424,6 +3490,43 @@ fn stripeHasSignificance(scratch: *const DirectBlockScratch, stripe_y: usize, st
     return acc != 0;
 }
 
+fn stripeHasSignificanceRange(
+    words: []const u64,
+    row_words: usize,
+    width: usize,
+    height: usize,
+    stripe_y: usize,
+    stripe_height: usize,
+    x_begin: usize,
+    x_end: usize,
+) bool {
+    if (x_begin >= x_end or width == 0) return false;
+    const first_row = if (stripe_y == 0) 0 else stripe_y - 1;
+    const last_row = @min(height - 1, stripe_y + stripe_height);
+    const first_x = if (x_begin == 0) 0 else x_begin - 1;
+    const last_x = @min(width - 1, x_end);
+    return significantRowsHaveRange(words, row_words, first_row, last_row, first_x, last_x);
+}
+
+fn stripeHasSignificanceRangeDirect(
+    scratch: *const DirectBlockScratch,
+    stripe_y: usize,
+    stripe_height: usize,
+    x_begin: usize,
+    x_end: usize,
+) bool {
+    return stripeHasSignificanceRange(
+        scratch.significant_words.items,
+        scratch.row_words,
+        scratch.width,
+        scratch.height,
+        stripe_y,
+        stripe_height,
+        x_begin,
+        x_end,
+    );
+}
+
 /// True when any sample inside the stripe rows themselves is significant.
 fn stripeRowsSignificant(scratch: *const DirectBlockScratch, stripe_y: usize, stripe_height: usize) bool {
     var acc: u64 = 0;
@@ -3433,6 +3536,68 @@ fn stripeRowsSignificant(scratch: *const DirectBlockScratch, stripe_y: usize, st
         for (scratch.significant_words.items[base..][0..scratch.row_words]) |word| acc |= word;
     }
     return acc != 0;
+}
+
+fn stripeRowsSignificantRange(
+    words: []const u64,
+    row_words: usize,
+    width: usize,
+    stripe_y: usize,
+    stripe_height: usize,
+    x_begin: usize,
+    x_end: usize,
+) bool {
+    if (x_begin >= x_end or width == 0) return false;
+    return significantRowsHaveRange(
+        words,
+        row_words,
+        stripe_y,
+        stripe_y + stripe_height - 1,
+        x_begin,
+        x_end - 1,
+    );
+}
+
+fn stripeRowsSignificantRangeDirect(
+    scratch: *const DirectBlockScratch,
+    stripe_y: usize,
+    stripe_height: usize,
+    x_begin: usize,
+    x_end: usize,
+) bool {
+    return stripeRowsSignificantRange(
+        scratch.significant_words.items,
+        scratch.row_words,
+        scratch.width,
+        stripe_y,
+        stripe_height,
+        x_begin,
+        x_end,
+    );
+}
+
+fn significantRowsHaveRange(
+    words: []const u64,
+    row_words: usize,
+    first_row: usize,
+    last_row: usize,
+    first_x: usize,
+    last_x: usize,
+) bool {
+    const first_word = first_x / significant_word_bits;
+    const last_word = last_x / significant_word_bits;
+    var row = first_row;
+    while (row <= last_row) : (row += 1) {
+        const row_start = row * row_words;
+        var word = first_word;
+        while (word <= last_word) : (word += 1) {
+            const word_min_x = word * significant_word_bits;
+            const lo = if (first_x > word_min_x) first_x - word_min_x else 0;
+            const hi = @min(last_x - word_min_x, significant_word_bits - 1);
+            if ((words[row_start + word] & bitRangeMask(lo, hi)) != 0) return true;
+        }
+    }
+    return false;
 }
 
 fn emitDirectIsoSignificancePass(
@@ -3456,33 +3621,40 @@ fn emitDirectIsoSignificancePass(
         // a significant neighborhood, so the whole stripe is skipped.
         if (!stripeHasSignificance(scratch, stripe_y, stripe_height)) continue;
         var x: usize = 0;
-        while (x < rect.width) : (x += 1) {
-            var dy: usize = 0;
-            while (dy < stripe_height) : (dy += 1) {
-                const y = stripe_y + dy;
-                const p = nbfIndex(nbs, x, y);
-                const causal = style.vertical_causal and dy == 3;
-                const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
-                flags[p] |= nbf_visit;
-                const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
-                if (raw) {
-                    try encoder.writeBit(bit);
-                } else {
-                    try encoder.write(mqContextIndex(nbf_zc_lut[band][f & nbf_sig8]), bit);
-                }
-                symbol_count += 1;
-                if (bit) {
-                    const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
+        while (x < rect.width) {
+            const x_end = @min(x + significant_word_bits, rect.width);
+            if (!stripeHasSignificanceRangeDirect(scratch, stripe_y, stripe_height, x, x_end)) {
+                x = x_end;
+                continue;
+            }
+            while (x < x_end) : (x += 1) {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    const y = stripe_y + dy;
+                    const p = nbfIndex(nbs, x, y);
+                    const causal = style.vertical_causal and dy == 3;
+                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                    if ((f & nbf_sig_self) != 0 or (f & nbf_sig8) == 0) continue;
+                    flags[p] |= nbf_visit;
+                    const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
                     if (raw) {
-                        try encoder.writeBit(negative);
+                        try encoder.writeBit(bit);
                     } else {
-                        const sign = nbf_sc_lut[nbfScIndex(f)];
-                        try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+                        try encoder.write(mqContextIndex(nbf_zc_lut[band][f & nbf_sig8]), bit);
                     }
                     symbol_count += 1;
-                    nbfMarkSignificant(flags, nbs, x, y, negative);
-                    setSignificantRow(scratch, x, y);
+                    if (bit) {
+                        const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
+                        if (raw) {
+                            try encoder.writeBit(negative);
+                        } else {
+                            const sign = nbf_sc_lut[nbfScIndex(f)];
+                            try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+                        }
+                        symbol_count += 1;
+                        nbfMarkSignificant(flags, nbs, x, y, negative);
+                        setSignificantRow(scratch, x, y);
+                    }
                 }
             }
         }
@@ -3509,28 +3681,35 @@ fn emitDirectIsoRefinementPass(
         // Nothing significant inside the stripe rows means nothing to refine.
         if (!stripeRowsSignificant(scratch, stripe_y, stripe_height)) continue;
         var x: usize = 0;
-        while (x < rect.width) : (x += 1) {
-            var dy: usize = 0;
-            while (dy < stripe_height) : (dy += 1) {
-                const y = stripe_y + dy;
-                const p = nbfIndex(nbs, x, y);
-                const causal = style.vertical_causal and dy == 3;
-                const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-                if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
-                const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
-                if (raw) {
-                    try encoder.writeBit(bit);
-                } else {
-                    const context: Context = if ((f & nbf_refine) != 0)
-                        .refinement_later
-                    else if ((f & nbf_sig8) != 0)
-                        .refinement_neighbor
-                    else
-                        .refinement;
-                    try encoder.write(mqContextIndex(context), bit);
+        while (x < rect.width) {
+            const x_end = @min(x + significant_word_bits, rect.width);
+            if (!stripeRowsSignificantRangeDirect(scratch, stripe_y, stripe_height, x, x_end)) {
+                x = x_end;
+                continue;
+            }
+            while (x < x_end) : (x += 1) {
+                var dy: usize = 0;
+                while (dy < stripe_height) : (dy += 1) {
+                    const y = stripe_y + dy;
+                    const p = nbfIndex(nbs, x, y);
+                    const causal = style.vertical_causal and dy == 3;
+                    const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
+                    if ((f & nbf_sig_self) == 0 or (f & nbf_visit) != 0) continue;
+                    const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
+                    if (raw) {
+                        try encoder.writeBit(bit);
+                    } else {
+                        const context: Context = if ((f & nbf_refine) != 0)
+                            .refinement_later
+                        else if ((f & nbf_sig8) != 0)
+                            .refinement_neighbor
+                        else
+                            .refinement;
+                        try encoder.write(mqContextIndex(context), bit);
+                    }
+                    symbol_count += 1;
+                    flags[p] |= nbf_refine;
                 }
-                symbol_count += 1;
-                flags[p] |= nbf_refine;
             }
         }
     }
@@ -4061,15 +4240,15 @@ fn clearFlagChunk(values: *[flag_clear_lanes]u8, mask: FlagClearVector) void {
 }
 
 fn rowWordCount(width: usize) usize {
-    return (width + 63) / 64;
+    return (width + significant_word_bits - 1) / significant_word_bits;
 }
 
 fn significantWordIndex(scratch: *const DirectBlockScratch, x: usize, y: usize) usize {
-    return y * scratch.row_words + x / 64;
+    return y * scratch.row_words + x / significant_word_bits;
 }
 
 fn significantBit(x: usize) u64 {
-    return @as(u64, 1) << @as(u6, @intCast(x & 63));
+    return @as(u64, 1) << @as(u6, @intCast(x & (significant_word_bits - 1)));
 }
 
 fn hasSignificantRow(scratch: *const DirectBlockScratch, x: usize, y: usize) bool {
@@ -4081,7 +4260,7 @@ fn setSignificantRow(scratch: *DirectBlockScratch, x: usize, y: usize) void {
 }
 
 fn significantWordIndexDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) usize {
-    return y * scratch.row_words + x / 64;
+    return y * scratch.row_words + x / significant_word_bits;
 }
 
 fn hasSignificantRowDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) bool {
@@ -4098,19 +4277,19 @@ fn neighborSignificanceRows(scratch: *const DirectBlockScratch, x: usize, y: usi
     const max_y = neighborMaxY(scratch.height, y, style);
     const min_x = if (x == 0) 0 else x - 1;
     const max_x = @min(scratch.width - 1, x + 1);
-    const first_word = min_x / 64;
-    const last_word = max_x / 64;
+    const first_word = min_x / significant_word_bits;
+    const last_word = max_x / significant_word_bits;
 
     var yy = min_y;
     while (yy <= max_y) : (yy += 1) {
         const row_start = yy * scratch.row_words;
         var word = first_word;
         while (word <= last_word) : (word += 1) {
-            const word_min_x = word * 64;
+            const word_min_x = word * significant_word_bits;
             const lo = if (min_x > word_min_x) min_x - word_min_x else 0;
-            const hi = @min(max_x - word_min_x, 63);
+            const hi = @min(max_x - word_min_x, significant_word_bits - 1);
             var mask = bitRangeMask(lo, hi);
-            if (yy == y and word == x / 64) mask &= ~significantBit(x);
+            if (yy == y and word == x / significant_word_bits) mask &= ~significantBit(x);
             count += @intCast(@popCount(scratch.significant_words.items[row_start + word] & mask));
         }
     }
@@ -4123,19 +4302,19 @@ fn neighborSignificanceRowsDecode(scratch: *const DecodeBlockScratch, x: usize, 
     const max_y = neighborMaxY(scratch.height, y, style);
     const min_x = if (x == 0) 0 else x - 1;
     const max_x = @min(scratch.width - 1, x + 1);
-    const first_word = min_x / 64;
-    const last_word = max_x / 64;
+    const first_word = min_x / significant_word_bits;
+    const last_word = max_x / significant_word_bits;
 
     var yy = min_y;
     while (yy <= max_y) : (yy += 1) {
         const row_start = yy * scratch.row_words;
         var word = first_word;
         while (word <= last_word) : (word += 1) {
-            const word_min_x = word * 64;
+            const word_min_x = word * significant_word_bits;
             const lo = if (min_x > word_min_x) min_x - word_min_x else 0;
-            const hi = @min(max_x - word_min_x, 63);
+            const hi = @min(max_x - word_min_x, significant_word_bits - 1);
             var mask = bitRangeMask(lo, hi);
-            if (yy == y and word == x / 64) mask &= ~significantBit(x);
+            if (yy == y and word == x / significant_word_bits) mask &= ~significantBit(x);
             count += @intCast(@popCount(scratch.significant_words.items[row_start + word] & mask));
         }
     }
