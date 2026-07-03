@@ -979,6 +979,32 @@ pub fn layerPayloadSlice(bytes: []const u8, previous: LayerTruncation, current: 
     return bytes[start_index..end_index];
 }
 
+fn packetBlockForLayerPacketBlock(block: LayerPacketBlock) !PacketBlock {
+    var packet_block = try packetBlockForLayer(
+        block.location,
+        block.nominal_bitplanes,
+        block.encoded_bitplanes,
+        block.previous,
+        block.current,
+    );
+    if (block.segments.len > 0 and packet_block.included) {
+        var segment_passes: u16 = 0;
+        var segment_bytes: u64 = 0;
+        for (block.segments) |segment| {
+            segment_passes = std.math.add(u16, segment_passes, segment.pass_count) catch
+                return PacketHeaderError.InvalidPacketHeader;
+            segment_bytes = try std.math.add(u64, segment_bytes, segment.byte_length);
+        }
+        if (segment_passes != packet_block.pass_count or
+            segment_bytes != packet_block.byte_length)
+        {
+            return PacketHeaderError.InvalidPacketHeader;
+        }
+        packet_block.segments = block.segments;
+    }
+    return packet_block;
+}
+
 fn firstInclusionLayer(block: EncodedLayerBlock) u32 {
     for (block.layers, 0..) |layer, index| {
         if (layer.cumulative_passes != 0 or layer.cumulative_bytes != 0) return @intCast(index);
@@ -1180,17 +1206,67 @@ pub fn appendRpclPacketForIndexes(
     encoded_blocks: []const EncodedLayerBlock,
     indexes: []const usize,
 ) !WrittenPacket {
-    const blocks = try layerPacketBlocksForIndexes(allocator, encoded_blocks, indexes, packet.layer);
-    defer allocator.free(blocks);
-    return state.appendRpclPacket(
-        allocator,
-        out,
-        packet,
-        expected_resolution,
-        expected_component,
-        expected_precinct,
-        blocks,
+    try validateRpclPacketCursor(state.layer_count, state.next_sequence, state.precinct_x, state.precinct_y, state.next_layer, packet, expected_resolution, expected_component, expected_precinct);
+    if (state.states.len != indexes.len) return PacketHeaderError.InvalidPacketHeader;
+
+    const layer_index: usize = @intCast(packet.layer);
+    const packet_blocks = try allocator.alloc(PacketBlock, indexes.len);
+    defer allocator.free(packet_blocks);
+
+    var payload_length: usize = 0;
+    var included_blocks: usize = 0;
+    for (indexes, 0..) |encoded_index, packet_index| {
+        if (encoded_index >= encoded_blocks.len) return PacketHeaderError.InvalidPacketHeader;
+        const block = try layerPacketBlockFor(encoded_blocks[encoded_index], layer_index);
+        if (block.previous.cumulative_passes != state.states[packet_index].cumulative_passes or
+            block.previous.cumulative_bytes != state.states[packet_index].cumulative_bytes)
+        {
+            return PacketHeaderError.InvalidPacketHeader;
+        }
+
+        packet_blocks[packet_index] = try packetBlockForLayerPacketBlock(block);
+
+        const payload = try layerPayloadSlice(block.payload, block.previous, block.current);
+        if (packet_blocks[packet_index].included) {
+            if (payload.len != packet_blocks[packet_index].byte_length) return PacketHeaderError.InvalidPacketHeader;
+            payload_length = try std.math.add(usize, payload_length, packet_blocks[packet_index].byte_length);
+            included_blocks += 1;
+        } else if (payload.len != 0) {
+            return PacketHeaderError.InvalidPacketHeader;
+        }
+    }
+
+    const header_offset = out.items.len;
+    var writer = PacketHeaderWriter.init(allocator, out);
+    try writePrecinctPacketHeader(
+        &writer,
+        &state.inclusion,
+        &state.zero_bitplanes,
+        state.states,
+        packet.layer,
+        packet_blocks,
     );
+    try writer.finish();
+    const header_length = out.items.len - header_offset;
+    const payload_offset = out.items.len;
+
+    for (indexes, packet_blocks) |encoded_index, packet_block| {
+        if (!packet_block.included) continue;
+        const block = try layerPacketBlockFor(encoded_blocks[encoded_index], layer_index);
+        const payload = try layerPayloadSlice(block.payload, block.previous, block.current);
+        if (payload.len != packet_block.byte_length) return PacketHeaderError.InvalidPacketHeader;
+        try out.appendSlice(allocator, payload);
+    }
+
+    state.next_layer = std.math.add(u16, state.next_layer, 1) catch return PacketHeaderError.InvalidPacketHeader;
+    try advanceRpclPacketCursor(&state.next_sequence, &state.precinct_x, &state.precinct_y, packet);
+    return .{
+        .header_offset = header_offset,
+        .header_length = header_length,
+        .payload_offset = payload_offset,
+        .payload_length = payload_length,
+        .included_blocks = included_blocks,
+    };
 }
 
 pub fn appendPrecinctLayerPacket(
@@ -1206,8 +1282,6 @@ pub fn appendPrecinctLayerPacket(
 
     const packet_blocks = try allocator.alloc(PacketBlock, blocks.len);
     defer allocator.free(packet_blocks);
-    const payload_slices = try allocator.alloc([]const u8, blocks.len);
-    defer allocator.free(payload_slices);
 
     var payload_length: usize = 0;
     var included_blocks: usize = 0;
@@ -1217,36 +1291,15 @@ pub fn appendPrecinctLayerPacket(
         {
             return PacketHeaderError.InvalidPacketHeader;
         }
-        packet_blocks[index] = try packetBlockForLayer(
-            block.location,
-            block.nominal_bitplanes,
-            block.encoded_bitplanes,
-            block.previous,
-            block.current,
-        );
-        if (block.segments.len > 0 and packet_blocks[index].included) {
-            var segment_passes: u16 = 0;
-            var segment_bytes: u64 = 0;
-            for (block.segments) |segment| {
-                segment_passes = std.math.add(u16, segment_passes, segment.pass_count) catch
-                    return PacketHeaderError.InvalidPacketHeader;
-                segment_bytes = try std.math.add(u64, segment_bytes, segment.byte_length);
-            }
-            if (segment_passes != packet_blocks[index].pass_count or
-                segment_bytes != packet_blocks[index].byte_length)
-            {
-                return PacketHeaderError.InvalidPacketHeader;
-            }
-            packet_blocks[index].segments = block.segments;
-        }
-        payload_slices[index] = try layerPayloadSlice(block.payload, block.previous, block.current);
+        packet_blocks[index] = try packetBlockForLayerPacketBlock(block);
+        const payload = try layerPayloadSlice(block.payload, block.previous, block.current);
         if (packet_blocks[index].included) {
-            if (payload_slices[index].len != packet_blocks[index].byte_length) {
+            if (payload.len != packet_blocks[index].byte_length) {
                 return PacketHeaderError.InvalidPacketHeader;
             }
-            payload_length = try std.math.add(usize, payload_length, payload_slices[index].len);
+            payload_length = try std.math.add(usize, payload_length, packet_blocks[index].byte_length);
             included_blocks += 1;
-        } else if (payload_slices[index].len != 0) {
+        } else if (payload.len != 0) {
             return PacketHeaderError.InvalidPacketHeader;
         }
     }
@@ -1265,8 +1318,11 @@ pub fn appendPrecinctLayerPacket(
     const header_length = out.items.len - header_offset;
     const payload_offset = out.items.len;
 
-    for (payload_slices, packet_blocks) |payload, block| {
-        if (block.included) try out.appendSlice(allocator, payload);
+    for (blocks, packet_blocks) |layer_block, packet_block| {
+        if (!packet_block.included) continue;
+        const payload = try layerPayloadSlice(layer_block.payload, layer_block.previous, layer_block.current);
+        if (payload.len != packet_block.byte_length) return PacketHeaderError.InvalidPacketHeader;
+        try out.appendSlice(allocator, payload);
     }
 
     return .{

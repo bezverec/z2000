@@ -834,23 +834,23 @@ const RpclBlockIndexCell = struct {
 const RpclPacketBandGroup = struct {
     band_index: usize,
     encoded: []t2.EncodedLayerBlock,
-    indexes: []usize,
     writer_state: t2.PrecinctPacketWriterState,
 
     fn deinit(self: *RpclPacketBandGroup, allocator: std.mem.Allocator) void {
         self.writer_state.deinit();
-        allocator.free(self.indexes);
         allocator.free(self.encoded);
         self.* = undefined;
     }
 };
 
+/// One RPCL packet targets the LL band at resolution 0, or the HL/LH/HH
+/// trio at higher resolutions.
+const max_rpcl_packet_band_groups = 3;
+
 const PreparedRpclPacketGroup = struct {
     packet_blocks: []t2.PacketBlock,
-    payload_slices: [][]const u8,
 
     fn deinit(self: *PreparedRpclPacketGroup, allocator: std.mem.Allocator) void {
-        allocator.free(self.payload_slices);
         allocator.free(self.packet_blocks);
         self.* = undefined;
     }
@@ -3616,14 +3616,10 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     if (plane.len != pixels) return CodestreamError.InvalidCodestream;
     @memset(plane, 0);
 
-    const covered = try allocator.alloc(bool, pixels);
-    defer allocator.free(covered);
-    @memset(covered, false);
-
     const blocks = catalog.components[component];
     const worker_count = strictDecodeBlockThreadCount(options, blocks.len);
     if (worker_count > 1) {
-        try validateStrictBlockCatalogCoverage(width, height, blocks, covered);
+        try validateStrictBlockCatalogCoverageBits(allocator, width, height, blocks);
         try reconstructStrictComponentBlocksParallel(
             allocator,
             width,
@@ -3637,6 +3633,10 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         );
         return;
     }
+
+    const covered = try allocator.alloc(bool, pixels);
+    defer allocator.free(covered);
+    @memset(covered, false);
 
     // One reusable T1 scratch per component keeps the hot decode loop free
     // of per-block allocations.
@@ -3701,20 +3701,78 @@ fn strictDecodeBlockThreadCount(options: DecodeOptions, block_count: usize) usiz
     return @min(@as(usize, options.threads), block_count);
 }
 
-fn validateStrictBlockCatalogCoverage(
+fn validateStrictBlockCatalogCoverageBits(
+    allocator: std.mem.Allocator,
     width: usize,
     height: usize,
     blocks: []const StrictPacketBlock,
-    covered: []bool,
 ) !void {
-    @memset(covered, false);
+    if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
+    const row_words = strictCoverageRowWords(width);
+    const word_count = try std.math.mul(usize, row_words, height);
+    const covered = try allocator.alloc(u64, word_count);
+    defer allocator.free(covered);
+    @memset(covered, 0);
+
     for (blocks) |block| {
         if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
-        try markStrictZeroBlockCovered(covered, width, height, block.rect);
+        try markStrictRectCoveredBits(covered, row_words, width, height, block.rect);
     }
-    for (covered) |is_covered| {
-        if (!is_covered) return CodestreamError.InvalidCodestream;
+
+    const full_word = std.math.maxInt(u64);
+    const last_word_mask = strictCoverageBitRangeMask(0, (width - 1) & 63);
+    var y: usize = 0;
+    while (y < height) : (y += 1) {
+        const row_start = try std.math.mul(usize, y, row_words);
+        var word: usize = 0;
+        while (word < row_words) : (word += 1) {
+            const expected = if (word + 1 == row_words) last_word_mask else full_word;
+            if (covered[row_start + word] != expected) return CodestreamError.InvalidCodestream;
+        }
     }
+}
+
+fn strictCoverageRowWords(width: usize) usize {
+    return (width + 63) / 64;
+}
+
+fn markStrictRectCoveredBits(
+    covered: []u64,
+    row_words: usize,
+    plane_width: usize,
+    plane_height: usize,
+    rect: subband.Rect,
+) !void {
+    const end_x = try std.math.add(usize, rect.x, rect.width);
+    const end_y = try std.math.add(usize, rect.y, rect.height);
+    if (end_x > plane_width or end_y > plane_height) return CodestreamError.InvalidCodestream;
+
+    const first_word = rect.x / 64;
+    const last_word = (end_x - 1) / 64;
+    var y = rect.y;
+    while (y < end_y) : (y += 1) {
+        const row_start = try std.math.mul(usize, y, row_words);
+        var word = first_word;
+        while (word <= last_word) : (word += 1) {
+            const word_min_x = word * 64;
+            const lo = if (rect.x > word_min_x) rect.x - word_min_x else 0;
+            const hi = @min(end_x - 1 - word_min_x, 63);
+            const mask = strictCoverageBitRangeMask(lo, hi);
+            const index = try std.math.add(usize, row_start, word);
+            if (index >= covered.len or (covered[index] & mask) != 0) return CodestreamError.InvalidCodestream;
+            covered[index] |= mask;
+        }
+    }
+}
+
+fn strictCoverageBitRangeMask(lo: usize, hi: usize) u64 {
+    const all: u64 = std.math.maxInt(u64);
+    const lower = all << @as(u6, @intCast(lo));
+    const upper = if (hi == 63)
+        all
+    else
+        (@as(u64, 1) << @as(u6, @intCast(hi + 1))) - 1;
+    return lower & upper;
 }
 
 fn reconstructStrictComponentBlocksParallel(
@@ -6190,8 +6248,6 @@ fn buildRpclPacketBandGroup(
 
     const encoded = try allocator.alloc(t2.EncodedLayerBlock, leaf_count);
     errdefer allocator.free(encoded);
-    const indexes = try allocator.alloc(usize, leaf_count);
-    errdefer allocator.free(indexes);
     const filled = try allocator.alloc(bool, leaf_count);
     defer allocator.free(filled);
     @memset(filled, false);
@@ -6205,7 +6261,6 @@ fn buildRpclPacketBandGroup(
         filled[local_index] = true;
         encoded[local_index] = catalog.blocks[source_index].encoded;
         encoded[local_index].location = .{ .leaf_x = local_x, .leaf_y = local_y };
-        indexes[local_index] = local_index;
     }
 
     for (filled) |is_filled| {
@@ -6221,7 +6276,6 @@ fn buildRpclPacketBandGroup(
     return .{
         .band_index = band_index,
         .encoded = encoded,
-        .indexes = indexes,
         .writer_state = writer_state,
     };
 }
@@ -6241,9 +6295,10 @@ fn appendRpclPacketForBandGroups(
     {
         return CodestreamError.InvalidCodestream;
     }
+    if (groups.len > max_rpcl_packet_band_groups) return CodestreamError.InvalidCodestream;
 
-    const prepared = try allocator.alloc(PreparedRpclPacketGroup, groups.len);
-    defer allocator.free(prepared);
+    var prepared_storage: [max_rpcl_packet_band_groups]PreparedRpclPacketGroup = undefined;
+    const prepared = prepared_storage[0..groups.len];
     var initialized: usize = 0;
     defer {
         for (prepared[0..initialized]) |*group| group.deinit(allocator);
@@ -6256,9 +6311,9 @@ fn appendRpclPacketForBandGroups(
         prepared[group_index] = try prepareRpclPacketGroup(allocator, group, packet.layer);
         initialized += 1;
         packet_included = packet_included or t2.packetBlocksIncluded(prepared[group_index].packet_blocks);
-        for (prepared[group_index].packet_blocks, prepared[group_index].payload_slices) |packet_block, payload| {
+        for (prepared[group_index].packet_blocks) |packet_block| {
             if (packet_block.included) {
-                payload_length = try std.math.add(usize, payload_length, payload.len);
+                payload_length = try std.math.add(usize, payload_length, packet_block.byte_length);
                 included_blocks += 1;
             }
         }
@@ -6284,9 +6339,13 @@ fn appendRpclPacketForBandGroups(
     const payload_offset = out.items.len;
 
     if (packet_included) {
-        for (prepared[0..initialized]) |prepared_group| {
-            for (prepared_group.packet_blocks, prepared_group.payload_slices) |packet_block, payload| {
-                if (packet_block.included) try out.appendSlice(allocator, payload);
+        const layer_index: usize = @intCast(packet.layer);
+        for (groups, prepared[0..initialized]) |group, prepared_group| {
+            for (prepared_group.packet_blocks, group.encoded) |packet_block, encoded| {
+                if (!packet_block.included) continue;
+                const payload = try rpclEncodedLayerPayload(encoded, layer_index);
+                if (payload.len != packet_block.byte_length) return CodestreamError.InvalidCodestream;
+                try out.appendSlice(allocator, payload);
             }
         }
     }
@@ -6306,15 +6365,11 @@ fn prepareRpclPacketGroup(
     layer: u32,
 ) !PreparedRpclPacketGroup {
     const layer_index: usize = @intCast(layer);
-    const layer_blocks = try t2.layerPacketBlocksForIndexes(allocator, group.encoded, group.indexes, layer_index);
-    defer allocator.free(layer_blocks);
-
-    const packet_blocks = try allocator.alloc(t2.PacketBlock, layer_blocks.len);
+    const packet_blocks = try allocator.alloc(t2.PacketBlock, group.encoded.len);
     errdefer allocator.free(packet_blocks);
-    const payload_slices = try allocator.alloc([]const u8, layer_blocks.len);
-    errdefer allocator.free(payload_slices);
 
-    for (layer_blocks, 0..) |block, index| {
+    for (group.encoded, 0..) |encoded, index| {
+        const block = try t2.layerPacketBlockFor(encoded, layer_index);
         if (block.previous.cumulative_passes != group.writer_state.states[index].cumulative_passes or
             block.previous.cumulative_bytes != group.writer_state.states[index].cumulative_bytes)
         {
@@ -6342,18 +6397,26 @@ fn prepareRpclPacketGroup(
             }
             packet_blocks[index].segments = block.segments;
         }
-        payload_slices[index] = try t2.layerPayloadSlice(block.payload, block.previous, block.current);
+        const payload = try t2.layerPayloadSlice(block.payload, block.previous, block.current);
         if (packet_blocks[index].included) {
-            if (payload_slices[index].len != packet_blocks[index].byte_length) return CodestreamError.InvalidCodestream;
-        } else if (payload_slices[index].len != 0) {
+            if (payload.len != packet_blocks[index].byte_length) return CodestreamError.InvalidCodestream;
+        } else if (payload.len != 0) {
             return CodestreamError.InvalidCodestream;
         }
     }
 
     return .{
         .packet_blocks = packet_blocks,
-        .payload_slices = payload_slices,
     };
+}
+
+fn rpclEncodedLayerPayload(encoded: t2.EncodedLayerBlock, layer_index: usize) ![]const u8 {
+    if (layer_index >= encoded.layers.len) return CodestreamError.InvalidCodestream;
+    const previous: t2.LayerTruncation = if (layer_index == 0)
+        .{ .cumulative_passes = 0, .cumulative_bytes = 0 }
+    else
+        encoded.layers[layer_index - 1];
+    return t2.layerPayloadSlice(encoded.payload, previous, encoded.layers[layer_index]);
 }
 
 fn appendShadowPacketLength(allocator: std.mem.Allocator, lengths: *std.ArrayList(u32), length: usize) !void {
