@@ -25,7 +25,8 @@ This first milestone is intentionally small and honest:
 - physical resolution-ordered tile-parts for `--tile-parts R`
 - explicit RPCL packet sequence iterator for single-tile packet ordering
 - T2 packet-header bitstream, tag-tree, coding-pass, and segment-length
-  primitives with marker-safe bit stuffing
+  primitives with marker-safe bit stuffing, including the terminal `0xff`
+  header-byte padding case needed for independent PLT parsers
 - T2 tag-tree known-state tracking so repeated included leaves do not consume
   duplicate packet-header bits
 - fail-closed validation for standalone RPCL/T2 packet metadata helpers
@@ -200,8 +201,10 @@ lines we are targeting:
   cleanup/RLC, and raw BYPASS pass CPU-sum, pass count, and symbol count across
   workers. The MQ profile also separates fast MPS reads, LPS reads, MPS reads
   needing renormalization, renormalization shifts, and byte-in calls. This is
-  the first pass at deciding whether the next optimization should target MQ
-  decode, SIMD compute, scratch-buffer reuse/cache locality, or IO.
+  intentionally collected only when `--timings` is enabled, so normal decode
+  benchmarks avoid the MQ branch-counter overhead. This is the first pass at
+  deciding whether the next optimization should target MQ decode, SIMD compute,
+  scratch-buffer reuse/cache locality, or IO.
 - `--threads N` enables deterministic parallelism for the current TIFF/JP2
   encoder. `N=1` keeps the original single-threaded path; `2..3` parallelizes
   independent Y/Cb/Cr DWT and component payload encoding; `N>3` uses one
@@ -339,11 +342,25 @@ payload behavior is implemented.
 - The component-parallel strict decode path now writes directly into the final
   Y/Cb/Cr planes, avoiding the previous worker-owned plane allocation and
   full-plane copy back to the caller allocator.
+- Strict single-layer packet catalog assembly now transfers component-owned
+  payload buffers into the final block catalog, avoiding an extra per-block
+  payload copy in the no-sidecar decode path.
+- Strict single-layer packet-header assembly reuses a per-packet arena for
+  short-lived T2 audit groups; multi-layer decoding keeps the original
+  long-lived group state across layers.
 - Strict decode scatters reconstructed code-block rows with slice copies and
   row coverage updates instead of per-sample destination index arithmetic.
 - Strict no-sidecar decode now runs component-parallel with `--threads`,
   reuses one T1 scratch and one ISO MQ decoder per component, and skips
   context-index bounds checks in the hot MQ loops (debug asserts remain).
+- Strict decode only zero-initializes coefficient planes when the packet block
+  catalog contains zero blocks; dense no-sidecar outputs let decoded block
+  scatter fill the full plane directly.
+- ReleaseFast strict T1 significance, refinement, and cleanup decode use shorter
+  neighborhood-flag paths for the common non-vertical-causal style;
+  Debug/ReleaseSafe continue to maintain packed-context shadow checks.
+- ReleaseFast direct T1 significance, refinement, and cleanup encode use the
+  same shorter neighborhood-flag path for the common non-vertical-causal style.
 - T1 neighborhood state is now incremental (openjpeg-style flag words): one
   u16 per sample in a bordered grid carries the eight neighbor significance
   bits, four neighbor signs, and self/visit/refine state, updated when a
@@ -462,12 +479,13 @@ through `tiff-to-jp2` and `decode-temp-jp2`.
 The codestream marker skeleton now writes non-zero `SOT/Psot` values and TLM
 entries for resolution-ordered tile-parts. OpenJPEG `opj_dump` indexes the
 current single-tile archival profile as six tile-parts for six resolutions.
-On the current no-sidecar smoke path, z2000 strict decode, OpenJPEG, and Grok
-accept the output losslessly. Grok no longer reports PL marker length warnings
-after the RPCL subband precinct projection fix. valid2000 is still an active
-hygiene gate: the local lossless file currently reports an ICC-profile failure
-and a PLT count warning, while the access profile also trips profile-specific
-transform/QCD/layer/tile-size expectations.
+On the current no-sidecar smoke path, z2000 strict decode, OpenJPEG, Grok, and
+Kakadu accept the output losslessly. Grok no longer reports PL marker length
+warnings after the RPCL subband precinct projection and terminal packet-header
+stuffing fixes. valid2000 is still an active hygiene gate: the local lossless
+file currently reports an ICC-profile failure and a PLT count warning, while
+the access profile also trips profile-specific transform/QCD/layer/tile-size
+expectations.
 
 Strict marker handling now checks SOT tile-part sequence/count, TLM tile indexes
 and tile-part lengths, PLT packet spans, ordered multi-segment TLM/PLT marker

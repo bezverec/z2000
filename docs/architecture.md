@@ -114,7 +114,8 @@ coverage before any nonzero style byte is accepted in strict codestream decode.
 
 `t2.zig` owns the current T2 building blocks:
 
-- marker-safe packet-header bit IO;
+- marker-safe packet-header bit IO, including terminal `0xff` stuffing/padding
+  so PLT packet lengths match independent decoder packet parsers;
 - tag-tree encoder/decoder with known-node state so continued packets do not
   consume duplicate inclusion bits for already proven leaves;
 - code-block packet state;
@@ -135,11 +136,11 @@ The most recent bridge pieces are:
   tag-tree known-node state, `numlenbits`, cumulative pass/byte deltas, and
   strict whole-packet consumption.
 
-The next integration step is to connect strict T2 packet views to real T1 image
-reconstruction from the EBCOT/MQ payload, then close packet-header differences
-reported by independent decoders. RPCL remains the priority path; LRCP, PCRL,
-and CPRL stay fail-closed until their ordering is implemented on both write and
-read sides.
+The current strict path connects T2 packet views to real T1 image
+reconstruction from the EBCOT/MQ payload and has closed the known PLT
+packet-length mismatch caused by terminal packet-header stuffing. RPCL remains
+the priority path; LRCP, PCRL, and CPRL stay fail-closed until their ordering is
+implemented on both write and read sides.
 
 The strict RPCL validation path now also reassembles per-code-block payload
 contributions from decoded T2 packets and compares the resulting cumulative
@@ -184,6 +185,18 @@ encoding paths. SIMD lane selection is centralized in `src/simd.zig`, with
 portable vector widths selected for native x86 and AArch64 targets.
 Strict decode also uses an atomic block queue; block indexes are ordered by
 payload size before dispatch so expensive T1 blocks are spread across workers.
+For the common single-layer strict path, T2 packet assembly stores code-block
+payload bytes in component-owned buffers and transfers those buffers into the
+strict block catalog, avoiding a second payload copy during catalog finalize.
+The same single-layer path also builds short-lived packet audit groups from a
+retained per-packet arena, reducing allocator churn while keeping multi-layer
+reader state on the original long-lived allocation path.
+During strict reconstruction, coefficient planes are zero-initialized only when
+the packet block catalog contains zero blocks; dense single-layer outputs rely
+on decoded block scatter to cover the whole plane.
+ReleaseFast T1 significance/refinement/cleanup encode and decode also have
+plain neighborhood-flag paths for the common style without vertical causal
+mode. Debug builds retain the packed-context shadow assertions.
 
 ## Current Non-Goals
 

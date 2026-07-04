@@ -261,6 +261,26 @@ test "T2 packet header bitstream inserts marker-safe stuff bits after 0xff" {
     try std.testing.expectEqual(out.items.len, reader.bytesConsumed());
 }
 
+test "T2 packet header bitstream terminates trailing 0xff with stuff padding" {
+    const allocator = std.testing.allocator;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var writer = t2.PacketHeaderWriter.init(allocator, &out);
+    try writer.writeBits(0xff, 8);
+    try writer.finish();
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xff, 0x00 }, out.items);
+
+    var reader = t2.PacketHeaderReader.init(out.items);
+    var bit_count: usize = 0;
+    while (bit_count < 8) : (bit_count += 1) {
+        try std.testing.expect(try reader.readBit());
+    }
+    try reader.byteAlign();
+    try std.testing.expectEqual(out.items.len, reader.bytesConsumed());
+}
+
 test "T2 packet header reader rejects missing stuff bit after 0xff" {
     var reader = t2.PacketHeaderReader.init(&[_]u8{ 0xff, 0x80 });
 
@@ -6875,12 +6895,13 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     var strict_catalog_passes: u64 = 0;
     for (0..3) |component| {
         try std.testing.expect(block_catalog.components[component].len > 0);
-        var component_payload_offset: usize = 0;
+        var component_payload_bytes: usize = 0;
         for (block_catalog.components[component], 0..) |block, block_index| {
-            try std.testing.expectEqual(component_payload_offset, block.payload_offset);
             try std.testing.expectEqual(@as(usize, @intCast(block.cumulative_bytes)), block.payload_length);
             try std.testing.expectEqual(block.payload_length, block_catalog.blockPayload(component, block_index).len);
-            component_payload_offset += block.payload_length;
+            try std.testing.expect(block.payload_offset <= block_catalog.payloads[component].len);
+            try std.testing.expect(block.payload_length <= block_catalog.payloads[component].len - block.payload_offset);
+            component_payload_bytes += block.payload_length;
             if (!block.metadata_ready) {
                 try std.testing.expectEqual(@as(u16, 0), block.cumulative_passes);
                 try std.testing.expectEqual(@as(usize, 0), block.payload_length);
@@ -6893,7 +6914,7 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
             strict_catalog_bytes += block.cumulative_bytes;
             strict_catalog_passes += block.cumulative_passes;
         }
-        try std.testing.expectEqual(component_payload_offset, block_catalog.payloads[component].len);
+        try std.testing.expectEqual(component_payload_bytes, block_catalog.payloads[component].len);
     }
     try std.testing.expectEqual(stats.t2_assembled_blocks, strict_catalog_blocks);
     try std.testing.expectEqual(stats.t2_assembled_bytes, strict_catalog_bytes);

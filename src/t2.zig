@@ -78,6 +78,10 @@ pub const PacketHeaderWriter = struct {
 
     pub fn finish(self: *PacketHeaderWriter) !void {
         if (self.has_bits) try self.flushByte();
+        if (self.bits_remaining == 7) {
+            try self.out.append(self.allocator, 0);
+            self.bits_remaining = 8;
+        }
     }
 
     fn flushByte(self: *PacketHeaderWriter) !void {
@@ -116,7 +120,13 @@ pub const PacketHeaderReader = struct {
     }
 
     pub fn byteAlign(self: *PacketHeaderReader) PacketHeaderError!void {
-        if (self.bits_remaining == 0) return;
+        if (self.bits_remaining == 0) {
+            if (self.previous == 0xff) {
+                try self.loadByte();
+            } else {
+                return;
+            }
+        }
         const padding_mask = (@as(u16, 1) << self.bits_remaining) - 1;
         if ((@as(u16, self.current) & padding_mask) != 0) return PacketHeaderError.InvalidMarkerStuffing;
         self.bits_remaining = 0;

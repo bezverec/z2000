@@ -123,14 +123,16 @@ Notes:
   further split into SOD/PLT scan, packet-header assembly, and final block
   catalog materialization; strict block-payload timing also includes worker
   balance counters for max/average job wall time, decoded block count, and
-  payload bytes.
+  payload bytes. T1/MQ pass and branch counters are collected only for timed
+  decodes, keeping the normal strict decode hot path free of profiling writes.
 - Encode-side RPCL catalog construction uses a deterministic cost-ordered
   queue across Y/Cb/Cr code-blocks when `threads > 3`; worker-local bitplane
   and EBCOT scratch buffers are reused while packet emission still reads stable
   per-component catalog indexes.
 - Strict packet catalog parsing validates SOT/TLM/PLT marker accounting,
   ordered multi-segment TLM/PLT indexes, SOP/EPH marker policy, and packet
-  header marker stuffing for the current supported RPCL/RCT/5-3 profile.
+  header marker stuffing, including terminal `0xff` packet-header padding, for
+  the current supported RPCL/RCT/5-3 profile.
 
 ## `src/jp2.zig`
 

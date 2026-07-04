@@ -32,6 +32,36 @@ entries are grouped by development milestone rather than semantic version.
 - Sorted strict decode block work by payload size before feeding the atomic
   worker queue, reducing tail imbalance while keeping deterministic block
   scatter/output behavior.
+- Reduced strict single-layer packet-catalog finalize overhead by storing
+  decoded packet payloads in component-owned buffers and transferring those
+  buffers into the block catalog instead of copying every code-block payload
+  through an intermediate per-block `ArrayList`.
+- Reduced strict single-layer packet-header assembly allocation churn by
+  building short-lived T2 audit groups from a retained per-packet arena; the
+  local timed decode split moved packet-header assembly from about 41 ms to
+  about 32 ms on the 3520x5115 smoke file.
+- Skipped full coefficient-plane zero-initialization for strict decodes whose
+  packet block catalog has no zero blocks. On the local dense 3520x5115
+  no-sidecar output, z2000 t16 decode measured about 548 ms with lossless
+  output.
+- Kept T1/MQ pass and branch profiling out of the normal strict decode hot path;
+  worker T1 stats are now collected only when decode timings are requested.
+- Added ReleaseFast T1 significance/refinement/cleanup decode paths for the
+  common style without vertical causal mode; they derive candidate/context
+  directly from the neighborhood flag word while Debug/ReleaseSafe keep the
+  packed-context shadow assertions. On the local 3520x5115 smoke file, the
+  combined shortcuts moved z2000 decode to about 3.58 s single-thread and
+  566 ms with 16 threads.
+- Added the matching ReleaseFast direct T1 refinement encode shortcut for the
+  common non-vertical-causal style.
+- Extended the ReleaseFast direct T1 encode shortcut to significance and
+  cleanup passes. On the local 3520x5115 smoke file, z2000 encode measured
+  about 3.35 s single-thread and 500 ms with 16 threads, with z2000,
+  Grok/OpenJPEG/Kakadu decode all lossless.
+- Fixed T2 packet-header termination when the final header byte is `0xff` by
+  emitting and validating the required zero stuffing/padding byte; this aligns
+  PLT packet lengths with Grok/OpenJPEG/Kakadu packet parsers on the current
+  no-sidecar output.
 - Split strict packet-catalog timing into scan, packet-header assembly, and
   final block-catalog materialization phases.
 - Reduced packet-header assembly allocation churn by filling strict and legacy
@@ -304,6 +334,9 @@ entries are grouped by development milestone rather than semantic version.
 - Fixed RPCL high-pass precinct projection so packet code-block selection uses
   subband-local low/high coordinates instead of transformed-plane offsets,
   aligning PLT packet lengths with Grok's packet parser.
+- Fixed terminal `0xff` packet-header stuffing so PLT packet lengths also match
+  independent decoder packet parsers when a packet header ends exactly on an
+  all-ones byte.
 - Strict main-header and tile-part readers now reject unsupported marker
   segments such as COC, QCC, POC, PPM/PPT, RGN, CRG, PLM, and CAP instead of
   silently skipping payload behavior that is not implemented.
