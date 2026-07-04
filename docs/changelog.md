@@ -26,6 +26,9 @@ entries are grouped by development milestone rather than semantic version.
 - Ordered encode-side block catalog work by estimated block cost before feeding
   the atomic queue, so large high-resolution code-blocks start earlier without
   changing deterministic catalog/output ordering.
+- Flattened encode-side Y/Cb/Cr code-block catalog work into one cost-ordered
+  atomic queue for `threads > 3`, keeping stable per-component catalogs while
+  reducing the three sequential component payload phases.
 - Sorted strict decode block work by payload size before feeding the atomic
   worker queue, reducing tail imbalance while keeping deterministic block
   scatter/output behavior.

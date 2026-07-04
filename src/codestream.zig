@@ -671,6 +671,44 @@ const ComponentCatalogBlockJob = struct {
     }
 };
 
+const ComponentCatalogBlockRef = struct {
+    component: u8,
+    block_index: usize,
+};
+
+const ComponentCatalogBlockInit = struct {
+    component: u8,
+    block_index: usize,
+};
+
+const ComponentCatalogAllBlockJob = struct {
+    allocator: std.mem.Allocator,
+    planes: [3][]const i32,
+    stride: usize,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    catalog_blocks: [3][]RpclShadowBlock,
+    next_block: *std.atomic.Value(usize),
+    block_order: []const ComponentCatalogBlockRef,
+    nominal_bitplanes: u8,
+    options: LosslessOptions,
+    include_bitplane_payload: bool,
+    initialized: std.ArrayList(ComponentCatalogBlockInit) = .empty,
+    result: anyerror!void = {},
+
+    fn deinit(self: *ComponentCatalogAllBlockJob) void {
+        for (self.initialized.items) |record| {
+            self.catalog_blocks[record.component][record.block_index].deinit(self.allocator);
+        }
+        self.initialized.deinit(self.allocator);
+        self.initialized = .empty;
+    }
+
+    fn release(self: *ComponentCatalogAllBlockJob) void {
+        self.initialized.clearRetainingCapacity();
+    }
+};
+
 const ComponentBlockPayloadJob = struct {
     blocks: []const subband.CodeBlock,
     catalog: []const RpclShadowBlock,
@@ -1148,6 +1186,69 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
         job.catalog_blocks[index].encoded.layers = job.catalog_blocks[index].layers[0..layer_count];
         job.initialized.append(job.allocator, index) catch |err| {
             job.catalog_blocks[index].deinit(job.allocator);
+            job.result = err;
+            return;
+        };
+    }
+    job.result = {};
+}
+
+fn componentCatalogAllBlockWorker(job: *ComponentCatalogAllBlockJob) void {
+    inline for (0..3) |component| {
+        if (job.blocks.len != job.catalog_blocks[component].len) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+    }
+
+    var bitplane_scratch = bitplane.BlockScratch.init(job.allocator);
+    defer bitplane_scratch.deinit();
+    var ebcot_scratch = ebcot.DirectBlockScratch.init(job.allocator);
+    defer ebcot_scratch.deinit();
+
+    while (true) {
+        const order_index = job.next_block.fetchAdd(1, .monotonic);
+        if (order_index >= job.block_order.len) break;
+        const entry = job.block_order[order_index];
+        if (entry.component >= 3) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+        const block = job.blocks[entry.block_index];
+        if (block.band_index >= job.bands.len) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+        const block_nominal_bitplanes = bandNominalBitplanesForTransform(
+            job.nominal_bitplanes,
+            job.bands[block.band_index].kind,
+            job.bands[block.band_index].level,
+            job.options.transform,
+            job.options.guard_bits,
+        ) catch |err| {
+            job.result = err;
+            return;
+        };
+        const component: usize = entry.component;
+        job.catalog_blocks[component][entry.block_index] = buildRpclShadowBlock(
+            job.allocator,
+            &bitplane_scratch,
+            &ebcot_scratch,
+            job.planes[component],
+            job.stride,
+            block.rect,
+            job.bands[block.band_index].kind,
+            block_nominal_bitplanes,
+            job.options,
+            job.include_bitplane_payload,
+        ) catch |err| {
+            job.result = err;
+            return;
+        };
+        const layer_count: usize = @intCast(job.options.layers);
+        job.catalog_blocks[component][entry.block_index].encoded.layers = job.catalog_blocks[component][entry.block_index].layers[0..layer_count];
+        job.initialized.append(job.allocator, .{ .component = entry.component, .block_index = entry.block_index }) catch |err| {
+            job.catalog_blocks[component][entry.block_index].deinit(job.allocator);
             job.result = err;
             return;
         };
@@ -6008,7 +6109,19 @@ fn buildComponentRpclShadowCatalogs(
     options: LosslessOptions,
     include_bitplane_payload: bool,
 ) ![3]ComponentRpclShadowCatalog {
-    if (payloadBlockThreadCount(options, blocks.len) > 1 or componentThreadCount(options) < 2) {
+    const block_worker_count = payloadBlockThreadCount(options, blocks.len);
+    if (block_worker_count > 1 or componentThreadCount(options) < 2) {
+        if (block_worker_count > 1) {
+            return buildComponentRpclShadowCatalogsBlocksParallel(
+                allocator,
+                planes,
+                bands,
+                blocks,
+                options,
+                include_bitplane_payload,
+                block_worker_count,
+            );
+        }
         var catalogs: [3]ComponentRpclShadowCatalog = undefined;
         var initialized: usize = 0;
         errdefer {
@@ -6037,6 +6150,87 @@ fn buildComponentRpclShadowCatalogs(
         job.initialized = false;
     }
     return catalogs;
+}
+
+fn buildComponentRpclShadowCatalogsBlocksParallel(
+    allocator: std.mem.Allocator,
+    planes: color.RctPlanes,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+    include_bitplane_payload: bool,
+    worker_count: usize,
+) ![3]ComponentRpclShadowCatalog {
+    var catalog_blocks: [3][]RpclShadowBlock = undefined;
+    var initialized_catalogs: usize = 0;
+    errdefer {
+        for (catalog_blocks[0..initialized_catalogs]) |component_blocks| {
+            allocator.free(component_blocks);
+        }
+    }
+    inline for (0..3) |component| {
+        catalog_blocks[component] = try allocator.alloc(RpclShadowBlock, blocks.len);
+        initialized_catalogs += 1;
+    }
+
+    const sorted_blocks = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(sorted_blocks);
+    for (sorted_blocks, 0..) |*entry, index| entry.* = index;
+    std.mem.sort(usize, sorted_blocks, EncodeBlockOrderContext{ .bands = bands, .blocks = blocks }, encodeBlockHeavierThan);
+
+    const block_order_len = std.math.mul(usize, blocks.len, 3) catch return CodestreamError.ImageTooLarge;
+    const block_order = try allocator.alloc(ComponentCatalogBlockRef, block_order_len);
+    defer allocator.free(block_order);
+    var order_index: usize = 0;
+    for (sorted_blocks) |block_index| {
+        inline for (0..3) |component| {
+            block_order[order_index] = .{ .component = component, .block_index = block_index };
+            order_index += 1;
+        }
+    }
+
+    var jobs = try allocator.alloc(ComponentCatalogAllBlockJob, worker_count);
+    defer allocator.free(jobs);
+    var next_block = std.atomic.Value(usize).init(0);
+    for (jobs) |*job| {
+        job.* = .{
+            .allocator = allocator,
+            .planes = .{ planes.y, planes.cb, planes.cr },
+            .stride = planes.width,
+            .bands = bands,
+            .blocks = blocks,
+            .catalog_blocks = catalog_blocks,
+            .next_block = &next_block,
+            .block_order = block_order,
+            .nominal_bitplanes = planes.bit_depth,
+            .options = options,
+            .include_bitplane_payload = include_bitplane_payload,
+        };
+    }
+    defer for (jobs) |*job| job.deinit();
+
+    const spawn_count = worker_count - 1;
+    var threads = try allocator.alloc(std.Thread, spawn_count);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < spawn_count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, componentCatalogAllBlockWorker, .{&jobs[spawned]}) catch |err| {
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+
+    componentCatalogAllBlockWorker(&jobs[spawn_count]);
+    for (threads[0..spawned]) |thread| thread.join();
+
+    for (jobs) |job| try job.result;
+    for (jobs) |*job| job.release();
+
+    return .{
+        .{ .allocator = allocator, .blocks = catalog_blocks[0] },
+        .{ .allocator = allocator, .blocks = catalog_blocks[1] },
+        .{ .allocator = allocator, .blocks = catalog_blocks[2] },
+    };
 }
 
 fn buildComponentRpclShadowCatalog(

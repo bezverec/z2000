@@ -204,10 +204,10 @@ lines we are targeting:
   decode, SIMD compute, scratch-buffer reuse/cache locality, or IO.
 - `--threads N` enables deterministic parallelism for the current TIFF/JP2
   encoder. `N=1` keeps the original single-threaded path; `2..3` parallelizes
-  independent Y/Cb/Cr DWT and component payload encoding; `N>3` keeps component
-  order stable and parallelizes payload code-block ranges with per-worker
-  scratch buffers. The decoder accepts the same flag for component
-  payload decode and inverse DWT.
+  independent Y/Cb/Cr DWT and component payload encoding; `N>3` uses one
+  deterministic cost-ordered queue across Y/Cb/Cr code-block catalog work with
+  per-worker scratch buffers, then emits packets in stable RPCL order. The
+  decoder accepts the same flag for component payload decode and inverse DWT.
 
 Archival-style scaffold:
 

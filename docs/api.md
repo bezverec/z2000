@@ -124,6 +124,10 @@ Notes:
   catalog materialization; strict block-payload timing also includes worker
   balance counters for max/average job wall time, decoded block count, and
   payload bytes.
+- Encode-side RPCL catalog construction uses a deterministic cost-ordered
+  queue across Y/Cb/Cr code-blocks when `threads > 3`; worker-local bitplane
+  and EBCOT scratch buffers are reused while packet emission still reads stable
+  per-component catalog indexes.
 - Strict packet catalog parsing validates SOT/TLM/PLT marker accounting,
   ordered multi-segment TLM/PLT indexes, SOP/EPH marker policy, and packet
   header marker stuffing for the current supported RPCL/RCT/5-3 profile.
