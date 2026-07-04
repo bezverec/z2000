@@ -174,11 +174,14 @@ The current TIFF/JP2 encoder is deterministic across thread counts.
 - `threads=1`: serial path.
 - `threads=2..3`: component-level scheduling for Y, Cb, Cr.
 - `threads>3`: component order remains stable while code-block catalog work is
-  pulled from an atomic block queue and encoded with per-worker scratch buffers.
+  ordered by estimated block cost, pulled from an atomic block queue, and
+  encoded with per-worker scratch buffers.
 
 Hot-path scratch reuse currently exists in bitplane, entropy, and direct EBCOT
 encoding paths. SIMD lane selection is centralized in `src/simd.zig`, with
 portable vector widths selected for native x86 and AArch64 targets.
+Strict decode also uses an atomic block queue; block indexes are ordered by
+payload size before dispatch so expensive T1 blocks are spread across workers.
 
 ## Current Non-Goals
 

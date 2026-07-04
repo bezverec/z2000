@@ -23,6 +23,12 @@ entries are grouped by development milestone rather than semantic version.
 - Switched the encode-side component block catalog builder from fixed contiguous
   worker ranges to an atomic block queue, matching the strict decode work-queue
   shape and improving all-thread encode load balance.
+- Ordered encode-side block catalog work by estimated block cost before feeding
+  the atomic queue, so large high-resolution code-blocks start earlier without
+  changing deterministic catalog/output ordering.
+- Sorted strict decode block work by payload size before feeding the atomic
+  worker queue, reducing tail imbalance while keeping deterministic block
+  scatter/output behavior.
 - Split strict packet-catalog timing into scan, packet-header assembly, and
   final block-catalog materialization phases.
 - Reduced packet-header assembly allocation churn by filling strict and legacy

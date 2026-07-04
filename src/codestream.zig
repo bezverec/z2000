@@ -651,6 +651,7 @@ const ComponentCatalogBlockJob = struct {
     blocks: []const subband.CodeBlock,
     catalog_blocks: []RpclShadowBlock,
     next_block: *std.atomic.Value(usize),
+    block_order: []const usize,
     nominal_bitplanes: u8,
     options: LosslessOptions,
     include_bitplane_payload: bool,
@@ -1110,8 +1111,9 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
     defer ebcot_scratch.deinit();
 
     while (true) {
-        const index = job.next_block.fetchAdd(1, .monotonic);
-        if (index >= job.blocks.len) break;
+        const order_index = job.next_block.fetchAdd(1, .monotonic);
+        if (order_index >= job.block_order.len) break;
+        const index = job.block_order[order_index];
         const block = job.blocks[index];
         if (block.band_index >= job.bands.len) {
             job.result = CodestreamError.InvalidCodestream;
@@ -3629,6 +3631,7 @@ const StrictBlockDecodeJob = struct {
     component: usize,
     next_block: *std.atomic.Value(usize),
     blocks: []const StrictPacketBlock,
+    block_order: []const usize,
     options: DecodeOptions,
     plane: []i32,
     profile_worker: bool = false,
@@ -3664,8 +3667,9 @@ fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
     };
 
     while (true) {
-        const block_index = job.next_block.fetchAdd(1, .monotonic);
-        if (block_index >= job.blocks.len) break;
+        const order_index = job.next_block.fetchAdd(1, .monotonic);
+        if (order_index >= job.block_order.len) break;
+        const block_index = job.block_order[order_index];
         const block = job.blocks[block_index];
         if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) continue;
         if (!block.metadata_ready) {
@@ -4072,6 +4076,11 @@ fn reconstructStrictComponentBlocksParallel(
     t1_stats: ?*ebcot.DecodePassStats,
     timings: ?*DecodeTimings,
 ) !void {
+    const block_order = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(block_order);
+    for (block_order, 0..) |*entry, index| entry.* = index;
+    std.mem.sort(usize, block_order, blocks, strictDecodeBlockHeavierThan);
+
     var jobs = try allocator.alloc(StrictBlockDecodeJob, worker_count);
     defer allocator.free(jobs);
     var next_block = std.atomic.Value(usize).init(0);
@@ -4083,6 +4092,7 @@ fn reconstructStrictComponentBlocksParallel(
             .component = component,
             .next_block = &next_block,
             .blocks = blocks,
+            .block_order = block_order,
             .options = options,
             .plane = plane,
             .profile_worker = timings != null,
@@ -4110,6 +4120,17 @@ fn reconstructStrictComponentBlocksParallel(
     if (timings) |t| {
         for (jobs) |job| t.addStrictBlockWorker(job.worker_stats);
     }
+}
+
+fn strictDecodeBlockHeavierThan(blocks: []const StrictPacketBlock, lhs: usize, rhs: usize) bool {
+    const a = blocks[lhs];
+    const b = blocks[rhs];
+    if (a.payload_length != b.payload_length) return a.payload_length > b.payload_length;
+    if (a.cumulative_passes != b.cumulative_passes) return a.cumulative_passes > b.cumulative_passes;
+    const a_area = a.rect.width * a.rect.height;
+    const b_area = b.rect.width * b.rect.height;
+    if (a_area != b_area) return a_area > b_area;
+    return lhs < rhs;
 }
 
 fn reconstructStrictComponentCoefficients(
@@ -6106,6 +6127,11 @@ fn buildComponentRpclShadowCatalogBlocksParallel(
 ) !void {
     if (blocks.len != catalog_blocks.len) return CodestreamError.InvalidCodestream;
 
+    const block_order = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(block_order);
+    for (block_order, 0..) |*entry, index| entry.* = index;
+    std.mem.sort(usize, block_order, EncodeBlockOrderContext{ .bands = bands, .blocks = blocks }, encodeBlockHeavierThan);
+
     var jobs = try allocator.alloc(ComponentCatalogBlockJob, worker_count);
     defer allocator.free(jobs);
     var next_block = std.atomic.Value(usize).init(0);
@@ -6119,6 +6145,7 @@ fn buildComponentRpclShadowCatalogBlocksParallel(
             .blocks = blocks,
             .catalog_blocks = catalog_blocks,
             .next_block = &next_block,
+            .block_order = block_order,
             .nominal_bitplanes = nominal_bitplanes,
             .options = options,
             .include_bitplane_payload = include_bitplane_payload,
@@ -6142,6 +6169,23 @@ fn buildComponentRpclShadowCatalogBlocksParallel(
 
     for (jobs) |job| try job.result;
     for (jobs) |*job| job.release();
+}
+
+const EncodeBlockOrderContext = struct {
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+};
+
+fn encodeBlockHeavierThan(context: EncodeBlockOrderContext, lhs: usize, rhs: usize) bool {
+    const a = context.blocks[lhs];
+    const b = context.blocks[rhs];
+    const a_area = a.rect.width * a.rect.height;
+    const b_area = b.rect.width * b.rect.height;
+    if (a_area != b_area) return a_area > b_area;
+    const a_level = if (a.band_index < context.bands.len) context.bands[a.band_index].level else 0;
+    const b_level = if (b.band_index < context.bands.len) context.bands[b.band_index].level else 0;
+    if (a_level != b_level) return a_level < b_level;
+    return lhs < rhs;
 }
 
 fn buildRpclShadowBlock(
