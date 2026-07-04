@@ -650,19 +650,23 @@ const ComponentCatalogBlockJob = struct {
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
     catalog_blocks: []RpclShadowBlock,
+    next_block: *std.atomic.Value(usize),
     nominal_bitplanes: u8,
     options: LosslessOptions,
     include_bitplane_payload: bool,
-    initialized: usize = 0,
+    initialized: std.ArrayList(usize) = .empty,
     result: anyerror!void = {},
 
     fn deinit(self: *ComponentCatalogBlockJob) void {
-        for (self.catalog_blocks[0..self.initialized]) |*block| block.deinit(self.allocator);
-        self.initialized = 0;
+        for (self.initialized.items) |block_index| {
+            self.catalog_blocks[block_index].deinit(self.allocator);
+        }
+        self.initialized.deinit(self.allocator);
+        self.initialized = .empty;
     }
 
     fn release(self: *ComponentCatalogBlockJob) void {
-        self.initialized = 0;
+        self.initialized.clearRetainingCapacity();
     }
 };
 
@@ -1105,7 +1109,10 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
     var ebcot_scratch = ebcot.DirectBlockScratch.init(job.allocator);
     defer ebcot_scratch.deinit();
 
-    for (job.blocks, 0..) |block, index| {
+    while (true) {
+        const index = job.next_block.fetchAdd(1, .monotonic);
+        if (index >= job.blocks.len) break;
+        const block = job.blocks[index];
         if (block.band_index >= job.bands.len) {
             job.result = CodestreamError.InvalidCodestream;
             return;
@@ -1137,7 +1144,11 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
         };
         const layer_count: usize = @intCast(job.options.layers);
         job.catalog_blocks[index].encoded.layers = job.catalog_blocks[index].layers[0..layer_count];
-        job.initialized += 1;
+        job.initialized.append(job.allocator, index) catch |err| {
+            job.catalog_blocks[index].deinit(job.allocator);
+            job.result = err;
+            return;
+        };
     }
     job.result = {};
 }
@@ -6097,16 +6108,17 @@ fn buildComponentRpclShadowCatalogBlocksParallel(
 
     var jobs = try allocator.alloc(ComponentCatalogBlockJob, worker_count);
     defer allocator.free(jobs);
+    var next_block = std.atomic.Value(usize).init(0);
     for (jobs, 0..) |*job, index| {
-        const start = blockRangeBoundary(blocks.len, worker_count, index);
-        const end = blockRangeBoundary(blocks.len, worker_count, index + 1);
+        _ = index;
         job.* = .{
             .allocator = allocator,
             .plane = plane,
             .stride = stride,
             .bands = bands,
-            .blocks = blocks[start..end],
-            .catalog_blocks = catalog_blocks[start..end],
+            .blocks = blocks,
+            .catalog_blocks = catalog_blocks,
+            .next_block = &next_block,
             .nominal_bitplanes = nominal_bitplanes,
             .options = options,
             .include_bitplane_payload = include_bitplane_payload,

@@ -384,6 +384,16 @@ sh tools/bench_smoke.sh
 sh tools/bench_profiles.sh
 ```
 
+`tools/bench_compare.sh` and `tools/bench_profiles.sh` default z2000's
+threaded runs to all detected logical CPUs. Override with `Z2000_THREADS=N` for
+a fixed worker count, or use `Z2000_THREADS=all` / `auto` explicitly when
+recording benchmark commands. On Windows, `tools/bench_compare.ps1` provides
+the same comparative encode/decode benchmark without shell quoting issues:
+
+```powershell
+.\tools\bench_compare.ps1 -Input C:\temp\tools\images\0004.tif -Threads all
+```
+
 `tools/bench_profiles.sh` also includes the `bezverec/tif2jp2` wrapper when a
 `tif2jp2` binary is in `PATH`. To use a local checkout or release binary
 explicitly:

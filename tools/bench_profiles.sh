@@ -15,7 +15,44 @@ TIF2JP2=${TIF2JP2:-tif2jp2}
 VALID2000=${VALID2000:-../valid2000/jp2.py}
 VALID2000_PYTHON=${VALID2000_PYTHON:-python3}
 VALID2000_JPYLYZER_CMD=${VALID2000_JPYLYZER_CMD:-}
-Z2000_THREADS=${Z2000_THREADS:-3}
+
+detect_logical_threads() {
+  if command -v getconf >/dev/null 2>&1; then
+    n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)
+    if [ -n "${n:-}" ] && [ "$n" -gt 0 ] 2>/dev/null; then
+      echo "$n"
+      return
+    fi
+  fi
+  if command -v nproc >/dev/null 2>&1; then
+    n=$(nproc 2>/dev/null || true)
+    if [ -n "${n:-}" ] && [ "$n" -gt 0 ] 2>/dev/null; then
+      echo "$n"
+      return
+    fi
+  fi
+  if command -v sysctl >/dev/null 2>&1; then
+    n=$(sysctl -n hw.ncpu 2>/dev/null || true)
+    if [ -n "${n:-}" ] && [ "$n" -gt 0 ] 2>/dev/null; then
+      echo "$n"
+      return
+    fi
+  fi
+  if [ -n "${NUMBER_OF_PROCESSORS:-}" ] && [ "$NUMBER_OF_PROCESSORS" -gt 0 ] 2>/dev/null; then
+    echo "$NUMBER_OF_PROCESSORS"
+    return
+  fi
+  echo 4
+}
+
+resolve_z2000_threads() {
+  case "${Z2000_THREADS:-all}" in
+    ""|all|auto) detect_logical_threads ;;
+    *) echo "$Z2000_THREADS" ;;
+  esac
+}
+
+Z2000_THREADS=$(resolve_z2000_threads)
 
 if command -v "$TIF2JP2" >/dev/null 2>&1; then
   HAVE_TIF2JP2=1

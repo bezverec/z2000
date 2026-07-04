@@ -6,9 +6,46 @@ set -eu
 
 INPUT=${1:-bench-rgb-2048.tif}
 RUNS=${RUNS:-8}
-THREADS=${Z2000_THREADS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}
 ZIG_BUILD_FLAGS=${ZIG_BUILD_FLAGS:-}
 PRECINCTS='[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]'
+
+detect_logical_threads() {
+  if command -v getconf >/dev/null 2>&1; then
+    n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)
+    if [ -n "${n:-}" ] && [ "$n" -gt 0 ] 2>/dev/null; then
+      echo "$n"
+      return
+    fi
+  fi
+  if command -v nproc >/dev/null 2>&1; then
+    n=$(nproc 2>/dev/null || true)
+    if [ -n "${n:-}" ] && [ "$n" -gt 0 ] 2>/dev/null; then
+      echo "$n"
+      return
+    fi
+  fi
+  if command -v sysctl >/dev/null 2>&1; then
+    n=$(sysctl -n hw.ncpu 2>/dev/null || true)
+    if [ -n "${n:-}" ] && [ "$n" -gt 0 ] 2>/dev/null; then
+      echo "$n"
+      return
+    fi
+  fi
+  if [ -n "${NUMBER_OF_PROCESSORS:-}" ] && [ "$NUMBER_OF_PROCESSORS" -gt 0 ] 2>/dev/null; then
+    echo "$NUMBER_OF_PROCESSORS"
+    return
+  fi
+  echo 4
+}
+
+resolve_z2000_threads() {
+  case "${Z2000_THREADS:-all}" in
+    ""|all|auto) detect_logical_threads ;;
+    *) echo "$Z2000_THREADS" ;;
+  esac
+}
+
+THREADS=$(resolve_z2000_threads)
 
 if [ ! -f "$INPUT" ]; then
   python3 tools/make_bench_tiff.py 2048 2048 "$INPUT" >/dev/null

@@ -12,6 +12,17 @@ entries are grouped by development milestone rather than semantic version.
   read, codestream extraction, metadata parsing, T2 packet catalog construction,
   T1 block payload reconstruction, inverse DWT, inverse MCT, ICC extraction,
   and TIFF write.
+- Updated comparative benchmark scripts so `Z2000_THREADS=all` / `auto`
+  resolves to all detected logical CPUs, including Windows environments via
+  `NUMBER_OF_PROCESSORS`; profile benchmarks now default to the all-thread
+  z2000 mode instead of a fixed three-worker run.
+- Added `tools/bench_compare.ps1`, a Windows-native comparative benchmark for
+  z2000, Grok, OpenJPEG, and Kakadu that uses `hyperfine --shell=none`, exports
+  encode/decode JSON results, reports output sizes, and runs optional pixel
+  checks when a Python with NumPy/Pillow is available.
+- Switched the encode-side component block catalog builder from fixed contiguous
+  worker ranges to an atomic block queue, matching the strict decode work-queue
+  shape and improving all-thread encode load balance.
 - Split strict packet-catalog timing into scan, packet-header assembly, and
   final block-catalog materialization phases.
 - Reduced packet-header assembly allocation churn by filling strict and legacy
