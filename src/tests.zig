@@ -2424,6 +2424,56 @@ test "TIFF to JP2 fixture keeps ICC absence explicit" {
     try std.testing.expect(extracted == null);
 }
 
+test "TIFF to JP2 fixture roundtrips embedded ICC profile bytes" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/icc-present-rgb.tif", .{tmp.sub_path});
+
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+    const icc = try allocator.dupe(u8, "eciRGBv2 synthetic ICC");
+    defer allocator.free(icc);
+
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+        .icc_profile = icc,
+    };
+    try tiff.writeRgb(io, allocator, source, path);
+
+    // Read the profile back from disk to prove it survives the TIFF I/O boundary,
+    // then carry it through the JP2 wrap into the restricted colr box.
+    var parsed = try tiff.readRgb(io, allocator, path);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.icc_profile != null);
+    try std.testing.expectEqualSlices(u8, icc, parsed.icc_profile.?);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, parsed, minimal_jp2_codestream[0..]);
+    defer allocator.free(wrapped);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expect(info.has_icc_profile);
+    try std.testing.expectEqual(icc.len, info.icc_profile_bytes);
+
+    const extracted = try jp2.extractIccProfile(allocator, wrapped);
+    defer if (extracted) |profile| allocator.free(profile);
+    try std.testing.expect(extracted != null);
+    try std.testing.expectEqualSlices(u8, icc, extracted.?);
+
+    // The bytes must land verbatim in the colr box payload (method 2, 3-byte header).
+    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+    const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+    try std.testing.expectEqual(@as(u8, 2), wrapped[colr_payload.start]);
+    try std.testing.expectEqualSlices(u8, icc, wrapped[colr_payload.start + 3 .. colr_payload.end]);
+}
+
 test "TIFF parser rejects malformed ICC profile tag" {
     const allocator = std.testing.allocator;
 
@@ -2505,6 +2555,46 @@ test "DNG info parser reads primary IFD metadata and SubIFD summaries" {
     try std.testing.expectEqual(@as(u32, 640), info.ifds[1].width.?);
     try std.testing.expectEqual(@as(u16, 3), info.ifds[1].samples_per_pixel.?);
     try std.testing.expect(info.ifds[1].is_subifd);
+}
+
+test "DNG info parser rejects truncated buffers without out-of-bounds reads" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    const ifd0_offset: u32 = 8;
+    const ifd0_entries: u16 = 7;
+    const ifd0_end: u32 = ifd0_offset + 2 + @as(u32, ifd0_entries) * 12 + 4;
+    const make_offset = ifd0_end;
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, ifd0_offset);
+
+    try appendU16Le(allocator, &bytes, ifd0_entries);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 320);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 240);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 1, 16);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 1);
+    // Make string lives past the IFD, exercising the external-offset value path.
+    try appendIfdEntryLe(allocator, &bytes, 271, 2, 6, make_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50706, 1, 4, 1 | (@as(u32, 4) << 8));
+    try appendU32Le(allocator, &bytes, 0);
+    try bytes.appendSlice(allocator, "Codex\x00");
+    try std.testing.expectEqual(@as(usize, make_offset + 6), bytes.items.len);
+
+    // The full buffer parses cleanly.
+    const info = try dng.parseInfo(bytes.items);
+    try std.testing.expectEqualStrings("Codex", info.make.?);
+
+    // Every strict prefix must fail gracefully (an error, never a panic / OOB read).
+    var len: usize = 0;
+    while (len < bytes.items.len) : (len += 1) {
+        if (dng.parseInfo(bytes.items[0..len])) |_| {
+            return error.TruncatedBufferShouldFail;
+        } else |_| {}
+    }
 }
 
 test "JP2 wrapper records RGB image header" {
@@ -8323,9 +8413,13 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported RESET code-block style", .offset = 12, .value = 0x02, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported TERMALL code-block style", .offset = 12, .value = 0x04, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "unsupported CAUSAL code-block style", .offset = 12, .value = 0x08, .expected = codestream.CodestreamError.UnsupportedPayload },
+        // CAUSAL (0x08) is now supported end-to-end, so it is intentionally
+        // absent here; its acceptance + roundtrip is covered by a dedicated test.
         .{ .label = "unsupported ERTERM code-block style", .offset = 12, .value = 0x10, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "unsupported SEGMARK code-block style", .offset = 12, .value = 0x20, .expected = codestream.CodestreamError.UnsupportedPayload },
+        // CAUSAL (0x08) and SEGMARK (0x20) are supported end-to-end, so they are
+        // intentionally absent here; their acceptance + roundtrip is covered by
+        // dedicated tests. The combined 0x3f case still exercises rejection of
+        // the remaining (RESET/TERMALL/ERTERM) bits.
         .{ .label = "unsupported combined code-block style", .offset = 12, .value = 0x3f, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "reserved code-block style bit", .offset = 12, .value = 0x40, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
@@ -8471,9 +8565,10 @@ test "unsupported code-block style options fail closed" {
         .{ .label = "BYPASS+legacy", .options = .{ .bypass = true, .t1_backend = .legacy_mq } },
         .{ .label = "RESET", .options = .{ .reset_context = true } },
         .{ .label = "TERMALL", .options = .{ .terminate_all = true } },
-        .{ .label = "CAUSAL", .options = .{ .vertical_causal = true } },
+        // CAUSAL (vertical_causal) and SEGMARK (segmentation_symbols) are now
+        // wired end-to-end; see the dedicated roundtrip tests below. Neither is
+        // fail-closed any longer.
         .{ .label = "ERTERM", .options = .{ .predictable_termination = true } },
-        .{ .label = "SEGMARK", .options = .{ .segmentation_symbols = true } },
     };
 
     for (cases) |scenario| {
@@ -8483,6 +8578,147 @@ test "unsupported code-block style options fail closed" {
             codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options),
         );
     }
+}
+
+test "vertical causal code-block style roundtrips losslessly and changes the payload" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    // Varied content so causal context formation actually alters the MQ stream.
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const causal = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .vertical_causal = true });
+    defer allocator.free(causal);
+    const plain = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .vertical_causal = false });
+    defer allocator.free(plain);
+
+    // The COD code-block-style byte must advertise the causal bit (0x08) only
+    // when the flag is set.
+    const causal_cod = findMarker(causal, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const plain_cod = findMarker(plain, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x08), causal[causal_cod + 12] & 0x08);
+    try std.testing.expectEqual(@as(u8, 0x00), plain[plain_cod + 12] & 0x08);
+
+    // Causal context formation changes the coded payload bytes.
+    try std.testing.expect(!std.mem.eql(u8, causal, plain));
+
+    // Both streams reconstruct the source image byte-exactly (lossless oracle).
+    var decoded_causal = try codestream.decodeLosslessTemporary(allocator, causal);
+    defer decoded_causal.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded_causal.samples);
+
+    var decoded_plain = try codestream.decodeLosslessTemporary(allocator, plain);
+    defer decoded_plain.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded_plain.samples);
+}
+
+test "segmentation symbols code-block style roundtrips losslessly and changes the payload" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const segmark = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .segmentation_symbols = true });
+    defer allocator.free(segmark);
+    const plain = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .segmentation_symbols = false });
+    defer allocator.free(plain);
+
+    // The COD code-block-style byte must advertise the SEGMARK bit (0x20) only
+    // when the flag is set.
+    const segmark_cod = findMarker(segmark, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const plain_cod = findMarker(plain, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x20), segmark[segmark_cod + 12] & 0x20);
+    try std.testing.expectEqual(@as(u8, 0x00), plain[plain_cod + 12] & 0x20);
+
+    // The extra UNIFORM-coded symbols change the coded payload bytes.
+    try std.testing.expect(!std.mem.eql(u8, segmark, plain));
+
+    // The stream reconstructs the source image byte-exactly (lossless oracle).
+    var decoded = try codestream.decodeLosslessTemporary(allocator, segmark);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
+test "corrupted segmentation symbol is caught as a bounded decode error" {
+    const allocator = std.testing.allocator;
+    // A block whose cleanup pass emits a segmentation symbol the decoder checks
+    // against the fixed 0xA (1,0,1,0) pattern; flipping a payload bit must be
+    // reported (ISO 15444-1 D.5 error resilience), never panic.
+    const width = 5;
+    const height = 7;
+    const plane = [_]i32{
+        0, 4,  0,  -6, 0,
+        8, 0,  2,  0,  -1,
+        0, 0,  -9, 0,  3,
+        5, 0,  0,  -7, 0,
+        0, -2, 6,  0,  0,
+        1, 0,  0,  10, -4,
+        0, 7,  0,  0,  -8,
+    };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    const style = ebcot.CodeBlockStyle{ .segmentation_symbols = true };
+
+    var block = try ebcot.encodeBlockWithStyle(allocator, plane[0..], width, rect, style);
+    defer block.deinit(allocator);
+    var iso = try ebcot.encodeBlockSymbolsSegmentIsoMq(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer iso.deinit(allocator);
+
+    // Sanity: the clean segment roundtrips.
+    const clean = try ebcot.decodeCodeBlockSegmentCoefficientsIsoMqWithStyle(allocator, iso, width, height, style);
+    defer allocator.free(clean);
+    try std.testing.expectEqualSlices(i32, plane[0..], clean);
+
+    // Corrupt every payload byte in turn; each attempt must terminate with a
+    // bounded error or a (wrong-but-safe) decode — never a panic / UB. At least
+    // one corruption must be actively rejected, proving the symbol is validated.
+    try std.testing.expect(iso.bytes.len > 0);
+    var any_rejected = false;
+    for (0..iso.bytes.len) |i| {
+        const scratch = try allocator.dupe(u8, iso.bytes);
+        defer allocator.free(scratch);
+        scratch[i] ^= 0xff;
+        var corrupt = iso;
+        corrupt.bytes = scratch;
+        if (ebcot.decodeCodeBlockSegmentCoefficientsIsoMqWithStyle(allocator, corrupt, width, height, style)) |decoded| {
+            allocator.free(decoded);
+        } else |_| {
+            any_rejected = true;
+        }
+    }
+    try std.testing.expect(any_rejected);
 }
 
 test "unsupported JP2 profile marker options fail closed" {

@@ -7533,11 +7533,16 @@ fn validateCodingPath(options: LosslessOptions) !void {
             if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
         },
     }
+    // vertical_causal (0x08) and segmentation_symbols (0x20) are wired
+    // end-to-end. vertical_causal forms stripe-causal contexts (ISO 15444-1
+    // D.7); segmentation_symbols emits the 0xA UNIFORM-context symbol after each
+    // cleanup pass and the decoder validates it (ISO 15444-1 D.5). Both ride
+    // through encode + strict decode and stay opt-in behind their CLI flags;
+    // the default profile sets neither, so the narrow path is unaffected. The
+    // remaining resilience bits stay fail-closed until their payload is wired.
     if (options.reset_context or
         options.terminate_all or
-        options.vertical_causal or
-        options.predictable_termination or
-        options.segmentation_symbols)
+        options.predictable_termination)
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -7597,9 +7602,11 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
 
 fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
     const parsed = ebcot.CodeBlockStyle.fromCodByte(style) orelse return CodestreamError.InvalidCodestream;
-    // BYPASS (0x01) is implemented end-to-end; the remaining style bits stay
-    // fail-closed until their payload behavior is wired.
-    if ((parsed.toCodByte() & ~@as(u8, 0x01)) != 0) return CodestreamError.UnsupportedPayload;
+    // BYPASS (0x01), vertical_causal (0x08), and segmentation_symbols (0x20) are
+    // implemented end-to-end; the remaining style bits stay fail-closed until
+    // their payload behavior is wired.
+    const supported_style_bits: u8 = 0x01 | 0x08 | 0x20;
+    if ((parsed.toCodByte() & ~supported_style_bits) != 0) return CodestreamError.UnsupportedPayload;
     return parsed;
 }
 
