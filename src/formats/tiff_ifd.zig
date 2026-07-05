@@ -49,10 +49,10 @@ pub const Document = struct {
         else
             return Error.InvalidHeader;
 
-        const magic = readU16(bytes, 2, endian);
+        const magic = try readU16(bytes, 2, endian);
         if (magic != 42) return Error.UnsupportedTiffVariant;
 
-        const first_ifd_offset = @as(usize, readU32(bytes, 4, endian));
+        const first_ifd_offset = @as(usize, try readU32(bytes, 4, endian));
         const document = Document{
             .bytes = bytes,
             .endian = endian,
@@ -64,13 +64,13 @@ pub const Document = struct {
 
     pub fn readIfd(self: Document, offset: usize) Error!Ifd {
         if (offset < 8 or offset > self.bytes.len - 2) return Error.InvalidIfd;
-        const entry_count = readU16(self.bytes, offset, self.endian);
+        const entry_count = try readU16(self.bytes, offset, self.endian);
         const entries_offset = offset + 2;
         const entries_bytes = std.math.mul(usize, entry_count, 12) catch return Error.InvalidIfd;
         if (entries_offset > self.bytes.len or self.bytes.len - entries_offset < entries_bytes + 4) {
             return Error.InvalidIfd;
         }
-        const next_ifd_offset = @as(usize, readU32(self.bytes, entries_offset + entries_bytes, self.endian));
+        const next_ifd_offset = @as(usize, try readU32(self.bytes, entries_offset + entries_bytes, self.endian));
         return .{
             .offset = offset,
             .entry_count = entry_count,
@@ -83,10 +83,10 @@ pub const Document = struct {
         if (index >= ifd.entry_count) return Error.InvalidIfd;
         const offset = ifd.entries_offset + index * 12;
         return .{
-            .tag = readU16(self.bytes, offset, self.endian),
-            .field_type = readU16(self.bytes, offset + 2, self.endian),
-            .count = readU32(self.bytes, offset + 4, self.endian),
-            .value_or_offset = readU32(self.bytes, offset + 8, self.endian),
+            .tag = try readU16(self.bytes, offset, self.endian),
+            .field_type = try readU16(self.bytes, offset + 2, self.endian),
+            .count = try readU32(self.bytes, offset + 4, self.endian),
+            .value_or_offset = try readU32(self.bytes, offset + 8, self.endian),
             .value_field_offset = offset + 8,
         };
     }
@@ -170,7 +170,7 @@ pub const ValueRef = struct {
     pub fn u16At(self: ValueRef, document: Document, index: usize) Error!u16 {
         if (index >= self.count) return Error.InvalidTagValue;
         return switch (self.field_type) {
-            @intFromEnum(FieldType.short) => readU16(self.bytes(document), index * 2, document.endian),
+            @intFromEnum(FieldType.short) => try readU16(self.bytes(document), index * 2, document.endian),
             else => Error.InvalidTagValue,
         };
     }
@@ -179,7 +179,7 @@ pub const ValueRef = struct {
         if (index >= self.count) return Error.InvalidTagValue;
         return switch (self.field_type) {
             @intFromEnum(FieldType.short) => try self.u16At(document, index),
-            @intFromEnum(FieldType.long) => readU32(self.bytes(document), index * 4, document.endian),
+            @intFromEnum(FieldType.long) => try readU32(self.bytes(document), index * 4, document.endian),
             else => Error.InvalidTagValue,
         };
     }
@@ -212,14 +212,18 @@ pub fn typeSize(field_type: u16) ?usize {
     };
 }
 
-pub fn readU16(bytes: []const u8, offset: usize, endian: Endian) u16 {
+pub fn readU16(bytes: []const u8, offset: usize, endian: Endian) Error!u16 {
+    const end = std.math.add(usize, offset, 2) catch return Error.TruncatedData;
+    if (end > bytes.len) return Error.TruncatedData;
     return switch (endian) {
         .little => @as(u16, bytes[offset]) | (@as(u16, bytes[offset + 1]) << 8),
         .big => (@as(u16, bytes[offset]) << 8) | @as(u16, bytes[offset + 1]),
     };
 }
 
-pub fn readU32(bytes: []const u8, offset: usize, endian: Endian) u32 {
+pub fn readU32(bytes: []const u8, offset: usize, endian: Endian) Error!u32 {
+    const end = std.math.add(usize, offset, 4) catch return Error.TruncatedData;
+    if (end > bytes.len) return Error.TruncatedData;
     return switch (endian) {
         .little => @as(u32, bytes[offset]) |
             (@as(u32, bytes[offset + 1]) << 8) |
