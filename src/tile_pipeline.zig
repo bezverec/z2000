@@ -2713,6 +2713,7 @@ fn validateTileRpclPacketForGroups(
                 group.locations,
                 group.max_zero_bitplanes,
                 group.reader_state.bypass,
+                group.reader_state.terminate_all,
                 group.decoded,
             );
         }

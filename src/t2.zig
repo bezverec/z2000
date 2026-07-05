@@ -811,6 +811,7 @@ pub const PrecinctPacketReaderState = struct {
     precinct_x: ?u32 = null,
     precinct_y: ?u32 = null,
     bypass: bool = false,
+    terminate_all: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, leaves_x: usize, leaves_y: usize, block_count: usize) !PrecinctPacketReaderState {
         var inclusion = try TagTreeDecoder.init(allocator, leaves_x, leaves_y);
@@ -890,6 +891,7 @@ pub const PrecinctPacketReaderState = struct {
             locations,
             max_zero_bitplanes,
             self.bypass,
+            self.terminate_all,
             decoded,
             payloads,
         );
@@ -1354,6 +1356,7 @@ pub fn readPrecinctLayerPacket(
     locations: []const PacketBlockLocation,
     max_zero_bitplanes: u8,
     bypass: bool,
+    terminate_all: bool,
     decoded: []DecodedPacketBlock,
     payloads: []?[]const u8,
 ) !ReadPacket {
@@ -1387,6 +1390,7 @@ pub fn readPrecinctLayerPacket(
         locations,
         max_zero_bitplanes,
         bypass,
+        terminate_all,
         decoded,
     );
     try reader.byteAlign();
@@ -1521,6 +1525,7 @@ pub fn readCodeBlockPacketHeader(
     previously_included: bool,
     max_zero_bitplanes: u8,
     bypass: bool,
+    terminate_all: bool,
     first_pass: u16,
 ) !DecodedPacketBlock {
     const included = if (previously_included)
@@ -1545,9 +1550,16 @@ pub fn readCodeBlockPacketHeader(
         0;
     const pass_count = try readCodingPassCount(reader);
 
-    if (bypass) {
+    if (bypass or terminate_all) {
         var span_passes: [max_block_segments]u16 = undefined;
-        const segment_count = try bypassSegmentPassCounts(first_pass, pass_count, &span_passes);
+        const segment_count = if (bypass)
+            try bypassSegmentPassCounts(first_pass, pass_count, &span_passes)
+        else blk: {
+            // terminate_all: each coding pass is its own terminated segment.
+            if (pass_count > max_block_segments) return PacketHeaderError.InvalidPacketHeader;
+            for (0..pass_count) |i| span_passes[i] = 1;
+            break :blk @as(u8, @intCast(pass_count));
+        };
         var block = DecodedPacketBlock{
             .included = true,
             .first_inclusion = first_inclusion,
@@ -1584,6 +1596,7 @@ pub fn readPrecinctPacketHeader(
     locations: []const PacketBlockLocation,
     max_zero_bitplanes: u8,
     bypass: bool,
+    terminate_all: bool,
     decoded: []DecodedPacketBlock,
 ) !bool {
     if (states.len != locations.len or decoded.len != locations.len) {
@@ -1613,6 +1626,7 @@ pub fn readPrecinctPacketHeader(
         locations,
         max_zero_bitplanes,
         bypass,
+        terminate_all,
         decoded,
     );
 
@@ -1628,6 +1642,7 @@ pub fn readPrecinctPacketHeaderBody(
     locations: []const PacketBlockLocation,
     max_zero_bitplanes: u8,
     bypass: bool,
+    terminate_all: bool,
     decoded: []DecodedPacketBlock,
 ) !void {
     if (states.len != locations.len or decoded.len != locations.len) {
@@ -1646,6 +1661,7 @@ pub fn readPrecinctPacketHeaderBody(
             states[index].included,
             max_zero_bitplanes,
             bypass,
+            terminate_all,
             states[index].cumulative_passes,
         );
         if (decoded[index].included) {
