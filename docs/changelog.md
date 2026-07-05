@@ -285,6 +285,9 @@ entries are grouped by development milestone rather than semantic version.
   boundaries.
 - Added negative TIFF strip metadata coverage for mismatched `StripByteCounts`
   totals and truncated strip payload offsets.
+- Hardened TIFF scalar metadata readers so `readU16` and `readU32` now
+  bounds-check their offsets and return `TruncatedData`, improving ReleaseFast
+  behavior for malformed tags and future parser changes.
 - Added a public TIFF writer/reader roundtrip test for the optimized 8-bit and
   16-bit raster paths, plus negative coverage that the 8-bit SIMD narrowing
   path rejects out-of-range `u16` samples instead of truncating them.
@@ -468,6 +471,10 @@ entries are grouped by development milestone rather than semantic version.
 - Tightened JP2-boundary `COD` layer-count sanity so quality-layer counts above
   the current rate-allocation/T2 fixed metadata limit fail closed at the
   wrapper/parser boundary.
+- Reconciled the ISO coverage scorecard totals with the current row-level
+  estimates: narrow RGB lossless JP2 is 86/100 and the broader Part 1 family is
+  44/100; the TIFF reader hardening is robustness work rather than a new ISO
+  coverage point.
 - Tightened the JP2 wrapper writer to reject unsupported bit depths and RGB
   sample buffers that do not match `width * height * 3`.
 - Tightened strict codestream metadata parsing for the supported packet path:

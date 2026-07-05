@@ -8,12 +8,12 @@ interop or strict-reader check when the feature is externally visible.
 
 ## Current Snapshot
 
-Last updated: 2026-07-05.
+Last updated: 2026-07-06.
 
 | Target | Score | Meaning |
 | --- | ---: | --- |
-| Narrow RGB lossless JP2 target | 87 / 100 | Single-tile RGB TIFF 6.0 to JP2, RCT, reversible 5/3, RPCL, BYPASS, one or more quality layers, PLT/TLM, strict z2000 decode, and OpenJPEG/Grok/Kakadu/jpylyzer smoke acceptance. |
-| Full JPEG2000 Part 1 codec family | 41 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
+| Narrow RGB lossless JP2 target | 86 / 100 | Single-tile RGB TIFF 6.0 to JP2, RCT, reversible 5/3, RPCL, BYPASS, one or more quality layers, PLT/TLM, strict z2000 decode, and OpenJPEG/Grok/Kakadu/jpylyzer smoke acceptance. |
+| Full JPEG2000 Part 1 codec family | 44 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
 
 The narrow target is intentionally much closer than the full-codec target. It
 measures the practical archival path we are building first. The full-codec
@@ -34,7 +34,7 @@ exist.
 | T2 RPCL packetization | 15 | 13 | Packet headers, tag-trees, `numlenbits`, layer deltas, RPCL indexing, strict SOD block catalog, packet rollback tests, and subband-local precinct projection. | Keep multi-layer packet truncation interop stable and extend the same discipline to future progression orders. |
 | z2000 strict decode | 10 | 9 | No-sidecar strict RPCL/RCT/5-3 decode reconstructs z2000-produced ISO-MQ smoke files; ISO-MQ BP8 debug sidecar validation now reuses the same strict SOD packet block catalog after byte-for-byte shadow-stream checks. | Retire more debug-only assumptions and expand strict decode coverage for truncation/style combinations. |
 | Independent decoder interop | 10 | 10 | OpenJPEG, Grok, and Kakadu decode current no-sidecar output losslessly in local smoke tests; jpylyzer 2.2.1 reports the JP2 as valid with no warnings; pixels match the source TIFF. Output byte size is within about 0.06% of Grok/OpenJPEG/Kakadu on the local 3520x5115 smoke profile. | Keep commands/results reproducible and add a small fixture matrix for ICC-present and ICC-absent source TIFFs. |
-| **Total** | **100** | **87** |  |  |
+| **Total** | **100** | **86** |  |  |
 
 ## Full Part 1 Codec Family
 
@@ -48,7 +48,7 @@ exist.
 | T1 completeness | 15 | 5 | BYPASS is public; reset-context, terminate-all, vertical-causal, predictable termination, segmentation symbols, and more termination rules still need public profile coverage. |
 | T2 completeness | 10 | 5 | LRCP/PCRL/CPRL/CPRL ordering, packet parser breadth, tile-part divisions beyond none/R. |
 | Interop and conformance gates | 5 | 4 | Reproducible OpenJPEG/Grok/Kakadu/jpylyzer matrix exists locally for the narrow smoke file; malformed corpus, fuzzing, and broader profile gates remain incomplete. |
-| **Total** | **100** | **41** |  |
+| **Total** | **100** | **44** |  |
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more

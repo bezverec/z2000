@@ -160,12 +160,12 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
     else
         return TiffError.InvalidHeader;
 
-    if (readU16(bytes, 2, endian) != 42) return TiffError.InvalidHeader;
+    if (try readU16(bytes, 2, endian) != 42) return TiffError.InvalidHeader;
 
-    const ifd_offset = @as(usize, readU32(bytes, 4, endian));
+    const ifd_offset = @as(usize, try readU32(bytes, 4, endian));
     if (ifd_offset > bytes.len - 2) return TiffError.InvalidIfd;
 
-    const entry_count = readU16(bytes, ifd_offset, endian);
+    const entry_count = try readU16(bytes, ifd_offset, endian);
     const entries_offset = ifd_offset + 2;
     const entries_bytes = try std.math.mul(usize, entry_count, 12);
     if (entries_offset > bytes.len or bytes.len - entries_offset < entries_bytes) {
@@ -186,7 +186,7 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
     var icc_profile_ref: ?ValueRef = null;
 
     for (0..entry_count) |i| {
-        const entry = readEntry(bytes, entries_offset + i * 12, endian);
+        const entry = try readEntry(bytes, entries_offset + i * 12, endian);
         switch (entry.tag) {
             256 => width = try readSingleU32(bytes, endian, entry),
             257 => height = try readSingleU32(bytes, endian, entry),
@@ -263,7 +263,7 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
         if (bits[0] == 8) {
             sample_index = widenU8Samples(samples, sample_index, strip_bytes);
         } else {
-            sample_index = readU16Samples(samples, sample_index, strip_bytes, endian);
+            sample_index = try readU16Samples(samples, sample_index, strip_bytes, endian);
         }
     }
 
@@ -294,7 +294,7 @@ fn widenU8Samples(out: []u16, start: usize, bytes: []const u8) usize {
     return start + bytes.len;
 }
 
-fn readU16Samples(out: []u16, start: usize, bytes: []const u8, endian: Endian) usize {
+fn readU16Samples(out: []u16, start: usize, bytes: []const u8, endian: Endian) !usize {
     const sample_count = bytes.len / 2;
     if (comptime builtin.target.cpu.arch.endian() == .little) {
         if (endian == .little) {
@@ -306,7 +306,7 @@ fn readU16Samples(out: []u16, start: usize, bytes: []const u8, endian: Endian) u
     var cursor: usize = 0;
     var sample_index = start;
     while (cursor < bytes.len) : (cursor += 2) {
-        out[sample_index] = readU16(bytes, cursor, endian);
+        out[sample_index] = try readU16(bytes, cursor, endian);
         sample_index += 1;
     }
     return sample_index;
@@ -319,12 +319,12 @@ const ValueRef = struct {
     offset: ?usize,
 };
 
-fn readEntry(bytes: []const u8, offset: usize, endian: Endian) IfdEntry {
+fn readEntry(bytes: []const u8, offset: usize, endian: Endian) !IfdEntry {
     return .{
-        .tag = readU16(bytes, offset, endian),
-        .field_type = readU16(bytes, offset + 2, endian),
-        .count = readU32(bytes, offset + 4, endian),
-        .value_or_offset = readU32(bytes, offset + 8, endian),
+        .tag = try readU16(bytes, offset, endian),
+        .field_type = try readU16(bytes, offset + 2, endian),
+        .count = try readU32(bytes, offset + 4, endian),
+        .value_or_offset = try readU32(bytes, offset + 8, endian),
     };
 }
 
@@ -410,7 +410,7 @@ fn readU16Value(bytes: []const u8, endian: Endian, ref: ValueRef, index: usize) 
     if (index >= ref.count) return TiffError.InvalidTagValue;
     return switch (ref.field_type) {
         3 => if (ref.offset) |offset|
-            readU16(bytes, offset + index * 2, endian)
+            try readU16(bytes, offset + index * 2, endian)
         else
             inlineU16(ref.inline_value, endian, index),
         else => TiffError.InvalidTagValue,
@@ -421,7 +421,7 @@ fn readU32Value(bytes: []const u8, endian: Endian, ref: ValueRef, index: usize) 
     if (index >= ref.count) return TiffError.InvalidTagValue;
     return switch (ref.field_type) {
         3 => try readU16Value(bytes, endian, ref, index),
-        4 => if (ref.offset) |offset| readU32(bytes, offset + index * 4, endian) else ref.inline_value,
+        4 => if (ref.offset) |offset| try readU32(bytes, offset + index * 4, endian) else ref.inline_value,
         else => TiffError.InvalidTagValue,
     };
 }
@@ -433,14 +433,18 @@ fn inlineU16(value: u32, endian: Endian, index: usize) u16 {
     };
 }
 
-fn readU16(bytes: []const u8, offset: usize, endian: Endian) u16 {
+fn readU16(bytes: []const u8, offset: usize, endian: Endian) !u16 {
+    const end = std.math.add(usize, offset, 2) catch return TiffError.TruncatedData;
+    if (end > bytes.len) return TiffError.TruncatedData;
     return switch (endian) {
         .little => @as(u16, bytes[offset]) | (@as(u16, bytes[offset + 1]) << 8),
         .big => (@as(u16, bytes[offset]) << 8) | @as(u16, bytes[offset + 1]),
     };
 }
 
-fn readU32(bytes: []const u8, offset: usize, endian: Endian) u32 {
+fn readU32(bytes: []const u8, offset: usize, endian: Endian) !u32 {
+    const end = std.math.add(usize, offset, 4) catch return TiffError.TruncatedData;
+    if (end > bytes.len) return TiffError.TruncatedData;
     return switch (endian) {
         .little => @as(u32, bytes[offset]) |
             (@as(u32, bytes[offset + 1]) << 8) |
