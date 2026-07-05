@@ -41,8 +41,9 @@ interop gate.
   tests.
 - JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
-  Start with 8-bit and 16-bit RGB plus sRGB `colr`; keep JPX-only features
-  rejected until JPX boxes are intentionally implemented.
+  Start with 8-bit and 16-bit RGB plus sRGB `colr`; the reader now also accepts
+  final length-to-EOF codestream boxes and 64-bit `XLBox` lengths. Keep
+  JPX-only features rejected until JPX boxes are intentionally implemented.
 - ICC profile preservation: TIFF tag 34675 now roundtrips as a JP2 restricted
   ICC `colr` box and back to TIFF as opaque metadata for common RGB profiles
   such as eciRGBv2 and Adobe RGB. Malformed ICC box/tag rejection coverage is
@@ -69,12 +70,23 @@ interop gate.
 
 ## Next Implementation Slice
 
-1. Build a small JP2/ICC interop fixture matrix: ICC-absent RGB TIFF,
-   ICC-present RGB TIFF, malformed ICC tag, and malformed `colr` box. The
-   ICC-absent fixture should stay valid without inventing a profile.
+1. Turn the local JP2/ICC fixture coverage into a small interop matrix:
+   ICC-absent RGB TIFF, ICC-present RGB TIFF, malformed ICC tag, and malformed
+   `colr` box against OpenJPEG/Grok/Kakadu where applicable. The ICC-absent
+   fixture already stays valid without inventing a profile.
 2. Harden JP2 reader diagnostics around duplicate or misplaced required boxes,
    unsupported brands, ICC-vs-sRGB `colr` policy, variable bits-per-component,
-   extra components, and multiple contiguous codestream boxes.
+   extra components, and multiple contiguous codestream boxes. Basic
+   length-to-EOF, `XLBox`, sequential `SOT` tile-part auditing, and `TLM/Psot`
+   length matching are now covered for codestream boxes. JP2-boundary `PLT`
+   parsing now also rejects unterminated packet lengths and packet spans that
+   do not match the tile-part `SOD` byte count; packet `SOP`/`EPH` framing is
+   checked against `COD/Scod` before trusting the codestream, and reversible
+   `QCD` exponent bytes plus public 9/7 scalar-expounded step sizes are checked
+   against `SIZ` bit depth. `COD/Scod` implicit/default precinct geometry stays
+   fail-closed; supported JP2 codestreams must carry explicit precinct bytes,
+   and `COD` layer counts are capped to the current rate-allocation/T2 metadata
+   limit.
 3. Extend strict T2 audit fixtures from the current smoke file to deliberately
    corrupted PLT/TLM/SOP/EPH/header cases that can be compared against
    OpenJPEG/Grok/Kakadu behavior without assuming any validator is final.

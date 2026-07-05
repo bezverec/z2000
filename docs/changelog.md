@@ -347,6 +347,127 @@ entries are grouped by development milestone rather than semantic version.
 - Tightened the basic JP2 box reader for the supported `.jp2` profile:
   signature and `ftyp` ordering, `jp2 ` compatibility, RGB `ihdr`, sRGB `colr`,
   and one contiguous codestream are now validated fail-closed.
+- Extended the JP2 box reader to accept standard Annex I codestream box lengths:
+  `LBox == 0` for a final length-to-EOF box and `LBox == 1` with a 64-bit
+  `XLBox`, with malformed/truncated XLBox coverage.
+- Hardened JP2 big-endian numeric field reads so short box payloads return
+  deterministic `InvalidBox` errors instead of relying on unchecked indexing.
+- Kept `LBox == 0` fail-closed for nested JP2 header child boxes, so
+  length-to-EOF remains a top-level final-box mechanism rather than silently
+  consuming the rest of a superbox.
+- Rejected empty contiguous codestream boxes in both JP2 wrapping and parsing
+  so malformed `.jp2` inputs cannot pass metadata validation with a zero-byte
+  `jp2c` payload.
+- Tightened JP2 profile diagnostics further: `ftyp` now rejects any compatible
+  brand outside the narrow `jp2 ` profile, and tests explicitly cover extra RGB
+  components plus duplicate `colr` boxes.
+- Added explicit JP2 header required-box regression coverage for missing
+  `ihdr`, missing `colr`, and misplaced `colr` before `ihdr`.
+- Added a narrow `jp2c` payload signature check: JP2 wrapping and metadata
+  parsing now reject codestream boxes that do not start with `SOC` or end with
+  `EOC`, while leaving full strict marker validation to the codestream reader.
+- Extended that JP2 sanity check to the first `SIZ` marker: the reader now
+  rejects codestream boxes whose width, height, component count, bit depth, or
+  component sampling disagree with the JP2 `ihdr` metadata.
+- Tightened the JP2 `SIZ` sanity gate to the current fail-closed profile:
+  nonzero `Rsiz`, nonzero image origins, tile origins that differ from the image
+  origin, or tile sizes that imply real multi-tile payloads are rejected until
+  that path is enabled.
+- Added explicit `SIZ` length validation in the JP2 container sanity check so
+  malformed `Lsiz`/component-table combinations fail before metadata is trusted.
+- Added a positive JP2 wrapper regression using a real z2000 lossless
+  codestream, proving the stricter `SIZ` sanity gate still accepts normal
+  encoder output and returns the exact embedded `jp2c` bytes.
+- Added the same real-codestream JP2 `SIZ` sanity coverage for 16-bit RGB,
+  including a negative `ihdr` bit-depth mismatch check.
+- Added writer-side JP2 `SIZ` mismatch regressions so wrapping an image with
+  codestream metadata for a different bit depth or image shape fails before
+  emitting a container.
+- Added real-codestream JP2 `SIZ` component-table regressions for signed
+  components, mismatched per-component precision, and unsupported component
+  subsampling.
+- Consolidated the real-codestream JP2 test fixtures so the 8-bit and 16-bit
+  `SIZ` sanity tests share one owned RGB fixture helper.
+- Added a combined real-codestream JP2 + restricted ICC preservation regression
+  that validates `SIZ` metadata, `jp2c` extraction, and ICC extraction together.
+- Added a real-codestream JP2 negative ICC regression so empty restricted ICC
+  payloads are rejected before emitting a `colr` box.
+- Hardened JP2 codestream sanity checks so corrupted bytes immediately after
+  the `SIZ` marker segment are rejected unless they start the next marker.
+- Normalized malformed JP2 `XLBox` overflow handling to deterministic
+  `InvalidBox` diagnostics.
+- Added JP2 `ihdr` fail-closed regressions for unknown colorspace and
+  intellectual-property flags in the narrow RGB profile.
+- Tightened JP2 `ftyp` validation so nonzero minor versions fail closed for the
+  current basic `jp2 ` profile.
+- Added a lightweight JP2 codestream main-header walk so duplicate `SIZ`,
+  premature `SOD`, malformed marker lengths, or non-marker bytes before the
+  first tile-part are rejected before container metadata is trusted.
+- Extended that JP2 main-header sanity gate to require `COD` and `QCD` before
+  the first `SOT` in real tile-part codestreams.
+- Tightened the same JP2 main-header gate to reject duplicate `COD` or `QCD`
+  marker segments in the narrow single-profile codestream.
+- Kept per-component `COC`/`QCC` main-header marker segments fail-closed in the
+  JP2 wrapper/parser until their payload behavior is wired end-to-end.
+- Kept additional profile-changing main-header markers (`CAP`, `RGN`, `POC`,
+  `PPM`, `PPT`, and `CRG`) fail-closed at the JP2 wrapper/parser boundary.
+- Changed the JP2 main-header sanity walk to a narrow whitelist: only `COD`,
+  `QCD`, `TLM`, and `COM` are accepted before the first `SOT`; unknown
+  length-segment markers now fail closed.
+- Added a first-`SOT` sanity check in the JP2 wrapper/parser so malformed
+  `Lsot` values are rejected before container metadata is trusted.
+- Extended first-`SOT` sanity validation for the narrow single-tile profile:
+  nonzero tile indexes, nonzero first tile-part indexes, unknown tile-part
+  counts, zero `Psot`, and out-of-range `Psot` are rejected at the JP2 boundary.
+- Added a lightweight first tile-part header sanity pass so JP2 wrapping/parsing
+  requires a `SOD` delimiter after optional `PLT`/`COM` marker segments.
+- Added JP2 boundary checks for minimum marker segment lengths on whitelisted
+  `COD`, `QCD`, `TLM`, `PLT`, and `COM` segments.
+- Tightened JP2 `TLM` sanity for the narrow single-tile profile: unsupported
+  `Stlm`, nonzero tile indexes, malformed entry byte counts, and zero `Psot`
+  entries fail closed.
+- Tightened JP2 `PLT` sanity in the first tile-part header: empty length
+  payloads and non-sequential `Zplt` indexes now fail closed.
+- Added JP2 `COD` profile sanity for the current public path: reserved `Scod`,
+  unsupported progression orders, zero layers, unsupported MCT flags,
+  unsupported code-block style bits, malformed precinct payload lengths, and
+  unknown transform bytes fail closed before container metadata is trusted.
+- Extended JP2 `COD` sanity to reject oversized code-block exponents and
+  code-block areas above the Part 1 limit used by the strict reader.
+- Tightened JP2 `COD` MCT sanity so RGB codestreams with MCT disabled fail
+  closed until `--mct none` has real payload behavior.
+- Added JP2 `QCD` profile sanity so unsupported guard bits, scalar-derived
+  quantization, invalid qstyle values, and band-count length mismatches fail
+  closed at the wrapper/parser boundary.
+- Added positive JP2 wrapper coverage for the public 9/7 ICT scalar-expounded
+  codestream path so profile hardening keeps the irreversible RGB path green.
+- Tightened JP2 codestream tile-part sanity so real z2000 codestream payloads
+  audit every sequential `SOT` through `EOC`, reject hidden multi-tile indexes,
+  skipped `TPsot` values, inconsistent `TNsot` counts, and missing final
+  tile-parts while preserving the current resolution tile-part profile.
+- Connected JP2-boundary `TLM` sanity to the audited tile-part sequence: `Ptlm`
+  entries are now collected from the main header and checked against each
+  corresponding `SOT/Psot` value in the current narrow profile.
+- Tightened JP2-boundary `PLT` sanity for the same profile: tile-part `PLT`
+  segments now parse JPEG2000 variable-length packet spans, reject unterminated
+  length values, and require the summed packet spans to match the actual `SOD`
+  payload byte count.
+- Extended the same JP2-boundary packet audit to `COD/Scod` packet-marker
+  policy: `SOP` and `EPH` framing must match the advertised flags across
+  `PLT` packet spans, and `SOP` sequence numbers are checked before the
+  codestream is trusted.
+- Tightened JP2-boundary `QCD` sanity for the reversible 5/3 path: no-quant
+  exponent bytes must now match the `SIZ` component bit depth and expected
+  LL/HL/LH/HH subband gains before the codestream is trusted.
+- Tightened JP2-boundary `QCD` sanity for the public irreversible 9/7 path as
+  well: scalar-expounded step-size values must match the encoder's
+  OpenJPEG-style 9/7 norm table and LL/HL/LH/HH band ordering.
+- Tightened JP2-boundary `COD` sanity so real z2000 codestreams must carry
+  explicit precinct size bytes in `Scod`; implicit/default precinct geometry
+  remains fail-closed until it is wired through the RPCL/T2 profile.
+- Tightened JP2-boundary `COD` layer-count sanity so quality-layer counts above
+  the current rate-allocation/T2 fixed metadata limit fail closed at the
+  wrapper/parser boundary.
 - Tightened the JP2 wrapper writer to reject unsupported bit depths and RGB
   sample buffers that do not match `width * height * 3`.
 - Tightened strict codestream metadata parsing for the supported packet path:
@@ -364,6 +485,8 @@ entries are grouped by development milestone rather than semantic version.
   TIFF without transforming pixel values.
 - Added malformed ICC coverage for zero-length/truncated TIFF profile tags and
   unsupported restricted-ICC JP2 `colr` box variants.
+- Added an ICC-absent TIFF-to-JP2 fixture test to keep no-profile RGB input
+  explicit and valid without inventing a JP2 ICC profile.
 - Recorded the current interop gate: no-sidecar/no-EPH output strict-decodes in
   z2000 and is accepted losslessly by OpenJPEG and Grok; Grok no longer reports
   PL marker length warnings after RPCL subband precinct projection was fixed.

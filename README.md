@@ -12,7 +12,8 @@ This first milestone is intentionally small and honest:
 - a tiny custom `.z2000` codestream
 - CLI encode/decode roundtrip tests
 - safe narrow RGB TIFF 6.0 reader for uncompressed chunky RGB strips
-- JP2 box-level scaffold writer/parser for RGB metadata
+- JP2 box-level scaffold writer/parser for RGB metadata, including standard
+  length-to-EOF and 64-bit `XLBox` codestream box lengths
 - reversible RGB color transform (RCT) for the future lossless 5/3 path
 - subband/code-block partitioning plus raw bit-plane block payloads
 - narrow RGB JP2 encode/decode roundtrip back to TIFF
@@ -74,8 +75,8 @@ with or without BYPASS and quality layers) decode losslessly/pixel-identically
 in the current z2000/OpenJPEG/Grok/Kakadu smoke gates.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-04, the narrow RGB lossless JP2 target is estimated at 86/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 40/100.
+2026-07-05, the narrow RGB lossless JP2 target is estimated at 87/100, while
+the broader JPEG2000 Part 1 codec family is estimated at 41/100.
 
 ## Build
 

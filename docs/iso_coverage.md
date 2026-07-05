@@ -8,12 +8,12 @@ interop or strict-reader check when the feature is externally visible.
 
 ## Current Snapshot
 
-Last updated: 2026-07-04.
+Last updated: 2026-07-05.
 
 | Target | Score | Meaning |
 | --- | ---: | --- |
-| Narrow RGB lossless JP2 target | 86 / 100 | Single-tile RGB TIFF 6.0 to JP2, RCT, reversible 5/3, RPCL, BYPASS, one or more quality layers, PLT/TLM, strict z2000 decode, and OpenJPEG/Grok/Kakadu/jpylyzer smoke acceptance. |
-| Full JPEG2000 Part 1 codec family | 40 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
+| Narrow RGB lossless JP2 target | 87 / 100 | Single-tile RGB TIFF 6.0 to JP2, RCT, reversible 5/3, RPCL, BYPASS, one or more quality layers, PLT/TLM, strict z2000 decode, and OpenJPEG/Grok/Kakadu/jpylyzer smoke acceptance. |
+| Full JPEG2000 Part 1 codec family | 41 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
 
 The narrow target is intentionally much closer than the full-codec target. It
 measures the practical archival path we are building first. The full-codec
@@ -25,22 +25,22 @@ exist.
 
 | Area | Weight | Current | Evidence | Next gate |
 | --- | ---: | ---: | --- | --- |
-| JP2 boxes and RGB metadata | 8 | 7 | Signature, `ftyp`, `jp2h`, `ihdr`, `colr`, contiguous `jp2c`, sRGB and restricted ICC preservation. | Harden malformed box coverage and basic reader diagnostics. |
+| JP2 boxes and RGB metadata | 8 | 8 | Signature, `ftyp`, `jp2h`, `ihdr`, `colr`, contiguous `jp2c`, sRGB and restricted ICC preservation, plus `LBox == 0` and `XLBox` codestream box lengths. | Build a JP2/ICC interop fixture matrix and continue hardening malformed box diagnostics. |
 | TIFF 6.0 RGB input/output | 7 | 6 | Uncompressed chunky RGB strips, 8/16-bit samples, ICC tag preservation. | Add tiled TIFF or explicit fail-closed docs for every skipped TIFF feature. |
-| Core main markers | 10 | 8 | `SIZ`, `COD`, per-subband reversible `QCD`, single-tile profile validation. | Keep marker validation synced with every newly accepted profile option. |
-| Tile-part markers | 10 | 9 | `SOT`, `SOD`, `EOC`, `TLM`, `PLT`, optional `SOP`/`EPH`, resolution tile-parts. Grok no longer reports PL marker length warnings, Kakadu decodes the current no-sidecar smoke file losslessly, and jpylyzer accepts the JP2. | Keep a non-authoritative validator gate and investigate any future PLT/TLM warnings against independent decoders and the strict reader. |
+| Core main markers | 10 | 8 | `SIZ`, `COD` including layer-count and explicit precinct-byte policy, reversible `QCD` style/count/exponent validation, irreversible scalar-expounded `QCD` step-size validation for the public 9/7 path, and single-tile profile validation. | Keep marker validation synced with every newly accepted profile option. |
+| Tile-part markers | 10 | 9 | `SOT`, `SOD`, `EOC`, `TLM`, `PLT`, optional `SOP`/`EPH`, resolution tile-parts, JP2-boundary sequential `SOT` audit through `EOC`, `TLM/Psot` length matching, `PLT` packet-span matching against `SOD` payload bytes, and packet-marker policy checks from `COD/Scod`. Grok no longer reports PL marker length warnings, Kakadu decodes the current no-sidecar smoke file losslessly, and jpylyzer accepts the JP2. | Keep a non-authoritative validator gate and investigate any future PLT/TLM warnings against independent decoders and the strict reader. |
 | RCT and reversible 5/3 DWT | 10 | 9 | Lossless RCT and integer 5/3 encode/decode paths with strict roundtrip checks. | Expand odd-size and edge-tile coverage when multi-tile starts. |
 | T1/EBCOT/MQ for this profile | 20 | 14 | Continuous MQ-backed code-block payloads, ISO MQ default backend, direct MQ hot path, cleanup run mode, sign/refinement contexts, partial-prefix decode helpers, and BYPASS raw/MQ segments. | Close remaining style-bit gaps and reduce decode hot-path cost. |
 | T2 RPCL packetization | 15 | 13 | Packet headers, tag-trees, `numlenbits`, layer deltas, RPCL indexing, strict SOD block catalog, packet rollback tests, and subband-local precinct projection. | Keep multi-layer packet truncation interop stable and extend the same discipline to future progression orders. |
 | z2000 strict decode | 10 | 9 | No-sidecar strict RPCL/RCT/5-3 decode reconstructs z2000-produced ISO-MQ smoke files; ISO-MQ BP8 debug sidecar validation now reuses the same strict SOD packet block catalog after byte-for-byte shadow-stream checks. | Retire more debug-only assumptions and expand strict decode coverage for truncation/style combinations. |
 | Independent decoder interop | 10 | 10 | OpenJPEG, Grok, and Kakadu decode current no-sidecar output losslessly in local smoke tests; jpylyzer 2.2.1 reports the JP2 as valid with no warnings; pixels match the source TIFF. Output byte size is within about 0.06% of Grok/OpenJPEG/Kakadu on the local 3520x5115 smoke profile. | Keep commands/results reproducible and add a small fixture matrix for ICC-present and ICC-absent source TIFFs. |
-| **Total** | **100** | **86** |  |  |
+| **Total** | **100** | **87** |  |  |
 
 ## Full Part 1 Codec Family
 
 | Area | Weight | Current | Missing breadth |
 | --- | ---: | ---: | --- |
-| Containers and metadata | 10 | 6 | Basic JP2 boxes are accepted by jpylyzer for the current no-sidecar smoke file; more reader diagnostics, broader color/profile handling, and JPX remain missing or unsupported by design. |
+| Containers and metadata | 10 | 7 | Basic JP2 boxes are accepted by jpylyzer for the current no-sidecar smoke file, restricted ICC preservation exists, and standard `LBox == 0`/`XLBox` lengths parse for codestream boxes; broader color/profile handling and JPX remain missing or unsupported by design. |
 | Core codestream syntax | 15 | 8 | More marker variants, component/tile layouts, progression and style combinations. |
 | Lossless encode profiles | 15 | 7 | Multi-tile images, more progressions, remaining code-block style bits, stronger rate/layer allocation. |
 | Lossless decode profiles | 15 | 4 | Independent arbitrary JP2/J2K input, multi-tile decode, more progression orders, more marker combinations. |
@@ -48,7 +48,7 @@ exist.
 | T1 completeness | 15 | 5 | BYPASS is public; reset-context, terminate-all, vertical-causal, predictable termination, segmentation symbols, and more termination rules still need public profile coverage. |
 | T2 completeness | 10 | 5 | LRCP/PCRL/CPRL/CPRL ordering, packet parser breadth, tile-part divisions beyond none/R. |
 | Interop and conformance gates | 5 | 4 | Reproducible OpenJPEG/Grok/Kakadu/jpylyzer matrix exists locally for the narrow smoke file; malformed corpus, fuzzing, and broader profile gates remain incomplete. |
-| **Total** | **100** | **40** |  |
+| **Total** | **100** | **41** |  |
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more

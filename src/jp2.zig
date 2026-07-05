@@ -1,9 +1,11 @@
 const std = @import("std");
 const image = @import("image.zig");
+const rate_alloc = @import("rate_alloc.zig");
 
 pub const Jp2Error = error{
     ImageTooLarge,
     CodestreamTooLarge,
+    InvalidCodestream,
     InvalidBox,
     MissingRequiredBox,
     UnsupportedColorSpace,
@@ -32,6 +34,53 @@ const BoxType = enum(u32) {
 
 const signature_payload = [_]u8{ 0x0d, 0x0a, 0x87, 0x0a };
 const brand_jp2 = fourcc("jp2 ");
+const marker_soc = 0xff4f;
+const marker_cap = 0xff50;
+const marker_siz = 0xff51;
+const marker_cod = 0xff52;
+const marker_coc = 0xff53;
+const marker_tlm = 0xff55;
+const marker_plt = 0xff58;
+const marker_qcd = 0xff5c;
+const marker_qcc = 0xff5d;
+const marker_rgn = 0xff5e;
+const marker_poc = 0xff5f;
+const marker_ppm = 0xff60;
+const marker_ppt = 0xff61;
+const marker_crg = 0xff63;
+const marker_com = 0xff64;
+const marker_sot = 0xff90;
+const marker_sop = 0xff91;
+const marker_eph = 0xff92;
+const marker_sod = 0xff93;
+const marker_eoc = 0xffd9;
+
+const CodestreamShape = struct {
+    width: u32,
+    height: u32,
+    components: u16,
+    bits_per_component: u8,
+};
+
+const CodSegmentInfo = struct {
+    levels: u8,
+    transform: u8,
+    sop: bool,
+    eph: bool,
+};
+
+const TlmState = struct {
+    next_segment_index: u8 = 0,
+    lengths: [256]u32 = [_]u32{0} ** 256,
+    count: u8 = 0,
+    saw: bool = false,
+};
+
+const PltState = struct {
+    expected_segment_index: u8 = 0,
+    packet_bytes: usize = 0,
+    saw: bool = false,
+};
 
 pub fn wrapRgbCodestream(
     allocator: std.mem.Allocator,
@@ -46,6 +95,12 @@ pub fn wrapRgbCodestream(
     const pixels = try std.math.mul(usize, input.width, input.height);
     const expected_samples = try std.math.mul(usize, pixels, 3);
     if (input.samples.len != expected_samples) return Jp2Error.InvalidBox;
+    try validateCodestreamPayload(codestream, .{
+        .width = @as(u32, @intCast(input.width)),
+        .height = @as(u32, @intCast(input.height)),
+        .components = 3,
+        .bits_per_component = input.bit_depth,
+    });
     if (codestream.len > std.math.maxInt(u32) - 8) return Jp2Error.CodestreamTooLarge;
 
     var out: std.ArrayList(u8) = .empty;
@@ -114,7 +169,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
     };
 
     while (cursor < bytes.len) {
-        const box = try nextBox(bytes, &cursor);
+        const box = try nextBox(bytes, &cursor, true);
         if (box_index == 0 and box.kind != @intFromEnum(BoxType.signature)) return Jp2Error.InvalidBox;
         if (box_index == 1 and box.kind != @intFromEnum(BoxType.file_type)) return Jp2Error.InvalidBox;
         switch (box.kind) {
@@ -139,6 +194,12 @@ pub fn parseInfo(bytes: []const u8) !Info {
             },
             @intFromEnum(BoxType.contiguous_codestream) => {
                 if (!saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
+                try validateCodestreamPayload(box.payload, .{
+                    .width = info.width,
+                    .height = info.height,
+                    .components = info.components,
+                    .bits_per_component = info.bits_per_component,
+                });
                 info.codestream_bytes = box.payload.len;
                 saw_jp2c = true;
             },
@@ -157,7 +218,7 @@ pub fn extractCodestream(bytes: []const u8) ![]const u8 {
     _ = try parseInfo(bytes);
     var cursor: usize = 0;
     while (cursor < bytes.len) {
-        const box = try nextBox(bytes, &cursor);
+        const box = try nextBox(bytes, &cursor, true);
         if (box.kind == @intFromEnum(BoxType.contiguous_codestream)) {
             return box.payload;
         }
@@ -171,7 +232,7 @@ pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8
 
     var cursor: usize = 0;
     while (cursor < bytes.len) {
-        const box = try nextBox(bytes, &cursor);
+        const box = try nextBox(bytes, &cursor, true);
         if (box.kind == @intFromEnum(BoxType.jp2_header)) {
             return extractIccProfileFromJp2Header(allocator, box.payload);
         }
@@ -187,7 +248,7 @@ const Box = struct {
 fn extractIccProfileFromJp2Header(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
     var cursor: usize = 0;
     while (cursor < bytes.len) {
-        const box = try nextBox(bytes, &cursor);
+        const box = try nextBox(bytes, &cursor, false);
         if (box.kind != @intFromEnum(BoxType.color)) continue;
         if (box.payload.len < 3) return Jp2Error.InvalidBox;
         if (box.payload[0] != 2) return null;
@@ -203,15 +264,15 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var saw_colr = false;
     var box_index: usize = 0;
     while (cursor < bytes.len) {
-        const box = try nextBox(bytes, &cursor);
+        const box = try nextBox(bytes, &cursor, false);
         if (box_index == 0 and box.kind != @intFromEnum(BoxType.image_header)) return Jp2Error.InvalidBox;
         switch (box.kind) {
             @intFromEnum(BoxType.image_header) => {
                 if (box_index != 0 or saw_ihdr) return Jp2Error.InvalidBox;
                 if (box.payload.len != 14) return Jp2Error.InvalidBox;
-                info.height = readU32Be(box.payload, 0);
-                info.width = readU32Be(box.payload, 4);
-                info.components = readU16Be(box.payload, 8);
+                info.height = try readU32Be(box.payload, 0);
+                info.width = try readU32Be(box.payload, 4);
+                info.components = try readU16Be(box.payload, 8);
                 const bpc = box.payload[10];
                 const compression_type = box.payload[11];
                 const colorspace_unknown = box.payload[12];
@@ -238,7 +299,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 switch (method) {
                     1 => {
                         if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
-                        const enum_cs = readU32Be(box.payload, 3);
+                        const enum_cs = try readU32Be(box.payload, 3);
                         if (enum_cs != 16) return Jp2Error.UnsupportedColorSpace;
                         info.has_icc_profile = false;
                         info.icc_profile_bytes = 0;
@@ -261,29 +322,577 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
 
 fn validateFileTypeBox(payload: []const u8) !void {
     if (payload.len < 8 or (payload.len - 8) % 4 != 0) return Jp2Error.InvalidBox;
-    if (readU32Be(payload, 0) != brand_jp2) return Jp2Error.UnsupportedProfile;
+    if (try readU32Be(payload, 0) != brand_jp2) return Jp2Error.UnsupportedProfile;
+    if (try readU32Be(payload, 4) != 0) return Jp2Error.UnsupportedProfile;
 
     var compatible = false;
     var cursor: usize = 8;
     while (cursor < payload.len) : (cursor += 4) {
-        if (readU32Be(payload, cursor) == brand_jp2) compatible = true;
+        const compatibility = try readU32Be(payload, cursor);
+        if (compatibility != brand_jp2) return Jp2Error.UnsupportedProfile;
+        compatible = true;
     }
     if (!compatible) return Jp2Error.UnsupportedProfile;
 }
 
-fn nextBox(bytes: []const u8, cursor: *usize) !Box {
-    if (bytes.len - cursor.* < 8) return Jp2Error.InvalidBox;
+fn validateCodestreamPayload(payload: []const u8, expected: CodestreamShape) !void {
+    if (payload.len < 4) return Jp2Error.InvalidCodestream;
+    if (try readU16Be(payload, 0) != marker_soc) return Jp2Error.InvalidCodestream;
+    if (try readU16Be(payload, payload.len - 2) != marker_eoc) return Jp2Error.InvalidCodestream;
+    if (payload.len < 8 or try readU16Be(payload, 2) != marker_siz) return Jp2Error.InvalidCodestream;
+
+    const lsiz = try readU16Be(payload, 4);
+    if (lsiz < 38) return Jp2Error.InvalidCodestream;
+    const segment_end = std.math.add(usize, 4, lsiz) catch return Jp2Error.InvalidCodestream;
+    if (segment_end > payload.len - 2) return Jp2Error.InvalidCodestream;
+    if (segment_end < payload.len - 2) {
+        const marker_prefix = payload[segment_end];
+        const marker_code = payload[segment_end + 1];
+        if (marker_prefix != 0xff or marker_code == 0x00 or marker_code == 0xff) {
+            return Jp2Error.InvalidCodestream;
+        }
+    }
+    const segment = payload[6..segment_end];
+    const rsiz = try readU16Be(segment, 0);
+    if (rsiz != 0) return Jp2Error.UnsupportedProfile;
+    const components = try readU16Be(segment, 34);
+    if (components == 0 or segment.len != 36 + @as(usize, components) * 3) {
+        return Jp2Error.InvalidCodestream;
+    }
+    if (@as(usize, lsiz) != 38 + @as(usize, components) * 3) return Jp2Error.InvalidCodestream;
+
+    const xsiz = try readU32Be(segment, 2);
+    const ysiz = try readU32Be(segment, 6);
+    const xosiz = try readU32Be(segment, 10);
+    const yosiz = try readU32Be(segment, 14);
+    const xtsiz = try readU32Be(segment, 18);
+    const ytsiz = try readU32Be(segment, 22);
+    const xtosiz = try readU32Be(segment, 26);
+    const ytosiz = try readU32Be(segment, 30);
+    if (xsiz <= xosiz or ysiz <= yosiz) return Jp2Error.InvalidCodestream;
+    if (xosiz != 0 or yosiz != 0) return Jp2Error.UnsupportedProfile;
+    if (xtsiz == 0 or ytsiz == 0) return Jp2Error.InvalidCodestream;
+    if (xtosiz != xosiz or ytosiz != yosiz) return Jp2Error.UnsupportedProfile;
+    const width = xsiz - xosiz;
+    const height = ysiz - yosiz;
+    if (xtsiz < width or ytsiz < height) return Jp2Error.UnsupportedProfile;
+    const bits_per_component = (segment[36] & 0x7f) + 1;
+    if ((segment[36] & 0x80) != 0) return Jp2Error.UnsupportedProfile;
+    if (width != expected.width or
+        height != expected.height or
+        components != expected.components or
+        bits_per_component != expected.bits_per_component)
+    {
+        return Jp2Error.InvalidCodestream;
+    }
+
+    var component_index: usize = 0;
+    while (component_index < components) : (component_index += 1) {
+        const component_offset = 36 + component_index * 3;
+        const ssiz = segment[component_offset];
+        if ((ssiz & 0x80) != 0) return Jp2Error.UnsupportedProfile;
+        if ((ssiz & 0x7f) + 1 != bits_per_component) return Jp2Error.InvalidCodestream;
+        if (segment[component_offset + 1] != 1 or segment[component_offset + 2] != 1) {
+            return Jp2Error.UnsupportedProfile;
+        }
+    }
+    try validateMainHeaderMarkers(payload, segment_end, bits_per_component);
+}
+
+fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, bit_depth: u8) !void {
+    var cursor = cursor_after_siz;
+    var cod_info: ?CodSegmentInfo = null;
+    var saw_qcd = false;
+    var tlm_state = TlmState{};
+    while (cursor < payload.len - 2) {
+        const marker = try readU16Be(payload, cursor);
+        if ((marker >> 8) != 0xff) return Jp2Error.InvalidCodestream;
+        switch (marker) {
+            marker_sot => {
+                if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
+                try validateTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null);
+                return;
+            },
+            marker_cod => {
+                if (cod_info != null) return Jp2Error.InvalidCodestream;
+            },
+            marker_qcd => {
+                if (cod_info == null) return Jp2Error.InvalidCodestream;
+                if (saw_qcd) return Jp2Error.InvalidCodestream;
+            },
+            marker_tlm, marker_com => {},
+            marker_cap, marker_coc, marker_qcc, marker_rgn, marker_poc, marker_ppm, marker_ppt, marker_crg => {
+                return Jp2Error.UnsupportedProfile;
+            },
+            marker_soc, marker_siz, marker_sod, marker_eoc => return Jp2Error.InvalidCodestream,
+            else => return Jp2Error.UnsupportedProfile,
+        }
+
+        const length_offset = std.math.add(usize, cursor, 2) catch return Jp2Error.InvalidCodestream;
+        const marker_length = try readU16Be(payload, length_offset);
+        try validateMarkerSegmentLength(marker, marker_length);
+        const next = std.math.add(usize, length_offset, marker_length) catch return Jp2Error.InvalidCodestream;
+        if (next > payload.len - 2) return Jp2Error.InvalidCodestream;
+        switch (marker) {
+            marker_cod => cod_info = try validateCodSegment(payload, length_offset, marker_length),
+            marker_qcd => {
+                try validateQcdSegment(payload, length_offset, marker_length, cod_info.?, bit_depth);
+                saw_qcd = true;
+            },
+            else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state),
+        }
+        cursor = next;
+    }
+}
+
+fn validateTilePartSequence(
+    payload: []const u8,
+    first_sot_offset: usize,
+    cod: CodSegmentInfo,
+    tlm_state: ?*const TlmState,
+) !void {
+    var cursor = first_sot_offset;
+    var expected_tile_part_index: u8 = 0;
+    var tile_part_count: ?u8 = null;
+    var packet_sequence: u16 = 0;
+    while (cursor < payload.len - 2) {
+        if (try readU16Be(payload, cursor) != marker_sot) return Jp2Error.InvalidCodestream;
+        const expected_psot = if (tlm_state) |state| blk: {
+            if (expected_tile_part_index >= state.count) return Jp2Error.InvalidCodestream;
+            break :blk state.lengths[expected_tile_part_index];
+        } else null;
+        cursor = try validateSotSegment(payload, cursor, expected_tile_part_index, expected_psot, cod, &packet_sequence, &tile_part_count);
+        expected_tile_part_index = std.math.add(u8, expected_tile_part_index, 1) catch return Jp2Error.InvalidCodestream;
+    }
+    if (cursor != payload.len - 2) return Jp2Error.InvalidCodestream;
+    const expected_count = tile_part_count orelse return Jp2Error.InvalidCodestream;
+    if (expected_tile_part_index != expected_count) return Jp2Error.InvalidCodestream;
+    if (tlm_state) |state| {
+        if (state.count != expected_count) return Jp2Error.InvalidCodestream;
+    }
+}
+
+fn validateSotSegment(
+    payload: []const u8,
+    marker_offset: usize,
+    expected_tile_part_index: u8,
+    expected_tile_part_length: ?u32,
+    cod: CodSegmentInfo,
+    packet_sequence: *u16,
+    tile_part_count: *?u8,
+) !usize {
+    const length_offset = std.math.add(usize, marker_offset, 2) catch return Jp2Error.InvalidCodestream;
+    const marker_length = try readU16Be(payload, length_offset);
+    if (marker_length != 10) return Jp2Error.InvalidCodestream;
+    const segment_end = std.math.add(usize, length_offset, marker_length) catch return Jp2Error.InvalidCodestream;
+    if (segment_end > payload.len - 2) return Jp2Error.InvalidCodestream;
+    const tile_index = try readU16Be(payload, marker_offset + 4);
+    const tile_part_length = try readU32Be(payload, marker_offset + 6);
+    const tile_part_index = payload[marker_offset + 10];
+    const current_tile_part_count = payload[marker_offset + 11];
+    if (tile_index != 0 or tile_part_index != expected_tile_part_index or current_tile_part_count == 0) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    if (tile_part_count.*) |expected_count| {
+        if (current_tile_part_count != expected_count) return Jp2Error.InvalidCodestream;
+    } else {
+        tile_part_count.* = current_tile_part_count;
+    }
+    if (tile_part_length == 0) return Jp2Error.UnsupportedProfile;
+    if (expected_tile_part_length) |expected_length| {
+        if (tile_part_length != expected_length) return Jp2Error.InvalidCodestream;
+    }
+    const tile_part_end = std.math.add(usize, marker_offset, tile_part_length) catch return Jp2Error.InvalidCodestream;
+    if (tile_part_end > payload.len - 2) return Jp2Error.InvalidCodestream;
+    try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, packet_sequence);
+    return tile_part_end;
+}
+
+fn validateFirstTilePartHeader(
+    payload: []const u8,
+    start: usize,
+    end: usize,
+    cod: CodSegmentInfo,
+    packet_sequence: *u16,
+) !void {
+    var cursor = start;
+    var plt_state = PltState{};
+    while (cursor < end) {
+        const marker = try readU16Be(payload, cursor);
+        if ((marker >> 8) != 0xff) return Jp2Error.InvalidCodestream;
+        switch (marker) {
+            marker_sod => {
+                if (!plt_state.saw) return Jp2Error.UnsupportedProfile;
+                const payload_start = std.math.add(usize, cursor, 2) catch return Jp2Error.InvalidCodestream;
+                if (payload_start > end or plt_state.packet_bytes != end - payload_start) {
+                    return Jp2Error.InvalidCodestream;
+                }
+                try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
+                return;
+            },
+            marker_plt, marker_com => {},
+            marker_sot, marker_eoc => return Jp2Error.InvalidCodestream,
+            else => return Jp2Error.UnsupportedProfile,
+        }
+
+        const length_offset = std.math.add(usize, cursor, 2) catch return Jp2Error.InvalidCodestream;
+        const marker_length = try readU16Be(payload, length_offset);
+        try validateMarkerSegmentLength(marker, marker_length);
+        const next = std.math.add(usize, length_offset, marker_length) catch return Jp2Error.InvalidCodestream;
+        if (next > end) return Jp2Error.InvalidCodestream;
+        try validateTilePartHeaderMarkerSegment(payload, marker, length_offset, marker_length, &plt_state);
+        cursor = next;
+    }
+    return Jp2Error.InvalidCodestream;
+}
+
+fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
+    const min_length: u16 = switch (marker) {
+        marker_cod => 12,
+        marker_qcd => 4,
+        marker_tlm => 9,
+        marker_plt => 4,
+        marker_com => 4,
+        else => 2,
+    };
+    if (marker_length < min_length) return Jp2Error.InvalidCodestream;
+}
+
+fn validateMainHeaderMarkerSegment(
+    payload: []const u8,
+    marker: u16,
+    length_offset: usize,
+    marker_length: u16,
+    tlm_state: *TlmState,
+) !void {
+    switch (marker) {
+        marker_tlm => try validateTlmSegment(payload, length_offset, marker_length, tlm_state),
+        else => {},
+    }
+}
+
+fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: u16) !CodSegmentInfo {
+    const scod = payload[length_offset + 2];
+    if ((scod & ~@as(u8, 0x07)) != 0) return Jp2Error.InvalidCodestream;
+    if (payload[length_offset + 3] != 2) return Jp2Error.UnsupportedProfile;
+    const layers = try readU16Be(payload, length_offset + 4);
+    if (layers == 0) return Jp2Error.InvalidCodestream;
+    if (layers > rate_alloc.max_layers) return Jp2Error.UnsupportedProfile;
+    const mct = payload[length_offset + 6];
+    if (mct != 1) return Jp2Error.UnsupportedProfile;
+    const levels = payload[length_offset + 7];
+    if (levels > 32) return Jp2Error.InvalidCodestream;
+    const block_width = try codeBlockSizeFromCodExponent(payload[length_offset + 8]);
+    const block_height = try codeBlockSizeFromCodExponent(payload[length_offset + 9]);
+    if (@as(u32, block_width) * @as(u32, block_height) > 4096) return Jp2Error.InvalidCodestream;
+    const code_block_style = payload[length_offset + 10];
+    if ((code_block_style & 0xc0) != 0) return Jp2Error.InvalidCodestream;
+    if ((code_block_style & ~@as(u8, 0x01)) != 0) return Jp2Error.UnsupportedProfile;
+    const transform = payload[length_offset + 11];
+    if (transform != 0 and transform != 1) return Jp2Error.InvalidCodestream;
+    if ((scod & 0x01) == 0) return Jp2Error.UnsupportedProfile;
+    const precinct_bytes: u16 = if ((scod & 0x01) != 0) @as(u16, levels) + 1 else 0;
+    if (marker_length != 12 + precinct_bytes) return Jp2Error.InvalidCodestream;
+    try validateCodPrecinctBytes(payload, length_offset + 12, precinct_bytes);
+    return .{
+        .levels = levels,
+        .transform = transform,
+        .sop = (scod & 0x02) != 0,
+        .eph = (scod & 0x04) != 0,
+    };
+}
+
+fn validateCodPrecinctBytes(payload: []const u8, start: usize, count: u16) !void {
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        const value = payload[start + index];
+        const width_exponent = value & 0x0f;
+        const height_exponent = value >> 4;
+        if (width_exponent > 15 or height_exponent > 15) return Jp2Error.InvalidCodestream;
+    }
+}
+
+fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
+    if (exponent > 8) return Jp2Error.InvalidCodestream;
+    return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
+}
+
+fn validateQcdSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, bit_depth: u8) !void {
+    const style = payload[length_offset + 2];
+    const guard_bits = style >> 5;
+    if (guard_bits != 2) return Jp2Error.UnsupportedProfile;
+    const quantization_style = style & 0x1f;
+    if (quantization_style > 2) return Jp2Error.InvalidCodestream;
+    const bands: u16 = 1 + 3 * @as(u16, cod.levels);
+    if (cod.transform == 0) {
+        if (quantization_style != 2) return Jp2Error.UnsupportedProfile;
+        if (marker_length != 3 + 2 * bands) return Jp2Error.InvalidCodestream;
+        try validateScalarExpoundedQcdValues(payload, length_offset + 3, cod.levels, bit_depth);
+    } else {
+        if (quantization_style != 0) return Jp2Error.UnsupportedProfile;
+        if (marker_length != 3 + bands) return Jp2Error.InvalidCodestream;
+        try validateReversibleQcdExponents(payload, length_offset + 3, cod.levels, bit_depth);
+    }
+}
+
+fn validateScalarExpoundedQcdValues(payload: []const u8, start: usize, levels: u8, bit_depth: u8) !void {
+    var cursor = start;
+    try expectScalarExpoundedQcdValue(payload, &cursor, bit_depth, .ll, levels);
+    var level = levels;
+    while (level > 0) : (level -= 1) {
+        inline for (.{ SubbandKind.hl, SubbandKind.lh, SubbandKind.hh }) |kind| {
+            try expectScalarExpoundedQcdValue(payload, &cursor, bit_depth, kind, level);
+        }
+    }
+}
+
+fn expectScalarExpoundedQcdValue(payload: []const u8, cursor: *usize, bit_depth: u8, kind: SubbandKind, band_level: u8) !void {
+    if (try readU16Be(payload, cursor.*) != try scalarExpoundedQcdValue(bit_depth, kind, band_level)) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    cursor.* += 2;
+}
+
+fn validateReversibleQcdExponents(payload: []const u8, start: usize, levels: u8, bit_depth: u8) !void {
+    var cursor = start;
+    if (payload[cursor] != try reversibleQcdExponentByte(bit_depth, .ll)) return Jp2Error.UnsupportedProfile;
+    cursor += 1;
+    var level: u8 = 0;
+    while (level < levels) : (level += 1) {
+        inline for (.{ SubbandKind.hl, SubbandKind.lh, SubbandKind.hh }) |kind| {
+            if (payload[cursor] != try reversibleQcdExponentByte(bit_depth, kind)) return Jp2Error.UnsupportedProfile;
+            cursor += 1;
+        }
+    }
+}
+
+const SubbandKind = enum { ll, hl, lh, hh };
+
+fn reversibleQcdExponentByte(bit_depth: u8, kind: SubbandKind) !u8 {
+    if (bit_depth == 0) return Jp2Error.InvalidCodestream;
+    const gain: u8 = switch (kind) {
+        .ll => 0,
+        .hl, .lh => 1,
+        .hh => 2,
+    };
+    const exponent = std.math.add(u8, bit_depth, gain) catch return Jp2Error.InvalidCodestream;
+    if (exponent > 31) return Jp2Error.InvalidCodestream;
+    return exponent << 3;
+}
+
+const dwt97_norms = [4][10]f64{
+    .{ 1.000, 1.965, 4.177, 8.403, 16.90, 33.84, 67.69, 135.3, 270.6, 540.9 },
+    .{ 2.022, 3.989, 8.355, 17.04, 34.27, 68.63, 137.3, 274.6, 549.0, 549.0 },
+    .{ 2.022, 3.989, 8.355, 17.04, 34.27, 68.63, 137.3, 274.6, 549.0, 549.0 },
+    .{ 2.080, 3.865, 8.307, 17.18, 34.71, 69.59, 139.3, 278.6, 557.2, 557.2 },
+};
+
+fn scalarExpoundedQcdValue(bit_depth: u8, kind: SubbandKind, band_level: u8) !u16 {
+    const step = try irreversibleBandStepSize(bit_depth, kind, band_level);
+    return (@as(u16, step.exponent) << 11) | step.mantissa;
+}
+
+fn irreversibleBandStepSize(bit_depth: u8, kind: SubbandKind, band_level: u8) !struct { exponent: u8, mantissa: u16 } {
+    const opj_level: usize = if (kind == .ll) band_level else @as(usize, band_level) - 1;
+    const orient: usize = switch (kind) {
+        .ll => 0,
+        .hl => 1,
+        .lh => 2,
+        .hh => 3,
+    };
+    const clamped_level = if (orient == 0) @min(opj_level, 9) else @min(opj_level, 8);
+    const stepsize = 1.0 / dwt97_norms[orient][clamped_level];
+    const fixed: i32 = @intFromFloat(@floor(stepsize * 8192.0));
+    if (fixed <= 0) return Jp2Error.InvalidCodestream;
+    const log2_fixed: i32 = @as(i32, std.math.log2_int(u32, @intCast(fixed)));
+    const p = log2_fixed - 13;
+    const n = 11 - log2_fixed;
+    const mantissa: u16 = @intCast((if (n < 0)
+        fixed >> @intCast(-n)
+    else
+        fixed << @intCast(n)) & 0x7ff);
+    const exponent = @as(i32, bit_depth) - p;
+    if (exponent <= 0 or exponent > 31) return Jp2Error.InvalidCodestream;
+    return .{ .exponent = @intCast(exponent), .mantissa = mantissa };
+}
+
+fn validateTlmSegment(payload: []const u8, length_offset: usize, marker_length: u16, state: *TlmState) !void {
+    if ((marker_length - 4) % 5 != 0) return Jp2Error.InvalidCodestream;
+    if (payload[length_offset + 2] != state.next_segment_index or payload[length_offset + 3] != 0x50) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    state.next_segment_index = std.math.add(u8, state.next_segment_index, 1) catch return Jp2Error.InvalidCodestream;
+    var cursor = length_offset + 4;
+    const end = length_offset + @as(usize, marker_length);
+    while (cursor < end) : (cursor += 5) {
+        if (payload[cursor] != 0) return Jp2Error.UnsupportedProfile;
+        const tile_part_length = try readU32Be(payload, cursor + 1);
+        if (tile_part_length == 0) return Jp2Error.InvalidCodestream;
+        state.lengths[state.count] = tile_part_length;
+        state.count = std.math.add(u8, state.count, 1) catch return Jp2Error.InvalidCodestream;
+    }
+    state.saw = true;
+}
+
+fn validateTilePartHeaderMarkerSegment(
+    payload: []const u8,
+    marker: u16,
+    length_offset: usize,
+    marker_length: u16,
+    plt_state: *PltState,
+) !void {
+    switch (marker) {
+        marker_plt => try validatePltSegment(payload, length_offset, marker_length, plt_state),
+        else => {},
+    }
+}
+
+fn validatePltSegment(payload: []const u8, length_offset: usize, marker_length: u16, state: *PltState) !void {
+    if (payload[length_offset + 2] != state.expected_segment_index) return Jp2Error.InvalidCodestream;
+    state.expected_segment_index = std.math.add(u8, state.expected_segment_index, 1) catch return Jp2Error.InvalidCodestream;
+
+    var cursor = length_offset + 3;
+    const end = length_offset + @as(usize, marker_length);
+    var packet_length: usize = 0;
+    var pending_length = false;
+    while (cursor < end) : (cursor += 1) {
+        packet_length = std.math.mul(usize, packet_length, 128) catch return Jp2Error.InvalidCodestream;
+        packet_length = std.math.add(usize, packet_length, @as(usize, payload[cursor] & 0x7f)) catch return Jp2Error.InvalidCodestream;
+        pending_length = true;
+        if ((payload[cursor] & 0x80) == 0) {
+            state.packet_bytes = std.math.add(usize, state.packet_bytes, packet_length) catch return Jp2Error.InvalidCodestream;
+            packet_length = 0;
+            pending_length = false;
+            state.saw = true;
+        }
+    }
+    if (pending_length) return Jp2Error.InvalidCodestream;
+}
+
+fn validateTilePartPacketFrames(
+    payload: []const u8,
+    tile_header_start: usize,
+    sod_offset: usize,
+    payload_start: usize,
+    payload_end: usize,
+    cod: CodSegmentInfo,
+    packet_sequence: *u16,
+) !void {
+    var packet_cursor = payload_start;
+    var cursor = tile_header_start;
+    var expected_plt_index: u8 = 0;
+    while (cursor < sod_offset) {
+        const marker = try readU16Be(payload, cursor);
+        const length_offset = std.math.add(usize, cursor, 2) catch return Jp2Error.InvalidCodestream;
+        const marker_length = try readU16Be(payload, length_offset);
+        const next = std.math.add(usize, length_offset, marker_length) catch return Jp2Error.InvalidCodestream;
+        if (next > sod_offset) return Jp2Error.InvalidCodestream;
+        if (marker == marker_plt) {
+            try validatePltPacketFrameSegment(payload, length_offset, marker_length, &expected_plt_index, &packet_cursor, payload_end, cod, packet_sequence);
+        }
+        cursor = next;
+    }
+    if (packet_cursor != payload_end) return Jp2Error.InvalidCodestream;
+}
+
+fn validatePltPacketFrameSegment(
+    payload: []const u8,
+    length_offset: usize,
+    marker_length: u16,
+    expected_plt_index: *u8,
+    packet_cursor: *usize,
+    payload_end: usize,
+    cod: CodSegmentInfo,
+    packet_sequence: *u16,
+) !void {
+    if (payload[length_offset + 2] != expected_plt_index.*) return Jp2Error.InvalidCodestream;
+    expected_plt_index.* = std.math.add(u8, expected_plt_index.*, 1) catch return Jp2Error.InvalidCodestream;
+    var cursor = length_offset + 3;
+    const end = length_offset + @as(usize, marker_length);
+    var packet_length: usize = 0;
+    var pending_length = false;
+    while (cursor < end) : (cursor += 1) {
+        packet_length = std.math.mul(usize, packet_length, 128) catch return Jp2Error.InvalidCodestream;
+        packet_length = std.math.add(usize, packet_length, @as(usize, payload[cursor] & 0x7f)) catch return Jp2Error.InvalidCodestream;
+        pending_length = true;
+        if ((payload[cursor] & 0x80) == 0) {
+            try validatePacketFrame(payload, packet_cursor, payload_end, packet_length, cod, packet_sequence);
+            packet_length = 0;
+            pending_length = false;
+        }
+    }
+    if (pending_length) return Jp2Error.InvalidCodestream;
+}
+
+fn validatePacketFrame(
+    payload: []const u8,
+    packet_cursor: *usize,
+    payload_end: usize,
+    packet_length: usize,
+    cod: CodSegmentInfo,
+    packet_sequence: *u16,
+) !void {
+    const packet_start = packet_cursor.*;
+    const packet_end = std.math.add(usize, packet_start, packet_length) catch return Jp2Error.InvalidCodestream;
+    if (packet_end > payload_end) return Jp2Error.InvalidCodestream;
+    var packet_payload_start = packet_start;
+    if (cod.sop) {
+        if (packet_end - packet_start < 6) return Jp2Error.InvalidCodestream;
+        if (try readU16Be(payload, packet_start) != marker_sop) return Jp2Error.InvalidCodestream;
+        if (try readU16Be(payload, packet_start + 2) != 4) return Jp2Error.InvalidCodestream;
+        if (try readU16Be(payload, packet_start + 4) != packet_sequence.*) return Jp2Error.InvalidCodestream;
+        packet_sequence.* +%= 1;
+        packet_payload_start += 6;
+    } else if (packet_end - packet_start >= 2 and try readU16Be(payload, packet_start) == marker_sop) {
+        return Jp2Error.InvalidCodestream;
+    }
+
+    const eph_offset = try packetEphOffsetRejectingSop(payload, packet_payload_start, packet_end);
+    if (cod.eph != (eph_offset != null)) return Jp2Error.InvalidCodestream;
+    packet_cursor.* = packet_end;
+}
+
+fn packetEphOffsetRejectingSop(payload: []const u8, start: usize, end: usize) !?usize {
+    var eph_offset: ?usize = null;
+    var cursor = start;
+    while (cursor + 1 < end) {
+        const searchable = payload[cursor .. end - 1];
+        const relative = std.mem.indexOfScalar(u8, searchable, 0xff) orelse break;
+        const offset = cursor + relative;
+        const marker = try readU16Be(payload, offset);
+        if (marker == marker_sop) return Jp2Error.InvalidCodestream;
+        if (marker == marker_eph) {
+            if (eph_offset != null) return Jp2Error.InvalidCodestream;
+            eph_offset = offset;
+        }
+        cursor = offset + 1;
+    }
+    return eph_offset;
+}
+
+fn nextBox(bytes: []const u8, cursor: *usize, allow_length_to_eof: bool) !Box {
+    if (cursor.* > bytes.len or bytes.len - cursor.* < 8) return Jp2Error.InvalidBox;
     const start = cursor.*;
-    const length = readU32Be(bytes, start);
-    const kind = readU32Be(bytes, start + 4);
-    if (length == 0 or length == 1) return Jp2Error.UnsupportedProfile;
-    if (length < 8) return Jp2Error.InvalidBox;
-    const end = try std.math.add(usize, start, length);
+    const length = try readU32Be(bytes, start);
+    const kind = try readU32Be(bytes, start + 4);
+    var payload_start = try std.math.add(usize, start, 8);
+    const end = switch (length) {
+        0 => if (allow_length_to_eof) bytes.len else return Jp2Error.InvalidBox,
+        1 => blk: {
+            if (bytes.len - start < 16) return Jp2Error.InvalidBox;
+            const xl_box = try readU64Be(bytes, start + 8);
+            if (xl_box < 16 or xl_box > std.math.maxInt(usize)) return Jp2Error.InvalidBox;
+            payload_start = std.math.add(usize, start, 16) catch return Jp2Error.InvalidBox;
+            break :blk std.math.add(usize, start, @as(usize, @intCast(xl_box))) catch return Jp2Error.InvalidBox;
+        },
+        2...7 => return Jp2Error.InvalidBox,
+        else => std.math.add(usize, start, length) catch return Jp2Error.InvalidBox,
+    };
     if (end > bytes.len) return Jp2Error.InvalidBox;
     cursor.* = end;
     return .{
         .kind = kind,
-        .payload = bytes[start + 8 .. end],
+        .payload = bytes[payload_start..end],
     };
 }
 
@@ -315,15 +924,32 @@ fn appendU32Be(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u32
     try out.append(allocator, @as(u8, @truncate(value)));
 }
 
-fn readU16Be(bytes: []const u8, offset: usize) u16 {
+fn readU16Be(bytes: []const u8, offset: usize) !u16 {
+    const end = std.math.add(usize, offset, 2) catch return Jp2Error.InvalidBox;
+    if (end > bytes.len) return Jp2Error.InvalidBox;
     return (@as(u16, bytes[offset]) << 8) | @as(u16, bytes[offset + 1]);
 }
 
-fn readU32Be(bytes: []const u8, offset: usize) u32 {
+fn readU32Be(bytes: []const u8, offset: usize) !u32 {
+    const end = std.math.add(usize, offset, 4) catch return Jp2Error.InvalidBox;
+    if (end > bytes.len) return Jp2Error.InvalidBox;
     return (@as(u32, bytes[offset]) << 24) |
         (@as(u32, bytes[offset + 1]) << 16) |
         (@as(u32, bytes[offset + 2]) << 8) |
         @as(u32, bytes[offset + 3]);
+}
+
+fn readU64Be(bytes: []const u8, offset: usize) !u64 {
+    const end = std.math.add(usize, offset, 8) catch return Jp2Error.InvalidBox;
+    if (end > bytes.len) return Jp2Error.InvalidBox;
+    return (@as(u64, bytes[offset]) << 56) |
+        (@as(u64, bytes[offset + 1]) << 48) |
+        (@as(u64, bytes[offset + 2]) << 40) |
+        (@as(u64, bytes[offset + 3]) << 32) |
+        (@as(u64, bytes[offset + 4]) << 24) |
+        (@as(u64, bytes[offset + 5]) << 16) |
+        (@as(u64, bytes[offset + 6]) << 8) |
+        @as(u64, bytes[offset + 7]);
 }
 
 fn fourcc(comptime value: *const [4]u8) u32 {

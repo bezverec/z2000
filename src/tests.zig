@@ -21,6 +21,28 @@ const tiff = @import("tiff.zig");
 const wavelet = @import("wavelet.zig");
 const wavelet_int = @import("wavelet_int.zig");
 
+const minimal_jp2_codestream = [_]u8{
+    0xff, 0x4f, // SOC
+    0xff, 0x51, // SIZ
+    0x00, 0x2f, // Lsiz
+    0x00, 0x00, // Rsiz
+    0x00, 0x00, 0x00, 0x02, // Xsiz
+    0x00, 0x00, 0x00, 0x01, // Ysiz
+    0x00, 0x00, 0x00, 0x00, // XOsiz
+    0x00, 0x00, 0x00, 0x00, // YOsiz
+    0x00, 0x00, 0x00, 0x02, // XTsiz
+    0x00, 0x00, 0x00, 0x01, // YTsiz
+    0x00, 0x00, 0x00, 0x00, // XTOsiz
+    0x00, 0x00, 0x00, 0x00, // YTOsiz
+    0x00, 0x03, // Csiz
+    0x07, 0x01,
+    0x01, 0x07,
+    0x01, 0x01,
+    0x07, 0x01,
+    0x01,
+    0xff, 0xd9, // EOC
+};
+
 test "5/3 wavelet roundtrips integer-like samples" {
     const allocator = std.testing.allocator;
     const width = 5;
@@ -2368,6 +2390,40 @@ test "TIFF parser preserves embedded ICC profile tag" {
     try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, rgb.samples);
 }
 
+test "TIFF to JP2 fixture keeps ICC absence explicit" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/icc-absent-rgb.tif", .{tmp.sub_path});
+
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    try tiff.writeRgb(io, allocator, source, path);
+
+    var parsed = try tiff.readRgb(io, allocator, path);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.icc_profile == null);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, parsed, minimal_jp2_codestream[0..]);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expect(!info.has_icc_profile);
+    try std.testing.expectEqual(@as(usize, 0), info.icc_profile_bytes);
+    const extracted = try jp2.extractIccProfile(allocator, wrapped);
+    try std.testing.expect(extracted == null);
+}
+
 test "TIFF parser rejects malformed ICC profile tag" {
     const allocator = std.testing.allocator;
 
@@ -2464,7 +2520,7 @@ test "JP2 wrapper records RGB image header" {
         .samples = samples,
     };
 
-    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
     defer allocator.free(wrapped);
 
     const info = try jp2.parseInfo(wrapped);
@@ -2472,7 +2528,908 @@ test "JP2 wrapper records RGB image header" {
     try std.testing.expectEqual(@as(u32, 1), info.height);
     try std.testing.expectEqual(@as(u16, 3), info.components);
     try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
-    try std.testing.expectEqual(@as(usize, 20), info.codestream_bytes);
+    try std.testing.expectEqual(@as(usize, minimal_jp2_codestream.len), info.codestream_bytes);
+}
+
+test "JP2 wrapper validates z2000 codestream SIZ metadata" {
+    const allocator = std.testing.allocator;
+    var rgb = try makeJp2RealCodestreamFixtureRgb(allocator, 8);
+    defer rgb.deinit();
+
+    const codestream_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 1 });
+    defer allocator.free(codestream_bytes);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, codestream_bytes);
+    defer allocator.free(wrapped);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u32, 2), info.width);
+    try std.testing.expectEqual(@as(u32, 2), info.height);
+    try std.testing.expectEqual(@as(u16, 3), info.components);
+    try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
+    try std.testing.expectEqual(codestream_bytes.len, info.codestream_bytes);
+    try std.testing.expectEqualSlices(u8, codestream_bytes, try jp2.extractCodestream(wrapped));
+
+    const corrupted = try allocator.dupe(u8, wrapped);
+    defer allocator.free(corrupted);
+    const jp2h_payload = try findJp2BoxPayload(corrupted, "jp2h");
+    const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
+    corrupted[ihdr_payload.start + 7] = 3;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(corrupted));
+
+    const jp2c_payload = try findJp2BoxPayload(wrapped, "jp2c");
+    {
+        const signed_component = try allocator.dupe(u8, wrapped);
+        defer allocator.free(signed_component);
+        signed_component[jp2c_payload.start + 42] |= 0x80;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(signed_component));
+    }
+
+    {
+        const signed_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(signed_codestream);
+        signed_codestream[42] |= 0x80;
+        try std.testing.expectError(
+            jp2.Jp2Error.UnsupportedProfile,
+            jp2.wrapRgbCodestream(allocator, rgb, signed_codestream),
+        );
+    }
+
+    {
+        const subsampled_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(subsampled_codestream);
+        subsampled_codestream[43] = 2;
+        try std.testing.expectError(
+            jp2.Jp2Error.UnsupportedProfile,
+            jp2.wrapRgbCodestream(allocator, rgb, subsampled_codestream),
+        );
+    }
+
+    {
+        const mismatched_component_precision = try allocator.dupe(u8, wrapped);
+        defer allocator.free(mismatched_component_precision);
+        mismatched_component_precision[jp2c_payload.start + 45] = 0x0f;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(mismatched_component_precision));
+    }
+
+    {
+        const siz_len = readU16BeTest(codestream_bytes, 4);
+        const next_marker_offset = @as(usize, siz_len) + 4;
+        try std.testing.expectEqual(@as(u8, 0xff), codestream_bytes[next_marker_offset]);
+
+        const bad_post_siz_marker = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_post_siz_marker);
+        bad_post_siz_marker[jp2c_payload.start + next_marker_offset] = 0x7f;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_post_siz_marker));
+
+        const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(bad_codestream);
+        bad_codestream[next_marker_offset] = 0x7f;
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+        );
+    }
+
+    {
+        const siz_len = readU16BeTest(codestream_bytes, 4);
+        const next_marker_offset = @as(usize, siz_len) + 4;
+        var duplicated_siz_codestream: std.ArrayList(u8) = .empty;
+        defer duplicated_siz_codestream.deinit(allocator);
+        try duplicated_siz_codestream.appendSlice(allocator, codestream_bytes[0..next_marker_offset]);
+        try duplicated_siz_codestream.appendSlice(allocator, codestream_bytes[2..next_marker_offset]);
+        try duplicated_siz_codestream.appendSlice(allocator, codestream_bytes[next_marker_offset..]);
+        const bad_codestream = try duplicated_siz_codestream.toOwnedSlice(allocator);
+        defer allocator.free(bad_codestream);
+
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+        );
+
+        var duplicated_siz_jp2: std.ArrayList(u8) = .empty;
+        defer duplicated_siz_jp2.deinit(allocator);
+        try duplicated_siz_jp2.appendSlice(allocator, wrapped[0..jp2c_payload.start]);
+        try duplicated_siz_jp2.appendSlice(allocator, bad_codestream);
+        try duplicated_siz_jp2.appendSlice(allocator, wrapped[jp2c_payload.end..]);
+        const bad_wrapped = try duplicated_siz_jp2.toOwnedSlice(allocator);
+        defer allocator.free(bad_wrapped);
+        writeU32BeTest(bad_wrapped, jp2c_payload.start - 8, @as(u32, @intCast(bad_codestream.len + 8)));
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_wrapped));
+    }
+
+    {
+        const RequiredMainMarkerCase = struct {
+            label: []const u8,
+            source: u16,
+        };
+        const required_main_marker_cases = [_]RequiredMainMarkerCase{
+            .{ .label = "missing COD", .source = codestream.markerValue("cod") },
+            .{ .label = "missing QCD", .source = codestream.markerValue("qcd") },
+        };
+        for (required_main_marker_cases) |scenario| {
+            errdefer std.debug.print("JP2 main-header required marker case failed: {s}\n", .{scenario.label});
+            const marker_offset = findMarker(codestream_bytes, scenario.source) orelse return error.MissingMarker;
+
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            writeU16BeTest(bad_codestream, marker_offset, codestream.markerValue("com"));
+            try std.testing.expectError(
+                jp2.Jp2Error.InvalidCodestream,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            writeU16BeTest(bad_wrapped, jp2c_payload.start + marker_offset, codestream.markerValue("com"));
+            try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    {
+        const UnsupportedMainMarkerCase = struct {
+            label: []const u8,
+            source: u16,
+            replacement: u16,
+        };
+        const unsupported_main_marker_cases = [_]UnsupportedMainMarkerCase{
+            .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
+            .{ .label = "COC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("coc") },
+            .{ .label = "QCC main marker", .source = codestream.markerValue("qcd"), .replacement = codestream.markerValue("qcc") },
+            .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
+            .{ .label = "POC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("poc") },
+            .{ .label = "PPM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppm") },
+            .{ .label = "PPT main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppt") },
+            .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
+        };
+        for (unsupported_main_marker_cases) |scenario| {
+            errdefer std.debug.print("JP2 main-header unsupported marker case failed: {s}\n", .{scenario.label});
+            const marker_offset = findMarker(codestream_bytes, scenario.source) orelse return error.MissingMarker;
+
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            writeU16BeTest(bad_codestream, marker_offset, scenario.replacement);
+            try std.testing.expectError(
+                jp2.Jp2Error.UnsupportedProfile,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            writeU16BeTest(bad_wrapped, jp2c_payload.start + marker_offset, scenario.replacement);
+            try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    {
+        const cod_offset = findMarker(codestream_bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
+        const unknown_main_marker: u16 = 0xff54;
+
+        const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(bad_codestream);
+        writeU16BeTest(bad_codestream, cod_offset, unknown_main_marker);
+        try std.testing.expectError(
+            jp2.Jp2Error.UnsupportedProfile,
+            jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+        );
+
+        const bad_wrapped = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_wrapped);
+        writeU16BeTest(bad_wrapped, jp2c_payload.start + cod_offset, unknown_main_marker);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(bad_wrapped));
+    }
+
+    {
+        const sot_offset = findMarker(codestream_bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+
+        const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(bad_codestream);
+        writeU16BeTest(bad_codestream, sot_offset + 2, 9);
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+        );
+
+        const bad_wrapped = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_wrapped);
+        writeU16BeTest(bad_wrapped, jp2c_payload.start + sot_offset + 2, 9);
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_wrapped));
+    }
+
+    {
+        const FirstSotCase = struct {
+            label: []const u8,
+            mutate: *const fn ([]u8, usize) void,
+            expected: anyerror,
+        };
+        const first_sot_cases = [_]FirstSotCase{
+            .{ .label = "nonzero tile index", .mutate = struct {
+                fn mutate(bytes: []u8, sot: usize) void {
+                    writeU16BeTest(bytes, sot + 4, 1);
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "zero Psot", .mutate = struct {
+                fn mutate(bytes: []u8, sot: usize) void {
+                    writeU32BeTest(bytes, sot + 6, 0);
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "oversized Psot", .mutate = struct {
+                fn mutate(bytes: []u8, sot: usize) void {
+                    writeU32BeTest(bytes, sot + 6, std.math.maxInt(u32));
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "nonzero tile-part index", .mutate = struct {
+                fn mutate(bytes: []u8, sot: usize) void {
+                    bytes[sot + 10] = 1;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "unknown tile-part count", .mutate = struct {
+                fn mutate(bytes: []u8, sot: usize) void {
+                    bytes[sot + 11] = 0;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+        };
+        for (first_sot_cases) |scenario| {
+            errdefer std.debug.print("JP2 first-SOT field case failed: {s}\n", .{scenario.label});
+            const sot_offset = findMarker(codestream_bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            scenario.mutate(bad_codestream, sot_offset);
+            try std.testing.expectError(
+                scenario.expected,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            scenario.mutate(bad_wrapped, jp2c_payload.start + sot_offset);
+            try std.testing.expectError(scenario.expected, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    {
+        const sod_offset = findMarker(codestream_bytes, codestream.markerValue("sod")) orelse return error.MissingSod;
+
+        const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(bad_codestream);
+        writeU16BeTest(bad_codestream, sod_offset, codestream.markerValue("eoc"));
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+        );
+
+        const bad_wrapped = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_wrapped);
+        writeU16BeTest(bad_wrapped, jp2c_payload.start + sod_offset, codestream.markerValue("eoc"));
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_wrapped));
+    }
+
+    {
+        const first_sot = findMarker(codestream_bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+        const second_sot = findMarkerAfter(codestream_bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
+        const tile_part_count = codestream_bytes[first_sot + 11];
+        try std.testing.expect(tile_part_count > 1);
+
+        const TilePartSequenceCase = struct {
+            label: []const u8,
+            mutate: *const fn ([]u8, usize, usize, u8) void,
+            expected: anyerror,
+        };
+        const tile_part_sequence_cases = [_]TilePartSequenceCase{
+            .{ .label = "second tile index", .mutate = struct {
+                fn mutate(bytes: []u8, _: usize, second: usize, _: u8) void {
+                    writeU16BeTest(bytes, second + 4, 1);
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "skipped TPsot", .mutate = struct {
+                fn mutate(bytes: []u8, _: usize, second: usize, _: u8) void {
+                    bytes[second + 10] += 1;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "inconsistent TNsot", .mutate = struct {
+                fn mutate(bytes: []u8, _: usize, second: usize, count: u8) void {
+                    bytes[second + 11] = count - 1;
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+        };
+        for (tile_part_sequence_cases) |scenario| {
+            errdefer std.debug.print("JP2 tile-part sequence case failed: {s}\n", .{scenario.label});
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            scenario.mutate(bad_codestream, first_sot, second_sot, tile_part_count);
+            try std.testing.expectError(
+                scenario.expected,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            scenario.mutate(bad_wrapped, jp2c_payload.start + first_sot, jp2c_payload.start + second_sot, tile_part_count);
+            try std.testing.expectError(scenario.expected, jp2.parseInfo(bad_wrapped));
+        }
+
+        const missing_final_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(missing_final_codestream);
+        var sot_cursor: ?usize = first_sot;
+        while (sot_cursor) |sot| {
+            missing_final_codestream[sot + 11] = tile_part_count + 1;
+            sot_cursor = findMarkerAfter(missing_final_codestream, codestream.markerValue("sot"), sot + 2);
+        }
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, missing_final_codestream),
+        );
+
+        const missing_final_wrapped = try allocator.dupe(u8, wrapped);
+        defer allocator.free(missing_final_wrapped);
+        sot_cursor = jp2c_payload.start + first_sot;
+        while (sot_cursor) |sot| {
+            missing_final_wrapped[sot + 11] = tile_part_count + 1;
+            sot_cursor = findMarkerAfter(missing_final_wrapped, codestream.markerValue("sot"), sot + 2);
+        }
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(missing_final_wrapped));
+    }
+
+    {
+        const CodProfileCase = struct {
+            label: []const u8,
+            mutate: *const fn ([]u8, usize) void,
+            expected: anyerror,
+        };
+        const cod_profile_cases = [_]CodProfileCase{
+            .{ .label = "reserved Scod bit", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 4] |= 0x80;
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "missing precinct bytes", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 4] &= ~@as(u8, 0x01);
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "unsupported progression", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 5] = @intFromEnum(codestream.ProgressionOrder.lrcp);
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "zero layers", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    writeU16BeTest(bytes, cod + 6, 0);
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "too many layers", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    writeU16BeTest(bytes, cod + 6, 33);
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "unsupported MCT", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 8] = 2;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "disabled MCT", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 8] = 0;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "oversized block exponent", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 10] = 9;
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "oversized block area", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 10] = 8;
+                    bytes[cod + 11] = 8;
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "unsupported style bit", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 12] = 0x02;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "unknown transform", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 13] = 2;
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+        };
+        for (cod_profile_cases) |scenario| {
+            errdefer std.debug.print("JP2 COD profile case failed: {s}\n", .{scenario.label});
+            const cod_offset = findMarker(codestream_bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
+
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            scenario.mutate(bad_codestream, cod_offset);
+            try std.testing.expectError(
+                scenario.expected,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            scenario.mutate(bad_wrapped, jp2c_payload.start + cod_offset);
+            try std.testing.expectError(scenario.expected, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    {
+        const QcdProfileCase = struct {
+            label: []const u8,
+            mutate: *const fn ([]u8, usize) void,
+            expected: anyerror,
+        };
+        const qcd_profile_cases = [_]QcdProfileCase{
+            .{ .label = "zero guard bits", .mutate = struct {
+                fn mutate(bytes: []u8, qcd: usize) void {
+                    bytes[qcd + 4] = 0x00;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "scalar-derived qstyle", .mutate = struct {
+                fn mutate(bytes: []u8, qcd: usize) void {
+                    bytes[qcd + 4] = 0x41;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "invalid qstyle", .mutate = struct {
+                fn mutate(bytes: []u8, qcd: usize) void {
+                    bytes[qcd + 4] = 0x43;
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "bad band byte count", .mutate = struct {
+                fn mutate(bytes: []u8, qcd: usize) void {
+                    writeU16BeTest(bytes, qcd + 2, readU16BeTest(bytes, qcd + 2) + 1);
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "bad reversible exponent", .mutate = struct {
+                fn mutate(bytes: []u8, qcd: usize) void {
+                    bytes[qcd + 5] ^= 0x08;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+        };
+        for (qcd_profile_cases) |scenario| {
+            errdefer std.debug.print("JP2 QCD profile case failed: {s}\n", .{scenario.label});
+            const qcd_offset = findMarker(codestream_bytes, codestream.markerValue("qcd")) orelse return error.MissingMarker;
+
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            scenario.mutate(bad_codestream, qcd_offset);
+            try std.testing.expectError(
+                scenario.expected,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            scenario.mutate(bad_wrapped, jp2c_payload.start + qcd_offset);
+            try std.testing.expectError(scenario.expected, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    {
+        const ShortMarkerSegmentCase = struct {
+            label: []const u8,
+            marker: u16,
+            short_length: u16,
+        };
+        const short_marker_segment_cases = [_]ShortMarkerSegmentCase{
+            .{ .label = "short COD", .marker = codestream.markerValue("cod"), .short_length = 11 },
+            .{ .label = "short QCD", .marker = codestream.markerValue("qcd"), .short_length = 3 },
+            .{ .label = "short TLM", .marker = codestream.markerValue("tlm"), .short_length = 5 },
+            .{ .label = "short PLT", .marker = codestream.markerValue("plt"), .short_length = 2 },
+            .{ .label = "empty PLT", .marker = codestream.markerValue("plt"), .short_length = 3 },
+        };
+        for (short_marker_segment_cases) |scenario| {
+            errdefer std.debug.print("JP2 short marker segment case failed: {s}\n", .{scenario.label});
+            const marker_offset = findMarker(codestream_bytes, scenario.marker) orelse return error.MissingMarker;
+
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            writeU16BeTest(bad_codestream, marker_offset + 2, scenario.short_length);
+            try std.testing.expectError(
+                jp2.Jp2Error.InvalidCodestream,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            writeU16BeTest(bad_wrapped, jp2c_payload.start + marker_offset + 2, scenario.short_length);
+            try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    {
+        const plt_offset = findMarker(codestream_bytes, codestream.markerValue("plt")) orelse return error.MissingMarker;
+        const plt_segment_length = readU16BeTest(codestream_bytes, plt_offset + 2);
+        const last_plt_length_byte = plt_offset + 2 + @as(usize, plt_segment_length) - 1;
+
+        const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(bad_codestream);
+        bad_codestream[plt_offset + 4] = 1;
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+        );
+
+        const bad_wrapped = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_wrapped);
+        bad_wrapped[jp2c_payload.start + plt_offset + 4] = 1;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_wrapped));
+
+        const unterminated_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(unterminated_codestream);
+        unterminated_codestream[last_plt_length_byte] |= 0x80;
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, unterminated_codestream),
+        );
+
+        const unterminated_wrapped = try allocator.dupe(u8, wrapped);
+        defer allocator.free(unterminated_wrapped);
+        unterminated_wrapped[jp2c_payload.start + last_plt_length_byte] |= 0x80;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(unterminated_wrapped));
+
+        const mismatched_span_codestream = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(mismatched_span_codestream);
+        mismatched_span_codestream[last_plt_length_byte] ^= 0x01;
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, mismatched_span_codestream),
+        );
+
+        const mismatched_span_wrapped = try allocator.dupe(u8, wrapped);
+        defer allocator.free(mismatched_span_wrapped);
+        mismatched_span_wrapped[jp2c_payload.start + last_plt_length_byte] ^= 0x01;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(mismatched_span_wrapped));
+    }
+
+    {
+        const scod_offset = try codScodOffsetForTest(codestream_bytes);
+        const first_sod_payload = try firstSodPayloadOffsetForTest(codestream_bytes);
+        try std.testing.expectEqual(codestream.markerValue("sop"), readU16BeTest(codestream_bytes, first_sod_payload));
+
+        const PacketMarkerCase = struct {
+            label: []const u8,
+            mutate: *const fn ([]u8, usize, usize) void,
+        };
+        const packet_marker_cases = [_]PacketMarkerCase{
+            .{ .label = "SOP marker without COD flag", .mutate = struct {
+                fn mutate(bytes: []u8, scod: usize, _: usize) void {
+                    bytes[scod] &= ~@as(u8, 0x02);
+                }
+            }.mutate },
+            .{ .label = "missing EPH with COD flag", .mutate = struct {
+                fn mutate(bytes: []u8, scod: usize, _: usize) void {
+                    bytes[scod] |= 0x04;
+                }
+            }.mutate },
+            .{ .label = "bad SOP sequence", .mutate = struct {
+                fn mutate(bytes: []u8, _: usize, packet: usize) void {
+                    bytes[packet + 5] ^= 0x01;
+                }
+            }.mutate },
+        };
+        for (packet_marker_cases) |scenario| {
+            errdefer std.debug.print("JP2 packet marker framing case failed: {s}\n", .{scenario.label});
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            scenario.mutate(bad_codestream, scod_offset, first_sod_payload);
+            try std.testing.expectError(
+                jp2.Jp2Error.InvalidCodestream,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            scenario.mutate(bad_wrapped, jp2c_payload.start + scod_offset, jp2c_payload.start + first_sod_payload);
+            try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    {
+        const TlmCase = struct {
+            label: []const u8,
+            mutate: *const fn ([]u8, usize) void,
+            expected: anyerror,
+        };
+        const tlm_cases = [_]TlmCase{
+            .{ .label = "unsupported Stlm", .mutate = struct {
+                fn mutate(bytes: []u8, tlm: usize) void {
+                    bytes[tlm + 5] = 0x40;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "bad entry byte count", .mutate = struct {
+                fn mutate(bytes: []u8, tlm: usize) void {
+                    writeU16BeTest(bytes, tlm + 2, readU16BeTest(bytes, tlm + 2) + 1);
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "nonzero tile index", .mutate = struct {
+                fn mutate(bytes: []u8, tlm: usize) void {
+                    bytes[tlm + 6] = 1;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "zero Psot", .mutate = struct {
+                fn mutate(bytes: []u8, tlm: usize) void {
+                    writeU32BeTest(bytes, tlm + 7, 0);
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "Psot mismatch", .mutate = struct {
+                fn mutate(bytes: []u8, tlm: usize) void {
+                    writeU32BeTest(bytes, tlm + 7, readU32BeTest(bytes, tlm + 7) + 1);
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+        };
+        for (tlm_cases) |scenario| {
+            errdefer std.debug.print("JP2 TLM profile case failed: {s}\n", .{scenario.label});
+            const tlm_offset = findMarker(codestream_bytes, codestream.markerValue("tlm")) orelse return error.MissingMarker;
+
+            const bad_codestream = try allocator.dupe(u8, codestream_bytes);
+            defer allocator.free(bad_codestream);
+            scenario.mutate(bad_codestream, tlm_offset);
+            try std.testing.expectError(
+                scenario.expected,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            const bad_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(bad_wrapped);
+            scenario.mutate(bad_wrapped, jp2c_payload.start + tlm_offset);
+            try std.testing.expectError(scenario.expected, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    {
+        const DuplicateMainMarkerCase = struct {
+            label: []const u8,
+            source: u16,
+        };
+        const duplicate_main_marker_cases = [_]DuplicateMainMarkerCase{
+            .{ .label = "duplicate COD", .source = codestream.markerValue("cod") },
+            .{ .label = "duplicate QCD", .source = codestream.markerValue("qcd") },
+        };
+        for (duplicate_main_marker_cases) |scenario| {
+            errdefer std.debug.print("JP2 main-header duplicate marker case failed: {s}\n", .{scenario.label});
+            const marker_offset = findMarker(codestream_bytes, scenario.source) orelse return error.MissingMarker;
+            const marker_length = readU16BeTest(codestream_bytes, marker_offset + 2);
+            const segment_end = marker_offset + 2 + @as(usize, marker_length);
+
+            var duplicated_marker_codestream: std.ArrayList(u8) = .empty;
+            defer duplicated_marker_codestream.deinit(allocator);
+            try duplicated_marker_codestream.appendSlice(allocator, codestream_bytes[0..segment_end]);
+            try duplicated_marker_codestream.appendSlice(allocator, codestream_bytes[marker_offset..segment_end]);
+            try duplicated_marker_codestream.appendSlice(allocator, codestream_bytes[segment_end..]);
+            const bad_codestream = try duplicated_marker_codestream.toOwnedSlice(allocator);
+            defer allocator.free(bad_codestream);
+
+            try std.testing.expectError(
+                jp2.Jp2Error.InvalidCodestream,
+                jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
+            );
+
+            var duplicated_marker_jp2: std.ArrayList(u8) = .empty;
+            defer duplicated_marker_jp2.deinit(allocator);
+            try duplicated_marker_jp2.appendSlice(allocator, wrapped[0..jp2c_payload.start]);
+            try duplicated_marker_jp2.appendSlice(allocator, bad_codestream);
+            try duplicated_marker_jp2.appendSlice(allocator, wrapped[jp2c_payload.end..]);
+            const bad_wrapped = try duplicated_marker_jp2.toOwnedSlice(allocator);
+            defer allocator.free(bad_wrapped);
+            writeU32BeTest(bad_wrapped, jp2c_payload.start - 8, @as(u32, @intCast(bad_codestream.len + 8)));
+            try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_wrapped));
+        }
+    }
+
+    const mismatched_depth = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 16,
+        .samples = rgb.samples,
+    };
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidCodestream,
+        jp2.wrapRgbCodestream(allocator, mismatched_depth, codestream_bytes),
+    );
+
+    const mismatched_shape = image.RgbImage{
+        .allocator = allocator,
+        .width = 1,
+        .height = 4,
+        .bit_depth = 8,
+        .samples = rgb.samples,
+    };
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidCodestream,
+        jp2.wrapRgbCodestream(allocator, mismatched_shape, codestream_bytes),
+    );
+}
+
+test "JP2 wrapper validates 16-bit z2000 codestream SIZ metadata" {
+    const allocator = std.testing.allocator;
+    var rgb = try makeJp2RealCodestreamFixtureRgb(allocator, 16);
+    defer rgb.deinit();
+
+    const codestream_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 1 });
+    defer allocator.free(codestream_bytes);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, codestream_bytes);
+    defer allocator.free(wrapped);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u32, 2), info.width);
+    try std.testing.expectEqual(@as(u32, 2), info.height);
+    try std.testing.expectEqual(@as(u16, 3), info.components);
+    try std.testing.expectEqual(@as(u8, 16), info.bits_per_component);
+    try std.testing.expectEqual(codestream_bytes.len, info.codestream_bytes);
+    try std.testing.expectEqualSlices(u8, codestream_bytes, try jp2.extractCodestream(wrapped));
+
+    const corrupted = try allocator.dupe(u8, wrapped);
+    defer allocator.free(corrupted);
+    const jp2h_payload = try findJp2BoxPayload(corrupted, "jp2h");
+    const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
+    corrupted[ihdr_payload.start + 10] = 7;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(corrupted));
+
+    const mismatched_depth = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = rgb.samples,
+    };
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidCodestream,
+        jp2.wrapRgbCodestream(allocator, mismatched_depth, codestream_bytes),
+    );
+}
+
+test "JP2 wrapper accepts 9-7 ICT scalar-expounded codestream metadata" {
+    const allocator = std.testing.allocator;
+    var rgb = try makeJp2RealCodestreamFixtureRgb(allocator, 8);
+    defer rgb.deinit();
+
+    const codestream_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+    });
+    defer allocator.free(codestream_bytes);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, codestream_bytes);
+    defer allocator.free(wrapped);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u32, 2), info.width);
+    try std.testing.expectEqual(@as(u32, 2), info.height);
+    try std.testing.expectEqual(@as(u16, 3), info.components);
+    try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
+    try std.testing.expectEqual(codestream_bytes.len, info.codestream_bytes);
+    try std.testing.expectEqualSlices(u8, codestream_bytes, try jp2.extractCodestream(wrapped));
+
+    const qcd_offset = findMarker(codestream_bytes, codestream.markerValue("qcd")) orelse return error.MissingMarker;
+    const corrupted_codestream = try allocator.dupe(u8, codestream_bytes);
+    defer allocator.free(corrupted_codestream);
+    corrupted_codestream[qcd_offset + 5] ^= 0x01;
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedProfile,
+        jp2.wrapRgbCodestream(allocator, rgb, corrupted_codestream),
+    );
+
+    const jp2c_payload = try findJp2BoxPayload(wrapped, "jp2c");
+    const corrupted_wrapped = try allocator.dupe(u8, wrapped);
+    defer allocator.free(corrupted_wrapped);
+    corrupted_wrapped[jp2c_payload.start + qcd_offset + 5] ^= 0x01;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted_wrapped));
+}
+
+test "JP2 wrapper preserves ICC with z2000 codestream SIZ metadata" {
+    const allocator = std.testing.allocator;
+    var rgb = try makeJp2RealCodestreamFixtureRgb(allocator, 8);
+    const icc = try allocator.dupe(u8, "eciRGBv2 synthetic real-codestream ICC");
+    rgb.icc_profile = icc;
+    defer rgb.deinit();
+
+    const codestream_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 1 });
+    defer allocator.free(codestream_bytes);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, codestream_bytes);
+    defer allocator.free(wrapped);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expect(info.has_icc_profile);
+    try std.testing.expectEqual(icc.len, info.icc_profile_bytes);
+    try std.testing.expectEqual(codestream_bytes.len, info.codestream_bytes);
+    try std.testing.expectEqualSlices(u8, codestream_bytes, try jp2.extractCodestream(wrapped));
+
+    const extracted = try jp2.extractIccProfile(allocator, wrapped);
+    defer if (extracted) |profile| allocator.free(profile);
+    try std.testing.expect(extracted != null);
+    try std.testing.expectEqualSlices(u8, icc, extracted.?);
+}
+
+test "JP2 wrapper rejects empty ICC with z2000 codestream" {
+    const allocator = std.testing.allocator;
+    var rgb = try makeJp2RealCodestreamFixtureRgb(allocator, 8);
+    rgb.icc_profile = try allocator.alloc(u8, 0);
+    defer rgb.deinit();
+
+    const codestream_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 1 });
+    defer allocator.free(codestream_bytes);
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedProfile,
+        jp2.wrapRgbCodestream(allocator, rgb, codestream_bytes),
+    );
+}
+
+test "JP2 reader accepts length-to-EOF and XLBox codestream boxes" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const jp2c_bytes = minimal_jp2_codestream[0..];
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, jp2c_bytes);
+    defer allocator.free(wrapped);
+    const explicit_info = try jp2.parseInfo(wrapped);
+
+    const jp2c_payload = try findJp2BoxPayload(wrapped, "jp2c");
+    const jp2c_start = jp2c_payload.start - 8;
+
+    {
+        const eof_length = try allocator.dupe(u8, wrapped);
+        defer allocator.free(eof_length);
+        writeU32BeTest(eof_length, jp2c_start, 0);
+        const info = try jp2.parseInfo(eof_length);
+        try std.testing.expectEqual(explicit_info.codestream_bytes, info.codestream_bytes);
+        const extracted = try jp2.extractCodestream(eof_length);
+        try std.testing.expectEqualSlices(u8, jp2c_bytes, extracted);
+    }
+
+    {
+        var xl: std.ArrayList(u8) = .empty;
+        defer xl.deinit(allocator);
+        try xl.appendSlice(allocator, wrapped[0..jp2c_start]);
+        try appendU32BeTest(allocator, &xl, 1);
+        try appendU32BeTest(allocator, &xl, fourccTest("jp2c"));
+        try appendU64BeTest(allocator, &xl, @as(u64, jp2c_bytes.len + 16));
+        try xl.appendSlice(allocator, jp2c_bytes);
+        const bytes = try xl.toOwnedSlice(allocator);
+        defer allocator.free(bytes);
+
+        const info = try jp2.parseInfo(bytes);
+        try std.testing.expectEqual(explicit_info.codestream_bytes, info.codestream_bytes);
+        const extracted = try jp2.extractCodestream(bytes);
+        try std.testing.expectEqualSlices(u8, jp2c_bytes, extracted);
+    }
+
+    {
+        const truncated_xl = try allocator.dupe(u8, wrapped);
+        defer allocator.free(truncated_xl);
+        writeU32BeTest(truncated_xl, jp2c_start, 1);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(truncated_xl));
+    }
+
+    {
+        var overflowing_xl: std.ArrayList(u8) = .empty;
+        defer overflowing_xl.deinit(allocator);
+        try overflowing_xl.appendSlice(allocator, wrapped[0..jp2c_start]);
+        try appendU32BeTest(allocator, &overflowing_xl, 1);
+        try appendU32BeTest(allocator, &overflowing_xl, fourccTest("jp2c"));
+        try appendU64BeTest(allocator, &overflowing_xl, std.math.maxInt(u64));
+        try overflowing_xl.appendSlice(allocator, jp2c_bytes);
+        const bytes = try overflowing_xl.toOwnedSlice(allocator);
+        defer allocator.free(bytes);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(bytes));
+    }
+
+    {
+        const bad_signature = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_signature);
+        writeU32BeTest(bad_signature, 0, 0);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(bad_signature));
+    }
 }
 
 test "JP2 wrapper preserves restricted ICC color profile" {
@@ -2489,7 +3446,7 @@ test "JP2 wrapper preserves restricted ICC color profile" {
     };
     defer rgb.deinit();
 
-    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
     defer allocator.free(wrapped);
 
     const info = try jp2.parseInfo(wrapped);
@@ -2522,7 +3479,7 @@ test "JP2 reader rejects malformed restricted ICC color boxes" {
     };
     defer rgb.deinit();
 
-    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
     defer allocator.free(wrapped);
     const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
     const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
@@ -2565,7 +3522,19 @@ test "JP2 wrapper rejects unsupported RGB input metadata" {
         .bit_depth = 12,
         .samples = samples,
     };
-    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, bad_depth, "codestream"));
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, bad_depth, minimal_jp2_codestream[0..]));
+
+    const valid_rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.wrapRgbCodestream(allocator, valid_rgb, ""));
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.wrapRgbCodestream(allocator, valid_rgb, &.{ 0xff, 0x50, 0xff, 0xd9 }));
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.wrapRgbCodestream(allocator, valid_rgb, &.{ 0xff, 0x4f, 0xff, 0xd9 }));
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.wrapRgbCodestream(allocator, valid_rgb, &.{ 0xff, 0x4f, 0xff, 0x93 }));
 
     const short_samples = image.RgbImage{
         .allocator = allocator,
@@ -2574,7 +3543,7 @@ test "JP2 wrapper rejects unsupported RGB input metadata" {
         .bit_depth = 8,
         .samples = samples[0..5],
     };
-    try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.wrapRgbCodestream(allocator, short_samples, "codestream"));
+    try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.wrapRgbCodestream(allocator, short_samples, minimal_jp2_codestream[0..]));
 }
 
 test "JP2 reader rejects unsupported file type brand" {
@@ -2590,7 +3559,7 @@ test "JP2 reader rejects unsupported file type brand" {
         .samples = samples,
     };
 
-    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
     defer allocator.free(wrapped);
 
     {
@@ -2608,6 +3577,32 @@ test "JP2 reader rejects unsupported file type brand" {
         @memcpy(corrupted[ftyp_payload.start + 8 ..][0..4], "jpx ");
         try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
     }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const ftyp_payload = try findJp2BoxPayload(corrupted, "ftyp");
+        writeU32BeTest(corrupted, ftyp_payload.start + 4, 1);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const ftyp_payload = try findJp2BoxPayload(wrapped, "ftyp");
+        const ftyp_start = ftyp_payload.start - 8;
+        var extra_brand: std.ArrayList(u8) = .empty;
+        defer extra_brand.deinit(allocator);
+        try extra_brand.appendSlice(allocator, wrapped[0..ftyp_start]);
+        try appendU32BeTest(allocator, &extra_brand, 24);
+        try appendU32BeTest(allocator, &extra_brand, fourccTest("ftyp"));
+        try appendU32BeTest(allocator, &extra_brand, fourccTest("jp2 "));
+        try appendU32BeTest(allocator, &extra_brand, 0);
+        try appendU32BeTest(allocator, &extra_brand, fourccTest("jp2 "));
+        try appendU32BeTest(allocator, &extra_brand, fourccTest("jpx "));
+        try extra_brand.appendSlice(allocator, wrapped[ftyp_payload.end..]);
+        const bytes = try extra_brand.toOwnedSlice(allocator);
+        defer allocator.free(bytes);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(bytes));
+    }
 }
 
 test "JP2 reader rejects unsupported basic RGB profile boxes" {
@@ -2623,7 +3618,7 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
         .samples = samples,
     };
 
-    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
     defer allocator.free(wrapped);
     const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
 
@@ -2639,7 +3634,31 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
         const corrupted = try allocator.dupe(u8, wrapped);
         defer allocator.free(corrupted);
         const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
+        corrupted[ihdr_payload.start + 9] = 4;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
         corrupted[ihdr_payload.start + 10] = 0xff;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
+        corrupted[ihdr_payload.start + 12] = 1;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
+        corrupted[ihdr_payload.start + 13] = 1;
         try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
     }
 
@@ -2649,6 +3668,28 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
         const colr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "colr");
         corrupted[colr_payload.start + 3] = 17;
         try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const corrupted = try allocator.dupe(u8, wrapped);
+        defer allocator.free(corrupted);
+        const colr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "colr");
+        writeU32BeTest(corrupted, colr_payload.start - 8, 0);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(corrupted));
+    }
+
+    {
+        const ihdr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "ihdr");
+        const missing_ihdr = try removeJp2ChildBoxForTest(allocator, wrapped, jp2h_payload, ihdr_payload);
+        defer allocator.free(missing_ihdr);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(missing_ihdr));
+    }
+
+    {
+        const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+        const missing_colr = try removeJp2ChildBoxForTest(allocator, wrapped, jp2h_payload, colr_payload);
+        defer allocator.free(missing_colr);
+        try std.testing.expectError(jp2.Jp2Error.MissingRequiredBox, jp2.parseInfo(missing_colr));
     }
 }
 
@@ -2665,7 +3706,7 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
         .samples = samples,
     };
 
-    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
     defer allocator.free(wrapped);
     const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
     const jp2h_start = jp2h_payload.start - 8;
@@ -2682,6 +3723,91 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
     }
 
     {
+        var empty_codestream: std.ArrayList(u8) = .empty;
+        defer empty_codestream.deinit(allocator);
+        try empty_codestream.appendSlice(allocator, wrapped[0..jp2c_start]);
+        try appendU32BeTest(allocator, &empty_codestream, 8);
+        try appendU32BeTest(allocator, &empty_codestream, fourccTest("jp2c"));
+        const bytes = try empty_codestream.toOwnedSlice(allocator);
+        defer allocator.free(bytes);
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bytes));
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.extractCodestream(bytes));
+    }
+
+    {
+        const bad_soc = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_soc);
+        bad_soc[jp2c_payload.start + 1] = 0x50;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_soc));
+    }
+
+    {
+        const bad_eoc = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_eoc);
+        bad_eoc[jp2c_payload.end - 1] = 0x93;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_eoc));
+    }
+
+    {
+        const bad_siz_width = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_siz_width);
+        bad_siz_width[jp2c_payload.start + 11] = 3;
+        bad_siz_width[jp2c_payload.start + 27] = 3;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_siz_width));
+    }
+
+    {
+        const bad_siz_bit_depth = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_siz_bit_depth);
+        bad_siz_bit_depth[jp2c_payload.start + 42] = 0x0f;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_siz_bit_depth));
+    }
+
+    {
+        const unsupported_rsiz = try allocator.dupe(u8, wrapped);
+        defer allocator.free(unsupported_rsiz);
+        unsupported_rsiz[jp2c_payload.start + 7] = 1;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(unsupported_rsiz));
+    }
+
+    {
+        const bad_lsiz = try allocator.dupe(u8, wrapped);
+        defer allocator.free(bad_lsiz);
+        bad_lsiz[jp2c_payload.start + 5] = 0x2e;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(bad_lsiz));
+    }
+
+    {
+        const multi_tile_width = try allocator.dupe(u8, wrapped);
+        defer allocator.free(multi_tile_width);
+        multi_tile_width[jp2c_payload.start + 27] = 1;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(multi_tile_width));
+    }
+
+    {
+        const image_origin_offset = try allocator.dupe(u8, wrapped);
+        defer allocator.free(image_origin_offset);
+        image_origin_offset[jp2c_payload.start + 19] = 1;
+        image_origin_offset[jp2c_payload.start + 11] = 3;
+        image_origin_offset[jp2c_payload.start + 27] = 3;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(image_origin_offset));
+    }
+
+    {
+        const tile_origin_offset = try allocator.dupe(u8, wrapped);
+        defer allocator.free(tile_origin_offset);
+        tile_origin_offset[jp2c_payload.start + 35] = 1;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(tile_origin_offset));
+    }
+
+    {
+        const component_subsampling = try allocator.dupe(u8, wrapped);
+        defer allocator.free(component_subsampling);
+        component_subsampling[jp2c_payload.start + 43] = 2;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(component_subsampling));
+    }
+
+    {
         var reordered: std.ArrayList(u8) = .empty;
         defer reordered.deinit(allocator);
         try reordered.appendSlice(allocator, wrapped[0..jp2h_start]);
@@ -2693,9 +3819,39 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
     }
 
     {
+        const ihdr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "ihdr");
+        const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+        var reordered_jp2h: std.ArrayList(u8) = .empty;
+        defer reordered_jp2h.deinit(allocator);
+        try reordered_jp2h.appendSlice(allocator, wrapped[0..jp2h_start]);
+        try appendU32BeTest(allocator, &reordered_jp2h, @as(u32, @intCast(jp2h_payload.end - jp2h_start)));
+        try appendU32BeTest(allocator, &reordered_jp2h, fourccTest("jp2h"));
+        try reordered_jp2h.appendSlice(allocator, wrapped[colr_payload.start - 8 .. colr_payload.end]);
+        try reordered_jp2h.appendSlice(allocator, wrapped[ihdr_payload.start - 8 .. ihdr_payload.end]);
+        try reordered_jp2h.appendSlice(allocator, wrapped[jp2h_end..]);
+        const bytes = try reordered_jp2h.toOwnedSlice(allocator);
+        defer allocator.free(bytes);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(bytes));
+    }
+
+    {
         const extra = try insertJp2BoxForTest(allocator, wrapped, jp2c_start, "free", "");
         defer allocator.free(extra);
         try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(extra));
+    }
+
+    {
+        const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+        const duplicate_colr = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "colr",
+            wrapped[colr_payload.start..colr_payload.end],
+        );
+        defer allocator.free(duplicate_colr);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(duplicate_colr));
     }
 }
 
@@ -2712,7 +3868,7 @@ test "JP2 reader rejects variable bits-per-component child box" {
         .samples = samples,
     };
 
-    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, "temporary-codestream");
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
     defer allocator.free(wrapped);
     const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
     const with_bpcc = try allocator.dupe(u8, wrapped);
@@ -9593,6 +10749,35 @@ fn findJp2ChildBoxPayload(bytes: []const u8, parent: Jp2BoxPayload, comptime kin
     return error.MissingJp2Box;
 }
 
+fn makeJp2RealCodestreamFixtureRgb(allocator: std.mem.Allocator, bit_depth: u8) !image.RgbImage {
+    const samples = try allocator.alloc(u16, 12);
+    errdefer allocator.free(samples);
+    if (bit_depth == 8) {
+        @memcpy(samples, &[_]u16{
+            10,  20,  30,
+            40,  50,  60,
+            70,  80,  90,
+            100, 110, 120,
+        });
+    } else if (bit_depth == 16) {
+        @memcpy(samples, &[_]u16{
+            1000,  2000,  3000,
+            4000,  5000,  6000,
+            7000,  8000,  9000,
+            10000, 11000, 12000,
+        });
+    } else {
+        return error.UnsupportedFixtureBitDepth;
+    }
+    return .{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = bit_depth,
+        .samples = samples,
+    };
+}
+
 fn insertJp2BoxForTest(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -9608,6 +10793,59 @@ fn insertJp2BoxForTest(
     try appendU32BeTest(allocator, &out, fourccTest(kind));
     try out.appendSlice(allocator, payload);
     try out.appendSlice(allocator, bytes[offset..]);
+    return out.toOwnedSlice(allocator);
+}
+
+fn insertJp2BoxInsideJp2HeaderForTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    parent: Jp2BoxPayload,
+    offset: usize,
+    comptime kind: *const [4]u8,
+    payload: []const u8,
+) ![]u8 {
+    const parent_start = parent.start - 8;
+    const parent_end = parent.end;
+    if (offset < parent.start or offset > parent.end) return error.InvalidOffset;
+
+    const inserted_len = payload.len + 8;
+    const new_parent_payload_len = parent.end - parent.start + inserted_len;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..parent_start]);
+    try appendU32BeTest(allocator, &out, @as(u32, @intCast(new_parent_payload_len + 8)));
+    try appendU32BeTest(allocator, &out, readU32BeTest(bytes, parent_start + 4));
+    try out.appendSlice(allocator, bytes[parent.start..offset]);
+    try appendU32BeTest(allocator, &out, @as(u32, @intCast(inserted_len)));
+    try appendU32BeTest(allocator, &out, fourccTest(kind));
+    try out.appendSlice(allocator, payload);
+    try out.appendSlice(allocator, bytes[offset..parent.end]);
+    try out.appendSlice(allocator, bytes[parent_end..]);
+    return out.toOwnedSlice(allocator);
+}
+
+fn removeJp2ChildBoxForTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    parent: Jp2BoxPayload,
+    child: Jp2BoxPayload,
+) ![]u8 {
+    const parent_start = parent.start - 8;
+    const parent_end = parent.end;
+    const child_start = child.start - 8;
+    const child_end = child.end;
+    if (parent_start > child_start or child_end > parent_end) return error.InvalidOffset;
+
+    const old_child_len = child_end - child_start;
+    const new_parent_payload_len = parent.end - parent.start - old_child_len;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..parent_start]);
+    try appendU32BeTest(allocator, &out, @as(u32, @intCast(new_parent_payload_len + 8)));
+    try appendU32BeTest(allocator, &out, readU32BeTest(bytes, parent_start + 4));
+    try out.appendSlice(allocator, bytes[parent.start..child_start]);
+    try out.appendSlice(allocator, bytes[child_end..parent.end]);
+    try out.appendSlice(allocator, bytes[parent_end..]);
     return out.toOwnedSlice(allocator);
 }
 
@@ -9802,12 +11040,29 @@ fn appendU32BeTest(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value:
     try out.append(allocator, @as(u8, @truncate(value)));
 }
 
+fn appendU64BeTest(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u64) !void {
+    try out.append(allocator, @as(u8, @truncate(value >> 56)));
+    try out.append(allocator, @as(u8, @truncate(value >> 48)));
+    try out.append(allocator, @as(u8, @truncate(value >> 40)));
+    try out.append(allocator, @as(u8, @truncate(value >> 32)));
+    try out.append(allocator, @as(u8, @truncate(value >> 24)));
+    try out.append(allocator, @as(u8, @truncate(value >> 16)));
+    try out.append(allocator, @as(u8, @truncate(value >> 8)));
+    try out.append(allocator, @as(u8, @truncate(value)));
+}
+
 fn findMarker(bytes: []const u8, marker: u16) ?usize {
     var i: usize = 0;
     while (i + 1 < bytes.len) : (i += 1) {
         const value = (@as(u16, bytes[i]) << 8) | bytes[i + 1];
         if (value == marker) return i;
     }
+    return null;
+}
+
+fn findMarkerAfter(bytes: []const u8, marker: u16, start: usize) ?usize {
+    if (start >= bytes.len) return null;
+    if (findMarker(bytes[start..], marker)) |relative| return start + relative;
     return null;
 }
 
