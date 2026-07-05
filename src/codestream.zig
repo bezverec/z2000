@@ -2824,6 +2824,7 @@ fn assembleStrictPacketCatalogHeaders(
                     header.bit_depth,
                     header.transform,
                     header.code_block_style.bypass,
+                    header.code_block_style.terminate_all,
                     &active_group_storage,
                 );
             }
@@ -2895,6 +2896,7 @@ fn readStrictPacketHeaderForAudit(
                 group.locations,
                 group.max_zero_bitplanes,
                 group.reader_state.bypass,
+                group.reader_state.terminate_all,
                 group.decoded,
             ) catch return CodestreamError.InvalidCodestream;
         }
@@ -3156,6 +3158,7 @@ fn buildStrictPacketAuditBandGroups(
     bit_depth: u8,
     transform: WaveletTransform,
     bypass: bool,
+    terminate_all: bool,
     groups: *[max_rpcl_packet_band_groups]StrictPacketAuditBandGroup,
 ) !usize {
     var group_count: usize = 0;
@@ -3185,6 +3188,7 @@ fn buildStrictPacketAuditBandGroups(
             bit_depth,
             transform,
             bypass,
+            terminate_all,
         );
         group_count += 1;
         cursor = end;
@@ -3205,6 +3209,7 @@ fn buildStrictPacketAuditBandGroup(
     bit_depth: u8,
     transform: WaveletTransform,
     bypass: bool,
+    terminate_all: bool,
 ) !StrictPacketAuditBandGroup {
     if (selected.len == 0) return CodestreamError.InvalidCodestream;
     const grid = try t2.CodeBlockGrid.init(
@@ -3262,6 +3267,7 @@ fn buildStrictPacketAuditBandGroup(
     var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, leaves_x, leaves_y, leaf_count, layer_count);
     errdefer reader_state.deinit();
     reader_state.bypass = bypass;
+    reader_state.terminate_all = terminate_all;
     const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
     errdefer allocator.free(decoded);
 
@@ -3464,6 +3470,7 @@ fn readRpclPacketForBandGroups(
                 group.locations,
                 group.max_zero_bitplanes,
                 group.reader_state.bypass,
+                group.reader_state.terminate_all,
                 group.decoded,
             );
         }
@@ -4095,6 +4102,24 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         if (block.code_block_style.bypass) {
             if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
             const decoded = try ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
+                &scratch,
+                block.encoded_bitplanes,
+                block.cumulative_passes,
+                payload,
+                block.segment_lengths[0..block.segment_count],
+                block.rect.width,
+                block.rect.height,
+                block.code_block_style,
+                t1_stats,
+            );
+            try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+            continue;
+        }
+        if (block.code_block_style.terminate_all) {
+            // Each coding pass is an independently terminated MQ segment; decode
+            // from the per-pass segment lengths recovered from the packet header.
+            if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
+            const decoded = try ebcot.decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
                 &scratch,
                 block.encoded_bitplanes,
                 block.cumulative_passes,
@@ -6461,25 +6486,26 @@ fn buildRpclShadowBlock(
     options: LosslessOptions,
     include_bitplane_payload: bool,
 ) !RpclShadowBlock {
+    const block_style = codeBlockStyleForBand(.{
+        .bypass = options.bypass,
+        .reset_context = options.reset_context,
+        .terminate_all = options.terminate_all,
+        .vertical_causal = options.vertical_causal,
+        .predictable_termination = options.predictable_termination,
+        .segmentation_symbols = options.segmentation_symbols,
+    }, band_kind);
     var segment = switch (options.t1_backend) {
         .legacy_mq => try ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect),
-        // Hot path: direct ISO MQ encoding with per-worker scratch reuse, no
-        // symbol materialization. Produces the same bytes as the symbol-based
-        // encoder pair (covered by tests).
-        .iso_mq => try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
-            ebcot_scratch,
-            plane,
-            stride,
-            rect,
-            codeBlockStyleForBand(.{
-                .bypass = options.bypass,
-                .reset_context = options.reset_context,
-                .terminate_all = options.terminate_all,
-                .vertical_causal = options.vertical_causal,
-                .predictable_termination = options.predictable_termination,
-                .segmentation_symbols = options.segmentation_symbols,
-            }, band_kind),
-        ),
+        // terminate_all flushes an independently terminated ISO MQ segment per
+        // coding pass (ISO 15444-1 D.4.5). The direct ISO scratch encoder emits
+        // one continuous segment, so route terminate_all through the dedicated
+        // ISO MQ per-pass terminated encoder. Everything else takes the hot
+        // direct path with per-worker scratch reuse; it produces the same bytes
+        // as the symbol-based encoder pair.
+        .iso_mq => if (block_style.terminate_all)
+            try ebcot.encodeCodeBlockSegmentIsoMqTerminatedWithStyle(allocator, plane, stride, rect, block_style)
+        else
+            try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(ebcot_scratch, plane, stride, rect, block_style),
     };
     errdefer segment.deinit(allocator);
 
@@ -7533,18 +7559,29 @@ fn validateCodingPath(options: LosslessOptions) !void {
             if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
         },
     }
-    // vertical_causal (0x08) and segmentation_symbols (0x20) are wired
-    // end-to-end. vertical_causal forms stripe-causal contexts (ISO 15444-1
-    // D.7); segmentation_symbols emits the 0xA UNIFORM-context symbol after each
-    // cleanup pass and the decoder validates it (ISO 15444-1 D.5). Both ride
-    // through encode + strict decode and stay opt-in behind their CLI flags;
-    // the default profile sets neither, so the narrow path is unaffected. The
-    // remaining resilience bits stay fail-closed until their payload is wired.
+    // vertical_causal (0x08), segmentation_symbols (0x20), and terminate_all
+    // (0x04) are wired end-to-end. vertical_causal forms stripe-causal contexts
+    // (ISO 15444-1 D.7); segmentation_symbols emits the 0xA UNIFORM-context
+    // symbol after each cleanup pass and the decoder validates it (D.5);
+    // terminate_all independently terminates the MQ coder on every coding pass
+    // (D.4.5), and strict decode consumes the per-pass segments. All three ride
+    // through encode + strict decode and stay opt-in behind their CLI flags; the
+    // default profile sets none, so the narrow path is unaffected. reset_context
+    // and predictable_termination stay fail-closed until their payload is wired.
     if (options.reset_context or
-        options.terminate_all or
         options.predictable_termination)
     {
         return CodestreamError.UnsupportedPayload;
+    }
+    if (options.terminate_all) {
+        // The per-pass terminated encoder is only wired for the ISO MQ backend;
+        // the legacy backend would silently drop the flag while the COD marker
+        // still advertised it, so fail closed instead of emitting a stream the
+        // strict decoder cannot read back.
+        if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
+        // Multi-layer terminate_all (a layer including only part of a block's
+        // per-pass segments) is not yet wired; keep it fail-closed until proven.
+        if (options.layers != 1) return CodestreamError.UnsupportedPayload;
     }
     if (options.bypass) {
         // BYPASS requires the ISO MQ backend; quality layers and rates are
@@ -7602,10 +7639,10 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
 
 fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
     const parsed = ebcot.CodeBlockStyle.fromCodByte(style) orelse return CodestreamError.InvalidCodestream;
-    // BYPASS (0x01), vertical_causal (0x08), and segmentation_symbols (0x20) are
-    // implemented end-to-end; the remaining style bits stay fail-closed until
-    // their payload behavior is wired.
-    const supported_style_bits: u8 = 0x01 | 0x08 | 0x20;
+    // BYPASS (0x01), terminate_all (0x04), vertical_causal (0x08), and
+    // segmentation_symbols (0x20) are implemented end-to-end; the remaining
+    // style bits stay fail-closed until their payload behavior is wired.
+    const supported_style_bits: u8 = 0x01 | 0x04 | 0x08 | 0x20;
     if ((parsed.toCodByte() & ~supported_style_bits) != 0) return CodestreamError.UnsupportedPayload;
     return parsed;
 }

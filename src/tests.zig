@@ -506,6 +506,7 @@ test "T2 block packet header roundtrips first inclusion metadata" {
         false,
         8,
         false,
+        false,
         0,
     );
     try reader.byteAlign();
@@ -565,6 +566,7 @@ test "T2 block packet header roundtrips continued block metadata" {
         0,
         true,
         8,
+        false,
         false,
         0,
     );
@@ -645,6 +647,7 @@ test "T2 precinct packet header roundtrips first and continued layers" {
         locations[0..],
         8,
         false,
+        false,
         decoded[0..],
     ));
     try first_reader.byteAlign();
@@ -670,6 +673,7 @@ test "T2 precinct packet header roundtrips first and continued layers" {
         1,
         locations[0..],
         8,
+        false,
         false,
         decoded[0..],
     ));
@@ -1197,6 +1201,7 @@ test "T2 single block packet header carries EBCOT layer payload deltas" {
         &[_]t2.PacketBlockLocation{.{ .leaf_x = 0, .leaf_y = 0 }},
         8,
         false,
+        false,
         decoded[0..],
     ));
     try reader.byteAlign();
@@ -1226,6 +1231,7 @@ test "T2 single block packet header carries EBCOT layer payload deltas" {
         1,
         &[_]t2.PacketBlockLocation{.{ .leaf_x = 0, .leaf_y = 0 }},
         8,
+        false,
         false,
         decoded[0..],
     ));
@@ -1384,6 +1390,7 @@ test "T2 precinct layer packet assembles multiple EBCOT payload slices" {
         locations[0..],
         8,
         false,
+        false,
         decoded[0..],
         payloads[0..],
     );
@@ -1408,6 +1415,7 @@ test "T2 precinct layer packet assembles multiple EBCOT payload slices" {
         1,
         locations[0..],
         8,
+        false,
         false,
         decoded[0..],
         payloads[0..],
@@ -1495,6 +1503,7 @@ test "T2 precinct layer reader rolls back state on truncated payload" {
             0,
             &[_]t2.PacketBlockLocation{.{ .leaf_x = 0, .leaf_y = 0 }},
             8,
+            false,
             false,
             decoded[0..],
             payloads[0..],
@@ -8412,14 +8421,11 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "unsupported MCT", .offset = 8, .value = 2, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported RESET code-block style", .offset = 12, .value = 0x02, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "unsupported TERMALL code-block style", .offset = 12, .value = 0x04, .expected = codestream.CodestreamError.UnsupportedPayload },
-        // CAUSAL (0x08) is now supported end-to-end, so it is intentionally
-        // absent here; its acceptance + roundtrip is covered by a dedicated test.
         .{ .label = "unsupported ERTERM code-block style", .offset = 12, .value = 0x10, .expected = codestream.CodestreamError.UnsupportedPayload },
-        // CAUSAL (0x08) and SEGMARK (0x20) are supported end-to-end, so they are
-        // intentionally absent here; their acceptance + roundtrip is covered by
-        // dedicated tests. The combined 0x3f case still exercises rejection of
-        // the remaining (RESET/TERMALL/ERTERM) bits.
+        // TERMALL (0x04), CAUSAL (0x08), and SEGMARK (0x20) are supported
+        // end-to-end, so they are intentionally absent here; their acceptance +
+        // roundtrip is covered by dedicated tests. The combined 0x3f case still
+        // exercises rejection of the remaining (RESET/ERTERM) bits.
         .{ .label = "unsupported combined code-block style", .offset = 12, .value = 0x3f, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "reserved code-block style bit", .offset = 12, .value = 0x40, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
@@ -8564,10 +8570,15 @@ test "unsupported code-block style options fail closed" {
     const cases = [_]UnsupportedCase{
         .{ .label = "BYPASS+legacy", .options = .{ .bypass = true, .t1_backend = .legacy_mq } },
         .{ .label = "RESET", .options = .{ .reset_context = true } },
-        .{ .label = "TERMALL", .options = .{ .terminate_all = true } },
-        // CAUSAL (vertical_causal) and SEGMARK (segmentation_symbols) are now
-        // wired end-to-end; see the dedicated roundtrip tests below. Neither is
-        // fail-closed any longer.
+        // terminate_all is wired for the ISO MQ backend only; requesting it with
+        // the legacy backend must still fail closed (the flag would otherwise be
+        // silently dropped while the COD marker advertised it).
+        .{ .label = "TERMALL+legacy", .options = .{ .terminate_all = true, .t1_backend = .legacy_mq } },
+        // Multi-layer terminate_all is not yet wired; it must fail closed.
+        .{ .label = "TERMALL+layers", .options = .{ .terminate_all = true, .layers = 2 } },
+        // CAUSAL (vertical_causal), SEGMARK (segmentation_symbols), and TERMALL
+        // (terminate_all, ISO MQ) are now wired end-to-end; see the dedicated
+        // roundtrip tests below. None of those is fail-closed any longer.
         .{ .label = "ERTERM", .options = .{ .predictable_termination = true } },
     };
 
@@ -8663,6 +8674,53 @@ test "segmentation symbols code-block style roundtrips losslessly and changes th
 
     // The stream reconstructs the source image byte-exactly (lossless oracle).
     var decoded = try codestream.decodeLosslessTemporary(allocator, segmark);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
+test "terminate-all code-block style roundtrips losslessly and is deterministic" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const termall = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .terminate_all = true });
+    defer allocator.free(termall);
+    const plain = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .terminate_all = false });
+    defer allocator.free(plain);
+
+    // The COD code-block-style byte must advertise the TERMALL bit (0x04) only
+    // when the flag is set.
+    const termall_cod = findMarker(termall, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const plain_cod = findMarker(plain, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x04), termall[termall_cod + 12] & 0x04);
+    try std.testing.expectEqual(@as(u8, 0x00), plain[plain_cod + 12] & 0x04);
+
+    // Per-pass termination changes the coded payload (extra flush bytes per pass).
+    try std.testing.expect(!std.mem.eql(u8, termall, plain));
+
+    // Encoding is deterministic: re-encoding yields byte-identical output (the
+    // per-pass segment length accounting must not depend on scheduling).
+    const termall_again = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .terminate_all = true });
+    defer allocator.free(termall_again);
+    try std.testing.expectEqualSlices(u8, termall, termall_again);
+
+    // The stream reconstructs the source image byte-exactly (lossless oracle).
+    var decoded = try codestream.decodeLosslessTemporary(allocator, termall);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }

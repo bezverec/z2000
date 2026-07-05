@@ -2518,6 +2518,107 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypass(
     };
 }
 
+/// ISO MQ terminate_all encoder: every coding pass is flushed into its own
+/// independently-terminated MQ codeword segment (ISO 15444-1 D.4.5). The
+/// adaptive contexts persist across passes (resetStream keeps them and only
+/// restarts the coder register), matching the strict decoder's per-segment
+/// `reinitStream`. Unlike encodeBlockSymbolsSegmentTerminated (which uses the
+/// internal arithmetic coder for oracle tests) this emits ISO MQ bytes suitable
+/// for the public codestream.
+pub fn encodeBlockSymbolsSegmentIsoMqTerminated(
+    allocator: std.mem.Allocator,
+    block: EncodedBlockView,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
+    try validateImplementedStyle(style);
+    if (!style.terminate_all or style.bypass or style.reset_context) return EbcotError.InvalidBlock;
+    if (block.passes.len == 0) {
+        const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
+        errdefer allocator.free(passes);
+        const bytes = try allocator.dupe(u8, &.{});
+        return .{
+            .bitplanes = block.bitplanes,
+            .non_zero_count = block.non_zero_count,
+            .pass_count = 0,
+            .byte_length = 0,
+            .passes = passes,
+            .bytes = bytes,
+        };
+    }
+    if (block.passes.len > max_block_segments) return EbcotError.InvalidBlock;
+
+    var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
+    errdefer pass_payloads.deinit(allocator);
+    var segments: std.ArrayList(SegmentSpan) = .empty;
+    errdefer segments.deinit(allocator);
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+
+    var encoder = try mq_iso.Encoder.init(allocator, mq_context_count);
+    defer encoder.deinit();
+    try encoder.resetJpeg2000Contexts();
+
+    var symbol_offset: usize = 0;
+    for (block.passes, 0..) |pass, ordinal| {
+        if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
+        const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
+        for (pass_symbols) |symbol| {
+            try encoder.write(mqContextIndex(symbol.context), symbol.bit);
+        }
+        const encoded = try encoder.finish();
+        defer allocator.free(encoded);
+        const byte_offset = bytes.items.len;
+        try bytes.appendSlice(allocator, encoded);
+        try pass_payloads.append(allocator, .{
+            .kind = pass.kind,
+            .magnitude_bitplane = pass.magnitude_bitplane,
+            .symbol_count = pass.symbol_count,
+            .byte_offset = byte_offset,
+            .byte_length = @intCast(encoded.len),
+            .cumulative_bytes = @intCast(bytes.items.len),
+        });
+        try segments.append(allocator, .{ .pass_count = 1, .byte_length = @intCast(encoded.len) });
+        symbol_offset += pass.symbol_count;
+        const last_pass = ordinal + 1 == block.passes.len;
+        if (!last_pass) encoder.resetStream();
+    }
+    if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
+
+    const pass_slice = try pass_payloads.toOwnedSlice(allocator);
+    errdefer allocator.free(pass_slice);
+    const segment_slice = try segments.toOwnedSlice(allocator);
+    errdefer allocator.free(segment_slice);
+    const byte_slice = try bytes.toOwnedSlice(allocator);
+
+    return .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .pass_count = @intCast(pass_slice.len),
+        .byte_length = @intCast(byte_slice.len),
+        .passes = pass_slice,
+        .bytes = byte_slice,
+        .segments = segment_slice,
+    };
+}
+
+/// Plane-in wrapper for the ISO MQ terminate_all segment encoder.
+pub fn encodeCodeBlockSegmentIsoMqTerminatedWithStyle(
+    allocator: std.mem.Allocator,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
+    var block = try encodeBlockWithStyle(allocator, plane, stride, rect, style);
+    defer block.deinit(allocator);
+    return encodeBlockSymbolsSegmentIsoMqTerminated(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    }, style);
+}
+
 pub fn encodeBlockSymbolsSegmentContinuous(allocator: std.mem.Allocator, block: EncodedBlockView) !CodeBlockSegment {
     return encodeBlockSymbolsSegmentContinuousWithStyle(allocator, block, .{});
 }
@@ -2593,8 +2694,15 @@ pub fn encodeBlockSymbolsSegmentContinuousWithStyle(allocator: std.mem.Allocator
 }
 
 fn encodeBlockSymbolsSegmentTerminated(allocator: std.mem.Allocator, block: EncodedBlockView, style: CodeBlockStyle) !CodeBlockSegment {
+    // terminate_all: every coding pass is independently terminated, so each pass
+    // forms its own codeword segment (ISO 15444-1 D.4.5). Emit a per-pass
+    // segment table so the packet writer records one length per pass and the
+    // strict decoder can restart the MQ codeword register at each boundary.
+    if (block.passes.len > max_block_segments) return EbcotError.InvalidBlock;
     var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
     errdefer pass_payloads.deinit(allocator);
+    var segments: std.ArrayList(SegmentSpan) = .empty;
+    errdefer segments.deinit(allocator);
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
     var encoder = try mq.Encoder.init(allocator, mq_context_count);
@@ -2619,6 +2727,7 @@ fn encodeBlockSymbolsSegmentTerminated(allocator: std.mem.Allocator, block: Enco
             .byte_length = encoded_len,
             .cumulative_bytes = @intCast(bytes.items.len),
         });
+        try segments.append(allocator, .{ .pass_count = 1, .byte_length = encoded_len });
         symbol_offset += pass.symbol_count;
         encoder.resetSegmentRetainingContexts();
     }
@@ -2626,6 +2735,8 @@ fn encodeBlockSymbolsSegmentTerminated(allocator: std.mem.Allocator, block: Enco
 
     const pass_slice = try pass_payloads.toOwnedSlice(allocator);
     errdefer allocator.free(pass_slice);
+    const segment_slice = try segments.toOwnedSlice(allocator);
+    errdefer allocator.free(segment_slice);
     const byte_slice = try bytes.toOwnedSlice(allocator);
 
     return .{
@@ -2635,6 +2746,7 @@ fn encodeBlockSymbolsSegmentTerminated(allocator: std.mem.Allocator, block: Enco
         .byte_length = @intCast(byte_slice.len),
         .passes = pass_slice,
         .bytes = byte_slice,
+        .segments = segment_slice,
     };
 }
 
@@ -3339,6 +3451,113 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
         }
     }
     if (pass_index != pass_count or seg_index != seg_count or seg_passes_left != 0) {
+        return EbcotError.InvalidBlock;
+    }
+
+    return scratch.coeffs.items;
+}
+
+/// terminate_all decode (ISO 15444-1 D.4.5): every coding pass is its own
+/// independently-terminated MQ codeword segment. Structurally this is the
+/// bypass decoder with all segments MQ (never raw) and exactly one pass per
+/// segment; the adaptive contexts carry across segments while each segment
+/// restarts the codeword register. Inferred (re-derives symbols from geometry),
+/// so it needs no per-pass symbol counts — only the packet-coded per-pass
+/// lengths, which the terminate_all encoder records via its segment table.
+pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
+    scratch: *DecodeBlockScratch,
+    bitplanes: u8,
+    pass_count: u16,
+    bytes: []const u8,
+    segment_lengths: []const u64,
+    width: usize,
+    height: usize,
+    style: CodeBlockStyle,
+    stats: ?*DecodePassStats,
+) ![]const i32 {
+    try validateImplementedStyle(style);
+    if (!style.terminate_all or style.bypass or style.reset_context) return EbcotError.InvalidBlock;
+    if (width == 0 or height == 0) return EbcotError.InvalidBlock;
+    const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
+    if (area > max_codeblock_area) return EbcotError.InvalidBlock;
+    if (bitplanes == 0) {
+        if (pass_count != 0 or bytes.len != 0 or segment_lengths.len != 0) return EbcotError.InvalidBlock;
+        try scratch.ensureBlockState(width, height, area);
+        @memset(scratch.coeffs.items, 0);
+        return scratch.coeffs.items;
+    }
+
+    const expected_passes = expectedCodingPasses(bitplanes);
+    if (pass_count != expected_passes) return EbcotError.InvalidBlock;
+    // One terminated segment per pass.
+    if (segment_lengths.len != pass_count) return EbcotError.InvalidBlock;
+    var total_bytes: u64 = 0;
+    for (segment_lengths) |len| total_bytes = try std.math.add(u64, total_bytes, len);
+    if (total_bytes != bytes.len) return EbcotError.InvalidBlock;
+
+    try scratch.ensureBlockState(width, height, area);
+    @memset(scratch.flags.items, 0);
+    @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
+    @memset(scratch.coeffs.items, 0);
+
+    var mq_decoder: ?*mq_iso.Decoder = null;
+    const profiling = stats != null;
+
+    var seg_offset: usize = 0;
+    var seg_index: usize = 0;
+    var pass_index: u16 = 0;
+    var bitplane_index = bitplanes;
+    while (bitplane_index > 0 and pass_index < pass_count) {
+        bitplane_index -= 1;
+        const bitplane: u8 = @intCast(bitplane_index);
+        decodeClearNbfVisit(scratch);
+
+        const kinds: [3]PassKind = if (bitplane == bitplanes - 1)
+            .{ .cleanup, .cleanup, .cleanup }
+        else
+            .{ .significance, .refinement, .cleanup };
+        const passes_this_bitplane: u16 = if (bitplane == bitplanes - 1) 1 else 3;
+
+        var kind_index: u16 = 0;
+        while (kind_index < passes_this_bitplane and pass_index < pass_count) : (kind_index += 1) {
+            const kind = kinds[kind_index];
+
+            const len = std.math.cast(usize, segment_lengths[seg_index]) orelse return EbcotError.InvalidBlock;
+            const seg_end = try std.math.add(usize, seg_offset, len);
+            if (seg_end > bytes.len) return EbcotError.InvalidBlock;
+            const slice = bytes[seg_offset..seg_end];
+            if (mq_decoder) |d| {
+                // Keep the adaptive contexts, restart the codeword register.
+                d.reinitStream(slice);
+            } else {
+                mq_decoder = try scratch.isoMqDecoder(slice);
+            }
+            seg_offset = seg_end;
+            seg_index += 1;
+
+            switch (kind) {
+                .significance => {
+                    var pass_profile = profileMqStart(stats);
+                    const symbols = try decodeSignificancePassInferredProfiled(scratch, mq_decoder.?, bitplane, style, &pass_profile, profiling);
+                    profileMqPass(stats, .significance, symbols, pass_profile);
+                },
+                .refinement => {
+                    var pass_profile = profileMqStart(stats);
+                    const symbols = try decodeRefinementPassInferredProfiled(scratch, mq_decoder.?, bitplane, style, &pass_profile, profiling);
+                    profileMqPass(stats, .refinement, symbols, pass_profile);
+                },
+                .cleanup => {
+                    var pass_profile = profileMqStart(stats);
+                    const symbols = try decodeCleanupPassInferredProfiled(scratch, mq_decoder.?, bitplane, style, &pass_profile, profiling);
+                    profileMqPass(stats, .cleanup, symbols, pass_profile);
+                },
+            }
+            pass_index += 1;
+        }
+    }
+    if (pass_index != pass_count or seg_index != segment_lengths.len) {
         return EbcotError.InvalidBlock;
     }
 

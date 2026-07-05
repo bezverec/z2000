@@ -33,11 +33,13 @@ scorecard reconciliation (the earlier rows summed to 43 against a stated 40).
 
 **Update (post-`d664306` working tree):** Tier 1 is fully closed — the
 DNG/`tiff_ifd.zig` reader-hardening sliver (1.3) and the ICC fixture matrix
-(1.2) both landed. **2.1 (vertical_causal)** and **2.2 (segmentation_symbols)**
-are both wired end-to-end with local byte-exact oracles (and a bounded-error
-corruption test for 2.2); only their external interop gates remain before their
-scores are claimed. The next unclaimed levers are the interop passes for 2.1 /
-2.2, then the termination bits (2.3), then Tier 3 (multi-tile 3.1).
+(1.2) both landed. **2.1 (vertical_causal)**, **2.2 (segmentation_symbols)**,
+and **2.3 `terminate_all`** are all wired end-to-end with local byte-exact
+oracles (plus a bounded-error corruption test for 2.2 and a determinism check
+for 2.3); only their external interop gates remain before their scores are
+claimed. 2.3's `predictable_termination` half is still fail-closed. The next
+unclaimed levers are the interop passes for 2.1 / 2.2 / 2.3, then
+`predictable_termination`, then Tier 3 (multi-tile 3.1).
 
 ## How to read the priority tags
 
@@ -173,7 +175,7 @@ off, so this is safe to ship.
   pass before the scorecard point is claimed; until then it is proven
   internally but not counted, and stays off by default.
 
-### 2.3 `terminate_all` (0x04) + `predictable_termination` (0x10)
+### 2.3 `terminate_all` (0x04) ✅ DONE (local oracle) + `predictable_termination` (0x10) — still open
 
 - **Impact:** full "T1 completeness" +1–2. (+1–2)
 - **Effort:** M–L · **Risk:** Medium–High (termination changes byte layout of
@@ -181,13 +183,48 @@ off, so this is safe to ship.
   `hasUnsupportedPayloadMode`)
 - **ISO clause:** D.4.5 (termination on each coding pass) and the predictable
   (error-resilient) MQ termination annex.
-- **Current state:** `ebcot.zig:222` marks predictable termination unsupported;
-  terminate-all is parse-only. Segment-length accounting (`numlenbits`, per-pass
-  terminated segments) already exists for BYPASS, which is the hard part.
-- **What to add:** reuse the BYPASS terminated-segment machinery to terminate
-  *every* pass (terminate_all), then layer predictable termination on top.
-- **Test plan:** per-pass length determinism across thread counts; interop with
-  OpenJPEG `-M` terminate-all. Gate behind fail-closed until interop is green.
+
+**terminate_all landed (local oracle; interop pending).** This was more than a
+gate flip: the pre-existing `encodeBlockSymbolsSegmentTerminated` used the
+*internal* arithmetic coder (`mq.zig`), which is byte-incompatible with the ISO
+MQ coder (`mq_iso.zig`) the public codestream requires — fine as an internal
+oracle, wrong for a real stream. What was added:
+
+  - **Encoder:** new `encodeBlockSymbolsSegmentIsoMqTerminated` /
+    `encodeCodeBlockSegmentIsoMqTerminatedWithStyle` (`ebcot.zig`) — an ISO MQ
+    per-pass terminated encoder modelled on the BYPASS one: `finish()` flushes
+    each pass into its own codeword segment, `resetStream()` restarts the coder
+    register while the adaptive contexts persist. Emits a per-pass `SegmentSpan`
+    table so the packet writer records one length per pass. `buildRpclShadowBlock`
+    routes `iso_mq` + terminate_all here.
+  - **Packet header (`t2.zig`):** threaded `terminate_all` through
+    `readCodeBlockPacketHeader` / `readPrecinctPacketHeaderBody` /
+    `readPrecinctPacketHeader` / `readPrecinctLayerPacket` /
+    `PrecinctPacketReaderState`; for terminate_all each pass is one segment
+    (mirrors the BYPASS `bypassSegmentPassCounts` branch). The single-segment
+    edge case stays byte-compatible with the existing `write`/`readSegments`
+    path (BYPASS already relies on this).
+  - **Decoder:** new inferred `decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed`
+    (`ebcot.zig`), structurally the BYPASS decoder with all-MQ, one-pass-per
+    segment (`reinitStream` per segment, contexts carried). Wired into the
+    strict block-catalog decode (`reconstructStrictComponentCoefficientsFromBlockCatalog`).
+  - **Gates:** removed from `validateCodingPath` / accepted (`0x04`) in
+    `parseCodeBlockStyleByte`; kept fail-closed for the legacy backend and for
+    `layers != 1` (multi-layer per-pass segmentation not yet wired).
+
+- **Tests added:** "terminate-all code-block style roundtrips losslessly and is
+  deterministic" (lossless reconstruction, payload differs from plain, COD byte
+  carries `0x04`, re-encode is byte-identical) plus fail-closed cases
+  `TERMALL+legacy` and `TERMALL+layers`. Full `zig build test` green in `Debug`
+  + `ReleaseFast` (248/248).
+- **Interop gate — pending:** OpenJPEG `-M` terminate-all interop; and cross
+  thread-count determinism is only checked via same-config re-encode so far.
+  Stays opt-in behind `--terminate-all`, default off.
+
+**`predictable_termination` (0x10) — still open.** `ebcot.zig`
+`hasUnsupportedPayloadMode` still marks it unsupported. Now that the ISO MQ
+terminated-segment machinery exists, it can be layered on top (predictable /
+error-resilient MQ termination per D.4.5 annex). Left fail-closed.
 
 ---
 
@@ -270,9 +307,11 @@ off, so this is safe to ship.
    causal-enabled smoke JP2 to OpenJPEG/Grok/Kakadu; once one accepts it, claim
    the T1/EBCOT point. It stays opt-in/off-by-default until then.
 3. **2.2 (segmentation-symbols):** gates removed; local oracle + bounded-error
-   corruption test pass. Remaining work is the OpenJPEG `-M` interop gate. **2.3
-   (termination bits)** is the last resilience item — keep it fail-closed until
-   its own interop passes.
+   corruption test pass. Remaining work is the OpenJPEG `-M` interop gate.
+4. **2.3 (`terminate_all`):** now wired end-to-end with a dedicated ISO MQ
+   per-pass terminated encoder + inferred decoder (not just a gate flip). Local
+   oracle + determinism pass; remaining work is the OpenJPEG `-M` terminate-all
+   interop gate and, separately, `predictable_termination` (still fail-closed).
 4. **Tier 3:** the multi-tile scaffold (3.1) already advanced; converting the
    `isSingleTile`/`tile_index != 0` fail-closed checks into real per-tile
    encode/decode is the highest full-target lever but also the largest. Keep
@@ -293,11 +332,13 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
   1.1 (containers +1) and 1.3.
 - **Working tree (post-`d664306`):** 1.2 and the 1.3 DNG sliver landed (test-only
   hardening; interop-evidence +1 pending external confirmation). 2.1
-  (vertical_causal) and 2.2 (segmentation_symbols) both have green local oracles
-  — their narrow "T1/EBCOT" +2 and full "T1" +2/+3 (2.1) plus full "T1
-  completeness" +1 (2.2) are **staged, not yet claimed**, gated on the
-  OpenJPEG/Grok/Kakadu interop passes.
-- **If remaining Tier 1–2 land (2.1 / 2.2 interop, 2.3):** narrow 86 → ~89
-  (T1/EBCOT +2, interop-evidence +1), full 44 → ~47 (T1 +2/+3, containers +1).
+  (vertical_causal), 2.2 (segmentation_symbols), and 2.3 (`terminate_all`) all
+  have green local oracles — their narrow "T1/EBCOT" +2 and full "T1" +2/+3
+  (2.1), full "T1 completeness" +1 (2.2), and full "T1 completeness" +1–2 (2.3
+  terminate_all) are **staged, not yet claimed**, gated on the
+  OpenJPEG/Grok/Kakadu interop passes. `predictable_termination` remains open.
+- **If remaining Tier 1–2 land (2.1 / 2.2 / 2.3 interop + predictable_term):**
+  narrow 86 → ~89 (T1/EBCOT +2, interop-evidence +1), full 44 → ~48 (T1 +3/+4,
+  containers +1).
 - **If Tier 3 (multi-tile 3.1 + LRCP 3.2) then lands:** full ~47 → ~53, the
   first real jump on the broad-codec axis.
