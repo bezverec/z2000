@@ -56,13 +56,33 @@ interop gate.
   produce larger/higher-PSNR access files than Grok/OpenJPEG for the same
   nominal ladder. Add PCRD-style distortion metadata before treating access
   benchmarks as equivalent.
-- Multi-tile: introduce a real tile grid, per-tile DWT, per-tile packet state,
-  and tile-part scheduling before allowing tile sizes smaller than the image.
+- Multi-tile: the shared tile-grid geometry helper is in place; next introduce
+  per-tile image extraction, per-tile DWT, per-tile packet state, and tile-part
+  scheduling before allowing tile sizes smaller than the image.
 - Interop gate: for each major phase, keep OpenJPEG/Grok/Kakadu checks for
   encode/decode roundtrip, marker conformance, output size, strict reader
   validation, and single-thread plus multi-thread encode/decode benchmarks.
-  valid2000 currently still reports ICC/PLT and access-profile policy issues,
-  so keep it as an explicit hygiene gate rather than a passed gate.
+  Treat valid2000/jpylyzer-style validators as explicit hygiene gates rather
+  than absolute truth: every warning should be checked against the strict
+  reader, independent decoders, and the Part 1 text. ICC absence is acceptable
+  when the source TIFF has no ICC tag.
+
+## Next Implementation Slice
+
+1. Build a small JP2/ICC interop fixture matrix: ICC-absent RGB TIFF,
+   ICC-present RGB TIFF, malformed ICC tag, and malformed `colr` box. The
+   ICC-absent fixture should stay valid without inventing a profile.
+2. Harden JP2 reader diagnostics around duplicate or misplaced required boxes,
+   unsupported brands, ICC-vs-sRGB `colr` policy, variable bits-per-component,
+   extra components, and multiple contiguous codestream boxes.
+3. Extend strict T2 audit fixtures from the current smoke file to deliberately
+   corrupted PLT/TLM/SOP/EPH/header cases that can be compared against
+   OpenJPEG/Grok/Kakadu behavior without assuming any validator is final.
+4. Return to T1 style coverage after the JP2/T2 diagnostics are sharper:
+   keep BYPASS public, keep other nonzero style bits fail-closed in public
+   codestreams until each has writer, strict reader, oracle tests, and interop.
+5. Run a comparative benchmark only after the above interop fixtures are green,
+   so performance numbers are attached to output that external decoders accept.
 
 ## Phase 1: Finish The Narrow Lossless RPCL Path
 
@@ -121,13 +141,13 @@ Tasks:
 - Keep SOP/EPH sequencing validation active. SOP remains default-on; EPH is
   opt-in until OpenJPEG/Kakadu packet-boundary interop is stable.
 - Keep benchmarking gated on interop: current no-sidecar/no-EPH smoke decodes
-  through z2000 strict path, OpenJPEG, and Grok without Grok PL marker length
-  warnings. Kakadu and valid2000 remain the next external gates before treating
-  benchmark comparisons as fully fair.
-- Validate PLT/TLM consistency against actual packet and tile-part lengths.
-  through z2000 strict path and OpenJPEG, but Grok/Kakadu still report packet
-  header or PLT interpretation failures, so the next fix belongs in ISO T2
-  header/state semantics rather than in performance tuning.
+  through z2000 strict path, OpenJPEG, Grok, and Kakadu without pixel
+  differences; jpylyzer 2.2.1 accepts the current JP2. Validator reports remain
+  diagnostic rather than authoritative.
+- Validate PLT/TLM consistency against actual packet and tile-part lengths
+  through z2000 strict path, OpenJPEG, Grok, Kakadu, and a validator where
+  available; disagreements should be reduced to a minimal packet/marker case
+  before treating either side as authoritative.
 - Keep PLT/TLM consistency validation against actual packet and tile-part
   lengths, including ordered multi-segment TLM/PLT coverage.
 - Keep RPCL as the first supported progression, with bounded per-precinct state
@@ -148,11 +168,13 @@ Goal: support large images without requiring a single full-image tile path.
 
 Tasks:
 
-- Add real tile partitioning in image coordinates.
+- Build on the shared tile-grid helper to add real tile partitioning in image
+  coordinates.
 - Preserve tile-component independence in DWT, T1, and T2 scheduling.
 - Rework scratch pools for tile-local reuse.
 - Add memory usage benchmarks.
-- Add tests for edge tiles and non-divisible image sizes.
+- Extend the current edge-tile and non-divisible dimension geometry tests into
+  positive per-tile payload coverage.
 
 Exit criteria:
 

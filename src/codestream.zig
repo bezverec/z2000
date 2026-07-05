@@ -9,6 +9,7 @@ const packet_plan = @import("packet_plan.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
+const tile_grid = @import("tile_grid.zig");
 const wavelet_int = @import("wavelet_int.zig");
 const wavelet = @import("wavelet.zig");
 
@@ -1757,7 +1758,20 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             height = ysiz - yosiz;
             if (xtsiz == 0 or ytsiz == 0) return CodestreamError.InvalidCodestream;
             if (xtosiz != xosiz or ytosiz != yosiz) return CodestreamError.UnsupportedPayload;
-            if (xtsiz < width or ytsiz < height) return CodestreamError.UnsupportedPayload;
+            const grid = tile_grid.Grid.init(.{
+                .xsiz = xsiz,
+                .ysiz = ysiz,
+                .xosiz = xosiz,
+                .yosiz = yosiz,
+                .xtsiz = xtsiz,
+                .ytsiz = ytsiz,
+                .xtosiz = xtosiz,
+                .ytosiz = ytosiz,
+            }) catch |err| switch (err) {
+                tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
+                tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
+            };
+            if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
             bit_depth = (segment[36] & 0x7f) + 1;
             if (bit_depth != 8 and bit_depth != 16) return CodestreamError.UnsupportedPayload;
             var component_index: usize = 0;
@@ -7472,8 +7486,11 @@ fn validateBlockSize(width: u16, height: u16) !void {
 }
 
 fn validateTileSize(width: u32, height: u32, image_width: usize, image_height: usize) !void {
-    if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
-    if (width < image_width or height < image_height) return CodestreamError.UnsupportedPayload;
+    const grid = tile_grid.Grid.fromImageSize(image_width, image_height, width, height) catch |err| switch (err) {
+        tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
+        tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
+    };
+    if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
 }
 
 fn validatePrecincts(options: LosslessOptions) !void {

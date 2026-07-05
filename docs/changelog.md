@@ -5,6 +5,136 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile Foundation
+
+- Added a standalone JPEG2000 tile-grid helper for image/tile reference-grid
+  geometry, including edge-tile rectangles for non-divisible dimensions and
+  non-zero reference origins. Encoder and strict SIZ validation now use this
+  shared geometry while still failing closed for real multi-tile payloads until
+  per-tile DWT/T1/T2 state exists.
+- Added tile-local RGB extraction and copy-back helpers with edge-tile
+  roundtrip tests, giving future per-tile encode/decode scheduling a shared
+  checked row-copy primitive.
+- Added row-major tile descriptors and an iterator over the tile grid, including
+  edge-tile classification for future tile work queues.
+- Added a standalone tile-local RCT pipeline scaffold that transforms one tile
+  descriptor into local RCT planes and roundtrips it back into the full RGB
+  image without enabling multi-tile codestream output.
+- Added in-place tile-local reversible 5/3 DWT and inverse-DWT scaffolding over
+  the RCT tile planes, reusing the production integer wavelet workspace and
+  roundtripping edge tiles in tests.
+- Added a tile-local packet scaffold that derives subbands, code-block
+  rectangles, and an RPCL packet plan for one transformed tile without emitting
+  multi-tile codestream payloads yet.
+- Added deterministic component-block job descriptors over the tile packet
+  scaffold, giving future T1 scheduling an explicit component/block/band/rect
+  iteration order.
+- Added checked component-block plane views for tile-local T1 jobs, carrying a
+  borrowed component plane, stride, and block rect in the shape expected by the
+  existing EBCOT block encoder.
+- Added an isolated tile-local ISO-MQ EBCOT component-block encode helper,
+  byte-checked against the existing symbol-based EBCOT oracle while still
+  leaving multi-tile packet emission disabled.
+- Added a tile-local encoded block catalog builder that encodes every
+  component-block job for one tile, owns the resulting EBCOT segments, and
+  preserves deterministic component-major ordering for later T2 integration.
+- Added tile-local quality-layer truncation metadata to each encoded block,
+  using the same normalized `LayerTruncation` shape as the current RPCL packet
+  writer so future per-tile T2 assembly can avoid recomputing block metadata.
+- Added a borrowed tile-local `t2.EncodedLayerBlock` view over encoded catalog
+  entries, including band-local leaf coordinates, EBCOT payload bytes, segment
+  spans, and bitplane metadata for future RPCL packet assembly.
+- Added a tile-local `RpclPacketIndex` that precomputes packet-sequence to
+  code-block-index selections and maps those selections into the encoded block
+  catalog, avoiding repeated per-packet code-block scans in the future per-tile
+  T2 writer.
+- Added tile-local RPCL packet band grouping with packet-local leaf coordinate
+  normalization, producing borrowed `t2.EncodedLayerBlock` arrays that can
+  initialize T2 tag-tree packet writer state.
+- Added a standalone tile-local RPCL packet stream builder with packet and
+  packet-header length tables, exercising real T2 packet-header and payload
+  emission without enabling multi-tile codestream output yet.
+- Added a tile-local RPCL packet stream readback validator that replays the
+  emitted packets through T2 reader state and checks header lengths, decoded
+  layer deltas, and payload slices against the shared encoded block catalog.
+- Added an owned tile-local RPCL encode artifact wrapper that runs one tile
+  through RCT, reversible 5/3 DWT, ISO-MQ EBCOT catalog construction, RPCL
+  index creation, packet stream emission, and immediate T2 readback validation.
+  This gives future multi-tile scheduling a single checked work item without
+  enabling multi-tile codestream output yet.
+- Added a deterministic tile-grid artifact builder that produces the same owned
+  RPCL encode artifact for every tile in row-major order, providing a serial
+  correctness baseline for the future persistent tile work queue.
+- Added a parallel tile-grid RPCL artifact builder backed by an atomic tile work
+  index. Results are written to their tile-index slots and tested byte-for-byte
+  against the serial builder to preserve deterministic output.
+- Added a deterministic cost-ordered tile work list for the parallel builder so
+  larger tiles start first while output remains indexed in row-major tile order.
+- Added a standalone tile-part layout derivation over tile-grid artifacts,
+  computing one future tile-part per tile with packet counts, raw/framed packet
+  bytes, PLT byte counts, and `Psot` values for later SOT/TLM/PLT writer wiring.
+- Added a standalone TLM plan over tile-part layout entries, carrying 16-bit
+  tile indexes and 32-bit `Psot` values plus marker byte-count validation for
+  the future multi-tile writer.
+- Added a standalone PLT plan over tile-part layout entries, grouping framed
+  packet lengths per future tile-part and validating PLT marker byte totals
+  against the computed `Psot` layout.
+- Added standalone TLM and PLT marker-segment writers for the tile pipeline
+  scaffold, with tests decoding the emitted bytes back to tile indexes, `Psot`
+  values, and framed packet lengths.
+- Added a standalone future tile-part byte writer over tile-grid artifacts,
+  emitting `SOT`, optional `PLT`, `SOD`, and SOP/EPH-framed RPCL packet payloads
+  while keeping real multi-tile codestream output disabled. Tests parse the
+  generated tile-part bytes and compare packet payload slices back to the
+  tile-local RPCL stream.
+- Added a standalone tile-part sequence writer that concatenates all row-major
+  future tile-parts, optionally prefixed by the derived `TLM` marker segment.
+  Tests cover both TLM-present and no-TLM sequence buffers and compare each
+  tile-part slice against the per-entry writer.
+- Added an owned indexed tile-part sequence form carrying the emitted bytes,
+  `TLM` span length, and per-tile-part offsets so future codestream assembly can
+  use checked byte ranges instead of marker rescans.
+- Added a standalone `SOC`/`EOC` codestream-fragment wrapper around indexed
+  tile-part sequences, including validation that every `SOT/Psot` span matches
+  the stored offsets. This keeps multi-tile output fail-closed while moving the
+  scaffold closer to real Part 1 codestream structure.
+- Added a matching strict parser for the standalone codestream fragment. It
+  rebuilds the `TLM` span and tile-part offset map from bytes and rejects
+  corrupted `SOC`, `EOC`, `SOT/Psot`, and `SOD` boundaries in tests.
+- Extended the standalone fragment parser to decode explicit `TLM` entries
+  (`Stlm=0x60`) and validate each tile index and `Psot` value against the parsed
+  tile-part headers, with corrupt `Stlm` and TLM length regressions.
+- Extended the standalone fragment parser to decode ordered `PLT` marker
+  segments, expand variable-length packet lengths, and validate that each
+  tile-part's PLT length sum exactly matches its `SOD` payload span. Tests now
+  cover corrupt `Zplt`, packet-length bytes, and PLT marker corruption.
+- Added parsed packet spans derived from those PLT lengths, exposing exact
+  tile-part `SOD` payload slices for future strict T2 packet decode work.
+- Added a standalone fragment-vs-grid-artifacts validator that checks parsed
+  tile-part packet spans against the original tile-local RPCL streams,
+  including SOP/EPH framing and corrupted packet-payload coverage.
+- Added a raw RPCL stream extractor for parsed tile-part packet spans and a
+  standalone fragment T2 readback validator that replays those reconstructed
+  streams through the existing T2 packet reader state and tile-local EBCOT
+  catalog.
+- Added a marker-only parsed tile-part audit table with tile identity, `Psot`,
+  PLT bytes, packet counts, framed bytes, and raw packet bytes. Tests now cover
+  both SOP/EPH-framed tile-parts and no-framing tile-parts.
+- Added full no-TLM standalone codestream-fragment coverage:
+  `SOC -> SOT/PLT/SOD -> EOC` now parses, audits, validates against tile-grid
+  artifacts, and replays through T2 readback without relying on `TLM`.
+- Added an explicit single-part tile-order validator for the standalone
+  multi-tile scaffold. It requires row-major tile indexes and exactly one
+  tile-part per tile, with coverage for malformed tile order and tile-part
+  count metadata.
+- Added a tile-local encoded block catalog coverage validator and wired it into
+  tile artifact construction. It checks that each component's code-block rects
+  match the scaffold and cover the transformed tile plane exactly once.
+- Added standalone tile-grid pixel reconstruction from encoded tile artifacts:
+  direct-ISO T1 payloads decode through the inferred continuous ISO-MQ path,
+  inverse 5-3 and inverse RCT run per tile, and the reconstructed edge tiles are
+  copied back into the full RGB image in tests.
+
 ### Performance Instrumentation
 
 - Added `decode-temp-jp2 --timings` and a public `DecodeTimings` profiling API
@@ -62,6 +192,12 @@ entries are grouped by development milestone rather than semantic version.
   emitting and validating the required zero stuffing/padding byte; this aligns
   PLT packet lengths with Grok/OpenJPEG/Kakadu packet parsers on the current
   no-sidecar output.
+- Updated the ISO scorecard after the current no-sidecar z2000/OpenJPEG/Grok/
+  Kakadu lossless gate and jpylyzer 2.2.1 validity check: the narrow RGB
+  lossless JP2 target is now estimated at 86/100 and the broader Part 1 codec
+  family at 40/100. Validator warnings are treated as diagnostic leads rather
+  than absolute failures, and ICC absence is acceptable when the source TIFF has
+  no ICC tag.
 - Split strict packet-catalog timing into scan, packet-header assembly, and
   final block-catalog materialization phases.
 - Reduced packet-header assembly allocation churn by filling strict and legacy
@@ -368,10 +504,6 @@ entries are grouped by development milestone rather than semantic version.
   available.
 - Added `tools/bench_compare.sh` and `tools/compare_tiff.py` for local macOS
   benchmark and pixel-check workflows.
-- Updated the ISO scorecard after local OpenJPEG/Grok/valid2000 checks: narrow
-  RGB lossless JP2 target is now estimated at 83/100 and the broader Part 1
-  codec family at 37/100. valid2000 still reports ICC/PLT and access-profile
-  policy failures, so it remains a gate rather than a pass.
 - Started the MQ fast-path optimization: direct ISO-MQ block encoding now
   finalizes codeword segments into the reusable per-worker payload buffer
   instead of returning a temporary owned slice. Raw BYPASS segments now use

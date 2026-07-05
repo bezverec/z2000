@@ -70,12 +70,12 @@ This first milestone is intentionally small and honest:
 
 It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder, but
 the narrow single-tile RPCL profiles (lossless RCT/5-3 and lossy ICT/9-7,
-with or without BYPASS and quality layers) decode losslessly/pixel-identical
-in OpenJPEG; Kakadu remains the next external gate.
+with or without BYPASS and quality layers) decode losslessly/pixel-identically
+in the current z2000/OpenJPEG/Grok/Kakadu smoke gates.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-03, the narrow RGB lossless JP2 target is estimated at 83/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 38/100.
+2026-07-04, the narrow RGB lossless JP2 target is estimated at 86/100, while
+the broader JPEG2000 Part 1 codec family is estimated at 40/100.
 
 ## Build
 
@@ -387,8 +387,10 @@ payload behavior is implemented.
 - Use checked integer math for dimensions, offsets, byte counts, and box sizes.
 - Keep hot image data in contiguous component buffers before DWT.
 - Keep tile-level parallelism fail-closed until real multi-tile payload layout
-  exists; the current hot path uses component-level scheduling plus encode-side
-  code-block range scheduling with per-worker scratch-buffer reuse.
+  exists. A shared tile-grid geometry helper now computes edge-tile rectangles
+  and feeds encoder/strict SIZ validation, but the current hot path still uses
+  component-level scheduling plus encode-side code-block range scheduling with
+  per-worker scratch-buffer reuse.
 - Benchmark encode/decode throughput, memory peak, and lossless roundtrip
   against OpenJPEG and Grok on the same TIFF corpus.
 
@@ -482,10 +484,11 @@ current single-tile archival profile as six tile-parts for six resolutions.
 On the current no-sidecar smoke path, z2000 strict decode, OpenJPEG, Grok, and
 Kakadu accept the output losslessly. Grok no longer reports PL marker length
 warnings after the RPCL subband precinct projection and terminal packet-header
-stuffing fixes. valid2000 is still an active hygiene gate: the local lossless
-file currently reports an ICC-profile failure and a PLT count warning, while
-the access profile also trips profile-specific transform/QCD/layer/tile-size
-expectations.
+stuffing fixes. jpylyzer 2.2.1 reports the current JP2 as valid with no
+warnings. External validators such as valid2000 or jpylyzer are hygiene gates,
+not absolute sources of truth: any warning should be reduced against the strict
+reader, independent decoders, and the Part 1 text. ICC absence is acceptable
+when the source TIFF has no ICC tag.
 
 Strict marker handling now checks SOT tile-part sequence/count, TLM tile indexes
 and tile-part lengths, PLT packet spans, ordered multi-segment TLM/PLT marker
@@ -571,8 +574,10 @@ Features:
 
 1. Real multi-tile payload layout, then tile-parallel scheduling on top of
    the per-worker scratch-buffer model.
-2. Kakadu/valid2000 cross-checks on the full profile matrix; current local
-   valid2000 logs still flag ICC/PLT and access-profile policy issues.
+2. Expand the full profile matrix across OpenJPEG/Grok/Kakadu and
+   valid2000/jpylyzer-style validators, treating validator warnings as
+   diagnostic leads rather than authoritative failures until checked against
+   the strict reader, independent decoders, and Part 1.
 3. Distortion-aware rate allocation (PCRD-style) so early quality layers
    carry more PSNR than the current byte-even/ratio split.
 

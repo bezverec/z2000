@@ -15,6 +15,8 @@ const rate_alloc = @import("rate_alloc.zig");
 const simd = @import("simd.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
+const tile_grid = @import("tile_grid.zig");
+const tile_pipeline = @import("tile_pipeline.zig");
 const tiff = @import("tiff.zig");
 const wavelet = @import("wavelet.zig");
 const wavelet_int = @import("wavelet_int.zig");
@@ -7371,6 +7373,2199 @@ test "unsupported JP2 profile marker options fail closed" {
             codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options),
         );
     }
+}
+
+test "tile grid describes single full-image tile" {
+    const grid = try tile_grid.Grid.fromImageSize(640, 480, 1024, 1024);
+
+    try std.testing.expect(grid.isSingleTile());
+    try std.testing.expectEqual(@as(u32, 1), grid.columns);
+    try std.testing.expectEqual(@as(u32, 1), grid.rows);
+    try std.testing.expectEqual(@as(u64, 1), grid.tileCount());
+
+    const rect = try grid.tileRect(0);
+    try std.testing.expectEqual(@as(u32, 0), rect.x0);
+    try std.testing.expectEqual(@as(u32, 0), rect.y0);
+    try std.testing.expectEqual(@as(u32, 640), rect.x1);
+    try std.testing.expectEqual(@as(u32, 480), rect.y1);
+    try std.testing.expectEqual(@as(u32, 640), rect.width());
+    try std.testing.expectEqual(@as(u32, 480), rect.height());
+}
+
+test "tile grid computes edge tiles for non-divisible image dimensions" {
+    const grid = try tile_grid.Grid.fromImageSize(5, 4, 2, 3);
+
+    try std.testing.expect(!grid.isSingleTile());
+    try std.testing.expectEqual(@as(u32, 3), grid.columns);
+    try std.testing.expectEqual(@as(u32, 2), grid.rows);
+    try std.testing.expectEqual(@as(u64, 6), grid.tileCount());
+
+    const top_left = try grid.tileRectAt(0, 0);
+    try std.testing.expectEqualDeep(tile_grid.Rect{ .x0 = 0, .y0 = 0, .x1 = 2, .y1 = 3 }, top_left);
+
+    const top_right = try grid.tileRectAt(2, 0);
+    try std.testing.expectEqualDeep(tile_grid.Rect{ .x0 = 4, .y0 = 0, .x1 = 5, .y1 = 3 }, top_right);
+
+    const bottom_left = try grid.tileRectAt(0, 1);
+    try std.testing.expectEqualDeep(tile_grid.Rect{ .x0 = 0, .y0 = 3, .x1 = 2, .y1 = 4 }, bottom_left);
+
+    const bottom_right = try grid.tileRect(5);
+    try std.testing.expectEqualDeep(tile_grid.Rect{ .x0 = 4, .y0 = 3, .x1 = 5, .y1 = 4 }, bottom_right);
+}
+
+test "tile grid iterator yields row-major tile descriptors" {
+    const grid = try tile_grid.Grid.fromImageSize(7, 7, 3, 3);
+    var iterator = grid.iterator();
+
+    const ExpectedTile = struct {
+        index: u64,
+        column: u32,
+        row: u32,
+        rect: tile_grid.Rect,
+        edge: bool,
+    };
+    const expected = [_]ExpectedTile{
+        .{ .index = 0, .column = 0, .row = 0, .rect = .{ .x0 = 0, .y0 = 0, .x1 = 3, .y1 = 3 }, .edge = true },
+        .{ .index = 1, .column = 1, .row = 0, .rect = .{ .x0 = 3, .y0 = 0, .x1 = 6, .y1 = 3 }, .edge = true },
+        .{ .index = 2, .column = 2, .row = 0, .rect = .{ .x0 = 6, .y0 = 0, .x1 = 7, .y1 = 3 }, .edge = true },
+        .{ .index = 3, .column = 0, .row = 1, .rect = .{ .x0 = 0, .y0 = 3, .x1 = 3, .y1 = 6 }, .edge = true },
+        .{ .index = 4, .column = 1, .row = 1, .rect = .{ .x0 = 3, .y0 = 3, .x1 = 6, .y1 = 6 }, .edge = false },
+        .{ .index = 5, .column = 2, .row = 1, .rect = .{ .x0 = 6, .y0 = 3, .x1 = 7, .y1 = 6 }, .edge = true },
+        .{ .index = 6, .column = 0, .row = 2, .rect = .{ .x0 = 0, .y0 = 6, .x1 = 3, .y1 = 7 }, .edge = true },
+        .{ .index = 7, .column = 1, .row = 2, .rect = .{ .x0 = 3, .y0 = 6, .x1 = 6, .y1 = 7 }, .edge = true },
+        .{ .index = 8, .column = 2, .row = 2, .rect = .{ .x0 = 6, .y0 = 6, .x1 = 7, .y1 = 7 }, .edge = true },
+    };
+
+    for (expected) |want| {
+        const maybe_tile = try iterator.next();
+        const tile = maybe_tile orelse return error.MissingTile;
+        try std.testing.expectEqual(want.index, tile.index);
+        try std.testing.expectEqual(want.column, tile.column);
+        try std.testing.expectEqual(want.row, tile.row);
+        try std.testing.expectEqualDeep(want.rect, tile.rect);
+        try std.testing.expectEqual(want.edge, tile.isEdge(grid));
+    }
+
+    try std.testing.expect((try iterator.next()) == null);
+}
+
+test "tile grid supports reference-grid origins before multi-tile payload is enabled" {
+    const grid = try tile_grid.Grid.init(.{
+        .xsiz = 17,
+        .ysiz = 13,
+        .xosiz = 3,
+        .yosiz = 2,
+        .xtsiz = 5,
+        .ytsiz = 4,
+        .xtosiz = 1,
+        .ytosiz = 0,
+    });
+
+    try std.testing.expectEqual(@as(u32, 4), grid.columns);
+    try std.testing.expectEqual(@as(u32, 4), grid.rows);
+    try std.testing.expectEqualDeep(tile_grid.Rect{ .x0 = 3, .y0 = 2, .x1 = 6, .y1 = 4 }, try grid.tileRectAt(0, 0));
+    try std.testing.expectEqualDeep(tile_grid.Rect{ .x0 = 16, .y0 = 12, .x1 = 17, .y1 = 13 }, try grid.tileRectAt(3, 3));
+}
+
+test "tile grid rejects malformed geometry" {
+    try std.testing.expectError(
+        tile_grid.TileGridError.InvalidTileGrid,
+        tile_grid.Grid.fromImageSize(8, 8, 0, 8),
+    );
+    try std.testing.expectError(
+        tile_grid.TileGridError.InvalidTileGrid,
+        tile_grid.Grid.init(.{
+            .xsiz = 8,
+            .ysiz = 8,
+            .xosiz = 0,
+            .yosiz = 0,
+            .xtsiz = 8,
+            .ytsiz = 8,
+            .xtosiz = 1,
+            .ytosiz = 0,
+        }),
+    );
+}
+
+test "tile grid extracts and copies RGB edge tiles" {
+    const allocator = std.testing.allocator;
+    const width = 5;
+    const height = 4;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast(x + y * 10);
+            samples[base + 1] = @intCast(100 + x + y * 10);
+            samples[base + 2] = @intCast(200 + x + y * 10);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const reconstructed_samples = try allocator.alloc(u16, samples.len);
+    defer allocator.free(reconstructed_samples);
+    @memset(reconstructed_samples, 0);
+    const reconstructed = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = reconstructed_samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 2, 3);
+    var tile_index: u64 = 0;
+    while (tile_index < grid.tileCount()) : (tile_index += 1) {
+        const rect = try grid.tileRect(tile_index);
+        var tile = try tile_grid.extractRgbTile(allocator, source, rect);
+        try tile_grid.copyRgbTileInto(reconstructed, rect, tile);
+        tile.deinit();
+    }
+
+    try std.testing.expectEqualSlices(u16, samples, reconstructed_samples);
+}
+
+test "tile grid rejects mismatched RGB tile copy" {
+    const allocator = std.testing.allocator;
+    const source_samples = try allocator.alloc(u16, 2 * 2 * 3);
+    defer allocator.free(source_samples);
+    @memset(source_samples, 0);
+    const destination = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = source_samples,
+    };
+
+    const tile_samples = try allocator.alloc(u16, 1 * 1 * 3);
+    defer allocator.free(tile_samples);
+    @memset(tile_samples, 0);
+    const tile = image.RgbImage{
+        .allocator = allocator,
+        .width = 1,
+        .height = 1,
+        .bit_depth = 16,
+        .samples = tile_samples,
+    };
+
+    try std.testing.expectError(
+        tile_grid.TileGridError.InvalidImage,
+        tile_grid.copyRgbTileInto(destination, .{ .x0 = 0, .y0 = 0, .x1 = 1, .y1 = 1 }, tile),
+    );
+}
+
+test "tile pipeline roundtrips tile-local RCT over edge tiles" {
+    const allocator = std.testing.allocator;
+    const width = 7;
+    const height = 5;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((x * 7 + y * 3) & 0xff);
+            samples[base + 1] = @intCast((40 + x * 5 + y * 11) & 0xff);
+            samples[base + 2] = @intCast((90 + x * 13 + y * 17) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const reconstructed_samples = try allocator.alloc(u16, samples.len);
+    defer allocator.free(reconstructed_samples);
+    @memset(reconstructed_samples, 0);
+    const reconstructed = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = reconstructed_samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 3, 2);
+    var iterator = grid.iterator();
+    while (try iterator.next()) |tile| {
+        var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+        try std.testing.expectEqual(@as(usize, tile.rect.width()), rct_tile.planes.width);
+        try std.testing.expectEqual(@as(usize, tile.rect.height()), rct_tile.planes.height);
+        try tile_pipeline.inverseRctTileInto(allocator, reconstructed, rct_tile);
+        rct_tile.deinit();
+    }
+
+    try std.testing.expectEqualSlices(u16, samples, reconstructed_samples);
+}
+
+test "tile pipeline roundtrips tile-local 5/3 DWT over edge tiles" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((13 + x * 9 + y * 2) & 0xff);
+            samples[base + 1] = @intCast((31 + x * 3 + y * 7) & 0xff);
+            samples[base + 2] = @intCast((57 + x * 5 + y * 11) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const reconstructed_samples = try allocator.alloc(u16, samples.len);
+    defer allocator.free(reconstructed_samples);
+    @memset(reconstructed_samples, 0);
+    const reconstructed = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = reconstructed_samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 3, 4);
+    var iterator = grid.iterator();
+    while (try iterator.next()) |tile| {
+        var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+        const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 5);
+        try std.testing.expect(levels > 0);
+        try tile_pipeline.inverse53TileInPlace(allocator, &rct_tile, levels);
+        try tile_pipeline.inverseRctTileInto(allocator, reconstructed, rct_tile);
+        rct_tile.deinit();
+    }
+
+    try std.testing.expectEqualSlices(u16, samples, reconstructed_samples);
+}
+
+test "tile pipeline builds tile-local RPCL packet scaffold" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((17 + x * 2 + y * 7) & 0xff);
+            samples[base + 1] = @intCast((29 + x * 11 + y * 5) & 0xff);
+            samples[base + 2] = @intCast((73 + x * 3 + y * 13) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 3, 4);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 5);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 2,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    try std.testing.expectEqual(tile.index, scaffold.tile.index);
+    try std.testing.expectEqual(levels, scaffold.levels);
+    try std.testing.expectEqual(@as(u16, 2), scaffold.layers);
+    try std.testing.expect(scaffold.bands.len > 0);
+    try std.testing.expect(scaffold.blocks.len > 0);
+    try std.testing.expectEqual(@as(u32, @intCast(tile.rect.width())), scaffold.plan.resolutions[scaffold.plan.resolution_count - 1].width);
+    try std.testing.expectEqual(@as(u32, @intCast(tile.rect.height())), scaffold.plan.resolutions[scaffold.plan.resolution_count - 1].height);
+
+    var iterator = try packet_plan.RpclIterator.init(scaffold.plan, 3, 2);
+    var packets: u64 = 0;
+    while (iterator.next()) |packet| {
+        try std.testing.expectEqual(packets, packet.sequence);
+        packets += 1;
+    }
+    try std.testing.expectEqual(scaffold.plan.packets, packets);
+}
+
+test "tile pipeline iterates component block jobs in deterministic order" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (samples, 0..) |*sample, index| sample.* = @intCast(index & 0xff);
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 1,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    const block_count = scaffold.blocks.len;
+    try std.testing.expect(block_count > 0);
+    try std.testing.expectEqual(block_count * 3, try scaffold.componentBlockCount());
+
+    const first = try scaffold.componentBlock(0);
+    try std.testing.expectEqual(@as(u8, 0), first.component);
+    try std.testing.expectEqual(@as(usize, 0), first.block_index);
+    try std.testing.expectEqualDeep(scaffold.blocks[0].rect, first.rect);
+
+    const first_cb = try scaffold.componentBlock(block_count);
+    try std.testing.expectEqual(@as(u8, 1), first_cb.component);
+    try std.testing.expectEqual(@as(usize, 0), first_cb.block_index);
+
+    const last = try scaffold.componentBlock(block_count * 3 - 1);
+    try std.testing.expectEqual(@as(u8, 2), last.component);
+    try std.testing.expectEqual(block_count - 1, last.block_index);
+
+    var job_iterator = scaffold.componentBlockIterator();
+    var jobs: usize = 0;
+    while (try job_iterator.next()) |job| {
+        try std.testing.expectEqual(jobs / block_count, job.component);
+        try std.testing.expectEqual(jobs % block_count, job.block_index);
+        jobs += 1;
+    }
+    try std.testing.expectEqual(try scaffold.componentBlockCount(), jobs);
+    try std.testing.expect((try job_iterator.next()) == null);
+}
+
+test "tile pipeline component block view borrows tile-local plane slice" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (samples, 0..) |*sample, index| sample.* = @intCast((index * 3) & 0xff);
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 1,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    const block_count = scaffold.blocks.len;
+    const cb_job = try scaffold.componentBlock(block_count);
+    const view = try cb_job.view(rct_tile);
+    try std.testing.expectEqual(@as(u8, 1), view.job.component);
+    try std.testing.expectEqual(rct_tile.planes.width, view.stride);
+    try std.testing.expectEqualDeep(cb_job.rect, view.rect);
+    try std.testing.expectEqual(
+        rct_tile.planes.cb[view.rect.y * view.stride + view.rect.x],
+        try view.sample(0, 0),
+    );
+
+    var other_tile_job = cb_job;
+    other_tile_job.tile.index += 1;
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidComponentBlock,
+        other_tile_job.view(rct_tile),
+    );
+}
+
+test "tile pipeline encodes one component block through ISO MQ EBCOT" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((80 + x * 9 + y * 5) & 0xff);
+            samples[base + 1] = @intCast((30 + x * 7 + y * 11) & 0xff);
+            samples[base + 2] = @intCast((10 + x * 13 + y * 3) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 1,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    var view: ?tile_pipeline.ComponentBlockView = null;
+    var job_iterator = scaffold.componentBlockIterator();
+    while (try job_iterator.next()) |job| {
+        const candidate = try job.view(rct_tile);
+        if (try candidate.sample(0, 0) != 0) {
+            view = candidate;
+            break;
+        }
+    }
+    const selected = view orelse return error.MissingNonZeroBlock;
+
+    var encoded = try tile_pipeline.encodeComponentBlockIsoMq(allocator, selected, .{});
+    defer encoded.deinit(allocator);
+    try std.testing.expectEqual(selected.job.component, encoded.job.component);
+    try std.testing.expectEqual(selected.job.block_index, encoded.job.block_index);
+    try std.testing.expect(encoded.segment.pass_count > 0);
+    try std.testing.expect(encoded.segment.byte_length > 0);
+
+    const style = ebcot.CodeBlockStyle{ .band_kind = selected.job.band.kind };
+    var block = try ebcot.encodeBlockWithStyle(allocator, selected.plane, selected.stride, selected.rect, style);
+    defer block.deinit(allocator);
+    var expected = try ebcot.encodeBlockSymbolsSegmentIsoMqContinuous(allocator, .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .passes = block.passes,
+        .symbols = block.symbols,
+    });
+    defer expected.deinit(allocator);
+
+    try std.testing.expectEqual(expected.bitplanes, encoded.segment.bitplanes);
+    try std.testing.expectEqual(expected.non_zero_count, encoded.segment.non_zero_count);
+    try std.testing.expectEqual(expected.pass_count, encoded.segment.pass_count);
+    try std.testing.expectEqual(expected.byte_length, encoded.segment.byte_length);
+    try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, expected.passes, encoded.segment.passes);
+    try std.testing.expectEqualSlices(u8, expected.bytes, encoded.segment.bytes);
+}
+
+test "tile pipeline builds encoded block catalog for one tile" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((15 + x * 17 + y * 3) & 0xff);
+            samples[base + 1] = @intCast((45 + x * 5 + y * 19) & 0xff);
+            samples[base + 2] = @intCast((95 + x * 11 + y * 7) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 1,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    var catalog = try tile_pipeline.buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, .{});
+    defer catalog.deinit();
+
+    const block_count = scaffold.blocks.len;
+    try std.testing.expectEqual(tile.index, catalog.tile.index);
+    try std.testing.expectEqual(block_count, catalog.component_block_count);
+    try std.testing.expectEqual(block_count * 3, catalog.blocks.len);
+    try std.testing.expect(catalog.totalPasses() > 0);
+    try std.testing.expect(catalog.totalBytes() > 0);
+
+    const y_blocks = try catalog.componentBlocks(0);
+    const cb_blocks = try catalog.componentBlocks(1);
+    const cr_blocks = try catalog.componentBlocks(2);
+    try std.testing.expectEqual(block_count, y_blocks.len);
+    try std.testing.expectEqual(block_count, cb_blocks.len);
+    try std.testing.expectEqual(block_count, cr_blocks.len);
+
+    for (catalog.blocks, 0..) |encoded, index| {
+        const expected_component: u8 = @intCast(index / block_count);
+        const expected_block = index % block_count;
+        try std.testing.expectEqual(expected_component, encoded.job.component);
+        try std.testing.expectEqual(expected_block, encoded.job.block_index);
+        try std.testing.expectEqualDeep(scaffold.blocks[expected_block].rect, encoded.job.rect);
+        try std.testing.expectEqual(@as(u64, @intCast(encoded.segment.bytes.len)), encoded.segment.byte_length);
+        try std.testing.expectEqual(@as(usize, 1), encoded.layers.len);
+        try std.testing.expectEqual(encoded.segment.pass_count, encoded.layers[0].cumulative_passes);
+        try std.testing.expectEqual(encoded.segment.byte_length, encoded.layers[0].cumulative_bytes);
+    }
+}
+
+test "tile pipeline assigns layer truncations to encoded block catalog" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((33 + x * 23 + y * 7) & 0xff);
+            samples[base + 1] = @intCast((19 + x * 13 + y * 17) & 0xff);
+            samples[base + 2] = @intCast((101 + x * 5 + y * 11) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 3,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    var catalog = try tile_pipeline.buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, .{});
+    defer catalog.deinit();
+
+    var saw_non_empty = false;
+    for (catalog.blocks) |encoded| {
+        try std.testing.expectEqual(@as(usize, 3), encoded.layers.len);
+        var previous = t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 };
+        for (encoded.layers) |layer| {
+            try std.testing.expect(layer.cumulative_passes >= previous.cumulative_passes);
+            try std.testing.expect(layer.cumulative_bytes >= previous.cumulative_bytes);
+            try std.testing.expect(layer.cumulative_passes <= encoded.segment.pass_count);
+            try std.testing.expect(layer.cumulative_bytes <= encoded.segment.byte_length);
+            _ = try t2.layerContribution(previous, layer);
+            previous = layer;
+        }
+
+        const final_layer = encoded.layers[encoded.layers.len - 1];
+        try std.testing.expectEqual(encoded.segment.pass_count, final_layer.cumulative_passes);
+        try std.testing.expectEqual(encoded.segment.byte_length, final_layer.cumulative_bytes);
+        if (encoded.segment.pass_count > 0) saw_non_empty = true;
+    }
+    try std.testing.expect(saw_non_empty);
+}
+
+test "tile pipeline exposes encoded blocks as T2 layer blocks" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((21 + x * 29 + y * 3) & 0xff);
+            samples[base + 1] = @intCast((47 + x * 7 + y * 23) & 0xff);
+            samples[base + 2] = @intCast((83 + x * 17 + y * 13) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 3,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    var catalog = try tile_pipeline.buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, .{});
+    defer catalog.deinit();
+
+    for (catalog.blocks) |encoded| {
+        const gain: u8 = switch (encoded.job.band.kind) {
+            .ll => 0,
+            .hl, .lh => 1,
+            .hh => 2,
+        };
+        const nominal_bitplanes = rct_tile.planes.bit_depth + gain + 1;
+        const t2_block = try encoded.asEncodedLayerBlock(scaffold, nominal_bitplanes);
+
+        const block_grid = try t2.CodeBlockGrid.init(
+            encoded.job.band.rect.x,
+            encoded.job.band.rect.y,
+            encoded.job.band.rect.width,
+            encoded.job.band.rect.height,
+            scaffold.block_width,
+            scaffold.block_height,
+        );
+        const expected_location = try block_grid.locationForRect(.{
+            .x = encoded.job.rect.x,
+            .y = encoded.job.rect.y,
+            .width = encoded.job.rect.width,
+            .height = encoded.job.rect.height,
+        });
+        try std.testing.expectEqualDeep(expected_location, t2_block.location);
+        try std.testing.expectEqual(nominal_bitplanes, t2_block.nominal_bitplanes);
+        try std.testing.expectEqual(encoded.segment.bitplanes, t2_block.encoded_bitplanes);
+        try std.testing.expectEqualSlices(t2.LayerTruncation, encoded.layers, t2_block.layers);
+        try std.testing.expectEqualSlices(u8, encoded.segment.bytes, t2_block.payload);
+
+        const final_layer = t2_block.layers[t2_block.layers.len - 1];
+        const full_payload = try t2.layerPayloadSlice(
+            t2_block.payload,
+            .{ .cumulative_passes = 0, .cumulative_bytes = 0 },
+            final_layer,
+        );
+        try std.testing.expectEqualSlices(u8, encoded.segment.bytes, full_payload);
+        _ = try t2.layerPacketBlockFor(t2_block, 0);
+    }
+}
+
+test "tile pipeline precomputes RPCL packet block index" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((39 + x * 11 + y * 5) & 0xff);
+            samples[base + 1] = @intCast((71 + x * 19 + y * 7) & 0xff);
+            samples[base + 2] = @intCast((9 + x * 3 + y * 29) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 3, .height = 3 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 2,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    var catalog = try tile_pipeline.buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, .{});
+    defer catalog.deinit();
+    var index = try tile_pipeline.buildRpclPacketIndex(allocator, scaffold);
+    defer index.deinit();
+
+    try std.testing.expectEqual(@as(usize, @intCast(scaffold.plan.packets)), index.entries.len);
+    var iterator = try packet_plan.RpclIterator.init(scaffold.plan, 3, scaffold.layers);
+    var seen_packets: usize = 0;
+    var seen_non_empty = false;
+    while (iterator.next()) |packet| {
+        const packet_entry = try index.entry(packet.sequence);
+        try std.testing.expectEqualDeep(packet, packet_entry.packet);
+
+        const expected = try t2.collectRpclCodeBlockIndexes(
+            allocator,
+            scaffold.plan,
+            packet,
+            scaffold.levels,
+            scaffold.bands,
+            scaffold.blocks,
+        );
+        defer allocator.free(expected);
+
+        const actual = try index.blockIndexes(packet.sequence);
+        try std.testing.expectEqualSlices(usize, expected, actual);
+
+        const catalog_indexes = try index.catalogIndexesForPacket(allocator, catalog, packet.sequence);
+        defer allocator.free(catalog_indexes);
+        try std.testing.expectEqual(actual.len, catalog_indexes.len);
+        for (actual, catalog_indexes) |local_index, catalog_index| {
+            try std.testing.expect(catalog_index < catalog.blocks.len);
+            const encoded = catalog.blocks[catalog_index];
+            try std.testing.expectEqual(@as(u8, @intCast(packet.component)), encoded.job.component);
+            try std.testing.expectEqual(local_index, encoded.job.block_index);
+        }
+
+        if (actual.len > 0) seen_non_empty = true;
+        seen_packets += 1;
+    }
+    try std.testing.expectEqual(index.entries.len, seen_packets);
+    try std.testing.expect(seen_non_empty);
+}
+
+test "tile pipeline builds packet-local T2 band groups" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((55 + x * 13 + y * 9) & 0xff);
+            samples[base + 1] = @intCast((17 + x * 31 + y * 5) & 0xff);
+            samples[base + 2] = @intCast((121 + x * 7 + y * 21) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 2,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    var catalog = try tile_pipeline.buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, .{});
+    defer catalog.deinit();
+    var index = try tile_pipeline.buildRpclPacketIndex(allocator, scaffold);
+    defer index.deinit();
+
+    var saw_multi_band_packet = false;
+    var saw_writer_state = false;
+    for (index.entries) |entry| {
+        var groups = try index.bandGroupsForPacket(allocator, scaffold, entry.packet.sequence);
+        defer groups.deinit();
+        try std.testing.expect(groups.groups.len <= 3);
+        if (groups.groups.len > 1) saw_multi_band_packet = true;
+
+        var covered: usize = 0;
+        for (groups.groups, 0..) |group, group_index| {
+            const local_indexes = try groups.groupLocalBlockIndexes(group_index);
+            try std.testing.expectEqual(group.index_count, local_indexes.len);
+            covered += local_indexes.len;
+            for (local_indexes) |local_index| {
+                try std.testing.expectEqual(group.band_index, scaffold.blocks[local_index].band_index);
+            }
+            if (local_indexes.len == 0) continue;
+
+            const encoded_blocks = try groups.encodedLayerBlocksForGroup(
+                allocator,
+                scaffold,
+                catalog,
+                group_index,
+                rct_tile.planes.bit_depth,
+            );
+            defer allocator.free(encoded_blocks);
+            try std.testing.expectEqual(local_indexes.len, encoded_blocks.len);
+            for (encoded_blocks, 0..) |block, block_index| {
+                try std.testing.expectEqual(block_index, block.location.leaf_x + block.location.leaf_y * encodedBlocksPerRow(encoded_blocks));
+                try std.testing.expectEqual(@as(usize, scaffold.layers), block.layers.len);
+            }
+
+            var writer_state = try t2.PrecinctPacketWriterState.initForEncodedBlocks(allocator, encoded_blocks);
+            defer writer_state.deinit();
+            try std.testing.expectEqual(encoded_blocks.len, writer_state.states.len);
+            try std.testing.expectEqual(scaffold.layers, writer_state.layer_count.?);
+            saw_writer_state = true;
+        }
+        try std.testing.expectEqual((try index.blockIndexes(entry.packet.sequence)).len, covered);
+    }
+
+    try std.testing.expect(saw_multi_band_packet);
+    try std.testing.expect(saw_writer_state);
+}
+
+test "tile pipeline emits standalone RPCL packet stream" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 6;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((5 + x * 17 + y * 15) & 0xff);
+            samples[base + 1] = @intCast((41 + x * 9 + y * 25) & 0xff);
+            samples[base + 2] = @intCast((99 + x * 21 + y * 3) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(0);
+    var rct_tile = try tile_pipeline.forwardRctTile(allocator, source, tile);
+    defer rct_tile.deinit();
+    const levels = try tile_pipeline.forward53TileInPlace(allocator, &rct_tile, 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var scaffold = try tile_pipeline.buildPacketScaffold(allocator, rct_tile, levels, .{
+        .layers = 2,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    });
+    defer scaffold.deinit();
+
+    var catalog = try tile_pipeline.buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, .{});
+    defer catalog.deinit();
+    var index = try tile_pipeline.buildRpclPacketIndex(allocator, scaffold);
+    defer index.deinit();
+
+    var stream = try tile_pipeline.buildTileRpclPacketStream(
+        allocator,
+        scaffold,
+        catalog,
+        index,
+        rct_tile.planes.bit_depth,
+    );
+    defer stream.deinit();
+
+    try std.testing.expectEqual(@as(usize, @intCast(scaffold.plan.packets)), stream.packet_lengths.len);
+    try std.testing.expectEqual(stream.packet_lengths.len, stream.packet_header_lengths.len);
+    try std.testing.expectEqual(stream.bytes.len, try stream.totalPacketBytes());
+    try std.testing.expect(stream.bytes.len > 0);
+
+    var payload_bytes: usize = 0;
+    for (stream.packet_lengths, stream.packet_header_lengths) |packet_length, header_length| {
+        try std.testing.expect(packet_length >= header_length);
+        payload_bytes += packet_length - header_length;
+    }
+    try std.testing.expect(payload_bytes > 0);
+
+    try tile_pipeline.validateTileRpclPacketStream(
+        allocator,
+        scaffold,
+        catalog,
+        index,
+        stream,
+        rct_tile.planes.bit_depth,
+    );
+}
+
+test "tile pipeline builds owned RPCL encode artifacts for edge tile" {
+    const allocator = std.testing.allocator;
+    const width = 10;
+    const height = 7;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((11 + x * 23 + y * 5) & 0xff);
+            samples[base + 1] = @intCast((53 + x * 7 + y * 19) & 0xff);
+            samples[base + 2] = @intCast((97 + x * 13 + y * 29) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const tile = try grid.tile(grid.tileCount() - 1);
+    try std.testing.expect(tile.isEdge(grid));
+    try std.testing.expect(tile.rect.width() < 4 or tile.rect.height() < 3);
+
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileRpclEncodeArtifactsIsoMq(
+        allocator,
+        source,
+        tile,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+    );
+    defer artifacts.deinit();
+
+    try std.testing.expectEqual(tile.index, artifacts.tile.index);
+    try std.testing.expectEqual(@as(u8, 8), artifacts.bit_depth);
+    try std.testing.expect(artifacts.levels <= 3);
+    try std.testing.expectEqual(@as(usize, @intCast(artifacts.scaffold.plan.packets)), artifacts.packetCount());
+    try std.testing.expectEqual(artifacts.stream.bytes.len, try artifacts.totalPacketBytes());
+    try std.testing.expect((try artifacts.totalPayloadBytes()) > 0);
+    try std.testing.expect(artifacts.catalog.totalBytes() > 0);
+}
+
+test "tile pipeline builds owned RPCL encode artifacts for tile grid" {
+    const allocator = std.testing.allocator;
+    const width = 10;
+    const height = 7;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((3 + x * 17 + y * 31) & 0xff);
+            samples[base + 1] = @intCast((67 + x * 11 + y * 13) & 0xff);
+            samples[base + 2] = @intCast((149 + x * 5 + y * 23) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMq(
+        allocator,
+        source,
+        grid,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+    );
+    defer artifacts.deinit();
+
+    try std.testing.expect(!grid.isSingleTile());
+    try std.testing.expectEqual(@as(usize, @intCast(grid.tileCount())), artifacts.tileCount());
+    try std.testing.expect((try artifacts.totalPackets()) > 0);
+    try std.testing.expect((try artifacts.totalPacketBytes()) > 0);
+    try std.testing.expect((try artifacts.totalPayloadBytes()) > 0);
+
+    var summed_packets: usize = 0;
+    var summed_packet_bytes: usize = 0;
+    var summed_payload_bytes: usize = 0;
+    for (artifacts.tiles, 0..) |tile_artifacts, index| {
+        try std.testing.expectEqual(@as(u64, @intCast(index)), tile_artifacts.tile.index);
+        try std.testing.expectEqualDeep((try grid.tile(@intCast(index))).rect, tile_artifacts.tile.rect);
+        try std.testing.expectEqual(@as(u8, 8), tile_artifacts.bit_depth);
+        try std.testing.expect(tile_artifacts.packetCount() > 0);
+        try std.testing.expect(tile_artifacts.catalog.totalBytes() > 0);
+        summed_packets += tile_artifacts.packetCount();
+        summed_packet_bytes += try tile_artifacts.totalPacketBytes();
+        summed_payload_bytes += try tile_artifacts.totalPayloadBytes();
+    }
+    try std.testing.expectEqual(summed_packets, try artifacts.totalPackets());
+    try std.testing.expectEqual(summed_packet_bytes, try artifacts.totalPacketBytes());
+    try std.testing.expectEqual(summed_payload_bytes, try artifacts.totalPayloadBytes());
+}
+
+test "tile pipeline tile-grid work order prioritizes larger tiles" {
+    const allocator = std.testing.allocator;
+    const grid = try tile_grid.Grid.fromImageSize(10, 7, 4, 3);
+    const order = try tile_pipeline.buildTileGridWorkOrder(allocator, grid);
+    defer allocator.free(order);
+
+    try std.testing.expectEqual(@as(usize, @intCast(grid.tileCount())), order.len);
+    try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 3, 4, 2, 5, 6, 7, 8 }, order);
+
+    var seen = [_]bool{false} ** 9;
+    var previous_cost: u64 = std.math.maxInt(u64);
+    for (order) |tile_index| {
+        try std.testing.expect(tile_index < seen.len);
+        try std.testing.expect(!seen[tile_index]);
+        seen[tile_index] = true;
+        const tile = try grid.tile(@intCast(tile_index));
+        const cost = @as(u64, tile.rect.width()) * @as(u64, tile.rect.height());
+        try std.testing.expect(cost <= previous_cost);
+        previous_cost = cost;
+    }
+    for (seen) |was_seen| try std.testing.expect(was_seen);
+}
+
+test "tile pipeline derives tile-part layout from grid artifacts" {
+    const allocator = std.testing.allocator;
+    const width = 10;
+    const height = 7;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((7 + x * 41 + y * 3) & 0xff);
+            samples[base + 1] = @intCast((73 + x * 5 + y * 17) & 0xff);
+            samples[base + 2] = @intCast((131 + x * 13 + y * 11) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
+        allocator,
+        source,
+        grid,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+        3,
+    );
+    defer artifacts.deinit();
+
+    var layout = try tile_pipeline.buildTilePartLayoutForGridArtifacts(allocator, artifacts, .{});
+    defer layout.deinit();
+
+    try std.testing.expectEqual(artifacts.tileCount(), layout.entries.len);
+    try std.testing.expectEqual(try artifacts.totalPackets(), try layout.totalPackets());
+    try std.testing.expectEqual(try artifacts.totalPacketBytes(), try layout.totalPacketBytes());
+    try std.testing.expectEqual(try artifacts.totalPacketBytes(), try layout.totalFramedPacketBytes());
+    try std.testing.expect((try layout.totalPltBytes()) > 0);
+
+    for (layout.entries, artifacts.tiles) |entry, tile_artifacts| {
+        try std.testing.expectEqual(@as(u16, @intCast(tile_artifacts.tile.index)), entry.tile_index);
+        try std.testing.expectEqual(@as(u8, 0), entry.tile_part_index);
+        try std.testing.expectEqual(@as(u8, 1), entry.tile_part_count);
+        try std.testing.expectEqual(tile_artifacts.packetCount(), entry.packet_count);
+        try std.testing.expectEqual(try tile_artifacts.totalPacketBytes(), entry.packet_bytes);
+        try std.testing.expectEqual(entry.packet_bytes, entry.framed_packet_bytes);
+        try std.testing.expect(entry.plt_bytes > 0);
+        try std.testing.expectEqual(
+            @as(u32, @intCast(14 + entry.plt_bytes + entry.framed_packet_bytes)),
+            entry.psot,
+        );
+    }
+
+    var framed = try tile_pipeline.buildTilePartLayoutForGridArtifacts(
+        allocator,
+        artifacts,
+        .{ .sop = true, .eph = true },
+    );
+    defer framed.deinit();
+
+    try std.testing.expectEqual(layout.entries.len, framed.entries.len);
+    for (layout.entries, framed.entries) |plain, with_markers| {
+        const marker_bytes = plain.packet_count * 8;
+        try std.testing.expectEqual(plain.packet_bytes, with_markers.packet_bytes);
+        try std.testing.expectEqual(plain.framed_packet_bytes + marker_bytes, with_markers.framed_packet_bytes);
+        try std.testing.expect(with_markers.psot >= plain.psot + marker_bytes);
+    }
+}
+
+test "tile pipeline derives TLM plan from tile-part layout" {
+    const allocator = std.testing.allocator;
+    const width = 10;
+    const height = 7;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((19 + x * 17 + y * 5) & 0xff);
+            samples[base + 1] = @intCast((61 + x * 11 + y * 29) & 0xff);
+            samples[base + 2] = @intCast((113 + x * 23 + y * 7) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMq(
+        allocator,
+        source,
+        grid,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+    );
+    defer artifacts.deinit();
+
+    var layout = try tile_pipeline.buildTilePartLayoutForGridArtifacts(
+        allocator,
+        artifacts,
+        .{ .sop = true, .eph = true },
+    );
+    defer layout.deinit();
+
+    var tlm = try tile_pipeline.buildTilePartTlmPlan(allocator, layout);
+    defer tlm.deinit();
+
+    try std.testing.expectEqual(layout.entries.len, tlm.entries.len);
+    try std.testing.expectEqual(layout.entries.len * 6, try tlm.payloadBytes());
+    try std.testing.expectEqual(2 + 4 + layout.entries.len * 6, try tlm.singleSegmentMarkerBytes());
+    for (layout.entries, tlm.entries, 0..) |layout_entry, tlm_entry, index| {
+        try std.testing.expectEqual(@as(u16, @intCast(index)), tlm_entry.tile_index);
+        try std.testing.expectEqual(layout_entry.tile_index, tlm_entry.tile_index);
+        try std.testing.expectEqual(layout_entry.psot, tlm_entry.psot);
+    }
+
+    const marker = try tile_pipeline.writeTilePartTlmMarkerSegment(allocator, tlm);
+    defer allocator.free(marker);
+    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.tlm), readU16BeTest(marker, 0));
+    try std.testing.expectEqual(@as(u16, @intCast(4 + tlm.entries.len * 6)), readU16BeTest(marker, 2));
+    try std.testing.expectEqual(@as(u8, 0), marker[4]);
+    try std.testing.expectEqual(@as(u8, 0x60), marker[5]);
+    try std.testing.expectEqual(try tlm.singleSegmentMarkerBytes(), marker.len);
+    var cursor: usize = 6;
+    for (tlm.entries) |entry| {
+        try std.testing.expectEqual(entry.tile_index, readU16BeTest(marker, cursor));
+        try std.testing.expectEqual(entry.psot, readU32BeTest(marker, cursor + 2));
+        cursor += 6;
+    }
+    try std.testing.expectEqual(marker.len, cursor);
+}
+
+test "tile pipeline derives PLT plan from tile-part layout" {
+    const allocator = std.testing.allocator;
+    const width = 10;
+    const height = 7;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((37 + x * 29 + y * 11) & 0xff);
+            samples[base + 1] = @intCast((83 + x * 3 + y * 31) & 0xff);
+            samples[base + 2] = @intCast((127 + x * 13 + y * 17) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
+        allocator,
+        source,
+        grid,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+        3,
+    );
+    defer artifacts.deinit();
+
+    const options = tile_pipeline.TilePartLayoutOptions{ .sop = true, .eph = true };
+    var layout = try tile_pipeline.buildTilePartLayoutForGridArtifacts(allocator, artifacts, options);
+    defer layout.deinit();
+    var plt = try tile_pipeline.buildTilePartPltPlan(allocator, artifacts, layout, options);
+    defer plt.deinit();
+
+    try std.testing.expectEqual(layout.entries.len, plt.entries.len);
+    try std.testing.expectEqual(try layout.totalPackets(), try plt.totalPackets());
+    try std.testing.expectEqual(try layout.totalPltBytes(), try plt.totalMarkerBytes());
+    try std.testing.expectEqual(try layout.totalFramedPacketBytes(), try sumU32ForTest(plt.packet_lengths));
+
+    for (layout.entries, plt.entries, artifacts.tiles, 0..) |layout_entry, plt_entry, tile_artifacts, entry_index| {
+        try std.testing.expectEqual(layout_entry.tile_index, plt_entry.tile_index);
+        try std.testing.expectEqual(layout_entry.tile_part_index, plt_entry.tile_part_index);
+        try std.testing.expectEqual(layout_entry.packet_count, plt_entry.packet_count);
+        try std.testing.expectEqual(layout_entry.plt_bytes, plt_entry.marker_bytes);
+
+        const lengths = try plt.packetLengthsForEntry(entry_index);
+        try std.testing.expectEqual(tile_artifacts.stream.packet_lengths.len, lengths.len);
+        var framed_sum: usize = 0;
+        for (tile_artifacts.stream.packet_lengths, lengths) |raw_length, framed_length| {
+            try std.testing.expectEqual(raw_length + 8, framed_length);
+            framed_sum += framed_length;
+        }
+        try std.testing.expectEqual(layout_entry.framed_packet_bytes, framed_sum);
+    }
+
+    const first_marker = try tile_pipeline.writeTilePartPltMarkerSegmentsForEntry(allocator, plt, 0);
+    defer allocator.free(first_marker);
+    try std.testing.expectEqual(plt.entries[0].marker_bytes, first_marker.len);
+    const decoded_lengths = try decodePltMarkerLengthsForTest(allocator, first_marker);
+    defer allocator.free(decoded_lengths);
+    try std.testing.expectEqualSlices(u32, try plt.packetLengthsForEntry(0), decoded_lengths);
+}
+
+test "tile pipeline writes standalone SOT/SOD tile-part bytes from layout" {
+    const allocator = std.testing.allocator;
+    const width = 10;
+    const height = 7;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((43 + x * 17 + y * 23) & 0xff);
+            samples[base + 1] = @intCast((89 + x * 31 + y * 3) & 0xff);
+            samples[base + 2] = @intCast((149 + x * 7 + y * 19) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
+        allocator,
+        source,
+        grid,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+        3,
+    );
+    defer artifacts.deinit();
+
+    const options = tile_pipeline.TilePartLayoutOptions{ .sop = true, .eph = true };
+    var layout = try tile_pipeline.buildTilePartLayoutForGridArtifacts(allocator, artifacts, options);
+    defer layout.deinit();
+    var plt = try tile_pipeline.buildTilePartPltPlan(allocator, artifacts, layout, options);
+    defer plt.deinit();
+
+    for (layout.entries, artifacts.tiles, 0..) |entry, tile_artifacts, entry_index| {
+        const bytes = try tile_pipeline.writeTilePartBytesForEntry(
+            allocator,
+            artifacts,
+            layout,
+            plt,
+            entry_index,
+            options,
+        );
+        defer allocator.free(bytes);
+
+        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sot), readU16BeTest(bytes, 0));
+        try std.testing.expectEqual(@as(u16, 10), readU16BeTest(bytes, 2));
+        try std.testing.expectEqual(entry.tile_index, readU16BeTest(bytes, 4));
+        try std.testing.expectEqual(entry.psot, readU32BeTest(bytes, 6));
+        try std.testing.expectEqual(entry.tile_part_index, bytes[10]);
+        try std.testing.expectEqual(entry.tile_part_count, bytes[11]);
+        try std.testing.expectEqual(@as(usize, entry.psot), bytes.len);
+
+        const plt_start: usize = 12;
+        const plt_end = plt_start + entry.plt_bytes;
+        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.plt), readU16BeTest(bytes, plt_start));
+        const decoded_lengths = try decodePltMarkerLengthsForTest(allocator, bytes[plt_start..plt_end]);
+        defer allocator.free(decoded_lengths);
+        try std.testing.expectEqualSlices(u32, try plt.packetLengthsForEntry(entry_index), decoded_lengths);
+
+        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sod), readU16BeTest(bytes, plt_end));
+        try expectTilePartPayloadMatchesStreamForTest(bytes[plt_end + 2 ..], tile_artifacts.stream, options);
+    }
+}
+
+test "tile pipeline writes standalone tile-part sequence bytes" {
+    const allocator = std.testing.allocator;
+    const width = 10;
+    const height = 7;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((53 + x * 11 + y * 29) & 0xff);
+            samples[base + 1] = @intCast((97 + x * 19 + y * 7) & 0xff);
+            samples[base + 2] = @intCast((173 + x * 5 + y * 31) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
+        allocator,
+        source,
+        grid,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+        3,
+    );
+    defer artifacts.deinit();
+
+    const tile_part_options = tile_pipeline.TilePartLayoutOptions{ .sop = true, .eph = true };
+    var layout = try tile_pipeline.buildTilePartLayoutForGridArtifacts(allocator, artifacts, tile_part_options);
+    defer layout.deinit();
+    var tlm = try tile_pipeline.buildTilePartTlmPlan(allocator, layout);
+    defer tlm.deinit();
+    var plt = try tile_pipeline.buildTilePartPltPlan(allocator, artifacts, layout, tile_part_options);
+    defer plt.deinit();
+
+    const sequence = try tile_pipeline.writeTilePartSequenceBytes(
+        allocator,
+        artifacts,
+        layout,
+        tlm,
+        plt,
+        .{ .tlm = true, .tile_part = tile_part_options },
+    );
+    defer allocator.free(sequence);
+
+    var indexed_sequence = try tile_pipeline.buildTilePartSequence(
+        allocator,
+        artifacts,
+        layout,
+        tlm,
+        plt,
+        .{ .tlm = true, .tile_part = tile_part_options },
+    );
+    defer indexed_sequence.deinit();
+    try std.testing.expectEqualSlices(u8, sequence, indexed_sequence.bytes);
+    try std.testing.expectEqual(layout.entries.len, indexed_sequence.tile_part_offsets.len);
+
+    const tlm_marker = try tile_pipeline.writeTilePartTlmMarkerSegment(allocator, tlm);
+    defer allocator.free(tlm_marker);
+    try std.testing.expectEqualSlices(u8, tlm_marker, sequence[0..tlm_marker.len]);
+    try std.testing.expectEqual(tlm_marker.len, indexed_sequence.tlm_bytes);
+    try std.testing.expectEqualSlices(u8, tlm_marker, try indexed_sequence.tlmSlice());
+    try std.testing.expectEqual(try layout.totalPsotBytes(), try indexed_sequence.totalTilePartBytes());
+    try std.testing.expectEqual(tlm_marker.len + try layout.totalPsotBytes(), sequence.len);
+
+    var cursor = tlm_marker.len;
+    for (layout.entries, 0..) |entry, entry_index| {
+        const end = cursor + @as(usize, entry.psot);
+        try std.testing.expectEqual(cursor, indexed_sequence.tile_part_offsets[entry_index]);
+        try std.testing.expect(end <= sequence.len);
+        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sot), readU16BeTest(sequence, cursor));
+        try std.testing.expectEqual(entry.tile_index, readU16BeTest(sequence, cursor + 4));
+        try std.testing.expectEqual(entry.psot, readU32BeTest(sequence, cursor + 6));
+
+        const tile_part = try tile_pipeline.writeTilePartBytesForEntry(
+            allocator,
+            artifacts,
+            layout,
+            plt,
+            entry_index,
+            tile_part_options,
+        );
+        defer allocator.free(tile_part);
+        try std.testing.expectEqualSlices(u8, tile_part, sequence[cursor..end]);
+        try std.testing.expectEqualSlices(u8, tile_part, try indexed_sequence.tilePartSlice(entry_index));
+        cursor = end;
+    }
+    try std.testing.expectEqual(sequence.len, cursor);
+
+    var fragment = try tile_pipeline.buildTilePartCodestreamFragment(allocator, indexed_sequence);
+    defer fragment.deinit();
+    try fragment.validate();
+    try std.testing.expectEqual(sequence.len + 4, fragment.bytes.len);
+    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.soc), readU16BeTest(fragment.bytes, 0));
+    try std.testing.expectEqual(
+        @intFromEnum(tile_pipeline.TilePartMarker.eoc),
+        readU16BeTest(fragment.bytes, fragment.bytes.len - 2),
+    );
+    try std.testing.expectEqual(@as(usize, 2), fragment.tile_part_sequence_offset);
+    try std.testing.expectEqualSlices(u8, sequence, try fragment.tilePartSequenceSlice());
+    try std.testing.expectEqualSlices(u8, tlm_marker, try fragment.tlmSlice());
+    for (layout.entries, 0..) |entry, entry_index| {
+        try std.testing.expectEqual(indexed_sequence.tile_part_offsets[entry_index] + 2, fragment.tile_part_offsets[entry_index]);
+        const tile_part = try fragment.tilePartSlice(entry_index);
+        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sot), readU16BeTest(tile_part, 0));
+        try std.testing.expectEqual(entry.psot, readU32BeTest(tile_part, 6));
+        try std.testing.expectEqualSlices(u8, try indexed_sequence.tilePartSlice(entry_index), tile_part);
+    }
+
+    var parsed_fragment = try tile_pipeline.parseTilePartCodestreamFragment(allocator, fragment.bytes);
+    defer parsed_fragment.deinit();
+    try parsed_fragment.validate();
+    try std.testing.expectEqualSlices(u8, fragment.bytes, parsed_fragment.bytes);
+    try std.testing.expectEqualSlices(usize, fragment.tile_part_offsets, parsed_fragment.tile_part_offsets);
+    try std.testing.expectEqual(fragment.tlm_bytes, parsed_fragment.tlm_bytes);
+    try std.testing.expectEqualSlices(u8, try fragment.tlmSlice(), try parsed_fragment.tlmSlice());
+    try parsed_fragment.validateTlmMatchesTileParts(allocator);
+    const parsed_tlm_entries = try parsed_fragment.parseTlmEntries(allocator);
+    defer allocator.free(parsed_tlm_entries);
+    try std.testing.expectEqual(tlm.entries.len, parsed_tlm_entries.len);
+    for (tlm.entries, parsed_tlm_entries) |expected, actual| {
+        try std.testing.expectEqual(expected.tile_index, actual.tile_index);
+        try std.testing.expectEqual(expected.psot, actual.psot);
+    }
+    const parsed_audit = try parsed_fragment.parseTilePartAudit(allocator, tile_part_options);
+    defer allocator.free(parsed_audit);
+    try std.testing.expectEqual(layout.entries.len, parsed_audit.len);
+    for (layout.entries, parsed_audit) |expected, actual| {
+        try std.testing.expectEqual(expected.tile_index, actual.tile_index);
+        try std.testing.expectEqual(expected.tile_part_index, actual.tile_part_index);
+        try std.testing.expectEqual(expected.tile_part_count, actual.tile_part_count);
+        try std.testing.expectEqual(expected.psot, actual.psot);
+        try std.testing.expectEqual(expected.plt_bytes, actual.plt_bytes);
+        try std.testing.expectEqual(expected.packet_count, actual.packet_count);
+        try std.testing.expectEqual(expected.framed_packet_bytes, actual.framed_packet_bytes);
+        try std.testing.expectEqual(expected.packet_bytes, actual.raw_packet_bytes);
+    }
+    try tile_pipeline.validateSinglePartTileAuditOrder(parsed_audit, grid);
+    try parsed_fragment.validateSinglePartTileOrder(allocator, tile_part_options, grid);
+    try parsed_fragment.validatePltMatchesAllTileParts(allocator);
+    for (layout.entries, 0..) |entry, entry_index| {
+        const parsed_plt_lengths = try parsed_fragment.parseTilePartPltLengths(allocator, entry_index);
+        defer allocator.free(parsed_plt_lengths);
+        try std.testing.expectEqualSlices(u32, try plt.packetLengthsForEntry(entry_index), parsed_plt_lengths);
+
+        const parsed_packet_spans = try parsed_fragment.parseTilePartPacketSpans(allocator, entry_index);
+        defer allocator.free(parsed_packet_spans);
+        try std.testing.expectEqual(parsed_plt_lengths.len, parsed_packet_spans.len);
+
+        const parsed_tile_part = try parsed_fragment.tilePartSlice(entry_index);
+        const payload = parsed_tile_part[12 + entry.plt_bytes + 2 ..];
+        var payload_cursor: usize = 0;
+        for (parsed_packet_spans, parsed_plt_lengths) |span, expected_length| {
+            try std.testing.expectEqual(payload_cursor, span.payload_offset);
+            try std.testing.expectEqual(expected_length, span.length);
+            const span_slice = try parsed_fragment.tilePartPacketPayloadSlice(entry_index, span);
+            try std.testing.expectEqualSlices(u8, payload[payload_cursor..][0..expected_length], span_slice);
+            payload_cursor += expected_length;
+        }
+        try std.testing.expectEqual(payload.len, payload_cursor);
+    }
+    try tile_pipeline.validateTilePartCodestreamFragmentMatchesGridArtifacts(
+        allocator,
+        parsed_fragment,
+        artifacts,
+        tile_part_options,
+    );
+    try tile_pipeline.validateTilePartCodestreamFragmentT2Readback(
+        allocator,
+        parsed_fragment,
+        artifacts,
+        tile_part_options,
+    );
+    for (artifacts.tiles, 0..) |tile_artifacts, tile_part_index| {
+        var extracted_stream = try tile_pipeline.extractTileRpclPacketStreamFromFragmentTilePart(
+            allocator,
+            parsed_fragment,
+            tile_part_index,
+            tile_artifacts.stream.packet_header_lengths,
+            tile_part_options,
+        );
+        defer extracted_stream.deinit();
+        try std.testing.expectEqualSlices(u8, tile_artifacts.stream.bytes, extracted_stream.bytes);
+        try std.testing.expectEqualSlices(u32, tile_artifacts.stream.packet_lengths, extracted_stream.packet_lengths);
+        try std.testing.expectEqualSlices(u32, tile_artifacts.stream.packet_header_lengths, extracted_stream.packet_header_lengths);
+    }
+
+    const bad_soc = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_soc);
+    bad_soc[0] ^= 0x01;
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_soc),
+    );
+
+    const bad_eoc = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_eoc);
+    bad_eoc[bad_eoc.len - 1] ^= 0x01;
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_eoc),
+    );
+
+    const bad_tlm_stlm = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_tlm_stlm);
+    bad_tlm_stlm[fragment.tile_part_sequence_offset + 5] ^= 0x01;
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_tlm_stlm),
+    );
+
+    const bad_tlm_psot = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_tlm_psot);
+    const first_tlm_psot = fragment.tile_part_sequence_offset + 6 + 2;
+    writeU32BeTest(bad_tlm_psot, first_tlm_psot, readU32BeTest(bad_tlm_psot, first_tlm_psot) + 1);
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_tlm_psot),
+    );
+
+    const first_plt = fragment.tile_part_offsets[0] + 12;
+    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.plt), readU16BeTest(fragment.bytes, first_plt));
+    const bad_plt_z = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_plt_z);
+    bad_plt_z[first_plt + 4] +%= 1;
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_plt_z),
+    );
+
+    const bad_plt_length = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_plt_length);
+    bad_plt_length[first_plt + 5] ^= 0x01;
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_plt_length),
+    );
+
+    const bad_plt_marker = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_plt_marker);
+    bad_plt_marker[first_plt + 1] ^= 0x01;
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_plt_marker),
+    );
+
+    const bad_packet_payload = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_packet_payload);
+    const first_packet_spans = try parsed_fragment.parseTilePartPacketSpans(allocator, 0);
+    defer allocator.free(first_packet_spans);
+    const first_packet_slice = try parsed_fragment.tilePartPacketPayloadSlice(0, first_packet_spans[0]);
+    const first_packet_absolute = @intFromPtr(first_packet_slice.ptr) - @intFromPtr(parsed_fragment.bytes.ptr);
+    bad_packet_payload[first_packet_absolute + 6] ^= 0x01;
+    var parsed_bad_packet_payload = try tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_packet_payload);
+    defer parsed_bad_packet_payload.deinit();
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.validateTilePartCodestreamFragmentMatchesGridArtifacts(
+            allocator,
+            parsed_bad_packet_payload,
+            artifacts,
+            tile_part_options,
+        ),
+    );
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.validateTilePartCodestreamFragmentT2Readback(
+            allocator,
+            parsed_bad_packet_payload,
+            artifacts,
+            tile_part_options,
+        ),
+    );
+
+    const bad_psot = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_psot);
+    writeU32BeTest(
+        bad_psot,
+        fragment.tile_part_offsets[0] + 6,
+        readU32BeTest(bad_psot, fragment.tile_part_offsets[0] + 6) + 1,
+    );
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_psot),
+    );
+
+    const bad_sod = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_sod);
+    const first_sod = fragment.tile_part_offsets[0] + 12 + layout.entries[0].plt_bytes;
+    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sod), readU16BeTest(bad_sod, first_sod));
+    bad_sod[first_sod + 1] ^= 0x01;
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_sod),
+    );
+
+    const bad_tile_part_count = try allocator.dupe(u8, fragment.bytes);
+    defer allocator.free(bad_tile_part_count);
+    bad_tile_part_count[fragment.tile_part_offsets[0] + 11] = 2;
+    var parsed_bad_tile_part_count = try tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_tile_part_count);
+    defer parsed_bad_tile_part_count.deinit();
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        parsed_bad_tile_part_count.validateSinglePartTileOrder(allocator, tile_part_options, grid),
+    );
+
+    const no_tlm = try tile_pipeline.writeTilePartSequenceBytes(
+        allocator,
+        artifacts,
+        layout,
+        null,
+        plt,
+        .{ .tlm = false, .tile_part = tile_part_options },
+    );
+    defer allocator.free(no_tlm);
+    try std.testing.expectEqual(try layout.totalPsotBytes(), no_tlm.len);
+    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sot), readU16BeTest(no_tlm, 0));
+    var no_tlm_sequence = try tile_pipeline.buildTilePartSequence(
+        allocator,
+        artifacts,
+        layout,
+        null,
+        plt,
+        .{ .tlm = false, .tile_part = tile_part_options },
+    );
+    defer no_tlm_sequence.deinit();
+    try std.testing.expectEqual(@as(usize, 0), no_tlm_sequence.tlm_bytes);
+    try std.testing.expectEqualSlices(u8, no_tlm, no_tlm_sequence.bytes);
+    var no_tlm_fragment = try tile_pipeline.buildTilePartCodestreamFragment(allocator, no_tlm_sequence);
+    defer no_tlm_fragment.deinit();
+    var parsed_no_tlm_fragment = try tile_pipeline.parseTilePartCodestreamFragment(allocator, no_tlm_fragment.bytes);
+    defer parsed_no_tlm_fragment.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed_no_tlm_fragment.tlm_bytes);
+    try std.testing.expectEqualSlices(u8, &.{}, try parsed_no_tlm_fragment.tlmSlice());
+    try tile_pipeline.validateTilePartCodestreamFragmentMatchesGridArtifacts(
+        allocator,
+        parsed_no_tlm_fragment,
+        artifacts,
+        tile_part_options,
+    );
+    try tile_pipeline.validateTilePartCodestreamFragmentT2Readback(
+        allocator,
+        parsed_no_tlm_fragment,
+        artifacts,
+        tile_part_options,
+    );
+    const no_tlm_audit = try parsed_no_tlm_fragment.parseTilePartAudit(allocator, tile_part_options);
+    defer allocator.free(no_tlm_audit);
+    try std.testing.expectEqual(layout.entries.len, no_tlm_audit.len);
+    for (layout.entries, no_tlm_audit) |expected, actual| {
+        try std.testing.expectEqual(expected.tile_index, actual.tile_index);
+        try std.testing.expectEqual(expected.psot, actual.psot);
+        try std.testing.expectEqual(expected.packet_count, actual.packet_count);
+        try std.testing.expectEqual(expected.framed_packet_bytes, actual.framed_packet_bytes);
+        try std.testing.expectEqual(expected.packet_bytes, actual.raw_packet_bytes);
+    }
+    try parsed_no_tlm_fragment.validateSinglePartTileOrder(allocator, tile_part_options, grid);
+
+    const bad_no_tlm_tile_order = try allocator.dupe(u8, no_tlm_fragment.bytes);
+    defer allocator.free(bad_no_tlm_tile_order);
+    writeU16BeTest(bad_no_tlm_tile_order, no_tlm_fragment.tile_part_offsets[0] + 4, 1);
+    var parsed_bad_no_tlm_tile_order = try tile_pipeline.parseTilePartCodestreamFragment(allocator, bad_no_tlm_tile_order);
+    defer parsed_bad_no_tlm_tile_order.deinit();
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidPacket,
+        parsed_bad_no_tlm_tile_order.validateSinglePartTileOrder(allocator, tile_part_options, grid),
+    );
+
+    const no_framing_options = tile_pipeline.TilePartLayoutOptions{};
+    var no_framing_layout = try tile_pipeline.buildTilePartLayoutForGridArtifacts(allocator, artifacts, no_framing_options);
+    defer no_framing_layout.deinit();
+    var no_framing_tlm = try tile_pipeline.buildTilePartTlmPlan(allocator, no_framing_layout);
+    defer no_framing_tlm.deinit();
+    var no_framing_plt = try tile_pipeline.buildTilePartPltPlan(allocator, artifacts, no_framing_layout, no_framing_options);
+    defer no_framing_plt.deinit();
+    var no_framing_sequence = try tile_pipeline.buildTilePartSequence(
+        allocator,
+        artifacts,
+        no_framing_layout,
+        no_framing_tlm,
+        no_framing_plt,
+        .{ .tlm = true, .tile_part = no_framing_options },
+    );
+    defer no_framing_sequence.deinit();
+    var no_framing_fragment = try tile_pipeline.buildTilePartCodestreamFragment(allocator, no_framing_sequence);
+    defer no_framing_fragment.deinit();
+    var parsed_no_framing_fragment = try tile_pipeline.parseTilePartCodestreamFragment(allocator, no_framing_fragment.bytes);
+    defer parsed_no_framing_fragment.deinit();
+    try tile_pipeline.validateTilePartCodestreamFragmentT2Readback(
+        allocator,
+        parsed_no_framing_fragment,
+        artifacts,
+        no_framing_options,
+    );
+    const no_framing_audit = try parsed_no_framing_fragment.parseTilePartAudit(allocator, no_framing_options);
+    defer allocator.free(no_framing_audit);
+    try std.testing.expectEqual(no_framing_layout.entries.len, no_framing_audit.len);
+    for (no_framing_layout.entries, no_framing_audit) |expected, actual| {
+        try std.testing.expectEqual(expected.tile_index, actual.tile_index);
+        try std.testing.expectEqual(expected.psot, actual.psot);
+        try std.testing.expectEqual(expected.packet_count, actual.packet_count);
+        try std.testing.expectEqual(expected.framed_packet_bytes, actual.framed_packet_bytes);
+        try std.testing.expectEqual(expected.packet_bytes, actual.raw_packet_bytes);
+        try std.testing.expectEqual(actual.framed_packet_bytes, actual.raw_packet_bytes);
+    }
+    try parsed_no_framing_fragment.validateSinglePartTileOrder(allocator, no_framing_options, grid);
+}
+
+test "tile pipeline parallel tile-grid encode matches serial artifacts" {
+    const allocator = std.testing.allocator;
+    const width = 10;
+    const height = 7;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((29 + x * 3 + y * 43) & 0xff);
+            samples[base + 1] = @intCast((91 + x * 37 + y * 7) & 0xff);
+            samples[base + 2] = @intCast((151 + x * 19 + y * 11) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    const options = tile_pipeline.PacketScaffoldOptions{
+        .layers = 2,
+        .block_width = 2,
+        .block_height = 2,
+        .precincts = &precincts,
+    };
+    var serial = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMq(
+        allocator,
+        source,
+        grid,
+        3,
+        options,
+        .{},
+    );
+    defer serial.deinit();
+
+    var parallel = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
+        allocator,
+        source,
+        grid,
+        3,
+        options,
+        .{},
+        3,
+    );
+    defer parallel.deinit();
+
+    try std.testing.expectEqual(serial.tileCount(), parallel.tileCount());
+    try std.testing.expectEqual(try serial.totalPackets(), try parallel.totalPackets());
+    try std.testing.expectEqual(try serial.totalPacketBytes(), try parallel.totalPacketBytes());
+    try std.testing.expectEqual(try serial.totalPayloadBytes(), try parallel.totalPayloadBytes());
+    for (serial.tiles, parallel.tiles) |serial_tile, parallel_tile| {
+        try std.testing.expectEqual(serial_tile.tile.index, parallel_tile.tile.index);
+        try std.testing.expectEqualDeep(serial_tile.tile.rect, parallel_tile.tile.rect);
+        try std.testing.expectEqual(serial_tile.levels, parallel_tile.levels);
+        try std.testing.expectEqual(serial_tile.packetCount(), parallel_tile.packetCount());
+        try std.testing.expectEqual(serial_tile.catalog.totalBytes(), parallel_tile.catalog.totalBytes());
+        try std.testing.expectEqualSlices(u32, serial_tile.stream.packet_lengths, parallel_tile.stream.packet_lengths);
+        try std.testing.expectEqualSlices(u32, serial_tile.stream.packet_header_lengths, parallel_tile.stream.packet_header_lengths);
+        try std.testing.expectEqualSlices(u8, serial_tile.stream.bytes, parallel_tile.stream.bytes);
+    }
+}
+
+test "tile pipeline validates encoded block catalog coverage per tile" {
+    const allocator = std.testing.allocator;
+    const width = 11;
+    const height = 9;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((17 + x * 19 + y * 31) & 0xff);
+            samples[base + 1] = @intCast((71 + x * 7 + y * 13) & 0xff);
+            samples[base + 2] = @intCast((139 + x * 23 + y * 5) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
+        allocator,
+        source,
+        grid,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+        3,
+    );
+    defer artifacts.deinit();
+
+    for (artifacts.tiles) |tile_artifacts| {
+        try tile_pipeline.validateEncodedBlockCatalogCoversTile(
+            allocator,
+            tile_artifacts.scaffold,
+            tile_artifacts.catalog,
+        );
+    }
+
+    const first_tile = artifacts.tiles[0];
+    const copied_blocks = try allocator.dupe(tile_pipeline.EncodedComponentBlock, first_tile.catalog.blocks);
+    defer allocator.free(copied_blocks);
+    copied_blocks[1].job.component = copied_blocks[0].job.component;
+    copied_blocks[1].job.block_index = copied_blocks[0].job.block_index;
+    copied_blocks[1].job.band_index = copied_blocks[0].job.band_index;
+    copied_blocks[1].job.band = copied_blocks[0].job.band;
+    copied_blocks[1].job.rect = copied_blocks[0].job.rect;
+    const corrupt_catalog = tile_pipeline.EncodedBlockCatalog{
+        .allocator = allocator,
+        .tile = first_tile.catalog.tile,
+        .component_block_count = first_tile.catalog.component_block_count,
+        .blocks = copied_blocks,
+    };
+    try std.testing.expectError(
+        tile_pipeline.PacketScaffoldError.InvalidComponentBlock,
+        tile_pipeline.validateEncodedBlockCatalogCoversTile(
+            allocator,
+            first_tile.scaffold,
+            corrupt_catalog,
+        ),
+    );
+}
+
+test "tile pipeline reconstructs tile-grid encode artifacts to RGB image" {
+    const allocator = std.testing.allocator;
+    const width = 11;
+    const height = 9;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((17 + x * 19 + y * 31) & 0xff);
+            samples[base + 1] = @intCast((71 + x * 7 + y * 13) & 0xff);
+            samples[base + 2] = @intCast((139 + x * 23 + y * 5) & 0xff);
+        }
+    }
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 4, 3);
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+        .{ .width = 4, .height = 4 },
+    };
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
+        allocator,
+        source,
+        grid,
+        3,
+        .{
+            .layers = 2,
+            .block_width = 2,
+            .block_height = 2,
+            .precincts = &precincts,
+        },
+        .{},
+        3,
+    );
+    defer artifacts.deinit();
+
+    const reconstructed_samples = try allocator.alloc(u16, samples.len);
+    defer allocator.free(reconstructed_samples);
+    @memset(reconstructed_samples, 0);
+    const reconstructed = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = reconstructed_samples,
+    };
+
+    try tile_pipeline.reconstructTileGridRpclEncodeArtifactsIsoMqInto(
+        allocator,
+        reconstructed,
+        artifacts,
+        .{},
+    );
+    try std.testing.expectEqualSlices(u16, samples, reconstructed_samples);
+}
+
+fn encodedBlocksPerRow(blocks: []const t2.EncodedLayerBlock) usize {
+    var max_x: usize = 0;
+    for (blocks) |block| max_x = @max(max_x, block.location.leaf_x);
+    return max_x + 1;
+}
+
+fn sumU32ForTest(values: []const u32) !usize {
+    var total: usize = 0;
+    for (values) |value| total = try std.math.add(usize, total, value);
+    return total;
+}
+
+fn decodePltMarkerLengthsForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u32 {
+    var out: std.ArrayList(u32) = .empty;
+    errdefer out.deinit(allocator);
+
+    var cursor: usize = 0;
+    var expected_marker_index: u8 = 0;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 5) return error.InvalidPlt;
+        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.plt), readU16BeTest(bytes, cursor));
+        const lplt = readU16BeTest(bytes, cursor + 2);
+        if (lplt < 3) return error.InvalidPlt;
+        const segment_end = cursor + 2 + @as(usize, lplt);
+        if (segment_end > bytes.len) return error.InvalidPlt;
+        try std.testing.expectEqual(expected_marker_index, bytes[cursor + 4]);
+        expected_marker_index +%= 1;
+
+        var payload_cursor = cursor + 5;
+        var pending = false;
+        var length: u64 = 0;
+        while (payload_cursor < segment_end) : (payload_cursor += 1) {
+            const byte = bytes[payload_cursor];
+            length = (length << 7) | @as(u64, byte & 0x7f);
+            pending = true;
+            if ((byte & 0x80) == 0) {
+                try out.append(allocator, std.math.cast(u32, length) orelse return error.InvalidPlt);
+                length = 0;
+                pending = false;
+            }
+        }
+        if (pending) return error.InvalidPlt;
+        cursor = segment_end;
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn expectTilePartPayloadMatchesStreamForTest(
+    payload: []const u8,
+    stream: tile_pipeline.TileRpclPacketStream,
+    options: tile_pipeline.TilePartLayoutOptions,
+) !void {
+    var cursor: usize = 0;
+    var raw_cursor: usize = 0;
+    for (stream.packet_lengths, 0..) |packet_length_u32, packet_index| {
+        const packet_length = @as(usize, @intCast(packet_length_u32));
+        if (options.sop) {
+            if (payload.len - cursor < 6) return error.Truncated;
+            try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sop), readU16BeTest(payload, cursor));
+            try std.testing.expectEqual(@as(u16, 4), readU16BeTest(payload, cursor + 2));
+            try std.testing.expectEqual(@as(u16, @intCast(packet_index & 0xffff)), readU16BeTest(payload, cursor + 4));
+            cursor += 6;
+        }
+
+        if (payload.len - cursor < packet_length or stream.bytes.len - raw_cursor < packet_length) {
+            return error.Truncated;
+        }
+        try std.testing.expectEqualSlices(
+            u8,
+            stream.bytes[raw_cursor..][0..packet_length],
+            payload[cursor..][0..packet_length],
+        );
+        cursor += packet_length;
+        raw_cursor += packet_length;
+
+        if (options.eph) {
+            if (payload.len - cursor < 2) return error.Truncated;
+            try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.eph), readU16BeTest(payload, cursor));
+            cursor += 2;
+        }
+    }
+
+    try std.testing.expectEqual(stream.bytes.len, raw_cursor);
+    try std.testing.expectEqual(payload.len, cursor);
 }
 
 const Jp2BoxPayload = struct {
