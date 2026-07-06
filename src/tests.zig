@@ -8725,6 +8725,47 @@ test "terminate-all code-block style roundtrips losslessly and is deterministic"
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
+test "mct none codes components independently and roundtrips losslessly" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const no_mct = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .mct = .none });
+    defer allocator.free(no_mct);
+    const rct = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .mct = .rct });
+    defer allocator.free(rct);
+
+    // The COD MCT field (segment byte 4, i.e. cod + 8) advertises 0 (none) vs
+    // 1 (RCT). The 2-byte marker and 2-byte length precede the segment body.
+    const no_mct_cod = findMarker(no_mct, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const rct_cod = findMarker(rct, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0), no_mct[no_mct_cod + 8]);
+    try std.testing.expectEqual(@as(u8, 1), rct[rct_cod + 8]);
+
+    // Skipping the color transform changes the coded payload.
+    try std.testing.expect(!std.mem.eql(u8, no_mct, rct));
+
+    // Both reconstruct the source image byte-exactly (lossless oracle).
+    var decoded = try codestream.decodeLosslessTemporary(allocator, no_mct);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
 test "corrupted segmentation symbol is caught as a bounded decode error" {
     const allocator = std.testing.allocator;
     // A block whose cleanup pass emits a segmentation symbol the decoder checks

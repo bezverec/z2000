@@ -34,12 +34,15 @@ scorecard reconciliation (the earlier rows summed to 43 against a stated 40).
 **Update (post-`d664306` working tree):** Tier 1 is fully closed — the
 DNG/`tiff_ifd.zig` reader-hardening sliver (1.3) and the ICC fixture matrix
 (1.2) both landed. **2.1 (vertical_causal)**, **2.2 (segmentation_symbols)**,
-and **2.3 `terminate_all`** are all wired end-to-end with local byte-exact
-oracles (plus a bounded-error corruption test for 2.2 and a determinism check
-for 2.3); only their external interop gates remain before their scores are
-claimed. 2.3's `predictable_termination` half is still fail-closed. The next
-unclaimed levers are the interop passes for 2.1 / 2.2 / 2.3, then
-`predictable_termination`, then Tier 3 (multi-tile 3.1).
+**2.3 `terminate_all`**, and **3.3 `--mct none` (reversible)** are all wired
+end-to-end with local byte-exact oracles. The resilience bits (2.1/2.2/2.3)
+await external interop before their scores are claimed; `--mct none` is fully
+local (coding path unchanged, only the color transform is skipped). **2.3's
+`predictable_termination` half was attempted and deferred** — it needs a
+reference decoder to validate the ER-TERM flush, so a local oracle would give
+false confidence (see 2.3). Remaining unclaimed levers: the interop passes;
+`--qstyle scalar-derived` (3.3); LRCP progression (3.2); and Tier 3 multi-tile
+(3.1, the biggest lever).
 
 ## How to read the priority tags
 
@@ -221,10 +224,18 @@ oracle, wrong for a real stream. What was added:
   thread-count determinism is only checked via same-config re-encode so far.
   Stays opt-in behind `--terminate-all`, default off.
 
-**`predictable_termination` (0x10) — still open.** `ebcot.zig`
-`hasUnsupportedPayloadMode` still marks it unsupported. Now that the ISO MQ
-terminated-segment machinery exists, it can be layered on top (predictable /
-error-resilient MQ termination per D.4.5 annex). Left fail-closed.
+**`predictable_termination` (0x10) — attempted, deferred (needs a reference
+decoder).** The ISO MQ terminated-segment machinery makes the wiring easy, but
+predictable termination is fundamentally an *interop* feature: its value is that
+an external decoder can verify the exact ER-TERM flush bytes for error
+detection. A first pass implementing `opj_mqc_erterm_enc` as `mq_iso`'s
+`finishErterm` did not even round-trip through our own decoder (the flush is
+subtle and byte-exact), and — critically — a self-consistent-but-non-normative
+flush would *pass* a local oracle while still failing real interop, i.e. false
+confidence about the one thing that matters here. Unlike terminate_all (which
+uses the standard MQ flush the narrow path already exercises), this needs
+validation against OpenJPEG/Kakadu to be trustworthy. **Deferred until a
+reference decoder is available in the loop.** Left fail-closed.
 
 ---
 
@@ -268,19 +279,37 @@ error-resilient MQ termination per D.4.5 annex). Left fail-closed.
 - **Test plan:** per-order writer↔reader packet-length/slice agreement;
   corrupted-header bounded-error tests; interop for at least LRCP.
 
-### 3.3 `--mct none` and `--qstyle scalar-derived`
+### 3.3 `--mct none` ✅ DONE (reversible) + `--qstyle scalar-derived` — still open
 
 - **Impact:** full "lossy" +1, "core syntax" +1. (+2)
 - **Effort:** M · **Risk:** Medium
 - **ISO clause:** A.3.1 (MCT signalling), A.6.4 / E.1 (scalar-derived
   quantization: derive all subband step sizes from the `NL` LL step).
-- **Current state:** both fail-closed — `codestream.zig:7527` (`mct != .rct`),
-  `7532` (`quantization != .scalar_expounded`), `1935` (decode side).
-- **What to add:** component-independent coding path for `mct none` (no color
-  transform, 1–3 independent components); scalar-derived QCD write + E.1 derived
-  inverse-quant read.
-- **Test plan:** roundtrip + OpenJPEG interop for each; keep scalar-expounded as
-  the reference to diff derived step sizes against.
+
+**`--mct none` landed for the reversible (lossless) path.** No inter-component
+decorrelation — each component is coded independently through the 5/3 DWT + T1
+and carries only the B.1.1 DC level shift. Changes:
+
+  - **`color.zig`:** new `forwardNoTransform` / `inverseNoTransform` (each of the
+    three planes gets the level shift directly; inverse adds it back and clamps
+    to `[0, 2^Ssiz − 1]`, reusing the generic `RctPlanes` carrier).
+  - **`codestream.zig`:** encode routes `mct == .none` to `forwardNoTransform`;
+    the COD MCT byte already wrote `0`. Decode parses the MCT byte into
+    `TemporaryHeader.mct` and all three inverse-transform sites switch on it.
+  - **Gates:** `validateCodingPath` accepts `mct none` for the reversible path;
+    the decode COD reader accepts MCT `0`. `mct none` is fail-closed with the
+    debug temporary-payload sidecar (its header does not carry the MCT choice)
+    and stays reversible-only (the 9/7 ICT path is untouched).
+- **Test added:** "mct none codes components independently and roundtrips
+  losslessly" — COD MCT byte is `0` vs `1`, payload differs from RCT, and the
+  stream reconstructs byte-exactly. Full `zig build test` green in `Debug` +
+  `ReleaseFast` (249/249). Verifiable entirely locally (no interop dependency,
+  since the coding path is unchanged — only the color transform is skipped).
+
+**`--qstyle scalar-derived` — still open.** `codestream.zig` still fail-closes
+`quantization != .scalar_expounded` on the irreversible path. Needs the
+scalar-derived QCD write + E.1 derived inverse-quant read; keep scalar-expounded
+as the reference to diff derived step sizes against.
 
 ### 3.4 PCRD-style rate allocation
 
@@ -311,8 +340,15 @@ error-resilient MQ termination per D.4.5 annex). Left fail-closed.
 4. **2.3 (`terminate_all`):** now wired end-to-end with a dedicated ISO MQ
    per-pass terminated encoder + inferred decoder (not just a gate flip). Local
    oracle + determinism pass; remaining work is the OpenJPEG `-M` terminate-all
-   interop gate and, separately, `predictable_termination` (still fail-closed).
-4. **Tier 3:** the multi-tile scaffold (3.1) already advanced; converting the
+   interop gate. Its `predictable_termination` half was attempted and **deferred
+   pending a reference decoder** (the ER-TERM flush cannot be validated locally).
+5. **3.3 `--mct none` (reversible):** landed and fully local — component-
+   independent coding, no interop dependency. `--qstyle scalar-derived` is the
+   remaining half of 3.3.
+6. **Next best local, interop-independent levers:** LRCP progression (3.2) and
+   Tier 3 multi-tile (3.1) — both verifiable against the existing RPCL /
+   single-tile paths without an external decoder.
+7. **Tier 3:** the multi-tile scaffold (3.1) already advanced; converting the
    `isSingleTile`/`tile_index != 0` fail-closed checks into real per-tile
    encode/decode is the highest full-target lever but also the largest. Keep
    `tile == image` a passing special case at every step so the narrow path never
@@ -336,9 +372,12 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
   have green local oracles — their narrow "T1/EBCOT" +2 and full "T1" +2/+3
   (2.1), full "T1 completeness" +1 (2.2), and full "T1 completeness" +1–2 (2.3
   terminate_all) are **staged, not yet claimed**, gated on the
-  OpenJPEG/Grok/Kakadu interop passes. `predictable_termination` remains open.
-- **If remaining Tier 1–2 land (2.1 / 2.2 / 2.3 interop + predictable_term):**
-  narrow 86 → ~89 (T1/EBCOT +2, interop-evidence +1), full 44 → ~48 (T1 +3/+4,
-  containers +1).
+  OpenJPEG/Grok/Kakadu interop passes. **`--mct none` (3.3, reversible) landed
+  and is fully local** — full "core syntax" +1 is claimable now (no interop
+  dependency). `predictable_termination` and `--qstyle scalar-derived` remain
+  open.
+- **If remaining Tier 1–2 land (2.1 / 2.2 / 2.3 interop):** narrow 86 → ~89
+  (T1/EBCOT +2, interop-evidence +1), full 44 → ~48+ (T1 +3/+4, core syntax +1
+  from `--mct none`, containers +1).
 - **If Tier 3 (multi-tile 3.1 + LRCP 3.2) then lands:** full ~47 → ~53, the
   first real jump on the broad-codec axis.

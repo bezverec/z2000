@@ -1314,7 +1314,10 @@ fn encodeLosslessWithOptionsMeasured(
     const levels = actualDwtLevels(rgb.width, rgb.height, options.levels);
     const color_start = monotonicNs();
     var planes = switch (options.transform) {
-        .reversible_5_3 => try color.forwardRct(allocator, rgb),
+        .reversible_5_3 => if (options.mct == .none)
+            try color.forwardNoTransform(allocator, rgb)
+        else
+            try color.forwardRct(allocator, rgb),
         .irreversible_9_7 => try forwardIrreversibleQuantizedPlanes(allocator, rgb, levels, options),
     };
     defer planes.deinit();
@@ -1517,7 +1520,10 @@ fn decodeTemporaryPayloadWithOptionsMeasured(
     defer {
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
-    return color.inverseRct(allocator, planes);
+    return if (header.mct == .none)
+        color.inverseNoTransform(allocator, planes)
+    else
+        color.inverseRct(allocator, planes);
 }
 
 pub fn analyzeLosslessTemporary(bytes: []const u8) !TemporaryStats {
@@ -1712,6 +1718,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var block_height: u16 = 0;
     var parsed_code_block_style = ebcot.CodeBlockStyle{};
     var parsed_transform: WaveletTransform = .reversible_5_3;
+    var parsed_mct: MultipleComponentTransform = .rct;
     var precincts = defaultPrecincts();
     var precinct_count: u8 = 0;
     var saw_siz = false;
@@ -1794,7 +1801,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             if (segment[1] != @intFromEnum(ProgressionOrder.rpcl)) return CodestreamError.UnsupportedPayload;
             layers = readU16Be(segment, 2);
             if (layers == 0 or layers > max_quality_layers) return CodestreamError.InvalidCodestream;
-            if (segment[4] != @intFromEnum(MultipleComponentTransform.rct)) return CodestreamError.UnsupportedPayload;
+            parsed_mct = switch (segment[4]) {
+                @intFromEnum(MultipleComponentTransform.rct) => .rct,
+                @intFromEnum(MultipleComponentTransform.none) => .none,
+                else => return CodestreamError.UnsupportedPayload,
+            };
             levels = segment[5];
             if (levels > 32) return CodestreamError.TooManyLevels;
             block_width = try codeBlockSizeFromCodExponent(segment[6]);
@@ -1873,6 +1884,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .bit_depth = bit_depth,
         .levels = levels,
         .layers = layers,
+        .mct = parsed_mct,
         .transform = parsed_transform,
         .code_block_style = parsed_code_block_style,
         .block_width = block_width,
@@ -2627,7 +2639,10 @@ fn decodeStrictRpclImageFromPackets(
     var strict_planes = try reconstructStrictComponentCoefficientPlanes(allocator, header, catalogs, assemblies, options);
     defer strict_planes.deinit();
     try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
-    var strict_image = try color.inverseRct(allocator, strict_planes);
+    var strict_image = if (header.mct == .none)
+        try color.inverseNoTransform(allocator, strict_planes)
+    else
+        try color.inverseRct(allocator, strict_planes);
     errdefer strict_image.deinit();
 
     return .{
@@ -3707,7 +3722,10 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     defer {
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
-    return color.inverseRct(allocator, strict_planes);
+    return if (header.mct == .none)
+        color.inverseNoTransform(allocator, strict_planes)
+    else
+        color.inverseRct(allocator, strict_planes);
 }
 
 /// Irreversible path back end: dequantize the assembled i32 coefficient
@@ -5179,6 +5197,7 @@ const TemporaryHeader = struct {
     bit_depth: u8,
     levels: u8,
     layers: u16,
+    mct: MultipleComponentTransform = .rct,
     transform: WaveletTransform = .reversible_5_3,
     code_block_style: ebcot.CodeBlockStyle = .{},
     block_width: u16,
@@ -7550,8 +7569,13 @@ fn validateCodingPath(options: LosslessOptions) !void {
     if (options.progression != .rpcl) return CodestreamError.UnsupportedPayload;
     switch (options.transform) {
         .reversible_5_3 => {
-            if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
+            // RCT (component-decorrelating) and none (independent components,
+            // ISO A.3.1) are both wired for the reversible path.
+            if (options.mct != .rct and options.mct != .none) return CodestreamError.UnsupportedPayload;
             if (options.quantization != .none) return CodestreamError.UnsupportedPayload;
+            // The debug temporary-payload sidecar header does not carry the MCT
+            // choice, so it would misdecode a no-transform stream; fail closed.
+            if (options.mct == .none and options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
         },
         .irreversible_9_7 => {
             if (options.mct != .ict) return CodestreamError.UnsupportedPayload;
