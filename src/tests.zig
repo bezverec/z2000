@@ -9177,6 +9177,37 @@ test "corrupted multi-tile packet payload fails with a bounded error" {
     try std.testing.expect(rejected);
 }
 
+test "multi-tile stats and header audit aggregate across tiles" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+
+    const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expect(audit.packets > 0);
+    try std.testing.expectEqual(audit.packets, audit.header_decoded_packets);
+    try std.testing.expectEqual(audit.packets, audit.present_packets + audit.absent_packets);
+    try std.testing.expect(audit.assembled_blocks > 0);
+    try std.testing.expectEqual(audit.assembled_blocks, audit.t1_ready_blocks);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(usize, width), stats.width);
+    try std.testing.expectEqual(audit.packets, stats.packet_count);
+    try std.testing.expectEqual(audit.packets, stats.sod_packets);
+    try std.testing.expectEqual(audit.payload_bytes, stats.t2_payload_bytes);
+}
+
 test "multi-tile encode rejects tiles that clamp the global DWT level count" {
     const allocator = std.testing.allocator;
     // 34x34 with 32x32 tiles keeps the alignment guard satisfied

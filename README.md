@@ -154,13 +154,20 @@ ground for a later narrow `dng-to-jp2` RGB/preview path.
 The CLI now accepts the JPEG2000 profile knobs used by the Grok/Kakadu command
 lines we are targeting:
 
-- `--tile W,H` maps to Grok `-t` and Kakadu `Stiles`; tile sizes smaller than
-  the image fail closed until multi-tile encoding exists.
+- `--tile W,H` maps to Grok `-t` and Kakadu `Stiles`. Multi-tile encode and
+  decode work end-to-end in a v1 envelope (lossless RCT/5-3, one quality
+  layer, one tile-part per tile in row-major order, plain code-block style);
+  the geometry must satisfy ISO B.6/B.7 partition anchoring (tile sizes a
+  multiple of `2^levels x` the largest precinct, precincts >= code-blocks
+  with the r>0 half-span rule) and every tile must achieve the global
+  decomposition level count. Configurations outside the envelope fail
+  closed. See `docs/multi_tile_plan.md`.
 - `--progression RPCL` maps to Grok `-p RPCL` and Kakadu `Corder=RPCL`; other
   progression orders fail closed until matching payload packetization exists.
 - `--mct rct` maps to COD multiple component transform 1 with the reversible
   5/3 path; `--mct ict` selects the irreversible ICT and requires
-  `--transform 9-7 --qstyle scalar-expounded`. `--mct none` fails closed.
+  `--transform 9-7 --qstyle scalar-expounded`. `--mct none` codes the three
+  components independently on the reversible path (single-tile only).
 - `--transform 5-3` maps to COD wavelet transform 1 (lossless RCT path).
   `--transform 9-7` maps to COD wavelet transform 0 and enables the
   irreversible ICT/9-7/scalar-quantization pipeline.
