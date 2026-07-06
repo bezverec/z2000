@@ -72,7 +72,8 @@ const CodSegmentInfo = struct {
 const TlmState = struct {
     next_segment_index: u8 = 0,
     lengths: [256]u32 = [_]u32{0} ** 256,
-    count: u8 = 0,
+    tile_indices: [256]u16 = [_]u16{0} ** 256,
+    count: u16 = 0,
     saw: bool = false,
 };
 
@@ -375,7 +376,15 @@ fn validateCodestreamPayload(payload: []const u8, expected: CodestreamShape) !vo
     if (xtosiz != xosiz or ytosiz != yosiz) return Jp2Error.UnsupportedProfile;
     const width = xsiz - xosiz;
     const height = ysiz - yosiz;
-    if (xtsiz < width or ytsiz < height) return Jp2Error.UnsupportedProfile;
+    // Multi-tile SIZ (XTSiz < width) is accepted: with zero tile offsets any
+    // nonzero tile size partitions the image into a valid ISO B.3 grid.
+    const tile_columns = (@as(u64, width) + xtsiz - 1) / xtsiz;
+    const tile_rows = (@as(u64, height) + ytsiz - 1) / ytsiz;
+    const tile_count_u64 = tile_columns * tile_rows;
+    // The tile-part walker tracks up to 256 TLM entries; larger grids stay
+    // unsupported in the wrapper profile until the walker is generalized.
+    if (tile_count_u64 == 0 or tile_count_u64 > 256) return Jp2Error.UnsupportedProfile;
+    const tile_count: u32 = @intCast(tile_count_u64);
     const bits_per_component = (segment[36] & 0x7f) + 1;
     if ((segment[36] & 0x80) != 0) return Jp2Error.UnsupportedProfile;
     if (width != expected.width or
@@ -396,10 +405,10 @@ fn validateCodestreamPayload(payload: []const u8, expected: CodestreamShape) !vo
             return Jp2Error.UnsupportedProfile;
         }
     }
-    try validateMainHeaderMarkers(payload, segment_end, bits_per_component);
+    try validateMainHeaderMarkers(payload, segment_end, bits_per_component, tile_count);
 }
 
-fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, bit_depth: u8) !void {
+fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, bit_depth: u8, tile_count: u32) !void {
     var cursor = cursor_after_siz;
     var cod_info: ?CodSegmentInfo = null;
     var saw_qcd = false;
@@ -410,7 +419,11 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, bit_d
         switch (marker) {
             marker_sot => {
                 if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
-                try validateTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null);
+                if (tile_count == 1) {
+                    try validateTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null);
+                } else {
+                    try validateMultiTileTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null, tile_count);
+                }
                 return;
             },
             marker_cod => {
@@ -459,6 +472,7 @@ fn validateTilePartSequence(
         if (try readU16Be(payload, cursor) != marker_sot) return Jp2Error.InvalidCodestream;
         const expected_psot = if (tlm_state) |state| blk: {
             if (expected_tile_part_index >= state.count) return Jp2Error.InvalidCodestream;
+            if (state.tile_indices[expected_tile_part_index] != 0) return Jp2Error.InvalidCodestream;
             break :blk state.lengths[expected_tile_part_index];
         } else null;
         cursor = try validateSotSegment(payload, cursor, expected_tile_part_index, expected_psot, cod, &packet_sequence, &tile_part_count);
@@ -469,6 +483,50 @@ fn validateTilePartSequence(
     if (expected_tile_part_index != expected_count) return Jp2Error.InvalidCodestream;
     if (tlm_state) |state| {
         if (state.count != expected_count) return Jp2Error.InvalidCodestream;
+    }
+}
+
+/// Multi-tile v1 tile-part discipline (docs/multi_tile_plan.md §3): exactly one
+/// tile-part per tile in row-major order — Isot counts 0..tile_count-1,
+/// TPsot = 0, TNsot = 1 — and SOP packet numbering restarts per tile.
+fn validateMultiTileTilePartSequence(
+    payload: []const u8,
+    first_sot_offset: usize,
+    cod: CodSegmentInfo,
+    tlm_state: ?*const TlmState,
+    tile_count: u32,
+) !void {
+    var cursor = first_sot_offset;
+    var tile_index: u32 = 0;
+    while (cursor < payload.len - 2) {
+        if (try readU16Be(payload, cursor) != marker_sot) return Jp2Error.InvalidCodestream;
+        const length_offset = std.math.add(usize, cursor, 2) catch return Jp2Error.InvalidCodestream;
+        if (try readU16Be(payload, length_offset) != 10) return Jp2Error.InvalidCodestream;
+        const segment_end = length_offset + 10;
+        if (segment_end > payload.len - 2) return Jp2Error.InvalidCodestream;
+        const sot_tile_index = try readU16Be(payload, cursor + 4);
+        const tile_part_length = try readU32Be(payload, cursor + 6);
+        const tile_part_index = payload[cursor + 10];
+        const tile_part_total = payload[cursor + 11];
+        if (tile_index >= tile_count or sot_tile_index != tile_index) return Jp2Error.UnsupportedProfile;
+        if (tile_part_index != 0 or tile_part_total != 1) return Jp2Error.UnsupportedProfile;
+        if (tile_part_length == 0) return Jp2Error.UnsupportedProfile;
+        if (tlm_state) |state| {
+            if (tile_index >= state.count) return Jp2Error.InvalidCodestream;
+            if (state.tile_indices[tile_index] != sot_tile_index) return Jp2Error.InvalidCodestream;
+            if (state.lengths[tile_index] != tile_part_length) return Jp2Error.InvalidCodestream;
+        }
+        const tile_part_end = std.math.add(usize, cursor, tile_part_length) catch return Jp2Error.InvalidCodestream;
+        if (tile_part_end > payload.len - 2) return Jp2Error.InvalidCodestream;
+        var packet_sequence: u16 = 0;
+        try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, &packet_sequence);
+        cursor = tile_part_end;
+        tile_index += 1;
+    }
+    if (cursor != payload.len - 2) return Jp2Error.InvalidCodestream;
+    if (tile_index != tile_count) return Jp2Error.InvalidCodestream;
+    if (tlm_state) |state| {
+        if (state.count != tile_count) return Jp2Error.InvalidCodestream;
     }
 }
 
@@ -717,19 +775,35 @@ fn irreversibleBandStepSize(bit_depth: u8, kind: SubbandKind, band_level: u8) !s
 }
 
 fn validateTlmSegment(payload: []const u8, length_offset: usize, marker_length: u16, state: *TlmState) !void {
-    if ((marker_length - 4) % 5 != 0) return Jp2Error.InvalidCodestream;
-    if (payload[length_offset + 2] != state.next_segment_index or payload[length_offset + 3] != 0x50) {
-        return Jp2Error.UnsupportedProfile;
-    }
+    if (payload[length_offset + 2] != state.next_segment_index) return Jp2Error.UnsupportedProfile;
+    // Stlm 0x50: ST=1/SP=1 (u8 tile index + u32 length), the single-tile
+    // resolution-part layout. Stlm 0x60: ST=2/SP=1 (u16 tile index + u32
+    // length), the multi-tile one-part-per-tile layout.
+    const stlm = payload[length_offset + 3];
+    const entry_bytes: usize = switch (stlm) {
+        0x50 => 5,
+        0x60 => 6,
+        else => return Jp2Error.UnsupportedProfile,
+    };
+    if ((marker_length - 4) % entry_bytes != 0) return Jp2Error.InvalidCodestream;
     state.next_segment_index = std.math.add(u8, state.next_segment_index, 1) catch return Jp2Error.InvalidCodestream;
     var cursor = length_offset + 4;
     const end = length_offset + @as(usize, marker_length);
-    while (cursor < end) : (cursor += 5) {
-        if (payload[cursor] != 0) return Jp2Error.UnsupportedProfile;
-        const tile_part_length = try readU32Be(payload, cursor + 1);
+    while (cursor < end) : (cursor += entry_bytes) {
+        if (state.count >= state.lengths.len) return Jp2Error.UnsupportedProfile;
+        const tile_index: u16 = switch (stlm) {
+            0x50 => blk: {
+                if (payload[cursor] != 0) return Jp2Error.UnsupportedProfile;
+                break :blk 0;
+            },
+            0x60 => try readU16Be(payload, cursor),
+            else => unreachable,
+        };
+        const tile_part_length = try readU32Be(payload, cursor + (entry_bytes - 4));
         if (tile_part_length == 0) return Jp2Error.InvalidCodestream;
+        state.tile_indices[state.count] = tile_index;
         state.lengths[state.count] = tile_part_length;
-        state.count = std.math.add(u8, state.count, 1) catch return Jp2Error.InvalidCodestream;
+        state.count = std.math.add(u16, state.count, 1) catch return Jp2Error.InvalidCodestream;
     }
     state.saw = true;
 }

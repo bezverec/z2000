@@ -87,17 +87,37 @@ current code path.
 
 ## 4. Staged plan (each stage = one PR, green tests, narrow path untouched)
 
-### Stage A — Encode integration (~1 session)
-In `encodeLosslessWithOptions`: when `!grid.isSingleTile()`, after the v1
-fail-close checks, route to
-`tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel` +
-`buildTilePartCodestreamFragment`, then emit SOC/SIZ/COD/QCD (+TLM from the
-fragment) + fragment tile-parts + EOC. Relax `validateTileSize` and
-`jp2.zig:378`. *Tests:* multi-tile stream has N SOTs with row-major `Isot`,
-correct SIZ; single-tile output byte-identical to `main`; encode is
-deterministic across `--threads`; fail-close matrix for the §3 exclusions.
-*Note:* the stream is not yet self-decodable — decoder still rejects it; the
-test oracle at this stage is marker-level + `tile_pipeline` readback.
+### Stage A — Encode integration — ✅ DONE
+Landed as implemented (with two deviations from the sketch, both noted below):
+`encodeLosslessWithOptionsMeasured` branches on `!grid.isSingleTile()` into
+`encodeLosslessMultiTileMeasured`, which routes through
+`buildTileGridRpclEncodeArtifactsIsoMqParallel` → tile-part layout / TLM / PLT
+plans → `buildTilePartSequence`, and emits SOC/SIZ/COD/QCD + sequence (TLM +
+one SOT..SOD part per tile, row-major) + EOC. `validateTileSize` is gone
+(grid computed at the entry); `validateMultiTileCodingPath` enforces the §3
+envelope and `validateMultiTileGeometry` enforces §2.3 (no per-tile level
+clamping) plus the anchoring guard below.
+
+*Deviation 1 — alignment guard:* scoping's per-resolution origin check was
+refined: the tile pipeline anchors precinct **and code-block** partitions at
+the tile-local origin, so the v1 sufficient condition is "every precinct ≥
+the code-block size, and XTSiz/YTSiz are multiples of 2^levels × the largest
+precinct" — then every partition boundary aligns at every resolution.
+*Deviation 2 — JP2 wrapper:* relaxing `jp2.zig:378` alone was not enough; the
+wrapper's profile validator was single-tile throughout. It now understands
+multi-tile: SIZ-derived tile count (≤ 256 for the wrapper profile), TLM Stlm
+`0x60` (u16 Ttlm + u32 Ptlm) alongside the single-tile `0x50`, and a
+`validateMultiTileTilePartSequence` walker (row-major Isot, TPsot=0, TNsot=1,
+per-tile SOP restart, TLM cross-check).
+
+*Tests:* "multi-tile encode emits row-major single-part tiles with TLM"
+(SIZ/TLM/SOT structure, Psot chaining to EOC, thread-count determinism, JP2
+wrap acceptance, and decode still failing closed pending Stages B/C);
+"multi-tile encode fails closed outside the v1 envelope" (layers, mct none,
+bypass, style bits, sidecar, 9/7, misaligned tile size); "multi-tile encode
+rejects tiles that clamp the global DWT level count" (18×18 with 16×16 tiles).
+Single-tile output is byte-identical (branch only taken when multi-tile; full
+suite green in Debug + ReleaseFast).
 
 ### Stage B — Decode: SOT walk + per-tile packet spans (~1 session)
 Accept multi-tile SIZ (gate 2) and `Isot != 0` (gate 3) behind the grid
