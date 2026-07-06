@@ -1459,6 +1459,12 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     const header = try readStrictCodestreamMetadata(allocator, bytes);
     if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
 
+    // Multi-tile headers carry the real SIZ tile dimensions (single-tile
+    // metadata leaves them zero); route them through the per-tile decode.
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return decodeStrictMultiTileImageMeasured(allocator, bytes, header, options, timings);
+    }
+
     const catalog_start = monotonicNs();
     var strict_catalog = try readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, timings);
     defer strict_catalog.deinit();
@@ -3779,6 +3785,175 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
         color.inverseNoTransform(allocator, strict_planes)
     else
         color.inverseRct(allocator, strict_planes);
+}
+
+/// Builds a per-tile packet catalog from one Stage B tile-part span: the
+/// tile's PLT packet lengths drive the tile-local RPCL iterator, and each
+/// framed packet (SOP/EPH per the COD policy, Nsop restarting at 0 for the
+/// tile) is stripped into the catalog's raw packet bytes.
+fn readStrictMultiTileTilePartPacketCatalog(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    span: StrictMultiTileTilePartSpan,
+    tile_plan: packet_plan.Plan,
+    layers: u16,
+    marker_policy: MainHeaderPacketMarkers,
+) !StrictPacketCatalog {
+    var entries: std.ArrayList(StrictPacketEntry) = .empty;
+    errdefer entries.deinit(allocator);
+    const packet_capacity = std.math.cast(usize, tile_plan.packets) orelse return CodestreamError.InvalidCodestream;
+    try entries.ensureTotalCapacity(allocator, packet_capacity);
+    var packet_bytes: std.ArrayList(u8) = .empty;
+    errdefer packet_bytes.deinit(allocator);
+    try packet_bytes.ensureTotalCapacity(allocator, span.packet_payload_bytes);
+
+    var packet_lengths: std.ArrayList(usize) = .empty;
+    defer packet_lengths.deinit(allocator);
+    const sod = try readTilePartHeaderMarkers(allocator, bytes, span.sot_start + 12, span.end, &packet_lengths);
+    if (sod != span.sod) return CodestreamError.InvalidCodestream;
+    if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
+
+    var iterator = try packet_plan.RpclIterator.init(tile_plan, 3, layers);
+    var cursor = span.sod + 2;
+    var packet_sequence: u16 = 0;
+    for (packet_lengths.items) |packet_length| {
+        const packet = iterator.next() orelse return CodestreamError.InvalidCodestream;
+        const byte_offset = packet_bytes.items.len;
+        const byte_length = try appendStrictSodPacketPayload(
+            allocator,
+            &packet_bytes,
+            bytes,
+            &cursor,
+            span.end,
+            packet_length,
+            marker_policy,
+            &packet_sequence,
+        );
+        try entries.append(allocator, .{
+            .packet = packet,
+            .tile_index = span.tile_index,
+            .tile_part_index = 0,
+            .byte_offset = byte_offset,
+            .byte_length = byte_length,
+        });
+    }
+    if (iterator.next() != null) return CodestreamError.InvalidCodestream;
+    if (cursor != span.end) return CodestreamError.InvalidCodestream;
+
+    const owned_entries = try entries.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_entries);
+    const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
+    return .{
+        .allocator = allocator,
+        .entries = owned_entries,
+        .packet_bytes = owned_packet_bytes,
+    };
+}
+
+/// Stage C multi-tile decode (docs/multi_tile_plan.md): every tile decodes as
+/// its own single-tile image. A per-tile header (tile dims + the tile's own
+/// packet plan) drives the unchanged strict chain — packet catalog → T2 header
+/// assembly → block catalog → T1 → inverse DWT → inverse MCT — and the tile
+/// image is blitted into the assembled output at the tile's grid rect. Tiles
+/// decode serially; the existing per-block threading applies within each tile.
+fn decodeStrictMultiTileImageMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !image.RgbImage {
+    const grid = tile_grid.Grid.fromImageSize(header.width, header.height, header.tile_width, header.tile_height) catch return CodestreamError.InvalidCodestream;
+    if (grid.isSingleTile()) return CodestreamError.InvalidCodestream;
+    if (header.packet_plan_count == 0) return CodestreamError.InvalidCodestream;
+
+    // Rebuild the per-resolution precinct list from the whole-image plan the
+    // metadata stage stored; precinct dimensions per resolution do not depend
+    // on tile geometry.
+    var precincts = defaultPrecincts();
+    for (header.packet_plan[0..header.packet_plan_count], 0..) |resolution, index| {
+        const precinct_width = std.math.cast(u16, resolution.precinct_width) orelse return CodestreamError.InvalidCodestream;
+        const precinct_height = std.math.cast(u16, resolution.precinct_height) orelse return CodestreamError.InvalidCodestream;
+        precincts[index] = .{ .width = precinct_width, .height = precinct_height };
+    }
+    const plan_options = LosslessOptions{
+        .levels = header.levels,
+        .layers = header.layers,
+        .block_width = header.block_width,
+        .block_height = header.block_height,
+        .precincts = precincts,
+        .precinct_count = header.packet_plan_count,
+    };
+
+    var main_header = try readStrictMainHeaderIndex(allocator, bytes);
+    defer main_header.deinit();
+
+    var spans = try readStrictMultiTileTilePartSpans(
+        allocator,
+        bytes,
+        main_header.first_sot,
+        grid,
+        header.levels,
+        plan_options,
+        if (main_header.tlm_entries) |tlm_slice| tlm_slice else null,
+    );
+    defer spans.deinit(allocator);
+
+    const pixels = try std.math.mul(usize, header.width, header.height);
+    const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
+    errdefer allocator.free(samples);
+    const assembled = image.RgbImage{
+        .allocator = allocator,
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .samples = samples,
+    };
+
+    for (spans.items) |span| {
+        const tile = grid.tile(span.tile_index) catch return CodestreamError.InvalidCodestream;
+        const tile_width = @as(usize, tile.rect.width());
+        const tile_height = @as(usize, tile.rect.height());
+        const tile_plan = try makePacketPlan(tile_width, tile_height, header.levels, plan_options);
+
+        var tile_header = header;
+        tile_header.width = tile_width;
+        tile_header.height = tile_height;
+        tile_header.tile_width = 0;
+        tile_header.tile_height = 0;
+        tile_header.tile_part_divisions = null;
+        tile_header.tile_part_plan_count = 0;
+        tile_header.tile_part_plan = [_]u8{0} ** 33;
+        tile_header.packet_plan_count = tile_plan.resolution_count;
+        tile_header.packet_plan = tile_plan.resolutions;
+        tile_header.packet_count = tile_plan.packets;
+
+        const catalog_start = monotonicNs();
+        var catalog = try readStrictMultiTileTilePartPacketCatalog(
+            allocator,
+            bytes,
+            span,
+            tile_plan,
+            header.layers,
+            main_header.packet_markers,
+        );
+        defer catalog.deinit();
+
+        var audit = StrictPacketHeaderAudit{};
+        var assemblies = try assembleStrictPacketCatalogHeaders(allocator, tile_header, catalog, &audit);
+        defer assemblies.deinit();
+        const build = try strictPacketBlockCatalogFromAssembliesChecked(allocator, &assemblies.assemblies);
+        var block_catalog = build.catalog;
+        defer block_catalog.deinit();
+        if (build.stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
+        if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
+
+        var tile_image = try decodeStrictRpclImageFromBlockCatalogMeasured(allocator, tile_header, block_catalog, options, timings);
+        defer tile_image.deinit();
+        tile_grid.copyRgbTileInto(assembled, tile.rect, tile_image) catch return CodestreamError.InvalidCodestream;
+    }
+
+    return assembled;
 }
 
 /// Irreversible path back end: dequantize the assembled i32 coefficient
@@ -7726,8 +7901,15 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
 fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: LosslessOptions) !void {
     var max_precinct_width: u32 = 1;
     var max_precinct_height: u32 = 1;
-    for (options.precincts[0..options.precinct_count]) |precinct| {
-        if (precinct.width < options.block_width or precinct.height < options.block_height) {
+    for (options.precincts[0..options.precinct_count], 0..) |precinct, resolution| {
+        // ISO 15444-1 B.7: the effective code-block size is bounded by the
+        // precinct span in band coordinates — the full precinct at resolution
+        // 0, half of it at higher resolutions. Code blocks that would cross
+        // precinct boundaries make the packet/block index derivation ambiguous,
+        // so such configurations fail closed in the multi-tile v1 envelope.
+        const band_span_width = if (resolution == 0) precinct.width else precinct.width / 2;
+        const band_span_height = if (resolution == 0) precinct.height else precinct.height / 2;
+        if (band_span_width < options.block_width or band_span_height < options.block_height) {
             return CodestreamError.UnsupportedPayload;
         }
         max_precinct_width = @max(max_precinct_width, precinct.width);
