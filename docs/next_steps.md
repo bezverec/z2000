@@ -241,27 +241,37 @@ reference decoder is available in the loop.** Left fail-closed.
 
 ## Tier 3 — Larger structural work (unlocks the biggest full-codec gaps)
 
-### 3.1 Multi-tile encode/decode
+### 3.1 Multi-tile encode/decode — SCOPED, see `docs/multi_tile_plan.md`
 
 - **Impact:** full "lossless encode" 7→9, "lossless decode" 4→6,
   "core codestream syntax" +1. (+4–5, the single biggest full-target lever)
 - **Effort:** L · **Risk:** High
 - **ISO clause:** B.3–B.6 (tile grid, `SOT`/`SOD` per tile, tile-component
   geometry).
-- **Current state (re-verified `d664306`):** the RPCL scaffold advanced in
-  `77b26d1` and `jp2.zig` now handles tile-part lengths, but multi-tile is still
-  *enforced closed* — `codestream.zig` returns `UnsupportedPayload` when
-  `!grid.isSingleTile()` (line 1774) and when `sot.tile_index != 0` (line 4817).
-  The shared tile-grid geometry helper and edge-tile geometry tests already
-  exist (roadmap Phase 4). So the scaffolding is in place; the scored work is
-  turning the fail-closed checks into real per-tile encode/decode.
-- **What to add (in order):** per-tile image extraction → per-tile DWT
-  (reuse `wavelet_int.Workspace`) → per-tile T1 → per-tile packet state and
-  `SOT` scheduling → multi-`SOT` decode loop. Keep tile == image as a passing
-  special case throughout so the narrow path never regresses.
-- **Test plan:** 2×2 tiles on the smoke image, byte-exact vs. single-tile where
-  geometry coincides; OpenJPEG/Grok/Kakadu decode of a genuinely multi-tile
-  file; memory-usage benchmark (Phase 4 exit criterion).
+- **Current state (re-scoped post-`f61f199`, superseding the `d664306` note):**
+  the `77b26d1` scaffold is *much* further along than previously recorded —
+  `tile_pipeline.zig` already does per-tile RCT/DWT/T1, per-tile RPCL packet
+  streams, parallel grid encode with a byte-exact artifact-level
+  reconstruction test (3×3 edge-tile grid), and full tile-part assembly
+  (SOT/SOD layout, TLM, PLT, codestream-fragment build + parse). `appendSiz`
+  already writes real XTSiz/YTSiz and the CLI has `--tile W,H`. What is
+  genuinely missing: (a) the public encode branch wiring the fragment into
+  `encodeLosslessWithOptions`; (b) an **artifact-free per-tile decode** — the
+  fragment "readback" validates against encode artifacts, and the real strict
+  T2+T1 reader is per-image/single-tile; (c) opening four gates
+  (`codestream.zig:7533`, `:1781`, `:4860`, and `jp2.zig:378`). Scoping also
+  found a conformance trap: per-tile DWT level *clamping* on tiny tiles vs.
+  the global COD `NL` — v1 fails closed when any tile would clamp.
+- **Plan:** four staged PRs (A encode integration → B SOT walk / per-tile
+  spans → C per-tile strict decode refactor, the big one → D hardening +
+  docs), v1 constraints (layers==1, RCT 5/3 only, one part per tile,
+  row-major, no rates/style-bits), single-tile byte-identical at every stage.
+  Full details, seams, risks and test plans: **`docs/multi_tile_plan.md`**.
+- **Test plan (summary):** public encode→decode byte-exact roundtrip on 2×2 and
+  3×3 edge-tile grids; `tile == image` byte-identical to the current path;
+  malformed SOT/TLM matrix; cross-thread determinism; OpenJPEG/Grok/Kakadu
+  decode of a genuinely multi-tile file and the Phase-4 memory benchmark
+  remain the external gates before the score is raised.
 
 ### 3.2 Additional progression orders (LRCP first)
 
