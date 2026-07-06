@@ -119,14 +119,30 @@ rejects tiles that clamp the global DWT level count" (18×18 with 16×16 tiles).
 Single-tile output is byte-identical (branch only taken when multi-tile; full
 suite green in Debug + ReleaseFast).
 
-### Stage B — Decode: SOT walk + per-tile packet spans (~1 session)
-Accept multi-tile SIZ (gate 2) and `Isot != 0` (gate 3) behind the grid
-check; v1 SOT discipline: each tile exactly once, row-major, `TPsot=0`,
-`TNsot=1`; validate `Psot` chaining and TLM (`Ttlm`/`Ptlm`) against the walk
-(scaffold's `validateSinglePartTileAuditOrder` is the template). Output:
-per-tile packet-byte spans. *Tests:* malformed-input set — out-of-order
-`Isot`, duplicate tile, missing tile, truncated part, TLM mismatch → bounded
-errors; single-tile regression.
+### Stage B — Decode: SOT walk + per-tile packet spans — ✅ DONE
+`readStrictCodestreamMetadata` accepts multi-tile SIZ (the `isSingleTile`
+rejection is gone; the parsed grid is kept) and, for multi-tile grids, runs
+`readStrictMultiTileTilePartSpans`: one tile-part per tile, row-major `Isot`,
+`TPsot=0`/`TNsot=1`, `Psot` chaining ending exactly at EOC, PLT required,
+per-tile packet counts validated against each tile's own packet plan
+(`makePacketPlan` on the tile dims), and TLM `Ttlm`/`Ptlm` cross-checked per
+tile. The decode side also enforces the same `validateMultiTileGeometry`
+envelope as the encoder (level clamping + partition anchoring), so metadata
+never accepts a stream Stage C cannot decode. `TemporaryHeader` gained
+`tile_width`/`tile_height` (0 = single tile) and multi-tile `packet_count` is
+the per-tile sum.
+
+*Error taxonomy:* the TLM cross-check runs before the ordering check — a SOT
+contradicting the stream's own TLM index is corruption (`InvalidCodestream`);
+a self-consistent stream outside the v1 discipline (reordered tiles, multiple
+parts per tile) fails closed as `UnsupportedPayload`; truncation surfaces as
+`TruncatedData`. The intact multi-tile stream passes metadata and still fails
+closed at the block-catalog stage (Stage C pending) — asserted by test.
+
+*Tests:* "multi-tile decode SOT walk validates the v1 tile-part discipline"
+(Isot-vs-TLM contradiction, self-consistent reordering, nonzero TPsot, TNsot
+of 2, TLM length mismatch, truncated final tile-part); the full existing
+suite covers the single-tile regression (253/253, Debug + ReleaseFast).
 
 ### Stage C — Decode: per-tile strict T2+T1 (~1–2 sessions, the big one)
 Refactor the strict reader chain to take tile geometry (`width`, `height`,
