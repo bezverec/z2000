@@ -173,13 +173,29 @@ block) on both encode and decode; the fixtures moved to 8×8 precincts with
 across worker counts; corrupted second-tile payload → bounded error, never a
 panic. 256/256 in Debug + ReleaseFast.
 
-### Stage D — Hardening + docs (~½ session)
-Memory note (grid encode currently holds *all* tile artifacts before
-assembly — fine for v1, streaming assembly is v2 with the Phase-4 memory
-benchmark); `jp2 stats`/`tiff-info` surfacing of tile grid; update
-`iso_coverage.md`, `next_steps.md`, README `--tile` docs; only then raise the
-score per the verification protocol (external OpenJPEG/Grok decode of a
-genuinely multi-tile file remains the interop gate before full points).
+### Stage D — Hardening + docs — ✅ DONE (score raise still interop-gated)
+
+- **Real CLI verification:** `tiff-to-jp2 --tile 32,32 --levels 2 --block 4
+  --precincts "[8,8]"` on a 48×48 TIFF produced a genuine 4-tile JP2 and
+  `decode-temp-jp2` reconstructed a **byte-identical TIFF** — the first
+  end-to-end confirmation through the shipped binary rather than unit tests.
+- **`jp2 stats` / packet audit generalized:** the shared multi-tile setup was
+  extracted into `StrictMultiTileContext` (grid + reconstructed plan options +
+  main-header index + Stage B spans, with a `tileHeader` view helper); the
+  decode loop, `auditStrictPacketHeaders`, and `analyzeLosslessTemporary` all
+  ride it, so `jp2 stats` now reports aggregated per-tile T2 statistics for
+  multi-tile streams instead of failing closed.
+- **Docs:** README `--tile` / `--mct none` bullets updated; `next_steps.md`
+  §3.1 marked landed-pending-interop.
+- **Memory note:** the grid encoder holds *all* tile artifacts in memory
+  before tile-part assembly, and the decoder holds one tile's catalogs at a
+  time plus the full output image. Fine at v1 scale; streaming tile-part
+  assembly (encode) and the Phase-4 peak-memory benchmark are the v2 follow-up.
+
+**Score raise remains gated** (verification protocol): OpenJPEG/Grok/Kakadu
+must decode a genuinely multi-tile z2000 file before the +4–5 full-target
+points are claimed. The alignment envelope was designed so tile-local and
+reference-grid anchoring coincide, but only an external decoder proves it.
 
 ## 5. Risks, ranked
 

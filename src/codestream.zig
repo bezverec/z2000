@@ -1618,6 +1618,9 @@ fn analyzeTemporaryPayloadBytes(
 
 fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !TemporaryStats {
     const header = try readStrictCodestreamMetadata(allocator, bytes);
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return analyzeStrictMultiTilePacketStats(allocator, bytes, header);
+    }
     var catalog = try readStrictPacketCatalog(allocator, bytes);
     defer catalog.deinit();
     if (catalog.entries.len != header.packet_count) return CodestreamError.InvalidCodestream;
@@ -1659,6 +1662,52 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
     };
 }
 
+fn analyzeStrictMultiTilePacketStats(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+) !TemporaryStats {
+    var sod_packets: u64 = 0;
+    var sod_packet_bytes: u64 = 0;
+    const audit = try auditStrictMultiTilePacketHeaders(allocator, bytes, header, &sod_packets, &sod_packet_bytes);
+    if (audit.packets != header.packet_count) return CodestreamError.InvalidCodestream;
+
+    return .{
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .levels = header.levels,
+        .layers = header.layers,
+        .block_width = header.block_width,
+        .block_height = header.block_height,
+        .tile_part_divisions = header.tile_part_divisions,
+        .tile_part_plan_count = header.tile_part_plan_count,
+        .tile_part_plan = header.tile_part_plan,
+        .packet_plan_count = header.packet_plan_count,
+        .packet_plan = header.packet_plan,
+        .packet_count = header.packet_count,
+        .sod_packets = sod_packets,
+        .sod_packet_bytes = sod_packet_bytes,
+        .t2_audited_packets = audit.packets,
+        .t2_present_packets = audit.present_packets,
+        .t2_absent_packets = audit.absent_packets,
+        .t2_geometry_empty_packets = audit.geometry_empty_packets,
+        .t2_header_decoded_packets = audit.header_decoded_packets,
+        .t2_header_bytes = audit.header_bytes,
+        .t2_payload_bytes = audit.payload_bytes,
+        .t2_included_blocks = audit.included_blocks,
+        .t2_assembled_blocks = audit.assembled_blocks,
+        .t2_assembled_bytes = audit.assembled_bytes,
+        .t2_assembled_passes = audit.assembled_passes,
+        .t2_t1_ready_blocks = audit.t1_ready_blocks,
+        .rpcl_shadow_packets = 0,
+        .rpcl_shadow_bytes = 0,
+        .payload_bytes = 0,
+        .codestream_bytes = bytes.len,
+        .components = [_]ComponentStats{.{}} ** 3,
+    };
+}
+
 pub fn readStrictPacketCatalog(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketCatalog {
     const header = try readStrictCodestreamMetadata(allocator, bytes);
     return readStrictPacketCatalogWithHeader(allocator, bytes, header);
@@ -1675,6 +1724,9 @@ fn readStrictPacketCatalogWithHeader(
 
 pub fn auditStrictPacketHeaders(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketHeaderAudit {
     const header = try readStrictCodestreamMetadata(allocator, bytes);
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return auditStrictMultiTilePacketHeaders(allocator, bytes, header, null, null);
+    }
     var catalog = try readStrictPacketCatalogWithHeader(allocator, bytes, header);
     defer catalog.deinit();
     return auditStrictPacketCatalogHeaders(allocator, header, catalog);
@@ -3850,26 +3902,53 @@ fn readStrictMultiTileTilePartPacketCatalog(
     };
 }
 
-/// Stage C multi-tile decode (docs/multi_tile_plan.md): every tile decodes as
-/// its own single-tile image. A per-tile header (tile dims + the tile's own
-/// packet plan) drives the unchanged strict chain — packet catalog → T2 header
-/// assembly → block catalog → T1 → inverse DWT → inverse MCT — and the tile
-/// image is blitted into the assembled output at the tile's grid rect. Tiles
-/// decode serially; the existing per-block threading applies within each tile.
-fn decodeStrictMultiTileImageMeasured(
+/// Shared setup for the multi-tile strict stages: the SIZ grid, the decode
+/// options reconstructed from the whole-image plan (precinct dims per
+/// resolution are geometry independent), the main-header index (packet
+/// marker policy + TLM), and the validated Stage B tile-part spans.
+const StrictMultiTileContext = struct {
+    allocator: std.mem.Allocator,
+    grid: tile_grid.Grid,
+    plan_options: LosslessOptions,
+    main_header: StrictMainHeaderIndex,
+    spans: std.ArrayList(StrictMultiTileTilePartSpan),
+
+    fn deinit(self: *StrictMultiTileContext) void {
+        self.spans.deinit(self.allocator);
+        self.main_header.deinit();
+        self.* = undefined;
+    }
+
+    /// The per-tile header view that lets the unchanged single-tile strict
+    /// chain decode one tile: tile dims plus the tile's own packet plan.
+    fn tileHeader(self: StrictMultiTileContext, header: TemporaryHeader, tile: tile_grid.Tile) !TemporaryHeader {
+        const tile_width = @as(usize, tile.rect.width());
+        const tile_height = @as(usize, tile.rect.height());
+        const tile_plan = try makePacketPlan(tile_width, tile_height, header.levels, self.plan_options);
+        var tile_header = header;
+        tile_header.width = tile_width;
+        tile_header.height = tile_height;
+        tile_header.tile_width = 0;
+        tile_header.tile_height = 0;
+        tile_header.tile_part_divisions = null;
+        tile_header.tile_part_plan_count = 0;
+        tile_header.tile_part_plan = [_]u8{0} ** 33;
+        tile_header.packet_plan_count = tile_plan.resolution_count;
+        tile_header.packet_plan = tile_plan.resolutions;
+        tile_header.packet_count = tile_plan.packets;
+        return tile_header;
+    }
+};
+
+fn readStrictMultiTileContext(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     header: TemporaryHeader,
-    options: DecodeOptions,
-    timings: ?*DecodeTimings,
-) !image.RgbImage {
+) !StrictMultiTileContext {
     const grid = tile_grid.Grid.fromImageSize(header.width, header.height, header.tile_width, header.tile_height) catch return CodestreamError.InvalidCodestream;
     if (grid.isSingleTile()) return CodestreamError.InvalidCodestream;
     if (header.packet_plan_count == 0) return CodestreamError.InvalidCodestream;
 
-    // Rebuild the per-resolution precinct list from the whole-image plan the
-    // metadata stage stored; precinct dimensions per resolution do not depend
-    // on tile geometry.
     var precincts = defaultPrecincts();
     for (header.packet_plan[0..header.packet_plan_count], 0..) |resolution, index| {
         const precinct_width = std.math.cast(u16, resolution.precinct_width) orelse return CodestreamError.InvalidCodestream;
@@ -3886,9 +3965,9 @@ fn decodeStrictMultiTileImageMeasured(
     };
 
     var main_header = try readStrictMainHeaderIndex(allocator, bytes);
-    defer main_header.deinit();
+    errdefer main_header.deinit();
 
-    var spans = try readStrictMultiTileTilePartSpans(
+    const spans = try readStrictMultiTileTilePartSpans(
         allocator,
         bytes,
         main_header.first_sot,
@@ -3897,7 +3976,31 @@ fn decodeStrictMultiTileImageMeasured(
         plan_options,
         if (main_header.tlm_entries) |tlm_slice| tlm_slice else null,
     );
-    defer spans.deinit(allocator);
+
+    return .{
+        .allocator = allocator,
+        .grid = grid,
+        .plan_options = plan_options,
+        .main_header = main_header,
+        .spans = spans,
+    };
+}
+
+/// Stage C multi-tile decode (docs/multi_tile_plan.md): every tile decodes as
+/// its own single-tile image. A per-tile header (tile dims + the tile's own
+/// packet plan) drives the unchanged strict chain — packet catalog → T2 header
+/// assembly → block catalog → T1 → inverse DWT → inverse MCT — and the tile
+/// image is blitted into the assembled output at the tile's grid rect. Tiles
+/// decode serially; the existing per-block threading applies within each tile.
+fn decodeStrictMultiTileImageMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !image.RgbImage {
+    var context = try readStrictMultiTileContext(allocator, bytes, header);
+    defer context.deinit();
 
     const pixels = try std.math.mul(usize, header.width, header.height);
     const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
@@ -3910,32 +4013,18 @@ fn decodeStrictMultiTileImageMeasured(
         .samples = samples,
     };
 
-    for (spans.items) |span| {
-        const tile = grid.tile(span.tile_index) catch return CodestreamError.InvalidCodestream;
-        const tile_width = @as(usize, tile.rect.width());
-        const tile_height = @as(usize, tile.rect.height());
-        const tile_plan = try makePacketPlan(tile_width, tile_height, header.levels, plan_options);
-
-        var tile_header = header;
-        tile_header.width = tile_width;
-        tile_header.height = tile_height;
-        tile_header.tile_width = 0;
-        tile_header.tile_height = 0;
-        tile_header.tile_part_divisions = null;
-        tile_header.tile_part_plan_count = 0;
-        tile_header.tile_part_plan = [_]u8{0} ** 33;
-        tile_header.packet_plan_count = tile_plan.resolution_count;
-        tile_header.packet_plan = tile_plan.resolutions;
-        tile_header.packet_count = tile_plan.packets;
+    for (context.spans.items) |span| {
+        const tile = context.grid.tile(span.tile_index) catch return CodestreamError.InvalidCodestream;
+        const tile_header = try context.tileHeader(header, tile);
 
         const catalog_start = monotonicNs();
         var catalog = try readStrictMultiTileTilePartPacketCatalog(
             allocator,
             bytes,
             span,
-            tile_plan,
+            temporaryPacketPlan(tile_header),
             header.layers,
-            main_header.packet_markers,
+            context.main_header.packet_markers,
         );
         defer catalog.deinit();
 
@@ -3954,6 +4043,51 @@ fn decodeStrictMultiTileImageMeasured(
     }
 
     return assembled;
+}
+
+/// Aggregated multi-tile packet/header audit for `jp2 stats`: the per-tile
+/// catalogs and audits are summed across tiles.
+fn auditStrictMultiTilePacketHeaders(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    sod_packets: ?*u64,
+    sod_packet_bytes: ?*u64,
+) !StrictPacketHeaderAudit {
+    var context = try readStrictMultiTileContext(allocator, bytes, header);
+    defer context.deinit();
+
+    var total = StrictPacketHeaderAudit{};
+    for (context.spans.items) |span| {
+        const tile = context.grid.tile(span.tile_index) catch return CodestreamError.InvalidCodestream;
+        const tile_header = try context.tileHeader(header, tile);
+        var catalog = try readStrictMultiTileTilePartPacketCatalog(
+            allocator,
+            bytes,
+            span,
+            temporaryPacketPlan(tile_header),
+            header.layers,
+            context.main_header.packet_markers,
+        );
+        defer catalog.deinit();
+        if (sod_packets) |out| out.* += @intCast(catalog.entries.len);
+        if (sod_packet_bytes) |out| out.* += @intCast(catalog.packet_bytes.len);
+
+        const audit = try auditStrictPacketCatalogHeaders(allocator, tile_header, catalog);
+        total.packets += audit.packets;
+        total.present_packets += audit.present_packets;
+        total.absent_packets += audit.absent_packets;
+        total.geometry_empty_packets += audit.geometry_empty_packets;
+        total.header_decoded_packets += audit.header_decoded_packets;
+        total.header_bytes += audit.header_bytes;
+        total.payload_bytes += audit.payload_bytes;
+        total.included_blocks += audit.included_blocks;
+        total.assembled_blocks += audit.assembled_blocks;
+        total.assembled_bytes += audit.assembled_bytes;
+        total.assembled_passes += audit.assembled_passes;
+        total.t1_ready_blocks += audit.t1_ready_blocks;
+    }
+    return total;
 }
 
 /// Irreversible path back end: dequantize the assembled i32 coefficient

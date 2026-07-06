@@ -241,7 +241,19 @@ reference decoder is available in the loop.** Left fail-closed.
 
 ## Tier 3 — Larger structural work (unlocks the biggest full-codec gaps)
 
-### 3.1 Multi-tile encode/decode — SCOPED, see `docs/multi_tile_plan.md`
+### 3.1 Multi-tile encode/decode — ✅ LANDED (v1 envelope; score pending interop)
+
+**All four stages of `docs/multi_tile_plan.md` are implemented.** Multi-tile
+codestreams encode and decode byte-exactly through the public path (2×2 and
+3×3 edge-tile grid oracles, real codestream bytes), the CLI roundtrips a
+genuine 4-tile JP2 to a byte-identical TIFF, `jp2 stats`/packet audit
+aggregate per tile, and the JP2 wrapper validates the multi-tile profile.
+v1 envelope: lossless RCT/5-3, one quality layer, one tile-part per tile
+(row-major), plain code-block style, ISO B.6/B.7-aligned geometry (enforced
+fail-closed on both encode and decode). The full-target scorecard points
+(+4–5) stay **staged, not claimed**, until OpenJPEG/Grok/Kakadu decode a
+genuinely multi-tile z2000 file (verification protocol). Original scoping
+notes follow.
 
 - **Impact:** full "lossless encode" 7→9, "lossless decode" 4→6,
   "core codestream syntax" +1. (+4–5, the single biggest full-target lever)
