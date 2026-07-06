@@ -8945,6 +8945,122 @@ test "multi-tile encode fails closed outside the v1 envelope" {
     }
 }
 
+test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 24;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+
+    // The intact stream passes the Stage B metadata walk and fails closed only
+    // at the (Stage C pending) block-catalog stage.
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, bytes),
+    );
+
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const second_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingTlm;
+    // TLM layout: marker(2) Ltlm(2) Ztlm(1) Stlm(1), then 6-byte entries
+    // (Ttlm u16 + Ptlm u32).
+    const tlm_entries = tlm + 6;
+
+    const Case = struct {
+        label: []const u8,
+        expected: anyerror,
+        mutate: *const fn (stream: []u8, sot0: usize, sot1: usize, tlm_start: usize) void,
+    };
+    const cases = [_]Case{
+        .{
+            // SOT says tile 1 where TLM recorded tile 0.
+            .label = "SOT Isot contradicts TLM",
+            .expected = codestream.CodestreamError.InvalidCodestream,
+            .mutate = struct {
+                fn mutate(stream: []u8, sot0: usize, sot1: usize, tlm_start: usize) void {
+                    _ = sot1;
+                    _ = tlm_start;
+                    stream[sot0 + 5] = 1;
+                }
+            }.mutate,
+        },
+        .{
+            // Both TLM and SOT claim tile 1 first: structurally consistent but a
+            // legal ISO ordering outside the v1 row-major discipline.
+            .label = "reordered tile sequence",
+            .expected = codestream.CodestreamError.UnsupportedPayload,
+            .mutate = struct {
+                fn mutate(stream: []u8, sot0: usize, sot1: usize, tlm_start: usize) void {
+                    _ = sot1;
+                    stream[sot0 + 5] = 1;
+                    stream[tlm_start + 1] = 1;
+                }
+            }.mutate,
+        },
+        .{
+            .label = "nonzero TPsot",
+            .expected = codestream.CodestreamError.UnsupportedPayload,
+            .mutate = struct {
+                fn mutate(stream: []u8, sot0: usize, sot1: usize, tlm_start: usize) void {
+                    _ = sot1;
+                    _ = tlm_start;
+                    stream[sot0 + 10] = 1;
+                }
+            }.mutate,
+        },
+        .{
+            .label = "TNsot advertising two parts",
+            .expected = codestream.CodestreamError.UnsupportedPayload,
+            .mutate = struct {
+                fn mutate(stream: []u8, sot0: usize, sot1: usize, tlm_start: usize) void {
+                    _ = sot1;
+                    _ = tlm_start;
+                    stream[sot0 + 11] = 2;
+                }
+            }.mutate,
+        },
+        .{
+            // Second tile's Psot disagrees with its TLM entry.
+            .label = "TLM length mismatch",
+            .expected = codestream.CodestreamError.InvalidCodestream,
+            .mutate = struct {
+                fn mutate(stream: []u8, sot0: usize, sot1: usize, tlm_start: usize) void {
+                    _ = sot0;
+                    _ = tlm_start;
+                    stream[sot1 + 9] +%= 1;
+                }
+            }.mutate,
+        },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("multi-tile SOT walk case failed: {s}\n", .{scenario.label});
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        scenario.mutate(corrupted, first_sot, second_sot, tlm_entries);
+        try std.testing.expectError(
+            scenario.expected,
+            codestream.decodeLosslessTemporary(allocator, corrupted),
+        );
+    }
+
+    // Truncating inside the last tile-part must surface as bounded truncation.
+    try std.testing.expectError(
+        codestream.CodestreamError.TruncatedData,
+        codestream.decodeLosslessTemporary(allocator, bytes[0 .. bytes.len - 8]),
+    );
+}
+
 test "multi-tile encode rejects tiles that clamp the global DWT level count" {
     const allocator = std.testing.allocator;
     // 18x18 with 16x16 tiles keeps the alignment guard satisfied

@@ -1729,6 +1729,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var parsed_mct: MultipleComponentTransform = .rct;
     var precincts = defaultPrecincts();
     var precinct_count: u8 = 0;
+    var parsed_grid: ?tile_grid.Grid = null;
     var saw_siz = false;
     var saw_cod = false;
     var saw_qcd = false;
@@ -1773,7 +1774,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             height = ysiz - yosiz;
             if (xtsiz == 0 or ytsiz == 0) return CodestreamError.InvalidCodestream;
             if (xtosiz != xosiz or ytosiz != yosiz) return CodestreamError.UnsupportedPayload;
-            const grid = tile_grid.Grid.init(.{
+            parsed_grid = tile_grid.Grid.init(.{
                 .xsiz = xsiz,
                 .ysiz = ysiz,
                 .xosiz = xosiz,
@@ -1786,7 +1787,6 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
                 tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
             };
-            if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
             bit_depth = (segment[36] & 0x7f) + 1;
             if (bit_depth != 8 and bit_depth != 16) return CodestreamError.UnsupportedPayload;
             var component_index: usize = 0;
@@ -1876,6 +1876,51 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .precincts = precincts,
         .precinct_count = if (precinct_count == 0) 1 else precinct_count,
     };
+    const grid = parsed_grid orelse return CodestreamError.InvalidCodestream;
+    if (!grid.isSingleTile()) {
+        // Multi-tile: validate the v1 tile-part discipline (one part per tile,
+        // row-major, TPsot=0/TNsot=1, per-tile packet plans, TLM cross-check)
+        // and the same geometry envelope the encoder enforces. The per-tile
+        // spans this produces feed the Stage C decode; the block-catalog stage
+        // still fails closed until then.
+        try validateMultiTileGeometry(grid, levels, options);
+        var spans = try readStrictMultiTileTilePartSpans(
+            allocator,
+            bytes,
+            cursor,
+            grid,
+            levels,
+            options,
+            if (saw_tlm) tlm_entries.items else null,
+        );
+        defer spans.deinit(allocator);
+        var total_packets: u64 = 0;
+        for (spans.items) |span| {
+            total_packets = try std.math.add(u64, total_packets, span.packet_count);
+        }
+        const plan = try makePacketPlan(width, height, levels, options);
+        return .{
+            .version = 8,
+            .width = width,
+            .height = height,
+            .bit_depth = bit_depth,
+            .levels = levels,
+            .layers = layers,
+            .mct = parsed_mct,
+            .transform = parsed_transform,
+            .code_block_style = parsed_code_block_style,
+            .block_width = block_width,
+            .block_height = block_height,
+            .tile_width = grid.params.xtsiz,
+            .tile_height = grid.params.ytsiz,
+            .tile_part_divisions = null,
+            .tile_part_plan_count = 0,
+            .tile_part_plan = [_]u8{0} ** 33,
+            .packet_plan_count = plan.resolution_count,
+            .packet_plan = plan.resolutions,
+            .packet_count = total_packets,
+        };
+    }
     const plan = try makePacketPlan(width, height, levels, options);
     const tile_part_packets = try readStrictTilePartPacketPlan(
         allocator,
@@ -4770,6 +4815,107 @@ fn readStrictTilePartPacketPlan(
     return CodestreamError.InvalidCodestream;
 }
 
+/// One tile-part of a multi-tile stream, located by the Stage B SOT walk
+/// (docs/multi_tile_plan.md): byte spans for the SOT segment, the packet
+/// payload behind SOD, and the PLT-counted packet count validated against the
+/// tile's own packet plan. Stage C consumes these spans for per-tile decode.
+const StrictMultiTileTilePartSpan = struct {
+    tile_index: u16,
+    sot_start: usize,
+    sod: usize,
+    end: usize,
+    packet_payload_bytes: usize,
+    packet_count: usize,
+};
+
+/// Walks the tile-part sequence of a multi-tile stream and enforces the v1
+/// discipline: exactly one tile-part per tile in row-major order (Isot counts
+/// up from 0, TPsot = 0, TNsot = 1), Psot chaining ending exactly at EOC,
+/// PLT present, per-tile packet counts matching the tile's own packet plan,
+/// and TLM entries (when present) matching Isot/Psot per tile. Streams that
+/// are legal ISO but outside the v1 discipline (reordered tiles, multiple
+/// parts per tile) fail closed as UnsupportedPayload; structural damage is
+/// InvalidCodestream/TruncatedData.
+fn readStrictMultiTileTilePartSpans(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    first_sot: usize,
+    grid: tile_grid.Grid,
+    levels: u8,
+    options: LosslessOptions,
+    tlm_entries: ?[]const TlmEntry,
+) !std.ArrayList(StrictMultiTileTilePartSpan) {
+    const tile_count = grid.tileCount();
+    if (tile_count > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+
+    var spans: std.ArrayList(StrictMultiTileTilePartSpan) = .empty;
+    errdefer spans.deinit(allocator);
+
+    var scan = first_sot;
+    var tile_index: u64 = 0;
+    while (scan < bytes.len) {
+        if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, scan);
+        if (marker == @intFromEnum(Marker.eoc)) {
+            scan += 2;
+            if (scan != bytes.len) return CodestreamError.InvalidCodestream;
+            if (tile_index != tile_count) return CodestreamError.InvalidCodestream;
+            if (tlm_entries) |entries| {
+                if (entries.len != tile_count) return CodestreamError.InvalidCodestream;
+            }
+            return spans;
+        }
+        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (tile_index >= tile_count) return CodestreamError.InvalidCodestream;
+
+        const sot = try readStrictSotInfo(bytes, scan);
+        // TLM cross-check first: a SOT that contradicts the stream's own index
+        // is corruption (InvalidCodestream); a self-consistent stream that is
+        // merely outside the v1 row-major discipline fails closed below as
+        // UnsupportedPayload.
+        if (tlm_entries) |entries| {
+            try validateStrictTlmEntry(entries, @intCast(tile_index), sot.tile_index, sot.psot);
+        }
+        if (sot.tile_index != tile_index) return CodestreamError.UnsupportedPayload;
+        if (sot.tile_part_index != 0 or sot.tile_part_count != 1) return CodestreamError.UnsupportedPayload;
+
+        const tile_part_end = try std.math.add(usize, scan, sot.psot);
+        if (tile_part_end > bytes.len or tile_part_end < scan + 12) {
+            return CodestreamError.TruncatedData;
+        }
+
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(allocator);
+        const sod = try readTilePartHeaderMarkers(allocator, bytes, scan + 12, tile_part_end, &packet_lengths);
+        const packet_payload_bytes = try validateStrictTilePartPacketSpan(sod, tile_part_end, packet_lengths.items);
+        if (packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
+
+        const tile = grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
+        const tile_plan = try makePacketPlan(
+            @as(usize, tile.rect.width()),
+            @as(usize, tile.rect.height()),
+            levels,
+            options,
+        );
+        if (@as(u64, @intCast(packet_lengths.items.len)) != tile_plan.packets) {
+            return CodestreamError.InvalidCodestream;
+        }
+
+        try spans.append(allocator, .{
+            .tile_index = sot.tile_index,
+            .sot_start = scan,
+            .sod = sod,
+            .end = tile_part_end,
+            .packet_payload_bytes = packet_payload_bytes,
+            .packet_count = packet_lengths.items.len,
+        });
+        tile_index += 1;
+        scan = tile_part_end;
+    }
+
+    return CodestreamError.InvalidCodestream;
+}
+
 fn readStrictTilePartHeader(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -5210,6 +5356,11 @@ const TemporaryHeader = struct {
     code_block_style: ebcot.CodeBlockStyle = .{},
     block_width: u16,
     block_height: u16,
+    /// SIZ tile dimensions; 0 means image-sized (single tile). Multi-tile
+    /// streams carry the real XTSiz/YTSiz so the decode stages can rebuild
+    /// the tile grid.
+    tile_width: u32 = 0,
+    tile_height: u32 = 0,
     tile_part_divisions: ?u8,
     tile_part_plan_count: u8,
     tile_part_plan: [33]u8,
