@@ -3877,10 +3877,14 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
     }
 
     {
+        // Multi-tile SIZ (XTSiz < image width) is accepted since the multi-tile
+        // encode slice landed; the wrapper only requires a valid B.3 grid.
         const multi_tile_width = try allocator.dupe(u8, wrapped);
         defer allocator.free(multi_tile_width);
         multi_tile_width[jp2c_payload.start + 27] = 1;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(multi_tile_width));
+        const multi_tile_info = try jp2.parseInfo(multi_tile_width);
+        try std.testing.expectEqual(@as(usize, 2), multi_tile_info.width);
+        try std.testing.expectEqual(@as(usize, 1), multi_tile_info.height);
     }
 
     {
@@ -8764,6 +8768,205 @@ test "mct none codes components independently and roundtrips losslessly" {
     var decoded = try codestream.decodeLosslessTemporary(allocator, no_mct);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
+fn makeMultiTileTestImage(allocator: std.mem.Allocator, width: usize, height: usize) ![]u16 {
+    const samples = try allocator.alloc(u16, width * height * 3);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const base = (y * width + x) * 3;
+            samples[base + 0] = @intCast((17 + x * 19 + y * 31) & 0xff);
+            samples[base + 1] = @intCast((71 + x * 7 + y * 13) & 0xff);
+            samples[base + 2] = @intCast((139 + x * 23 + y * 5) & 0xff);
+        }
+    }
+    return samples;
+}
+
+const multi_tile_test_options = codestream.LosslessOptions{
+    .levels = 2,
+    .tile_width = 16,
+    .tile_height = 16,
+    .block_width = 4,
+    .block_height = 4,
+    .precincts = [_]codestream.PrecinctSize{.{ .width = 4, .height = 4 }} ** 33,
+    .precinct_count = 1,
+};
+
+test "multi-tile encode emits row-major single-part tiles with TLM" {
+    const allocator = std.testing.allocator;
+    // 24x24 with 16x16 tiles: a 2x2 grid whose right/bottom tiles are 8-wide
+    // edge tiles. Alignment holds (16 % (2^2 * 4) == 0) and every tile achieves
+    // the global two decomposition levels.
+    const width = 24;
+    const height = 24;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+
+    // SIZ advertises the real tile grid.
+    const siz = findMarker(bytes, codestream.markerValue("siz")) orelse return error.MissingSiz;
+    try std.testing.expectEqual(@as(u32, width), readU32BeTest(bytes, siz + 6));
+    try std.testing.expectEqual(@as(u32, height), readU32BeTest(bytes, siz + 10));
+    try std.testing.expectEqual(@as(u32, 16), readU32BeTest(bytes, siz + 22));
+    try std.testing.expectEqual(@as(u32, 16), readU32BeTest(bytes, siz + 26));
+
+    // One TLM segment with four entries (Ttlm u16 + Ptlm u32 each).
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingTlm;
+    try std.testing.expectEqual(@as(u16, 4 + 4 * 6), readU16BeTest(bytes, tlm + 2));
+
+    // Four SOT markers: row-major Isot 0..3, TPsot = 0, TNsot = 1, and each
+    // Psot chains exactly to the next SOT (the last one to EOC).
+    try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+    var sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    for (0..4) |tile_index| {
+        try std.testing.expectEqual(@as(u16, 10), readU16BeTest(bytes, sot + 2));
+        try std.testing.expectEqual(@as(u16, @intCast(tile_index)), readU16BeTest(bytes, sot + 4));
+        const psot = readU32BeTest(bytes, sot + 6);
+        try std.testing.expectEqual(@as(u8, 0), bytes[sot + 10]);
+        try std.testing.expectEqual(@as(u8, 1), bytes[sot + 11]);
+        const next = sot + @as(usize, psot);
+        if (tile_index < 3) {
+            try std.testing.expectEqual(codestream.markerValue("sot"), readU16BeTest(bytes, next));
+            sot = next;
+        } else {
+            try std.testing.expectEqual(codestream.markerValue("eoc"), readU16BeTest(bytes, next));
+            try std.testing.expectEqual(bytes.len, next + 2);
+        }
+    }
+
+    // Encoding is deterministic across worker counts.
+    var threaded_options = multi_tile_test_options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    // The JP2 wrapper accepts the multi-tile SIZ.
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(usize, width), info.width);
+
+    // Stage B/C pending: the strict decoder still fails closed on Isot != 0.
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, bytes),
+    );
+}
+
+test "multi-tile encode fails closed outside the v1 envelope" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 24;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Case = struct {
+        label: []const u8,
+        mutate: *const fn (options: *codestream.LosslessOptions) void,
+    };
+    const cases = [_]Case{
+        .{ .label = "quality layers", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.layers = 2;
+            }
+        }.mutate },
+        .{ .label = "mct none", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.mct = .none;
+            }
+        }.mutate },
+        .{ .label = "bypass", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.bypass = true;
+            }
+        }.mutate },
+        .{ .label = "terminate-all", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.terminate_all = true;
+            }
+        }.mutate },
+        .{ .label = "vertical causal", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.vertical_causal = true;
+            }
+        }.mutate },
+        .{ .label = "segmentation symbols", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.segmentation_symbols = true;
+            }
+        }.mutate },
+        .{ .label = "debug sidecar", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.emit_temporary_payload_sidecar = true;
+            }
+        }.mutate },
+        .{ .label = "lossy 9/7", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.transform = .irreversible_9_7;
+                options.mct = .ict;
+                options.quantization = .scalar_expounded;
+            }
+        }.mutate },
+        .{ .label = "misaligned tile size", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                // 20 is not a multiple of 2^levels x precinct (16), so tile
+                // origins would not land on partition boundaries.
+                options.tile_width = 20;
+            }
+        }.mutate },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("multi-tile fail-close case failed: {s}\n", .{scenario.label});
+        var options = multi_tile_test_options;
+        scenario.mutate(&options);
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.encodeLosslessWithOptions(allocator, rgb, options),
+        );
+    }
+}
+
+test "multi-tile encode rejects tiles that clamp the global DWT level count" {
+    const allocator = std.testing.allocator;
+    // 18x18 with 16x16 tiles keeps the alignment guard satisfied
+    // (16 % (2^2 * 4) == 0) but produces 2-wide edge tiles that can only
+    // achieve one decomposition level against the global two, so COD would
+    // lie about them (docs/multi_tile_plan.md section 2.3).
+    const width = 18;
+    const height = 18;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options),
+    );
 }
 
 test "corrupted segmentation symbol is caught as a bounded decode error" {

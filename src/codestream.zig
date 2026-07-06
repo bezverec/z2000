@@ -10,6 +10,7 @@ const rate_alloc = @import("rate_alloc.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
 const tile_grid = @import("tile_grid.zig");
+const tile_pipeline = @import("tile_pipeline.zig");
 const wavelet_int = @import("wavelet_int.zig");
 const wavelet = @import("wavelet.zig");
 
@@ -1301,7 +1302,10 @@ fn encodeLosslessWithOptionsMeasured(
     }
     if (options.levels > 32) return CodestreamError.TooManyLevels;
     try validateBlockSize(options.block_width, options.block_height);
-    try validateTileSize(options.tile_width, options.tile_height, rgb.width, rgb.height);
+    const grid = tile_grid.Grid.fromImageSize(rgb.width, rgb.height, options.tile_width, options.tile_height) catch |err| switch (err) {
+        tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
+        tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
+    };
     try validatePrecincts(options);
     try validateTilePartDivisions(options.tile_part_divisions);
     try validateCodingPath(options);
@@ -1310,6 +1314,10 @@ fn encodeLosslessWithOptionsMeasured(
     if (options.rate_count > options.layers) return CodestreamError.InvalidCodestream;
     try validateRates(options);
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
+
+    if (!grid.isSingleTile()) {
+        return encodeLosslessMultiTileMeasured(allocator, rgb, grid, options, timings, total_start);
+    }
 
     const levels = actualDwtLevels(rgb.width, rgb.height, options.levels);
     const color_start = monotonicNs();
@@ -7530,12 +7538,152 @@ fn validateBlockSize(width: u16, height: u16) !void {
     if (@as(u32, width) * @as(u32, height) > 4096) return CodestreamError.InvalidCodestream;
 }
 
-fn validateTileSize(width: u32, height: u32, image_width: usize, image_height: usize) !void {
-    const grid = tile_grid.Grid.fromImageSize(image_width, image_height, width, height) catch |err| switch (err) {
-        tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
-        tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
+/// Multi-tile v1 constraints (docs/multi_tile_plan.md §3): the tile pipeline
+/// currently covers reversible 5/3 + RCT, a single quality layer, the plain
+/// code-block style, and one tile-part per tile in row-major order. Everything
+/// outside that fails closed so the COD/SIZ markers never advertise behavior
+/// the tile encoder does not implement.
+fn validateMultiTileCodingPath(options: LosslessOptions) !void {
+    if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
+    if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
+    if (options.layers != 1 or options.rate_count != 0) return CodestreamError.UnsupportedPayload;
+    if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
+    if (options.bypass or options.reset_context or options.terminate_all or
+        options.vertical_causal or options.predictable_termination or
+        options.segmentation_symbols)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
+}
+
+/// Multi-tile v1 conformance guards (docs/multi_tile_plan.md §2.3 and risk #2):
+///
+/// (a) COD's NL is global, so every tile must achieve exactly the image-level
+/// decomposition count — tiles small enough to clamp are rejected.
+///
+/// (b) The tile pipeline anchors precinct and code-block partitions at the
+/// tile-local origin, while ISO B.6/B.7 anchor them to the reference grid.
+/// Both derivations coincide when every tile origin lands on a partition
+/// boundary at every resolution. With XTOSiz = 0 and power-of-two precincts,
+/// a sufficient condition (expects `options` pre-normalized so the precinct
+/// list covers all resolutions): every precinct is at least the code-block
+/// size, and XTSiz/YTSiz are multiples of 2^levels x the largest precinct —
+/// then tile origins are multiples of every partition step at every
+/// resolution. Misaligned grids fail closed until reference-grid anchoring
+/// is implemented.
+fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: LosslessOptions) !void {
+    var max_precinct_width: u32 = 1;
+    var max_precinct_height: u32 = 1;
+    for (options.precincts[0..options.precinct_count]) |precinct| {
+        if (precinct.width < options.block_width or precinct.height < options.block_height) {
+            return CodestreamError.UnsupportedPayload;
+        }
+        max_precinct_width = @max(max_precinct_width, precinct.width);
+        max_precinct_height = @max(max_precinct_height, precinct.height);
+    }
+    if (levels > 32) return CodestreamError.UnsupportedPayload;
+    const level_scale = @as(u64, 1) << @as(u6, @intCast(levels));
+    const x_step = level_scale * max_precinct_width;
+    const y_step = level_scale * max_precinct_height;
+    if (grid.params.xtsiz % x_step != 0 or grid.params.ytsiz % y_step != 0) {
+        return CodestreamError.UnsupportedPayload;
+    }
+
+    var iterator = grid.iterator();
+    while (iterator.next() catch return CodestreamError.InvalidCodestream) |tile| {
+        const tile_width = @as(usize, tile.rect.width());
+        const tile_height = @as(usize, tile.rect.height());
+        if (actualDwtLevels(tile_width, tile_height, levels) != levels) {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+}
+
+fn encodeLosslessMultiTileMeasured(
+    allocator: std.mem.Allocator,
+    rgb: image.RgbImage,
+    grid: tile_grid.Grid,
+    options: LosslessOptions,
+    timings: ?*EncodeTimings,
+    total_start: u64,
+) ![]u8 {
+    try validateMultiTileCodingPath(options);
+
+    const levels = actualDwtLevels(rgb.width, rgb.height, options.levels);
+    const encode_options = normalizedEncodePrecinctOptions(options, levels);
+    try validateMultiTileGeometry(grid, levels, encode_options);
+
+    var scaffold_precincts: [33]packet_plan.Precinct = undefined;
+    for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {
+        scaffold_precincts[index] = .{ .width = precinct.width, .height = precinct.height };
+    }
+
+    const payload_start = monotonicNs();
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
+        allocator,
+        rgb,
+        grid,
+        levels,
+        .{
+            .layers = encode_options.layers,
+            .block_width = encode_options.block_width,
+            .block_height = encode_options.block_height,
+            .precincts = scaffold_precincts[0..encode_options.precinct_count],
+        },
+        .{},
+        encode_options.threads,
+    );
+    defer artifacts.deinit();
+    // COD advertises one global NL; the geometry guard above should make
+    // per-tile clamping impossible, but verify what the pipeline achieved.
+    for (artifacts.tiles) |tile_artifacts| {
+        if (tile_artifacts.levels != levels) return CodestreamError.InvalidCodestream;
+    }
+    if (timings) |t| t.payload_ns = elapsedNs(payload_start);
+
+    const marker_start = monotonicNs();
+    // Multi-tile v1 emits exactly one tile-part per tile in row-major order
+    // (TPsot = 0, TNsot = 1); resolution tile-part divisions compose with the
+    // tile grid in a later slice, so options.tile_part_divisions is ignored.
+    const layout_options = tile_pipeline.TilePartLayoutOptions{
+        .sop = encode_options.sop,
+        .eph = encode_options.eph,
+        .plt = true,
     };
-    if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
+    var layout = try tile_pipeline.buildTilePartLayoutForGridArtifacts(allocator, artifacts, layout_options);
+    defer layout.deinit();
+    var tlm_plan: ?tile_pipeline.TilePartTlmPlan = if (encode_options.tlm)
+        try tile_pipeline.buildTilePartTlmPlan(allocator, layout)
+    else
+        null;
+    defer if (tlm_plan) |*plan| plan.deinit();
+    var plt_plan = try tile_pipeline.buildTilePartPltPlan(allocator, artifacts, layout, layout_options);
+    defer plt_plan.deinit();
+    var sequence = try tile_pipeline.buildTilePartSequence(
+        allocator,
+        artifacts,
+        layout,
+        tlm_plan,
+        plt_plan,
+        .{ .tlm = encode_options.tlm, .tile_part = layout_options },
+    );
+    defer sequence.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendMarker(allocator, &out, .soc);
+    try appendSiz(allocator, &out, rgb, encode_options);
+    try appendCod(allocator, &out, levels, encode_options);
+    try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+    try out.appendSlice(allocator, sequence.bytes);
+    try appendMarker(allocator, &out, .eoc);
+    if (timings) |t| {
+        t.marker_ns = elapsedNs(marker_start);
+        t.total_ns = elapsedNs(total_start);
+    }
+
+    return out.toOwnedSlice(allocator);
 }
 
 fn validatePrecincts(options: LosslessOptions) !void {
