@@ -72,6 +72,78 @@ pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbIma
     };
 }
 
+/// mct = none: no inter-component decorrelation. Each component is coded
+/// independently, so it carries only the ISO B.1.1 DC level shift
+/// (2^(Ssiz-1)). The three output planes reuse the generic RctPlanes carrier
+/// (y/cb/cr hold component 0/1/2 directly).
+pub fn forwardNoTransform(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes {
+    if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
+    const pixels = try std.math.mul(usize, rgb.width, rgb.height);
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
+
+    const c0 = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(c0);
+    const c1 = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(c1);
+    const c2 = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(c2);
+
+    const level_shift = try dcLevelShift(rgb.bit_depth);
+    var i: usize = 0;
+    while (i < pixels) : (i += 1) {
+        c0[i] = @as(i32, rgb.samples[i * 3]) - level_shift;
+        c1[i] = @as(i32, rgb.samples[i * 3 + 1]) - level_shift;
+        c2[i] = @as(i32, rgb.samples[i * 3 + 2]) - level_shift;
+    }
+
+    return .{
+        .allocator = allocator,
+        .width = rgb.width,
+        .height = rgb.height,
+        .bit_depth = rgb.bit_depth,
+        .y = c0,
+        .cb = c1,
+        .cr = c2,
+    };
+}
+
+pub fn inverseNoTransform(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbImage {
+    const pixels = try std.math.mul(usize, planes.width, planes.height);
+    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
+        return ColorError.InvalidImage;
+    }
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    const max_sample_value = try maxSample(planes.bit_depth);
+    const level_shift = try dcLevelShift(planes.bit_depth);
+
+    const samples = try allocator.alloc(u16, sample_count);
+    errdefer allocator.free(samples);
+
+    var i: usize = 0;
+    while (i < pixels) : (i += 1) {
+        const c0 = planes.y[i] + level_shift;
+        const c1 = planes.cb[i] + level_shift;
+        const c2 = planes.cr[i] + level_shift;
+        if (c0 < 0 or c1 < 0 or c2 < 0 or
+            c0 > max_sample_value or c1 > max_sample_value or c2 > max_sample_value)
+        {
+            return ColorError.SampleOutOfRange;
+        }
+        samples[i * 3] = @intCast(c0);
+        samples[i * 3 + 1] = @intCast(c1);
+        samples[i * 3 + 2] = @intCast(c2);
+    }
+
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = planes.bit_depth,
+        .samples = samples,
+    };
+}
+
 const rct_lanes = simd.i32_lanes;
 const RctVector = @Vector(rct_lanes, i32);
 const RctShiftVector = @Vector(rct_lanes, u5);
