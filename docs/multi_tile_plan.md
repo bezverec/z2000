@@ -144,16 +144,34 @@ closed at the block-catalog stage (Stage C pending) — asserted by test.
 of 2, TLM length mismatch, truncated final tile-part); the full existing
 suite covers the single-tile regression (253/253, Debug + ReleaseFast).
 
-### Stage C — Decode: per-tile strict T2+T1 (~1–2 sessions, the big one)
-Refactor the strict reader chain to take tile geometry (`width`, `height`,
-per-tile `makePacketPlan`) instead of reading them from the whole-image
-header; loop tiles → per-tile block catalog → T1 → `inverse53TileInPlace` →
-`inverseRctTileInto` → `copyRgbTileInto` + full-coverage check. *Tests:* the
-payoff oracle — public `encode → decode` byte-exact roundtrip on 2×2 and 3×3
-edge-tile grids (mirroring the existing artifact-level test, now through real
-codestream bytes); `tile == image` equals the single-tile decode result;
-cross-thread determinism; corrupted per-tile packet → bounded error naming
-the tile.
+### Stage C — Decode: per-tile strict T2+T1 — ✅ DONE
+Landed with a lighter refactor than sketched: instead of threading tile
+geometry through every strict-reader function, each tile decodes as its own
+single-tile image via a **per-tile `TemporaryHeader`** (tile dims + the
+tile's own packet plan; precincts reconstructed from the whole-image plan's
+per-resolution dims). `decodeStrictMultiTileImageMeasured` loops the Stage B
+spans: `readStrictMultiTileTilePartPacketCatalog` (tile-local RPCL iterator
+over the PLT lengths, SOP restarting per tile) → the *unchanged*
+`assembleStrictPacketCatalogHeaders` → block catalog →
+`decodeStrictRpclImageFromBlockCatalogMeasured` (T1 → DWT⁻¹ → MCT⁻¹, all
+header-driven) → `tile_grid.copyRgbTileInto`. Tiles decode serially; the
+existing per-block threading applies within each tile. Single-tile decode is
+untouched (the branch keys on the header's SIZ tile dims).
+
+*Conformance find:* the first roundtrip attempt exposed that 4×4 blocks with
+4×4 precincts are **not ISO-legal** — B.7 bounds the effective code-block by
+the precinct span in band coordinates (full precinct at r=0, half above), and
+the two RPCL index builders disagree on such configs (a block spanning
+precincts double-includes → `InvalidCodestream`). `validateMultiTileGeometry`
+now enforces the exact B.7 bound (r=0: precinct ≥ block; r>0: precinct/2 ≥
+block) on both encode and decode; the fixtures moved to 8×8 precincts with
+32-wide tiles.
+
+*Tests:* the payoff oracle — public `encode → decode` byte-exact roundtrip on
+2×2 (48×48) and 3×3 (80×80) edge-tile grids through real codestream bytes;
+`tile == image` vs 2×1 grid both reconstruct the source; decode determinism
+across worker counts; corrupted second-tile payload → bounded error, never a
+panic. 256/256 in Debug + ReleaseFast.
 
 ### Stage D — Hardening + docs (~½ session)
 Memory note (grid encode currently holds *all* tile artifacts before

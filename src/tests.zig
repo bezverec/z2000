@@ -8783,23 +8783,27 @@ fn makeMultiTileTestImage(allocator: std.mem.Allocator, width: usize, height: us
     return samples;
 }
 
+// Multi-tile fixture geometry: 8x8 precincts with 4x4 blocks satisfy the ISO
+// B.7 bound (blocks never cross precinct boundaries: 8 >= 4 at resolution 0,
+// 8/2 >= 4 above it), and 32-wide tiles satisfy the partition-anchoring guard
+// (32 % (2^2 * 8) == 0).
 const multi_tile_test_options = codestream.LosslessOptions{
     .levels = 2,
-    .tile_width = 16,
-    .tile_height = 16,
+    .tile_width = 32,
+    .tile_height = 32,
     .block_width = 4,
     .block_height = 4,
-    .precincts = [_]codestream.PrecinctSize{.{ .width = 4, .height = 4 }} ** 33,
+    .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
     .precinct_count = 1,
 };
 
 test "multi-tile encode emits row-major single-part tiles with TLM" {
     const allocator = std.testing.allocator;
-    // 24x24 with 16x16 tiles: a 2x2 grid whose right/bottom tiles are 8-wide
-    // edge tiles. Alignment holds (16 % (2^2 * 4) == 0) and every tile achieves
+    // 48x48 with 32x32 tiles: a 2x2 grid whose right/bottom tiles are 16-wide
+    // edge tiles. Alignment holds (32 % (2^2 * 8) == 0) and every tile achieves
     // the global two decomposition levels.
-    const width = 24;
-    const height = 24;
+    const width = 48;
+    const height = 48;
     const samples = try makeMultiTileTestImage(allocator, width, height);
     defer allocator.free(samples);
     const rgb = image.RgbImage{
@@ -8817,8 +8821,8 @@ test "multi-tile encode emits row-major single-part tiles with TLM" {
     const siz = findMarker(bytes, codestream.markerValue("siz")) orelse return error.MissingSiz;
     try std.testing.expectEqual(@as(u32, width), readU32BeTest(bytes, siz + 6));
     try std.testing.expectEqual(@as(u32, height), readU32BeTest(bytes, siz + 10));
-    try std.testing.expectEqual(@as(u32, 16), readU32BeTest(bytes, siz + 22));
-    try std.testing.expectEqual(@as(u32, 16), readU32BeTest(bytes, siz + 26));
+    try std.testing.expectEqual(@as(u32, 32), readU32BeTest(bytes, siz + 22));
+    try std.testing.expectEqual(@as(u32, 32), readU32BeTest(bytes, siz + 26));
 
     // One TLM segment with four entries (Ttlm u16 + Ptlm u32 each).
     const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingTlm;
@@ -8857,17 +8861,17 @@ test "multi-tile encode emits row-major single-part tiles with TLM" {
     const info = try jp2.parseInfo(wrapped);
     try std.testing.expectEqual(@as(usize, width), info.width);
 
-    // Stage B/C pending: the strict decoder still fails closed on Isot != 0.
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessTemporary(allocator, bytes),
-    );
+    // Stage C: the strict decoder reconstructs the multi-tile stream
+    // byte-exactly (lossless oracle).
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
 test "multi-tile encode fails closed outside the v1 envelope" {
     const allocator = std.testing.allocator;
-    const width = 24;
-    const height = 24;
+    const width = 48;
+    const height = 48;
     const samples = try makeMultiTileTestImage(allocator, width, height);
     defer allocator.free(samples);
     const rgb = image.RgbImage{
@@ -8927,7 +8931,7 @@ test "multi-tile encode fails closed outside the v1 envelope" {
         }.mutate },
         .{ .label = "misaligned tile size", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
-                // 20 is not a multiple of 2^levels x precinct (16), so tile
+                // 20 is not a multiple of 2^levels x precinct (32), so tile
                 // origins would not land on partition boundaries.
                 options.tile_width = 20;
             }
@@ -8947,8 +8951,8 @@ test "multi-tile encode fails closed outside the v1 envelope" {
 
 test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
     const allocator = std.testing.allocator;
-    const width = 24;
-    const height = 24;
+    const width = 48;
+    const height = 48;
     const samples = try makeMultiTileTestImage(allocator, width, height);
     defer allocator.free(samples);
     const rgb = image.RgbImage{
@@ -8962,12 +8966,12 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
     const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
     defer allocator.free(bytes);
 
-    // The intact stream passes the Stage B metadata walk and fails closed only
-    // at the (Stage C pending) block-catalog stage.
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessTemporary(allocator, bytes),
-    );
+    // The intact stream passes the Stage B walk and decodes losslessly.
+    {
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    }
 
     const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     const second_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
@@ -9061,14 +9065,126 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
     );
 }
 
+test "multi-tile codestream roundtrips a 3x3 edge-tile grid byte-exactly" {
+    const allocator = std.testing.allocator;
+    // 80x80 with 32x32 tiles: a 3x3 grid whose right/bottom tiles are 16 wide,
+    // exercising interior and both kinds of edge tiles through the public
+    // encode -> decode path (real codestream bytes, no artifact shortcuts).
+    const width = 80;
+    const height = 80;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+    try std.testing.expectEqual(@as(usize, 9), countMarker(bytes, codestream.markerValue("sot")));
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    // Decoding is deterministic across decode worker counts.
+    var threaded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = 3 });
+    defer threaded.deinit();
+    try std.testing.expectEqualSlices(u16, decoded.samples, threaded.samples);
+}
+
+test "multi-tile decode matches the single-tile decode when the tile covers the image" {
+    const allocator = std.testing.allocator;
+    // Same image encoded once with tile == image (single-tile path) and once
+    // as a 2x1 grid; both must reconstruct the identical source samples.
+    const width = 64;
+    const height = 32;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var single_options = multi_tile_test_options;
+    single_options.tile_width = 64;
+    single_options.tile_height = 32;
+    const single = try codestream.encodeLosslessWithOptions(allocator, rgb, single_options);
+    defer allocator.free(single);
+    const single_xtsiz = blk: {
+        const siz = findMarker(single, codestream.markerValue("siz")) orelse return error.MissingSiz;
+        break :blk readU32BeTest(single, siz + 22);
+    };
+    try std.testing.expectEqual(@as(u32, 64), single_xtsiz);
+
+    const tiled = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(tiled);
+    try std.testing.expectEqual(@as(usize, 2), countMarker(tiled, codestream.markerValue("sot")));
+
+    var single_decoded = try codestream.decodeLosslessTemporary(allocator, single);
+    defer single_decoded.deinit();
+    var tiled_decoded = try codestream.decodeLosslessTemporary(allocator, tiled);
+    defer tiled_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, single_decoded.samples);
+    try std.testing.expectEqualSlices(u16, rgb.samples, tiled_decoded.samples);
+}
+
+test "corrupted multi-tile packet payload fails with a bounded error" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+
+    // Corrupt one payload byte inside the *second* tile-part (past its SOD) so
+    // the failure exercises the per-tile decode path, not the first tile.
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const second_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
+    const second_sod = findMarkerAfter(bytes, codestream.markerValue("sod"), second_sot) orelse return error.MissingSod;
+
+    var corrupt_offset = second_sod + 8;
+    var rejected = false;
+    // A single flipped byte may still parse (MQ streams tolerate some damage);
+    // walk a few offsets and require at least one bounded rejection with no
+    // panic on any of them.
+    while (corrupt_offset < second_sod + 24) : (corrupt_offset += 1) {
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        corrupted[corrupt_offset] ^= 0x5a;
+        if (codestream.decodeLosslessTemporary(allocator, corrupted)) |decoded_image| {
+            var owned = decoded_image;
+            owned.deinit();
+        } else |_| {
+            rejected = true;
+        }
+    }
+    try std.testing.expect(rejected);
+}
+
 test "multi-tile encode rejects tiles that clamp the global DWT level count" {
     const allocator = std.testing.allocator;
-    // 18x18 with 16x16 tiles keeps the alignment guard satisfied
+    // 34x34 with 32x32 tiles keeps the alignment guard satisfied
     // (16 % (2^2 * 4) == 0) but produces 2-wide edge tiles that can only
     // achieve one decomposition level against the global two, so COD would
     // lie about them (docs/multi_tile_plan.md section 2.3).
-    const width = 18;
-    const height = 18;
+    const width = 34;
+    const height = 34;
     const samples = try makeMultiTileTestImage(allocator, width, height);
     defer allocator.free(samples);
     const rgb = image.RgbImage{
