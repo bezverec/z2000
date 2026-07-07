@@ -39,7 +39,8 @@ directions). Scorecard claims applied in `iso_coverage.md`: narrow 86 → **88**
 Kakadu leg of the matrix remains open; the reverse direction (z2000 decoding
 OpenJPEG-encoded streams) still fail-closes on profile and stays future work.
 
-**Remaining top levers after this pass:** LRCP progression (3.2),
+**Remaining top levers after this pass:** ~~LRCP progression (3.2)~~ (landed
+same day with interop, see 3.2 — full 53 → **55**), RLCP/PCRL/CPRL (3.2),
 `--qstyle scalar-derived` (3.3), PCRD rate allocation (3.4), and
 `predictable_termination` (2.3, still needs a reference decoder in the loop —
 Kakadu or an instrumented OpenJPEG build).
@@ -321,7 +322,30 @@ notes follow.
   decode of a genuinely multi-tile file and the Phase-4 memory benchmark
   remain the external gates before the score is raised.
 
-### 3.2 Additional progression orders (LRCP first)
+### 3.2 Additional progression orders — ✅ LRCP DONE (interop passed); RLCP/PCRL/CPRL open
+
+**LRCP landed (2026-07-07) with the interop gate already passed.** Key insight
+that kept the change small: packet bodies do not depend on the progression
+order — T2 coder state is per-precinct and each precinct's layers stay in
+increasing order in both RPCL and LRCP — so an LRCP stream is a
+byte-preserving permutation of the RPCL packets. Implementation:
+`packet_plan.LrcpIterator` + `rpclSequenceForPacket` (identity↔slot mapping);
+the encoder reorders the RPCL-built stream (`reorderPacketStreamRpclToLrcp`);
+the strict decoder walks slots with the progression's iterator and permutes
+the catalog entries back to RPCL grouping (`reorderStrictEntriesToRpcl`) so
+the downstream audit/assembly chain is untouched. Multi-layer LRCP encodes a
+single tile-part (per-resolution R-divisions are impossible when layer is
+outermost); single-layer LRCP keeps R-divisions. Fail-closed: RLCP/PCRL/CPRL,
+multi-tile LRCP, LRCP+debug-sidecar. Tests: iterator bijection oracle,
+lossless roundtrip at 1 and 3 layers with genuinely permuted streams, COD
+byte checks, fail-closed matrix updates. Interop: OpenJPEG 2.5.4 + Grok
+20.3.6 decode 1024x1024 LRCP output pixel-losslessly at 1, 4, and 4+BYPASS
+layers; jpylyzer valid with `<order>LRCP</order>`. Scorecard: full
+"T2 completeness" 5→6, "core codestream syntax" +1 — claimed.
+
+Remaining for this item: RLCP (nearly free — same permutation approach with a
+resolution-outer/layer-second iterator), then PCRL/CPRL (position-major;
+needs the precinct-geometry cache the roadmap calls for).
 
 - **Impact:** full "T2 completeness" 5→6/7, "core codestream syntax" +1. (+2)
 - **Effort:** M–L · **Risk:** Medium (new packet iterators; RPCL discipline is

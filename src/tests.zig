@@ -3006,7 +3006,7 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
             .{ .label = "unsupported progression", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
-                    bytes[cod + 5] = @intFromEnum(codestream.ProgressionOrder.lrcp);
+                    bytes[cod + 5] = @intFromEnum(codestream.ProgressionOrder.pcrl);
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
             .{ .label = "zero layers", .mutate = struct {
@@ -3077,6 +3077,7 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             .{ .label = "CAUSAL style bit", .offset = 12, .value = 0x08 },
             .{ .label = "SEGMARK style bit", .offset = 12, .value = 0x20 },
             .{ .label = "disabled MCT", .offset = 8, .value = 0 },
+            .{ .label = "LRCP progression", .offset = 5, .value = 0 },
         };
         for (accepted_cod_mutations) |scenario| {
             errdefer std.debug.print("JP2 COD accepted-profile case failed: {s}\n", .{scenario.label});
@@ -8806,6 +8807,100 @@ test "mct none codes components independently and roundtrips losslessly" {
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
+test "LRCP iterator emits layer-major packets that map back to RPCL slots" {
+    const precincts = [_]packet_plan.Precinct{.{ .width = 8, .height = 8 }};
+    const plan = try packet_plan.rpclSingleTile(17, 9, 2, 3, 2, &precincts);
+    const total = std.math.cast(usize, plan.packets).?;
+
+    var seen = [_]bool{false} ** 64;
+    try std.testing.expect(total <= seen.len);
+
+    var iterator = try packet_plan.LrcpIterator.init(plan, 3, 2);
+    var count: usize = 0;
+    var previous_layer: u16 = 0;
+    while (iterator.next()) |packet| {
+        try std.testing.expectEqual(@as(u64, count), packet.sequence);
+        // Layer is the outermost axis: it never decreases along the stream.
+        try std.testing.expect(packet.layer >= previous_layer);
+        previous_layer = packet.layer;
+
+        // Every LRCP packet maps to a distinct RPCL slot with the same identity.
+        const slot = try packet_plan.rpclSequenceForPacket(plan, 3, 2, packet);
+        const index = std.math.cast(usize, slot).?;
+        try std.testing.expect(index < total);
+        try std.testing.expect(!seen[index]);
+        seen[index] = true;
+
+        const rpcl_packet = (try packet_plan.rpclPacketAt(plan, 3, 2, slot)).?;
+        try std.testing.expectEqual(rpcl_packet.resolution, packet.resolution);
+        try std.testing.expectEqual(rpcl_packet.precinct_index, packet.precinct_index);
+        try std.testing.expectEqual(rpcl_packet.component, packet.component);
+        try std.testing.expectEqual(rpcl_packet.layer, packet.layer);
+        count += 1;
+    }
+    try std.testing.expectEqual(total, count);
+    for (seen[0..total]) |slot_seen| try std.testing.expect(slot_seen);
+}
+
+test "LRCP progression roundtrips losslessly and permutes the RPCL packet stream" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 32;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    // 8x8 precincts with 4x4 blocks give several precincts per resolution, so
+    // LRCP genuinely interleaves the stream differently from RPCL.
+    for ([_]u16{ 1, 3 }) |layers| {
+        const base = codestream.LosslessOptions{
+            .levels = 2,
+            .layers = layers,
+            .block_width = 4,
+            .block_height = 4,
+            .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+            .precinct_count = 1,
+        };
+        var lrcp_options = base;
+        lrcp_options.progression = .lrcp;
+
+        const lrcp = try codestream.encodeLosslessWithOptions(allocator, rgb, lrcp_options);
+        defer allocator.free(lrcp);
+        const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, base);
+        defer allocator.free(rpcl);
+
+        // The COD progression byte advertises the requested order.
+        const lrcp_cod = findMarker(lrcp, codestream.markerValue("cod")) orelse return error.MissingCod;
+        const rpcl_cod = findMarker(rpcl, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(@as(u8, 0), lrcp[lrcp_cod + 5]);
+        try std.testing.expectEqual(@as(u8, 2), rpcl[rpcl_cod + 5]);
+
+        // The permuted packet order produces a different stream.
+        try std.testing.expect(!std.mem.eql(u8, lrcp, rpcl));
+
+        // Both progressions reconstruct the source byte-exactly.
+        var decoded_lrcp = try codestream.decodeLosslessTemporary(allocator, lrcp);
+        defer decoded_lrcp.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded_lrcp.samples);
+
+        var decoded_rpcl = try codestream.decodeLosslessTemporary(allocator, rpcl);
+        defer decoded_rpcl.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded_rpcl.samples);
+    }
+}
+
 fn makeMultiTileTestImage(allocator: std.mem.Allocator, width: usize, height: usize) ![]u16 {
     const samples = try allocator.alloc(u16, width * height * 3);
     for (0..height) |y| {
@@ -9345,7 +9440,7 @@ test "unsupported JP2 profile marker options fail closed" {
         options: codestream.LosslessOptions,
     };
     const cases = [_]UnsupportedCase{
-        .{ .label = "LRCP progression", .options = .{ .progression = .lrcp } },
+        .{ .label = "LRCP with debug sidecar", .options = .{ .progression = .lrcp, .emit_temporary_payload_sidecar = true } },
         .{ .label = "RLCP progression", .options = .{ .progression = .rlcp } },
         .{ .label = "PCRL progression", .options = .{ .progression = .pcrl } },
         .{ .label = "CPRL progression", .options = .{ .progression = .cprl } },
@@ -9357,6 +9452,8 @@ test "unsupported JP2 profile marker options fail closed" {
         .{ .label = "scalar-derived quantization", .options = .{ .quantization = .scalar_derived } },
         .{ .label = "scalar-expounded quantization", .options = .{ .quantization = .scalar_expounded } },
         .{ .label = "multi-tile request", .options = .{ .tile_width = 1, .tile_height = 2 } },
+        // The multi-tile v1 envelope is RPCL-only; LRCP must fail closed there.
+        .{ .label = "LRCP multi-tile", .options = .{ .progression = .lrcp, .tile_width = 1, .tile_height = 2 } },
     };
 
     for (cases) |scenario| {

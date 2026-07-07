@@ -44,6 +44,20 @@ pub const Packet = struct {
     layer: u16,
 };
 
+fn validatePlan(plan: Plan, components: u16, layers: u16) !void {
+    if (components == 0 or layers == 0) return PacketPlanError.InvalidDimensions;
+    if (plan.resolution_count == 0 or plan.resolution_count > plan.resolutions.len) {
+        return PacketPlanError.InvalidDimensions;
+    }
+
+    var expected_packets: u64 = 0;
+    for (plan.resolutions[0..plan.resolution_count]) |resolution| {
+        try validateResolution(resolution, components, layers);
+        expected_packets = try std.math.add(u64, expected_packets, resolution.packets);
+    }
+    if (expected_packets != plan.packets) return PacketPlanError.InvalidDimensions;
+}
+
 pub const RpclIterator = struct {
     plan: Plan,
     components: u16,
@@ -55,18 +69,7 @@ pub const RpclIterator = struct {
     sequence: u64 = 0,
 
     pub fn init(plan: Plan, components: u16, layers: u16) !RpclIterator {
-        if (components == 0 or layers == 0) return PacketPlanError.InvalidDimensions;
-        if (plan.resolution_count == 0 or plan.resolution_count > plan.resolutions.len) {
-            return PacketPlanError.InvalidDimensions;
-        }
-
-        var expected_packets: u64 = 0;
-        for (plan.resolutions[0..plan.resolution_count]) |resolution| {
-            try validateResolution(resolution, components, layers);
-            expected_packets = try std.math.add(u64, expected_packets, resolution.packets);
-        }
-        if (expected_packets != plan.packets) return PacketPlanError.InvalidDimensions;
-
+        try validatePlan(plan, components, layers);
         return .{
             .plan = plan,
             .components = components,
@@ -111,6 +114,83 @@ pub const RpclIterator = struct {
         self.precinct_index += 1;
     }
 };
+
+/// ISO 15444-1 B.12.1.1 layer-resolution-component-position progression:
+/// layer is outermost, then resolution, component, and precinct. Emits the
+/// same packet identities as RpclIterator, only in LRCP stream order.
+pub const LrcpIterator = struct {
+    plan: Plan,
+    components: u16,
+    layers: u16,
+    layer: u16 = 0,
+    resolution: u8 = 0,
+    component: u16 = 0,
+    precinct_index: u64 = 0,
+    sequence: u64 = 0,
+
+    pub fn init(plan: Plan, components: u16, layers: u16) !LrcpIterator {
+        try validatePlan(plan, components, layers);
+        return .{
+            .plan = plan,
+            .components = components,
+            .layers = layers,
+        };
+    }
+
+    pub fn next(self: *LrcpIterator) ?Packet {
+        while (self.layer < self.layers) {
+            if (self.resolution >= self.plan.resolution_count) {
+                self.layer += 1;
+                self.resolution = 0;
+                self.component = 0;
+                self.precinct_index = 0;
+                continue;
+            }
+            const resolution = self.plan.resolutions[self.resolution];
+            if (self.precinct_index >= resolution.precincts) {
+                self.precinct_index = 0;
+                self.component += 1;
+                if (self.component >= self.components) {
+                    self.component = 0;
+                    self.resolution += 1;
+                }
+                continue;
+            }
+
+            const packet = Packet{
+                .sequence = self.sequence,
+                .resolution = self.resolution,
+                .precinct_x = @intCast(self.precinct_index % resolution.precincts_x),
+                .precinct_y = @intCast(self.precinct_index / resolution.precincts_x),
+                .precinct_index = self.precinct_index,
+                .component = self.component,
+                .layer = self.layer,
+            };
+            self.sequence += 1;
+            self.precinct_index += 1;
+            return packet;
+        }
+        return null;
+    }
+};
+
+/// Maps a packet identity to its slot in RPCL stream order, independent of
+/// the order the packet was emitted in. Used to permute packet streams and
+/// catalogs between progression orders.
+pub fn rpclSequenceForPacket(plan: Plan, components: u16, layers: u16, packet: Packet) !u64 {
+    if (packet.resolution >= plan.resolution_count) return PacketPlanError.InvalidDimensions;
+    if (packet.component >= components or packet.layer >= layers) return PacketPlanError.InvalidDimensions;
+    var offset: u64 = 0;
+    for (plan.resolutions[0..packet.resolution]) |resolution| {
+        offset = try std.math.add(u64, offset, resolution.packets);
+    }
+    if (packet.precinct_index >= plan.resolutions[packet.resolution].precincts) {
+        return PacketPlanError.InvalidDimensions;
+    }
+    const packets_per_precinct = @as(u64, components) * layers;
+    const precinct_offset = try std.math.mul(u64, packet.precinct_index, packets_per_precinct);
+    return offset + precinct_offset + @as(u64, packet.component) * layers + packet.layer;
+}
 
 pub fn rpclPacketAt(plan: Plan, components: u16, layers: u16, sequence: u64) !?Packet {
     _ = try RpclIterator.init(plan, components, layers);
