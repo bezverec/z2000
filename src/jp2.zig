@@ -587,12 +587,18 @@ fn validateFirstTilePartHeader(
         if ((marker >> 8) != 0xff) return Jp2Error.InvalidCodestream;
         switch (marker) {
             marker_sod => {
-                if (!plt_state.saw) return Jp2Error.UnsupportedProfile;
                 const payload_start = std.math.add(usize, cursor, 2) catch return Jp2Error.InvalidCodestream;
-                if (payload_start > end or plt_state.packet_bytes != end - payload_start) {
-                    return Jp2Error.InvalidCodestream;
+                if (payload_start > end) return Jp2Error.InvalidCodestream;
+                if (plt_state.saw) {
+                    if (plt_state.packet_bytes != end - payload_start) {
+                        return Jp2Error.InvalidCodestream;
+                    }
+                    try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
                 }
-                try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
+                // PLT-less tile-parts (default OpenJPEG/Grok/Kakadu output):
+                // packet spans are recoverable only by decoding the headers in
+                // stream order, which the strict decoder does (foreign
+                // Stage B); the wrapper skips per-packet frame validation.
                 return;
             },
             marker_plt, marker_com => {},
@@ -692,9 +698,16 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
 fn validateQcdSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, bit_depth: u8) !void {
     const style = payload[length_offset + 2];
     const guard_bits = style >> 5;
-    if (guard_bits != 2) return Jp2Error.UnsupportedProfile;
     const quantization_style = style & 0x1f;
     if (quantization_style > 2) return Jp2Error.InvalidCodestream;
+    // The irreversible step tables are pinned to z2000's OpenJPEG-compatible
+    // values, which assume two guard bits; the reversible path follows the
+    // signalled guard bits (foreign encoders use 1..7 — Kakadu writes 1).
+    if (cod.transform != 1) {
+        if (guard_bits != 2) return Jp2Error.UnsupportedProfile;
+    } else if (guard_bits == 0 or guard_bits > 7) {
+        return Jp2Error.InvalidCodestream;
+    }
     const bands: u16 = 1 + 3 * @as(u16, cod.levels);
     if (cod.transform == 0) {
         if (quantization_style == 1) {
@@ -711,7 +724,7 @@ fn validateQcdSegment(payload: []const u8, length_offset: usize, marker_length: 
     } else {
         if (quantization_style != 0) return Jp2Error.UnsupportedProfile;
         if (marker_length != 3 + bands) return Jp2Error.InvalidCodestream;
-        try validateReversibleQcdExponents(payload, length_offset + 3, cod.levels, bit_depth);
+        try validateReversibleQcdExponents(payload, length_offset + 3, bands, guard_bits);
     }
 }
 
@@ -733,16 +746,21 @@ fn expectScalarExpoundedQcdValue(payload: []const u8, cursor: *usize, bit_depth:
     cursor.* += 2;
 }
 
-fn validateReversibleQcdExponents(payload: []const u8, start: usize, levels: u8, bit_depth: u8) !void {
+/// Reversible SPqcd values carry epsilon_b in bits 7..3 (low bits must be
+/// zero). Foreign encoders choose legal exponents that differ from z2000's
+/// formula (Kakadu widens for the RCT), so the wrapper only bounds-checks:
+/// Mb = guard + epsilon - 1 must land in 1..31 (E-2).
+fn validateReversibleQcdExponents(payload: []const u8, start: usize, bands: u16, guard_bits: u8) !void {
     var cursor = start;
-    if (payload[cursor] != try reversibleQcdExponentByte(bit_depth, .ll)) return Jp2Error.UnsupportedProfile;
-    cursor += 1;
-    var level: u8 = 0;
-    while (level < levels) : (level += 1) {
-        inline for (.{ SubbandKind.hl, SubbandKind.lh, SubbandKind.hh }) |kind| {
-            if (payload[cursor] != try reversibleQcdExponentByte(bit_depth, kind)) return Jp2Error.UnsupportedProfile;
-            cursor += 1;
-        }
+    var band: u16 = 0;
+    while (band < bands) : (band += 1) {
+        const value = payload[cursor];
+        if ((value & 0x07) != 0) return Jp2Error.UnsupportedProfile;
+        const epsilon = value >> 3;
+        if (epsilon == 0) return Jp2Error.InvalidCodestream;
+        const nominal = @as(u16, epsilon) + guard_bits - 1;
+        if (nominal == 0 or nominal > 31) return Jp2Error.InvalidCodestream;
+        cursor += 1;
     }
 }
 

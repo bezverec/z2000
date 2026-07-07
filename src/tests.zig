@@ -3106,7 +3106,7 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
                 fn mutate(bytes: []u8, qcd: usize) void {
                     bytes[qcd + 4] = 0x00;
                 }
-            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "scalar-derived qstyle", .mutate = struct {
                 fn mutate(bytes: []u8, qcd: usize) void {
                     bytes[qcd + 4] = 0x41;
@@ -3124,7 +3124,7 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "bad reversible exponent", .mutate = struct {
                 fn mutate(bytes: []u8, qcd: usize) void {
-                    bytes[qcd + 5] ^= 0x08;
+                    bytes[qcd + 5] |= 0x04;
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
         };
@@ -6742,6 +6742,58 @@ test "precinct-less COD maps to maximal precincts and decodes byte-exactly" {
     allocator.free(wrapped);
 }
 
+test "foreign reversible QCD profiles decode via the signalled Mb" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 32;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(bytes);
+    const qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const lqcd = readU16BeTest(bytes, qcd + 2);
+    const exponent_count = @as(usize, lqcd) - 3;
+
+    // Zero-bitplane signalling is relative to Mb = G + epsilon_b - 1 (E-2).
+    // Rewriting guard bits and every exponent in opposite directions keeps
+    // every band's Mb identical, so a decoder that truly follows the
+    // signalled values reconstructs the exact pixels; foreign encoders
+    // (Kakadu: G=1 with widened exponents) rely on this.
+    const GuardShift = struct { guard: u8, exponent_delta: i16 };
+    const rewrites = [_]GuardShift{
+        .{ .guard = 1, .exponent_delta = 8 },
+        .{ .guard = 3, .exponent_delta = -8 },
+    };
+    for (rewrites) |rewrite| {
+        errdefer std.debug.print("QCD rewrite case failed: guard={}\n", .{rewrite.guard});
+        const rewritten = try allocator.dupe(u8, bytes);
+        defer allocator.free(rewritten);
+        rewritten[qcd + 4] = rewrite.guard << 5;
+        for (0..exponent_count) |index| {
+            const offset = qcd + 5 + index;
+            const updated = @as(i16, rewritten[offset]) + rewrite.exponent_delta;
+            rewritten[offset] = @intCast(updated);
+        }
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, rewritten);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    }
+}
+
 /// Removes every PLT segment from every tile-part, adjusting each SOT Psot
 /// and the TLM entries (single-tile 0x50 layout) to match. The result is a
 /// PLT-less stream shaped like default OpenJPEG/Grok output, driving the
@@ -8954,7 +9006,7 @@ test "strict QCD marker reader rejects unsupported quantization profile bytes" {
     };
     const cases = [_]QcdCase{
         .{ .label = "unsupported scalar quantization", .offset = 4, .value = 0x41, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "unsupported guard bits", .offset = 4, .value = 0x20, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "zero guard bits", .offset = 4, .value = 0x00, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported reversible exponent", .offset = 5, .value = 0x41, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "invalid quantization style", .offset = 4, .value = 0x5f, .expected = codestream.CodestreamError.InvalidCodestream },
     };
