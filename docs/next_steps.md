@@ -322,7 +322,22 @@ notes follow.
   decode of a genuinely multi-tile file and the Phase-4 memory benchmark
   remain the external gates before the score is raised.
 
-### 3.2 Additional progression orders — ✅ LRCP + RLCP DONE (interop passed); PCRL/CPRL open
+### 3.2 Additional progression orders — ✅ ALL FIVE DONE (interop passed)
+
+**PCRL + CPRL landed (2026-07-07), completing the Part 1 progression matrix.**
+The position-major orders sort packets by the precinct's reference-grid
+upper-left corner (`(px * pw_r, py * ph_r) << (levels - r)`), PCRL as
+(y, x, c, r, l) and CPRL as (c, y, x, r, l) — implemented as
+`packet_plan.positionOrderedPackets`, a sorted sequence builder that now
+backs every non-RPCL order on both the encoder reorder and the strict
+decoder slot walk (`buildStreamPacketSequence`). PCRL/CPRL always emit one
+tile-part. Interop: OpenJPEG 2.5.4 + Grok 20.3.6 lossless at 1 and 4 layers
+with default precincts and with dense `[64,64]`-precinct/32-block
+configurations; jpylyzer valid with the signalled `<order>`. Scorecard:
+full "T2 completeness" 7→8 — claimed. Note discovered in passing: the
+single-tile encoder does not fail-close the B.7 precinct≥block constraint
+(pre-existing, order-independent — `--precincts "[64,64]"` with the default
+64px block emits a stream that no decoder accepts, including RPCL).
 
 **RLCP landed (2026-07-07), same day as LRCP,** using the shared permutation
 machinery: `packet_plan.RlcpIterator` plugs into the progression-aware

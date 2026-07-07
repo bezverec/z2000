@@ -233,6 +233,83 @@ pub const RlcpIterator = struct {
     }
 };
 
+/// Position-major stream orders (ISO 15444-1 B.12.1.4 PCRL and B.12.1.5
+/// CPRL). A precinct's position is its upper-left corner on the image
+/// reference grid: one sample at resolution r spans 2^(levels - r) grid
+/// units, so precinct (px, py) sits at (px * pw_r, py * ph_r) << (levels - r).
+/// PCRL iterates y, x, component, resolution, layer; CPRL hoists component
+/// outermost. Layer stays innermost in both, so each precinct's layers remain
+/// consecutive and the packet bodies are the same byte-preserving permutation
+/// of the RPCL stream the other orders use.
+pub const PositionOrder = enum { pcrl, cprl };
+
+const PositionKeyedPacket = struct {
+    packet: Packet,
+    x_ref: u64,
+    y_ref: u64,
+};
+
+fn positionKeyLessThan(order: PositionOrder, a: PositionKeyedPacket, b: PositionKeyedPacket) bool {
+    if (order == .cprl and a.packet.component != b.packet.component) {
+        return a.packet.component < b.packet.component;
+    }
+    if (a.y_ref != b.y_ref) return a.y_ref < b.y_ref;
+    if (a.x_ref != b.x_ref) return a.x_ref < b.x_ref;
+    if (order == .pcrl and a.packet.component != b.packet.component) {
+        return a.packet.component < b.packet.component;
+    }
+    if (a.packet.resolution != b.packet.resolution) return a.packet.resolution < b.packet.resolution;
+    return a.packet.layer < b.packet.layer;
+}
+
+/// Builds the full packet sequence for a position-major progression. The
+/// caller owns the returned slice. Sequence numbers are rewritten to the
+/// position-major stream slots.
+pub fn positionOrderedPackets(
+    allocator: std.mem.Allocator,
+    plan: Plan,
+    components: u16,
+    layers: u16,
+    order: PositionOrder,
+) ![]Packet {
+    const total = std.math.cast(usize, plan.packets) orelse return PacketPlanError.InvalidDimensions;
+    const levels: u8 = plan.resolution_count - 1;
+
+    const keyed = try allocator.alloc(PositionKeyedPacket, total);
+    defer allocator.free(keyed);
+
+    var iterator = try RpclIterator.init(plan, components, layers);
+    var count: usize = 0;
+    while (iterator.next()) |packet| {
+        if (count >= total) return PacketPlanError.InvalidDimensions;
+        const resolution = plan.resolutions[packet.resolution];
+        const shift: u6 = @intCast(levels - packet.resolution);
+        keyed[count] = .{
+            .packet = packet,
+            .x_ref = (@as(u64, packet.precinct_x) * resolution.precinct_width) << shift,
+            .y_ref = (@as(u64, packet.precinct_y) * resolution.precinct_height) << shift,
+        };
+        count += 1;
+    }
+    if (count != total) return PacketPlanError.InvalidDimensions;
+
+    const Context = struct {
+        order: PositionOrder,
+        fn lessThan(self: @This(), a: PositionKeyedPacket, b: PositionKeyedPacket) bool {
+            return positionKeyLessThan(self.order, a, b);
+        }
+    };
+    std.sort.pdq(PositionKeyedPacket, keyed, Context{ .order = order }, Context.lessThan);
+
+    const packets = try allocator.alloc(Packet, total);
+    errdefer allocator.free(packets);
+    for (keyed, 0..) |entry, index| {
+        packets[index] = entry.packet;
+        packets[index].sequence = @intCast(index);
+    }
+    return packets;
+}
+
 /// Maps a packet identity to its slot in RPCL stream order, independent of
 /// the order the packet was emitted in. Used to permute packet streams and
 /// catalogs between progression orders.

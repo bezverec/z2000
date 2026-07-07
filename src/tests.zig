@@ -3006,7 +3006,7 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
             .{ .label = "unsupported progression", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
-                    bytes[cod + 5] = @intFromEnum(codestream.ProgressionOrder.pcrl);
+                    bytes[cod + 5] = 5;
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
             .{ .label = "zero layers", .mutate = struct {
@@ -3079,6 +3079,8 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             .{ .label = "disabled MCT", .offset = 8, .value = 0 },
             .{ .label = "LRCP progression", .offset = 5, .value = 0 },
             .{ .label = "RLCP progression", .offset = 5, .value = 1 },
+            .{ .label = "PCRL progression", .offset = 5, .value = 3 },
+            .{ .label = "CPRL progression", .offset = 5, .value = 4 },
         };
         for (accepted_cod_mutations) |scenario| {
             errdefer std.debug.print("JP2 COD accepted-profile case failed: {s}\n", .{scenario.label});
@@ -8953,7 +8955,58 @@ test "RLCP iterator emits resolution-major layer-second packets that map back to
     for (seen[0..total]) |slot_seen| try std.testing.expect(slot_seen);
 }
 
-test "LRCP and RLCP progressions roundtrip losslessly and permute the RPCL packet stream" {
+test "position-ordered packet sequences cover all RPCL slots in reference-grid order" {
+    const allocator = std.testing.allocator;
+    const precincts = [_]packet_plan.Precinct{.{ .width = 8, .height = 8 }};
+    const plan = try packet_plan.rpclSingleTile(17, 9, 2, 3, 2, &precincts);
+    const total = std.math.cast(usize, plan.packets).?;
+    const levels: u8 = plan.resolution_count - 1;
+
+    for ([_]packet_plan.PositionOrder{ .pcrl, .cprl }) |order| {
+        const sequence = try packet_plan.positionOrderedPackets(allocator, plan, 3, 2, order);
+        defer allocator.free(sequence);
+        try std.testing.expectEqual(total, sequence.len);
+
+        var seen = [_]bool{false} ** 64;
+        try std.testing.expect(total <= seen.len);
+        var previous_key: u64 = 0;
+        var previous_component: u16 = 0;
+        for (sequence, 0..) |packet, index| {
+            try std.testing.expectEqual(@as(u64, index), packet.sequence);
+
+            // The position key (y_ref, x_ref packed) never decreases within
+            // one component run for CPRL, or globally for PCRL.
+            const resolution = plan.resolutions[packet.resolution];
+            const shift: u6 = @intCast(levels - packet.resolution);
+            const x_ref = (@as(u64, packet.precinct_x) * resolution.precinct_width) << shift;
+            const y_ref = (@as(u64, packet.precinct_y) * resolution.precinct_height) << shift;
+            const key = (y_ref << 32) | x_ref;
+            switch (order) {
+                .pcrl => try std.testing.expect(key >= previous_key),
+                .cprl => {
+                    try std.testing.expect(packet.component >= previous_component);
+                    if (packet.component == previous_component) {
+                        try std.testing.expect(key >= previous_key);
+                    } else {
+                        previous_key = 0;
+                    }
+                    previous_component = packet.component;
+                },
+            }
+            previous_key = key;
+
+            // Every packet identity maps to a distinct RPCL slot.
+            const slot = try packet_plan.rpclSequenceForPacket(plan, 3, 2, packet);
+            const slot_index = std.math.cast(usize, slot).?;
+            try std.testing.expect(slot_index < total);
+            try std.testing.expect(!seen[slot_index]);
+            seen[slot_index] = true;
+        }
+        for (seen[0..total]) |slot_seen| try std.testing.expect(slot_seen);
+    }
+}
+
+test "permuted progression orders roundtrip losslessly and permute the RPCL packet stream" {
     const allocator = std.testing.allocator;
     const width = 32;
     const height = 32;
@@ -8980,6 +9033,8 @@ test "LRCP and RLCP progressions roundtrip losslessly and permute the RPCL packe
     const permuted_cases = [_]PermutedCase{
         .{ .progression = .lrcp, .cod_byte = 0 },
         .{ .progression = .rlcp, .cod_byte = 1 },
+        .{ .progression = .pcrl, .cod_byte = 3 },
+        .{ .progression = .cprl, .cod_byte = 4 },
     };
 
     // 8x8 precincts with 4x4 blocks give several precincts per resolution, so
@@ -9566,8 +9621,8 @@ test "unsupported JP2 profile marker options fail closed" {
     const cases = [_]UnsupportedCase{
         .{ .label = "LRCP with debug sidecar", .options = .{ .progression = .lrcp, .emit_temporary_payload_sidecar = true } },
         .{ .label = "RLCP with debug sidecar", .options = .{ .progression = .rlcp, .emit_temporary_payload_sidecar = true } },
-        .{ .label = "PCRL progression", .options = .{ .progression = .pcrl } },
-        .{ .label = "CPRL progression", .options = .{ .progression = .cprl } },
+        .{ .label = "PCRL with debug sidecar", .options = .{ .progression = .pcrl, .emit_temporary_payload_sidecar = true } },
+        .{ .label = "CPRL with debug sidecar", .options = .{ .progression = .cprl, .emit_temporary_payload_sidecar = true } },
         .{ .label = "L tile-parts", .options = .{ .tile_part_divisions = 'L' } },
         .{ .label = "C tile-parts", .options = .{ .tile_part_divisions = 'C' } },
         .{ .label = "P tile-parts", .options = .{ .tile_part_divisions = 'P' } },
@@ -9579,6 +9634,8 @@ test "unsupported JP2 profile marker options fail closed" {
         // The multi-tile v1 envelope is RPCL-only; permuted orders fail closed.
         .{ .label = "LRCP multi-tile", .options = .{ .progression = .lrcp, .tile_width = 1, .tile_height = 2 } },
         .{ .label = "RLCP multi-tile", .options = .{ .progression = .rlcp, .tile_width = 1, .tile_height = 2 } },
+        .{ .label = "PCRL multi-tile", .options = .{ .progression = .pcrl, .tile_width = 1, .tile_height = 2 } },
+        .{ .label = "CPRL multi-tile", .options = .{ .progression = .cprl, .tile_width = 1, .tile_height = 2 } },
     };
 
     for (cases) |scenario| {
