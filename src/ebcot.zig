@@ -4158,17 +4158,21 @@ fn decodeSignificancePassInferredPlain(
                 x = x_end;
                 continue;
             }
+            const band_index = @intFromEnum(band_kind);
             while (x < x_end) : (x += 1) {
+                // Strength-reduce the per-sample nbf index down the stripe
+                // column (mirrors decodeRefinementPassRaw): p advances by nbs.
+                var p = nbfIndex(nbs, x, stripe_y);
                 var dy: usize = 0;
                 while (dy < stripe_height) : (dy += 1) {
-                    const y = stripe_y + dy;
-                    const p = nbfIndex(nbs, x, y);
-                    const sample_flags = flags[p];
+                    const sample_flags_index = p;
+                    p += nbs;
+                    const sample_flags = flags[sample_flags_index];
                     if ((sample_flags & (nbf_sig_self | nbf_visit)) != 0) continue;
                     const pattern = sample_flags & nbf_sig8;
                     if (pattern == 0) continue;
-                    flags[p] |= nbf_visit;
-                    const zero_context = nbf_zc_lut[@intFromEnum(band_kind)][pattern];
+                    flags[sample_flags_index] |= nbf_visit;
+                    const zero_context = nbf_zc_lut[band_index][pattern];
                     const bit = try mqRead(decoder, mqContextIndex(zero_context));
                     symbol_count += 1;
                     if (bit) {
@@ -4176,7 +4180,7 @@ fn decodeSignificancePassInferredPlain(
                         const sign_bit = try mqRead(decoder, mqContextIndex(sign.context));
                         symbol_count += 1;
                         const negative = sign_bit != sign.predicted_negative;
-                        markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+                        markDecodedSignificantNbf(scratch, x, stripe_y + dy, bitplane, negative);
                     }
                 }
             }
@@ -4365,17 +4369,22 @@ fn decodeRefinementPassInferredPlain(
                 continue;
             }
             while (x < x_end) : (x += 1) {
+                // Strength-reduce both index streams down the stripe column.
+                var p = nbfIndex(nbs, x, stripe_y);
+                var coeff_index = localIndex(scratch.width, x, stripe_y);
                 var dy: usize = 0;
                 while (dy < stripe_height) : (dy += 1) {
-                    const y = stripe_y + dy;
-                    const p = nbfIndex(nbs, x, y);
-                    const sample_flags = flags[p];
+                    const sample_flags_index = p;
+                    const sample_coeff_index = coeff_index;
+                    p += nbs;
+                    coeff_index += scratch.width;
+                    const sample_flags = flags[sample_flags_index];
                     if ((sample_flags & nbf_sig_self) == 0 or (sample_flags & nbf_visit) != 0) continue;
                     const context = refinementContext((sample_flags & nbf_refine) != 0, @intCast(@popCount(sample_flags & nbf_sig8)));
                     const bit = try mqRead(decoder, mqContextIndex(context));
                     symbol_count += 1;
-                    flags[p] |= nbf_refine;
-                    if (bit) addMagnitudeBit(scratch, localIndex(scratch.width, x, y), bitplane);
+                    flags[sample_flags_index] |= nbf_refine;
+                    if (bit) addMagnitudeBit(scratch, sample_coeff_index, bitplane);
                 }
             }
         }
