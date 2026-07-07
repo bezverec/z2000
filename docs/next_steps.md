@@ -322,7 +322,17 @@ notes follow.
   decode of a genuinely multi-tile file and the Phase-4 memory benchmark
   remain the external gates before the score is raised.
 
-### 3.2 Additional progression orders — ✅ LRCP DONE (interop passed); RLCP/PCRL/CPRL open
+### 3.2 Additional progression orders — ✅ LRCP + RLCP DONE (interop passed); PCRL/CPRL open
+
+**RLCP landed (2026-07-07), same day as LRCP,** using the shared permutation
+machinery: `packet_plan.RlcpIterator` plugs into the progression-aware
+`StreamPacketIterator` that now drives both the encoder stream reorder and
+the strict decoder slot walk. Resolution stays outermost, so R tile-part
+divisions remain valid for every layer count (unlike multi-layer LRCP).
+Interop: OpenJPEG 2.5.4 + Grok 20.3.6 lossless at 1, 4, and 4+BYPASS layers;
+jpylyzer valid with `<order>RLCP</order>`. Scorecard: full "T2 completeness"
+6→7 — claimed. PCRL/CPRL are position-major and need the precinct-geometry
+cache before the same approach applies.
 
 **LRCP landed (2026-07-07) with the interop gate already passed.** Key insight
 that kept the change small: packet bodies do not depend on the progression
