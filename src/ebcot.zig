@@ -4518,15 +4518,9 @@ fn decodeCleanupPassSymbols(
                 const negative = sign_bit != sign.predicted_negative;
                 markDecodedSignificant(scratch, x, y, bitplane, negative);
 
-                var dy = runlen + 1;
-                while (dy < 4) : (dy += 1) {
-                    symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
-                }
+                symbol_count += try decodeCleanupSampleRange(scratch, decoder, x, stripe_y, runlen + 1, 4, bitplane, style);
             } else {
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
-                }
+                symbol_count += try decodeCleanupSampleRange(scratch, decoder, x, stripe_y, 0, stripe_height, bitplane, style);
             }
         }
     }
@@ -5027,6 +5021,24 @@ fn decodeCleanupSample(
     return symbol_count;
 }
 
+fn decodeCleanupSampleRange(
+    scratch: *DecodeBlockScratch,
+    decoder: anytype,
+    x: usize,
+    stripe_y: usize,
+    first_dy: usize,
+    end_dy: usize,
+    bitplane: u8,
+    style: CodeBlockStyle,
+) !usize {
+    var symbol_count: usize = 0;
+    var dy = first_dy;
+    while (dy < end_dy) : (dy += 1) {
+        symbol_count += try decodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
+    }
+    return symbol_count;
+}
+
 fn emitZeroCoding(
     allocator: std.mem.Allocator,
     symbols: *std.ArrayList(Symbol),
@@ -5178,15 +5190,9 @@ fn emitDirectCleanupPass(
                 try emitDirectSignOnly(scratch, encoder, plane, stride, rect, x, y, bitplane, style);
                 symbol_count += 1;
 
-                var dy = runlen + 1;
-                while (dy < 4) : (dy += 1) {
-                    symbol_count += try emitDirectCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
-                }
+                symbol_count += try emitDirectCleanupSampleRange(scratch, encoder, plane, stride, rect, x, stripe_y, runlen + 1, 4, bitplane, style);
             } else {
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try emitDirectCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
-                }
+                symbol_count += try emitDirectCleanupSampleRange(scratch, encoder, plane, stride, rect, x, stripe_y, 0, stripe_height, bitplane, style);
             }
         }
     }
@@ -5256,6 +5262,27 @@ fn emitDirectCleanupSample(
     if (bit) {
         try emitDirectSignOnly(scratch, encoder, plane, stride, rect, x, y, bitplane, style);
         symbol_count += 1;
+    }
+    return symbol_count;
+}
+
+fn emitDirectCleanupSampleRange(
+    scratch: *DirectBlockScratch,
+    encoder: anytype,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    stripe_y: usize,
+    first_dy: usize,
+    end_dy: usize,
+    bitplane: u8,
+    style: CodeBlockStyle,
+) !usize {
+    var symbol_count: usize = 0;
+    var dy = first_dy;
+    while (dy < end_dy) : (dy += 1) {
+        symbol_count += try emitDirectCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
     }
     return symbol_count;
 }
