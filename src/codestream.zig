@@ -429,7 +429,6 @@ fn forwardIrreversibleQuantizedPlanes(
     levels: u8,
     options: LosslessOptions,
 ) !color.RctPlanes {
-    _ = options;
     var ict = try color.forwardIct(allocator, rgb);
     defer ict.deinit();
 
@@ -453,7 +452,7 @@ fn forwardIrreversibleQuantizedPlanes(
         const delta = irreversibleBandDelta(
             rgb.bit_depth,
             band.kind,
-            try irreversibleBandStepSize(rgb.bit_depth, band.kind, band.level),
+            try irreversibleBandStepSizeFor(options.quantization, rgb.bit_depth, band.kind, band.level, levels),
         );
         quantizeBandRegion(ict.y, y, ict.width, band.rect, delta);
         quantizeBandRegion(ict.cb, cb, ict.width, band.rect, delta);
@@ -1171,6 +1170,8 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
             job.bands[block.band_index].level,
             job.options.transform,
             job.options.guard_bits,
+            job.options.quantization,
+            dwtLevelsFromBands(job.bands),
         ) catch |err| {
             job.result = err;
             return;
@@ -1233,6 +1234,8 @@ fn componentCatalogAllBlockWorker(job: *ComponentCatalogAllBlockJob) void {
             job.bands[block.band_index].level,
             job.options.transform,
             job.options.guard_bits,
+            job.options.quantization,
+            dwtLevelsFromBands(job.bands),
         ) catch |err| {
             job.result = err;
             return;
@@ -1795,6 +1798,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var parsed_transform: WaveletTransform = .reversible_5_3;
     var parsed_mct: MultipleComponentTransform = .rct;
     var parsed_progression: ProgressionOrder = .rpcl;
+    var parsed_quantization: QuantizationStyle = .none;
     var precincts = defaultPrecincts();
     var precinct_count: u8 = 0;
     var parsed_grid: ?tile_grid.Grid = null;
@@ -1921,7 +1925,9 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             saw_cod = true;
         } else if (marker == @intFromEnum(Marker.qcd)) {
             if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
-            qcd_band_count = try validateStrictQcdSegment(segment, bit_depth, levels, parsed_transform);
+            const qcd_info = try validateStrictQcdSegment(segment, bit_depth, levels, parsed_transform);
+            qcd_band_count = qcd_info.bands;
+            parsed_quantization = qcd_info.quantization;
             saw_qcd = true;
         } else if (marker == @intFromEnum(Marker.tlm)) {
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
@@ -1983,6 +1989,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .progression = parsed_progression,
             .mct = parsed_mct,
             .transform = parsed_transform,
+            .quantization = parsed_quantization,
             .code_block_style = parsed_code_block_style,
             .block_width = block_width,
             .block_height = block_height,
@@ -2015,6 +2022,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .progression = parsed_progression,
         .mct = parsed_mct,
         .transform = parsed_transform,
+        .quantization = parsed_quantization,
         .code_block_style = parsed_code_block_style,
         .block_width = block_width,
         .block_height = block_height,
@@ -2061,7 +2069,14 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
     return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
 }
 
-fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, transform: WaveletTransform) !usize {
+const StrictQcdInfo = struct {
+    /// Logical subband count covered by the segment (1 + 3 * levels); the
+    /// scalar-derived style covers all bands with a single signalled value.
+    bands: usize,
+    quantization: QuantizationStyle,
+};
+
+fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, transform: WaveletTransform) !StrictQcdInfo {
     if (segment.len < 2) return CodestreamError.InvalidCodestream;
     if (bit_depth == 0) return CodestreamError.InvalidCodestream;
     const bands = 1 + 3 * @as(usize, levels);
@@ -2073,6 +2088,12 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
     if (guard_bits != strict_guard_bits) return CodestreamError.UnsupportedPayload;
 
     if (transform == .irreversible_9_7) {
+        if (quantization == .scalar_derived) {
+            if (segment.len != 1 + 2) return CodestreamError.InvalidCodestream;
+            var cursor: usize = 1;
+            try validateStrictQcdScalarValue(segment, &cursor, bit_depth, .ll, levels);
+            return .{ .bands = bands, .quantization = quantization };
+        }
         if (quantization != .scalar_expounded) return CodestreamError.UnsupportedPayload;
         if (segment.len != 1 + 2 * bands) return CodestreamError.InvalidCodestream;
         var cursor: usize = 1;
@@ -2083,7 +2104,7 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
                 try validateStrictQcdScalarValue(segment, &cursor, bit_depth, kind, level);
             }
         }
-        return bands;
+        return .{ .bands = bands, .quantization = quantization };
     }
 
     if (quantization != .none) return CodestreamError.UnsupportedPayload;
@@ -2103,7 +2124,7 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
             cursor += 1;
         }
     }
-    return bands;
+    return .{ .bands = bands, .quantization = quantization };
 }
 
 fn validateStrictQcdScalarValue(
@@ -2930,7 +2951,7 @@ fn assembleStrictPacketCatalogHeaders(
     var assemblies = try StrictComponentAssemblySet.init(allocator, blocks.len, header.layers == 1);
     errdefer assemblies.deinit();
     inline for (0..3) |component| {
-        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], bands, blocks, header.bit_depth, header.transform, header.code_block_style);
+        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], bands, blocks, header.bit_depth, header.transform, header.quantization, header.code_block_style);
     }
 
     const use_packet_group_arena = header.layers == 1;
@@ -2967,6 +2988,7 @@ fn assembleStrictPacketCatalogHeaders(
                     header.layers,
                     header.bit_depth,
                     header.transform,
+                    header.quantization,
                     header.code_block_style.bypass,
                     header.code_block_style.terminate_all,
                     &active_group_storage,
@@ -3137,6 +3159,7 @@ fn initializeStrictAssemblyGeometry(
     source_blocks: []const subband.CodeBlock,
     bit_depth: u8,
     transform: WaveletTransform,
+    quantization: QuantizationStyle,
     code_block_style: ebcot.CodeBlockStyle,
 ) !void {
     if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
@@ -3150,6 +3173,8 @@ fn initializeStrictAssemblyGeometry(
             bands[source.band_index].level,
             transform,
             strict_guard_bits,
+            quantization,
+            dwtLevelsFromBands(bands),
         );
         block.encoded_bitplanes = 0;
         block.code_block_style = codeBlockStyleForBand(code_block_style, bands[source.band_index].kind);
@@ -3301,6 +3326,7 @@ fn buildStrictPacketAuditBandGroups(
     layer_count: u16,
     bit_depth: u8,
     transform: WaveletTransform,
+    quantization: QuantizationStyle,
     bypass: bool,
     terminate_all: bool,
     groups: *[max_rpcl_packet_band_groups]StrictPacketAuditBandGroup,
@@ -3331,6 +3357,8 @@ fn buildStrictPacketAuditBandGroups(
             layer_count,
             bit_depth,
             transform,
+            quantization,
+            dwtLevelsFromBands(bands),
             bypass,
             terminate_all,
         );
@@ -3352,6 +3380,8 @@ fn buildStrictPacketAuditBandGroup(
     layer_count: u16,
     bit_depth: u8,
     transform: WaveletTransform,
+    quantization: QuantizationStyle,
+    levels: u8,
     bypass: bool,
     terminate_all: bool,
 ) !StrictPacketAuditBandGroup {
@@ -3420,7 +3450,7 @@ fn buildStrictPacketAuditBandGroup(
         .locations = locations,
         .reader_state = reader_state,
         .decoded = decoded,
-        .max_zero_bitplanes = try bandNominalBitplanesForTransform(bit_depth, band.kind, band.level, transform, strict_guard_bits),
+        .max_zero_bitplanes = try bandNominalBitplanesForTransform(bit_depth, band.kind, band.level, transform, strict_guard_bits, quantization, levels),
     };
 }
 
@@ -4144,7 +4174,7 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
         const delta = irreversibleBandDelta(
             header.bit_depth,
             band.kind,
-            try irreversibleBandStepSize(header.bit_depth, band.kind, band.level),
+            try irreversibleBandStepSizeFor(header.quantization, header.bit_depth, band.kind, band.level, header.levels),
         );
         dequantizeBandRegion(quantized.y, y_f, header.width, band.rect, delta);
         dequantizeBandRegion(quantized.cb, cb_f, header.width, band.rect, delta);
@@ -5740,6 +5770,7 @@ const TemporaryHeader = struct {
     progression: ProgressionOrder = .rpcl,
     mct: MultipleComponentTransform = .rct,
     transform: WaveletTransform = .reversible_5_3,
+    quantization: QuantizationStyle = .none,
     code_block_style: ebcot.CodeBlockStyle = .{},
     block_width: u16,
     block_height: u16,
@@ -6160,6 +6191,14 @@ fn appendQcd(
     const bands = 1 + 3 * @as(u16, levels);
     try appendMarker(allocator, out, .qcd);
     if (options.transform == .irreversible_9_7) {
+        if (options.quantization == .scalar_derived) {
+            // A.6.4: derived quantization signals a single step size for the
+            // NL LL band; decoders derive every other subband via E-5.
+            try appendU16Be(allocator, out, 3 + 2);
+            try out.append(allocator, qcdStyleByte(options));
+            try appendQcdScalarValue(allocator, out, bit_depth, .ll, levels);
+            return;
+        }
         try appendU16Be(allocator, out, 3 + 2 * bands);
         try out.append(allocator, qcdStyleByte(options));
         try appendQcdScalarValue(allocator, out, bit_depth, .ll, levels);
@@ -6940,6 +6979,8 @@ fn buildComponentRpclShadowCatalog(
             bands[block.band_index].level,
             options.transform,
             options.guard_bits,
+            options.quantization,
+            dwtLevelsFromBands(bands),
         );
         catalog_blocks[index] = try buildRpclShadowBlock(
             allocator,
@@ -8344,7 +8385,13 @@ fn validateCodingPath(options: LosslessOptions) !void {
         },
         .irreversible_9_7 => {
             if (options.mct != .ict) return CodestreamError.UnsupportedPayload;
-            if (options.quantization != .scalar_expounded) return CodestreamError.UnsupportedPayload;
+            // Scalar-expounded signals every band step; scalar-derived
+            // signals only the NL LL step and derives the rest (A.6.4/E-5).
+            if (options.quantization != .scalar_expounded and
+                options.quantization != .scalar_derived)
+            {
+                return CodestreamError.UnsupportedPayload;
+            }
             if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
         },
     }
@@ -8519,6 +8566,36 @@ fn irreversibleBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8) !
     return .{ .exponent = @intCast(expn), .mantissa = mant };
 }
 
+/// Scalar-derived step size (ISO 15444-1 A.6.4, E-5): the QCD signals one
+/// (exponent, mantissa) pair for the NL LL band and every other subband
+/// derives epsilon_b = epsilon_0 - (NL - n_b) with the mantissa shared,
+/// where n_b is the band's decomposition depth (z2000 `band_level`, counting
+/// down from the total level count so the deepest triple keeps epsilon_0).
+fn derivedBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8, levels: u8) !BandStepSize {
+    const base = try irreversibleBandStepSize(bit_depth, .ll, levels);
+    if (kind == .ll) return base;
+    if (band_level == 0 or band_level > levels) return CodestreamError.InvalidCodestream;
+    const exponent = @as(i32, base.exponent) - (@as(i32, levels) - @as(i32, band_level));
+    if (exponent <= 0 or exponent > 31) return CodestreamError.InvalidCodestream;
+    return .{ .exponent = @intCast(exponent), .mantissa = base.mantissa };
+}
+
+/// Step size for one band of the irreversible path under the signalled
+/// quantization style. `.none` is the reversible style and never quantizes.
+fn irreversibleBandStepSizeFor(
+    quantization: QuantizationStyle,
+    bit_depth: u8,
+    kind: subband.Kind,
+    band_level: u8,
+    levels: u8,
+) !BandStepSize {
+    return switch (quantization) {
+        .scalar_expounded => try irreversibleBandStepSize(bit_depth, kind, band_level),
+        .scalar_derived => try derivedBandStepSize(bit_depth, kind, band_level, levels),
+        .none => CodestreamError.InvalidCodestream,
+    };
+}
+
 /// Reconstruction step size delta_b from an (exponent, mantissa) pair per
 /// ISO/IEC 15444-1 E-3 with R_b = bit_depth + Table E-1 subband gain (E-4).
 /// The encoder-side (epsilon, mu) derivation folds the gain out again, so the
@@ -8531,17 +8608,28 @@ fn irreversibleBandDelta(bit_depth: u8, kind: subband.Kind, step: BandStepSize) 
 }
 
 /// Mb for a band under either coding path: guard + epsilon_b - 1.
+/// makeBands always yields 1 + 3 * levels bands, so the decomposition level
+/// count can be recovered from the band table where it is not threaded.
+fn dwtLevelsFromBands(bands: []const subband.Band) u8 {
+    return @intCast((bands.len - 1) / 3);
+}
+
 fn bandNominalBitplanesForTransform(
     bit_depth: u8,
     kind: subband.Kind,
     band_level: u8,
     transform: WaveletTransform,
     guard_bits: u8,
+    quantization: QuantizationStyle,
+    levels: u8,
 ) !u8 {
     if (guard_bits == 0) return CodestreamError.InvalidCodestream;
+    // Mb derives from the *signalled* epsilon_b (E-2): under scalar-derived
+    // quantization every decoder reconstructs epsilon_b from the single QCD
+    // value via E-5, so the encoder must size bitplanes from the same table.
     const epsilon: u16 = switch (transform) {
         .reversible_5_3 => try subbandExponent(bit_depth, kind),
-        .irreversible_9_7 => (try irreversibleBandStepSize(bit_depth, kind, band_level)).exponent,
+        .irreversible_9_7 => (try irreversibleBandStepSizeFor(quantization, bit_depth, kind, band_level, levels)).exponent,
     };
     const total = epsilon + @as(u16, guard_bits) - 1;
     if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;

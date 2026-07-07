@@ -689,6 +689,14 @@ fn validateQcdSegment(payload: []const u8, length_offset: usize, marker_length: 
     if (quantization_style > 2) return Jp2Error.InvalidCodestream;
     const bands: u16 = 1 + 3 * @as(u16, cod.levels);
     if (cod.transform == 0) {
+        if (quantization_style == 1) {
+            // Scalar-derived (A.6.4): a single signalled step for the NL LL
+            // band; every other subband is derived via E-5.
+            if (marker_length != 3 + 2) return Jp2Error.InvalidCodestream;
+            var cursor: usize = length_offset + 3;
+            try expectScalarExpoundedQcdValue(payload, &cursor, bit_depth, .ll, cod.levels);
+            return;
+        }
         if (quantization_style != 2) return Jp2Error.UnsupportedProfile;
         if (marker_length != 3 + 2 * bands) return Jp2Error.InvalidCodestream;
         try validateScalarExpoundedQcdValues(payload, length_offset + 3, cod.levels, bit_depth);

@@ -6463,6 +6463,77 @@ test "irreversible 9/7 ICT codestream roundtrips within lossy tolerance" {
     try std.testing.expect(mse < 4.0);
 }
 
+test "scalar-derived quantization signals one QCD step and roundtrips within lossy tolerance" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = row * width + col;
+            samples[i * 3 + 0] = @intCast((col * 4) % 256);
+            samples[i * 3 + 1] = @intCast((row * 4) % 256);
+            samples[i * 3 + 2] = @intCast((col * 2 + row * 2) % 256);
+        }
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const derived = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_derived,
+    });
+    defer allocator.free(derived);
+    const expounded = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+    });
+    defer allocator.free(expounded);
+
+    // QCD carries a single (epsilon, mu) pair for scalar-derived: Lqcd is
+    // 3 (length + style) + 2 bytes, and the style byte advertises guard
+    // bits 2 with quantization style 1.
+    const derived_qcd = findMarker(derived, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    try std.testing.expectEqual(@as(u8, 0), derived[derived_qcd + 2]);
+    try std.testing.expectEqual(@as(u8, 5), derived[derived_qcd + 3]);
+    try std.testing.expectEqual(@as(u8, (2 << 5) | 1), derived[derived_qcd + 4]);
+    const expounded_qcd = findMarker(expounded, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    try std.testing.expectEqual(@as(u8, (2 << 5) | 2), expounded[expounded_qcd + 4]);
+
+    // Derived step sizes differ from the expounded table, so the coded
+    // payload differs.
+    try std.testing.expect(!std.mem.eql(u8, derived, expounded));
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, derived, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(rgb.width, decoded.width);
+    try std.testing.expectEqual(rgb.height, decoded.height);
+
+    var max_diff: i32 = 0;
+    var sum_sq: u64 = 0;
+    for (samples, decoded.samples) |expected, actual| {
+        const diff = @as(i32, expected) - @as(i32, actual);
+        max_diff = @max(max_diff, @as(i32, @intCast(@abs(diff))));
+        sum_sq += @as(u64, @intCast(diff * diff));
+    }
+    // Derived steps grow coarser toward finer resolutions than the expounded
+    // norm-based table, so allow a wider (but still tight) tolerance.
+    try std.testing.expect(max_diff <= 16);
+    const mse = @as(f64, @floatFromInt(sum_sq)) / @as(f64, @floatFromInt(samples.len));
+    try std.testing.expect(mse < 16.0);
+}
+
 test "lossy options fail closed for inconsistent combinations" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
