@@ -18,19 +18,31 @@ Kakadu 8.4.1 demo apps are now on the Windows/Ryzen benchmark box (see
   SOP+EPH+TLM+PLT, BYPASS, lossless 5/3, 2048² noise) **pixel-exactly**,
   consuming all 6 tile-parts. This closes the "Kakadu leg remains open"
   item from the earlier interop pass for the encode direction.
-- **New scoped gap — foreign reversible QCD profiles (kdu → z2000):**
-  z2000 does not yet decode Kakadu output. Two small JP2-layer blockers were
-  fixed on the spot (Kakadu writes `UnkC=1`, a legal I.5.3.1 value, and an
-  optional `res ` box in jp2h — both now accepted with tests). The remaining
-  blocker is real: Kakadu uses **1 guard bit** and its own legal reversible
-  QCD exponents, while both the JP2 wrapper (`validateQcdSegment`,
-  `guard_bits != 2`) and the strict decoder (`validateStrictQcdSegment`,
-  exact z2000 exponent formula) fail closed on anything but z2000's own QCD.
-  The fix is scoped like foreign Stage A/B: carry the parsed per-band QCD
-  exponents (and guard bits 1..7) in `TemporaryHeader` and derive each
-  band's `Mb = guard + exponent - 1` from them in
-  `initializeStrictAssemblyGeometry`, instead of recomputing z2000's
-  formula. Until then kdu-encoded files fail closed at the QCD check.
+- **Foreign reversible QCD profiles (kdu → z2000): ✅ LANDED.** Implemented
+  exactly as scoped: `validateStrictQcdSegment` now parses the reversible
+  per-band epsilon_b list and guard bits (1..7 accepted; low SPqcd bits must
+  be zero; Mb bounds 1..31), `TemporaryHeader` carries them, and
+  `bandNominalBitplanesForHeader` derives each band's `Mb = G + epsilon_b - 1`
+  from the *signalled* values (E-2) in both Mb consumers
+  (`initializeStrictAssemblyGeometry`, the band-group `max_zero_bitplanes`).
+  The QCD-order → band mapping keys on the signalled NL (`header.levels`),
+  not the band-derived level count — empty subbands skipped by the band
+  builder would otherwise shift the mapping. The JP2 wrapper follows suit
+  (guard 1..7 + bounds-only exponent check for the reversible path) and no
+  longer requires PLT in tile-parts (packet spans come from the Stage B
+  stream-order header decode; PLT frame validation still runs when PLT is
+  present). Irreversible QCD stays pinned to z2000's OpenJPEG-compatible
+  step tables.
+
+  **Verified against real Kakadu 8.4.1 files on this machine:** the archival
+  RPCL/R-parts/PLT stream *and* the default profile (LRCP, no precincts,
+  **no PLT**, 1 guard bit, RCT-widened exponents) both decode
+  **pixel-exactly** — the default-profile case exercises foreign Stage B and
+  the QCD tolerance together. Local oracle in-tree: the equivalent-Mb QCD
+  rewrite (guard 2→1 with exponents+1, and 2→3 with exponents−1) decodes
+  byte-exactly, proving Mb follows the signalled values. Bidirectional
+  Kakadu interop is now closed for these profiles (forward leg passed
+  earlier the same day).
 
 ## Status 2026-07-07 (later) — foreign stream decode, Stage A
 

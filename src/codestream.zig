@@ -1808,6 +1808,9 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var parsed_mct: MultipleComponentTransform = .rct;
     var parsed_progression: ProgressionOrder = .rpcl;
     var parsed_quantization: QuantizationStyle = .none;
+    var parsed_guard_bits: u8 = strict_guard_bits;
+    var parsed_qcd_exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands;
+    var parsed_qcd_exponent_count: u8 = 0;
     var precincts = defaultPrecincts();
     var precinct_count: u8 = 0;
     var parsed_grid: ?tile_grid.Grid = null;
@@ -1949,6 +1952,9 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             const qcd_info = try validateStrictQcdSegment(segment, bit_depth, levels, parsed_transform);
             qcd_band_count = qcd_info.bands;
             parsed_quantization = qcd_info.quantization;
+            parsed_guard_bits = qcd_info.guard_bits;
+            parsed_qcd_exponents = qcd_info.exponents;
+            parsed_qcd_exponent_count = qcd_info.exponent_count;
             saw_qcd = true;
         } else if (marker == @intFromEnum(Marker.tlm)) {
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
@@ -2020,6 +2026,9 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .block_height = block_height,
             .tile_width = grid.params.xtsiz,
             .tile_height = grid.params.ytsiz,
+            .guard_bits = parsed_guard_bits,
+            .qcd_exponents = parsed_qcd_exponents,
+            .qcd_exponent_count = parsed_qcd_exponent_count,
             .tile_part_divisions = null,
             .tile_part_plan_count = 0,
             .tile_part_plan = [_]u8{0} ** 33,
@@ -2051,6 +2060,9 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .code_block_style = parsed_code_block_style,
         .block_width = block_width,
         .block_height = block_height,
+        .guard_bits = parsed_guard_bits,
+        .qcd_exponents = parsed_qcd_exponents,
+        .qcd_exponent_count = parsed_qcd_exponent_count,
         .tile_part_divisions = if (tile_part_plan.count > 0) 'R' else null,
         .tile_part_plan_count = tile_part_plan.count,
         .tile_part_plan = tile_part_plan.entries,
@@ -2094,11 +2106,24 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
     return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
 }
 
+/// Upper bound on QCD subband entries: 1 LL + 3 per decomposition level,
+/// with levels capped at 32 by the COD validation.
+const max_qcd_bands = 1 + 3 * 32;
+
 const StrictQcdInfo = struct {
     /// Logical subband count covered by the segment (1 + 3 * levels); the
     /// scalar-derived style covers all bands with a single signalled value.
     bands: usize,
     quantization: QuantizationStyle,
+    /// Signalled guard bit count G (E-2). z2000 writes 2; foreign reversible
+    /// streams (Kakadu uses 1) are accepted in 1..7.
+    guard_bits: u8 = strict_guard_bits,
+    /// Signalled per-band epsilon_b for the reversible no-quantization path,
+    /// in QCD order: LL, then HL/LH/HH per decomposition level from `levels`
+    /// down to 1. Zero count means "derive from the z2000 formula"
+    /// (irreversible styles and the sidecar path).
+    exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands,
+    exponent_count: u8 = 0,
 };
 
 fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, transform: WaveletTransform) !StrictQcdInfo {
@@ -2110,9 +2135,11 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
     if (quantization_value > @intFromEnum(QuantizationStyle.scalar_expounded)) return CodestreamError.InvalidCodestream;
     const quantization: QuantizationStyle = @enumFromInt(quantization_value);
     const guard_bits = style >> 5;
-    if (guard_bits != strict_guard_bits) return CodestreamError.UnsupportedPayload;
 
     if (transform == .irreversible_9_7) {
+        // The irreversible step tables are validated against z2000's exact
+        // OpenJPEG-compatible values, which assume the z2000 guard count.
+        if (guard_bits != strict_guard_bits) return CodestreamError.UnsupportedPayload;
         if (quantization == .scalar_derived) {
             if (segment.len != 1 + 2) return CodestreamError.InvalidCodestream;
             var cursor: usize = 1;
@@ -2134,22 +2161,91 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
 
     if (quantization != .none) return CodestreamError.UnsupportedPayload;
     if (segment.len != 1 + bands) return CodestreamError.InvalidCodestream;
+    if (bands > max_qcd_bands) return CodestreamError.InvalidCodestream;
+    // Reversible no-quantization: follow the *signalled* epsilon_b and guard
+    // bits instead of requiring z2000's exact profile — foreign encoders
+    // choose different legal values (Kakadu: 1 guard bit, RCT-widened
+    // exponents), and E-2 obliges the decoder to derive Mb from what the
+    // stream says. Bounds keep Mb in 1..31.
+    if (guard_bits == 0 or guard_bits > 7) return CodestreamError.InvalidCodestream;
 
+    var info = StrictQcdInfo{
+        .bands = bands,
+        .quantization = quantization,
+        .guard_bits = guard_bits,
+    };
     var cursor: usize = 1;
-    if (segment[cursor] != try qcdReversibleExponentByteForBand(bit_depth, .ll)) {
-        return CodestreamError.UnsupportedPayload;
+    var band_index: usize = 0;
+    while (band_index < bands) : (band_index += 1) {
+        const value = segment[cursor];
+        // SPqcd for the no-quantization style carries epsilon_b in bits 7..3;
+        // the low bits are not defined for this style and must be zero.
+        if ((value & 0x07) != 0) return CodestreamError.UnsupportedPayload;
+        const epsilon = value >> 3;
+        if (epsilon == 0) return CodestreamError.InvalidCodestream;
+        const nominal = @as(u16, epsilon) + guard_bits - 1;
+        if (nominal == 0 or nominal > 31) return CodestreamError.InvalidCodestream;
+        info.exponents[band_index] = epsilon;
+        cursor += 1;
     }
-    cursor += 1;
-    var level: u8 = 0;
-    while (level < levels) : (level += 1) {
-        inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
-            if (segment[cursor] != try qcdReversibleExponentByteForBand(bit_depth, kind)) {
-                return CodestreamError.UnsupportedPayload;
-            }
-            cursor += 1;
-        }
+    info.exponent_count = @intCast(bands);
+    return info;
+}
+
+/// Signalled epsilon_b for a band, from the QCD exponent list stored in the
+/// header (order: LL, then HL/LH/HH per decomposition level from `levels`
+/// down to 1). Null when the header carries no parsed exponents.
+fn signalledBandEpsilon(
+    exponents: []const u8,
+    levels: u8,
+    kind: subband.Kind,
+    band_level: u8,
+) ?u8 {
+    if (exponents.len == 0) return null;
+    if (kind == .ll) return exponents[0];
+    if (band_level == 0 or band_level > levels) return null;
+    const level_offset = @as(usize, levels - band_level);
+    const kind_offset: usize = switch (kind) {
+        .ll => unreachable,
+        .hl => 0,
+        .lh => 1,
+        .hh => 2,
+    };
+    const index = 1 + 3 * level_offset + kind_offset;
+    if (index >= exponents.len) return null;
+    return exponents[index];
+}
+
+/// Mb for a band on the strict decode path: reversible streams follow the
+/// signalled QCD epsilon_b and guard bits (E-2); everything else falls back
+/// to the z2000 formula.
+fn bandNominalBitplanesForHeader(
+    header: TemporaryHeader,
+    kind: subband.Kind,
+    band_level: u8,
+    levels: u8,
+) !u8 {
+    if (header.transform == .reversible_5_3 and header.qcd_exponent_count != 0) {
+        // The QCD entry count follows the signalled NL (header.levels); the
+        // caller-derived level count can be smaller when empty subbands were
+        // skipped by the band builder, so the mapping must use the NL.
+        const exponents = header.qcd_exponents[0..header.qcd_exponent_count];
+        const epsilon = signalledBandEpsilon(exponents, header.levels, kind, band_level) orelse
+            return CodestreamError.InvalidCodestream;
+        if (header.guard_bits == 0) return CodestreamError.InvalidCodestream;
+        const total = @as(u16, epsilon) + header.guard_bits - 1;
+        if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
+        return @intCast(total);
     }
-    return .{ .bands = bands, .quantization = quantization };
+    return bandNominalBitplanesForTransform(
+        header.bit_depth,
+        kind,
+        band_level,
+        header.transform,
+        header.guard_bits,
+        header.quantization,
+        levels,
+    );
 }
 
 fn validateStrictQcdScalarValue(
@@ -2976,7 +3072,7 @@ fn assembleStrictPacketCatalogHeaders(
     var assemblies = try StrictComponentAssemblySet.init(allocator, blocks.len, header.layers == 1);
     errdefer assemblies.deinit();
     inline for (0..3) |component| {
-        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], bands, blocks, header.bit_depth, header.transform, header.quantization, header.code_block_style);
+        try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], bands, blocks, header);
     }
 
     const use_packet_group_arena = header.layers == 1;
@@ -3007,15 +3103,8 @@ fn assembleStrictPacketCatalogHeaders(
                     group_allocator,
                     bands,
                     blocks,
-                    header.block_width,
-                    header.block_height,
                     selected,
-                    header.layers,
-                    header.bit_depth,
-                    header.transform,
-                    header.quantization,
-                    header.code_block_style.bypass,
-                    header.code_block_style.terminate_all,
+                    header,
                     &active_group_storage,
                 );
             }
@@ -3182,27 +3271,21 @@ fn initializeStrictAssemblyGeometry(
     assembly: *StrictComponentAssembly,
     bands: []const subband.Band,
     source_blocks: []const subband.CodeBlock,
-    bit_depth: u8,
-    transform: WaveletTransform,
-    quantization: QuantizationStyle,
-    code_block_style: ebcot.CodeBlockStyle,
+    header: TemporaryHeader,
 ) !void {
     if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
     for (assembly.blocks, source_blocks) |*block, source| {
         if (source.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         block.band_index = source.band_index;
         block.rect = source.rect;
-        block.nominal_bitplanes = try bandNominalBitplanesForTransform(
-            bit_depth,
+        block.nominal_bitplanes = try bandNominalBitplanesForHeader(
+            header,
             bands[source.band_index].kind,
             bands[source.band_index].level,
-            transform,
-            strict_guard_bits,
-            quantization,
             dwtLevelsFromBands(bands),
         );
         block.encoded_bitplanes = 0;
-        block.code_block_style = codeBlockStyleForBand(code_block_style, bands[source.band_index].kind);
+        block.code_block_style = codeBlockStyleForBand(header.code_block_style, bands[source.band_index].kind);
     }
 }
 
@@ -3345,15 +3428,8 @@ fn buildStrictPacketAuditBandGroups(
     allocator: std.mem.Allocator,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
-    block_width: u16,
-    block_height: u16,
     selected: []const usize,
-    layer_count: u16,
-    bit_depth: u8,
-    transform: WaveletTransform,
-    quantization: QuantizationStyle,
-    bypass: bool,
-    terminate_all: bool,
+    header: TemporaryHeader,
     groups: *[max_rpcl_packet_band_groups]StrictPacketAuditBandGroup,
 ) !usize {
     var group_count: usize = 0;
@@ -3375,17 +3451,10 @@ fn buildStrictPacketAuditBandGroups(
             allocator,
             bands[band_index],
             blocks,
-            block_width,
-            block_height,
             selected[cursor..end],
             band_index,
-            layer_count,
-            bit_depth,
-            transform,
-            quantization,
             dwtLevelsFromBands(bands),
-            bypass,
-            terminate_all,
+            header,
         );
         group_count += 1;
         cursor = end;
@@ -3398,17 +3467,10 @@ fn buildStrictPacketAuditBandGroup(
     allocator: std.mem.Allocator,
     band: subband.Band,
     blocks: []const subband.CodeBlock,
-    block_width: u16,
-    block_height: u16,
     selected: []const usize,
     band_index: usize,
-    layer_count: u16,
-    bit_depth: u8,
-    transform: WaveletTransform,
-    quantization: QuantizationStyle,
     levels: u8,
-    bypass: bool,
-    terminate_all: bool,
+    header: TemporaryHeader,
 ) !StrictPacketAuditBandGroup {
     if (selected.len == 0) return CodestreamError.InvalidCodestream;
     const grid = try t2.CodeBlockGrid.init(
@@ -3416,8 +3478,8 @@ fn buildStrictPacketAuditBandGroup(
         band.rect.y,
         band.rect.width,
         band.rect.height,
-        block_width,
-        block_height,
+        header.block_width,
+        header.block_height,
     );
 
     var min_x: usize = std.math.maxInt(usize);
@@ -3463,10 +3525,10 @@ fn buildStrictPacketAuditBandGroup(
     }
     try validatePacketBandGroupFilled(source_indexes);
 
-    var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, leaves_x, leaves_y, leaf_count, layer_count);
+    var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, leaves_x, leaves_y, leaf_count, header.layers);
     errdefer reader_state.deinit();
-    reader_state.bypass = bypass;
-    reader_state.terminate_all = terminate_all;
+    reader_state.bypass = header.code_block_style.bypass;
+    reader_state.terminate_all = header.code_block_style.terminate_all;
     const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
     errdefer allocator.free(decoded);
 
@@ -3475,7 +3537,7 @@ fn buildStrictPacketAuditBandGroup(
         .locations = locations,
         .reader_state = reader_state,
         .decoded = decoded,
-        .max_zero_bitplanes = try bandNominalBitplanesForTransform(bit_depth, band.kind, band.level, transform, strict_guard_bits, quantization, levels),
+        .max_zero_bitplanes = try bandNominalBitplanesForHeader(header, band.kind, band.level, levels),
     };
 }
 
@@ -5237,15 +5299,8 @@ const StrictStatefulPrecinctGroups = struct {
                     self.allocator,
                     self.bands,
                     self.blocks,
-                    self.header.block_width,
-                    self.header.block_height,
                     selected,
-                    self.header.layers,
-                    self.header.bit_depth,
-                    self.header.transform,
-                    self.header.quantization,
-                    self.header.code_block_style.bypass,
-                    self.header.code_block_style.terminate_all,
+                    self.header,
                     &slot.groups,
                 );
             }
@@ -6049,6 +6104,12 @@ const TemporaryHeader = struct {
     /// the tile grid.
     tile_width: u32 = 0,
     tile_height: u32 = 0,
+    /// Signalled QCD guard bits and per-band epsilon_b (reversible path);
+    /// zero exponent count means "derive Mb from the z2000 formula"
+    /// (sidecar/legacy paths and irreversible styles).
+    guard_bits: u8 = strict_guard_bits,
+    qcd_exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands,
+    qcd_exponent_count: u8 = 0,
     tile_part_divisions: ?u8,
     tile_part_plan_count: u8,
     tile_part_plan: [33]u8,
