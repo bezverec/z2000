@@ -46,17 +46,19 @@ interop gate.
   such as eciRGBv2 and Adobe RGB. Malformed ICC box/tag rejection coverage is
   in place; optional LittleCMS-backed conversion should come only after the
   preservation path has interop coverage.
-- Profiles: ICT, irreversible 9/7, scalar-expounded QCD, and BYPASS are now
-  supported for the narrow single-tile RPCL path. Keep scalar-derived
-  quantization, `--mct none`, unsupported style bits, and multi-tile profile
-  variants fail-closed until they have payload behavior and interop coverage.
-- Rate allocation: current `--rates` support is byte-target based and can
-  produce larger/higher-PSNR access files than Grok/OpenJPEG for the same
-  nominal ladder. Add PCRD-style distortion metadata before treating access
-  benchmarks as equivalent.
-- Multi-tile: the shared tile-grid geometry helper is in place; next introduce
-  per-tile image extraction, per-tile DWT, per-tile packet state, and tile-part
-  scheduling before allowing tile sizes smaller than the image.
+- Profiles: ICT, irreversible 9/7, scalar-expounded and scalar-derived QCD,
+  BYPASS, reversible `--mct none`, and the currently wired style-bit
+  combinations are supported on their documented narrow paths. Keep unsupported
+  style combinations, broader profile mixes, and JPX-only behavior fail-closed
+  until they have payload behavior and interop coverage.
+- Rate allocation: `--rates` uses PCRD-style global slope allocation with
+  distortion metadata and byte-targeted layer deltas. The remaining work is
+  broadening fixtures and reducing the access-profile size/quality gap against
+  Grok/OpenJPEG/Kakadu.
+- Multi-tile: the v1 aligned-grid model is implemented for the reversible
+  RCT/5-3 profile with per-tile DWT, packet state, and strict decode. Next
+  expand the tile/profile matrix and scheduling while keeping unsupported
+  geometry/style combinations fail-closed.
 - Interop gate: for each major phase, keep OpenJPEG/Grok/Kakadu checks for
   encode/decode roundtrip, marker conformance, output size, strict reader
   validation, and single-thread plus multi-thread encode/decode benchmarks.
@@ -79,17 +81,18 @@ interop gate.
    parsing now also rejects unterminated packet lengths and packet spans that
    do not match the tile-part `SOD` byte count; packet `SOP`/`EPH` framing is
    checked against `COD/Scod` before trusting the codestream, and reversible
-   `QCD` exponent bytes plus public 9/7 scalar-expounded step sizes are checked
-   against `SIZ` bit depth. `COD/Scod` implicit/default precinct geometry stays
-   fail-closed; supported JP2 codestreams must carry explicit precinct bytes,
-   and `COD` layer counts are capped to the current rate-allocation/T2 metadata
-   limit.
+   `QCD` exponent bytes plus public 9/7 scalar-expounded/scalar-derived step
+   sizes are checked against `SIZ` bit depth. `COD/Scod` implicit/default
+   precinct geometry is supported in the strict foreign-stream decode path
+   where packet spans can be derived; `COD` layer counts are capped to the
+   current rate-allocation/T2 metadata limit.
 3. Extend strict T2 audit fixtures from the current smoke file to deliberately
    corrupted PLT/TLM/SOP/EPH/header cases that can be compared against
    OpenJPEG/Grok/Kakadu behavior without assuming any validator is final.
-4. Return to T1 style coverage after the JP2/T2 diagnostics are sharper:
-   keep BYPASS public, keep other nonzero style bits fail-closed in public
-   codestreams until each has writer, strict reader, oracle tests, and interop.
+4. Continue T1 style coverage after the JP2/T2 diagnostics are sharper:
+   keep the implemented public style combinations green and keep standalone
+   RESET/ERTERM, BYPASS+TERMALL, and untested combinations fail-closed until
+   each has writer, strict reader, oracle tests, and interop.
 5. Run a comparative benchmark only after the above interop fixtures are green,
    so performance numbers are attached to output that external decoders accept.
 
