@@ -1342,6 +1342,7 @@ fn encodeLosslessWithOptionsMeasured(
     if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
 
     var encode_options = normalizedEncodePrecinctOptions(options, levels);
+    try validatePrecinctBlockSpans(encode_options);
     // Per-resolution tile-parts require resolution-contiguous packet ranges.
     // Multi-layer LRCP interleaves resolutions across layers, and the
     // position-major orders (PCRL/CPRL) interleave them across precinct
@@ -1961,6 +1962,10 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .precincts = precincts,
         .precinct_count = if (precinct_count == 0) 1 else precinct_count,
     };
+    // A COD whose blocks cross precinct boundaries would need the B.7 size
+    // clamping z2000 does not implement; misreading it silently corrupts the
+    // block layout, so fail closed here for single- and multi-tile alike.
+    try validatePrecinctBlockSpans(options);
     const grid = parsed_grid orelse return CodestreamError.InvalidCodestream;
     if (!grid.isSingleTile()) {
         // Multi-tile: validate the v1 tile-part discipline (one part per tile,
@@ -8556,20 +8561,28 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
 /// then tile origins are multiples of every partition step at every
 /// resolution. Misaligned grids fail closed until reference-grid anchoring
 /// is implemented.
-fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: LosslessOptions) !void {
-    var max_precinct_width: u32 = 1;
-    var max_precinct_height: u32 = 1;
+/// ISO 15444-1 B.7: the effective code-block size is bounded by the precinct
+/// span in band coordinates — the full precinct at resolution 0, half of it
+/// at higher resolutions. z2000 does not implement the block-size clamping
+/// the standard prescribes, so code blocks that would cross precinct
+/// boundaries fail closed on both encode and strict decode instead of
+/// producing (or misreading) an ambiguous packet/block layout. Expects the
+/// precinct list normalized to cover the coded resolutions.
+fn validatePrecinctBlockSpans(options: LosslessOptions) !void {
     for (options.precincts[0..options.precinct_count], 0..) |precinct, resolution| {
-        // ISO 15444-1 B.7: the effective code-block size is bounded by the
-        // precinct span in band coordinates — the full precinct at resolution
-        // 0, half of it at higher resolutions. Code blocks that would cross
-        // precinct boundaries make the packet/block index derivation ambiguous,
-        // so such configurations fail closed in the multi-tile v1 envelope.
         const band_span_width = if (resolution == 0) precinct.width else precinct.width / 2;
         const band_span_height = if (resolution == 0) precinct.height else precinct.height / 2;
         if (band_span_width < options.block_width or band_span_height < options.block_height) {
             return CodestreamError.UnsupportedPayload;
         }
+    }
+}
+
+fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: LosslessOptions) !void {
+    try validatePrecinctBlockSpans(options);
+    var max_precinct_width: u32 = 1;
+    var max_precinct_height: u32 = 1;
+    for (options.precincts[0..options.precinct_count]) |precinct| {
         max_precinct_width = @max(max_precinct_width, precinct.width);
         max_precinct_height = @max(max_precinct_height, precinct.height);
     }
