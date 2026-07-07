@@ -2580,7 +2580,10 @@ pub fn encodeBlockSymbolsSegmentIsoMqTerminated(
     block: EncodedBlockView,
     style: CodeBlockStyle,
 ) !CodeBlockSegment {
-    try validateImplementedStyle(style);
+    // predictable_termination is supported here (and only here), layered on
+    // terminate_all: every pass segment is flushed with the ER-TERM procedure
+    // (D.4.2) instead of the standard setbits flush. bypass / reset_context
+    // stay unsupported.
     if (!style.terminate_all or style.bypass or style.reset_context) return EbcotError.InvalidBlock;
     if (block.passes.len == 0) {
         const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
@@ -2615,7 +2618,10 @@ pub fn encodeBlockSymbolsSegmentIsoMqTerminated(
         for (pass_symbols) |symbol| {
             try encoder.write(mqContextIndex(symbol.context), symbol.bit);
         }
-        const encoded = try encoder.finish();
+        const encoded = if (style.predictable_termination)
+            try encoder.finishErterm()
+        else
+            try encoder.finish();
         defer allocator.free(encoded);
         const byte_offset = bytes.items.len;
         try bytes.appendSlice(allocator, encoded);
@@ -2630,7 +2636,10 @@ pub fn encodeBlockSymbolsSegmentIsoMqTerminated(
         try segments.append(allocator, .{ .pass_count = 1, .byte_length = @intCast(encoded.len) });
         symbol_offset += pass.symbol_count;
         const last_pass = ordinal + 1 == block.passes.len;
-        if (!last_pass) encoder.resetStream();
+        if (!last_pass) {
+            const previous_byte = if (bytes.items.len == 0) @as(u8, 0) else bytes.items[bytes.items.len - 1];
+            encoder.resetStreamAfterPreviousByte(previous_byte);
+        }
     }
     if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
 
@@ -2659,7 +2668,13 @@ pub fn encodeCodeBlockSegmentIsoMqTerminatedWithStyle(
     rect: subband.Rect,
     style: CodeBlockStyle,
 ) !CodeBlockSegment {
-    var block = try encodeBlockWithStyle(allocator, plane, stride, rect, style);
+    // Symbol generation is termination-independent — predictable_termination
+    // only changes how each per-pass segment is flushed. Mask it off for
+    // symbol coding (whose validator treats it as an unsupported payload
+    // mode) and keep the full style for the segment encoder's flush choice.
+    var symbol_style = style;
+    symbol_style.predictable_termination = false;
+    var block = try encodeBlockWithStyle(allocator, plane, stride, rect, symbol_style);
     defer block.deinit(allocator);
     return encodeBlockSymbolsSegmentIsoMqTerminated(allocator, .{
         .bitplanes = block.bitplanes,
@@ -3525,7 +3540,9 @@ pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
     style: CodeBlockStyle,
     stats: ?*DecodePassStats,
 ) ![]const i32 {
-    try validateImplementedStyle(style);
+    // predictable_termination (ER-TERM flush) is permitted here with
+    // terminate_all: each per-pass segment is a self-contained MQ stream that
+    // the standard decoder reads back, so the inferred decode is unchanged.
     if (!style.terminate_all or style.bypass or style.reset_context) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;

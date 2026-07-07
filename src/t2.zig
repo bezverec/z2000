@@ -495,7 +495,6 @@ pub const SegmentLengthState = struct {
         if (segments.len == 0) return PacketHeaderError.InvalidPacketHeader;
         var increment: u16 = 0;
         for (segments) |segment| {
-            if (segment.byte_length == 0) return PacketHeaderError.InvalidPacketHeader;
             const extra_bits = try passCountLengthBits(segment.pass_count);
             const available = @as(u16, self.lblock) + @as(u16, extra_bits);
             const needed = bitsToRepresent(segment.byte_length);
@@ -998,6 +997,40 @@ pub fn layerPayloadSlice(bytes: []const u8, previous: LayerTruncation, current: 
 }
 
 fn packetBlockForLayerPacketBlock(block: LayerPacketBlock) !PacketBlock {
+    if (block.segments.len > 0) {
+        if (block.current.cumulative_passes < block.previous.cumulative_passes) return PacketHeaderError.InvalidPacketHeader;
+        if (block.current.cumulative_bytes < block.previous.cumulative_bytes) return PacketHeaderError.InvalidPacketHeader;
+        const pass_count = block.current.cumulative_passes - block.previous.cumulative_passes;
+        const byte_length = block.current.cumulative_bytes - block.previous.cumulative_bytes;
+        if (pass_count == 0 and byte_length != 0) return PacketHeaderError.InvalidPacketHeader;
+        if (pass_count > 164) return PacketHeaderError.InvalidPacketHeader;
+
+        var packet_block = PacketBlock{
+            .leaf_x = block.location.leaf_x,
+            .leaf_y = block.location.leaf_y,
+            .included = pass_count != 0,
+            .zero_bitplanes = try zeroBitPlaneCount(block.nominal_bitplanes, block.encoded_bitplanes),
+            .pass_count = pass_count,
+            .byte_length = byte_length,
+        };
+        if (packet_block.included) {
+            var segment_passes: u16 = 0;
+            var segment_bytes: u64 = 0;
+            for (block.segments) |segment| {
+                segment_passes = std.math.add(u16, segment_passes, segment.pass_count) catch
+                    return PacketHeaderError.InvalidPacketHeader;
+                segment_bytes = try std.math.add(u64, segment_bytes, segment.byte_length);
+            }
+            if (segment_passes != packet_block.pass_count or
+                segment_bytes != packet_block.byte_length)
+            {
+                return PacketHeaderError.InvalidPacketHeader;
+            }
+            packet_block.segments = block.segments;
+        }
+        return packet_block;
+    }
+
     var packet_block = try packetBlockForLayer(
         block.location,
         block.nominal_bitplanes,

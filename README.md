@@ -195,12 +195,13 @@ lines we are targeting:
 - `--bypass` (Grok `-M 1`, Kakadu `Cmodes=BYPASS`) is implemented end to end
   for single-layer codestreams with the ISO MQ backend, including raw
   segment termination and multi-segment packet-header lengths.
-  `--reset-context`, `--terminate-all`, `--vertical-causal`,
-  `--predictable-termination`, and `--segmentation-symbols` are represented as
-  explicit COD code-block style metadata, but the strict codestream profile
-  still rejects those style bits with `UnsupportedPayload` until their payload
-  behavior is wired end-to-end; they exist only in standalone EBCOT test
-  paths.
+  `--terminate-all`, `--vertical-causal`, and `--segmentation-symbols` are
+  public opt-in strict profiles with end-to-end payload behavior. Predictable
+  termination is wired only with `--terminate-all --predictable-termination`:
+  it emits COD style `0x10` and ER-TERM-flushed per-pass MQ segments, and the
+  current single-tile smoke is accepted by Kakadu `kdu_expand`; larger z2000
+  strict decode coverage is still being hardened. `--reset-context` remains
+  fail-closed in the public profile.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is
   disabled by default for the current independent-decoder interop path. Use

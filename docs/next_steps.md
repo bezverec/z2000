@@ -334,18 +334,20 @@ oracle, wrong for a real stream. What was added:
   thread-count determinism is only checked via same-config re-encode so far.
   Stays opt-in behind `--terminate-all`, default off.
 
-**`predictable_termination` (0x10) — attempted, deferred (needs a reference
-decoder).** The ISO MQ terminated-segment machinery makes the wiring easy, but
-predictable termination is fundamentally an *interop* feature: its value is that
-an external decoder can verify the exact ER-TERM flush bytes for error
-detection. A first pass implementing `opj_mqc_erterm_enc` as `mq_iso`'s
-`finishErterm` did not even round-trip through our own decoder (the flush is
-subtle and byte-exact), and — critically — a self-consistent-but-non-normative
-flush would *pass* a local oracle while still failing real interop, i.e. false
-confidence about the one thing that matters here. Unlike terminate_all (which
-uses the standard MQ flush the narrow path already exercises), this needs
-validation against OpenJPEG/Kakadu to be trustworthy. **Deferred until a
-reference decoder is available in the loop.** Left fail-closed.
+**`predictable_termination` (0x10) — partially wired; interop-positive,
+strict-decode hardening still open.** `mq_iso` now has an OpenJPEG/Grok-style
+`finishErterm` path that treats the final `byteout` as a guard/advance byte
+rather than payload, so short MQ ER-TERM streams roundtrip locally. The public
+profile accepts ERTERM only together with `terminate_all` and the ISO MQ backend
+(`--terminate-all --predictable-termination`); standalone ERTERM remains
+fail-closed because the encoder has no non-terminated ER-TERM segment model.
+Kakadu `kdu_expand` successfully decoded a no-sidecar single-tile ERTERM JP2
+from `C:\temp\tools\images\0002.tif` (3539x5120, tile forced to image size),
+which unblocks reference validation. The remaining blocker is z2000's own
+strict ERTERM decode on larger/non-trivial streams: a 257x383 synthetic
+roundtrip and the 0002 TIFF currently reproduce `SampleOutOfRange`, while the
+small codestream/unit smoke still passes. Keep this as the next T1/T2 bug before
+claiming the 2.3 score.
 
 ---
 
