@@ -5,7 +5,16 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
-### LRCP Progression
+### LRCP and RLCP Progressions
+
+- Added the RLCP progression order (`--progression RLCP`, ISO 15444-1
+  B.12.1.2) on top of the LRCP permutation machinery: a shared
+  progression-aware stream iterator drives both the encoder reorder and the
+  strict decoder slot walk. Resolution stays outermost in RLCP, so
+  per-resolution R tile-part divisions remain valid for any layer count.
+  OpenJPEG 2.5.4 and Grok 20.3.6 decode RLCP output pixel-losslessly (1, 4,
+  and 4+BYPASS layers); jpylyzer confirms `<order>RLCP</order>` on valid
+  JP2s. PCRL and CPRL stay fail-closed.
 
 - Added the LRCP progression order (`--progression LRCP`, ISO 15444-1
   B.12.1.1) for the single-tile path. Packet bodies are order-independent

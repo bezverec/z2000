@@ -174,6 +174,65 @@ pub const LrcpIterator = struct {
     }
 };
 
+/// ISO 15444-1 B.12.1.2 resolution-layer-component-position progression:
+/// resolution is outermost, then layer, component, and precinct. Emits the
+/// same packet identities as RpclIterator, only in RLCP stream order. Because
+/// resolution stays outermost, per-resolution tile-part divisions remain
+/// valid for any layer count.
+pub const RlcpIterator = struct {
+    plan: Plan,
+    components: u16,
+    layers: u16,
+    resolution: u8 = 0,
+    layer: u16 = 0,
+    component: u16 = 0,
+    precinct_index: u64 = 0,
+    sequence: u64 = 0,
+
+    pub fn init(plan: Plan, components: u16, layers: u16) !RlcpIterator {
+        try validatePlan(plan, components, layers);
+        return .{
+            .plan = plan,
+            .components = components,
+            .layers = layers,
+        };
+    }
+
+    pub fn next(self: *RlcpIterator) ?Packet {
+        while (self.resolution < self.plan.resolution_count) {
+            if (self.layer >= self.layers) {
+                self.layer = 0;
+                self.resolution += 1;
+                continue;
+            }
+            const resolution = self.plan.resolutions[self.resolution];
+            if (self.precinct_index >= resolution.precincts) {
+                self.precinct_index = 0;
+                self.component += 1;
+                if (self.component >= self.components) {
+                    self.component = 0;
+                    self.layer += 1;
+                }
+                continue;
+            }
+
+            const packet = Packet{
+                .sequence = self.sequence,
+                .resolution = self.resolution,
+                .precinct_x = @intCast(self.precinct_index % resolution.precincts_x),
+                .precinct_y = @intCast(self.precinct_index / resolution.precincts_x),
+                .precinct_index = self.precinct_index,
+                .component = self.component,
+                .layer = self.layer,
+            };
+            self.sequence += 1;
+            self.precinct_index += 1;
+            return packet;
+        }
+        return null;
+    }
+};
+
 /// Maps a packet identity to its slot in RPCL stream order, independent of
 /// the order the packet was emitted in. Used to permute packet streams and
 /// catalogs between progression orders.

@@ -1353,8 +1353,8 @@ fn encodeLosslessWithOptionsMeasured(
     const payload_start = monotonicNs();
     try appendTemporaryPayload(allocator, &tile_payload, planes, levels, encode_options, &rpcl_stream);
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
-    if (encode_options.progression == .lrcp) {
-        try reorderPacketStreamRpclToLrcp(allocator, &rpcl_stream, rgb.width, rgb.height, levels, encode_options);
+    if (encode_options.progression != .rpcl) {
+        try reorderPacketStreamFromRpcl(allocator, &rpcl_stream, rgb.width, rgb.height, levels, encode_options);
     }
 
     var out: std.ArrayList(u8) = .empty;
@@ -1877,6 +1877,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             parsed_progression = switch (segment[1]) {
                 @intFromEnum(ProgressionOrder.rpcl) => .rpcl,
                 @intFromEnum(ProgressionOrder.lrcp) => .lrcp,
+                @intFromEnum(ProgressionOrder.rlcp) => .rlcp,
                 else => return CodestreamError.UnsupportedPayload,
             };
             layers = readU16Be(segment, 2);
@@ -5022,11 +5023,13 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
 const StreamPacketIterator = union(enum) {
     rpcl: packet_plan.RpclIterator,
     lrcp: packet_plan.LrcpIterator,
+    rlcp: packet_plan.RlcpIterator,
 
     fn init(progression: ProgressionOrder, plan: packet_plan.Plan, components: u16, layers: u16) !StreamPacketIterator {
         return switch (progression) {
             .rpcl => .{ .rpcl = try packet_plan.RpclIterator.init(plan, components, layers) },
             .lrcp => .{ .lrcp = try packet_plan.LrcpIterator.init(plan, components, layers) },
+            .rlcp => .{ .rlcp = try packet_plan.RlcpIterator.init(plan, components, layers) },
             else => CodestreamError.UnsupportedPayload,
         };
     }
@@ -5035,6 +5038,7 @@ const StreamPacketIterator = union(enum) {
         return switch (self.*) {
             .rpcl => |*it| it.next(),
             .lrcp => |*it| it.next(),
+            .rlcp => |*it| it.next(),
         };
     }
 };
@@ -5109,7 +5113,7 @@ fn readStrictSodPacketCatalog(
 
             const owned_entries = try entries.toOwnedSlice(allocator);
             errdefer allocator.free(owned_entries);
-            if (progression == .lrcp) {
+            if (progression != .rpcl) {
                 try reorderStrictEntriesToRpcl(allocator, owned_entries, plan, layers);
             }
             const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
@@ -7652,10 +7656,10 @@ fn tilePartPacketRange(
 
 /// Packet bodies do not depend on the progression order: T2 coder state is
 /// per-precinct, and each precinct's layers appear in increasing order in
-/// both RPCL and LRCP streams. An LRCP stream is therefore a byte-preserving
-/// permutation of the RPCL packets. Rewrites the stream in place from RPCL
-/// emission order into LRCP stream order.
-fn reorderPacketStreamRpclToLrcp(
+/// every supported stream order. The target stream is therefore a
+/// byte-preserving permutation of the RPCL packets. Rewrites the stream in
+/// place from RPCL emission order into `options.progression` stream order.
+fn reorderPacketStreamFromRpcl(
     allocator: std.mem.Allocator,
     stream: *RpclPacketStream,
     width: usize,
@@ -7686,8 +7690,7 @@ fn reorderPacketStreamRpclToLrcp(
     const bytes = try allocator.alloc(u8, stream.packet_bytes.len);
     errdefer allocator.free(bytes);
 
-    var iterator = packet_plan.LrcpIterator.init(plan, 3, options.layers) catch
-        return CodestreamError.InvalidCodestream;
+    var iterator = try StreamPacketIterator.init(options.progression, plan, 3, options.layers);
     var out_index: usize = 0;
     var out_offset: usize = 0;
     while (iterator.next()) |packet| {
@@ -8322,10 +8325,11 @@ fn validateTilePartDivisions(value: ?u8) !void {
 fn validateCodingPath(options: LosslessOptions) !void {
     switch (options.progression) {
         .rpcl => {},
-        // LRCP (B.12.1.1) rides the same per-precinct packet bodies as RPCL;
-        // only the stream order differs. The debug sidecar frames packets in
-        // RPCL order and its cross-checks assume it, so it stays fail-closed.
-        .lrcp => if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload,
+        // LRCP (B.12.1.1) and RLCP (B.12.1.2) ride the same per-precinct
+        // packet bodies as RPCL; only the stream order differs. The debug
+        // sidecar frames packets in RPCL order and its cross-checks assume
+        // it, so it stays fail-closed for the permuted orders.
+        .lrcp, .rlcp => if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload,
         else => return CodestreamError.UnsupportedPayload,
     }
     switch (options.transform) {

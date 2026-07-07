@@ -632,10 +632,10 @@ fn validateMainHeaderMarkerSegment(
 fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: u16) !CodSegmentInfo {
     const scod = payload[length_offset + 2];
     if ((scod & ~@as(u8, 0x07)) != 0) return Jp2Error.InvalidCodestream;
-    // LRCP (0) and RPCL (2) are wired through the codestream layer; the
-    // other progression orders stay fail-closed until implemented.
+    // LRCP (0), RLCP (1), and RPCL (2) are wired through the codestream
+    // layer; PCRL and CPRL stay fail-closed until implemented.
     const progression = payload[length_offset + 3];
-    if (progression != 0 and progression != 2) return Jp2Error.UnsupportedProfile;
+    if (progression > 2) return Jp2Error.UnsupportedProfile;
     const layers = try readU16Be(payload, length_offset + 4);
     if (layers == 0) return Jp2Error.InvalidCodestream;
     if (layers > rate_alloc.max_layers) return Jp2Error.UnsupportedProfile;
