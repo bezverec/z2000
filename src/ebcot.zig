@@ -4602,6 +4602,9 @@ fn decodeCleanupPassInferredPlain(
     band_kind: subband.Kind,
     segmentation_symbols: bool,
 ) !usize {
+    const flags = scratch.nb_flags.items;
+    const nbs = scratch.nb_stride;
+    const band_index = @intFromEnum(band_kind);
     var symbol_count: usize = 0;
 
     var stripe_y: usize = 0;
@@ -4609,7 +4612,7 @@ fn decodeCleanupPassInferredPlain(
         const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
         var x: usize = 0;
         while (x < scratch.width) : (x += 1) {
-            if (stripe_height == 4 and nbfCanUseRunStripePlain(scratch.nb_flags.items, scratch.nb_stride, x, stripe_y)) {
+            if (stripe_height == 4 and nbfCanUseRunStripePlain(flags, nbs, x, stripe_y)) {
                 const agg = try mqRead(decoder, mqContextIndex(.cleanup_aggregation));
                 symbol_count += 1;
                 if (!agg) continue;
@@ -4620,22 +4623,22 @@ fn decodeCleanupPassInferredPlain(
 
                 {
                     const y = stripe_y + runlen;
-                    const sample_flags = scratch.nb_flags.items[nbfIndex(scratch.nb_stride, x, y)];
+                    const sample_flags = flags[nbfIndex(nbs, x, y)];
                     const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
                     const sign_bit = try mqRead(decoder, mqContextIndex(sign.context));
                     symbol_count += 1;
                     const negative = sign_bit != sign.predicted_negative;
-                    markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+                    markDecodedSignificantNbfKnown(scratch, flags, nbs, x, y, bitplane, negative);
                 }
 
                 var dy = runlen + 1;
                 while (dy < 4) : (dy += 1) {
-                    symbol_count += try nbfDecodeCleanupSamplePlain(scratch, decoder, x, stripe_y + dy, bitplane, band_kind);
+                    symbol_count += try nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, stripe_y + dy, bitplane, band_index);
                 }
             } else {
                 var dy: usize = 0;
                 while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try nbfDecodeCleanupSamplePlain(scratch, decoder, x, stripe_y + dy, bitplane, band_kind);
+                    symbol_count += try nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, stripe_y + dy, bitplane, band_index);
                 }
             }
         }
@@ -4949,6 +4952,31 @@ fn nbfDecodeCleanupSamplePlain(
         symbol_count += 1;
         const negative = sign_bit != sign.predicted_negative;
         markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+    }
+    return symbol_count;
+}
+
+inline fn nbfDecodeCleanupSamplePlainKnown(
+    scratch: *DecodeBlockScratch,
+    decoder: anytype,
+    flags: []u16,
+    nbs: usize,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+    band_index: usize,
+) !usize {
+    const sample = flags[nbfIndex(nbs, x, y)];
+    if ((sample & (nbf_sig_self | nbf_visit)) != 0) return 0;
+    const zero_context = nbf_zc_lut[band_index][sample & nbf_sig8];
+    const bit = try mqRead(decoder, mqContextIndex(zero_context));
+    var symbol_count: usize = 1;
+    if (bit) {
+        const sign = nbf_sc_lut[nbfScIndex(sample)];
+        const sign_bit = try mqRead(decoder, mqContextIndex(sign.context));
+        symbol_count += 1;
+        const negative = sign_bit != sign.predicted_negative;
+        markDecodedSignificantNbfKnown(scratch, flags, nbs, x, y, bitplane, negative);
     }
     return symbol_count;
 }
@@ -6467,6 +6495,23 @@ fn markDecodedSignificantNbf(scratch: *DecodeBlockScratch, x: usize, y: usize, b
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
     nbfMarkSignificant(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
+    decodeMarkPackedT1Significant(scratch, x, y, negative);
+}
+
+inline fn markDecodedSignificantNbfKnown(
+    scratch: *DecodeBlockScratch,
+    flags: []u16,
+    nbs: usize,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+    negative: bool,
+) void {
+    const index = localIndex(scratch.width, x, y);
+    const magnitude_bit = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
+    setSignificantRowDecode(scratch, x, y);
+    nbfMarkSignificant(flags, nbs, x, y, negative);
     decodeMarkPackedT1Significant(scratch, x, y, negative);
 }
 
