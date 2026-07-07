@@ -185,8 +185,8 @@ test "ISO MQ ER-TERM flush roundtrips encoded decisions" {
                     bad,
                     bytes.len,
                     flush_bytes.len,
-                    bytes[bytes.len -| 4 ..],
-                    flush_bytes[flush_bytes.len -| 4 ..],
+                    bytes[bytes.len -| 4..],
+                    flush_bytes[flush_bytes.len -| 4..],
                 },
             );
             return error.TestExpectedEqual;
@@ -518,6 +518,40 @@ test "T2 segment length coder preserves Lblock state" {
     try std.testing.expectEqual(write_state.lblock, read_state.lblock);
     try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
     try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, write_state.write(&writer, 0, 1));
+}
+
+test "T2 multi-segment length coder preserves zero-byte terminated segments" {
+    const allocator = std.testing.allocator;
+    const segments = [_]t2.SegmentSpan{
+        .{ .pass_count = 1, .byte_length = 2 },
+        .{ .pass_count = 1, .byte_length = 0 },
+        .{ .pass_count = 1, .byte_length = 5 },
+        .{ .pass_count = 1, .byte_length = 0 },
+        .{ .pass_count = 1, .byte_length = 33 },
+    };
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+    var write_state = t2.SegmentLengthState{};
+    try write_state.writeSegments(&writer, segments[0..]);
+    try writer.finish();
+
+    var pass_counts = [_]u16{1} ** segments.len;
+    var lengths: [segments.len]u64 = undefined;
+    var reader = t2.PacketHeaderReader.init(bytes.items);
+    var read_state = t2.SegmentLengthState{};
+    const total = try read_state.readSegments(&reader, pass_counts[0..], lengths[0..]);
+    try reader.byteAlign();
+
+    var expected_total: u64 = 0;
+    for (segments, lengths) |segment, length| {
+        try std.testing.expectEqual(segment.byte_length, length);
+        expected_total += segment.byte_length;
+    }
+    try std.testing.expectEqual(expected_total, total);
+    try std.testing.expectEqual(write_state.lblock, read_state.lblock);
+    try std.testing.expectEqual(bytes.items.len, reader.bytesConsumed());
 }
 
 test "T2 block packet header roundtrips first inclusion metadata" {
@@ -5592,6 +5626,53 @@ test "EBCOT terminate-all style writes and decodes pass-terminated MQ segments" 
     );
 }
 
+test "EBCOT ISO MQ predictable termination decodes larger terminated block" {
+    const allocator = std.testing.allocator;
+    const stride = 257;
+    const image_height = 383;
+    const width = 64;
+    const height = 64;
+    var plane: [stride * image_height]i32 = undefined;
+    for (&plane, 0..) |*sample, i| {
+        const base: i32 = @intCast((i * 37 + i / 11 * 53) % 511);
+        sample.* = if ((i & 3) == 0) -base else base;
+    }
+    const rect = subband.Rect{ .x = 129, .y = 71, .width = width, .height = height };
+    inline for (.{ subband.Kind.ll, subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
+        const style = ebcot.CodeBlockStyle{
+            .band_kind = kind,
+            .terminate_all = true,
+            .predictable_termination = true,
+        };
+
+        var segment = try ebcot.encodeCodeBlockSegmentIsoMqTerminatedWithStyle(allocator, plane[0..], stride, rect, style);
+        defer segment.deinit(allocator);
+        const segments = segment.segments orelse return error.MissingSegments;
+        const segment_lengths = try allocator.alloc(u64, segments.len);
+        defer allocator.free(segment_lengths);
+        for (segments, segment_lengths) |span, *length| length.* = span.byte_length;
+
+        var scratch = ebcot.DecodeBlockScratch.init(allocator);
+        defer scratch.deinit();
+        const decoded = try ebcot.decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
+            &scratch,
+            segment.bitplanes,
+            segment.pass_count,
+            segment.bytes,
+            segment_lengths,
+            width,
+            height,
+            style,
+            null,
+        );
+        for (0..height) |y| {
+            const src = plane[(rect.y + y) * stride + rect.x ..][0..width];
+            const dst = decoded[y * width ..][0..width];
+            try std.testing.expectEqualSlices(i32, src, dst);
+        }
+    }
+}
+
 test "EBCOT direct MQ segment matches symbol oracle" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{
@@ -9356,6 +9437,37 @@ test "predictable termination roundtrips losslessly and changes the flush" {
     allocator.free(wrapped);
 }
 
+test "predictable termination debug sidecar roundtrips larger stream" {
+    const allocator = std.testing.allocator;
+    const width = 257;
+    const height = 383;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 5,
+        .terminate_all = true,
+        .predictable_termination = true,
+        .emit_temporary_payload_sidecar = true,
+    });
+    defer allocator.free(bytes);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
 test "mct none codes components independently and roundtrips losslessly" {
     const allocator = std.testing.allocator;
     const width = 16;
@@ -9755,13 +9867,16 @@ test "multi-tile encode fails closed outside the v1 envelope" {
                 options.quantization = .scalar_expounded;
             }
         }.mutate },
-        .{ .label = "misaligned tile size", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                // 20 is not a multiple of 2^levels x precinct (32), so tile
-                // origins would not land on partition boundaries.
-                options.tile_width = 20;
-            }
-        }.mutate },
+        .{
+            .label = "misaligned tile size",
+            .mutate = struct {
+                fn mutate(options: *codestream.LosslessOptions) void {
+                    // 20 is not a multiple of 2^levels x precinct (32), so tile
+                    // origins would not land on partition boundaries.
+                    options.tile_width = 20;
+                }
+            }.mutate,
+        },
     };
 
     for (cases) |scenario| {

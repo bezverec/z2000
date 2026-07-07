@@ -94,8 +94,8 @@ The T1 work is split into two paths:
 - style-aware partial coefficient decoding for pass-prefix quality-layer
   validation;
 - explicit internal `CodeBlockStyle` metadata for all six COD style bits, with
-  BYPASS and predictable termination represented but still rejected as
-  unsupported payload modes;
+  BYPASS and TERMALL-scoped predictable termination carried through the strict
+  payload path and reset-context still rejected as an unsupported payload mode;
 - MQ encode/decode roundtrip tests;
 - direct MQ emission with scratch-buffer reuse;
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;

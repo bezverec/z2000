@@ -195,6 +195,8 @@ pub const Encoder = struct {
             if (bytes.items.len > len_before_guard) {
                 _ = bytes.pop();
             }
+        } else if (bytes.items.len > self.output_start) {
+            _ = bytes.pop();
         }
     }
 

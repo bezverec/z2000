@@ -14,9 +14,10 @@ entries are grouped by development milestone rather than semantic version.
   TERMALL (`0x04`) is also present.
 - T2 segment-length handling now permits zero-byte terminated segments only
   through explicit segment metadata; the normal layer-delta path still rejects
-  included zero-byte contributions. A Kakadu `kdu_expand` smoke accepts the
-  generated no-sidecar single-tile ERTERM JP2, while larger z2000 strict
-  ERTERM decode remains the next hardening target.
+  included zero-byte contributions. The ER-TERM final-byte handling now drops
+  the non-payload trailing `0xff` case as well as the guard byte case, and a
+  larger no-sidecar single-tile smoke decodes pixel-exactly through both z2000
+  strict decode and Kakadu `kdu_expand`.
 
 ### Foreign Stream Decode (Stage A)
 

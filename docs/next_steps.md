@@ -144,15 +144,14 @@ scorecard reconciliation (the earlier rows summed to 43 against a stated 40).
 **Update (post-`d664306` working tree):** Tier 1 is fully closed — the
 DNG/`tiff_ifd.zig` reader-hardening sliver (1.3) and the ICC fixture matrix
 (1.2) both landed. **2.1 (vertical_causal)**, **2.2 (segmentation_symbols)**,
-**2.3 `terminate_all`**, and **3.3 `--mct none` (reversible)** are all wired
-end-to-end with local byte-exact oracles. The resilience bits (2.1/2.2/2.3)
-await external interop before their scores are claimed; `--mct none` is fully
-local (coding path unchanged, only the color transform is skipped). **2.3's
-`predictable_termination` half was attempted and deferred** — it needs a
-reference decoder to validate the ER-TERM flush, so a local oracle would give
-false confidence (see 2.3). Remaining unclaimed levers: the interop passes;
-`--qstyle scalar-derived` (3.3); LRCP progression (3.2); and Tier 3 multi-tile
-(3.1, the biggest lever).
+**2.3 `terminate_all`**, **2.3 TERMALL-scoped `predictable_termination`**, and
+**3.3 `--mct none` (reversible)** are all wired end-to-end with local
+byte-exact oracles. The resilience bits (2.1/2.2/2.3) need broader external
+interop before all scores are claimed; `--mct none` is fully local (coding path
+unchanged, only the color transform is skipped). ERTERM is now reference-checked
+with Kakadu on the larger no-sidecar smoke. Remaining unclaimed levers: broaden
+the interop passes; `--qstyle scalar-derived` (3.3); LRCP progression (3.2);
+and Tier 3 multi-tile (3.1, the biggest lever).
 
 ## How to read the priority tags
 
@@ -334,20 +333,17 @@ oracle, wrong for a real stream. What was added:
   thread-count determinism is only checked via same-config re-encode so far.
   Stays opt-in behind `--terminate-all`, default off.
 
-**`predictable_termination` (0x10) — partially wired; interop-positive,
-strict-decode hardening still open.** `mq_iso` now has an OpenJPEG/Grok-style
-`finishErterm` path that treats the final `byteout` as a guard/advance byte
-rather than payload, so short MQ ER-TERM streams roundtrip locally. The public
-profile accepts ERTERM only together with `terminate_all` and the ISO MQ backend
-(`--terminate-all --predictable-termination`); standalone ERTERM remains
-fail-closed because the encoder has no non-terminated ER-TERM segment model.
-Kakadu `kdu_expand` successfully decoded a no-sidecar single-tile ERTERM JP2
-from `C:\temp\tools\images\0002.tif` (3539x5120, tile forced to image size),
-which unblocks reference validation. The remaining blocker is z2000's own
-strict ERTERM decode on larger/non-trivial streams: a 257x383 synthetic
-roundtrip and the 0002 TIFF currently reproduce `SampleOutOfRange`, while the
-small codestream/unit smoke still passes. Keep this as the next T1/T2 bug before
-claiming the 2.3 score.
+**`predictable_termination` (0x10) — wired for the TERMALL path.** `mq_iso`
+now has an OpenJPEG/Grok-style `finishErterm` path that treats the final
+`byteout` as guard/advance state rather than payload, including the case where
+the current byte is a trailing non-payload `0xff`. Short MQ ER-TERM streams,
+larger EBCOT blocks, and a 257x383 debug-sidecar codestream roundtrip locally.
+The public profile accepts ERTERM only together with `terminate_all` and the
+ISO MQ backend (`--terminate-all --predictable-termination`); standalone
+ERTERM remains fail-closed because the encoder has no non-terminated ER-TERM
+segment model. Kakadu `kdu_expand` and z2000 strict decode both reconstruct the
+larger no-sidecar `C:\temp\tools\images\0002.tif` smoke pixel-exactly
+(3539x5120, tile forced to image size).
 
 ---
 
@@ -552,11 +548,12 @@ byte-identical across thread counts.
    the T1/EBCOT point. It stays opt-in/off-by-default until then.
 3. **2.2 (segmentation-symbols):** gates removed; local oracle + bounded-error
    corruption test pass. Remaining work is the OpenJPEG `-M` interop gate.
-4. **2.3 (`terminate_all`):** now wired end-to-end with a dedicated ISO MQ
-   per-pass terminated encoder + inferred decoder (not just a gate flip). Local
-   oracle + determinism pass; remaining work is the OpenJPEG `-M` terminate-all
-   interop gate. Its `predictable_termination` half was attempted and **deferred
-   pending a reference decoder** (the ER-TERM flush cannot be validated locally).
+4. **2.3 (`terminate_all` + `predictable_termination`):** now wired
+   end-to-end for the ISO MQ TERMALL path with inferred strict decode. Local
+   oracle, larger sidecar roundtrip, and Kakadu/z2000 no-sidecar pixel checks
+   pass; remaining work is broadening the OpenJPEG/Grok/Kakadu matrix across
+   more fixtures and keeping standalone ERTERM fail-closed until a
+   non-terminated segment model exists.
 5. **3.3 `--mct none` (reversible):** landed and fully local — component-
    independent coding, no interop dependency. `--qstyle scalar-derived` is the
    remaining half of 3.3.
