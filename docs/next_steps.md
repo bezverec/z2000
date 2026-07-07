@@ -8,6 +8,42 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 State re-verified at commit `d664306` (scorecard **86/100 narrow, 44/100 full**,
 `iso_coverage.md` dated 2026-07-05). First drafted at `ba66799`.
 
+## Status 2026-07-07 — external interop gates PASSED
+
+All staged interop gates were run on the user's Mac against **OpenJPEG 2.5.4**
+(`opj_decompress`) and **Grok 20.3.6** (`grk_decompress`), decoding z2000
+`tiff-to-jp2` output of a 1024x1024 RGB TIFF pixel-exactly (LOSSLESS OK) and
+validated by **jpylyzer** (`isValid=True`) for every case:
+
+- **2.1 `--vertical-causal`** — PASSED (opj + grk lossless).
+- **2.2 `--segmentation-symbols`** — PASSED (opj + grk lossless).
+- **2.3 `--terminate-all`** — PASSED (opj + grk lossless).
+- **3.3 `--mct none`** — PASSED (opj + grk lossless).
+- **3.1 multi-tile** — PASSED on a genuine 2x2 grid
+  (`--tile 512,512 --levels 2 --precincts "[128,128]"`) and a 3x3 edge-tile
+  grid (`--tile 384,384 --levels 1 --precincts "[64,64]" --block 32`); both
+  decode losslessly in opj + grk. Note the v1 geometry guard: XTSiz/YTSiz must
+  be multiples of 2^levels x the largest precinct, so the default
+  levels-5/256-precinct profile rejects `--tile` without explicit
+  levels/precincts (fail-closed, by design).
+
+Unblocking fix: the JP2 wrapper's COD validation (`jp2.zig:validateCodSegment`)
+still allowed only BYPASS and MCT=1, so the public CLI rejected the wired
+features with `UnsupportedProfile` even though the codestream layer coded them
+correctly — the local oracles ran below the JP2 layer and missed it. The
+wrapper now accepts style bits `0x01|0x04|0x08|0x20` and MCT 0/1; RESET
+(`0x02`) and ERTERM (`0x10`) stay fail-closed (COD mutation tests cover both
+directions). Scorecard claims applied in `iso_coverage.md`: narrow 86 → **88**
+(T1/EBCOT 14→16), full 44 → **53** (T1 5→8, core syntax 8→10, lossless encode
+7→9, lossless decode 4→6). Kakadu is not installed on this machine, so the
+Kakadu leg of the matrix remains open; the reverse direction (z2000 decoding
+OpenJPEG-encoded streams) still fail-closes on profile and stays future work.
+
+**Remaining top levers after this pass:** LRCP progression (3.2),
+`--qstyle scalar-derived` (3.3), PCRD rate allocation (3.4), and
+`predictable_termination` (2.3, still needs a reference decoder in the loop —
+Kakadu or an instrumented OpenJPEG build).
+
 ## Status since first draft (`ba66799` → `d664306`)
 
 Two Tier-1 items already landed — the fast, low-risk wins are largely spent:
