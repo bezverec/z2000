@@ -199,8 +199,8 @@ lines we are targeting:
   public opt-in strict profiles with end-to-end payload behavior. Predictable
   termination is wired only with `--terminate-all --predictable-termination`:
   it emits COD style `0x10` and ER-TERM-flushed per-pass MQ segments, and the
-  current single-tile smoke is accepted by Kakadu `kdu_expand`; larger z2000
-  strict decode coverage is still being hardened. `--reset-context` remains
+  current larger single-tile no-sidecar smoke decodes pixel-exactly through
+  z2000 strict decode and Kakadu `kdu_expand`. `--reset-context` remains
   fail-closed in the public profile.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is
