@@ -10,6 +10,35 @@ Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 the subsequent JP2/T2/T1/profile work is **89/100 narrow, 63/100 full** as of
 2026-07-07. First drafted at `ba66799`.
 
+## Current Working Sequence (2026-07-07 docs sync)
+
+The old tier list below is intentionally preserved as implementation history,
+but many of its "next" items have since landed. The current high-signal order
+for more ISO coverage is:
+
+1. **PLT-less foreign decode matrix.** The local Stage B reader can derive
+   packet spans from packet headers without PLT; Kakadu default PLT-less input
+   already decodes pixel-exactly. The next score gate is real OpenJPEG/Grok
+   PLT-less files on this benchmark machine, including default LRCP/no-precinct
+   output and a small multi-layer case.
+2. **ERTERM interop breadth.** TERMALL-scoped predictable termination is wired
+   and Kakadu/z2000 strict decode are green. Broaden the matrix across
+   OpenJPEG/Grok/Kakadu and keep standalone ERTERM fail-closed until its
+   non-terminated segment model exists.
+3. **Malformed corpus / fuzzing gate.** Add targeted corruptions for JP2 boxes,
+   COD/QCD, SOT/TLM/PLT, SOP/EPH, packet headers, and tile-part boundaries.
+   Treat jpylyzer/valid2000-style findings as diagnostics, not absolute truth.
+4. **Multi-tile v2.** The v1 aligned envelope is real and interop-proven for
+   the documented lossless profile. Expand one axis at a time: edge-tile
+   fixtures, more progression orders, then quality layers/style bits only after
+   strict decode and independent decoder checks are green.
+5. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
+   public on the narrow path. The next work is broader error-bound and foreign
+   decode fixtures, not more parser-only options.
+6. **T1 style policy.** Keep standalone RESET/ERTERM, BYPASS+TERMALL, and
+   untested combinations fail-closed until each has writer, strict reader,
+   tests, and interop coverage.
+
 ## Status 2026-07-07 (evening) — Kakadu installed: leg PASSED + new gap found
 
 Kakadu 8.4.1 demo apps are now on the Windows/Ryzen benchmark box (see
@@ -112,9 +141,10 @@ were also wired through their implemented segment models; Kakadu is installed
 on this Windows/Ryzen box; and the broader scorecard now stands at 89/63.
 
 **Remaining top levers after the later passes:** broaden ERTERM interop across
-OpenJPEG/Grok, keep expanding the PLT-less/foreign-stream matrix, finish more
-JP2/ICC fixtures, and continue T1/T2 performance work without relaxing
-fail-closed policy for unsupported style combinations.
+OpenJPEG/Grok, finish the PLT-less OpenJPEG/Grok foreign-stream matrix, add a
+malformed-corpus/fuzzing gate, expand the multi-tile v1 matrix, and continue
+T1/T2 performance work without relaxing fail-closed policy for unsupported
+style combinations.
 
 ## Status since first draft (`ba66799` → `d664306`)
 
@@ -131,15 +161,16 @@ Two Tier-1 items already landed — the fast, low-risk wins are largely spent:
   return `!uN` with `std.math.add` + length guards, so the parsers stay safe
   under `ReleaseFast` regardless of caller validation. **Done** (audit `dng.zig`
   for the same pattern to fully close it).
-- **◐ 3.1 Multi-tile scaffold advanced** — `77b26d1` ("Advance multi-tile RPCL
-  scaffold"); `jp2.zig` gained tile-part length handling. Encode/decode still
-  fail-close multi-tile (`codestream.zig:1774` `!grid.isSingleTile()`,
-  `4817` `sot.tile_index != 0`), so the scored feature is still open — see 3.1.
+- **Historical 3.1 multi-tile staging note — superseded.** At `77b26d1` the
+  scaffold had tile-part length handling but public encode/decode still
+  fail-closed multi-tile. That is no longer the current state: the v1 aligned
+  lossless multi-tile envelope has since landed with strict decode and
+  OpenJPEG/Grok interop.
 
 The full-target total moved 40→44 partly from 1.1 and partly from an internal
 scorecard reconciliation (the earlier rows summed to 43 against a stated 40).
 
-**Update (post-`d664306` working tree):** Tier 1 is fully closed — the
+**Historical update (post-`d664306` working tree):** Tier 1 is fully closed — the
 DNG/`tiff_ifd.zig` reader-hardening sliver (1.3) and the ICC fixture matrix
 (1.2) both landed. **2.1 (vertical_causal)**, **2.2 (segmentation_symbols)**,
 **2.3 `terminate_all`**, **2.3 TERMALL-scoped `reset_context`**, **2.3
@@ -149,9 +180,10 @@ resilience bits (2.1/2.2/2.3) need broader external interop before all scores
 are claimed; `--mct none` is fully local (coding path unchanged, only the color
 transform is skipped). RESET+TERMALL is reference-checked with Kakadu,
 OpenJPEG, and Grok on the larger no-sidecar smoke; ERTERM is reference-checked
-with Kakadu. Remaining unclaimed levers: broaden the interop passes;
-`--qstyle scalar-derived` (3.3); LRCP progression (3.2); and Tier 3 multi-tile
-(3.1, the biggest lever).
+with Kakadu. This snapshot is superseded by later work: scalar-derived QCD, all
+progression orders, and multi-tile v1 have since landed. The remaining
+unclaimed levers are the current working-sequence items at the top of this
+file.
 
 ## How to read the priority tags
 
@@ -439,17 +471,17 @@ the strict decoder walks slots with the progression's iterator and permutes
 the catalog entries back to RPCL grouping (`reorderStrictEntriesToRpcl`) so
 the downstream audit/assembly chain is untouched. Multi-layer LRCP encodes a
 single tile-part (per-resolution R-divisions are impossible when layer is
-outermost); single-layer LRCP keeps R-divisions. Fail-closed: RLCP/PCRL/CPRL,
-multi-tile LRCP, LRCP+debug-sidecar. Tests: iterator bijection oracle,
-lossless roundtrip at 1 and 3 layers with genuinely permuted streams, COD
+outermost); single-layer LRCP keeps R-divisions. Tests: iterator bijection
+oracle, lossless roundtrip at 1 and 3 layers with genuinely permuted streams, COD
 byte checks, fail-closed matrix updates. Interop: OpenJPEG 2.5.4 + Grok
 20.3.6 decode 1024x1024 LRCP output pixel-losslessly at 1, 4, and 4+BYPASS
 layers; jpylyzer valid with `<order>LRCP</order>`. Scorecard: full
 "T2 completeness" 5→6, "core codestream syntax" +1 — claimed.
 
-Remaining for this item: RLCP (nearly free — same permutation approach with a
-resolution-outer/layer-second iterator), then PCRL/CPRL (position-major;
-needs the precinct-geometry cache the roadmap calls for).
+Historical note: the original staged order was LRCP first, then RLCP, then
+PCRL/CPRL. That plan has completed for the documented single-tile profiles;
+future work is about broadening progression/tile-part/profile combinations,
+not adding the base iterators.
 
 - **Impact:** full "T2 completeness" 5→6/7, "core codestream syntax" +1. (+2)
 - **Effort:** M–L · **Risk:** Medium (new packet iterators; RPCL discipline is
@@ -505,10 +537,9 @@ and carries only the B.1.1 DC level shift. Changes:
   `ReleaseFast` (249/249). Verifiable entirely locally (no interop dependency,
   since the coding path is unchanged — only the color transform is skipped).
 
-**`--qstyle scalar-derived` — still open.** `codestream.zig` still fail-closes
-`quantization != .scalar_expounded` on the irreversible path. Needs the
-scalar-derived QCD write + E.1 derived inverse-quant read; keep scalar-expounded
-as the reference to diff derived step sizes against.
+Historical note: the original scalar-derived TODO paragraph is
+superseded. Scalar-derived QCD is implemented and interop-passed for the narrow
+irreversible path; broader lossy decode/error-bound fixtures remain open.
 
 ### 3.4 PCRD-style rate allocation — ✅ DONE
 
@@ -546,34 +577,11 @@ byte-identical across thread counts.
 
 ---
 
-## Suggested sequencing (updated for `d664306`)
+## Suggested sequencing
 
-1. **Tier 1 is done.** 1.1, 1.3 (incl. the `tiff_ifd.zig`/DNG sliver), and 1.2
-   (ICC fixture matrix) have all landed.
-2. **2.1 (vertical-causal):** gates removed, local byte-exact oracle passes,
-   and the OpenJPEG/Grok staged interop gate passed. Keep it opt-in/off-by-
-   default while the broader fixture matrix grows.
-3. **2.2 (segmentation-symbols):** gates removed; local oracle, bounded-error
-   corruption test, and OpenJPEG/Grok staged interop gate pass.
-4. **2.3 (`terminate_all` + TERMALL-scoped `reset_context` +
-   `predictable_termination`):** now wired end-to-end for the ISO MQ TERMALL
-   path with inferred strict decode. Local oracle, larger sidecar roundtrip,
-   and no-sidecar pixel checks pass; RESET+TERMALL is green through z2000,
-   Kakadu, OpenJPEG, and Grok, while ERTERM is green through z2000 and Kakadu.
-   Remaining work is broadening the OpenJPEG/Grok/Kakadu matrix across more
-   fixtures and keeping standalone RESET/ERTERM fail-closed until their segment
-   models exist.
-5. **3.3 `--mct none` (reversible):** landed and fully local — component-
-   independent coding, no interop dependency. `--qstyle scalar-derived` is the
-   remaining half of 3.3.
-6. **Next best local, interop-independent levers:** LRCP progression (3.2) and
-   Tier 3 multi-tile (3.1) — both verifiable against the existing RPCL /
-   single-tile paths without an external decoder.
-7. **Tier 3:** the multi-tile scaffold (3.1) already advanced; converting the
-   `isSingleTile`/`tile_index != 0` fail-closed checks into real per-tile
-   encode/decode is the highest full-target lever but also the largest. Keep
-   `tile == image` a passing special case at every step so the narrow path never
-   regresses.
+Use the "Current Working Sequence" near the top of this file for active work.
+The older tier notes are retained as evidence for how the current score was
+earned, not as the next implementation order.
 
 ## Verification protocol (unchanged from roadmap)
 
