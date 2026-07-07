@@ -28,6 +28,8 @@ entries are grouped by development milestone rather than semantic version.
 - Added public roundtrip and strict COD mutation coverage. A larger no-sidecar
   single-tile smoke from `0002.tif` decodes pixel-exactly through z2000 strict
   decode, Kakadu, OpenJPEG, and Grok.
+- Rechecked documentation against the row-level scorecard: the narrow RGB
+  lossless JP2 target is now 89/100 and the broader Part 1 family is 63/100.
 
 ### Foreign Stream Decode (Stage A)
 

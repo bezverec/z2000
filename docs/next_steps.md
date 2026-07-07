@@ -5,8 +5,10 @@ scorecard gaps into concrete, testable work items: for each gap it names the
 ISO/IEC 15444-1 clause, the current code location, exactly what is missing, a
 test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
-State re-verified at commit `d664306` (scorecard **86/100 narrow, 44/100 full**,
-`iso_coverage.md` dated 2026-07-05). First drafted at `ba66799`.
+Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
+44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
+the subsequent JP2/T2/T1/profile work is **89/100 narrow, 63/100 full** as of
+2026-07-07. First drafted at `ba66799`.
 
 ## Status 2026-07-07 (evening) — Kakadu installed: leg PASSED + new gap found
 
@@ -100,23 +102,19 @@ validated by **jpylyzer** (`isValid=True`) for every case:
   levels-5/256-precinct profile rejects `--tile` without explicit
   levels/precincts (fail-closed, by design).
 
-Unblocking fix: the JP2 wrapper's COD validation (`jp2.zig:validateCodSegment`)
-still allowed only BYPASS and MCT=1, so the public CLI rejected the wired
-features with `UnsupportedProfile` even though the codestream layer coded them
-correctly — the local oracles ran below the JP2 layer and missed it. The
-wrapper now accepts style bits `0x01|0x04|0x08|0x20` and MCT 0/1; RESET
-(`0x02`) and ERTERM (`0x10`) stay fail-closed (COD mutation tests cover both
-directions). Scorecard claims applied in `iso_coverage.md`: narrow 86 → **88**
-(T1/EBCOT 14→16), full 44 → **53** (T1 5→8, core syntax 8→10, lossless encode
-7→9, lossless decode 4→6). Kakadu is not installed on this machine, so the
-Kakadu leg of the matrix remains open; the reverse direction (z2000 decoding
-OpenJPEG-encoded streams) still fail-closes on profile and stays future work.
+Unblocking fix at that milestone: the JP2 wrapper's COD validation
+(`jp2.zig:validateCodSegment`) still allowed only BYPASS and MCT=1, so the
+public CLI rejected wired features with `UnsupportedProfile` even though the
+codestream layer coded them correctly — the local oracles ran below the JP2
+layer and missed it. The wrapper opened the then-supported style bits and MCT
+0/1. Since then, RESET+TERMALL (`0x06`) and TERMALL-scoped ERTERM (`0x14`)
+were also wired through their implemented segment models; Kakadu is installed
+on this Windows/Ryzen box; and the broader scorecard now stands at 89/63.
 
-**Remaining top levers after this pass:** ~~LRCP progression (3.2)~~ (landed
-same day with interop, see 3.2 — full 53 → **55**), RLCP/PCRL/CPRL (3.2),
-`--qstyle scalar-derived` (3.3), PCRD rate allocation (3.4), and
-`predictable_termination` (2.3, still needs a reference decoder in the loop —
-Kakadu or an instrumented OpenJPEG build).
+**Remaining top levers after the later passes:** broaden ERTERM interop across
+OpenJPEG/Grok, keep expanding the PLT-less/foreign-stream matrix, finish more
+JP2/ICC fixtures, and continue T1/T2 performance work without relaxing
+fail-closed policy for unsupported style combinations.
 
 ## Status since first draft (`ba66799` → `d664306`)
 
@@ -206,7 +204,7 @@ gracefully (no OOB) under `Debug` and `ReleaseFast`. **Done.**
 
 ## Tier 2 — Medium risk, high scorecard leverage
 
-### 2.1 Wire `vertical_causal` (COD style bit 0x08) end-to-end — ✅ DONE (local oracle); interop gate pending
+### 2.1 Wire `vertical_causal` (COD style bit 0x08) end-to-end — ✅ DONE + interop passed
 
 **Landed:** both fail-closed gates are removed for `vertical_causal` only.
 Encoder gate `codestream.zig:validateCodingPath` no longer rejects it (the
@@ -225,10 +223,10 @@ byte-exactly via `decodeLosslessTemporary`, (b) the payloads differ, and (c)
 the COD code-block-style byte carries `0x08` only when set. The two prior tests
 that asserted CAUSAL was fail-closed were updated to reflect the new behavior.
 
-**Test plan step 2 (external interop) — pending:** OpenJPEG/Grok/Kakadu must
-accept a causal-enabled smoke JP2 before the scorecard point is claimed. Until
-then the bit is proven internally but not counted; the default profile keeps it
-off, so this is safe to ship.
+**Test plan step 2 (external interop) — passed for the staged gate:**
+OpenJPEG 2.5.4 and Grok 20.3.6 decode the causal-enabled smoke JP2
+pixel-losslessly; Kakadu is part of the broader no-sidecar smoke matrix.
+The flag stays opt-in/off-by-default.
 
 - **Impact:** narrow "T1/EBCOT" 14→15/16; full "T1 completeness" 5→6/7. (+2–3)
 - **Effort:** M · **Risk:** Medium (touches COD write + strict decode, but the
@@ -262,7 +260,7 @@ off, so this is safe to ship.
 - **Why first among style bits:** the coding math is done and tested, so this is
   the lowest-risk way to convert an internal capability into a scored feature.
 
-### 2.2 Segmentation symbols (COD style bit 0x20) — ✅ DONE (local oracle); interop gate pending
+### 2.2 Segmentation symbols (COD style bit 0x20) — ✅ DONE + interop passed
 
 - **Impact:** full "T1 completeness" +1. (+1)
 - **Effort:** M · **Risk:** Medium
@@ -285,11 +283,10 @@ off, so this is safe to ship.
   attempt terminates with a bounded error or safe wrong-decode — never a panic —
   and at least one corruption is actively rejected, proving the symbol is
   validated). The two tests that asserted SEGMARK was fail-closed were updated.
-- **Interop gate — pending:** OpenJPEG `-M` segmentation-symbol interop must
-  pass before the scorecard point is claimed; until then it is proven
-  internally but not counted, and stays off by default.
+- **Interop gate:** OpenJPEG 2.5.4 and Grok 20.3.6 decode the
+  segmentation-symbol smoke losslessly; the flag stays opt-in/off-by-default.
 
-### 2.3 `terminate_all` (0x04) ✅ DONE (local oracle) + `predictable_termination` (0x10) — still open
+### 2.3 `terminate_all` (0x04), RESET (0x02), and `predictable_termination` (0x10) — ✅ TERMALL-scoped
 
 - **Impact:** full "T1 completeness" +1–2. (+1–2)
 - **Effort:** M–L · **Risk:** Medium–High (termination changes byte layout of
@@ -298,7 +295,7 @@ off, so this is safe to ship.
 - **ISO clause:** D.4.5 (termination on each coding pass) and the predictable
   (error-resilient) MQ termination annex.
 
-**terminate_all landed (local oracle; interop pending).** This was more than a
+**terminate_all landed and has interop coverage.** This was more than a
 gate flip: the pre-existing `encodeBlockSymbolsSegmentTerminated` used the
 *internal* arithmetic coder (`mq.zig`), which is byte-incompatible with the ISO
 MQ coder (`mq_iso.zig`) the public codestream requires — fine as an internal
@@ -331,9 +328,18 @@ oracle, wrong for a real stream. What was added:
   carries `0x04`, re-encode is byte-identical) plus fail-closed cases
   `TERMALL+legacy` and `TERMALL+layers`. Full `zig build test` green in `Debug`
   + `ReleaseFast` (248/248).
-- **Interop gate — pending:** OpenJPEG `-M` terminate-all interop; and cross
-  thread-count determinism is only checked via same-config re-encode so far.
-  Stays opt-in behind `--terminate-all`, default off.
+- **Interop gate:** OpenJPEG/Grok lossless interop passed for TERMALL; Kakadu
+  has also accepted the current no-sidecar style smoke set. It stays opt-in
+  behind `--terminate-all`, default off.
+
+**`reset_context` (0x02) — wired for the TERMALL path.** Public encode accepts
+`--reset-context` only together with `--terminate-all`, where every coding pass
+has an explicit T2 segment length and MQ byte boundary. The ISO-MQ encoder and
+strict decoder reset JPEG2000 MQ context states between pass-terminated
+segments. Standalone RESET, BYPASS+TERMALL, multi-layer TERMALL, and multi-tile
+style combinations remain fail-closed. A larger no-sidecar `0002.tif` smoke
+roundtrips pixel-exactly through z2000 strict decode, Kakadu, OpenJPEG, and
+Grok.
 
 **`predictable_termination` (0x10) — wired for the TERMALL path.** `mq_iso`
 now has an OpenJPEG/Grok-style `finishErterm` path that treats the final
@@ -351,7 +357,7 @@ larger no-sidecar `C:\temp\tools\images\0002.tif` smoke pixel-exactly
 
 ## Tier 3 — Larger structural work (unlocks the biggest full-codec gaps)
 
-### 3.1 Multi-tile encode/decode — ✅ LANDED (v1 envelope; score pending interop)
+### 3.1 Multi-tile encode/decode — ✅ LANDED (v1 envelope; OpenJPEG/Grok interop passed)
 
 **All four stages of `docs/multi_tile_plan.md` are implemented.** Multi-tile
 codestreams encode and decode byte-exactly through the public path (2×2 and
@@ -544,12 +550,11 @@ byte-identical across thread counts.
 
 1. **Tier 1 is done.** 1.1, 1.3 (incl. the `tiff_ifd.zig`/DNG sliver), and 1.2
    (ICC fixture matrix) have all landed.
-2. **2.1 (vertical-causal):** the gates are removed and the local byte-exact
-   oracle passes. Remaining work is the **external interop gate** — feed a
-   causal-enabled smoke JP2 to OpenJPEG/Grok/Kakadu; once one accepts it, claim
-   the T1/EBCOT point. It stays opt-in/off-by-default until then.
-3. **2.2 (segmentation-symbols):** gates removed; local oracle + bounded-error
-   corruption test pass. Remaining work is the OpenJPEG `-M` interop gate.
+2. **2.1 (vertical-causal):** gates removed, local byte-exact oracle passes,
+   and the OpenJPEG/Grok staged interop gate passed. Keep it opt-in/off-by-
+   default while the broader fixture matrix grows.
+3. **2.2 (segmentation-symbols):** gates removed; local oracle, bounded-error
+   corruption test, and OpenJPEG/Grok staged interop gate pass.
 4. **2.3 (`terminate_all` + TERMALL-scoped `reset_context` +
    `predictable_termination`):** now wired end-to-end for the ISO MQ TERMALL
    path with inferred strict decode. Local oracle, larger sidecar roundtrip,
@@ -580,20 +585,13 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
 
 ## Scoreboard
 
-- **Baseline now (`d664306`):** narrow **86**, full **44** — already includes
-  1.1 (containers +1) and 1.3.
-- **Working tree (post-`d664306`):** 1.2 and the 1.3 DNG sliver landed (test-only
-  hardening; interop-evidence +1 pending external confirmation). 2.1
-  (vertical_causal), 2.2 (segmentation_symbols), and 2.3 (`terminate_all`) all
-  have green local oracles — their narrow "T1/EBCOT" +2 and full "T1" +2/+3
-  (2.1), full "T1 completeness" +1 (2.2), and full "T1 completeness" +1–2 (2.3
-  terminate_all) are **staged, not yet claimed**, gated on the
-  OpenJPEG/Grok/Kakadu interop passes. **`--mct none` (3.3, reversible) landed
-  and is fully local** — full "core syntax" +1 is claimable now (no interop
-  dependency). `predictable_termination` and `--qstyle scalar-derived` remain
-  open.
-- **If remaining Tier 1–2 land (2.1 / 2.2 / 2.3 interop):** narrow 86 → ~89
-  (T1/EBCOT +2, interop-evidence +1), full 44 → ~48+ (T1 +3/+4, core syntax +1
-  from `--mct none`, containers +1).
-- **If Tier 3 (multi-tile 3.1 + LRCP 3.2) then lands:** full ~47 → ~53, the
-  first real jump on the broad-codec axis.
+- **Current (`2026-07-07`):** narrow **89**, full **63** — matches
+  `docs/iso_coverage.md`.
+- **Recent claimed movement:** T1/EBCOT grew through BYPASS, TERMALL,
+  vertical-causal, segmentation-symbols, TERMALL-scoped RESET, and
+  TERMALL-scoped ERTERM; broad-codec score also moved through multi-tile v1,
+  additional progression orders, foreign PLT/PLT-less decode, ICT/9-7,
+  scalar-derived/scalar-expounded quantization, and PCRD-style rate allocation.
+- **Next score levers:** broaden ERTERM beyond Kakadu-only interop, add more
+  malformed-corpus/fuzzing coverage, expand JP2/ICC fixtures, and keep pushing
+  arbitrary external decode breadth.

@@ -102,13 +102,15 @@ The T1 work is split into two paths:
 - per-pass byte truncation metadata for quality layers.
 
 The implementation is still not a complete Part 1 T1 coder. Strict codestream
-metadata policy is fail-closed: any nonzero COD code-block style byte is rejected
-with `UnsupportedPayload` before packet decode. Reset-context, terminate-all,
-vertical-causal, and segmentation-symbol payload behavior now exist as
-standalone EBCOT style test paths only; they are not public codestream profile
-support yet. The next T1 work should continue tightening remaining cleanup edge
-cases, COD-driven termination/other style behavior, and byte-for-byte oracle
-coverage before any nonzero style byte is accepted in strict codestream decode.
+metadata policy is fail-closed per combination: a COD code-block style byte is
+accepted only when the matching payload model is wired through T1, T2 segment
+lengths, strict decode, tests, and interop smoke. BYPASS, TERMALL,
+TERMALL-scoped RESET, vertical-causal, TERMALL-scoped ERTERM, and
+segmentation-symbol profiles are public where their segment model exists;
+standalone RESET/ERTERM, BYPASS+TERMALL, and untested combinations still return
+`UnsupportedPayload`. The next T1 work should continue tightening remaining
+cleanup edge cases, COD-driven termination combinations, and byte-for-byte
+oracle coverage.
 
 ## T2 Direction
 
