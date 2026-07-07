@@ -5865,12 +5865,8 @@ fn emitDirectIsoCleanupPassPlain(
                 {
                     const y = stripe_y + runlen;
                     const sample_flags = flags[nbfIndex(nbs, x, y)];
-                    const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
-                    const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
-                    try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+                    try emitDirectCleanupSignPlain(scratch, encoder, plane, stride, rect, flags, nbs, x, y, sample_flags);
                     symbol_count += 1;
-                    nbfMarkSignificant(flags, nbs, x, y, negative);
-                    setSignificantRow(scratch, x, y);
                 }
 
                 var dy = runlen + 1;
@@ -5957,23 +5953,7 @@ fn nbfEmitCleanupSamplePlain(
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    const p = nbfIndex(nbs, x, y);
-    const sample_flags = flags[p];
-    if ((sample_flags & (nbf_sig_self | nbf_visit)) != 0) return 0;
-    const coeff = plane[(rect.y + y) * stride + rect.x + x];
-    const bit = isMagnitudeBitSet(coeff, bitplane);
-    const zero_context = nbf_zc_lut[@intFromEnum(band_kind)][sample_flags & nbf_sig8];
-    try encoder.write(mqContextIndex(zero_context), bit);
-    var symbol_count: usize = 1;
-    if (bit) {
-        const negative = coeff < 0;
-        const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
-        try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
-        symbol_count += 1;
-        nbfMarkSignificant(flags, nbs, x, y, negative);
-        setSignificantRow(scratch, x, y);
-    }
-    return symbol_count;
+    return nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, y, bitplane, @intFromEnum(band_kind));
 }
 
 inline fn nbfEmitCleanupSamplePlainKnown(
@@ -5997,14 +5977,29 @@ inline fn nbfEmitCleanupSamplePlainKnown(
     try encoder.write(mqContextIndex(zero_context), bit);
     var symbol_count: usize = 1;
     if (bit) {
-        const negative = coeff < 0;
-        const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
-        try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+        try emitDirectCleanupSignPlain(scratch, encoder, plane, stride, rect, flags, nbs, x, y, sample_flags);
         symbol_count += 1;
-        nbfMarkSignificant(flags, nbs, x, y, negative);
-        setSignificantRow(scratch, x, y);
     }
     return symbol_count;
+}
+
+inline fn emitDirectCleanupSignPlain(
+    scratch: *DirectBlockScratch,
+    encoder: *mq_iso.Encoder,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    flags: []u16,
+    nbs: usize,
+    x: usize,
+    y: usize,
+    sample_flags: u16,
+) !void {
+    const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
+    const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
+    try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+    nbfMarkSignificant(flags, nbs, x, y, negative);
+    setSignificantRow(scratch, x, y);
 }
 
 fn appendPass(
