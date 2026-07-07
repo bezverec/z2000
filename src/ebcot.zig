@@ -4628,15 +4628,9 @@ fn decodeCleanupPassInferredPlain(
                     symbol_count += 1;
                 }
 
-                var dy = runlen + 1;
-                while (dy < 4) : (dy += 1) {
-                    symbol_count += try nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, stripe_y + dy, bitplane, band_index);
-                }
+                symbol_count += try decodeCleanupSampleRangePlainKnown(scratch, decoder, flags, nbs, x, stripe_y, runlen + 1, 4, bitplane, band_index);
             } else {
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, stripe_y + dy, bitplane, band_index);
-                }
+                symbol_count += try decodeCleanupSampleRangePlainKnown(scratch, decoder, flags, nbs, x, stripe_y, 0, stripe_height, bitplane, band_index);
             }
         }
     }
@@ -4959,6 +4953,26 @@ inline fn nbfDecodeCleanupSamplePlainKnown(
     if (bit) {
         try decodeCleanupSignPlainKnown(scratch, decoder, flags, nbs, x, y, bitplane, sample);
         symbol_count += 1;
+    }
+    return symbol_count;
+}
+
+inline fn decodeCleanupSampleRangePlainKnown(
+    scratch: *DecodeBlockScratch,
+    decoder: anytype,
+    flags: []u16,
+    nbs: usize,
+    x: usize,
+    stripe_y: usize,
+    first_dy: usize,
+    end_dy: usize,
+    bitplane: u8,
+    band_index: usize,
+) !usize {
+    var symbol_count: usize = 0;
+    var dy = first_dy;
+    while (dy < end_dy) : (dy += 1) {
+        symbol_count += try nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, stripe_y + dy, bitplane, band_index);
     }
     return symbol_count;
 }
@@ -5867,15 +5881,9 @@ fn emitDirectIsoCleanupPassPlain(
                     symbol_count += 1;
                 }
 
-                var dy = runlen + 1;
-                while (dy < 4) : (dy += 1) {
-                    symbol_count += try nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y + dy, bitplane, band_index);
-                }
+                symbol_count += try emitDirectCleanupSampleRangePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y, runlen + 1, 4, bitplane, band_index);
             } else {
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y + dy, bitplane, band_index);
-                }
+                symbol_count += try emitDirectCleanupSampleRangePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y, 0, stripe_height, bitplane, band_index);
             }
         }
     }
@@ -5977,6 +5985,29 @@ inline fn nbfEmitCleanupSamplePlainKnown(
     if (bit) {
         try emitDirectCleanupSignPlain(scratch, encoder, plane, stride, rect, flags, nbs, x, y, sample_flags);
         symbol_count += 1;
+    }
+    return symbol_count;
+}
+
+inline fn emitDirectCleanupSampleRangePlainKnown(
+    scratch: *DirectBlockScratch,
+    encoder: *mq_iso.Encoder,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    flags: []u16,
+    nbs: usize,
+    x: usize,
+    stripe_y: usize,
+    first_dy: usize,
+    end_dy: usize,
+    bitplane: u8,
+    band_index: usize,
+) !usize {
+    var symbol_count: usize = 0;
+    var dy = first_dy;
+    while (dy < end_dy) : (dy += 1) {
+        symbol_count += try nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y + dy, bitplane, band_index);
     }
     return symbol_count;
 }
