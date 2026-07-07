@@ -68,6 +68,9 @@ This first milestone is intentionally small and honest:
 - explicit COD code-block style metadata for all six Part 1 style bits;
   BYPASS is implemented end to end, the remaining style bits stay fail-closed
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
+- decode of foreign (OpenJPEG/Grok) JP2 files that carry PLT packet lengths,
+  including their default LRCP/no-precinct profiles, multi-layer ladders,
+  and 9/7 lossy output; PLT-less foreign streams still fail closed
 - strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
   `COM` comments
 

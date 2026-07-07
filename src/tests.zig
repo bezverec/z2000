@@ -2999,11 +2999,14 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
                     bytes[cod + 4] |= 0x80;
                 }
             }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            // Clearing Scod bit 0 while the precinct bytes stay in the
+            // segment leaves Lcod inconsistent; precinct-less COD itself is
+            // a supported profile (mapped to maximal 2^15 precincts).
             .{ .label = "missing precinct bytes", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
                     bytes[cod + 4] &= ~@as(u8, 0x01);
                 }
-            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "unsupported progression", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
                     bytes[cod + 5] = 5;
@@ -6661,6 +6664,59 @@ test "strict decode rejects COD whose blocks cross precinct spans" {
         codestream.CodestreamError.UnsupportedPayload,
         codestream.decodeLosslessTemporary(allocator, corrupted),
     );
+}
+
+test "precinct-less COD maps to maximal precincts and decodes byte-exactly" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 32;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    // Explicit maximal precincts produce the exact packet layout a
+    // precinct-less COD implies (one precinct per resolution, ISO B.6).
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 32768, .height = 32768 }} ** 33,
+        .precinct_count = 1,
+    });
+    defer allocator.free(bytes);
+
+    // Splice the precinct bytes out of COD and clear Scod bit 0: the stream
+    // now signals "no precinct partition" like OpenJPEG/Grok defaults do,
+    // while every packet stays byte-identical.
+    const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const levels = bytes[cod + 9];
+    const removed: usize = @as(usize, levels) + 1;
+    var spliced: std.ArrayList(u8) = .empty;
+    defer spliced.deinit(allocator);
+    try spliced.appendSlice(allocator, bytes[0 .. cod + 14]);
+    try spliced.appendSlice(allocator, bytes[cod + 14 + removed ..]);
+    const old_length = (@as(u16, spliced.items[cod + 2]) << 8) | spliced.items[cod + 3];
+    const new_length = old_length - @as(u16, @intCast(removed));
+    spliced.items[cod + 2] = @intCast(new_length >> 8);
+    spliced.items[cod + 3] = @intCast(new_length & 0xff);
+    spliced.items[cod + 4] &= ~@as(u8, 0x01);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, spliced.items);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    // The JP2 wrapper accepts the precinct-less profile too.
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, spliced.items);
+    allocator.free(wrapped);
 }
 
 test "PCRD allocator prefers high-slope passes and respects layer budgets" {

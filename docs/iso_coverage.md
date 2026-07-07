@@ -13,7 +13,7 @@ Last updated: 2026-07-07.
 | Target | Score | Meaning |
 | --- | ---: | --- |
 | Narrow RGB lossless JP2 target | 88 / 100 | Single-tile RGB TIFF 6.0 to JP2, RCT, reversible 5/3, RPCL, BYPASS, one or more quality layers, PLT/TLM, strict z2000 decode, and OpenJPEG/Grok/Kakadu/jpylyzer smoke acceptance. |
-| Full JPEG2000 Part 1 codec family | 60 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
+| Full JPEG2000 Part 1 codec family | 62 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
 
 The narrow target is intentionally much closer than the full-codec target. It
 measures the practical archival path we are building first. The full-codec
@@ -43,12 +43,12 @@ exist.
 | Containers and metadata | 10 | 7 | Basic JP2 boxes are accepted by jpylyzer for the current no-sidecar smoke file, restricted ICC preservation exists, and standard `LBox == 0`/`XLBox` lengths parse for codestream boxes; broader color/profile handling and JPX remain missing or unsupported by design. |
 | Core codestream syntax | 15 | 11 | Multi-tile SIZ/SOT layouts, disabled MCT, and LRCP progression are now public interop-proven profiles; more marker variants, component layouts, and remaining progression/style combinations remain. |
 | Lossless encode profiles | 15 | 9 | Multi-tile v1 (aligned grids, one tile-part per tile) encodes streams OpenJPEG/Grok decode losslessly; more progressions, remaining code-block style bits, and stronger rate/layer allocation remain. |
-| Lossless decode profiles | 15 | 6 | Multi-tile z2000 streams decode per tile through the public strict path; independent arbitrary JP2/J2K input, more progression orders, and more marker combinations remain. |
+| Lossless decode profiles | 15 | 8 | Multi-tile z2000 streams decode per tile through the public strict path, and foreign OpenJPEG/Grok JP2s that carry PLT decode pixel-identically to the encoders' own decoders (default LRCP/no-precinct profiles, multi-layer ladders, 9/7 lossy). PLT-less input, arbitrary component layouts, and more marker combinations remain. |
 | Lossy encode/decode | 15 | 7 | ICT/9-7 with scalar-expounded and scalar-derived quantization exists for the narrow single-tile path with OpenJPEG-matching reconstruction, and rate-driven layers use global PCRD allocation (J.14) that lands on byte targets within 0.2-0.4 dB of OpenJPEG's allocator at matched sizes. Arbitrary decode and broader error-bound validation remain missing. |
 | T1 completeness | 15 | 8 | BYPASS, terminate-all, vertical-causal, and segmentation symbols are public opt-in profiles with OpenJPEG/Grok lossless interop; reset-context, predictable termination, and more termination rules still need public profile coverage. |
 | T2 completeness | 10 | 8 | All five Part 1 progression orders are public with OpenJPEG/Grok lossless interop (single- and multi-layer); packet parser breadth and tile-part divisions beyond none/R remain. |
 | Interop and conformance gates | 5 | 4 | Reproducible OpenJPEG/Grok/Kakadu/jpylyzer matrix exists locally for the narrow smoke file; malformed corpus, fuzzing, and broader profile gates remain incomplete. |
-| **Total** | **100** | **60** |  |
+| **Total** | **100** | **62** |  |
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more

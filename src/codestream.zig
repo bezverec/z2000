@@ -1909,13 +1909,14 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 @intFromEnum(WaveletTransform.reversible_5_3) => .reversible_5_3,
                 else => return CodestreamError.InvalidCodestream,
             };
-            precinct_count = if ((scod & 0x01) != 0) levels + 1 else 0;
-            if (precinct_count > precincts.len or segment.len < 10 + @as(usize, precinct_count)) {
+            const wire_precinct_count: usize = if ((scod & 0x01) != 0) @as(usize, levels) + 1 else 0;
+            if (wire_precinct_count > precincts.len or segment.len < 10 + wire_precinct_count) {
                 return CodestreamError.InvalidCodestream;
             }
-            if (segment.len != 10 + @as(usize, precinct_count)) return CodestreamError.InvalidCodestream;
-            if (precinct_count > 0) {
-                for (segment[10..][0..precinct_count], 0..) |byte, index| {
+            if (segment.len != 10 + wire_precinct_count) return CodestreamError.InvalidCodestream;
+            if (@as(usize, levels) + 1 > precincts.len) return CodestreamError.InvalidCodestream;
+            if (wire_precinct_count > 0) {
+                for (segment[10..][0..wire_precinct_count], 0..) |byte, index| {
                     const precinct = PrecinctSize{
                         .width = @as(u16, 1) << @as(u4, @intCast(byte & 0x0f)),
                         .height = @as(u16, 1) << @as(u4, @intCast(byte >> 4)),
@@ -1928,7 +1929,16 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                         .height = precinct.height,
                     };
                 }
+            } else {
+                // Scod bit 0 unset means no precinct partition (ISO B.6):
+                // every resolution uses the maximal 2^15 precinct, i.e. one
+                // precinct per resolution. OpenJPEG and Grok emit this by
+                // default, so map it explicitly instead of failing closed.
+                for (precincts[0 .. @as(usize, levels) + 1]) |*precinct| {
+                    precinct.* = .{ .width = 32768, .height = 32768 };
+                }
             }
+            precinct_count = levels + 1;
             saw_cod = true;
         } else if (marker == @intFromEnum(Marker.qcd)) {
             if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
