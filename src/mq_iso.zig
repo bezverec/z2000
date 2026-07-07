@@ -167,6 +167,12 @@ pub const Encoder = struct {
     /// decoder can verify the segment terminated where expected. The
     /// emitted segment still decodes with the standard MQ decoder because
     /// the spilled register bits are exactly what byte-in padding supplies.
+    ///
+    /// The exact output bytes are normative (kdu_expand/OpenJPEG/Grok decode
+    /// the full-image ERTERM stream pixel-exactly). The test "ISO MQ ER-TERM
+    /// flush matches interop-verified byte vectors" pins them, so any change to
+    /// finishActiveStreamErterm that alters the flush fails in CI — re-run
+    /// tools/interop_erterm.ps1 and refresh the golden vectors if it does.
     pub fn finishErterm(self: *Encoder) ![]u8 {
         std.debug.assert(self.output == null);
         try self.finishActiveStreamErterm();
