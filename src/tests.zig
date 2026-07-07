@@ -6618,6 +6618,51 @@ test "direct ISO segment encoder matches the symbol-based encoder byte for byte"
     }
 }
 
+test "strict decode rejects COD whose blocks cross precinct spans" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 32;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    // Valid geometry: 32x32 blocks inside 64x64 precincts (band span 32).
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 32,
+        .block_height = 32,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 64, .height = 64 }} ** 33,
+        .precinct_count = 1,
+    });
+    defer allocator.free(bytes);
+
+    // Shrink the signalled precincts to 32x32 (exponent byte 0x55): the band
+    // span above resolution 0 drops to 16 < the 32-sample block, which would
+    // require B.7 block clamping; the strict reader must fail closed.
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const cod = findMarker(corrupted, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const levels = corrupted[cod + 9];
+    for (0..@as(usize, levels) + 1) |index| {
+        corrupted[cod + 14 + index] = 0x55;
+    }
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, corrupted),
+    );
+}
+
 test "PCRD allocator prefers high-slope passes and respects layer budgets" {
     const allocator = std.testing.allocator;
 
@@ -9711,6 +9756,13 @@ test "unsupported JP2 profile marker options fail closed" {
         .{ .label = "RLCP multi-tile", .options = .{ .progression = .rlcp, .tile_width = 1, .tile_height = 2 } },
         .{ .label = "PCRL multi-tile", .options = .{ .progression = .pcrl, .tile_width = 1, .tile_height = 2 } },
         .{ .label = "CPRL multi-tile", .options = .{ .progression = .cprl, .tile_width = 1, .tile_height = 2 } },
+        // ISO B.7: 64x64 precincts leave a 32-sample band span above
+        // resolution 0, so the default 64x64 block would cross precinct
+        // boundaries; z2000 does not clamp block sizes, so this fails closed.
+        .{ .label = "block crosses precincts", .options = .{
+            .precincts = [_]codestream.PrecinctSize{.{ .width = 64, .height = 64 }} ** 33,
+            .precinct_count = 1,
+        } },
     };
 
     for (cases) |scenario| {

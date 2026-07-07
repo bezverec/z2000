@@ -21,6 +21,16 @@ entries are grouped by development milestone rather than semantic version.
   with `<qStyle>scalar derived</qStyle>`. Reversible + scalar-derived stays
   fail-closed.
 
+### B.7 Precinct/Block Guard
+
+- Fail-closed the ISO 15444-1 B.7 constraint on the single-tile path (both
+  encode and strict decode): when a precinct's band span (full precinct at
+  resolution 0, half above) is smaller than the code-block size, the
+  standard prescribes block-size clamping that z2000 does not implement.
+  Previously `--precincts "[64,64]"` with the default 64px block emitted a
+  stream no decoder accepted; both sides now return `UnsupportedPayload`
+  up front, sharing the guard the multi-tile envelope already had.
+
 ### PCRD Rate Allocation
 
 - Replaced the per-block proportional `--rates` split with a global
