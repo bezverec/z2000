@@ -241,6 +241,15 @@ encode passes the same way); candidates: SIMD magnitude/bitplane extraction
   the large TIFF gate: encode t16 529.8 → 546.6 ms and decode t16 567.5 →
   581.7 ms. Reverted; future O3 work should use structural fallthrough or
   generated-code inspection instead of generic branch hints.
+- **O3 plain significance candidate branch merge (2026-07-07, Windows
+  x86_64, `0004.tif`):** merging the `significant/visited` reject and
+  `pattern == 0` reject into one boolean expression passed EBCOT/strict tests
+  but regressed the full gate: encode t1 3.274 → 3.381 s, encode t16
+  506.8 → 555.3 ms, decode t16 512.9 → 532.3 ms. A follow-up that kept only
+  the `band_index` hoist still failed the keep rule for encode t16
+  (506.8 → 530.3 ms). Reverted both; future O3 work should avoid making the
+  candidate reject path less predictable unless generated-code inspection
+  shows a real fallthrough win.
 
 ## Milestones
 
@@ -271,3 +280,5 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | 2026-07-07 | O2 cleanup-run plain 4-row OR (`0004.tif`) | +0.5% | -1.4% | -1.3% | -4.2% | kept |
 | 2026-07-07 | O2 decode cleanup known flags/stride (`0004.tif`) | — | — | -7.6% | -3.2% | kept; t16 noisy |
 | 2026-07-07 | O2 encode cleanup known flags/stride (`0004.tif`) | -1.5% | -0.7% | -2.1% | -3.4% | kept; decode rechecked |
+| 2026-07-07 | cleanup range refactors + full gate (`0004.tif`) | 3274 ms | 507 ms | 3308 ms | 513 ms | kept; lossless interop |
+| 2026-07-07 | O3 significance branch merge (`0004.tif`) | +3.3% | +9.6% | +0.3% | +3.8% | reverted |
