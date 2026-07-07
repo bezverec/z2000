@@ -112,9 +112,15 @@ pub const PacketHeaderReader = struct {
 
     pub fn readBits(self: *PacketHeaderReader, bit_count: u6) PacketHeaderError!u64 {
         var value: u64 = 0;
-        var index: u6 = 0;
-        while (index < bit_count) : (index += 1) {
-            value = (value << 1) | @intFromBool(try self.readBit());
+        var remaining = bit_count;
+        while (remaining > 0) {
+            if (self.bits_remaining == 0) try self.loadByte();
+            const take = @min(remaining, self.bits_remaining);
+            const shift: u3 = @intCast(self.bits_remaining - take);
+            const mask = (@as(u16, 1) << take) - 1;
+            value = (value << take) | ((@as(u64, self.current >> shift)) & mask);
+            self.bits_remaining -= take;
+            remaining -= take;
         }
         return value;
     }

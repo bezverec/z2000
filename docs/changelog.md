@@ -239,6 +239,9 @@ entries are grouped by development milestone rather than semantic version.
 - Added portable SIMD shuffles to the horizontal integer 5/3 row lifting and
   pack/unpack steps, covering the repeated interior predict/update groups and
   low/high rearrangement used by both forward and inverse DWT.
+- Batched T2 packet-header `readBits` consumption from the current byte instead
+  of dispatching every bit through `readBit`, while preserving marker-stuffing
+  validation at byte boundaries.
 - Added pass-level T1 decode profiling for the strict ISO MQ/BYPASS path:
   significance, refinement, cleanup/RLC, and raw BYPASS passes now report
   CPU-sum timing, pass counts, and symbol counts across decode workers.

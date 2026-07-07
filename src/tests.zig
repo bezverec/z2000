@@ -316,6 +316,24 @@ test "T2 packet header reader rejects missing stuff bit after 0xff" {
     try std.testing.expectError(t2.PacketHeaderError.InvalidMarkerStuffing, reader.readBit());
 }
 
+test "T2 packet header readBits crosses stuffed byte boundaries" {
+    const allocator = std.testing.allocator;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var writer = t2.PacketHeaderWriter.init(allocator, &out);
+    try writer.writeBits(0xff, 8);
+    try writer.writeBits(0x55, 7);
+    try writer.finish();
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xff, 0x55 }, out.items);
+
+    var reader = t2.PacketHeaderReader.init(out.items);
+    try std.testing.expectEqual(@as(u64, 0x7fd5), try reader.readBits(15));
+    try reader.byteAlign();
+    try std.testing.expectEqual(out.items.len, reader.bytesConsumed());
+}
+
 test "T2 tag-tree encoder and decoder preserve threshold decisions" {
     const allocator = std.testing.allocator;
     const leaf_values = [_]u32{
