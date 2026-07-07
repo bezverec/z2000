@@ -190,6 +190,18 @@ separately against the branch counters:
   BYPASS profile). Lossless self-decode + t1==t16 determinism + full test suite
   green in Debug and ReleaseFast; z2000-decoder-only change, so encode bytes and
   external interop are unaffected.
+- **✗ Same index hoist on the *encode* emit paths (2026-07-08, reverted):**
+  applying the identical strength-reduction to `emitDirectIsoSignificancePassPlain`
+  and `emitDirectIsoRefinementPassPlain` (nbf index + plane index) produced
+  byte-identical output and all-green tests, but a clean A/B (6 runs each) put
+  encode block-payload at 1330 vs 1335 ms — ~0.4%, overlapping intervals, below
+  the 3% gate. Encode T1 is dominated by the MQ-*encode* inner cost and the
+  block extraction, not the significance/refinement index arithmetic, so the
+  hoist that mattered on decode is noise here. Reverted per the keep rule.
+- **DWT is no longer a lever (2026-07-08):** re-profiled, inverse DWT is 38 ms
+  = 2.7% of decode and the horizontal lifting is already `@Vector`-ized
+  (`forward53Line`/`HorizontalPairVector`), so O4 as written is spent. T1 is
+  92–95% of both encode and decode; all remaining headroom is in the MQ passes.
 
 ### O4. Horizontal 5/3 DWT SIMD — M effort, ~5% encode, ~3% decode
 
