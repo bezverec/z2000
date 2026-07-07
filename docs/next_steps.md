@@ -144,14 +144,16 @@ scorecard reconciliation (the earlier rows summed to 43 against a stated 40).
 **Update (post-`d664306` working tree):** Tier 1 is fully closed — the
 DNG/`tiff_ifd.zig` reader-hardening sliver (1.3) and the ICC fixture matrix
 (1.2) both landed. **2.1 (vertical_causal)**, **2.2 (segmentation_symbols)**,
-**2.3 `terminate_all`**, **2.3 TERMALL-scoped `predictable_termination`**, and
-**3.3 `--mct none` (reversible)** are all wired end-to-end with local
-byte-exact oracles. The resilience bits (2.1/2.2/2.3) need broader external
-interop before all scores are claimed; `--mct none` is fully local (coding path
-unchanged, only the color transform is skipped). ERTERM is now reference-checked
-with Kakadu on the larger no-sidecar smoke. Remaining unclaimed levers: broaden
-the interop passes; `--qstyle scalar-derived` (3.3); LRCP progression (3.2);
-and Tier 3 multi-tile (3.1, the biggest lever).
+**2.3 `terminate_all`**, **2.3 TERMALL-scoped `reset_context`**, **2.3
+TERMALL-scoped `predictable_termination`**, and **3.3 `--mct none`
+(reversible)** are all wired end-to-end with local byte-exact oracles. The
+resilience bits (2.1/2.2/2.3) need broader external interop before all scores
+are claimed; `--mct none` is fully local (coding path unchanged, only the color
+transform is skipped). RESET+TERMALL is reference-checked with Kakadu,
+OpenJPEG, and Grok on the larger no-sidecar smoke; ERTERM is reference-checked
+with Kakadu. Remaining unclaimed levers: broaden the interop passes;
+`--qstyle scalar-derived` (3.3); LRCP progression (3.2); and Tier 3 multi-tile
+(3.1, the biggest lever).
 
 ## How to read the priority tags
 
@@ -548,12 +550,14 @@ byte-identical across thread counts.
    the T1/EBCOT point. It stays opt-in/off-by-default until then.
 3. **2.2 (segmentation-symbols):** gates removed; local oracle + bounded-error
    corruption test pass. Remaining work is the OpenJPEG `-M` interop gate.
-4. **2.3 (`terminate_all` + `predictable_termination`):** now wired
-   end-to-end for the ISO MQ TERMALL path with inferred strict decode. Local
-   oracle, larger sidecar roundtrip, and Kakadu/z2000 no-sidecar pixel checks
-   pass; remaining work is broadening the OpenJPEG/Grok/Kakadu matrix across
-   more fixtures and keeping standalone ERTERM fail-closed until a
-   non-terminated segment model exists.
+4. **2.3 (`terminate_all` + TERMALL-scoped `reset_context` +
+   `predictable_termination`):** now wired end-to-end for the ISO MQ TERMALL
+   path with inferred strict decode. Local oracle, larger sidecar roundtrip,
+   and no-sidecar pixel checks pass; RESET+TERMALL is green through z2000,
+   Kakadu, OpenJPEG, and Grok, while ERTERM is green through z2000 and Kakadu.
+   Remaining work is broadening the OpenJPEG/Grok/Kakadu matrix across more
+   fixtures and keeping standalone RESET/ERTERM fail-closed until their segment
+   models exist.
 5. **3.3 `--mct none` (reversible):** landed and fully local — component-
    independent coding, no interop dependency. `--qstyle scalar-derived` is the
    remaining half of 3.3.

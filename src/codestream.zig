@@ -9030,18 +9030,18 @@ fn validateCodingPath(options: LosslessOptions) !void {
             if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
         },
     }
-    // vertical_causal (0x08), segmentation_symbols (0x20), and terminate_all
-    // (0x04) are wired end-to-end. vertical_causal forms stripe-causal contexts (ISO
-    // 15444-1 D.7); segmentation_symbols emits the 0xA UNIFORM-context symbol
-    // after each cleanup pass and the decoder validates it (D.5); terminate_all
-    // independently terminates the MQ coder on every coding pass (D.4.5).
+    // vertical_causal (0x08), segmentation_symbols (0x20), reset_context
+    // (0x02, TERMALL-only), and terminate_all (0x04) are wired end-to-end.
+    // vertical_causal forms stripe-causal contexts (ISO 15444-1 D.7);
+    // segmentation_symbols emits the 0xA UNIFORM-context symbol after each
+    // cleanup pass and the decoder validates it (D.5); terminate_all
+    // independently terminates the MQ coder on every coding pass (D.4.5), which
+    // gives RESET an explicit boundary where the MQ contexts can be reset.
     // predictable_termination (0x10) is an opt-in TERMALL-only ER-TERM encode
-    // path (D.4.2), accepted by the strict metadata reader and external Kakadu
-    // smoke, while larger z2000 strict decode coverage is still being hardened.
+    // path (D.4.2), accepted by the strict reader and external Kakadu smoke.
     // The default profile sets no style bits, so the narrow path is unaffected.
-    // reset_context stays fail-closed.
     if (options.reset_context) {
-        return CodestreamError.UnsupportedPayload;
+        if (!options.terminate_all) return CodestreamError.UnsupportedPayload;
     }
     if (options.predictable_termination) {
         // ER-TERM is only wired on top of the per-pass terminated encoder, so
@@ -9060,6 +9060,7 @@ fn validateCodingPath(options: LosslessOptions) !void {
         if (options.layers != 1) return CodestreamError.UnsupportedPayload;
     }
     if (options.bypass) {
+        if (options.terminate_all) return CodestreamError.UnsupportedPayload;
         // BYPASS requires the ISO MQ backend; quality layers and rates are
         // supported with truncation points snapped to segment boundaries.
         if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
@@ -9115,12 +9116,14 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
 
 fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
     const parsed = ebcot.CodeBlockStyle.fromCodByte(style) orelse return CodestreamError.InvalidCodestream;
-    // BYPASS (0x01), terminate_all (0x04), vertical_causal (0x08),
-    // predictable_termination (0x10, TERMALL-only), and segmentation_symbols
-    // (0x20) are accepted by the strict metadata layer; reset_context stays
-    // fail-closed until its payload behavior is wired.
-    const supported_style_bits: u8 = 0x01 | 0x04 | 0x08 | 0x10 | 0x20;
+    // BYPASS (0x01), reset_context (0x02, TERMALL-only), terminate_all (0x04),
+    // vertical_causal (0x08), predictable_termination (0x10, TERMALL-only), and
+    // segmentation_symbols (0x20) are accepted by the strict metadata layer
+    // only for combinations whose payload model is implemented.
+    const supported_style_bits: u8 = 0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20;
     if ((parsed.toCodByte() & ~supported_style_bits) != 0) return CodestreamError.UnsupportedPayload;
+    if (parsed.reset_context and !parsed.terminate_all) return CodestreamError.UnsupportedPayload;
+    if (parsed.bypass and parsed.terminate_all) return CodestreamError.UnsupportedPayload;
     // ER-TERM segments are only decodable through the per-pass terminated
     // machinery, so 0x10 is only valid together with 0x04.
     if (parsed.predictable_termination and !parsed.terminate_all) return CodestreamError.UnsupportedPayload;

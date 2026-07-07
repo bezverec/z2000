@@ -83,7 +83,7 @@ The T1 work is split into two paths:
   test path;
 - optional reset-context behavior in the standalone continuous MQ style path,
   preserving one payload stream while resetting MQ probability states between
-  coding passes;
+  coding passes, plus public TERMALL-scoped RESET in the ISO-MQ codestream path;
 - optional terminate-all behavior in the standalone T1 style path, storing
   pass-terminated MQ byte slices with explicit pass payload lengths;
 - optional vertical-causal context formation in the standalone T1 style path,
@@ -94,8 +94,8 @@ The T1 work is split into two paths:
 - style-aware partial coefficient decoding for pass-prefix quality-layer
   validation;
 - explicit internal `CodeBlockStyle` metadata for all six COD style bits, with
-  BYPASS and TERMALL-scoped predictable termination carried through the strict
-  payload path and reset-context still rejected as an unsupported payload mode;
+  BYPASS, TERMALL-scoped RESET, and TERMALL-scoped predictable termination
+  carried through the strict payload path;
 - MQ encode/decode roundtrip tests;
 - direct MQ emission with scratch-buffer reuse;
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;

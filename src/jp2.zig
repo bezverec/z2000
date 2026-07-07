@@ -661,11 +661,16 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     if (@as(u32, block_width) * @as(u32, block_height) > 4096) return Jp2Error.InvalidCodestream;
     const code_block_style = payload[length_offset + 10];
     if ((code_block_style & 0xc0) != 0) return Jp2Error.InvalidCodestream;
-    // BYPASS (0x01), TERMALL (0x04), CAUSAL (0x08), ERTERM (0x10, only with
-    // TERMALL), and SEGMARK (0x20) are accepted by the codestream layer; RESET
-    // (0x02) stays fail-closed until implemented. Larger z2000 strict ERTERM
-    // decode coverage is still being hardened.
-    if ((code_block_style & ~@as(u8, 0x3d)) != 0) return Jp2Error.UnsupportedProfile;
+    // BYPASS (0x01), RESET (0x02, only with TERMALL), TERMALL (0x04), CAUSAL
+    // (0x08), ERTERM (0x10, only with TERMALL), and SEGMARK (0x20) are accepted
+    // by the codestream layer only for implemented payload combinations.
+    if ((code_block_style & ~@as(u8, 0x3f)) != 0) return Jp2Error.UnsupportedProfile;
+    if ((code_block_style & 0x02) != 0 and (code_block_style & 0x04) == 0) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    if ((code_block_style & 0x01) != 0 and (code_block_style & 0x04) != 0) {
+        return Jp2Error.UnsupportedProfile;
+    }
     if ((code_block_style & 0x10) != 0 and (code_block_style & 0x04) == 0) {
         return Jp2Error.UnsupportedProfile;
     }
