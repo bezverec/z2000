@@ -148,6 +148,52 @@ test "ISO MQ encoder resetStream preserves deterministic output" {
     try std.testing.expectEqualSlices(u8, first, second);
 }
 
+test "ISO MQ ER-TERM flush roundtrips encoded decisions" {
+    const allocator = std.testing.allocator;
+    // Several lengths so the flush hits different ct phases.
+    inline for (.{ 5, 17, 96, 353 }) |count| {
+        var encoder = try mq_iso.Encoder.init(allocator, 4);
+        defer encoder.deinit();
+        var reference = try mq_iso.Encoder.init(allocator, 4);
+        defer reference.deinit();
+
+        var contexts: [count]usize = undefined;
+        var bits: [count]bool = undefined;
+        for (0..count) |index| {
+            contexts[index] = (index * 3 + index / 5) % 4;
+            bits[index] = ((index * 11 + 7) % 17) < 6;
+            try encoder.write(contexts[index], bits[index]);
+            try reference.write(contexts[index], bits[index]);
+        }
+        const bytes = try encoder.finishErterm();
+        defer allocator.free(bytes);
+        const flush_bytes = try reference.finish();
+        defer allocator.free(flush_bytes);
+
+        var decoder = try mq_iso.Decoder.init(allocator, 4, bytes);
+        defer decoder.deinit();
+        var first_bad: ?usize = null;
+        for (contexts, bits, 0..) |context, bit, index| {
+            const decoded = try decoder.read(context);
+            if (decoded != bit and first_bad == null) first_bad = index;
+        }
+        if (first_bad) |bad| {
+            std.debug.print(
+                "ERTERM-DIAG count={} first_bad={} erterm_len={} flush_len={} erterm_tail={x} flush_tail={x}\n",
+                .{
+                    count,
+                    bad,
+                    bytes.len,
+                    flush_bytes.len,
+                    bytes[bytes.len -| 4 ..],
+                    flush_bytes[flush_bytes.len -| 4 ..],
+                },
+            );
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
 test "ISO MQ decoder roundtrips encoded decisions" {
     const allocator = std.testing.allocator;
     var encoder = try mq_iso.Encoder.init(allocator, 4);
@@ -9249,6 +9295,65 @@ test "terminate-all code-block style roundtrips losslessly and is deterministic"
     var decoded = try codestream.decodeLosslessTemporary(allocator, termall);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
+test "predictable termination roundtrips losslessly and changes the flush" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const erterm = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .terminate_all = true,
+        .predictable_termination = true,
+    });
+    defer allocator.free(erterm);
+    const termall = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .terminate_all = true,
+    });
+    defer allocator.free(termall);
+
+    // The COD code-block-style byte must advertise ERTERM (0x10) together
+    // with TERMALL (0x04) only when predictable termination is requested.
+    const erterm_cod = findMarker(erterm, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const termall_cod = findMarker(termall, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x14), erterm[erterm_cod + 12] & 0x14);
+    try std.testing.expectEqual(@as(u8, 0x04), termall[termall_cod + 12] & 0x14);
+
+    // The ER-TERM flush produces a different (predictable) byte layout.
+    try std.testing.expect(!std.mem.eql(u8, erterm, termall));
+
+    // Encoding stays deterministic and the stream reconstructs byte-exactly.
+    const erterm_again = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .terminate_all = true,
+        .predictable_termination = true,
+    });
+    defer allocator.free(erterm_again);
+    try std.testing.expectEqualSlices(u8, erterm, erterm_again);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, erterm);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    // The JP2 wrapper accepts the ERTERM+TERMALL profile.
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, erterm);
+    allocator.free(wrapped);
 }
 
 test "mct none codes components independently and roundtrips losslessly" {

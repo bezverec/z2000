@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Predictable Termination (ERTERM) Bring-up
+
+- Added an ISO MQ ER-TERM flush path for `--terminate-all
+  --predictable-termination`. The flush mirrors OpenJPEG/Grok's ERTERM
+  treatment of the final guard byte, keeps standalone short MQ streams
+  roundtrippable, and allows the public COD style byte `0x10` only when
+  TERMALL (`0x04`) is also present.
+- T2 segment-length handling now permits zero-byte terminated segments only
+  through explicit segment metadata; the normal layer-delta path still rejects
+  included zero-byte contributions. A Kakadu `kdu_expand` smoke accepts the
+  generated no-sidecar single-tile ERTERM JP2, while larger z2000 strict
+  ERTERM decode remains the next hardening target.
+
 ### Foreign Stream Decode (Stage A)
 
 - z2000 now decodes JP2 files produced by other encoders when they carry

@@ -161,6 +161,43 @@ pub const Encoder = struct {
         }
     }
 
+    /// Predictable (error-resilient) MQ termination — ISO 15444-1 D.4.2's
+    /// ERTERM procedure, ported from OpenJPEG's opj_mqc_erterm_enc: flush
+    /// the minimal deterministic byte pattern (no setbits), so a resilient
+    /// decoder can verify the segment terminated where expected. The
+    /// emitted segment still decodes with the standard MQ decoder because
+    /// the spilled register bits are exactly what byte-in padding supplies.
+    pub fn finishErterm(self: *Encoder) ![]u8 {
+        std.debug.assert(self.output == null);
+        try self.finishActiveStreamErterm();
+        return self.bytes.toOwnedSlice(self.allocator);
+    }
+
+    pub fn finishErtermInto(self: *Encoder, output: *std.ArrayList(u8)) !usize {
+        std.debug.assert(self.output == output);
+        const start = self.output_start;
+        try self.finishActiveStreamErterm();
+        return output.items.len - start;
+    }
+
+    fn finishActiveStreamErterm(self: *Encoder) !void {
+        var k: i32 = 11 - @as(i32, @intCast(self.ct)) + 1;
+        while (k > 0) {
+            self.c <<= @as(u5, @intCast(self.ct));
+            self.ct = 0;
+            try self.byteOut();
+            k -= @as(i32, @intCast(self.ct));
+        }
+        const bytes = self.activeBytes();
+        if (self.previousByteFrom(bytes) != 0xff) {
+            const len_before_guard = bytes.items.len;
+            try self.byteOut();
+            if (bytes.items.len > len_before_guard) {
+                _ = bytes.pop();
+            }
+        }
+    }
+
     fn renormalize(self: *Encoder) !void {
         while ((self.a & 0x8000) == 0) {
             self.a <<= 1;
