@@ -2582,9 +2582,11 @@ pub fn encodeBlockSymbolsSegmentIsoMqTerminated(
 ) !CodeBlockSegment {
     // predictable_termination is supported here (and only here), layered on
     // terminate_all: every pass segment is flushed with the ER-TERM procedure
-    // (D.4.2) instead of the standard setbits flush. bypass / reset_context
-    // stay unsupported.
-    if (!style.terminate_all or style.bypass or style.reset_context) return EbcotError.InvalidBlock;
+    // (D.4.2) instead of the standard setbits flush. RESET (D.4.3) is safe in
+    // this per-pass segment path because every pass has an explicit byte
+    // boundary; BYPASS+TERMALL remains a separate segment model and stays
+    // fail-closed.
+    if (!style.terminate_all or style.bypass) return EbcotError.InvalidBlock;
     if (block.passes.len == 0) {
         const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
         errdefer allocator.free(passes);
@@ -2614,6 +2616,7 @@ pub fn encodeBlockSymbolsSegmentIsoMqTerminated(
     var symbol_offset: usize = 0;
     for (block.passes, 0..) |pass, ordinal| {
         if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
+        if (style.reset_context and ordinal != 0) try encoder.resetJpeg2000Contexts();
         const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
         for (pass_symbols) |symbol| {
             try encoder.write(mqContextIndex(symbol.context), symbol.bit);
@@ -3542,8 +3545,10 @@ pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
 ) ![]const i32 {
     // predictable_termination (ER-TERM flush) is permitted here with
     // terminate_all: each per-pass segment is a self-contained MQ stream that
-    // the standard decoder reads back, so the inferred decode is unchanged.
-    if (!style.terminate_all or style.bypass or style.reset_context) return EbcotError.InvalidBlock;
+    // the standard decoder reads back. RESET is also safe in this path because
+    // the segment table gives every pass an explicit boundary where the
+    // adaptive MQ contexts can be reset.
+    if (!style.terminate_all or style.bypass) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
@@ -3601,6 +3606,7 @@ pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
             } else {
                 mq_decoder = try scratch.isoMqDecoder(slice);
             }
+            if (style.reset_context and pass_index != 0) try mq_decoder.?.resetJpeg2000Contexts();
             seg_offset = seg_end;
             seg_index += 1;
 

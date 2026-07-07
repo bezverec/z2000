@@ -19,6 +19,16 @@ entries are grouped by development milestone rather than semantic version.
   larger no-sidecar single-tile smoke decodes pixel-exactly through both z2000
   strict decode and Kakadu `kdu_expand`.
 
+### RESET+TERMALL Code-Block Style
+
+- Opened COD style `RESET` (`0x02`) only in the implemented TERMALL ISO-MQ
+  segment model: `--reset-context --terminate-all` resets JPEG2000 MQ context
+  states between pass-terminated segments while preserving explicit T2 segment
+  lengths. Standalone RESET and BYPASS+TERMALL remain fail-closed.
+- Added public roundtrip and strict COD mutation coverage. A larger no-sidecar
+  single-tile smoke from `0002.tif` decodes pixel-exactly through z2000 strict
+  decode, Kakadu, OpenJPEG, and Grok.
+
 ### Foreign Stream Decode (Stage A)
 
 - z2000 now decodes JP2 files produced by other encoders when they carry
@@ -128,8 +138,9 @@ entries are grouped by development milestone rather than semantic version.
   codestream layer already codes end-to-end (TERMALL `0x04`, CAUSAL `0x08`,
   SEGMARK `0x20`) and to disabled MCT (`0`), unblocking `--terminate-all`,
   `--vertical-causal`, `--segmentation-symbols`, and `--mct none` through the
-  public `tiff-to-jp2` CLI. RESET (`0x02`) and ERTERM (`0x10`) stay
-  fail-closed; added accepted-profile and rejected-bit COD mutation tests.
+  public `tiff-to-jp2` CLI. At that milestone, RESET (`0x02`) and ERTERM
+  (`0x10`) still stayed fail-closed; accepted-profile and rejected-bit COD
+  mutation tests were added.
 - Passed the external interop gates staged in `docs/next_steps.md`:
   OpenJPEG 2.5.4 and Grok 20.3.6 decode z2000 output pixel-losslessly for
   vertical-causal, segmentation-symbols, terminate-all, `--mct none`, and

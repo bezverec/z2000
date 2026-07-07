@@ -9073,12 +9073,13 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "zero layers", .offset = 7, .value = 0, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported MCT", .offset = 8, .value = 2, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
-        .{ .label = "unsupported RESET code-block style", .offset = 12, .value = 0x02, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported standalone RESET code-block style", .offset = 12, .value = 0x02, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported ERTERM code-block style", .offset = 12, .value = 0x10, .expected = codestream.CodestreamError.UnsupportedPayload },
-        // TERMALL (0x04), CAUSAL (0x08), and SEGMARK (0x20) are supported
-        // end-to-end, so they are intentionally absent here; their acceptance +
-        // roundtrip is covered by dedicated tests. The combined 0x3f case still
-        // exercises rejection of the remaining (RESET/ERTERM) bits.
+        // TERMALL (0x04), RESET+TERMALL (0x06), CAUSAL (0x08), ERTERM+TERMALL
+        // (0x14), and SEGMARK (0x20) are supported end-to-end, so they are
+        // intentionally absent here; their acceptance + roundtrip is covered by
+        // dedicated tests. The combined 0x3f case still exercises rejection of
+        // the unimplemented BYPASS+TERMALL segment model.
         .{ .label = "unsupported combined code-block style", .offset = 12, .value = 0x3f, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "reserved code-block style bit", .offset = 12, .value = 0x40, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
@@ -9222,13 +9223,14 @@ test "unsupported code-block style options fail closed" {
     };
     const cases = [_]UnsupportedCase{
         .{ .label = "BYPASS+legacy", .options = .{ .bypass = true, .t1_backend = .legacy_mq } },
-        .{ .label = "RESET", .options = .{ .reset_context = true } },
+        .{ .label = "RESET without TERMALL", .options = .{ .reset_context = true } },
         // terminate_all is wired for the ISO MQ backend only; requesting it with
         // the legacy backend must still fail closed (the flag would otherwise be
         // silently dropped while the COD marker advertised it).
         .{ .label = "TERMALL+legacy", .options = .{ .terminate_all = true, .t1_backend = .legacy_mq } },
         // Multi-layer terminate_all is not yet wired; it must fail closed.
         .{ .label = "TERMALL+layers", .options = .{ .terminate_all = true, .layers = 2 } },
+        .{ .label = "BYPASS+TERMALL", .options = .{ .bypass = true, .terminate_all = true } },
         // CAUSAL (vertical_causal), SEGMARK (segmentation_symbols), and TERMALL
         // (terminate_all, ISO MQ) are now wired end-to-end; see the dedicated
         // roundtrip tests below. None of those is fail-closed any longer.
@@ -9376,6 +9378,61 @@ test "terminate-all code-block style roundtrips losslessly and is deterministic"
     var decoded = try codestream.decodeLosslessTemporary(allocator, termall);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
+test "reset-context with terminate-all roundtrips losslessly and changes context state" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 19 + i / 7) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 41 + 23) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 73 + 11) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const reset_termall = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .terminate_all = true,
+        .reset_context = true,
+    });
+    defer allocator.free(reset_termall);
+    const termall = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .terminate_all = true,
+    });
+    defer allocator.free(termall);
+
+    const reset_cod = findMarker(reset_termall, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const termall_cod = findMarker(termall, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x06), reset_termall[reset_cod + 12] & 0x06);
+    try std.testing.expectEqual(@as(u8, 0x04), termall[termall_cod + 12] & 0x06);
+
+    try std.testing.expect(!std.mem.eql(u8, reset_termall, termall));
+
+    const reset_termall_again = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .terminate_all = true,
+        .reset_context = true,
+    });
+    defer allocator.free(reset_termall_again);
+    try std.testing.expectEqualSlices(u8, reset_termall, reset_termall_again);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, reset_termall);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, reset_termall);
+    allocator.free(wrapped);
 }
 
 test "predictable termination roundtrips losslessly and changes the flush" {

@@ -286,11 +286,10 @@ sign prediction contexts, refined magnitude-refinement contexts, direct MQ
 emission, BYPASS raw segments, and terminated codeword segment metadata are
 covered by oracle tests in the current narrow path. Segmentation-symbol cleanup
 trailers, terminate-all pass-terminated MQ slices, vertical-causal context
-formation, and reset-context continuous MQ behavior are implemented behind
-internal EBCOT code-block style flags, but public strict codestream support
-rejects those style bits with `UnsupportedPayload` until each style has writer,
-reader, tests, and interop coverage. BYPASS is the one public nonzero COD style
-bit currently wired end to end.
+formation, TERMALL-scoped reset-context, and TERMALL-scoped ERTERM are wired
+through public strict codestream paths where their payload behavior has writer,
+reader, tests, and interop coverage. Unsupported combinations, such as
+standalone RESET or BYPASS+TERMALL, still return `UnsupportedPayload`.
 The inferred continuous payload decoder and partial coefficient decode helpers
 accept the same internal style state for future strict T2 audits and
 quality-layer prefix validation; inferred decode rejects terminate-all payloads

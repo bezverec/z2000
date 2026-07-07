@@ -66,7 +66,8 @@ This first milestone is intentionally small and honest:
   and PSNR at matched sizes tracks OpenJPEG's allocator within a few tenths
   of a dB.
 - explicit COD code-block style metadata for all six Part 1 style bits;
-  BYPASS is implemented end to end, the remaining style bits stay fail-closed
+  BYPASS, TERMALL, TERMALL-scoped RESET, vertical-causal, ERTERM, and
+  segmentation symbols are wired where their payload behavior is implemented
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
 - decode of foreign (OpenJPEG/Grok) JP2 files that carry PLT packet lengths,
   including their default LRCP/no-precinct profiles, multi-layer ladders,
@@ -195,13 +196,13 @@ lines we are targeting:
 - `--bypass` (Grok `-M 1`, Kakadu `Cmodes=BYPASS`) is implemented end to end
   for single-layer codestreams with the ISO MQ backend, including raw
   segment termination and multi-segment packet-header lengths.
-  `--terminate-all`, `--vertical-causal`, and `--segmentation-symbols` are
-  public opt-in strict profiles with end-to-end payload behavior. Predictable
-  termination is wired only with `--terminate-all --predictable-termination`:
-  it emits COD style `0x10` and ER-TERM-flushed per-pass MQ segments, and the
-  current larger single-tile no-sidecar smoke decodes pixel-exactly through
-  z2000 strict decode and Kakadu `kdu_expand`. `--reset-context` remains
-  fail-closed in the public profile.
+  `--terminate-all`, TERMALL-scoped `--reset-context`, `--vertical-causal`,
+  and `--segmentation-symbols` are public opt-in strict profiles with
+  end-to-end payload behavior. Predictable termination is wired only with
+  `--terminate-all --predictable-termination`: it emits COD style `0x10` and
+  ER-TERM-flushed per-pass MQ segments. The current larger single-tile
+  no-sidecar RESET+TERMALL and ERTERM smokes decode pixel-exactly through
+  z2000 strict decode and independent decoders.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is
   disabled by default for the current independent-decoder interop path. Use
@@ -259,7 +260,9 @@ deltas over one continuous MQ code-block segment, with byte ranges snapped to
 actual coding-pass truncation points. The optional BP8 debug sidecar mirrors the
 same metadata for oracle checks; it is no longer emitted by default or required
 for normal z2000 decode. Code-block style options remain fail-closed until their
-payload behavior is implemented.
+payload behavior is implemented; currently supported combinations include
+BYPASS without TERMALL and RESET only when TERMALL supplies explicit pass
+segment boundaries.
 
 ## Performance Notes (current pass)
 

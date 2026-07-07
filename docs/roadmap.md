@@ -22,14 +22,11 @@ interop gate.
 
 - T1/EBCOT: continue tightening the coding pass model after cleanup run mode,
   JPEG2000-style directional sign context/prediction, and more precise
-  refinement contexts. Reset-context, terminate-all, vertical-causal, and
-  segmentation-symbol behavior now exist in standalone T1 style paths, including
-  inferred continuous-payload decode where pass lengths are not required and
-  partial quality-layer prefix decode, but public codestream support remains
-  fail-closed until COD style handling is end-to-end. BYPASS is now the first
-  public nonzero COD style bit wired through packet payloads; reset-context,
-  terminate-all, vertical-causal, predictable termination, and segmentation
-  symbols remain internal or fail-closed. Keep row-mask, stripe-mask,
+  refinement contexts. BYPASS, terminate-all, TERMALL-scoped reset-context,
+  vertical-causal, TERMALL-scoped predictable termination, and
+  segmentation-symbol behavior now have public payload paths where the required
+  segment model exists. Standalone RESET, standalone ERTERM, BYPASS+TERMALL,
+  and untested combinations remain fail-closed. Keep row-mask, stripe-mask,
   flag-word, and SIMD-aware T1 optimization going only when byte-for-byte
   oracle tests continue to pass.
 - T2 packet state: make include tag-tree state, zero-bitplane tag-tree state,
