@@ -7,6 +7,48 @@ The campaign goal, in order: (1) beat Grok at equal thread counts on the
 archival profile, (2) beat Kakadu once it is installed on the benchmark
 machine.
 
+## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
+
+Machine: AMD Ryzen 7 5700X (8C/16T), Windows 11, x86_64. Kakadu **8.4.1**
+demo apps installed (`kdu_compress`/`kdu_expand`, outside PATH — see
+`KDU_COMPRESS`/`KDU_EXPAND` in `tools/bench_compare.sh`). Grok/OpenJPEG are
+not installed on this machine, so this box benches the Kakadu column and the
+Mac benches the Grok column. Input: 2048x2048 RGB **pure random noise**
+(PowerShell-generated — harsher than the Mac's generator; z2000 output
+13.568 MB vs Kakadu 13.537 MB, +0.23% — sizes tracked but the 0.1% fairness
+gate needs same-generator inputs before cross-machine comparisons).
+Profile: archival parity (RPCL, 6 res, 256/128 precincts, 64x64 blocks,
+SOP+EPH+TLM, BYPASS, lossless 5/3). Kakadu flags:
+`Creversible=yes Clevels=5 Cblk={64,64} Cprecincts={256,256},{256,256},{128,128}
+Corder=RPCL Cuse_sop=yes Cuse_eph=yes Cmodes=BYPASS ORGgen_plt=yes
+ORGtparts=R ORGgen_tlm=6` (`ORGgen_tlm` needs the tile-part count — 6 for
+the R-division profile; Part 1 MQ path only, no HT). hyperfine, warmup 2,
+8 runs, `-N`.
+
+| metric | z2000 | Kakadu 8.4.1 | gap |
+| --- | ---: | ---: | ---: |
+| encode t1 | 1486 ms ± 10 | 771 ms ± 4 | **1.93x** |
+| encode t16 | 228 ms ± 21 | 100 ms ± 6 | **2.29x** |
+| decode t1 | 1622 ms ± 15 | 854 ms ± 6 | **1.90x** |
+| decode t16 | 214 ms ± 1 | 104 ms ± 6 | **2.05x** |
+
+Scaling on 16 threads: z2000 6.5x encode / 7.6x decode; Kakadu 7.7x / 8.2x.
+`--timings` decode split on this input: block payload 95.4% (MQ cleanup/RLC
+489 ms, MQ significance 446 ms, RAW refinement 288 ms, MQ refinement
+187 ms, RAW significance 158 ms).
+
+**Interop found while baselining:** `kdu_expand` decodes the z2000 archival
+stream **pixel-exactly** (the previously open Kakadu leg of the interop
+matrix — see `next_steps.md`). The reverse direction fails on Kakadu's
+reversible QCD profile (guard bits = 1, non-z2000 exponents) — a scoped
+foreign-QCD work item, recorded in `next_steps.md`.
+
+The Kakadu gap (~2x) is larger than the Grok gap (~1.3–1.4x): Kakadu's
+Part 1 MQ path is the harder target, consistent with the plan's ordering
+(beat Grok first, then chase Kakadu). All backlog items and the keep rule
+apply unchanged on this machine; primary metrics here are the four rows
+above.
+
 ## Baseline (2026-07-07)
 
 Machine: Apple Silicon arm64, 10 logical cores, macOS (Darwin 25.5.0).
@@ -200,14 +242,23 @@ encode passes the same way); candidates: SIMD magnitude/bitplane extraction
 - **M2 — encode t1 beats Grok** (< 417 ms): O1 + O3 + O4 + O6.
 - **M3 — t10 parity with Grok** (encode < 107 ms, decode < 79 ms): M1/M2
   wins compound with O5.
-- **M4 — Kakadu columns**: install Kakadu SDK on the benchmark machine,
-  extend `tools/bench_compare.sh` with `kdu_compress`/`kdu_expand` rows
-  (`Corder=RPCL Cprecincts=... ORGgen_plt=yes`), re-baseline, then chase.
-  Note Kakadu's headline speed on Part 15 (HTJ2K) is out of scope; the
-  target is its Part 1 MQ path.
+- **M4 — Kakadu columns**: ✅ opened 2026-07-07 — Kakadu 8.4.1 demo apps
+  installed on the Windows/Ryzen box, `tools/bench_compare.sh` extended with
+  optional `kdu_compress`/`kdu_expand` rows (each reference codec is now
+  optional; set `KDU_COMPRESS`/`KDU_EXPAND` when outside PATH), and the
+  Kakadu baseline measured (see Baseline #2: ~1.9–2.3x across the four
+  primary metrics). Note Kakadu's headline speed on Part 15 (HTJ2K) is out
+  of scope; the target is its Part 1 MQ path.
 
 ## Progress log
 
 | date | change | encode t1 | encode t10 | decode t1 | decode t10 | verdict |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | 2026-07-07 | baseline @ 61a0ebd | 543.5 | 150.6 | 492.5 | 123.4 | — |
+
+Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
+
+| date | change | encode t1 | encode t16 | decode t1 | decode t16 | verdict |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 2026-07-07 | baseline #2 (Kakadu 771/100/854/104) | 1486 | 228 | 1622 | 214 | — |
+| 2026-07-07 | O1 column-mask (RAW sig) | — | — | +1.7% | — | reverted |

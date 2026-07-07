@@ -3789,11 +3789,16 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
     }
 
     {
-        const corrupted = try allocator.dupe(u8, wrapped);
-        defer allocator.free(corrupted);
-        const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
-        corrupted[ihdr_payload.start + 12] = 1;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+        // UnkC = 1 ("colourspace unknown") is a legal ISO I.5.3.1 value that
+        // Kakadu writes; it must parse. Values above 1 stay rejected.
+        const modified = try allocator.dupe(u8, wrapped);
+        defer allocator.free(modified);
+        const ihdr_payload = try findJp2ChildBoxPayload(modified, jp2h_payload, "ihdr");
+        modified[ihdr_payload.start + 12] = 1;
+        const info = try jp2.parseInfo(modified);
+        try std.testing.expectEqual(@as(usize, 2), info.width);
+        modified[ihdr_payload.start + 12] = 2;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(modified));
     }
 
     {
@@ -3802,6 +3807,24 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
         const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
         corrupted[ihdr_payload.start + 13] = 1;
         try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+    }
+
+    {
+        // Unknown optional jp2h boxes after ihdr (Kakadu writes a res box) are
+        // skipped without failing the parse.
+        const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+        const res_box = [_]u8{ 0, 0, 0, 10, 'r', 'e', 's', ' ', 0xaa, 0xbb };
+        const with_res = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "res ",
+            res_box[8..],
+        );
+        defer allocator.free(with_res);
+        const info = try jp2.parseInfo(with_res);
+        try std.testing.expectEqual(@as(usize, 2), info.width);
     }
 
     {

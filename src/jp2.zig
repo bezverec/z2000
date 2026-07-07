@@ -279,7 +279,9 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 const colorspace_unknown = box.payload[12];
                 const intellectual_property = box.payload[13];
                 if (info.width == 0 or info.height == 0) return Jp2Error.InvalidBox;
-                if (compression_type != 7 or colorspace_unknown != 0 or intellectual_property != 0) {
+                // UnkC is a boolean flag (ISO 15444-1 I.5.3.1): 0 = colourspace
+                // known, 1 = unknown. Kakadu writes 1; both are legal.
+                if (compression_type != 7 or colorspace_unknown > 1 or intellectual_property != 0) {
                     return Jp2Error.UnsupportedProfile;
                 }
                 if ((bpc & 0x80) != 0) return Jp2Error.UnsupportedProfile;
@@ -314,7 +316,12 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 }
                 saw_colr = true;
             },
-            else => return Jp2Error.InvalidBox,
+            // Optional jp2h boxes we do not interpret (res, pclr, cmap, cdef
+            // from foreign encoders — Kakadu writes a res box) are skipped;
+            // the required ihdr-first and colr checks above stay authoritative.
+            else => {
+                if (!saw_ihdr) return Jp2Error.InvalidBox;
+            },
         }
         box_index += 1;
     }
