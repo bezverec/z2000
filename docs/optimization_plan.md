@@ -178,6 +178,18 @@ separately against the branch counters:
   subpaths with byte-equality gates, per the failed wholesale attempt.
 - **byte-in batching:** 1.4M byte-ins per 20M symbols is already amortized;
   low priority.
+- **✅ Index strength-reduction (2026-07-08, kept):** the MQ significance and
+  refinement *plain* decode inner loops recomputed `nbfIndex(nbs, x, y)` (and
+  `localIndex(width, x, y)` for refinement) per sample down the stripe column,
+  while `decodeRefinementPassRaw` already advanced `p += nbs` / `coeff_index +=
+  width`. Applying the same hoist (proven by the earlier cleanup branch-layout
+  work) to `decodeSignificancePassInferredPlain` and
+  `decodeRefinementPassInferredPlain` measured MQ-significance -3.2%
+  (432→418 ms) and MQ-refinement -5.5% (182→172 ms), decode t1 total -2.1%
+  (1433→1403 ms), σ ≈ 2 ms non-overlapping, on `bench-rgb-2048` (noise, archival
+  BYPASS profile). Lossless self-decode + t1==t16 determinism + full test suite
+  green in Debug and ReleaseFast; z2000-decoder-only change, so encode bytes and
+  external interop are unaffected.
 
 ### O4. Horizontal 5/3 DWT SIMD — M effort, ~5% encode, ~3% decode
 
@@ -282,3 +294,4 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | 2026-07-07 | O2 encode cleanup known flags/stride (`0004.tif`) | -1.5% | -0.7% | -2.1% | -3.4% | kept; decode rechecked |
 | 2026-07-07 | cleanup range refactors + full gate (`0004.tif`) | 3274 ms | 507 ms | 3308 ms | 513 ms | kept; lossless interop |
 | 2026-07-07 | O3 significance branch merge (`0004.tif`) | +3.3% | +9.6% | +0.3% | +3.8% | reverted |
+| 2026-07-08 | O3 MQ sig/ref decode index strength-reduction (`bench-rgb-2048`) | — | — | -2.1% | noisy | kept; MQ-sig -3.2%, MQ-ref -5.5% |
