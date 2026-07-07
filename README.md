@@ -71,9 +71,9 @@ This first milestone is intentionally small and honest:
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
 - decode of foreign (OpenJPEG/Grok/Kakadu) JP2 profiles through the strict
   packet catalog where packet spans can be derived: PLT-backed OpenJPEG/Grok
-  output, Kakadu reversible QCD profiles including a default PLT-less smoke,
-  default LRCP/no-precinct profiles, multi-layer ladders, and 9/7 lossy output.
-  The broader PLT-less OpenJPEG/Grok matrix is still a pending coverage gate.
+  output, PLT-less default LRCP/no-precinct output from OpenJPEG/Grok/Kakadu,
+  PLT-less OpenJPEG/Grok multi-layer lossless ladders, Kakadu reversible QCD
+  profiles, and 9/7 lossy output where the current narrow profile applies
 - strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
   `COM` comments
 
@@ -88,7 +88,7 @@ fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
 2026-07-07, the narrow RGB lossless JP2 target is estimated at 89/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 63/100.
+the broader JPEG2000 Part 1 codec family is estimated at 65/100.
 
 ## Build
 
@@ -610,8 +610,8 @@ Features:
    valid2000/jpylyzer-style validators, treating validator warnings as
    diagnostic leads rather than authoritative failures until checked against
    the strict reader, independent decoders, and Part 1.
-3. Finish the PLT-less foreign decode matrix and broaden ERTERM/RESET-style
-   interop beyond the current staged smokes.
+3. Broaden ERTERM/RESET-style interop beyond the current staged smokes and add
+   a malformed-corpus/fuzzing gate for the broader strict reader.
 
 Performance (decode remains the larger Grok gap; ordered by current expected
 win per effort after the strict T2 profiling pass):

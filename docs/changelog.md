@@ -29,7 +29,8 @@ entries are grouped by development milestone rather than semantic version.
   single-tile smoke from `0002.tif` decodes pixel-exactly through z2000 strict
   decode, Kakadu, OpenJPEG, and Grok.
 - Rechecked documentation against the row-level scorecard: the narrow RGB
-  lossless JP2 target is now 89/100 and the broader Part 1 family is 63/100.
+  lossless JP2 target reached 89/100 and the broader Part 1 family reached
+  63/100 before the later PLT-less foreign-stream gate.
 
 ### Foreign Stream Decode (Stage A)
 
@@ -43,6 +44,13 @@ entries are grouped by development milestone rather than semantic version.
   no precincts) plus RPCL, explicit precincts, 32x32 blocks with 4 levels,
   multi-layer rate-truncated ladders, and OpenJPEG 9/7 lossy (max-diff 1
   reconstruction agreement, identical to the z2000-encoded baseline).
+- Stage B PLT-less foreign decode interop is now green for the current
+  single-tile lossless profile. Real OpenJPEG 2.5.4, Grok 20.3.6, and Kakadu
+  8.4.1 JP2 files were generated without PLT/TLM/SOP/EPH; z2000 strict decode
+  matched both the source TIFF and each reference decoder byte-for-byte for
+  default LRCP/no-precinct files, plus OpenJPEG/Grok `-r 20,10,1` multi-layer
+  lossless-final ladders. The full scorecard estimate moves from 63/100 to
+  65/100 by raising the lossless decode profile row from 8 to 10.
   PLT-less foreign streams remain fail-closed (packet-length derivation
   from header parsing is the next stage). Local oracle: splicing the
   precinct bytes out of a maximal-precinct z2000 stream decodes

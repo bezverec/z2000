@@ -348,7 +348,8 @@ These are intentionally not treated as complete yet:
   divisions beyond the current supported policy;
 - standalone RESET/ERTERM, BYPASS+TERMALL, and untested code-block style
   combinations;
-- broader PLT-less foreign OpenJPEG/Grok decode coverage;
+- broader PLT-less foreign decode coverage beyond the current single-tile
+  lossless OpenJPEG/Grok/Kakadu matrix;
 - general-purpose lossy decode/error-bound coverage beyond the current narrow
   ICT/9-7/scalar-quantization gates.
 

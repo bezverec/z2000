@@ -128,8 +128,9 @@ Notes:
   continuous MQ/T1 pass metadata from the payload. The strict path covers
   z2000-produced RCT/5-3, ICT/9-7, progression-order, quality-layer, and v1
   multi-tile profiles, plus selected foreign OpenJPEG/Grok/Kakadu streams where
-  packet spans can be derived. Debug BP8 sidecar files are still accepted as an
-  oracle/compat path for the reversible profile.
+  packet spans can be derived, including the current PLT-less single-tile
+  lossless matrix. Debug BP8 sidecar files are still accepted as an oracle/compat
+  path for the reversible profile.
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
@@ -147,8 +148,9 @@ Notes:
 - Strict packet catalog parsing validates SOT/TLM/PLT marker accounting,
   ordered multi-segment TLM/PLT indexes, SOP/EPH marker policy, packet-header
   marker stuffing, and terminal `0xff` packet-header padding. It also has a
-  PLT-less catalog branch that derives packet spans from packet headers for the
-  staged foreign-stream decode matrix.
+  PLT-less catalog branch that derives packet spans from packet headers; the
+  current foreign-stream gate covers OpenJPEG/Grok/Kakadu default lossless
+  files and OpenJPEG/Grok multi-layer lossless ladders.
 
 ## `src/jp2.zig`
 

@@ -7,7 +7,7 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **89/100 narrow, 63/100 full** as of
+the subsequent JP2/T2/T1/profile work is **89/100 narrow, 65/100 full** as of
 2026-07-07. First drafted at `ba66799`.
 
 ## Current Working Sequence (2026-07-07 docs sync)
@@ -16,28 +16,44 @@ The old tier list below is intentionally preserved as implementation history,
 but many of its "next" items have since landed. The current high-signal order
 for more ISO coverage is:
 
-1. **PLT-less foreign decode matrix.** The local Stage B reader can derive
-   packet spans from packet headers without PLT; Kakadu default PLT-less input
-   already decodes pixel-exactly. The next score gate is real OpenJPEG/Grok
-   PLT-less files on this benchmark machine, including default LRCP/no-precinct
-   output and a small multi-layer case.
-2. **ERTERM interop breadth.** TERMALL-scoped predictable termination is wired
+1. **ERTERM interop breadth.** TERMALL-scoped predictable termination is wired
    and Kakadu/z2000 strict decode are green. Broaden the matrix across
    OpenJPEG/Grok/Kakadu and keep standalone ERTERM fail-closed until its
    non-terminated segment model exists.
-3. **Malformed corpus / fuzzing gate.** Add targeted corruptions for JP2 boxes,
+2. **Malformed corpus / fuzzing gate.** Add targeted corruptions for JP2 boxes,
    COD/QCD, SOT/TLM/PLT, SOP/EPH, packet headers, and tile-part boundaries.
    Treat jpylyzer/valid2000-style findings as diagnostics, not absolute truth.
-4. **Multi-tile v2.** The v1 aligned envelope is real and interop-proven for
+3. **Multi-tile v2.** The v1 aligned envelope is real and interop-proven for
    the documented lossless profile. Expand one axis at a time: edge-tile
    fixtures, more progression orders, then quality layers/style bits only after
    strict decode and independent decoder checks are green.
-5. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
+4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.
-6. **T1 style policy.** Keep standalone RESET/ERTERM, BYPASS+TERMALL, and
+5. **T1 style policy.** Keep standalone RESET/ERTERM, BYPASS+TERMALL, and
    untested combinations fail-closed until each has writer, strict reader,
    tests, and interop coverage.
+
+## Status 2026-07-07 (PLT-less foreign decode matrix) — PASSED
+
+Real PLT-less files from independent encoders were generated on the Windows
+benchmark box from `C:\temp\tools\images\0004.tif` and decoded through z2000's
+strict path. A marker-aware JP2/codestream parser confirmed `PLT=0`, `TLM=0`,
+`SOP=0`, `EPH=0`, one `SOT`, and one `SOD` in every file. z2000's decoded TIFF
+matched both the source TIFF and the reference decoder output byte-for-byte:
+
+- OpenJPEG 2.5.4 default lossless LRCP/no-precinct JP2.
+- OpenJPEG 2.5.4 multi-layer `-r 20,10,1` lossless-final JP2.
+- Grok 20.3.6 default lossless JP2.
+- Grok 20.3.6 multi-layer `-r 20,10,1` lossless-final JP2.
+- Kakadu 8.4.1 default-style reversible LRCP/no-PLT JP2.
+
+This closes the previously open PLT-less OpenJPEG/Grok/Kakadu lossless decode gate for
+the current single-tile profile and raises the full-codec lossless decode row
+from 8 to 10, moving the full scorecard estimate from 63 to 65. Remaining
+PLT-less breadth is now about multi-tile, more marker combinations, arbitrary
+component layouts, and lossy/error-bound coverage rather than the default
+foreign lossless path.
 
 ## Status 2026-07-07 (evening) — Kakadu installed: leg PASSED + new gap found
 
@@ -89,8 +105,8 @@ blocks with 4 levels, multi-layer rate-truncated ladders, and OpenJPEG 9/7
 lossy (max-diff 1, same as the z2000-encoded baseline). The earlier
 progression work is what made the default-LRCP case possible.
 
-**Stage B — PLT-less foreign streams: ✅ LANDED (local oracle; foreign
-interop matrix pending).** Implemented exactly as scoped: (a) the catalog
+**Stage B — PLT-less foreign streams: ✅ LANDED + foreign interop passed.**
+Implemented exactly as scoped: (a) the catalog
 reader (`readStrictSodPacketCatalog`) gained a PLT-less branch that decodes
 each packet header in stream order to learn its span
 (`readStrictPacketHeaderSpan`, an open-ended variant of the audit reader),
@@ -107,10 +123,9 @@ Multi-tile PLT-less stays fail-closed.
 *Local oracle:* strip-PLT surgery on z2000 output (Psot + TLM adjusted) —
 RPCL with R tile-parts, **multi-layer LRCP** (the stateful case), PCRL,
 BYPASS (multi-segment header lengths), and EPH/no-TLM all decode
-byte-exactly without PLT; corrupted PLT-less headers fail bounded. The
-remaining gate for the "lossless decode 8→10" claim: re-run the
-OpenJPEG/Grok matrix on actual PLT-less foreign files (default `opj_compress`
-output) on the benchmark machine.
+byte-exactly without PLT; corrupted PLT-less headers fail bounded. The real
+foreign matrix now also passes for OpenJPEG/Grok/Kakadu default lossless
+PLT-less output and OpenJPEG/Grok multi-layer lossless-final ladders.
 
 ## Status 2026-07-07 — external interop gates PASSED
 
@@ -138,13 +153,12 @@ codestream layer coded them correctly — the local oracles ran below the JP2
 layer and missed it. The wrapper opened the then-supported style bits and MCT
 0/1. Since then, RESET+TERMALL (`0x06`) and TERMALL-scoped ERTERM (`0x14`)
 were also wired through their implemented segment models; Kakadu is installed
-on this Windows/Ryzen box; and the broader scorecard now stands at 89/63.
+on this Windows/Ryzen box; and the broader scorecard now stands at 89/65.
 
 **Remaining top levers after the later passes:** broaden ERTERM interop across
-OpenJPEG/Grok, finish the PLT-less OpenJPEG/Grok foreign-stream matrix, add a
-malformed-corpus/fuzzing gate, expand the multi-tile v1 matrix, and continue
-T1/T2 performance work without relaxing fail-closed policy for unsupported
-style combinations.
+OpenJPEG/Grok, add a malformed-corpus/fuzzing gate, expand the multi-tile v1
+matrix, and continue T1/T2 performance work without relaxing fail-closed policy
+for unsupported style combinations.
 
 ## Status since first draft (`ba66799` → `d664306`)
 
@@ -593,7 +607,7 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
 
 ## Scoreboard
 
-- **Current (`2026-07-07`):** narrow **89**, full **63** — matches
+- **Current (`2026-07-07`):** narrow **89**, full **65** — matches
   `docs/iso_coverage.md`.
 - **Recent claimed movement:** T1/EBCOT grew through BYPASS, TERMALL,
   vertical-causal, segmentation-symbols, TERMALL-scoped RESET, and
@@ -601,5 +615,5 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
   additional progression orders, foreign PLT/PLT-less decode, ICT/9-7,
   scalar-derived/scalar-expounded quantization, and PCRD-style rate allocation.
 - **Next score levers:** broaden ERTERM beyond Kakadu-only interop, add more
-  malformed-corpus/fuzzing coverage, expand JP2/ICC fixtures, and keep pushing
-  arbitrary external decode breadth.
+  malformed-corpus/fuzzing coverage, expand multi-tile/profile fixtures, and
+  keep pushing arbitrary external decode breadth.
