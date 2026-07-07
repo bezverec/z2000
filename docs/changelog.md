@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### LRCP Progression
+
+- Added the LRCP progression order (`--progression LRCP`, ISO 15444-1
+  B.12.1.1) for the single-tile path. Packet bodies are order-independent
+  (T2 coder state is per-precinct and layer order within each precinct is
+  preserved), so the encoder emits the RPCL-built packets as a byte-preserving
+  permutation into layer-major stream order; the strict decoder walks the
+  stream with an LRCP slot iterator and permutes the packet catalog back to
+  RPCL grouping for the unchanged downstream chain. Multi-layer LRCP encodes
+  one tile-part (the stream cannot be divided per resolution); single-layer
+  LRCP keeps R-divisions. The JP2 wrapper accepts progression 0/2; RLCP,
+  PCRL, CPRL, and multi-tile LRCP stay fail-closed. OpenJPEG 2.5.4 and Grok
+  20.3.6 decode LRCP output pixel-losslessly (1, 4, and 4+BYPASS layers) and
+  jpylyzer confirms `<order>LRCP</order>` on valid JP2s.
+
 ### Interop Gates Closed
 
 - Opened the JP2 wrapper profile validation to the code-block style bits the
