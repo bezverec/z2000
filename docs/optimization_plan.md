@@ -176,6 +176,23 @@ encode passes the same way); candidates: SIMD magnitude/bitplane extraction
   which run at the top bitplanes where such windows never occur. A retry
   would need the check to be near-free (e.g., folded into the existing
   range read) or gated to raw passes at deep bitplanes only.
+- **O1 per-column neighbor mask in RAW significance (2026-07-07, Windows
+  x86_64 directional):** computing a 64-bit "column can have a significant
+  neighbor" mask per stripe window (rows ±1 OR'd with their ±1 shifts,
+  in-pass significance extending the mask) and skipping zero columns,
+  applied to `decodeSignificancePassRaw` and the raw branch of
+  `emitDirectIsoSignificancePassPlain`. Bytes identical, tests green, but
+  measured decode RAW significance **+2.2%** (153.1 → 156.5 ms avg of 5)
+  and decode total +1.7% on the 2048 noise input. Root cause: the raw
+  passes run at deep bitplanes where, on noise, significance is dense — the
+  mask is essentially all-ones, so the mask build + per-column test is pure
+  tax and the membership cost is the per-*sample* candidate check, which
+  the mask cannot amortize when no column is skippable. O1's premise
+  (membership recomputation dominates) holds, but the win requires either
+  sparse content (would fail the noise gate) or folding the membership test
+  itself into word-parallel form (process 4-row columns from the nbf words
+  directly instead of gating them) — that reformulation belongs to O3's
+  column-pipeline item. Reverted.
 
 ## Milestones
 

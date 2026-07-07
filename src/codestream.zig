@@ -860,6 +860,10 @@ const StrictSotInfo = struct {
 const StrictTilePartPacketPlan = struct {
     count: usize = 0,
     packet_counts: [256]usize = [_]usize{0} ** 256,
+    /// True when any tile-part carried no PLT: per-part packet counts are then
+    /// unknown until the catalog stage decodes headers in stream order
+    /// (foreign-stream Stage B), so the R-division plan validation is skipped.
+    missing_plt: bool = false,
 };
 
 const StrictTilePartHeader = struct {
@@ -1736,7 +1740,7 @@ fn readStrictPacketCatalogWithHeader(
     header: TemporaryHeader,
 ) !StrictPacketCatalog {
     const plan = temporaryPacketPlan(header);
-    return readStrictSodPacketCatalog(allocator, bytes, plan, header.layers, header.progression);
+    return readStrictSodPacketCatalog(allocator, bytes, header, plan, header.layers, header.progression);
 }
 
 pub fn auditStrictPacketHeaders(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketHeaderAudit {
@@ -5158,9 +5162,154 @@ fn reorderStrictEntriesToRpcl(
     @memcpy(entries, scratch);
 }
 
+/// Persistent per-precinct packet-header reader states for the PLT-less
+/// decode path (foreign-stream Stage B, docs/next_steps.md): without PLT the
+/// packet spans come from decoding each packet header in stream order, and
+/// non-RPCL progressions revisit a precinct's later layers after other
+/// precincts, so the tag-tree / lblock / inclusion states must survive across
+/// the whole stream. Slots mirror the RpclBlockIndex cell layout
+/// (resolution-major, precinct x component).
+const StrictStatefulPrecinctGroups = struct {
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    bands: []subband.Band,
+    blocks: []subband.CodeBlock,
+    rpcl_index: RpclBlockIndex,
+    slots: []?Slot,
+
+    const Slot = struct {
+        groups: [max_rpcl_packet_band_groups]StrictPacketAuditBandGroup,
+        count: usize,
+    };
+
+    fn init(allocator: std.mem.Allocator, header: TemporaryHeader, plan: packet_plan.Plan) !StrictStatefulPrecinctGroups {
+        const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
+        errdefer allocator.free(bands);
+        const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
+        errdefer allocator.free(blocks);
+        var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
+        errdefer rpcl_index.deinit();
+
+        const slots = try allocator.alloc(?Slot, rpcl_index.cells.len);
+        @memset(slots, null);
+        return .{
+            .allocator = allocator,
+            .header = header,
+            .bands = bands,
+            .blocks = blocks,
+            .rpcl_index = rpcl_index,
+            .slots = slots,
+        };
+    }
+
+    fn deinit(self: *StrictStatefulPrecinctGroups) void {
+        for (self.slots) |*slot| {
+            if (slot.*) |*active| {
+                deinitStrictPacketAuditBandGroups(self.allocator, active.groups[0..active.count]);
+            }
+        }
+        self.allocator.free(self.slots);
+        self.rpcl_index.deinit();
+        self.allocator.free(self.blocks);
+        self.allocator.free(self.bands);
+        self.* = undefined;
+    }
+
+    fn slotIndex(self: *const StrictStatefulPrecinctGroups, packet: packet_plan.Packet) !usize {
+        if (packet.resolution >= self.rpcl_index.resolution_count or packet.component >= 3) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const base = self.rpcl_index.resolution_offsets[packet.resolution];
+        const precinct = std.math.cast(usize, packet.precinct_index) orelse return CodestreamError.InvalidCodestream;
+        const offset = try std.math.add(usize, try std.math.mul(usize, precinct, 3), packet.component);
+        const index = try std.math.add(usize, base, offset);
+        if (index >= self.slots.len) return CodestreamError.InvalidCodestream;
+        return index;
+    }
+
+    fn groupsFor(self: *StrictStatefulPrecinctGroups, packet: packet_plan.Packet) ![]StrictPacketAuditBandGroup {
+        const index = try self.slotIndex(packet);
+        if (self.slots[index] == null) {
+            const selected = try self.rpcl_index.indexesFor(packet.resolution, packet.precinct_index, packet.component);
+            var slot = Slot{ .groups = undefined, .count = 0 };
+            if (selected.len > 0) {
+                slot.count = try buildStrictPacketAuditBandGroups(
+                    self.allocator,
+                    self.bands,
+                    self.blocks,
+                    self.header.block_width,
+                    self.header.block_height,
+                    selected,
+                    self.header.layers,
+                    self.header.bit_depth,
+                    self.header.transform,
+                    self.header.quantization,
+                    self.header.code_block_style.bypass,
+                    self.header.code_block_style.terminate_all,
+                    &slot.groups,
+                );
+            }
+            self.slots[index] = slot;
+        }
+        const active = &self.slots[index].?;
+        return active.groups[0..active.count];
+    }
+};
+
+const StrictPacketSpanRead = struct {
+    header_length: usize,
+    payload_length: usize,
+};
+
+/// Open-ended variant of readStrictPacketHeaderForAudit for the PLT-less
+/// path: decodes one packet header from the remaining tile-part bytes
+/// (mutating the persistent per-precinct states) and reports the header and
+/// payload byte lengths so the caller can locate the packet's end without a
+/// PLT entry. Geometry-empty packets must be signalled absent.
+fn readStrictPacketHeaderSpan(
+    bytes: []const u8,
+    packet: packet_plan.Packet,
+    groups: []StrictPacketAuditBandGroup,
+) !StrictPacketSpanRead {
+    var reader = t2.PacketHeaderReader.init(bytes);
+    const packet_included = reader.readBit() catch return CodestreamError.InvalidCodestream;
+    if (packet_included) {
+        if (groups.len == 0) return CodestreamError.InvalidCodestream;
+        for (groups) |*group| {
+            t2.readPrecinctPacketHeaderBody(
+                &reader,
+                &group.reader_state.inclusion,
+                &group.reader_state.zero_bitplanes,
+                group.reader_state.states,
+                packet.layer,
+                group.locations,
+                group.max_zero_bitplanes,
+                group.reader_state.bypass,
+                group.reader_state.terminate_all,
+                group.decoded,
+            ) catch return CodestreamError.InvalidCodestream;
+        }
+    }
+    reader.byteAlign() catch return CodestreamError.InvalidCodestream;
+    const header_length = reader.bytesConsumed();
+
+    var payload_length: usize = 0;
+    if (packet_included) {
+        for (groups) |group| {
+            for (group.decoded) |decoded| {
+                if (!decoded.included) continue;
+                const byte_length = std.math.cast(usize, decoded.byte_length) orelse return CodestreamError.InvalidCodestream;
+                payload_length = try std.math.add(usize, payload_length, byte_length);
+            }
+        }
+    }
+    return .{ .header_length = header_length, .payload_length = payload_length };
+}
+
 fn readStrictSodPacketCatalog(
     allocator: std.mem.Allocator,
     bytes: []const u8,
+    header: TemporaryHeader,
     plan: packet_plan.Plan,
     layers: u16,
     progression: ProgressionOrder,
@@ -5181,6 +5330,8 @@ fn readStrictSodPacketCatalog(
     var sequence_index: usize = 0;
     var main_header = try readStrictMainHeaderIndex(allocator, bytes);
     defer main_header.deinit();
+    var stateful: ?StrictStatefulPrecinctGroups = null;
+    defer if (stateful) |*groups| groups.deinit();
     var cursor = main_header.first_sot;
     var packet_sequence: u16 = 0;
     var tile_part_index: usize = 0;
@@ -5217,33 +5368,84 @@ fn readStrictSodPacketCatalog(
         {
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries);
             defer tile_part.deinit(allocator);
-            if (tile_part.packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
             cursor = tile_part.sod + 2;
-            try packet_bytes.ensureTotalCapacity(allocator, try std.math.add(usize, packet_bytes.items.len, tile_part.packet_payload_bytes));
-            for (tile_part.packet_lengths.items) |packet_length| {
-                if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
-                const packet = sequence[sequence_index];
-                sequence_index += 1;
-                const byte_offset = packet_bytes.items.len;
-                const byte_length = try appendStrictSodPacketPayload(
-                    allocator,
-                    &packet_bytes,
-                    bytes,
-                    &cursor,
-                    tile_part.end,
-                    packet_length,
-                    main_header.packet_markers,
-                    &packet_sequence,
-                );
-                try entries.append(allocator, .{
-                    .packet = packet,
-                    .tile_index = tile_part.sot.tile_index,
-                    .tile_part_index = @intCast(tile_part_index),
-                    .byte_offset = byte_offset,
-                    .byte_length = byte_length,
-                });
+            if (tile_part.packet_lengths.items.len == 0) {
+                // Foreign-stream Stage B: no PLT, so each packet's span comes
+                // from decoding its header in stream order with persistent
+                // per-precinct states (non-RPCL progressions revisit precincts
+                // across layers). Tile-part boundaries fall on packet
+                // boundaries, so the walk continues seamlessly across parts.
+                if (stateful == null) {
+                    stateful = try StrictStatefulPrecinctGroups.init(allocator, header, plan);
+                }
+                while (cursor < tile_part.end) {
+                    if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
+                    const packet = sequence[sequence_index];
+                    sequence_index += 1;
+
+                    var packet_start = cursor;
+                    if (main_header.packet_markers.sop) {
+                        if (tile_part.end - packet_start < 6) return CodestreamError.TruncatedData;
+                        if (readU16Be(bytes, packet_start) != @intFromEnum(Marker.sop)) return CodestreamError.InvalidCodestream;
+                        if (readU16Be(bytes, packet_start + 2) != 4) return CodestreamError.InvalidCodestream;
+                        if (readU16Be(bytes, packet_start + 4) != packet_sequence) return CodestreamError.InvalidCodestream;
+                        packet_sequence +%= 1;
+                        packet_start += 6;
+                    }
+
+                    const groups = try stateful.?.groupsFor(packet);
+                    const span = try readStrictPacketHeaderSpan(bytes[packet_start..tile_part.end], packet, groups);
+                    const header_end = try std.math.add(usize, packet_start, span.header_length);
+                    var body_start = header_end;
+                    if (main_header.packet_markers.eph) {
+                        if (tile_part.end - body_start < 2) return CodestreamError.TruncatedData;
+                        if (readU16Be(bytes, body_start) != @intFromEnum(Marker.eph)) return CodestreamError.InvalidCodestream;
+                        body_start += 2;
+                    }
+                    const packet_end = try std.math.add(usize, body_start, span.payload_length);
+                    if (packet_end > tile_part.end) return CodestreamError.TruncatedData;
+
+                    const byte_offset = packet_bytes.items.len;
+                    try packet_bytes.appendSlice(allocator, bytes[packet_start..header_end]);
+                    try packet_bytes.appendSlice(allocator, bytes[body_start..packet_end]);
+                    const byte_length = std.math.cast(u32, span.header_length + span.payload_length) orelse return CodestreamError.InvalidCodestream;
+                    try entries.append(allocator, .{
+                        .packet = packet,
+                        .tile_index = tile_part.sot.tile_index,
+                        .tile_part_index = @intCast(tile_part_index),
+                        .byte_offset = byte_offset,
+                        .byte_length = byte_length,
+                    });
+                    cursor = packet_end;
+                }
+                if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
+            } else {
+                try packet_bytes.ensureTotalCapacity(allocator, try std.math.add(usize, packet_bytes.items.len, tile_part.packet_payload_bytes));
+                for (tile_part.packet_lengths.items) |packet_length| {
+                    if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
+                    const packet = sequence[sequence_index];
+                    sequence_index += 1;
+                    const byte_offset = packet_bytes.items.len;
+                    const byte_length = try appendStrictSodPacketPayload(
+                        allocator,
+                        &packet_bytes,
+                        bytes,
+                        &cursor,
+                        tile_part.end,
+                        packet_length,
+                        main_header.packet_markers,
+                        &packet_sequence,
+                    );
+                    try entries.append(allocator, .{
+                        .packet = packet,
+                        .tile_index = tile_part.sot.tile_index,
+                        .tile_part_index = @intCast(tile_part_index),
+                        .byte_offset = byte_offset,
+                        .byte_length = byte_length,
+                    });
+                }
+                if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
             }
-            if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
             cursor = tile_part.end;
         }
         tile_part_index += 1;
@@ -5281,7 +5483,9 @@ fn readStrictTilePartPacketPlan(
         {
             var tile_part = try readStrictTilePartHeader(allocator, bytes, scan, result.count, &expected_tile_part_count, tlm_entries);
             defer tile_part.deinit(allocator);
-            if (tile_part.packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
+            if (tile_part.packet_lengths.items.len == 0) {
+                result.missing_plt = true;
+            }
             result.packet_counts[result.count] = tile_part.packet_lengths.items.len;
             result.count += 1;
             scan = tile_part.end;
@@ -5451,6 +5655,12 @@ fn validateStrictTilePartPacketPlan(
     levels: u8,
 ) !TilePartPlan {
     if (tile_parts.count == 0) return CodestreamError.InvalidCodestream;
+    if (tile_parts.missing_plt) {
+        // PLT-less stream: per-part packet counts are unknown here; the
+        // catalog stage validates the total against the plan when it decodes
+        // the headers in stream order.
+        return emptyTilePartPlan();
+    }
     if (tile_parts.count == plan.resolution_count) {
         var resolution: usize = 0;
         while (resolution < plan.resolution_count) : (resolution += 1) {
