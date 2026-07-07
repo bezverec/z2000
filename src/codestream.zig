@@ -6669,6 +6669,13 @@ fn appendTemporaryPayload(
         for (&catalogs) |*catalog| catalog.deinit();
     }
 
+    // Rate-targeted layers get a global PCRD allocation over the finished
+    // block catalogs, replacing the per-block proportional split the
+    // catalog builder installed.
+    if (options.rate_count > 0 and options.layers > 1) {
+        try applyPcrdLayerAllocation(allocator, &catalogs, planes, bands, blocks, options);
+    }
+
     if (options.emit_temporary_payload_sidecar) {
         if (payloadBlockThreadCount(options, blocks.len) > 1) {
             try appendComponentPayload(allocator, out, 0, bands, blocks, catalogs[0].blocks, options);
@@ -6840,6 +6847,123 @@ fn buildRpclBlockIndex(
     }
 
     return index;
+}
+
+/// Global PCRD (ISO 15444-1 J.14) layer allocation across every code block
+/// of the three components. Exact per-pass distortion comes from the
+/// symbol-based reference coder, band-weighted into image-domain units,
+/// then rate_alloc picks a global slope threshold per layer byte target and
+/// each catalog block's layer truncations are rewritten in place (BYPASS
+/// segment snapping preserved via normalizedLayerTruncation). Runs
+/// single-threaded after the parallel block encode, so the allocation is
+/// independent of the encode thread count.
+fn applyPcrdLayerAllocation(
+    allocator: std.mem.Allocator,
+    catalogs: *[3]ComponentRpclShadowCatalog,
+    planes: color.RctPlanes,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    options: LosslessOptions,
+) !void {
+    const layer_count: usize = options.layers;
+    const levels = dwtLevelsFromBands(bands);
+    const total_blocks = blocks.len * 3;
+    const component_planes = [3][]const i32{ planes.y, planes.cb, planes.cr };
+
+    const base_style = ebcot.CodeBlockStyle{
+        .bypass = options.bypass,
+        .reset_context = options.reset_context,
+        .terminate_all = options.terminate_all,
+        .vertical_causal = options.vertical_causal,
+        .predictable_termination = options.predictable_termination,
+        .segmentation_symbols = options.segmentation_symbols,
+    };
+
+    var scratch = ebcot.BlockScratch.init(allocator);
+    defer scratch.deinit();
+
+    const Span = struct { start: usize, count: usize };
+    var pass_bytes_storage: std.ArrayList(u64) = .empty;
+    defer pass_bytes_storage.deinit(allocator);
+    var distortion_storage: std.ArrayList(f64) = .empty;
+    defer distortion_storage.deinit(allocator);
+    const spans = try allocator.alloc(Span, total_blocks);
+    defer allocator.free(spans);
+
+    var distortion_scratch: [164]f64 = undefined;
+    var total_full_bytes: u64 = 0;
+    for (0..3) |component| {
+        for (blocks, 0..) |block, block_index| {
+            if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
+            const band = bands[block.band_index];
+            const shadow = &catalogs[component].blocks[block_index];
+            const segment = shadow.segment;
+            total_full_bytes = try std.math.add(u64, total_full_bytes, segment.byte_length);
+
+            const slot = component * blocks.len + block_index;
+            spans[slot] = .{ .start = pass_bytes_storage.items.len, .count = segment.pass_count };
+            if (segment.pass_count == 0) continue;
+
+            const style = codeBlockStyleForBand(base_style, band.kind);
+            const distortion_passes = ebcot.passDistortions(
+                &scratch,
+                component_planes[component],
+                planes.width,
+                block.rect,
+                style,
+                distortion_scratch[0..],
+            ) catch return CodestreamError.InvalidCodestream;
+            if (distortion_passes != segment.pass_count) return CodestreamError.InvalidCodestream;
+
+            const weight = try pcrdBandWeight(band, options, planes.bit_depth, levels);
+            var pass_index: u16 = 0;
+            while (pass_index < segment.pass_count) : (pass_index += 1) {
+                try pass_bytes_storage.append(allocator, segment.passes[pass_index].cumulative_bytes);
+                try distortion_storage.append(allocator, distortion_scratch[pass_index] * weight);
+            }
+        }
+    }
+
+    const pcrd_blocks = try allocator.alloc(rate_alloc.PcrdBlock, total_blocks);
+    defer allocator.free(pcrd_blocks);
+    for (spans, 0..) |span, slot| {
+        pcrd_blocks[slot] = .{
+            .pass_bytes = pass_bytes_storage.items[span.start..][0..span.count],
+            .pass_distortion = distortion_storage.items[span.start..][0..span.count],
+        };
+    }
+
+    var targets: [max_quality_layers]u64 = undefined;
+    rate_alloc.layerTargetsFromRates(
+        targets[0..layer_count],
+        total_full_bytes,
+        options.rates[0..options.rate_count],
+    ) catch return CodestreamError.InvalidCodestream;
+
+    const out_passes = try allocator.alloc(u16, total_blocks * layer_count);
+    defer allocator.free(out_passes);
+    rate_alloc.allocatePcrdPasses(allocator, pcrd_blocks, targets[0..layer_count], out_passes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return CodestreamError.InvalidCodestream,
+    };
+
+    for (0..3) |component| {
+        for (blocks, 0..) |_, block_index| {
+            const slot = component * blocks.len + block_index;
+            const shadow = &catalogs[component].blocks[block_index];
+            var previous = t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 };
+            for (0..layer_count) |layer| {
+                const is_final = layer == layer_count - 1;
+                const requested = out_passes[slot * layer_count + layer];
+                const truncation = try normalizedLayerTruncation(shadow.segment, requested, previous, is_final);
+                shadow.layers[layer] = .{
+                    .cumulative_passes = truncation.cumulative_passes,
+                    .cumulative_bytes = truncation.cumulative_bytes,
+                };
+                previous = shadow.layers[layer];
+            }
+        }
+    }
 }
 
 fn buildComponentRpclShadowCatalogs(
@@ -8580,6 +8704,45 @@ pub const BandStepSize = struct {
 fn dwt97Norm(level: usize, orient: usize) f64 {
     const clamped = if (orient == 0) @min(level, 9) else @min(level, 8);
     return dwt97_norms[orient][clamped];
+}
+
+/// L2 norms of the 5/3 synthesis basis per orientation and decomposition
+/// level, matching OpenJPEG's opj_dwt_norms (qmfbid == 1). Used only to
+/// weight PCRD distortion estimates on the reversible path; never signalled.
+const dwt53_norms = [4][10]f64{
+    .{ 1.000, 1.500, 2.750, 5.375, 10.68, 21.34, 42.67, 85.33, 170.7, 341.3 },
+    .{ 1.038, 1.592, 2.919, 5.703, 11.33, 22.64, 45.25, 90.48, 180.9, 362.0 },
+    .{ 1.038, 1.592, 2.919, 5.703, 11.33, 22.64, 45.25, 90.48, 180.9, 362.0 },
+    .{ 0.7186, 0.9218, 1.586, 3.043, 6.019, 12.01, 24.00, 47.97, 95.93, 191.9 },
+};
+
+fn dwt53Norm(level: usize, orient: usize) f64 {
+    const clamped = if (orient == 0) @min(level, 9) else @min(level, 8);
+    return dwt53_norms[orient][clamped];
+}
+
+/// PCRD distortion weight for one band: (synthesis-basis L2 norm x
+/// quantization step)^2 converts coefficient-domain squared error into its
+/// image-domain contribution (J.14 weighting).
+fn pcrdBandWeight(band: subband.Band, options: LosslessOptions, bit_depth: u8, levels: u8) !f64 {
+    const opj_level: usize = if (band.kind == .ll) band.level else @as(usize, band.level) - 1;
+    const orient: usize = switch (band.kind) {
+        .ll => 0,
+        .hl => 1,
+        .lh => 2,
+        .hh => 3,
+    };
+    switch (options.transform) {
+        .reversible_5_3 => {
+            const norm = dwt53Norm(opj_level, orient);
+            return norm * norm;
+        },
+        .irreversible_9_7 => {
+            const step = try irreversibleBandStepSizeFor(options.quantization, bit_depth, band.kind, band.level, levels);
+            const weighted = irreversibleBandDelta(bit_depth, band.kind, step) * dwt97Norm(opj_level, orient);
+            return weighted * weighted;
+        },
+    }
 }
 
 /// Default scalar-expounded step size for the irreversible 9/7 path,

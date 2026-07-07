@@ -1787,6 +1787,56 @@ pub fn encodeBlockScratch(
     return encodeBlockScratchWithStyle(scratch, plane, stride, rect, .{});
 }
 
+/// Squared reconstruction error of a magnitude when the decoder knows the
+/// bits down to (and including) plane `p`: midpoint reconstruction
+/// ((m >> p) + 0.5) << p for p > 0, exact once every plane is coded.
+fn midpointSquaredError(sample_magnitude: u64, p: u8) f64 {
+    if (p == 0) return 0;
+    const quotient = sample_magnitude >> @intCast(p);
+    const reconstruction = (@as(f64, @floatFromInt(quotient)) + 0.5) *
+        @as(f64, @floatFromInt(@as(u64, 1) << @intCast(p)));
+    const err = @as(f64, @floatFromInt(sample_magnitude)) - reconstruction;
+    return err * err;
+}
+
+/// Per-pass squared-error reductions in the coefficient domain (unweighted)
+/// for PCRD rate allocation (ISO 15444-1 J.14). Pass membership comes from
+/// the symbol-based reference coder: each sample's `sign` symbol marks its
+/// significance event and each `magnitude_refinement` symbol marks one
+/// refinement, both tagged with the pass they were coded in. The error model
+/// is the decoder's midpoint reconstruction. Fills `out[0..pass_count]` and
+/// returns the pass count.
+pub fn passDistortions(
+    scratch: *BlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+    out: []f64,
+) !u16 {
+    const view = try encodeBlockScratchWithStyle(scratch, plane, stride, rect, style);
+    const pass_count: u16 = @intCast(view.passes.len);
+    if (out.len < pass_count) return EbcotError.InvalidBlock;
+    @memset(out[0..pass_count], 0);
+
+    for (view.symbols) |symbol| {
+        const is_significance = symbol.kind == .sign;
+        if (!is_significance and symbol.kind != .magnitude_refinement) continue;
+        if (symbol.pass_index >= pass_count) return EbcotError.InvalidBlock;
+
+        const value = plane[(rect.y + symbol.y) * stride + rect.x + symbol.x];
+        const sample_magnitude: u64 = @abs(value);
+        const p = symbol.magnitude_bitplane;
+        const before = if (is_significance)
+            @as(f64, @floatFromInt(sample_magnitude)) * @as(f64, @floatFromInt(sample_magnitude))
+        else
+            midpointSquaredError(sample_magnitude, p + 1);
+        const after = midpointSquaredError(sample_magnitude, p);
+        out[symbol.pass_index] += before - after;
+    }
+    return pass_count;
+}
+
 pub fn encodeBlockScratchWithStyle(
     scratch: *BlockScratch,
     plane: []const i32,

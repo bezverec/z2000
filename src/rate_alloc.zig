@@ -68,6 +68,175 @@ pub fn allocateFromCompressionRatios(out: []Truncation, block: Block, rates: []c
     out[out.len - 1] = .{ .cumulative_passes = block.pass_count, .cumulative_bytes = block.byte_length };
 }
 
+/// One code-block's rate-distortion data for global PCRD allocation
+/// (ISO 15444-1 J.14): cumulative payload bytes after each coding pass and
+/// the (band-weighted) squared-error reduction each pass contributes.
+pub const PcrdBlock = struct {
+    pass_bytes: []const u64,
+    pass_distortion: []const f64,
+};
+
+const PcrdHullPoint = struct {
+    passes: u16,
+    bytes: u64,
+    distortion: f64,
+    slope: f64,
+};
+
+/// Cumulative byte targets per layer from compression ratios, mirroring the
+/// per-block `allocateFromCompressionRatios` shape at image scale: explicit
+/// ratios first, interpolation toward the full size for remaining layers,
+/// the final layer always the full byte count.
+pub fn layerTargetsFromRates(targets: []u64, total_bytes: u64, rates: []const f64) !void {
+    try validateLayerCount(targets.len);
+    if (rates.len > targets.len) return RateAllocError.InvalidLayerCount;
+    var previous: u64 = 0;
+    for (targets, 0..) |*target, index| {
+        const is_final = index == targets.len - 1;
+        const raw = if (is_final)
+            total_bytes
+        else if (index < rates.len)
+            try targetBytesForRate(total_bytes, rates[index])
+        else
+            interpolatedBytes(previous, total_bytes, targets.len - index);
+        target.* = @min(total_bytes, @max(previous, raw));
+        previous = target.*;
+    }
+}
+
+/// Global PCRD pass allocation. Builds each block's convex hull over
+/// (cumulative bytes, cumulative distortion) truncation candidates, then for
+/// every layer's cumulative byte target finds the smallest slope threshold
+/// lambda whose selections fit the budget (selections never regress across
+/// layers). The final layer always takes every pass, matching the existing
+/// layer conventions. `out_passes` is block-major:
+/// out_passes[block * layer_count + layer] = cumulative passes.
+pub fn allocatePcrdPasses(
+    allocator: std.mem.Allocator,
+    blocks: []const PcrdBlock,
+    layer_targets: []const u64,
+    out_passes: []u16,
+) !void {
+    try validateLayerCount(layer_targets.len);
+    const layer_count = layer_targets.len;
+    if (out_passes.len != blocks.len * layer_count) return RateAllocError.InvalidBlock;
+
+    // Per-block convex hulls stored back to back; hull slopes are strictly
+    // decreasing within one block.
+    var hull_points: std.ArrayList(PcrdHullPoint) = .empty;
+    defer hull_points.deinit(allocator);
+    const hull_offsets = try allocator.alloc(usize, blocks.len + 1);
+    defer allocator.free(hull_offsets);
+
+    for (blocks, 0..) |block, block_index| {
+        hull_offsets[block_index] = hull_points.items.len;
+        if (block.pass_bytes.len != block.pass_distortion.len) return RateAllocError.InvalidBlock;
+        if (block.pass_bytes.len > 164) return RateAllocError.InvalidBlock;
+
+        var cumulative_distortion: f64 = 0;
+        var previous_bytes: u64 = 0;
+        for (block.pass_bytes, block.pass_distortion, 0..) |bytes, distortion, pass_index| {
+            if (bytes < previous_bytes) return RateAllocError.InvalidBlock;
+            previous_bytes = bytes;
+            cumulative_distortion += @max(distortion, 0);
+            if (bytes == 0) continue;
+
+            var candidate = PcrdHullPoint{
+                .passes = @intCast(pass_index + 1),
+                .bytes = bytes,
+                .distortion = cumulative_distortion,
+                .slope = 0,
+            };
+            // Upper convex hull on (bytes, distortion): pop points the
+            // candidate dominates (no byte growth) or whose slope would not
+            // strictly decrease along the hull.
+            while (hull_points.items.len > hull_offsets[block_index]) {
+                const top = hull_points.items[hull_points.items.len - 1];
+                if (candidate.bytes == top.bytes) {
+                    _ = hull_points.pop();
+                    continue;
+                }
+                const candidate_slope = (candidate.distortion - top.distortion) /
+                    @as(f64, @floatFromInt(candidate.bytes - top.bytes));
+                if (candidate_slope >= top.slope) {
+                    _ = hull_points.pop();
+                    continue;
+                }
+                candidate.slope = candidate_slope;
+                break;
+            }
+            if (hull_points.items.len == hull_offsets[block_index]) {
+                candidate.slope = candidate.distortion / @as(f64, @floatFromInt(candidate.bytes));
+            }
+            try hull_points.append(allocator, candidate);
+        }
+    }
+    hull_offsets[blocks.len] = hull_points.items.len;
+
+    // The finite, sorted (descending) set of candidate thresholds.
+    var slopes = try allocator.alloc(f64, hull_points.items.len);
+    defer allocator.free(slopes);
+    for (hull_points.items, 0..) |point, index| slopes[index] = point.slope;
+    std.sort.pdq(f64, slopes, {}, std.sort.desc(f64));
+
+    // Per-block selection floor (hull index count already committed by
+    // earlier layers; 0 = nothing selected yet).
+    const floors = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(floors);
+    @memset(floors, 0);
+
+    for (layer_targets, 0..) |target, layer| {
+        const is_final = layer == layer_count - 1;
+        if (is_final) {
+            for (blocks, 0..) |block, block_index| {
+                out_passes[block_index * layer_count + layer] = @intCast(block.pass_bytes.len);
+            }
+            break;
+        }
+
+        // Find the smallest threshold whose total still fits the budget;
+        // totals grow monotonically as the threshold drops.
+        var chosen_slope = std.math.inf(f64);
+        var low: usize = 0;
+        var high: usize = slopes.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const total = pcrdTotalBytes(hull_points.items, hull_offsets, floors, slopes[mid]);
+            if (total <= target) {
+                chosen_slope = slopes[mid];
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        for (blocks, 0..) |_, block_index| {
+            const hull = hull_points.items[hull_offsets[block_index]..hull_offsets[block_index + 1]];
+            var selected = floors[block_index];
+            while (selected < hull.len and hull[selected].slope >= chosen_slope) : (selected += 1) {}
+            floors[block_index] = selected;
+            out_passes[block_index * layer_count + layer] =
+                if (selected == 0) 0 else hull[selected - 1].passes;
+        }
+    }
+}
+
+fn pcrdTotalBytes(
+    hull_points: []const PcrdHullPoint,
+    hull_offsets: []const usize,
+    floors: []const usize,
+    slope_threshold: f64,
+) u64 {
+    var total: u64 = 0;
+    for (floors, 0..) |floor, block_index| {
+        const hull = hull_points[hull_offsets[block_index]..hull_offsets[block_index + 1]];
+        var selected = floor;
+        while (selected < hull.len and hull[selected].slope >= slope_threshold) : (selected += 1) {}
+        if (selected > 0) total += hull[selected - 1].bytes;
+    }
+    return total;
+}
+
 fn validateLayerCount(layer_count: usize) !void {
     if (layer_count == 0 or layer_count > max_layers) return RateAllocError.InvalidLayerCount;
 }

@@ -431,7 +431,25 @@ and carries only the B.1.1 DC level shift. Changes:
 scalar-derived QCD write + E.1 derived inverse-quant read; keep scalar-expounded
 as the reference to diff derived step sizes against.
 
-### 3.4 PCRD-style rate allocation
+### 3.4 PCRD-style rate allocation — ✅ DONE
+
+**Landed (2026-07-07).** `ebcot.passDistortions` extracts exact per-pass
+squared-error reductions from the symbol-based reference coder (each sample's
+`sign` symbol marks its significance event, `magnitude_refinement` symbols
+mark refinements; midpoint reconstruction error model), weighted per band by
+(synthesis norm x step)^2 (new 5/3 norm table for the reversible path).
+`rate_alloc.allocatePcrdPasses` builds per-block convex hulls over
+(cumulative bytes, cumulative distortion) and bisects a global slope
+threshold per layer byte target; `applyPcrdLayerAllocation` rewrites the
+catalog layer truncations after the parallel block encode (single-threaded →
+thread-count independent, covered by a determinism test). Measured on a
+1024x1024 natural-statistics image at rates 100/50/20/8: layer payloads land
+on target (old split overshot layer 1 by ~10x), first-layer PSNR 32.2 dB vs
+13.8 dB for the old allocator, and within 0.2–0.4 dB of OpenJPEG's own PCRD
+at matched byte sizes. Full stream still lossless (opj/grk/jpylyzer).
+Remaining refinements: count packet-header overhead against the byte targets
+and parallelize the distortion pass (it re-runs the symbol coder once per
+block on one thread when rates are active).
 
 - **Impact:** full "lossy" +2, fairer benchmarks. (+2)
 - **Effort:** L · **Risk:** Medium (encoder-only, but needs trustworthy T1
