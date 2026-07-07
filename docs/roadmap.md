@@ -176,22 +176,34 @@ Exit criteria:
 
 ## Phase 4: Multi-Tile And Memory Scaling
 
-Goal: support large images without requiring a single full-image tile path.
+Goal: broaden the v1 aligned multi-tile envelope and use it as the route to
+large-image memory scaling and tile-level parallelism.
 
 Tasks:
 
-- Build on the shared tile-grid helper to add real tile partitioning in image
-  coordinates.
-- Preserve tile-component independence in DWT, T1, and T2 scheduling.
-- Rework scratch pools for tile-local reuse.
+- Keep the current positive multi-tile encode/decode path green: lossless
+  RCT/5-3, one layer, one tile-part per tile, row-major order, plain
+  code-block style, and ISO B.6/B.7-aligned geometry.
+- Expand the tile/profile matrix one axis at a time: more fixtures for edge
+  tiles and non-divisible dimensions, then additional progression orders,
+  quality layers, and selected style-bit combinations only after strict decode
+  and interop coverage exist.
+- Preserve tile-component independence in DWT, T1, and T2 scheduling while
+  keeping packet order deterministic.
+- Rework scratch pools for tile-local reuse and later persistent worker
+  resources.
 - Add memory usage benchmarks.
-- Extend the current edge-tile and non-divisible dimension geometry tests into
-  positive per-tile payload coverage.
+- Add OpenJPEG/Grok/Kakadu interop fixtures for each newly opened multi-tile
+  profile.
 
 Exit criteria:
 
-- Tile sizes smaller than the image are supported.
-- Current fail-closed multi-tile test is replaced with positive coverage.
+- The v1 envelope remains accepted by z2000 strict decode and independent
+  decoders.
+- Unsupported multi-tile/profile combinations fail closed with deterministic
+  errors.
+- Tile-level scheduling improves memory or throughput without changing output
+  bytes.
 
 ## Phase 5: Irreversible And Lossy Paths
 
