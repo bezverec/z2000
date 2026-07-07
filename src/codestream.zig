@@ -6686,9 +6686,29 @@ fn appendTemporaryPayload(
 
     // Rate-targeted layers get a global PCRD allocation over the finished
     // block catalogs, replacing the per-block proportional split the
-    // catalog builder installed.
+    // catalog builder installed. A probe assembly measures the real packet
+    // header bytes per layer, then one refinement round charges them
+    // against the byte targets so assembled layer sizes land on the ladder.
     if (options.rate_count > 0 and options.layers > 1) {
-        try applyPcrdLayerAllocation(allocator, &catalogs, planes, bands, blocks, options);
+        var pcrd_data = try buildPcrdData(allocator, &catalogs, planes, bands, blocks, options);
+        defer pcrd_data.deinit();
+        try applyPcrdTargets(allocator, pcrd_data, &catalogs, blocks.len, options, &.{});
+
+        var probe_stream: RpclPacketStream = .{};
+        defer probe_stream.deinit();
+        try appendRpclShadowStream(allocator, null, planes, bands, blocks, catalogs, levels, options, &probe_stream);
+        var header_overhead = [_]u64{0} ** max_quality_layers;
+        // The probe stream is in RPCL order (layer innermost), so packet k
+        // belongs to layer k % layers.
+        for (probe_stream.packet_header_lengths, 0..) |header_length, packet_index| {
+            header_overhead[packet_index % options.layers] += header_length;
+        }
+        var cumulative: u64 = 0;
+        for (header_overhead[0..options.layers]) |*value| {
+            cumulative += value.*;
+            value.* = cumulative;
+        }
+        try applyPcrdTargets(allocator, pcrd_data, &catalogs, blocks.len, options, header_overhead[0..options.layers]);
     }
 
     if (options.emit_temporary_payload_sidecar) {
@@ -6864,23 +6884,95 @@ fn buildRpclBlockIndex(
     return index;
 }
 
-/// Global PCRD (ISO 15444-1 J.14) layer allocation across every code block
-/// of the three components. Exact per-pass distortion comes from the
-/// symbol-based reference coder, band-weighted into image-domain units,
-/// then rate_alloc picks a global slope threshold per layer byte target and
-/// each catalog block's layer truncations are rewritten in place (BYPASS
-/// segment snapping preserved via normalizedLayerTruncation). Runs
-/// single-threaded after the parallel block encode, so the allocation is
-/// independent of the encode thread count.
-fn applyPcrdLayerAllocation(
+/// Rate-distortion data for global PCRD (ISO 15444-1 J.14): per-block
+/// cumulative pass bytes plus band-weighted per-pass distortion reductions,
+/// extracted once from the symbol-based reference coder and reused for every
+/// target refinement. The distortion extraction parallelizes over blocks
+/// (each slot writes a disjoint span, so the result is independent of the
+/// worker count).
+const PcrdData = struct {
     allocator: std.mem.Allocator,
-    catalogs: *[3]ComponentRpclShadowCatalog,
+    blocks: []rate_alloc.PcrdBlock,
+    pass_bytes: []u64,
+    distortions: []f64,
+    total_full_bytes: u64,
+
+    fn deinit(self: *PcrdData) void {
+        self.allocator.free(self.blocks);
+        self.allocator.free(self.pass_bytes);
+        self.allocator.free(self.distortions);
+        self.* = undefined;
+    }
+};
+
+const PcrdDistortionJob = struct {
+    catalogs: *const [3]ComponentRpclShadowCatalog,
+    component_planes: [3][]const i32,
+    stride: usize,
+    bands: []const subband.Band,
+    blocks: []const subband.CodeBlock,
+    band_weights: []const f64,
+    base_style: ebcot.CodeBlockStyle,
+    spans: []const PcrdSpan,
+    distortions: []f64,
+    allocator: std.mem.Allocator,
+    first_slot: usize,
+    slot_count: usize,
+    result: anyerror!void = {},
+};
+
+const PcrdSpan = struct { start: usize, count: usize };
+
+fn pcrdDistortionWorker(job: *PcrdDistortionJob) void {
+    var scratch = ebcot.BlockScratch.init(job.allocator);
+    defer scratch.deinit();
+    var distortion_scratch: [164]f64 = undefined;
+
+    var offset: usize = 0;
+    while (offset < job.slot_count) : (offset += 1) {
+        const slot = job.first_slot + offset;
+        const component = slot / job.blocks.len;
+        const block_index = slot % job.blocks.len;
+        const span = job.spans[slot];
+        if (span.count == 0) continue;
+
+        const block = job.blocks[block_index];
+        const band = job.bands[block.band_index];
+        const style = codeBlockStyleForBand(job.base_style, band.kind);
+        const distortion_passes = ebcot.passDistortions(
+            &scratch,
+            job.component_planes[component],
+            job.stride,
+            block.rect,
+            style,
+            distortion_scratch[0..],
+        ) catch |err| {
+            job.result = err;
+            return;
+        };
+        if (distortion_passes != span.count) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+        const weight = job.band_weights[block.band_index];
+        for (0..span.count) |pass_index| {
+            job.distortions[span.start + pass_index] = distortion_scratch[pass_index] * weight;
+        }
+    }
+    job.result = {};
+}
+
+/// Extracts the PCRD rate-distortion tables from the finished block
+/// catalogs: pass byte boundaries serially (cheap), per-pass distortion in
+/// parallel over blocks (the expensive symbol-coder re-run).
+fn buildPcrdData(
+    allocator: std.mem.Allocator,
+    catalogs: *const [3]ComponentRpclShadowCatalog,
     planes: color.RctPlanes,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
     options: LosslessOptions,
-) !void {
-    const layer_count: usize = options.layers;
+) !PcrdData {
     const levels = dwtLevelsFromBands(bands);
     const total_blocks = blocks.len * 3;
     const component_planes = [3][]const i32{ planes.y, planes.cb, planes.cr };
@@ -6894,77 +6986,158 @@ fn applyPcrdLayerAllocation(
         .segmentation_symbols = options.segmentation_symbols,
     };
 
-    var scratch = ebcot.BlockScratch.init(allocator);
-    defer scratch.deinit();
+    const band_weights = try allocator.alloc(f64, bands.len);
+    defer allocator.free(band_weights);
+    for (bands, 0..) |band, index| {
+        band_weights[index] = try pcrdBandWeight(band, options, planes.bit_depth, levels);
+    }
 
-    const Span = struct { start: usize, count: usize };
-    var pass_bytes_storage: std.ArrayList(u64) = .empty;
-    defer pass_bytes_storage.deinit(allocator);
-    var distortion_storage: std.ArrayList(f64) = .empty;
-    defer distortion_storage.deinit(allocator);
-    const spans = try allocator.alloc(Span, total_blocks);
+    const spans = try allocator.alloc(PcrdSpan, total_blocks);
     defer allocator.free(spans);
 
-    var distortion_scratch: [164]f64 = undefined;
+    var total_passes: usize = 0;
     var total_full_bytes: u64 = 0;
     for (0..3) |component| {
         for (blocks, 0..) |block, block_index| {
             if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
-            const band = bands[block.band_index];
-            const shadow = &catalogs[component].blocks[block_index];
-            const segment = shadow.segment;
+            const segment = catalogs[component].blocks[block_index].segment;
             total_full_bytes = try std.math.add(u64, total_full_bytes, segment.byte_length);
+            spans[component * blocks.len + block_index] = .{ .start = total_passes, .count = segment.pass_count };
+            total_passes += segment.pass_count;
+        }
+    }
 
+    const pass_bytes = try allocator.alloc(u64, total_passes);
+    errdefer allocator.free(pass_bytes);
+    const distortions = try allocator.alloc(f64, total_passes);
+    errdefer allocator.free(distortions);
+    for (0..3) |component| {
+        for (blocks, 0..) |_, block_index| {
             const slot = component * blocks.len + block_index;
-            spans[slot] = .{ .start = pass_bytes_storage.items.len, .count = segment.pass_count };
-            if (segment.pass_count == 0) continue;
-
-            const style = codeBlockStyleForBand(base_style, band.kind);
-            const distortion_passes = ebcot.passDistortions(
-                &scratch,
-                component_planes[component],
-                planes.width,
-                block.rect,
-                style,
-                distortion_scratch[0..],
-            ) catch return CodestreamError.InvalidCodestream;
-            if (distortion_passes != segment.pass_count) return CodestreamError.InvalidCodestream;
-
-            const weight = try pcrdBandWeight(band, options, planes.bit_depth, levels);
-            var pass_index: u16 = 0;
-            while (pass_index < segment.pass_count) : (pass_index += 1) {
-                try pass_bytes_storage.append(allocator, segment.passes[pass_index].cumulative_bytes);
-                try distortion_storage.append(allocator, distortion_scratch[pass_index] * weight);
+            const segment = catalogs[component].blocks[block_index].segment;
+            const span = spans[slot];
+            for (0..span.count) |pass_index| {
+                pass_bytes[span.start + pass_index] = segment.passes[pass_index].cumulative_bytes;
             }
         }
     }
 
+    const worker_count = payloadBlockThreadCount(options, total_blocks);
+    if (worker_count <= 1) {
+        var job = PcrdDistortionJob{
+            .catalogs = catalogs,
+            .component_planes = component_planes,
+            .stride = planes.width,
+            .bands = bands,
+            .blocks = blocks,
+            .band_weights = band_weights,
+            .base_style = base_style,
+            .spans = spans,
+            .distortions = distortions,
+            .allocator = allocator,
+            .first_slot = 0,
+            .slot_count = total_blocks,
+        };
+        pcrdDistortionWorker(&job);
+        try job.result;
+    } else {
+        const jobs = try allocator.alloc(PcrdDistortionJob, worker_count);
+        defer allocator.free(jobs);
+        const chunk = (total_blocks + worker_count - 1) / worker_count;
+        var job_count: usize = 0;
+        var first: usize = 0;
+        while (first < total_blocks) : (first += chunk) {
+            jobs[job_count] = .{
+                .catalogs = catalogs,
+                .component_planes = component_planes,
+                .stride = planes.width,
+                .bands = bands,
+                .blocks = blocks,
+                .band_weights = band_weights,
+                .base_style = base_style,
+                .spans = spans,
+                .distortions = distortions,
+                .allocator = allocator,
+                .first_slot = first,
+                .slot_count = @min(chunk, total_blocks - first),
+            };
+            job_count += 1;
+        }
+
+        const threads = try allocator.alloc(std.Thread, job_count - 1);
+        defer allocator.free(threads);
+        var spawned: usize = 0;
+        while (spawned + 1 < job_count) : (spawned += 1) {
+            threads[spawned] = std.Thread.spawn(.{}, pcrdDistortionWorker, .{&jobs[spawned]}) catch |err| {
+                for (threads[0..spawned]) |thread| thread.join();
+                return err;
+            };
+        }
+        pcrdDistortionWorker(&jobs[job_count - 1]);
+        for (threads[0..spawned]) |thread| thread.join();
+        for (jobs[0..job_count]) |job| try job.result;
+    }
+
     const pcrd_blocks = try allocator.alloc(rate_alloc.PcrdBlock, total_blocks);
-    defer allocator.free(pcrd_blocks);
+    errdefer allocator.free(pcrd_blocks);
     for (spans, 0..) |span, slot| {
         pcrd_blocks[slot] = .{
-            .pass_bytes = pass_bytes_storage.items[span.start..][0..span.count],
-            .pass_distortion = distortion_storage.items[span.start..][0..span.count],
+            .pass_bytes = pass_bytes[span.start..][0..span.count],
+            .pass_distortion = distortions[span.start..][0..span.count],
         };
     }
+
+    return .{
+        .allocator = allocator,
+        .blocks = pcrd_blocks,
+        .pass_bytes = pass_bytes,
+        .distortions = distortions,
+        .total_full_bytes = total_full_bytes,
+    };
+}
+
+/// Applies one global PCRD allocation round: layer byte targets from the
+/// compression ratios minus the (cumulative) packet-header overhead measured
+/// on a previous assembly, then a slope-threshold allocation and an in-place
+/// rewrite of every catalog block's layer truncations (BYPASS segment
+/// snapping preserved via normalizedLayerTruncation).
+fn applyPcrdTargets(
+    allocator: std.mem.Allocator,
+    data: PcrdData,
+    catalogs: *[3]ComponentRpclShadowCatalog,
+    blocks_len: usize,
+    options: LosslessOptions,
+    header_overhead: []const u64,
+) !void {
+    const layer_count: usize = options.layers;
+    const total_blocks = blocks_len * 3;
 
     var targets: [max_quality_layers]u64 = undefined;
     rate_alloc.layerTargetsFromRates(
         targets[0..layer_count],
-        total_full_bytes,
+        data.total_full_bytes,
         options.rates[0..options.rate_count],
     ) catch return CodestreamError.InvalidCodestream;
+    // Non-final targets are payload budgets; charge the measured packet
+    // header bytes against them so the assembled layer sizes land on the
+    // requested ladder. Keep the sequence monotone.
+    var previous_target: u64 = 0;
+    for (0..layer_count - 1) |layer| {
+        const overhead = if (layer < header_overhead.len) header_overhead[layer] else 0;
+        targets[layer] = @max(previous_target, targets[layer] -| overhead);
+        previous_target = targets[layer];
+    }
 
     const out_passes = try allocator.alloc(u16, total_blocks * layer_count);
     defer allocator.free(out_passes);
-    rate_alloc.allocatePcrdPasses(allocator, pcrd_blocks, targets[0..layer_count], out_passes) catch |err| switch (err) {
+    rate_alloc.allocatePcrdPasses(allocator, data.blocks, targets[0..layer_count], out_passes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return CodestreamError.InvalidCodestream,
     };
 
     for (0..3) |component| {
-        for (blocks, 0..) |_, block_index| {
-            const slot = component * blocks.len + block_index;
+        for (0..blocks_len) |block_index| {
+            const slot = component * blocks_len + block_index;
             const shadow = &catalogs[component].blocks[block_index];
             var previous = t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 };
             for (0..layer_count) |layer| {

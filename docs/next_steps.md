@@ -472,9 +472,11 @@ thread-count independent, covered by a determinism test). Measured on a
 on target (old split overshot layer 1 by ~10x), first-layer PSNR 32.2 dB vs
 13.8 dB for the old allocator, and within 0.2–0.4 dB of OpenJPEG's own PCRD
 at matched byte sizes. Full stream still lossless (opj/grk/jpylyzer).
-Remaining refinements: count packet-header overhead against the byte targets
-and parallelize the distortion pass (it re-runs the symbol coder once per
-block on one thread when rates are active).
+Both follow-ups landed the same day: layer targets now charge measured
+packet-header overhead (probe assembly + one refinement round; assembled
+layer sizes land under the ladder headers-included), and the distortion
+extraction parallelizes across blocks with per-worker scratch while staying
+byte-identical across thread counts.
 
 - **Impact:** full "lossy" +2, fairer benchmarks. (+2)
 - **Effort:** L · **Risk:** Medium (encoder-only, but needs trustworthy T1

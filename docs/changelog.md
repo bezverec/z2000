@@ -38,15 +38,18 @@ entries are grouped by development milestone rather than semantic version.
   with `<qStyle>scalar derived</qStyle>`. Reversible + scalar-derived stays
   fail-closed.
 
-### B.7 Precinct/Block Guard
+### PCRD Refinements
 
-- Fail-closed the ISO 15444-1 B.7 constraint on the single-tile path (both
-  encode and strict decode): when a precinct's band span (full precinct at
-  resolution 0, half above) is smaller than the code-block size, the
-  standard prescribes block-size clamping that z2000 does not implement.
-  Previously `--precincts "[64,64]"` with the default 64px block emitted a
-  stream no decoder accepted; both sides now return `UnsupportedPayload`
-  up front, sharing the guard the multi-tile envelope already had.
+- Layer byte targets now charge the real packet-header overhead: a probe
+  assembly of the first allocation measures per-layer header bytes and one
+  refinement round subtracts them from the budgets, so assembled layer
+  sizes (headers included) land under the requested ladder (verified
+  10603/21200/53157 against targets 10646/21293/53233 at rates 100/50/20).
+- Parallelized the PCRD distortion extraction (the symbol-coder re-run)
+  across code blocks with per-worker scratch; each slot writes a disjoint
+  span, so the allocation stays byte-identical across thread counts
+  (4-thread rate-targeted encode of the 1024x1024 fixture drops ~0.42 s ->
+  ~0.15 s end to end).
 
 ### PCRD Rate Allocation
 
