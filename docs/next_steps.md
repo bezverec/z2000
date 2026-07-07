@@ -19,10 +19,15 @@ for more ISO coverage is:
 1. **Malformed corpus / fuzzing gate.** Add targeted corruptions for JP2 boxes,
    COD/QCD, SOT/TLM/PLT, SOP/EPH, packet headers, and tile-part boundaries.
    Treat jpylyzer/valid2000-style findings as diagnostics, not absolute truth.
-2. **Styled T1/T2 corruption matrix.** ERTERM is now green through z2000 strict
-   decode, OpenJPEG, Grok, and Kakadu on the larger no-sidecar smoke. Add
-   corrupt segment-length and terminated-pass payload fixtures for TERMALL,
-   RESET+TERMALL, and ERTERM before broadening style combinations.
+2. **Styled T1/T2 corruption matrix.** ✅ First slice landed: the test
+   "terminated styled T1 streams fail closed on corruption" runs, for each of
+   TERMALL / RESET+TERMALL / ERTERM, a clean roundtrip plus three corruptions —
+   a flipped per-pass PLT length byte → deterministic `InvalidCodestream`
+   (segment-span accounting), a truncated final tile-part → `TruncatedData`,
+   and a payload byte-flip walk requiring at least one bounded rejection with
+   no panic/OOB (green in Debug and ReleaseFast). Remaining: extend the same
+   fixtures to the multi-tile terminated path and to malformed *packet-header*
+   segment counts (not just PLT lengths), then broaden style combinations.
 3. **Multi-tile v2.** The v1 aligned envelope is real and interop-proven for
    the documented lossless profile. Expand one axis at a time: edge-tile
    fixtures, more progression orders, then quality layers/style bits only after
