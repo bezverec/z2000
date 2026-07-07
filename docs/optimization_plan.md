@@ -270,3 +270,4 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | 2026-07-07 | O1 column-mask (RAW sig) | — | — | +1.7% | — | reverted |
 | 2026-07-07 | O2 cleanup-run plain 4-row OR (`0004.tif`) | +0.5% | -1.4% | -1.3% | -4.2% | kept |
 | 2026-07-07 | O2 decode cleanup known flags/stride (`0004.tif`) | — | — | -7.6% | -3.2% | kept; t16 noisy |
+| 2026-07-07 | O2 encode cleanup known flags/stride (`0004.tif`) | -1.5% | -0.7% | -2.1% | -3.4% | kept; decode rechecked |

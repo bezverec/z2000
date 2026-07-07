@@ -5846,6 +5846,7 @@ fn emitDirectIsoCleanupPassPlain(
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
+    const band_index = @intFromEnum(band_kind);
     var symbol_count: usize = 0;
     var stripe_y: usize = 0;
     while (stripe_y < rect.height) : (stripe_y += 4) {
@@ -5874,12 +5875,12 @@ fn emitDirectIsoCleanupPassPlain(
 
                 var dy = runlen + 1;
                 while (dy < 4) : (dy += 1) {
-                    symbol_count += try nbfEmitCleanupSamplePlain(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, band_kind);
+                    symbol_count += try nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y + dy, bitplane, band_index);
                 }
             } else {
                 var dy: usize = 0;
                 while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try nbfEmitCleanupSamplePlain(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, band_kind);
+                    symbol_count += try nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y + dy, bitplane, band_index);
                 }
             }
         }
@@ -5962,6 +5963,37 @@ fn nbfEmitCleanupSamplePlain(
     const coeff = plane[(rect.y + y) * stride + rect.x + x];
     const bit = isMagnitudeBitSet(coeff, bitplane);
     const zero_context = nbf_zc_lut[@intFromEnum(band_kind)][sample_flags & nbf_sig8];
+    try encoder.write(mqContextIndex(zero_context), bit);
+    var symbol_count: usize = 1;
+    if (bit) {
+        const negative = coeff < 0;
+        const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
+        try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
+        symbol_count += 1;
+        nbfMarkSignificant(flags, nbs, x, y, negative);
+        setSignificantRow(scratch, x, y);
+    }
+    return symbol_count;
+}
+
+inline fn nbfEmitCleanupSamplePlainKnown(
+    scratch: *DirectBlockScratch,
+    encoder: *mq_iso.Encoder,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    flags: []u16,
+    nbs: usize,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+    band_index: usize,
+) !usize {
+    const sample_flags = flags[nbfIndex(nbs, x, y)];
+    if ((sample_flags & (nbf_sig_self | nbf_visit)) != 0) return 0;
+    const coeff = plane[(rect.y + y) * stride + rect.x + x];
+    const bit = isMagnitudeBitSet(coeff, bitplane);
+    const zero_context = nbf_zc_lut[band_index][sample_flags & nbf_sig8];
     try encoder.write(mqContextIndex(zero_context), bit);
     var symbol_count: usize = 1;
     if (bit) {
