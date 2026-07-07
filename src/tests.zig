@@ -148,48 +148,69 @@ test "ISO MQ encoder resetStream preserves deterministic output" {
     try std.testing.expectEqualSlices(u8, first, second);
 }
 
+fn ertermDecisionContext(index: usize) usize {
+    return (index * 3 + index / 5) % 4;
+}
+
+fn ertermDecisionBit(index: usize) bool {
+    return ((index * 11 + 7) % 17) < 6;
+}
+
 test "ISO MQ ER-TERM flush roundtrips encoded decisions" {
     const allocator = std.testing.allocator;
     // Several lengths so the flush hits different ct phases.
     inline for (.{ 5, 17, 96, 353 }) |count| {
         var encoder = try mq_iso.Encoder.init(allocator, 4);
         defer encoder.deinit();
-        var reference = try mq_iso.Encoder.init(allocator, 4);
-        defer reference.deinit();
 
         var contexts: [count]usize = undefined;
         var bits: [count]bool = undefined;
         for (0..count) |index| {
-            contexts[index] = (index * 3 + index / 5) % 4;
-            bits[index] = ((index * 11 + 7) % 17) < 6;
+            contexts[index] = ertermDecisionContext(index);
+            bits[index] = ertermDecisionBit(index);
             try encoder.write(contexts[index], bits[index]);
-            try reference.write(contexts[index], bits[index]);
         }
         const bytes = try encoder.finishErterm();
         defer allocator.free(bytes);
-        const flush_bytes = try reference.finish();
-        defer allocator.free(flush_bytes);
 
         var decoder = try mq_iso.Decoder.init(allocator, 4, bytes);
         defer decoder.deinit();
-        var first_bad: ?usize = null;
-        for (contexts, bits, 0..) |context, bit, index| {
-            const decoded = try decoder.read(context);
-            if (decoded != bit and first_bad == null) first_bad = index;
+        for (contexts, bits) |context, bit| {
+            try std.testing.expectEqual(bit, try decoder.read(context));
         }
-        if (first_bad) |bad| {
-            std.debug.print(
-                "ERTERM-DIAG count={} first_bad={} erterm_len={} flush_len={} erterm_tail={x} flush_tail={x}\n",
-                .{
-                    count,
-                    bad,
-                    bytes.len,
-                    flush_bytes.len,
-                    bytes[bytes.len -| 4..],
-                    flush_bytes[flush_bytes.len -| 4..],
-                },
-            );
-            return error.TestExpectedEqual;
+    }
+}
+
+test "ISO MQ ER-TERM flush matches interop-verified byte vectors" {
+    // Golden regression lock for the D.4.2 ER-TERM flush. These vectors were
+    // captured from the same encoder whose full-image ERTERM output kdu_expand,
+    // OpenJPEG, and Grok decode pixel-exactly (docs/next_steps.md interop pass),
+    // so the exact bytes are normative. A refactor of finishActiveStreamErterm
+    // that silently changes them will fail here in CI instead of only in the
+    // out-of-CI interop_erterm.ps1 gate. Each vector is also decoded back to
+    // confirm self-consistency.
+    const allocator = std.testing.allocator;
+    const Vector = struct { count: usize, bytes: []const u8 };
+    const vectors = [_]Vector{
+        .{ .count = 5, .bytes = &.{0x40} },
+        .{ .count = 40, .bytes = &.{ 0x45, 0xa4, 0xeb, 0x4d, 0xf1, 0xa9 } },
+        .{ .count = 96, .bytes = &.{ 0x45, 0xa4, 0xeb, 0x4d, 0xf1, 0xb3, 0x9d, 0xe6, 0xcd, 0xf8, 0x95, 0x10, 0x78 } },
+    };
+    for (vectors) |vector| {
+        errdefer std.debug.print("ERTERM golden vector count={} failed\n", .{vector.count});
+        var encoder = try mq_iso.Encoder.init(allocator, 4);
+        defer encoder.deinit();
+        for (0..vector.count) |index| {
+            try encoder.write(ertermDecisionContext(index), ertermDecisionBit(index));
+        }
+        const bytes = try encoder.finishErterm();
+        defer allocator.free(bytes);
+        try std.testing.expectEqualSlices(u8, vector.bytes, bytes);
+
+        var decoder = try mq_iso.Decoder.init(allocator, 4, bytes);
+        defer decoder.deinit();
+        for (0..vector.count) |index| {
+            try std.testing.expectEqual(ertermDecisionBit(index), try decoder.read(ertermDecisionContext(index)));
         }
     }
 }
