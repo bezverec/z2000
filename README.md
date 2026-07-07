@@ -69,16 +69,22 @@ This first milestone is intentionally small and honest:
   BYPASS, TERMALL, TERMALL-scoped RESET, vertical-causal, ERTERM, and
   segmentation symbols are wired where their payload behavior is implemented
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
-- decode of foreign (OpenJPEG/Grok) JP2 files that carry PLT packet lengths,
-  including their default LRCP/no-precinct profiles, multi-layer ladders,
-  and 9/7 lossy output; PLT-less foreign streams still fail closed
+- decode of foreign (OpenJPEG/Grok/Kakadu) JP2 profiles through the strict
+  packet catalog where packet spans can be derived: PLT-backed OpenJPEG/Grok
+  output, Kakadu reversible QCD profiles including a default PLT-less smoke,
+  default LRCP/no-precinct profiles, multi-layer ladders, and 9/7 lossy output.
+  The broader PLT-less OpenJPEG/Grok matrix is still a pending coverage gate.
 - strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
   `COM` comments
 
-It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` encoder, but
-the narrow single-tile RPCL profiles (lossless RCT/5-3 and lossy ICT/9-7,
-with or without BYPASS and quality layers) decode losslessly/pixel-identically
-in the current z2000/OpenJPEG/Grok/Kakadu smoke gates.
+It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` codec, but the
+supported JP2 surface is now broader than the original single-tile RPCL slice:
+lossless RCT/5-3, lossy ICT/9-7 scalar quantization, all five Part 1
+progression orders on the documented single-tile path, a v1 aligned multi-tile
+lossless envelope, BYPASS, selected error-resilience style bits, quality
+layers, and PCRD-style rate allocation all have local strict decode coverage
+and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported combinations still
+fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
 2026-07-07, the narrow RGB lossless JP2 target is estimated at 89/100, while
@@ -411,11 +417,11 @@ segment boundaries.
 - Keep parsers bounds-checked and allocation-limited.
 - Use checked integer math for dimensions, offsets, byte counts, and box sizes.
 - Keep hot image data in contiguous component buffers before DWT.
-- Keep tile-level parallelism fail-closed until real multi-tile payload layout
-  exists. A shared tile-grid geometry helper now computes edge-tile rectangles
-  and feeds encoder/strict SIZ validation, but the current hot path still uses
-  component-level scheduling plus encode-side code-block range scheduling with
-  per-worker scratch-buffer reuse.
+- Keep tile-level parallelism conservative until the v1 multi-tile envelope is
+  broadened. Real aligned multi-tile lossless payloads now encode/decode with
+  per-tile DWT/T1/T2 state, but scheduling still uses deterministic component
+  and code-block queues; the next step is tile/profile matrix expansion before
+  more aggressive tile work queues.
 - Benchmark encode/decode throughput, memory peak, and lossless roundtrip
   against OpenJPEG and Grok on the same TIFF corpus.
 
@@ -597,14 +603,15 @@ Optimization read from those numbers:
 
 Features:
 
-1. Real multi-tile payload layout, then tile-parallel scheduling on top of
-   the per-worker scratch-buffer model.
+1. Broaden the v1 multi-tile envelope: more layers, more progression orders,
+   stricter edge-tile fixtures, and then tile-parallel scheduling on top of the
+   per-worker scratch-buffer model.
 2. Expand the full profile matrix across OpenJPEG/Grok/Kakadu and
    valid2000/jpylyzer-style validators, treating validator warnings as
    diagnostic leads rather than authoritative failures until checked against
    the strict reader, independent decoders, and Part 1.
-3. Distortion-aware rate allocation (PCRD-style) so early quality layers
-   carry more PSNR than the current byte-even/ratio split.
+3. Finish the PLT-less foreign decode matrix and broaden ERTERM/RESET-style
+   interop beyond the current staged smokes.
 
 Performance (decode remains the larger Grok gap; ordered by current expected
 win per effort after the strict T2 profiling pass):

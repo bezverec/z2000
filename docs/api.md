@@ -34,14 +34,14 @@ Important `tiff-to-jp2` options:
 
 - `--levels N` or `--resolutions N`
 - `--tile W,H`
-- `--progression RPCL`
+- `--progression RPCL|LRCP|RLCP|PCRL|CPRL`
 - `--precincts "[256,256],[128,128]"`
 - `--block N`
 - `--layers N`
 - `--rates R1,R2,...`
-- `--mct rct|ict`
+- `--mct rct|ict|none`
 - `--transform 5-3|9-7`
-- `--qstyle none|scalar-expounded`
+- `--qstyle none|scalar-derived|scalar-expounded`
 - `--tile-parts none|R`
 - `--sop`, `--eph`, `--tlm`
 - `--t1-backend iso-mq|legacy-mq`
@@ -53,18 +53,29 @@ Important `tiff-to-jp2` options:
 Supported public JP2 profiles are still narrow:
 
 - lossless RGB: `--mct rct --transform 5-3 --qstyle none`
-- irreversible RGB: `--mct ict --transform 9-7 --qstyle scalar-expounded`
-- RPCL progression, one full-image tile, optional resolution tile-parts, and
-  8/16-bit chunky RGB TIFF input
+- irreversible RGB: `--mct ict --transform 9-7` with scalar-expounded or
+  scalar-derived quantization
+- reversible component-independent RGB: `--mct none --transform 5-3 --qstyle none`
+- all five Part 1 progression orders on the documented single-tile path;
+  multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
+  streams cannot be divided per resolution
+- a v1 aligned multi-tile lossless envelope: RCT/5-3, one quality layer, one
+  tile-part per tile, row-major tiles, plain code-block style, and ISO B.6/B.7
+  geometry constraints
+- 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
 - `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
   segments and packet-header segment length accounting
+- selected code-block style profiles where the payload model is implemented:
+  TERMALL, TERMALL-scoped RESET, vertical-causal, segmentation symbols, and
+  TERMALL-scoped predictable termination
 
-Unsupported progression orders, scalar-derived quantization, `--mct none`,
-multi-tile requests, unsupported tile-part divisions, and code-block style bits
-other than BYPASS should fail closed. SOP is enabled by default for the current
-narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok smoke tests
-cover the common no-EPH and archival EPH paths, while valid2000 remains a
-separate policy/conformance gate.
+Unsupported combinations still fail closed. Examples include standalone RESET,
+standalone ERTERM, BYPASS+TERMALL, tile-part divisions other than none/R, JPX
+features, unsupported component layouts, and multi-tile/profile mixes outside
+the v1 envelope. SOP is enabled by default for the current narrow profile. EPH
+is available via `--eph`; current OpenJPEG/Grok smoke tests cover the common
+no-EPH and archival EPH paths, while valid2000/jpylyzer-style validators remain
+diagnostic gates rather than absolute sources of truth.
 
 ## `src/codestream.zig`
 
@@ -105,16 +116,20 @@ Primary public functions:
 
 Notes:
 
-- `encodeLosslessWithOptions` writes JPEG2000 markers with strict RPCL packet
-  payloads in `SOD`. Despite the historical name, it now covers both the
-  reversible RCT/5-3 path and the irreversible ICT/9-7/scalar-expounded path.
+- `encodeLosslessWithOptions` writes JPEG2000 markers with strict packet
+  payloads in `SOD`. Despite the historical name, it now covers the reversible
+  RCT/5-3 path, reversible `mct none`, the irreversible ICT/9-7 scalar
+  quantization path, all five progression orders on the documented single-tile
+  path, and the v1 aligned multi-tile lossless envelope.
 - The latest private payload is BP8 and is emitted only when
   `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
-- `decodeLosslessTemporary*` decodes normal no-sidecar codestreams for the
-  current RPCL/RCT/5-3 and ICT/9-7 paths by reconstructing T2 block payloads
-  from strict `SOD` packets and inferring continuous MQ/T1 pass metadata from
-  the payload. Debug BP8 sidecar files are still accepted as an oracle/compat
-  path for the reversible profile.
+- `decodeLosslessTemporary*` decodes normal no-sidecar codestreams by
+  reconstructing T2 block payloads from strict `SOD` packets and inferring
+  continuous MQ/T1 pass metadata from the payload. The strict path covers
+  z2000-produced RCT/5-3, ICT/9-7, progression-order, quality-layer, and v1
+  multi-tile profiles, plus selected foreign OpenJPEG/Grok/Kakadu streams where
+  packet spans can be derived. Debug BP8 sidecar files are still accepted as an
+  oracle/compat path for the reversible profile.
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
@@ -130,9 +145,10 @@ Notes:
   and EBCOT scratch buffers are reused while packet emission still reads stable
   per-component catalog indexes.
 - Strict packet catalog parsing validates SOT/TLM/PLT marker accounting,
-  ordered multi-segment TLM/PLT indexes, SOP/EPH marker policy, and packet
-  header marker stuffing, including terminal `0xff` packet-header padding, for
-  the current supported RPCL/RCT/5-3 profile.
+  ordered multi-segment TLM/PLT indexes, SOP/EPH marker policy, packet-header
+  marker stuffing, and terminal `0xff` packet-header padding. It also has a
+  PLT-less catalog branch that derives packet spans from packet headers for the
+  staged foreign-stream decode matrix.
 
 ## `src/jp2.zig`
 
@@ -221,6 +237,8 @@ Primary public types:
 - `Plan`
 - `Packet`
 - `RpclIterator`
+- `LrcpIterator`
+- `RlcpIterator`
 
 Primary public functions:
 
@@ -229,12 +247,14 @@ Primary public functions:
 - `precinctRect(plan, resolution_index, precinct_index)`
 - `rectsIntersect(a, b)`
 
-`RpclIterator` emits packets in resolution, precinct, component, layer order for
-the current single-tile RPCL path.
-
-Future progression iterators must not be exposed as supported CLI options until
-their packet writer, strict reader, packet-state lifetime, and corruption tests
-exist.
+`RpclIterator` emits packets in resolution, precinct, component, layer order.
+The non-RPCL progression orders are implemented as stream-order permutations
+over the same packet body model: LRCP, RLCP, PCRL, and CPRL build deterministic
+packet sequences for the writer and strict reader, then catalog entries are
+reordered back to the internal RPCL grouping used by downstream reconstruction.
+Future progression/tile-part combinations must still stay fail-closed until
+their packet writer, strict reader, packet-state lifetime, corruption tests, and
+interop gates exist.
 
 ## `src/ebcot.zig`
 
@@ -300,15 +320,20 @@ because pass byte lengths are required.
 Primary public types:
 
 - `Block`
+- `PcrdBlock`
 - `Truncation`
 
 Primary public functions:
 
 - `allocateEven(out, block)`
 - `allocateFromCompressionRatios(out, block, rates)`
+- `allocatePcrdPasses(allocator, blocks, layer_targets, out_passes)`
 
-The allocator works on cumulative pass and byte targets. T2 then converts those
-cumulative points into per-layer deltas.
+The allocator works on cumulative pass and byte targets. The legacy helpers
+keep even and compression-ratio allocation available for tests, while the
+current rate-driven path uses PCRD-style global slope allocation over
+per-block distortion metadata. T2 then converts the chosen cumulative points
+into per-layer deltas.
 
 ## `src/subband.zig`
 

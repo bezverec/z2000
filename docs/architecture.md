@@ -4,28 +4,32 @@ z2000 is an educational JPEG2000-style codec core written from scratch in Zig.
 The current codebase has two codec surfaces:
 
 - a small custom grayscale `.z2000` path used for early wavelet experiments;
-- a narrow JP2/RPCL/RCT/5-3 path for RGB TIFF input, with strict packet
-  payloads in `jp2c` and an optional private debug sidecar.
+- a JP2 path for RGB TIFF input, with strict packet payloads in `jp2c`,
+  selected Part 1 profiles, strict no-sidecar decode, and an optional private
+  debug sidecar.
 
 The project is intentionally fail-closed. Profile options that would require
 payload behavior not implemented yet are rejected with `UnsupportedPayload`.
 
 ## High-Level Pipeline
 
-Current RGB TIFF to temporary JP2 encode:
+Current RGB TIFF to JP2 encode:
 
 1. `src/tiff.zig` reads a narrow subset of TIFF 6.0:
    uncompressed chunky RGB, 8 or 16 bits per channel, strip storage, and an
    optional embedded ICC profile from tag 34675.
-2. `src/color.zig` converts RGB samples into reversible RCT planes.
-3. `src/wavelet_int.zig` applies the reversible integer 5/3 transform.
+2. `src/color.zig` converts RGB samples through RCT, ICT, or no-MCT depending
+   on the accepted profile.
+3. `src/wavelet_int.zig` and `src/wavelet_float.zig` apply the reversible
+   integer 5/3 or irreversible 9/7 transform.
 4. `src/subband.zig` builds subband and code-block grids.
 5. `src/bitplane.zig` can still write the old debug sidecar block payload.
 6. `src/ebcot.zig` builds EBCOT-style coding passes and MQ-backed code-block
    segment bytes used by the current RPCL packet payload.
 7. `src/rate_alloc.zig` maps quality layers or target rates to cumulative
    code-block truncation points.
-8. `src/packet_plan.zig` describes RPCL packet order and precinct geometry.
+8. `src/packet_plan.zig` describes packet order and precinct geometry for the
+   implemented progression orders.
 9. `src/t2.zig` owns packet-header primitives, tag-trees, layer deltas,
    packet read/write state, and RPCL packet assembly helpers.
 10. `src/codestream.zig` writes JPEG2000 markers, PLT-backed RPCL tile-part
@@ -127,7 +131,8 @@ oracle coverage.
 - precinct packet writer/reader;
 - RPCL packet helpers over encoded block catalogs.
 
-The most recent bridge pieces are:
+The bridge pieces that feed both the current v1 path and future broader tile
+support are:
 
 - `collectRpclCodeBlockIndexes`, which maps an RPCL packet to code-block indexes;
 - `layerPacketBlocksForIndexes`, which converts encoded blocks into packet blocks;
@@ -250,8 +255,10 @@ The most recent bridge pieces are:
 The current strict path connects T2 packet views to real T1 image
 reconstruction from the EBCOT/MQ payload and has closed the known PLT
 packet-length mismatch caused by terminal packet-header stuffing. RPCL remains
-the priority path; LRCP, PCRL, and CPRL stay fail-closed until their ordering is
-implemented on both write and read sides.
+the primary internal grouping for reconstruction, but all five Part 1
+progression orders are public on the documented single-tile path: LRCP, RLCP,
+PCRL, and CPRL are emitted/read as deterministic stream-order permutations and
+then normalized back to the internal RPCL grouping.
 
 The strict RPCL validation path now also reassembles per-code-block payload
 contributions from decoded T2 packets and compares the resulting cumulative
@@ -312,60 +319,38 @@ mode. Debug builds retain the packed-context shadow assertions.
 ## Tile Grid Foundation
 
 `src/tile_grid.zig` owns the JPEG2000 reference-grid tile geometry used by the
-encoder and strict SIZ validation. It computes tile columns, rows, total tile
-count, clipped edge-tile rectangles for non-divisible image dimensions and
-non-zero reference origins, plus row-major tile descriptors for future work
-queues. It also provides tile-local RGB sample extraction and copy-back helpers
-so future per-tile encode/decode work can move rectangular image regions
-without ad hoc row math. The production payload path still requires a single
-tile and fails closed for multi-tile requests; this helper is the shared
-geometry layer that later per-tile DWT, T1, T2, packet state, and scheduling
-will build on.
+encoder, strict SIZ validation, and the v1 public multi-tile envelope. It
+computes tile columns, rows, total tile count, clipped edge-tile rectangles for
+non-divisible image dimensions and non-zero reference origins, plus row-major
+tile descriptors. It also provides tile-local RGB sample extraction and
+copy-back helpers so per-tile encode/decode work can move rectangular image
+regions without ad hoc row math. Multi-tile support is intentionally bounded:
+lossless RCT/5-3, one quality layer, one tile-part per tile, row-major tile
+order, plain code-block style, and ISO B.6/B.7-aligned geometry.
 
-`src/tile_pipeline.zig` is the first narrow consumer of that geometry. It can
-run the reversible component transform on a single tile descriptor, producing
-tile-local RCT planes and copying the inverse result back into the full RGB
-image. It also has an in-place reversible 5/3 DWT/inverse-DWT scaffold over
-those tile-local component planes using the same integer wavelet workspace as
-the production single-tile path. The same module can now build a tile-local
-packet scaffold: subband geometry, code-block rectangles, and an RPCL packet
-plan for the tile dimensions, component count, layers, block size, and precinct
-sizes. The scaffold exposes deterministic component-block descriptors in
-component-major order, giving the future T1 work queue an explicit
-`component/block/band/rect` job list. Each descriptor can borrow a checked
-tile-local component-plane view with stride and code-block rect, matching the
-shape that the existing EBCOT encoder expects. A single component-block view can
-also be encoded through the direct ISO-MQ EBCOT segment path and checked against
-the existing symbol-based oracle. The scaffold can now build a tile-local
-encoded block catalog for all three components, owning each EBCOT segment while
-preserving deterministic component-major job order. Each encoded block also owns
-normalized quality-layer truncation points snapped to valid EBCOT pass
-boundaries, so the future tile-local T2 writer can consume the same
-`LayerTruncation` shape as the current single-tile RPCL path. The catalog can
-also expose each encoded block as a borrowed `t2.EncodedLayerBlock` with
-band-local leaf coordinates, payload bytes, segment spans, and bitplane
-metadata. A tile-local `RpclPacketIndex` precomputes packet-sequence to
-code-block-index selections over the scaffold, and can map those local indexes
-directly into the encoded catalog. Packet selections can also be split into
-T2 band groups with packet-local leaf coordinates, producing borrowed
-`t2.EncodedLayerBlock` arrays that initialize JPEG2000 tag-tree packet writer
-state. The scaffold can now emit a standalone tile-local RPCL packet stream
-with packet and packet-header length tables using those writer states. It is
-intentionally not connected to codestream writing yet; it exists to make the
-future per-tile DWT/T1/T2 pipeline testable before multi-tile profiles are
-allowed.
+`src/tile_pipeline.zig` is the tile-local implementation layer. It runs the
+reversible component transform, tile-local 5/3 DWT/inverse-DWT, T1 code-block
+encoding, tile-local packet indexing, T2 packet emission, tile-part assembly,
+and strict tile-local decode/reconstruction for the v1 envelope. The earlier
+standalone fragment/parser scaffolds remain useful as unit-test surfaces, but
+the public path now uses the same concepts to write and decode genuine
+multi-tile codestreams.
 
-## Current Non-Goals
+## Remaining Boundaries
 
 These are intentionally not treated as complete yet:
 
-- arbitrary progression orders;
-- real multi-tile payload layout;
-- ICT and irreversible 9/7 JP2 output;
-- scalar-derived or scalar-expounded JP2 quantization payloads;
-- JPX-only box features;
-- independent-decoder-compatible T1 payload conformance;
-- full code-block style bit behavior in T1.
+- arbitrary JP2/JPX box families and JPX-only features;
+- arbitrary component layouts, subsampling, palettes, alpha channels, and
+  variable bits-per-component;
+- multi-tile combinations outside the v1 envelope, including broader profile
+  mixes, multiple quality layers, advanced style-bit combinations, and tile-part
+  divisions beyond the current supported policy;
+- standalone RESET/ERTERM, BYPASS+TERMALL, and untested code-block style
+  combinations;
+- broader PLT-less foreign OpenJPEG/Grok decode coverage;
+- general-purpose lossy decode/error-bound coverage beyond the current narrow
+  ICT/9-7/scalar-quantization gates.
 
 ## Interop Gates
 
