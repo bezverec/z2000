@@ -6719,6 +6719,166 @@ test "precinct-less COD maps to maximal precincts and decodes byte-exactly" {
     allocator.free(wrapped);
 }
 
+/// Removes every PLT segment from every tile-part, adjusting each SOT Psot
+/// and the TLM entries (single-tile 0x50 layout) to match. The result is a
+/// PLT-less stream shaped like default OpenJPEG/Grok output, driving the
+/// Stage B in-stream-order packet-header span decoding.
+fn stripAllPltForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..first_sot]);
+
+    var removed_per_part: [64]u32 = undefined;
+    var part_count: usize = 0;
+    var cursor = first_sot;
+    while (cursor + 2 <= bytes.len and readU16BeTest(bytes, cursor) == codestream.markerValue("sot")) {
+        const psot = readU32BeTest(bytes, cursor + 6);
+        const part_end = cursor + @as(usize, psot);
+        if (part_end > bytes.len) return error.InvalidStream;
+        const sot_out_offset = out.items.len;
+        try out.appendSlice(allocator, bytes[cursor .. cursor + 12]);
+
+        var scan = cursor + 12;
+        var removed: u32 = 0;
+        while (scan + 2 <= part_end and readU16BeTest(bytes, scan) != codestream.markerValue("sod")) {
+            const segment_total = 2 + @as(usize, readU16BeTest(bytes, scan + 2));
+            if (scan + segment_total > part_end) return error.InvalidStream;
+            if (readU16BeTest(bytes, scan) == codestream.markerValue("plt")) {
+                removed += @intCast(segment_total);
+            } else {
+                try out.appendSlice(allocator, bytes[scan .. scan + segment_total]);
+            }
+            scan += segment_total;
+        }
+        try out.appendSlice(allocator, bytes[scan..part_end]);
+        writeU32BeTest(out.items, sot_out_offset + 6, psot - removed);
+        if (part_count >= removed_per_part.len) return error.InvalidStream;
+        removed_per_part[part_count] = removed;
+        part_count += 1;
+        cursor = part_end;
+    }
+    try out.appendSlice(allocator, bytes[cursor..]);
+
+    if (findMarker(out.items, codestream.markerValue("tlm"))) |tlm| {
+        if (out.items[tlm + 5] != 0x50) return error.InvalidTlm;
+        var entry = tlm + 6;
+        for (removed_per_part[0..part_count]) |removed| {
+            writeU32BeTest(out.items, entry + 1, readU32BeTest(out.items, entry + 1) - removed);
+            entry += 5;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "PLT-less streams decode via in-stream-order packet header spans" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 32;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    // Small explicit precincts force several precincts per resolution, so the
+    // non-RPCL cases genuinely interleave per-precinct reader states across
+    // the stream; block 8 <= precinct/2 keeps B.7 satisfied.
+    const small_precincts = [_]codestream.PrecinctSize{.{ .width = 16, .height = 16 }} ** 33;
+
+    const Case = struct {
+        label: []const u8,
+        options: codestream.LosslessOptions,
+    };
+    const cases = [_]Case{
+        // R tile-part divisions: the PLT-less walk must continue the packet
+        // sequence seamlessly across tile-part boundaries.
+        .{ .label = "RPCL R-parts", .options = .{ .levels = 2, .block_width = 8, .block_height = 8, .precincts = small_precincts, .precinct_count = 1 } },
+        // Multi-layer LRCP: precincts revisited across layers — the stateful
+        // per-precinct decode is what makes the spans recoverable.
+        .{ .label = "LRCP 2 layers", .options = .{ .levels = 2, .layers = 2, .progression = .lrcp, .block_width = 8, .block_height = 8, .precincts = small_precincts, .precinct_count = 1 } },
+        // Position-ordered progression exercises the sorted stream sequence.
+        .{ .label = "PCRL", .options = .{ .levels = 2, .progression = .pcrl, .block_width = 8, .block_height = 8, .precincts = small_precincts, .precinct_count = 1 } },
+        // BYPASS emits multi-segment packet-header lengths (B.10.7.2).
+        .{ .label = "BYPASS", .options = .{ .levels = 2, .bypass = true, .block_width = 8, .block_height = 8, .precincts = small_precincts, .precinct_count = 1 } },
+        // EPH sits between the packet header and the body; the span walk must
+        // hop it. Also drop TLM so the no-TLM main header path is covered.
+        .{ .label = "EPH no-TLM", .options = .{ .levels = 2, .eph = true, .tlm = false, .block_width = 8, .block_height = 8, .precincts = small_precincts, .precinct_count = 1 } },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("PLT-less case failed: {s}\n", .{scenario.label});
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options);
+        defer allocator.free(bytes);
+        const stripped = try stripAllPltForTest(allocator, bytes);
+        defer allocator.free(stripped);
+        try std.testing.expect(findMarker(stripped, codestream.markerValue("plt")) == null);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, stripped);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        // The audit path uses the same catalog and must agree with the plan.
+        const audit = try codestream.auditStrictPacketHeaders(allocator, stripped);
+        try std.testing.expect(audit.packets > 0);
+        try std.testing.expectEqual(audit.packets, audit.header_decoded_packets);
+    }
+}
+
+test "corrupted PLT-less packet header fails with a bounded error" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 32;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .block_width = 8, .block_height = 8 });
+    defer allocator.free(bytes);
+    const stripped = try stripAllPltForTest(allocator, bytes);
+    defer allocator.free(stripped);
+
+    // Without PLT the packet spans come entirely from the decoded headers, so
+    // flipping bytes just past the first SOD must never panic or read out of
+    // bounds — every corruption either decodes to wrong-but-bounded output or
+    // reports a bounded error, and at least one byte must be rejected.
+    const first_sod = findMarker(stripped, codestream.markerValue("sod")) orelse return error.MissingSod;
+    var rejected = false;
+    var offset = first_sod + 2;
+    while (offset < first_sod + 18 and offset < stripped.len) : (offset += 1) {
+        const corrupted = try allocator.dupe(u8, stripped);
+        defer allocator.free(corrupted);
+        corrupted[offset] ^= 0x5a;
+        if (codestream.decodeLosslessTemporary(allocator, corrupted)) |decoded_image| {
+            var owned = decoded_image;
+            owned.deinit();
+        } else |_| {
+            rejected = true;
+        }
+    }
+    try std.testing.expect(rejected);
+}
+
 test "PCRD allocator prefers high-slope passes and respects layer budgets" {
     const allocator = std.testing.allocator;
 

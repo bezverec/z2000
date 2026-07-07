@@ -22,16 +22,28 @@ blocks with 4 levels, multi-layer rate-truncated ladders, and OpenJPEG 9/7
 lossy (max-diff 1, same as the z2000-encoded baseline). The earlier
 progression work is what made the default-LRCP case possible.
 
-**Stage B (open): PLT-less foreign streams.** Without PLT the packet spans
-must come from parsing each packet header in stream order
-(`readStrictPacketHeaderForAudit` already computes header + payload lengths
-given the precinct band groups). Two structural changes: (a) fuse packet
-cataloging with header decoding instead of slicing by PLT first; (b) for
-non-RPCL streams keep per-precinct reader states alive across the whole
-stream (the current audit assumes each precinct's layers arrive
-consecutively, which only RPCL guarantees — the catalog-reorder trick works
-for cataloging but not for stateful in-order header decoding). Scorecard:
-full "lossless decode" 8→10 when it lands with the same interop matrix.
+**Stage B — PLT-less foreign streams: ✅ LANDED (local oracle; foreign
+interop matrix pending).** Implemented exactly as scoped: (a) the catalog
+reader (`readStrictSodPacketCatalog`) gained a PLT-less branch that decodes
+each packet header in stream order to learn its span
+(`readStrictPacketHeaderSpan`, an open-ended variant of the audit reader),
+fused with cataloging; (b) `StrictStatefulPrecinctGroups` keeps per-precinct
+tag-tree/lblock/inclusion states alive across the whole stream (slot layout
+mirrors `RpclBlockIndex`), so non-RPCL progressions that revisit precincts
+across layers decode correctly; the cataloged entries then reorder to RPCL
+for the unchanged downstream assembler, exactly like the PLT path. Metadata
+skips the R-division plan validation when any part lacks PLT (the catalog
+stage validates the total against the plan). Tile-part boundaries fall on
+packet boundaries, so the walk continues seamlessly across R-parts.
+Multi-tile PLT-less stays fail-closed.
+
+*Local oracle:* strip-PLT surgery on z2000 output (Psot + TLM adjusted) —
+RPCL with R tile-parts, **multi-layer LRCP** (the stateful case), PCRL,
+BYPASS (multi-segment header lengths), and EPH/no-TLM all decode
+byte-exactly without PLT; corrupted PLT-less headers fail bounded. The
+remaining gate for the "lossless decode 8→10" claim: re-run the
+OpenJPEG/Grok matrix on actual PLT-less foreign files (default `opj_compress`
+output) on the benchmark machine.
 
 ## Status 2026-07-07 — external interop gates PASSED
 
