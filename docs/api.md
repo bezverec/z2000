@@ -309,8 +309,10 @@ emission, BYPASS raw segments, and terminated codeword segment metadata are
 covered by oracle tests in the current narrow path. Segmentation-symbol cleanup
 trailers, terminate-all pass-terminated MQ slices, vertical-causal context
 formation, TERMALL-scoped reset-context, and TERMALL-scoped ERTERM are wired
-through public strict codestream paths where their payload behavior has writer,
-reader, tests, and interop coverage. Unsupported combinations, such as
+through public codestream paths where their payload behavior has writer,
+reader, tests, and interop coverage. Larger no-sidecar ERTERM files are
+accepted by z2000 strict decode, OpenJPEG, Grok, and Kakadu, including the
+block-parallel strict decode path. Unsupported combinations, such as
 standalone RESET or BYPASS+TERMALL, still return `UnsupportedPayload`.
 The inferred continuous payload decoder and partial coefficient decode helpers
 accept the same internal style state for future strict T2 audits and

@@ -18,6 +18,18 @@ entries are grouped by development milestone rather than semantic version.
   the non-payload trailing `0xff` case as well as the guard byte case, and a
   larger no-sidecar single-tile smoke decodes pixel-exactly through both z2000
   strict decode and Kakadu `kdu_expand`.
+- Added `tools/interop_erterm.ps1` and ran the larger no-sidecar ERTERM smoke
+  through OpenJPEG 2.5.4, Grok 20.3.6, and Kakadu 8.4.1 on
+  `C:\temp\tools\images\0002.tif` and `0004.tif`; all three external decoders
+  reconstructed the source pixels losslessly.
+- Fixed the block-parallel strict decoder for TERMALL/ERTERM payloads: the
+  worker now routes terminated code-blocks through the explicit per-pass
+  segment decoder instead of the continuous MQ path. z2000 strict decode now
+  reconstructs the same ERTERM smoke files losslessly at 16 threads, and the
+  predictable-termination test covers the threaded path. The scorecard moves
+  to 90/100 narrow and 66/100 full.
+- Removed the obsolete tracked `sample.pgm` manual fixture; PGM support remains
+  documented, but tests now generate their small fixtures directly.
 
 ### RESET+TERMALL Code-Block Style
 
@@ -30,7 +42,7 @@ entries are grouped by development milestone rather than semantic version.
   decode, Kakadu, OpenJPEG, and Grok.
 - Rechecked documentation against the row-level scorecard: the narrow RGB
   lossless JP2 target reached 89/100 and the broader Part 1 family reached
-  63/100 before the later PLT-less foreign-stream gate.
+  63/100 before the later PLT-less foreign-stream and ERTERM interop gates.
 
 ### Foreign Stream Decode (Stage A)
 

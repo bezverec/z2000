@@ -9489,6 +9489,10 @@ test "predictable termination roundtrips losslessly and changes the flush" {
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 
+    var threaded = try codestream.decodeLosslessTemporaryWithOptions(allocator, erterm, .{ .threads = 4 });
+    defer threaded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, threaded.samples);
+
     // The JP2 wrapper accepts the ERTERM+TERMALL profile.
     const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, erterm);
     allocator.free(wrapped);

@@ -4393,6 +4393,31 @@ fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
             };
             continue;
         }
+        if (block.code_block_style.terminate_all) {
+            if (job.options.t1_backend != .iso_mq) {
+                job.result = CodestreamError.UnsupportedPayload;
+                return;
+            }
+            const decoded = ebcot.decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
+                &scratch,
+                block.encoded_bitplanes,
+                block.cumulative_passes,
+                payload,
+                block.segment_lengths[0..block.segment_count],
+                block.rect.width,
+                block.rect.height,
+                block.code_block_style,
+                if (job.collect_t1_stats) &job.t1_stats else null,
+            ) catch |err| {
+                job.result = err;
+                return;
+            };
+            scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
+                job.result = err;
+                return;
+            };
+            continue;
+        }
 
         switch (job.options.t1_backend) {
             .legacy_mq => {
