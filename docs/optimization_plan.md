@@ -235,6 +235,12 @@ encode passes the same way); candidates: SIMD magnitude/bitplane extraction
   itself into word-parallel form (process 4-row columns from the nbf words
   directly instead of gating them) — that reformulation belongs to O3's
   column-pipeline item. Reverted.
+- **MQ branch hints in `mq_iso.zig` (2026-07-07, Windows x86_64,
+  `0004.tif`):** annotating the fast MPS paths as likely and the LPS paths as
+  unlikely compiled and passed EBCOT tests, but measured slightly slower on
+  the large TIFF gate: encode t16 529.8 → 546.6 ms and decode t16 567.5 →
+  581.7 ms. Reverted; future O3 work should use structural fallthrough or
+  generated-code inspection instead of generic branch hints.
 
 ## Milestones
 
@@ -262,3 +268,4 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | 2026-07-07 | baseline #2 (Kakadu 771/100/854/104) | 1486 | 228 | 1622 | 214 | — |
 | 2026-07-07 | O1 column-mask (RAW sig) | — | — | +1.7% | — | reverted |
+| 2026-07-07 | O2 cleanup-run plain 4-row OR (`0004.tif`) | +0.5% | -1.4% | -1.3% | -4.2% | kept |
