@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Scalar-Derived Quantization
+
+- Added `--qstyle scalar-derived` (ISO 15444-1 A.6.4) for the irreversible
+  9/7 path: the QCD signals a single (exponent, mantissa) pair for the NL LL
+  band and both sides derive every other subband step via E-5 (epsilon
+  drops by one per resolution, mantissa shared). The fix that made external
+  interop exact: the nominal bit-plane budget Mb (E-2) now derives from the
+  *signalled* epsilon table — under derived quantization the expounded
+  norm table would disagree with what decoders reconstruct, shifting
+  zero-bitplane interpretation. OpenJPEG 2.5.4 reconstructs z2000
+  scalar-derived output within max-diff 1 of z2000's own decode (identical
+  agreement to the scalar-expounded baseline); Grok differs by its usual
+  max-diff 3 reconstruction bias against both. jpylyzer reports valid JP2
+  with `<qStyle>scalar derived</qStyle>`. Reversible + scalar-derived stays
+  fail-closed.
+
 ### LRCP and RLCP Progressions
 
 - Added the RLCP progression order (`--progression RLCP`, ISO 15444-1

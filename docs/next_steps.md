@@ -371,7 +371,20 @@ needs the precinct-geometry cache the roadmap calls for).
 - **Test plan:** per-order writer↔reader packet-length/slice agreement;
   corrupted-header bounded-error tests; interop for at least LRCP.
 
-### 3.3 `--mct none` ✅ DONE (reversible) + `--qstyle scalar-derived` — still open
+### 3.3 `--mct none` ✅ DONE (reversible) + `--qstyle scalar-derived` ✅ DONE (interop passed)
+
+**`--qstyle scalar-derived` landed (2026-07-07) with the interop gate
+passed.** QCD signals one (epsilon, mantissa) for the NL LL band; both sides
+derive the other subbands via E-5 (`derivedBandStepSize`). The subtle bug the
+interop run caught immediately: Mb (E-2) must derive from the *signalled*
+epsilon table, not the expounded norm table — `bandNominalBitplanesForTransform`
+now takes the quantization style, otherwise the zero-bitplane interpretation
+shifts and external decoders misreconstruct (max-diff 41 before the fix).
+After the fix OpenJPEG 2.5.4 agrees with z2000's decode at max-diff 1
+(identical to the expounded baseline agreement); Grok shows its usual
+max-diff 2–3 reconstruction bias against both z2000 and OpenJPEG. jpylyzer:
+valid, `<qStyle>scalar derived</qStyle>`. Reversible + derived stays
+fail-closed. Scorecard: full "lossy" 4→5 — claimed. Original notes follow.
 
 - **Impact:** full "lossy" +1, "core syntax" +1. (+2)
 - **Effort:** M · **Risk:** Medium

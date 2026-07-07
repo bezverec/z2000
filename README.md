@@ -178,7 +178,10 @@ lines we are targeting:
   irreversible ICT/9-7/scalar-quantization pipeline.
 - `--qstyle none` and `--guard-bits 2` map to QCD `Sqcd` on the lossless path.
   `--qstyle scalar-expounded` is the lossy default quantization with
-  OpenJPEG-compatible explicit step sizes; scalar-derived still fails closed.
+  OpenJPEG-compatible explicit step sizes. `--qstyle scalar-derived` signals a
+  single step size for the deepest LL band and derives every other subband via
+  ISO E-5 (the nominal bit-plane budget derives from the same signalled
+  exponents, so external decoders reconstruct identically).
 - `--resolutions 6` maps to Grok `-n 6`; it is equivalent to `--levels 5`
   and Kakadu `Clevels=5`.
 - `--precincts "[256,256],[256,256],[128,128]"` maps to Grok `-c` and Kakadu
