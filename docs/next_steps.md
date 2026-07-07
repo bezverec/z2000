@@ -8,6 +8,31 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 State re-verified at commit `d664306` (scorecard **86/100 narrow, 44/100 full**,
 `iso_coverage.md` dated 2026-07-05). First drafted at `ba66799`.
 
+## Status 2026-07-07 (later) — foreign stream decode, Stage A
+
+The reverse direction opened up far more cheaply than scoped: probing real
+OpenJPEG/Grok output showed the strict reader already handled everything in
+their PLT-carrying streams except COD without precinct bytes. After mapping
+Scod bit 0 = 0 to the ISO B.6 "no precinct partition" geometry (maximal 2^15
+precinct per resolution) in both the strict reader and the JP2 wrapper,
+**z2000 decodes OpenJPEG 2.5.4 and Grok 20.3.6 output pixel-identically to
+their own decoders whenever the file carries PLT** — verified for the
+default profiles (LRCP, no precincts), RPCL, explicit precincts, 32x32
+blocks with 4 levels, multi-layer rate-truncated ladders, and OpenJPEG 9/7
+lossy (max-diff 1, same as the z2000-encoded baseline). The earlier
+progression work is what made the default-LRCP case possible.
+
+**Stage B (open): PLT-less foreign streams.** Without PLT the packet spans
+must come from parsing each packet header in stream order
+(`readStrictPacketHeaderForAudit` already computes header + payload lengths
+given the precinct band groups). Two structural changes: (a) fuse packet
+cataloging with header decoding instead of slicing by PLT first; (b) for
+non-RPCL streams keep per-precinct reader states alive across the whole
+stream (the current audit assumes each precinct's layers arrive
+consecutively, which only RPCL guarantees — the catalog-reorder trick works
+for cataloging but not for stateful in-order header decoding). Scorecard:
+full "lossless decode" 8→10 when it lands with the same interop matrix.
+
 ## Status 2026-07-07 — external interop gates PASSED
 
 All staged interop gates were run on the user's Mac against **OpenJPEG 2.5.4**

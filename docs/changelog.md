@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Foreign Stream Decode (Stage A)
+
+- z2000 now decodes JP2 files produced by other encoders when they carry
+  PLT packet lengths. The one missing profile piece was COD without
+  precinct bytes (Scod bit 0 unset — the OpenJPEG/Grok default): the strict
+  reader and the JP2 wrapper now map it to the ISO B.6 "no precinct
+  partition" geometry (maximal 2^15 precinct, one per resolution) instead
+  of failing closed. Verified pixel-lossless against the encoders' own
+  decodes: OpenJPEG 2.5.4 and Grok 20.3.6 default configurations (LRCP,
+  no precincts) plus RPCL, explicit precincts, 32x32 blocks with 4 levels,
+  multi-layer rate-truncated ladders, and OpenJPEG 9/7 lossy (max-diff 1
+  reconstruction agreement, identical to the z2000-encoded baseline).
+  PLT-less foreign streams remain fail-closed (packet-length derivation
+  from header parsing is the next stage). Local oracle: splicing the
+  precinct bytes out of a maximal-precinct z2000 stream decodes
+  byte-exactly.
+
 ### Scalar-Derived Quantization
 
 - Added `--qstyle scalar-derived` (ISO 15444-1 A.6.4) for the irreversible

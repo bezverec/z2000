@@ -654,7 +654,8 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     if ((code_block_style & ~@as(u8, 0x2d)) != 0) return Jp2Error.UnsupportedProfile;
     const transform = payload[length_offset + 11];
     if (transform != 0 and transform != 1) return Jp2Error.InvalidCodestream;
-    if ((scod & 0x01) == 0) return Jp2Error.UnsupportedProfile;
+    // Scod bit 0 unset (no precinct partition, ISO B.6) is a supported
+    // profile: the codestream layer maps it to maximal 2^15 precincts.
     const precinct_bytes: u16 = if ((scod & 0x01) != 0) @as(u16, levels) + 1 else 0;
     if (marker_length != 12 + precinct_bytes) return Jp2Error.InvalidCodestream;
     try validateCodPrecinctBytes(payload, length_offset + 12, precinct_bytes);
