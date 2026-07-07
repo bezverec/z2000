@@ -637,7 +637,7 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     if (layers == 0) return Jp2Error.InvalidCodestream;
     if (layers > rate_alloc.max_layers) return Jp2Error.UnsupportedProfile;
     const mct = payload[length_offset + 6];
-    if (mct != 1) return Jp2Error.UnsupportedProfile;
+    if (mct != 0 and mct != 1) return Jp2Error.UnsupportedProfile;
     const levels = payload[length_offset + 7];
     if (levels > 32) return Jp2Error.InvalidCodestream;
     const block_width = try codeBlockSizeFromCodExponent(payload[length_offset + 8]);
@@ -645,7 +645,10 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     if (@as(u32, block_width) * @as(u32, block_height) > 4096) return Jp2Error.InvalidCodestream;
     const code_block_style = payload[length_offset + 10];
     if ((code_block_style & 0xc0) != 0) return Jp2Error.InvalidCodestream;
-    if ((code_block_style & ~@as(u8, 0x01)) != 0) return Jp2Error.UnsupportedProfile;
+    // BYPASS (0x01), TERMALL (0x04), CAUSAL (0x08), and SEGMARK (0x20) are
+    // wired end-to-end in the codestream layer; RESET (0x02) and ERTERM
+    // (0x10) stay fail-closed until they are implemented and interop-proven.
+    if ((code_block_style & ~@as(u8, 0x2d)) != 0) return Jp2Error.UnsupportedProfile;
     const transform = payload[length_offset + 11];
     if (transform != 0 and transform != 1) return Jp2Error.InvalidCodestream;
     if ((scod & 0x01) == 0) return Jp2Error.UnsupportedProfile;
