@@ -9550,6 +9550,110 @@ test "predictable termination debug sidecar roundtrips larger stream" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "terminated styled T1 streams fail closed on corruption" {
+    const allocator = std.testing.allocator;
+    // A varied 24x24 image with 8x8 blocks and two levels produces several
+    // per-pass terminated segments per block, so each style below carries a
+    // real multi-segment PLT and payload for the corruption matrix.
+    const width = 24;
+    const height = 24;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Style = struct { label: []const u8, options: codestream.LosslessOptions };
+    const base = codestream.LosslessOptions{ .levels = 2, .block_width = 8, .block_height = 8 };
+    var termall = base;
+    termall.terminate_all = true;
+    var reset_termall = base;
+    reset_termall.terminate_all = true;
+    reset_termall.reset_context = true;
+    var erterm = base;
+    erterm.terminate_all = true;
+    erterm.predictable_termination = true;
+    const styles = [_]Style{
+        .{ .label = "TERMALL", .options = termall },
+        .{ .label = "RESET+TERMALL", .options = reset_termall },
+        .{ .label = "ERTERM", .options = erterm },
+    };
+
+    for (styles) |style| {
+        errdefer std.debug.print("terminated corruption style failed: {s}\n", .{style.label});
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, style.options);
+        defer allocator.free(bytes);
+
+        // Sanity: the intact stream roundtrips.
+        {
+            var ok = try codestream.decodeLosslessTemporary(allocator, bytes);
+            defer ok.deinit();
+            try std.testing.expectEqualSlices(u16, samples, ok.samples);
+        }
+
+        // Corrupting the last per-pass PLT length byte breaks the terminated
+        // segment-span accounting deterministically (packet length no longer
+        // matches the SOD payload span).
+        {
+            const corrupted = try allocator.dupe(u8, bytes);
+            defer allocator.free(corrupted);
+            const plt = findMarker(corrupted, codestream.markerValue("plt")) orelse return error.MissingPlt;
+            const segment_length = readU16BeTest(corrupted, plt + 2);
+            if (segment_length < 4) return error.InvalidPlt;
+            const last_length_byte = plt + 2 + @as(usize, segment_length) - 1;
+            if ((corrupted[last_length_byte] & 0x7f) == 0x7f) {
+                corrupted[last_length_byte] -= 1;
+            } else {
+                corrupted[last_length_byte] += 1;
+            }
+            try std.testing.expectError(
+                codestream.CodestreamError.InvalidCodestream,
+                codestream.analyzeLosslessTemporary(corrupted),
+            );
+        }
+
+        // Truncating inside the final tile-part payload must surface as a
+        // bounded error, never a panic or out-of-bounds read.
+        {
+            try std.testing.expectError(
+                codestream.CodestreamError.TruncatedData,
+                codestream.decodeLosslessTemporary(allocator, bytes[0 .. bytes.len - 6]),
+            );
+        }
+
+        // Flipping payload bytes just past the first SOD must terminate with a
+        // bounded error or a safe wrong-decode on every offset, and at least
+        // one flip must be actively rejected (the terminated per-pass segment
+        // machinery is exercised, not the continuous path).
+        {
+            const first_sod = findMarker(bytes, codestream.markerValue("sod")) orelse return error.MissingSod;
+            var rejected = false;
+            var offset = first_sod + 2;
+            while (offset < first_sod + 20 and offset < bytes.len) : (offset += 1) {
+                const corrupted = try allocator.dupe(u8, bytes);
+                defer allocator.free(corrupted);
+                corrupted[offset] ^= 0x5a;
+                if (codestream.decodeLosslessTemporary(allocator, corrupted)) |decoded_image| {
+                    var owned = decoded_image;
+                    owned.deinit();
+                } else |_| {
+                    rejected = true;
+                }
+            }
+            try std.testing.expect(rejected);
+        }
+    }
+}
+
 test "mct none codes components independently and roundtrips losslessly" {
     const allocator = std.testing.allocator;
     const width = 16;
