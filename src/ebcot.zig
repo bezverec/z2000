@@ -4575,15 +4575,9 @@ fn decodeCleanupPassInferred(
                     markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
                 }
 
-                var dy = runlen + 1;
-                while (dy < 4) : (dy += 1) {
-                    symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
-                }
+                symbol_count += try nbfDecodeCleanupSampleRange(scratch, decoder, x, stripe_y, runlen + 1, 4, bitplane, style);
             } else {
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
-                }
+                symbol_count += try nbfDecodeCleanupSampleRange(scratch, decoder, x, stripe_y, 0, stripe_height, bitplane, style);
             }
         }
     }
@@ -4918,6 +4912,24 @@ fn nbfDecodeCleanupSample(
         symbol_count += 1;
         const negative = sign_bit != sign.predicted_negative;
         markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+    }
+    return symbol_count;
+}
+
+inline fn nbfDecodeCleanupSampleRange(
+    scratch: *DecodeBlockScratch,
+    decoder: anytype,
+    x: usize,
+    stripe_y: usize,
+    first_dy: usize,
+    end_dy: usize,
+    bitplane: u8,
+    style: CodeBlockStyle,
+) !usize {
+    var symbol_count: usize = 0;
+    var dy = first_dy;
+    while (dy < end_dy) : (dy += 1) {
+        symbol_count += try nbfDecodeCleanupSample(scratch, decoder, x, stripe_y + dy, bitplane, style);
     }
     return symbol_count;
 }
@@ -5826,15 +5838,9 @@ fn emitDirectIsoCleanupPass(
                     setSignificantRow(scratch, x, y);
                 }
 
-                var dy = runlen + 1;
-                while (dy < 4) : (dy += 1) {
-                    symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
-                }
+                symbol_count += try nbfEmitCleanupSampleRange(scratch, encoder, plane, stride, rect, x, stripe_y, runlen + 1, 4, bitplane, style);
             } else {
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
-                }
+                symbol_count += try nbfEmitCleanupSampleRange(scratch, encoder, plane, stride, rect, x, stripe_y, 0, stripe_height, bitplane, style);
             }
         }
     }
@@ -5942,6 +5948,27 @@ fn nbfEmitCleanupSample(
         nbfMarkSignificant(flags, nbs, x, y, negative);
         directMarkPackedT1Significant(scratch, x, y, negative);
         setSignificantRow(scratch, x, y);
+    }
+    return symbol_count;
+}
+
+inline fn nbfEmitCleanupSampleRange(
+    scratch: *DirectBlockScratch,
+    encoder: *mq_iso.Encoder,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    x: usize,
+    stripe_y: usize,
+    first_dy: usize,
+    end_dy: usize,
+    bitplane: u8,
+    style: CodeBlockStyle,
+) !usize {
+    var symbol_count: usize = 0;
+    var dy = first_dy;
+    while (dy < end_dy) : (dy += 1) {
+        symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
     }
     return symbol_count;
 }
