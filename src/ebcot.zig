@@ -345,6 +345,7 @@ const nbf_sig_self: u16 = 1 << 12;
 const nbf_visit: u16 = 1 << 13;
 const nbf_refine: u16 = 1 << 14;
 const nbf_sig8: u16 = 0x00ff;
+const nbf_cleanup_run_blockers: u16 = nbf_sig8 | nbf_sig_self | nbf_visit;
 /// Vertical causal mode hides the row below the current stripe: mask the
 /// south / south-east / south-west significance and the south sign.
 const nbf_causal_mask: u16 = ~(nbf_sig_s | nbf_sig_se | nbf_sig_sw | nbf_sgn_s);
@@ -4608,7 +4609,7 @@ fn decodeCleanupPassInferredPlain(
         const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
         var x: usize = 0;
         while (x < scratch.width) : (x += 1) {
-            if (stripe_height == 4 and nbfCanUseRunStripe(scratch.nb_flags.items, scratch.nb_stride, x, stripe_y, .{ .band_kind = band_kind })) {
+            if (stripe_height == 4 and nbfCanUseRunStripePlain(scratch.nb_flags.items, scratch.nb_stride, x, stripe_y)) {
                 const agg = try mqRead(decoder, mqContextIndex(.cleanup_aggregation));
                 symbol_count += 1;
                 if (!agg) continue;
@@ -5823,7 +5824,7 @@ fn emitDirectIsoCleanupPassPlain(
         const stripe_height = @min(@as(usize, 4), rect.height - stripe_y);
         var x: usize = 0;
         while (x < rect.width) : (x += 1) {
-            if (stripe_height == 4 and nbfCanUseRunStripe(flags, nbs, x, stripe_y, .{ .band_kind = band_kind })) {
+            if (stripe_height == 4 and nbfCanUseRunStripePlain(flags, nbs, x, stripe_y)) {
                 const runlen = cleanupRunLength(plane, stride, rect, x, stripe_y, bitplane);
                 try encoder.write(mqContextIndex(.cleanup_aggregation), runlen != 4);
                 symbol_count += 1;
@@ -5869,9 +5870,15 @@ fn nbfCanUseRunStripe(flags: []const u16, nbs: usize, x: usize, stripe_y: usize,
         const p = nbfIndex(nbs, x, stripe_y + dy);
         const causal = style.vertical_causal and dy == 3;
         const f = if (causal) flags[p] & nbf_causal_mask else flags[p];
-        if ((f & (nbf_sig8 | nbf_sig_self | nbf_visit)) != 0) return false;
+        if ((f & nbf_cleanup_run_blockers) != 0) return false;
     }
     return true;
+}
+
+inline fn nbfCanUseRunStripePlain(flags: []const u16, nbs: usize, x: usize, stripe_y: usize) bool {
+    const p = nbfIndex(nbs, x, stripe_y);
+    const combined = flags[p] | flags[p + nbs] | flags[p + nbs * 2] | flags[p + nbs * 3];
+    return (combined & nbf_cleanup_run_blockers) == 0;
 }
 
 fn nbfEmitCleanupSample(
