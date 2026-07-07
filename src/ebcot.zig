@@ -4624,11 +4624,8 @@ fn decodeCleanupPassInferredPlain(
                 {
                     const y = stripe_y + runlen;
                     const sample_flags = flags[nbfIndex(nbs, x, y)];
-                    const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
-                    const sign_bit = try mqRead(decoder, mqContextIndex(sign.context));
+                    try decodeCleanupSignPlainKnown(scratch, decoder, flags, nbs, x, y, bitplane, sample_flags);
                     symbol_count += 1;
-                    const negative = sign_bit != sign.predicted_negative;
-                    markDecodedSignificantNbfKnown(scratch, flags, nbs, x, y, bitplane, negative);
                 }
 
                 var dy = runlen + 1;
@@ -4940,20 +4937,8 @@ fn nbfDecodeCleanupSamplePlain(
     band_kind: subband.Kind,
 ) !usize {
     const flags = scratch.nb_flags.items;
-    const p = nbfIndex(scratch.nb_stride, x, y);
-    const sample = flags[p];
-    if ((sample & (nbf_sig_self | nbf_visit)) != 0) return 0;
-    const zero_context = nbf_zc_lut[@intFromEnum(band_kind)][sample & nbf_sig8];
-    const bit = try mqRead(decoder, mqContextIndex(zero_context));
-    var symbol_count: usize = 1;
-    if (bit) {
-        const sign = nbf_sc_lut[nbfScIndex(sample)];
-        const sign_bit = try mqRead(decoder, mqContextIndex(sign.context));
-        symbol_count += 1;
-        const negative = sign_bit != sign.predicted_negative;
-        markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
-    }
-    return symbol_count;
+    const nbs = scratch.nb_stride;
+    return nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, y, bitplane, @intFromEnum(band_kind));
 }
 
 inline fn nbfDecodeCleanupSamplePlainKnown(
@@ -4972,13 +4957,26 @@ inline fn nbfDecodeCleanupSamplePlainKnown(
     const bit = try mqRead(decoder, mqContextIndex(zero_context));
     var symbol_count: usize = 1;
     if (bit) {
-        const sign = nbf_sc_lut[nbfScIndex(sample)];
-        const sign_bit = try mqRead(decoder, mqContextIndex(sign.context));
+        try decodeCleanupSignPlainKnown(scratch, decoder, flags, nbs, x, y, bitplane, sample);
         symbol_count += 1;
-        const negative = sign_bit != sign.predicted_negative;
-        markDecodedSignificantNbfKnown(scratch, flags, nbs, x, y, bitplane, negative);
     }
     return symbol_count;
+}
+
+inline fn decodeCleanupSignPlainKnown(
+    scratch: *DecodeBlockScratch,
+    decoder: anytype,
+    flags: []u16,
+    nbs: usize,
+    x: usize,
+    y: usize,
+    bitplane: u8,
+    sample_flags: u16,
+) !void {
+    const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
+    const sign_bit = try mqRead(decoder, mqContextIndex(sign.context));
+    const negative = sign_bit != sign.predicted_negative;
+    markDecodedSignificantNbfKnown(scratch, flags, nbs, x, y, bitplane, negative);
 }
 
 fn decodeCleanupSample(
