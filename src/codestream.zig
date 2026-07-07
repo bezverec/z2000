@@ -1342,10 +1342,14 @@ fn encodeLosslessWithOptionsMeasured(
     if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
 
     var encode_options = normalizedEncodePrecinctOptions(options, levels);
-    // Multi-layer LRCP interleaves resolutions across layers, so the stream
-    // cannot be divided into per-resolution tile-parts; emit one tile-part.
-    // Single-layer LRCP keeps resolution outermost and R-divisions stay valid.
-    if (encode_options.progression == .lrcp and encode_options.layers > 1) {
+    // Per-resolution tile-parts require resolution-contiguous packet ranges.
+    // Multi-layer LRCP interleaves resolutions across layers, and the
+    // position-major orders (PCRL/CPRL) interleave them across precinct
+    // positions, so those emit one tile-part. Single-layer LRCP and RLCP
+    // keep resolution outermost and R-divisions stay valid.
+    if ((encode_options.progression == .lrcp and encode_options.layers > 1) or
+        encode_options.progression == .pcrl or encode_options.progression == .cprl)
+    {
         encode_options.tile_part_divisions = null;
     }
 
@@ -1882,6 +1886,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 @intFromEnum(ProgressionOrder.rpcl) => .rpcl,
                 @intFromEnum(ProgressionOrder.lrcp) => .lrcp,
                 @intFromEnum(ProgressionOrder.rlcp) => .rlcp,
+                @intFromEnum(ProgressionOrder.pcrl) => .pcrl,
+                @intFromEnum(ProgressionOrder.cprl) => .cprl,
                 else => return CodestreamError.UnsupportedPayload,
             };
             layers = readU16Be(segment, 2);
@@ -5073,6 +5079,41 @@ const StreamPacketIterator = union(enum) {
     }
 };
 
+/// Full packet sequence in the stream order of any supported progression.
+/// The iterator-backed orders stream directly; the position-major orders
+/// (PCRL/CPRL) sort by reference-grid precinct position. Caller frees.
+fn buildStreamPacketSequence(
+    allocator: std.mem.Allocator,
+    progression: ProgressionOrder,
+    plan: packet_plan.Plan,
+    layers: u16,
+) ![]packet_plan.Packet {
+    switch (progression) {
+        .rpcl, .lrcp, .rlcp => {
+            const total = std.math.cast(usize, plan.packets) orelse return CodestreamError.InvalidCodestream;
+            const packets = try allocator.alloc(packet_plan.Packet, total);
+            errdefer allocator.free(packets);
+            var iterator = try StreamPacketIterator.init(progression, plan, 3, layers);
+            var count: usize = 0;
+            while (iterator.next()) |packet| {
+                if (count >= total) return CodestreamError.InvalidCodestream;
+                packets[count] = packet;
+                count += 1;
+            }
+            if (count != total) return CodestreamError.InvalidCodestream;
+            return packets;
+        },
+        .pcrl => return packet_plan.positionOrderedPackets(allocator, plan, 3, layers, .pcrl) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => CodestreamError.InvalidCodestream,
+        },
+        .cprl => return packet_plan.positionOrderedPackets(allocator, plan, 3, layers, .cprl) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => CodestreamError.InvalidCodestream,
+        },
+    }
+}
+
 /// The downstream catalog consumers (packet-header audit/assembly) walk
 /// entries assuming RPCL grouping: each precinct's layers arrive as one
 /// consecutive run. LRCP preserves per-precinct layer order but interleaves
@@ -5120,7 +5161,9 @@ fn readStrictSodPacketCatalog(
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
 
-    var iterator = try StreamPacketIterator.init(progression, plan, 3, layers);
+    const sequence = try buildStreamPacketSequence(allocator, progression, plan, layers);
+    defer allocator.free(sequence);
+    var sequence_index: usize = 0;
     var main_header = try readStrictMainHeaderIndex(allocator, bytes);
     defer main_header.deinit();
     var cursor = main_header.first_sot;
@@ -5163,7 +5206,9 @@ fn readStrictSodPacketCatalog(
             cursor = tile_part.sod + 2;
             try packet_bytes.ensureTotalCapacity(allocator, try std.math.add(usize, packet_bytes.items.len, tile_part.packet_payload_bytes));
             for (tile_part.packet_lengths.items) |packet_length| {
-                const packet = iterator.next() orelse return CodestreamError.InvalidCodestream;
+                if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
+                const packet = sequence[sequence_index];
+                sequence_index += 1;
                 const byte_offset = packet_bytes.items.len;
                 const byte_length = try appendStrictSodPacketPayload(
                     allocator,
@@ -7731,11 +7776,11 @@ fn reorderPacketStreamFromRpcl(
     const bytes = try allocator.alloc(u8, stream.packet_bytes.len);
     errdefer allocator.free(bytes);
 
-    var iterator = try StreamPacketIterator.init(options.progression, plan, 3, options.layers);
-    var out_index: usize = 0;
+    const sequence = try buildStreamPacketSequence(allocator, options.progression, plan, options.layers);
+    defer allocator.free(sequence);
+    if (sequence.len != packet_count) return CodestreamError.InvalidCodestream;
     var out_offset: usize = 0;
-    while (iterator.next()) |packet| {
-        if (out_index >= packet_count) return CodestreamError.InvalidCodestream;
+    for (sequence, 0..) |packet, out_index| {
         const source_sequence = packet_plan.rpclSequenceForPacket(plan, 3, options.layers, packet) catch
             return CodestreamError.InvalidCodestream;
         const source = std.math.cast(usize, source_sequence) orelse return CodestreamError.InvalidCodestream;
@@ -7745,9 +7790,8 @@ fn reorderPacketStreamFromRpcl(
         header_lengths[out_index] = stream.packet_header_lengths[source];
         @memcpy(bytes[out_offset..][0..source_length], stream.packet_bytes[offsets[source]..][0..source_length]);
         out_offset += source_length;
-        out_index += 1;
     }
-    if (out_index != packet_count or out_offset != bytes.len) return CodestreamError.InvalidCodestream;
+    if (out_offset != bytes.len) return CodestreamError.InvalidCodestream;
 
     stream.deinit();
     stream.* = .{
@@ -8366,12 +8410,12 @@ fn validateTilePartDivisions(value: ?u8) !void {
 fn validateCodingPath(options: LosslessOptions) !void {
     switch (options.progression) {
         .rpcl => {},
-        // LRCP (B.12.1.1) and RLCP (B.12.1.2) ride the same per-precinct
-        // packet bodies as RPCL; only the stream order differs. The debug
-        // sidecar frames packets in RPCL order and its cross-checks assume
-        // it, so it stays fail-closed for the permuted orders.
-        .lrcp, .rlcp => if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload,
-        else => return CodestreamError.UnsupportedPayload,
+        // LRCP (B.12.1.1), RLCP (B.12.1.2), PCRL (B.12.1.4), and CPRL
+        // (B.12.1.5) ride the same per-precinct packet bodies as RPCL; only
+        // the stream order differs. The debug sidecar frames packets in RPCL
+        // order and its cross-checks assume it, so it stays fail-closed for
+        // the permuted orders.
+        .lrcp, .rlcp, .pcrl, .cprl => if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload,
     }
     switch (options.transform) {
         .reversible_5_3 => {

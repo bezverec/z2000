@@ -13,7 +13,7 @@ Last updated: 2026-07-07.
 | Target | Score | Meaning |
 | --- | ---: | --- |
 | Narrow RGB lossless JP2 target | 88 / 100 | Single-tile RGB TIFF 6.0 to JP2, RCT, reversible 5/3, RPCL, BYPASS, one or more quality layers, PLT/TLM, strict z2000 decode, and OpenJPEG/Grok/Kakadu/jpylyzer smoke acceptance. |
-| Full JPEG2000 Part 1 codec family | 57 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
+| Full JPEG2000 Part 1 codec family | 58 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
 
 The narrow target is intentionally much closer than the full-codec target. It
 measures the practical archival path we are building first. The full-codec
@@ -46,9 +46,9 @@ exist.
 | Lossless decode profiles | 15 | 6 | Multi-tile z2000 streams decode per tile through the public strict path; independent arbitrary JP2/J2K input, more progression orders, and more marker combinations remain. |
 | Lossy encode/decode | 15 | 5 | ICT/9-7 with scalar-expounded and scalar-derived quantization exists for the narrow single-tile path with OpenJPEG-matching reconstruction, rate-driven layers are covered locally, and ICT has SIMD vector/tail tests. PCRD rate allocation, arbitrary decode, and broader error-bound validation remain missing. |
 | T1 completeness | 15 | 8 | BYPASS, terminate-all, vertical-causal, and segmentation symbols are public opt-in profiles with OpenJPEG/Grok lossless interop; reset-context, predictable termination, and more termination rules still need public profile coverage. |
-| T2 completeness | 10 | 7 | LRCP and RLCP are public with OpenJPEG/Grok lossless interop (single- and multi-layer); PCRL/CPRL ordering, packet parser breadth, and tile-part divisions beyond none/R remain. |
+| T2 completeness | 10 | 8 | All five Part 1 progression orders are public with OpenJPEG/Grok lossless interop (single- and multi-layer); packet parser breadth and tile-part divisions beyond none/R remain. |
 | Interop and conformance gates | 5 | 4 | Reproducible OpenJPEG/Grok/Kakadu/jpylyzer matrix exists locally for the narrow smoke file; malformed corpus, fuzzing, and broader profile gates remain incomplete. |
-| **Total** | **100** | **57** |  |
+| **Total** | **100** | **58** |  |
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more

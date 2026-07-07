@@ -21,6 +21,21 @@ entries are grouped by development milestone rather than semantic version.
   with `<qStyle>scalar derived</qStyle>`. Reversible + scalar-derived stays
   fail-closed.
 
+### PCRL and CPRL Progressions
+
+- Completed the Part 1 progression-order matrix: `--progression PCRL`
+  (B.12.1.4) and `--progression CPRL` (B.12.1.5) order packets by precinct
+  position on the image reference grid (upper-left corner scaled by
+  `2^(levels - r)`), with component hoisted outermost for CPRL. Both are
+  byte-preserving permutations of the RPCL packets built by a sorted
+  sequence builder that now backs every non-RPCL order on both the encoder
+  reorder and the strict-decoder slot walk. Position-major streams cannot be
+  divided per resolution, so PCRL/CPRL always emit one tile-part. OpenJPEG
+  2.5.4 and Grok 20.3.6 decode PCRL/CPRL output pixel-losslessly (1 and 4
+  layers, plus dense 64x64-precinct/32x32-block configurations); jpylyzer
+  confirms the signalled order. The undefined COD progression values 5+
+  stay fail-closed.
+
 ### LRCP and RLCP Progressions
 
 - Added the RLCP progression order (`--progression RLCP`, ISO 15444-1

@@ -162,13 +162,13 @@ lines we are targeting:
   with the r>0 half-span rule) and every tile must achieve the global
   decomposition level count. Configurations outside the envelope fail
   closed. See `docs/multi_tile_plan.md`.
-- `--progression RPCL` maps to Grok `-p RPCL` and Kakadu `Corder=RPCL`.
-  `--progression LRCP` and `--progression RLCP` emit the same per-precinct
-  packet bodies permuted into ISO B.12.1.1 layer-major or B.12.1.2
-  resolution-major order (single-tile only; multi-layer LRCP uses one
-  tile-part because its stream cannot be divided per resolution, while RLCP
-  keeps per-resolution tile-parts). PCRL and CPRL fail closed until matching
-  packet iterators exist.
+- `--progression RPCL` maps to Grok `-p RPCL` and Kakadu `Corder=RPCL`. All
+  five Part 1 progression orders are supported on the single-tile path: the
+  non-RPCL orders (LRCP, RLCP, PCRL, CPRL) emit the same per-precinct packet
+  bodies permuted into the ISO B.12 stream order. Multi-layer LRCP and the
+  position-major PCRL/CPRL use one tile-part (their streams cannot be
+  divided per resolution); RLCP and single-layer LRCP keep per-resolution
+  tile-parts.
 - `--mct rct` maps to COD multiple component transform 1 with the reversible
   5/3 path; `--mct ict` selects the irreversible ICT and requires
   `--transform 9-7 --qstyle scalar-expounded`. `--mct none` codes the three
