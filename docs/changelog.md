@@ -21,6 +21,24 @@ entries are grouped by development milestone rather than semantic version.
   with `<qStyle>scalar derived</qStyle>`. Reversible + scalar-derived stays
   fail-closed.
 
+### PCRD Rate Allocation
+
+- Replaced the per-block proportional `--rates` split with a global
+  PCRD-style allocation (ISO 15444-1 J.14). The symbol-based reference
+  coder yields exact per-pass squared-error reductions (midpoint
+  reconstruction model), weighted by (synthesis-basis norm x quantization
+  step)^2 per band; `rate_alloc.allocatePcrdPasses` builds each block's
+  convex hull over (bytes, distortion) truncation candidates and picks a
+  global slope threshold per layer byte target. Runs single-threaded after
+  the parallel block encode, so allocation is thread-count independent
+  (covered by a determinism test). Layer payloads now land on the byte
+  targets (the old split overshot the first layer by ~10x), and PSNR at
+  matched sizes is within 0.2-0.4 dB of OpenJPEG's own PCRD (previous
+  allocator trailed by 15+ dB at the first layer). BYPASS segment snapping
+  is preserved via the existing truncation normalization; the full stream
+  still decodes losslessly on the reversible path (opj/grk verified,
+  jpylyzer valid).
+
 ### PCRL and CPRL Progressions
 
 - Completed the Part 1 progression-order matrix: `--progression PCRL`

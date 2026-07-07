@@ -60,9 +60,11 @@ This first milestone is intentionally small and honest:
   (B.10.7.2); OpenJPEG decodes bypass output losslessly. Quality layers and
   `--rates` work with BYPASS by snapping layer truncation points to codeword
   segment boundaries, and rate-driven layers also apply to the irreversible
-  9/7 path. Current rate allocation is byte-target based rather than
-  distortion/PCRD based, so 1:8 access files can be larger and higher-PSNR
-  than Grok/OpenJPEG outputs for the same nominal rate ladder.
+  9/7 path. Rate allocation is PCRD-style (ISO J.14): exact per-pass
+  distortion from the reference coder, band-weighted, with a global slope
+  threshold per layer byte target — layer sizes land on the requested ladder
+  and PSNR at matched sizes tracks OpenJPEG's allocator within a few tenths
+  of a dB.
 - explicit COD code-block style metadata for all six Part 1 style bits;
   BYPASS is implemented end to end, the remaining style bits stay fail-closed
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams

@@ -6618,6 +6618,81 @@ test "direct ISO segment encoder matches the symbol-based encoder byte for byte"
     }
 }
 
+test "PCRD allocator prefers high-slope passes and respects layer budgets" {
+    const allocator = std.testing.allocator;
+
+    // Block A: cheap bytes, large distortion reductions (steep slopes).
+    // Block B: same byte layout, tiny distortion reductions (shallow slopes).
+    const bytes_a = [_]u64{ 10, 20, 30 };
+    const dist_a = [_]f64{ 9000, 3000, 1000 };
+    const bytes_b = [_]u64{ 10, 20, 30 };
+    const dist_b = [_]f64{ 90, 30, 10 };
+    const blocks = [_]rate_alloc.PcrdBlock{
+        .{ .pass_bytes = &bytes_a, .pass_distortion = &dist_a },
+        .{ .pass_bytes = &bytes_b, .pass_distortion = &dist_b },
+    };
+
+    // Layer 0 budget fits exactly one block's full payload plus one pass of
+    // the other; the steep block must win every contested slot. Layer 1 is
+    // the full stream.
+    const targets = [_]u64{ 40, 60 };
+    var out: [4]u16 = undefined;
+    try rate_alloc.allocatePcrdPasses(allocator, &blocks, &targets, &out);
+
+    // Block-major layout: [block0 layer0, block0 layer1, block1 layer0, ...].
+    try std.testing.expectEqual(@as(u16, 3), out[0]);
+    try std.testing.expectEqual(@as(u16, 3), out[1]);
+    try std.testing.expect(out[2] <= 1);
+    try std.testing.expectEqual(@as(u16, 3), out[3]);
+
+    // Selections never regress across layers and the layer-0 total fits.
+    var layer0_total: u64 = 0;
+    if (out[0] > 0) layer0_total += bytes_a[out[0] - 1];
+    if (out[2] > 0) layer0_total += bytes_b[out[2] - 1];
+    try std.testing.expect(layer0_total <= targets[0]);
+}
+
+test "PCRD rate allocation is deterministic across encode thread counts" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    var seed: u32 = 12345;
+    for (0..width * height) |i| {
+        seed = seed *% 1664525 +% 1013904223;
+        samples[i * 3 + 0] = @intCast((seed >> 8) & 0xff);
+        samples[i * 3 + 1] = @intCast((seed >> 16) & 0xff);
+        samples[i * 3 + 2] = @intCast((seed >> 24) & 0xff);
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = codestream.LosslessOptions{ .levels = 2, .block_width = 16, .block_height = 16 };
+    const rates = [_]f64{ 20, 4 };
+    @memcpy(options.rates[0..rates.len], &rates);
+    options.rate_count = rates.len;
+    options.layers = 3;
+
+    options.threads = 1;
+    const single = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(single);
+    options.threads = 4;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, single, threaded);
+
+    // The full stream still reconstructs losslessly (final layer is full).
+    var decoded = try codestream.decodeLosslessTemporary(allocator, single);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
 test "rate-driven layers work on the irreversible 9/7 path" {
     const allocator = std.testing.allocator;
     const width = 64;
