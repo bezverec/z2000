@@ -3024,11 +3024,6 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
                     bytes[cod + 8] = 2;
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
-            .{ .label = "disabled MCT", .mutate = struct {
-                fn mutate(bytes: []u8, cod: usize) void {
-                    bytes[cod + 8] = 0;
-                }
-            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
             .{ .label = "oversized block exponent", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
                     bytes[cod + 10] = 9;
@@ -3040,9 +3035,14 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
                     bytes[cod + 11] = 8;
                 }
             }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
-            .{ .label = "unsupported style bit", .mutate = struct {
+            .{ .label = "unsupported style bit RESET", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
                     bytes[cod + 12] = 0x02;
+                }
+            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            .{ .label = "unsupported style bit ERTERM", .mutate = struct {
+                fn mutate(bytes: []u8, cod: usize) void {
+                    bytes[cod + 12] = 0x10;
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
             .{ .label = "unknown transform", .mutate = struct {
@@ -3067,6 +3067,24 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             defer allocator.free(bad_wrapped);
             scenario.mutate(bad_wrapped, jp2c_payload.start + cod_offset);
             try std.testing.expectError(scenario.expected, jp2.parseInfo(bad_wrapped));
+        }
+
+        // The wired code-block style bits (TERMALL 0x04, CAUSAL 0x08,
+        // SEGMARK 0x20) and disabled MCT (0) are supported profiles: the
+        // JP2 wrapper must accept what the codestream layer can decode.
+        const accepted_cod_mutations = [_]struct { label: []const u8, offset: usize, value: u8 }{
+            .{ .label = "TERMALL style bit", .offset = 12, .value = 0x04 },
+            .{ .label = "CAUSAL style bit", .offset = 12, .value = 0x08 },
+            .{ .label = "SEGMARK style bit", .offset = 12, .value = 0x20 },
+            .{ .label = "disabled MCT", .offset = 8, .value = 0 },
+        };
+        for (accepted_cod_mutations) |scenario| {
+            errdefer std.debug.print("JP2 COD accepted-profile case failed: {s}\n", .{scenario.label});
+            const cod_offset = findMarker(codestream_bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
+            const ok_wrapped = try allocator.dupe(u8, wrapped);
+            defer allocator.free(ok_wrapped);
+            ok_wrapped[jp2c_payload.start + cod_offset + scenario.offset] = scenario.value;
+            _ = try jp2.parseInfo(ok_wrapped);
         }
     }
 

@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Interop Gates Closed
+
+- Opened the JP2 wrapper profile validation to the code-block style bits the
+  codestream layer already codes end-to-end (TERMALL `0x04`, CAUSAL `0x08`,
+  SEGMARK `0x20`) and to disabled MCT (`0`), unblocking `--terminate-all`,
+  `--vertical-causal`, `--segmentation-symbols`, and `--mct none` through the
+  public `tiff-to-jp2` CLI. RESET (`0x02`) and ERTERM (`0x10`) stay
+  fail-closed; added accepted-profile and rejected-bit COD mutation tests.
+- Passed the external interop gates staged in `docs/next_steps.md`:
+  OpenJPEG 2.5.4 and Grok 20.3.6 decode z2000 output pixel-losslessly for
+  vertical-causal, segmentation-symbols, terminate-all, `--mct none`, and
+  genuine multi-tile streams (2x2 aligned grid and 3x3 edge-tile grid), and
+  jpylyzer reports every feature file as valid JP2.
+
 ### Multi-Tile Foundation
 
 - Added a standalone JPEG2000 tile-grid helper for image/tile reference-grid
