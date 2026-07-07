@@ -111,7 +111,9 @@ accepted only when the matching payload model is wired through T1, T2 segment
 lengths, strict decode, tests, and interop smoke. BYPASS, TERMALL,
 TERMALL-scoped RESET, vertical-causal, TERMALL-scoped ERTERM, and
 segmentation-symbol profiles are public where their segment model exists;
-standalone RESET/ERTERM, BYPASS+TERMALL, and untested combinations still return
+large no-sidecar ERTERM files are green through z2000 strict decode,
+OpenJPEG, Grok, and Kakadu.
+Standalone RESET/ERTERM, BYPASS+TERMALL, and untested combinations still return
 `UnsupportedPayload`. The next T1 work should continue tightening remaining
 cleanup edge cases, COD-driven termination combinations, and byte-for-byte
 oracle coverage.

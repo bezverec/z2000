@@ -87,8 +87,8 @@ and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported combinations still
 fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-07, the narrow RGB lossless JP2 target is estimated at 89/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 65/100.
+2026-07-07, the narrow RGB lossless JP2 target is estimated at 90/100, while
+the broader JPEG2000 Part 1 codec family is estimated at 66/100.
 
 ## Build
 
@@ -207,8 +207,10 @@ lines we are targeting:
   end-to-end payload behavior. Predictable termination is wired only with
   `--terminate-all --predictable-termination`: it emits COD style `0x10` and
   ER-TERM-flushed per-pass MQ segments. The current larger single-tile
-  no-sidecar RESET+TERMALL and ERTERM smokes decode pixel-exactly through
-  z2000 strict decode and independent decoders.
+  no-sidecar RESET+TERMALL smoke decodes pixel-exactly through z2000 strict
+  decode and independent decoders. The ERTERM smoke now decodes
+  pixel-exactly through z2000 strict decode, OpenJPEG, Grok, and Kakadu,
+  including the block-parallel strict decode path.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is
   disabled by default for the current independent-decoder interop path. Use
@@ -610,8 +612,9 @@ Features:
    valid2000/jpylyzer-style validators, treating validator warnings as
    diagnostic leads rather than authoritative failures until checked against
    the strict reader, independent decoders, and Part 1.
-3. Broaden ERTERM/RESET-style interop beyond the current staged smokes and add
-   a malformed-corpus/fuzzing gate for the broader strict reader.
+3. Add a malformed-corpus/fuzzing gate for the broader strict reader: JP2
+   boxes, marker segments, packet headers, tile-part boundaries, and styled T1
+   segment lengths.
 
 Performance (decode remains the larger Grok gap; ordered by current expected
 win per effort after the strict T2 profiling pass):

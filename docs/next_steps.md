@@ -7,7 +7,7 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **89/100 narrow, 65/100 full** as of
+the subsequent JP2/T2/T1/profile work is **90/100 narrow, 66/100 full** as of
 2026-07-07. First drafted at `ba66799`.
 
 ## Current Working Sequence (2026-07-07 docs sync)
@@ -16,13 +16,13 @@ The old tier list below is intentionally preserved as implementation history,
 but many of its "next" items have since landed. The current high-signal order
 for more ISO coverage is:
 
-1. **ERTERM interop breadth.** TERMALL-scoped predictable termination is wired
-   and Kakadu/z2000 strict decode are green. Broaden the matrix across
-   OpenJPEG/Grok/Kakadu and keep standalone ERTERM fail-closed until its
-   non-terminated segment model exists.
-2. **Malformed corpus / fuzzing gate.** Add targeted corruptions for JP2 boxes,
+1. **Malformed corpus / fuzzing gate.** Add targeted corruptions for JP2 boxes,
    COD/QCD, SOT/TLM/PLT, SOP/EPH, packet headers, and tile-part boundaries.
    Treat jpylyzer/valid2000-style findings as diagnostics, not absolute truth.
+2. **Styled T1/T2 corruption matrix.** ERTERM is now green through z2000 strict
+   decode, OpenJPEG, Grok, and Kakadu on the larger no-sidecar smoke. Add
+   corrupt segment-length and terminated-pass payload fixtures for TERMALL,
+   RESET+TERMALL, and ERTERM before broadening style combinations.
 3. **Multi-tile v2.** The v1 aligned envelope is real and interop-proven for
    the documented lossless profile. Expand one axis at a time: edge-tile
    fixtures, more progression orders, then quality layers/style bits only after
@@ -33,6 +33,22 @@ for more ISO coverage is:
 5. **T1 style policy.** Keep standalone RESET/ERTERM, BYPASS+TERMALL, and
    untested combinations fail-closed until each has writer, strict reader,
    tests, and interop coverage.
+
+## Status 2026-07-07 (ERTERM OpenJPEG/Grok interop) — PASSED
+
+`tools/interop_erterm.ps1` now provides a repeatable Windows smoke for the
+TERMALL-scoped predictable-termination path. On
+`C:\temp\tools\images\0002.tif` and `0004.tif`, z2000 produced no-sidecar
+single-tile RPCL/RCT/5-3 JP2 files with `--terminate-all
+--predictable-termination`; OpenJPEG 2.5.4, Grok 20.3.6, and Kakadu 8.4.1 all
+decoded those files pixel-identically to the source TIFFs. Output sizes were
+24,278,954 bytes (`0002`) and 20,108,619 bytes (`0004`).
+
+The z2000 block-parallel strict decoder now routes TERMALL/ERTERM blocks
+through the terminated-segment T1 path instead of the continuous MQ path. With
+that fix, the same files also decode pixel-identically through z2000 strict
+decode at 16 threads. This moves the scorecard to 90/66. Standalone ERTERM
+remains fail-closed.
 
 ## Status 2026-07-07 (PLT-less foreign decode matrix) — PASSED
 
@@ -153,12 +169,12 @@ codestream layer coded them correctly — the local oracles ran below the JP2
 layer and missed it. The wrapper opened the then-supported style bits and MCT
 0/1. Since then, RESET+TERMALL (`0x06`) and TERMALL-scoped ERTERM (`0x14`)
 were also wired through their implemented segment models; Kakadu is installed
-on this Windows/Ryzen box; and the broader scorecard now stands at 89/65.
+on this Windows/Ryzen box; and the broader scorecard now stands at 90/66.
 
-**Remaining top levers after the later passes:** broaden ERTERM interop across
-OpenJPEG/Grok, add a malformed-corpus/fuzzing gate, expand the multi-tile v1
-matrix, and continue T1/T2 performance work without relaxing fail-closed policy
-for unsupported style combinations.
+**Remaining top levers after the later passes:** add a malformed-corpus/fuzzing
+gate, expand styled T1/T2 corruption coverage, expand the multi-tile v1 matrix,
+and continue T1/T2 performance work without relaxing fail-closed policy for
+unsupported style combinations.
 
 ## Status since first draft (`ba66799` → `d664306`)
 
@@ -194,7 +210,8 @@ resilience bits (2.1/2.2/2.3) need broader external interop before all scores
 are claimed; `--mct none` is fully local (coding path unchanged, only the color
 transform is skipped). RESET+TERMALL is reference-checked with Kakadu,
 OpenJPEG, and Grok on the larger no-sidecar smoke; ERTERM is reference-checked
-with Kakadu. This snapshot is superseded by later work: scalar-derived QCD, all
+with z2000 strict decode, OpenJPEG, Grok, and Kakadu. This snapshot is
+superseded by later work: scalar-derived QCD, all
 progression orders, and multi-tile v1 have since landed. The remaining
 unclaimed levers are the current working-sequence items at the top of this
 file.
@@ -395,9 +412,10 @@ larger EBCOT blocks, and a 257x383 debug-sidecar codestream roundtrip locally.
 The public profile accepts ERTERM only together with `terminate_all` and the
 ISO MQ backend (`--terminate-all --predictable-termination`); standalone
 ERTERM remains fail-closed because the encoder has no non-terminated ER-TERM
-segment model. Kakadu `kdu_expand` and z2000 strict decode both reconstruct the
-larger no-sidecar `C:\temp\tools\images\0002.tif` smoke pixel-exactly
-(3539x5120, tile forced to image size).
+segment model. z2000 strict decode, OpenJPEG, Grok, and Kakadu reconstruct the
+larger no-sidecar `C:\temp\tools\images\0002.tif` and `0004.tif` smokes
+pixel-exactly. The block-parallel strict decode regression is covered by the
+predictable-termination unit test.
 
 ---
 
@@ -607,13 +625,13 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
 
 ## Scoreboard
 
-- **Current (`2026-07-07`):** narrow **89**, full **65** — matches
+- **Current (`2026-07-07`):** narrow **90**, full **66** — matches
   `docs/iso_coverage.md`.
 - **Recent claimed movement:** T1/EBCOT grew through BYPASS, TERMALL,
   vertical-causal, segmentation-symbols, TERMALL-scoped RESET, and
   TERMALL-scoped ERTERM; broad-codec score also moved through multi-tile v1,
   additional progression orders, foreign PLT/PLT-less decode, ICT/9-7,
   scalar-derived/scalar-expounded quantization, and PCRD-style rate allocation.
-- **Next score levers:** broaden ERTERM beyond Kakadu-only interop, add more
-  malformed-corpus/fuzzing coverage, expand multi-tile/profile fixtures, and
+- **Next score levers:** add more malformed-corpus/fuzzing coverage, expand
+  styled T1/T2 corruption fixtures, expand multi-tile/profile fixtures, and
   keep pushing arbitrary external decode breadth.
