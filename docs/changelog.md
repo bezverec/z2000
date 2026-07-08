@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Odd/Edge Dimension Coverage
+
+- Added an odd/thin/minimal-dimension roundtrip matrix (1x1, 5x5, 17x13,
+  3x100, 100x3, 255x1, 33x31, 63x65, 127x129, 2x2) through the archival
+  encode/decode (SOP+EPH+TLM, 3 requested resolution levels so the clamp
+  path runs on tiny dimensions). Each stresses the odd 5/3 DWT edge lifting,
+  sub-band/precinct/code-block edge derivation, and the resolution clamp,
+  and reconstructs byte-exactly through z2000 strict decode. Every case was
+  also confirmed lossless through OpenJPEG 2.5.4 and Grok 20.3.6, including
+  the archival profile with precincts. Scorecard: narrow RCT/5-3 DWT row
+  9→10 (narrow 90→91).
+
 ### Malformed-Input Fuzzing Gate
 
 - Added a CI-enforced corruption-sweep test that fuzzes every strict-decode

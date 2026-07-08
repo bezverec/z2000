@@ -4463,6 +4463,52 @@ test "parallel 5/3 DWT matches the serial workspace transform byte-for-byte" {
     }
 }
 
+test "odd and edge dimensions roundtrip losslessly through archival encode/decode" {
+    const allocator = std.testing.allocator;
+    // Odd, thin, and minimal geometries stress the 5/3 DWT edge lifting
+    // (odd lowCount), sub-band/precinct/code-block edge derivation, and the
+    // resolution clamp on tiny dimensions. Each was also confirmed to decode
+    // losslessly through OpenJPEG 2.5.4 and Grok 20.3.6.
+    const dims = [_][2]usize{
+        .{ 1, 1 },   .{ 5, 5 },     .{ 17, 13 }, .{ 3, 100 },   .{ 100, 3 },
+        .{ 255, 1 }, .{ 33, 31 },   .{ 63, 65 }, .{ 127, 129 }, .{ 2, 2 },
+    };
+    for (dims) |d| {
+        errdefer std.debug.print("odd-dimension roundtrip failed at {}x{}\n", .{ d[0], d[1] });
+        const w = d[0];
+        const h = d[1];
+        const samples = try allocator.alloc(u16, w * h * 3);
+        defer allocator.free(samples);
+        var seed: u32 = @intCast(w * 6151 + h * 389 + 7);
+        for (samples) |*s| {
+            seed = seed *% 1664525 +% 1013904223;
+            s.* = @intCast((seed >> 15) & 0xff);
+        }
+        const rgb = image.RgbImage{ .allocator = allocator, .width = w, .height = h, .bit_depth = 8, .samples = samples };
+
+        // Archival framing (SOP+EPH+TLM) plus a request for more resolution
+        // levels than tiny dimensions can supply, so the clamp path runs too.
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+            .levels = 3,
+            .sop = true,
+            .eph = true,
+            .tlm = true,
+        });
+        defer allocator.free(bytes);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqual(w, decoded.width);
+        try std.testing.expectEqual(h, decoded.height);
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        // The JP2 wrapper accepts the odd-geometry codestream.
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+        defer allocator.free(wrapped);
+        _ = try jp2.parseInfo(wrapped);
+    }
+}
+
 test "lossless codestream skeleton contains JPEG2000 markers" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
