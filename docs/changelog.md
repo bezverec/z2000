@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Full-Core Parallel DWT
+
+- The reversible 5/3 DWT now distributes each of the three components'
+  per-level row and column bands across every requested worker instead of
+  capping at three component threads. On multi-core machines the DWT phase
+  was a large tail of threaded runs (forward DWT ~30% of encode t10, inverse
+  ~13% of decode t10) with most cores idle. `wavelet_int.forward53Parallel` /
+  `inverse53Parallel` keep the sequential per-level cascade but split column
+  bands at SIMD-vector boundaries (final band takes the scalar tail) and row
+  bands evenly, each worker with private scratch. Output is byte-identical to
+  the serial workspace transform (unit test across 6 dimensions x 5 worker
+  counts), so encode bytes and external interop are unaffected. Measured on
+  a 2048x2048 noise image (Apple M4, 4P+6E): encode t10 143 -> 121 ms
+  (-15.4%), decode t10 115 -> 110 ms (-4.2%); single-thread encode/decode
+  unchanged (serial path untouched). See `docs/optimization_plan.md`.
+
 ### Predictable Termination (ERTERM) Bring-up
 
 - Added an ISO MQ ER-TERM flush path for `--terminate-all

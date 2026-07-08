@@ -203,21 +203,46 @@ separately against the branch counters:
   (`forward53Line`/`HorizontalPairVector`), so O4 as written is spent. T1 is
   92–95% of both encode and decode; all remaining headroom is in the MQ passes.
 
-### O4. Horizontal 5/3 DWT SIMD — M effort, ~5% encode, ~3% decode
+### O4. Horizontal 5/3 DWT SIMD — spent (single-thread); ✅ parallel win landed
 
-Encode DWT 67 ms, decode 30 ms; vertical passes are vectorized, horizontal
-lifting is scalar (strided-by-2). Deinterleave via `@shuffle` into even/odd
-lanes or process row pairs to fill lanes. Cache-block the column passes at
-the same time.
+Single-thread: horizontal lifting is already `@Vector`-ized
+(`forward53Line`/`HorizontalPairVector`) and the inverse DWT is 2.7% of a
+1-thread decode, so there is no single-thread lever here (see the 2026-07-08
+note under O3).
 
-### O5. Parallel efficiency at 10 threads — M effort, tN metrics only
+**Multi-thread (2026-07-08, kept):** the `--timings` phase split at t10 told
+a different story than the 1-thread profile — the forward DWT was **30% of
+encode t10** (45 ms) and the inverse DWT **12.6% of decode t10** (14.7 ms),
+because both were capped at 3 component threads (`componentThreadCount` →
+min(threads,3)) while the M4 has 10 logical cores. `wavelet_int.forward53Parallel`
+/ `inverse53Parallel` keep the sequential per-level cascade but distribute the
+three components' column bands (split at `vertical_lanes` boundaries, final
+band takes the scalar tail) and row bands across all requested workers, each
+with private scratch. Byte-identical to the serial workspace transform (unit
+test across 6 dims x 5 worker counts). Measured on `bench-rgb-2048` (M4,
+4P+6E): **encode t10 143 -> 121 ms (-15.4%)**, **decode t10 115.2 -> 110.4 ms
+(-4.2%)**, both with non-overlapping sigma and reduced variance; encode/decode
+t1 unchanged (serial path untouched); t1==t16 determinism, full suite green,
+Grok still decodes the output. This closes most of the parallel-scaling gap
+the O5 note flagged for the DWT.
+
+### O5. Parallel efficiency at high thread counts — M effort, tN metrics only
 
 z2000 scales 3.6x/4.0x where Grok gets 3.9x/4.6x. Known-not-it: LPT
-ordering (tried, slower), scheduler tail (balanced per counters). Next
-probes: persistent worker pool across phases (threads currently spawn per
-encode/decode call), parallel inverse-DWT within a component (currently
-3-way component cap bounds DWT at 30 ms serial-ish), and the serial packet
-catalog + TIFF write tail (~10 ms) overlapping with T1 workers.
+ordering (tried, slower), scheduler tail (balanced per counters).
+**✅ The biggest item — parallel inverse/forward DWT beyond the 3-way
+component cap — landed (see O4, 2026-07-08): encode t10 -15.4%, decode t10
+-4.2%.** Note the M4 topology (4 performance + 6 efficiency cores):
+block-payload scaling flattens past 4 threads because the E-cores are ~half
+speed, and the low-thread anomaly (t2 = 1.31x) is the component-parallel
+2:1 imbalance at threads <= 3. Remaining probes: route threads <= 3 through
+block/DWT-band parallelism too (fixes the t2/t3 imbalance; not a primary
+metric), a persistent worker pool across phases (threads still spawn per
+phase), and overlapping the serial packet catalog + TIFF write tail (~8 ms at
+t10) with T1 workers. **Fundamental limit:** even ideal scaling cannot beat
+Grok because the single-thread MQ floor (decode t1 ~1.26x Grok) caps t10 at
+~98 ms > Grok's 78.7 ms — the remaining decisive lever is the single-thread
+MQ column-pipeline reformulation (O3), not more parallelism.
 
 ### O6. Encode-side bitplane extraction — S–M effort, up to ~5% encode
 
@@ -307,3 +332,5 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | 2026-07-07 | cleanup range refactors + full gate (`0004.tif`) | 3274 ms | 507 ms | 3308 ms | 513 ms | kept; lossless interop |
 | 2026-07-07 | O3 significance branch merge (`0004.tif`) | +3.3% | +9.6% | +0.3% | +3.8% | reverted |
 | 2026-07-08 | O3 MQ sig/ref decode index strength-reduction (`bench-rgb-2048`) | — | — | -2.1% | noisy | kept; MQ-sig -3.2%, MQ-ref -5.5% |
+| 2026-07-08 | O3 markDecodedSignificantNbfKnown swap in plain sig decode (Mac M4) | — | — | +0.9% | — | reverted; reload already hoisted, A/B 462.1 vs 466.3 |
+| 2026-07-08 | O4/O5 full-core parallel forward+inverse DWT (Mac M4) | 539 | **-15.4%** | 469 | **-4.2%** | kept; t1 unchanged, byte-exact, Grok decodes |

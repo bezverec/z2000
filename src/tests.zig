@@ -4369,6 +4369,62 @@ test "integer 5/3 DWT roundtrips horizontal vector groups" {
     }
 }
 
+test "parallel 5/3 DWT matches the serial workspace transform byte-for-byte" {
+    const allocator = std.testing.allocator;
+    // Cover vector-group sizes, scalar tails, odd dims, and several worker
+    // counts (1 = inline fallback, up to more workers than columns).
+    const dims = [_][2]usize{ .{ 64, 64 }, .{ 65, 63 }, .{ 129, 128 }, .{ 100, 40 }, .{ 17, 200 }, .{ 512, 512 } };
+    const thread_counts = [_]usize{ 1, 2, 4, 8, 16 };
+
+    for (dims) |dim| {
+        const width = dim[0];
+        const height = dim[1];
+        const pixels = width * height;
+
+        var serial: [3][]i32 = undefined;
+        var parallel: [3][]i32 = undefined;
+        for (0..3) |c| {
+            serial[c] = try allocator.alloc(i32, pixels);
+            parallel[c] = try allocator.alloc(i32, pixels);
+        }
+        defer for (0..3) |c| {
+            allocator.free(serial[c]);
+            allocator.free(parallel[c]);
+        };
+
+        for (thread_counts) |threads| {
+            var seed: u32 = @intCast(width * 2749 + height * 40961 + threads * 7);
+            for (0..3) |c| {
+                for (serial[c], 0..) |*sample, index| {
+                    seed = seed *% 1664525 +% 1013904223;
+                    sample.* = @as(i32, @intCast((seed >> 13) & 0x3ff)) - 512 +
+                        @as(i32, @intCast(index % 23)) - 11;
+                }
+                @memcpy(parallel[c], serial[c]);
+            }
+
+            // Serial reference: one workspace transform per component.
+            var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+            defer workspace.deinit();
+            var serial_levels: u8 = 0;
+            for (0..3) |c| {
+                serial_levels = try wavelet_int.forward53WithWorkspace(&workspace, serial[c], width, height, 6);
+            }
+
+            const parallel_levels = try wavelet_int.forward53Parallel(allocator, parallel, width, height, 6, threads);
+            try std.testing.expectEqual(serial_levels, parallel_levels);
+            for (0..3) |c| try std.testing.expectEqualSlices(i32, serial[c], parallel[c]);
+
+            // Inverse must also match and restore the input.
+            for (0..3) |c| {
+                try wavelet_int.inverse53WithWorkspace(&workspace, serial[c], width, height, serial_levels);
+            }
+            try wavelet_int.inverse53Parallel(allocator, parallel, width, height, parallel_levels, threads);
+            for (0..3) |c| try std.testing.expectEqualSlices(i32, serial[c], parallel[c]);
+        }
+    }
+}
+
 test "lossless codestream skeleton contains JPEG2000 markers" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
