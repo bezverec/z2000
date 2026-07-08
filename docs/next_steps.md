@@ -87,13 +87,31 @@ items are preserved further below as implementation history.
 - **Test plan:** local byte-exact roundtrip + a fail-closed corruption case per
   combination (extend the styled-T1 matrix), then external `-M` interop.
 
-### N4. Lossy breadth — foreign 9/7 decode fixtures + PCRD PSNR gate — M · Med
+### N4. Lossy breadth — two precisely-characterized foreign-9/7 gaps — M · Med
 
-- **Impact:** full "Lossy encode/decode" +2–3 (the largest single gap, 7/15).
+- **Impact:** full "Lossy encode/decode" +2 (now 8/15 after the OpenJPEG 9/7
+  decode gate landed; two concrete gaps remain, characterized 2026-07-08).
 - **ISO clause:** E (quantization), G (9/7), J.14 (rate-distortion).
-- **State:** ICT/9-7 with scalar-expounded and scalar-derived QCD encode/decode
-  locally; z2000 decodes OpenJPEG 9/7 lossy at max-diff 1. Missing: a
-  PSNR-gated interop fixture set and broader error-bound validation.
+- **State:** ICT/9-7 encode/decode locally; **foreign OpenJPEG 9/7 lossy now
+  decodes byte-identically across `-r 1..8` / `-q`** (embedded-fixture
+  regression gate). Two specific gaps remain:
+  - **(a) Heavy truncation.** OpenJPEG `-r 10` fails with `InvalidBlock`: those
+    blocks carry *fewer* coding passes than the full bitplane count, and the
+    strict decoder's `pass_count != expected_passes` (five sites in
+    `ebcot.zig`) rejects them. Fix: accept a packet-header pass count below the
+    full expected and decode only those passes on the single-layer strict path
+    (z2000 already truncates per-layer for its own `--rates` streams — reuse
+    that partial-pass machinery here). Test: the existing embedded fixture at
+    higher `-r`.
+  - **(b) Foreign 9/7 QCD step tables.** Grok 9/7 fails with
+    `UnsupportedProfile`: its scalar-expounded QCD step values differ from
+    z2000's OpenJPEG-pinned 9/7 norm table, so `validateStrictQcdScalarValue`
+    rejects them. Fix: for irreversible scalar-expounded QCD, accept foreign
+    (exponent, mantissa) pairs and derive Mb from the *signalled* exponents
+    (E-2) — the same relaxation the reversible foreign-QCD and scalar-derived
+    work already applied, extended to the irreversible expounded path, using
+    the signalled steps for dequantization. Test: a Grok/Kakadu 9/7 fixture.
+- **What to add (was):** a decode fixture matrix over foreign 9/7 lossy JP2s
 - **What to add:** a decode fixture matrix over foreign 9/7 lossy JP2s
   (OpenJPEG/Grok/Kakadu at several rate ladders) asserting z2000's PSNR is
   within a tight bound of each reference decoder's own output; a PCRD PSNR
