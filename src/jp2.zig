@@ -441,7 +441,16 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, bit_d
                 if (saw_qcd) return Jp2Error.InvalidCodestream;
             },
             marker_tlm, marker_com => {},
-            marker_cap, marker_coc, marker_qcc, marker_rgn, marker_poc, marker_ppm, marker_ppt, marker_crg => {
+            // COC/QCC are accepted structurally here (after their main COD/QCD);
+            // the strict codestream reader enforces that they byte-replicate the
+            // main marker (z2000 has no per-component coding/quantization path).
+            marker_coc => {
+                if (cod_info == null) return Jp2Error.InvalidCodestream;
+            },
+            marker_qcc => {
+                if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
+            },
+            marker_cap, marker_rgn, marker_poc, marker_ppm, marker_ppt, marker_crg => {
                 return Jp2Error.UnsupportedProfile;
             },
             marker_soc, marker_siz, marker_sod, marker_eoc => return Jp2Error.InvalidCodestream,
@@ -621,6 +630,8 @@ fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
     const min_length: u16 = switch (marker) {
         marker_cod => 12,
         marker_qcd => 4,
+        marker_coc => 5, // Lcoc(2) Ccoc(1) Scoc(1) + >=1 SPcoc byte
+        marker_qcc => 4, // Lqcc(2) Cqcc(1) Sqcc(1)
         marker_tlm => 9,
         marker_plt => 4,
         marker_com => 4,

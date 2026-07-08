@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Redundant COC/QCC Component Markers
+
+- The strict reader and JP2 wrapper now accept COC (A.6.2) and QCC (A.6.5)
+  component-specific coding/quantization markers when they byte-replicate the
+  main COD/QCD for a valid component (some encoders emit a redundant COC/QCC
+  per component even when identical to the main marker). Any genuine
+  per-component override fails closed, since z2000 has no per-component coding
+  path. A splice-oracle test inserts a redundant COC (component 1) and QCC
+  (component 2) into a valid codestream and asserts byte-exact decode plus JP2
+  acceptance, and a mismatched COC (flipped transform byte) returns
+  UnsupportedPayload. Scorecard: full "Core codestream syntax" 11→12
+  (full 67→68). Note: OpenJPEG/Grok do not emit COC/QCC for plain RGB, so this
+  is strict-reader-gated (no reference file on hand); the follow-up is a
+  Kakadu/tuned-encoder file that carries them.
+
 ### 16-bit RGB End-to-End
 
 - Confirmed and locked in the full 16-bit RGB archival pipeline. A new test
