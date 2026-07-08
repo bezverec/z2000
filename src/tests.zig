@@ -9644,40 +9644,20 @@ test "predictable termination debug sidecar roundtrips larger stream" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
-test "malformed codestream corruption sweep never panics or reads out of bounds" {
-    const base_allocator = std.testing.allocator;
-    // A 16x16 image with 8x8 blocks, two resolutions, and SOP+EPH+TLM keeps
-    // every parse surface the strict decoder walks present (SIZ/COD/QCD, TLM,
-    // per-tile SOT/SOD, PLT, SOP/EPH framing, packet headers, tag-trees, T1
-    // payloads) while staying small enough to sweep byte by byte quickly. The
-    // gate is code-path coverage, not data volume.
-    const width = 16;
-    const height = 16;
-    const samples = try base_allocator.alloc(u16, width * height * 3);
-    defer base_allocator.free(samples);
-    var seed: u32 = 0x9e3779b9;
-    for (samples) |*s| {
-        seed = seed *% 1664525 +% 1013904223;
-        s.* = @intCast((seed >> 15) & 0xff);
-    }
-    const rgb = image.RgbImage{ .allocator = base_allocator, .width = width, .height = height, .bit_depth = 8, .samples = samples };
-
-    const codestream_bytes = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{
-        .levels = 2,
-        .block_width = 8,
-        .block_height = 8,
-        .sop = true,
-        .eph = true,
-        .tlm = true,
-    });
-    defer base_allocator.free(codestream_bytes);
-    const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, codestream_bytes);
-    defer base_allocator.free(wrapped);
-
-    // An OOB read or unchecked slice would abort the test binary (Debug and
-    // ReleaseSafe bounds checks; ReleaseFast would corrupt or crash), so
-    // simply reaching the end of every sweep is the assertion. Errors are
-    // caught and ignored — the gate is "no panic, no out-of-bounds".
+/// Fuzzes one codestream and its JP2 wrapper against truncation at every
+/// length and single-byte corruption (values 0xff/0x00) at every
+/// `corruption_step`-th position. An OOB read or unchecked slice would abort
+/// the test binary under Debug/ReleaseSafe bounds checks (ReleaseFast would
+/// corrupt or crash), so simply returning is the assertion: no panic, no
+/// out-of-bounds. Errors are caught and ignored. An arena reset per attempt
+/// bounds memory.
+fn fuzzCorruptionSweep(
+    base_allocator: std.mem.Allocator,
+    codestream_bytes: []const u8,
+    wrapped: []const u8,
+    truncation_step: usize,
+    corruption_step: usize,
+) !void {
     var arena = std.heap.ArenaAllocator.init(base_allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -9688,9 +9668,8 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
     for (targets) |target| {
         const n = target.bytes.len;
 
-        // 1) Truncation at every length (bounds-checks short buffers).
         var len: usize = 0;
-        while (len <= n) : (len += 1) {
+        while (len <= n) : (len += truncation_step) {
             _ = arena.reset(.retain_capacity);
             const buf = try a.dupe(u8, target.bytes[0..len]);
             if (target.jp2) {
@@ -9703,11 +9682,9 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
             }
         }
 
-        // 2) Single-byte corruption at every other position, with values that
-        // hit marker prefixes (0xff) and zero lengths (0x00).
         for ([_]u8{ 0xff, 0x00 }) |value| {
             var i: usize = 0;
-            while (i < n) : (i += 2) {
+            while (i < n) : (i += corruption_step) {
                 _ = arena.reset(.retain_capacity);
                 const buf = try a.dupe(u8, target.bytes);
                 buf[i] = value;
@@ -9721,6 +9698,84 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
                 }
             }
         }
+    }
+}
+
+fn fillFuzzSamples(samples: []u16, salt: u32) void {
+    var seed: u32 = 0x9e3779b9 ^ salt;
+    for (samples) |*s| {
+        seed = seed *% 1664525 +% 1013904223;
+        s.* = @intCast((seed >> 15) & 0xff);
+    }
+}
+
+test "malformed codestream corruption sweep never panics or reads out of bounds" {
+    const base_allocator = std.testing.allocator;
+
+    // Profile 1: single-tile archival RCT/5-3 with SOP+EPH+TLM. A 16x16 image
+    // with 8x8 blocks and two resolutions keeps every parse surface present
+    // (SIZ/COD/QCD, TLM, SOT/SOD, PLT, SOP/EPH framing, packet headers,
+    // tag-trees, T1) while staying small enough to sweep byte by byte. The
+    // gate is code-path coverage, not data volume.
+    {
+        const samples = try base_allocator.alloc(u16, 16 * 16 * 3);
+        defer base_allocator.free(samples);
+        fillFuzzSamples(samples, 1);
+        const rgb = image.RgbImage{ .allocator = base_allocator, .width = 16, .height = 16, .bit_depth = 8, .samples = samples };
+        const cs = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{ .levels = 2, .block_width = 8, .block_height = 8, .sop = true, .eph = true, .tlm = true });
+        defer base_allocator.free(cs);
+        const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, cs);
+        defer base_allocator.free(wrapped);
+        try fuzzCorruptionSweep(base_allocator, cs, wrapped, 1, 2);
+    }
+
+    // Profile 2: multi-tile RCT/5-3 (48x48, 2x2 grid of 32x32 tiles, 8x8
+    // precincts, 4x4 blocks). Exercises the per-tile SOT walk, per-tile PLT,
+    // and the multi-tile strict decode path, which have more parsing than the
+    // single-tile path. Larger codestream, so sample corruption more coarsely.
+    {
+        const samples = try base_allocator.alloc(u16, 48 * 48 * 3);
+        defer base_allocator.free(samples);
+        fillFuzzSamples(samples, 2);
+        const rgb = image.RgbImage{ .allocator = base_allocator, .width = 48, .height = 48, .bit_depth = 8, .samples = samples };
+        const cs = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{
+            .levels = 2,
+            .tile_width = 32,
+            .tile_height = 32,
+            .block_width = 4,
+            .block_height = 4,
+            .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+            .precinct_count = 1,
+            .sop = true,
+            .eph = true,
+            .tlm = true,
+        });
+        defer base_allocator.free(cs);
+        const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, cs);
+        defer base_allocator.free(wrapped);
+        try fuzzCorruptionSweep(base_allocator, cs, wrapped, 24, 24);
+    }
+
+    // Profile 3: irreversible ICT/9-7 with scalar-expounded QCD. Exercises the
+    // 9/7 QCD step-size parsing and the float inverse-DWT/ICT decode path.
+    {
+        const samples = try base_allocator.alloc(u16, 16 * 16 * 3);
+        defer base_allocator.free(samples);
+        fillFuzzSamples(samples, 3);
+        const rgb = image.RgbImage{ .allocator = base_allocator, .width = 16, .height = 16, .bit_depth = 8, .samples = samples };
+        const cs = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{
+            .levels = 3,
+            .transform = .irreversible_9_7,
+            .mct = .ict,
+            .quantization = .scalar_expounded,
+            .sop = true,
+            .eph = true,
+            .tlm = true,
+        });
+        defer base_allocator.free(cs);
+        const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, cs);
+        defer base_allocator.free(wrapped);
+        try fuzzCorruptionSweep(base_allocator, cs, wrapped, 4, 4);
     }
 }
 
