@@ -102,7 +102,12 @@ items are preserved further below as implementation history.
     full expected and decode only those passes on the single-layer strict path
     (z2000 already truncates per-layer for its own `--rates` streams — reuse
     that partial-pass machinery here). Test: the existing embedded fixture at
-    higher `-r`.
+    higher `-r`. **Progress:** the continuous inferred T1 decoders now accept
+    pass prefixes for both legacy MQ and ISO-MQ, and strict irreversible QCD
+    decode carries the signalled exponent table into `Mb` sizing. A local
+    OpenJPEG 2.5.4 `-I -r 10` smoke now decodes without `InvalidBlock`; next is
+    pinning that as a fixture with an explicit PSNR/error-bound gate because
+    reconstruction is not byte-identical to OpenJPEG at heavy truncation.
   - **(b) Foreign 9/7 QCD step tables.** Grok 9/7 fails with
     `UnsupportedProfile`: its scalar-expounded QCD step values differ from
     z2000's OpenJPEG-pinned 9/7 norm table, so `validateStrictQcdScalarValue`
