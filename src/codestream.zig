@@ -1782,6 +1782,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var saw_siz = false;
     var saw_cod = false;
     var saw_qcd = false;
+    // Captured COD/QCD payload slices (into `bytes`) so a redundant COC/QCC
+    // can be accepted only when it byte-replicates the main marker.
+    var cod_scod: u8 = 0;
+    var cod_coding: []const u8 = &.{};
+    var qcd_payload: []const u8 = &.{};
     var qcd_band_count: usize = 0;
     var tlm_entries: std.ArrayList(TlmEntry) = .empty;
     defer tlm_entries.deinit(allocator);
@@ -1911,6 +1916,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 }
             }
             precinct_count = levels + 1;
+            cod_scod = scod;
+            cod_coding = segment[5..];
             saw_cod = true;
         } else if (marker == @intFromEnum(Marker.qcd)) {
             if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
@@ -1920,7 +1927,29 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             parsed_guard_bits = qcd_info.guard_bits;
             parsed_qcd_exponents = qcd_info.exponents;
             parsed_qcd_exponent_count = qcd_info.exponent_count;
+            qcd_payload = segment;
             saw_qcd = true;
+        } else if (marker == @intFromEnum(Marker.coc)) {
+            // ISO 15444-1 A.6.2: component-specific coding style. z2000 has no
+            // per-component coding path, so accept only a COC that byte-
+            // replicates the main COD for a valid component (some encoders
+            // emit a redundant COC per component); any genuine override fails
+            // closed. Layout: Ccoc(1) Scoc(1) SPcoc(NL,xcb,ycb,cblk,transform,
+            // precincts) — SPcoc mirrors the main COD's coding fields.
+            if (!saw_cod) return CodestreamError.InvalidCodestream;
+            if (segment.len < 2) return CodestreamError.InvalidCodestream;
+            if (segment[0] >= 3) return CodestreamError.UnsupportedPayload;
+            if ((segment[1] & 0x01) != (cod_scod & 0x01)) return CodestreamError.UnsupportedPayload;
+            if (!std.mem.eql(u8, segment[2..], cod_coding)) return CodestreamError.UnsupportedPayload;
+        } else if (marker == @intFromEnum(Marker.qcc)) {
+            // ISO 15444-1 A.6.5: component-specific quantization. Same policy:
+            // accept only a QCC that byte-replicates the main QCD (Sqcc+steps
+            // mirror Sqcd+steps) for a valid component. Layout: Cqcc(1) then
+            // the QCD-style Sqcc + step data.
+            if (!saw_qcd) return CodestreamError.InvalidCodestream;
+            if (segment.len < 1) return CodestreamError.InvalidCodestream;
+            if (segment[0] >= 3) return CodestreamError.UnsupportedPayload;
+            if (!std.mem.eql(u8, segment[1..], qcd_payload)) return CodestreamError.UnsupportedPayload;
         } else if (marker == @intFromEnum(Marker.tlm)) {
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
             saw_tlm = true;
@@ -2040,9 +2069,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
 fn isUnsupportedMainHeaderMarker(marker: u16) bool {
     return switch (marker) {
         @intFromEnum(Marker.cap),
-        @intFromEnum(Marker.coc),
         @intFromEnum(Marker.plm),
-        @intFromEnum(Marker.qcc),
         @intFromEnum(Marker.rgn),
         @intFromEnum(Marker.poc),
         @intFromEnum(Marker.ppm),

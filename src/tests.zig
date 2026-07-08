@@ -2891,8 +2891,6 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
         };
         const unsupported_main_marker_cases = [_]UnsupportedMainMarkerCase{
             .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
-            .{ .label = "COC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("coc") },
-            .{ .label = "QCC main marker", .source = codestream.markerValue("qcd"), .replacement = codestream.markerValue("qcc") },
             .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
             .{ .label = "POC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("poc") },
             .{ .label = "PPM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppm") },
@@ -7020,6 +7018,94 @@ test "strict decode rejects COD whose blocks cross precinct spans" {
     );
 }
 
+test "redundant COC/QCC that byte-replicate the main COD/QCD decode byte-exactly" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 32;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .samples = samples };
+
+    const base = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(base);
+
+    // Build a COC for component 1 that replicates the main COD: Ccoc(1) +
+    // Scoc(1, = COD Scod & 0x01) + SPcoc(= COD coding fields, COD segment[5..]).
+    const cod = findMarker(base, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const cod_len = (@as(usize, base[cod + 2]) << 8) | base[cod + 3];
+    const cod_seg = base[cod + 4 ..][0..cod_len - 2]; // COD payload (Scod..precincts)
+    const cod_scod = cod_seg[0];
+    const cod_coding = cod_seg[5..]; // NL,xcb,ycb,cblk,transform,precincts
+
+    var coc_payload: std.ArrayList(u8) = .empty;
+    defer coc_payload.deinit(allocator);
+    try coc_payload.append(allocator, 1); // Ccoc: component 1
+    try coc_payload.append(allocator, cod_scod & 0x01); // Scoc precinct flag
+    try coc_payload.appendSlice(allocator, cod_coding);
+
+    // Build a QCC for component 2 that replicates the main QCD: Cqcc(1) +
+    // (Sqcd + steps = the whole QCD payload).
+    const qcd = findMarker(base, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const qcd_len = (@as(usize, base[qcd + 2]) << 8) | base[qcd + 3];
+    const qcd_seg = base[qcd + 4 ..][0..qcd_len - 2];
+    var qcc_payload: std.ArrayList(u8) = .empty;
+    defer qcc_payload.deinit(allocator);
+    try qcc_payload.append(allocator, 2); // Cqcc: component 2
+    try qcc_payload.appendSlice(allocator, qcd_seg);
+
+    // Splice COC after COD and QCC after QCD (both after their main markers).
+    const spliceMarker = struct {
+        fn run(a: std.mem.Allocator, stream: []const u8, after_marker: usize, after_len: usize, marker: u16, mpayload: []const u8) ![]u8 {
+            const insert_at = after_marker + 4 + (after_len - 2);
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(a);
+            try out.appendSlice(a, stream[0..insert_at]);
+            try out.append(a, @intCast(marker >> 8));
+            try out.append(a, @intCast(marker & 0xff));
+            const seg_len: u16 = @intCast(mpayload.len + 2);
+            try out.append(a, @intCast(seg_len >> 8));
+            try out.append(a, @intCast(seg_len & 0xff));
+            try out.appendSlice(a, mpayload);
+            try out.appendSlice(a, stream[insert_at..]);
+            return out.toOwnedSlice(a);
+        }
+    }.run;
+
+    const with_coc = try spliceMarker(allocator, base, cod, cod_len, codestream.markerValue("coc"), coc_payload.items);
+    defer allocator.free(with_coc);
+    // Re-find QCD in the extended stream (shifted by the COC bytes).
+    const qcd2 = findMarker(with_coc, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const qcd2_len = (@as(usize, with_coc[qcd2 + 2]) << 8) | with_coc[qcd2 + 3];
+    const spliced = try spliceMarker(allocator, with_coc, qcd2, qcd2_len, codestream.markerValue("qcc"), qcc_payload.items);
+    defer allocator.free(spliced);
+
+    // The strict decoder accepts the redundant COC/QCC and reconstructs the
+    // exact same image.
+    var decoded = try codestream.decodeLosslessTemporary(allocator, spliced);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    // The JP2 wrapper accepts the COC/QCC-carrying codestream.
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, spliced);
+    defer allocator.free(wrapped);
+    _ = try jp2.parseInfo(wrapped);
+
+    // A COC whose coding fields differ from the main COD (flip the transform
+    // byte) is a genuine per-component override and must fail closed.
+    const bad = try allocator.dupe(u8, spliced);
+    defer allocator.free(bad);
+    const bad_coc = findMarker(bad, codestream.markerValue("coc")) orelse return error.MissingCoc;
+    // COC payload: [Ccoc][Scoc][NL][xcb][ycb][cblk][transform]... transform is
+    // payload index 6 → byte offset bad_coc + 4 + 6.
+    bad[bad_coc + 4 + 6] ^= 0x01;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.decodeLosslessTemporary(allocator, bad));
+}
+
 test "precinct-less COD maps to maximal precincts and decodes byte-exactly" {
     const allocator = std.testing.allocator;
     const width = 32;
@@ -9383,8 +9469,6 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         replacement: u16,
     };
     const cases = [_]UnsupportedMarkerCase{
-        .{ .label = "COC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("coc") },
-        .{ .label = "QCC main marker", .source = codestream.markerValue("qcd"), .replacement = codestream.markerValue("qcc") },
         .{ .label = "PPT tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("ppt") },
     };
 
