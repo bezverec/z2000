@@ -336,3 +336,4 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | 2026-07-08 | O4/O5 full-core parallel forward+inverse DWT (Mac M4) | 539 | **-15.4%** | 469 | **-4.2%** | kept; t1 unchanged, byte-exact, Grok decodes |
 | 2026-07-08 | O5 parallel forward RCT (encode only) (Mac M4) | unchanged | **-3.5%** | — | — | kept; reproducible across 2 A/Bs, variance ±4.5→±1.7, sigma marginally overlaps (base noise); t1 unchanged, byte-exact |
 | 2026-07-08 | O5 parallel inverse RCT (decode) (Mac M4) | — | — | — | +1.2% | reverted; 3.4 ms phase too small, spawn+error-check cancels the gain |
+| 2026-07-08 | O5 block-level decode for 2-3 threads (t2/t3 imbalance) (Mac M4) | — | — | t2 -19.5%, t3 +7% | unchanged | kept; monotone scaling, t1/t10 unchanged, removes nested-parallel special case |

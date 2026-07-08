@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Balanced Low-Thread Decode
+
+- Strict decode now routes every multi-thread run (2 threads and up) through
+  the per-component block-level atomic scheduler instead of the special-case
+  component-parallel path (one thread per component). Component-parallel was
+  only load-balanced at exactly 3 threads and left a 2:1 imbalance at 2
+  threads (~1.31x); on the 2048 noise image at 2 threads block-level
+  balancing lifts decode from ~362 ms to ~291 ms (-19.5%). Scaling is now
+  monotone across thread counts (the old path could make 3 threads
+  accidentally faster than 4 via nested oversubscription, which would thrash
+  on low-core machines). Single-thread and t10 are unchanged; byte-identical
+  output verified across thread counts. Removes two now-dead worker types.
+
 ### Parallel Forward RCT
 
 - The forward reversible color transform now splits its per-pixel work across
