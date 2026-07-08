@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Foreign 9/7 Lossy Decode
+
+- z2000 now decodes foreign OpenJPEG 2.5.4 irreversible 9/7 lossy JP2s
+  byte-identically to OpenJPEG's own decode across a moderate rate ladder
+  (`opj_compress -I` at `-r 1..8`, plus `-q`). A new regression test embeds a
+  32x32 OpenJPEG 9/7 file and asserts z2000's strict decode matches the
+  reference by an FNV-1a hash over the decoded samples. This is the first
+  "arbitrary lossy decode" capability (Lossy row 7->8, full 68->69). Heavy
+  truncation (e.g. `-r 10`) still fails: those blocks carry fewer coding
+  passes than the full bitplane count and the strict decoder's
+  `pass_count != expected_passes` check rejects them — the truncated-block
+  decode path is the recorded follow-up (see next_steps N4).
+
 ### Redundant COC/QCC Component Markers
 
 - The strict reader and JP2 wrapper now accept COC (A.6.2) and QCC (A.6.5)
