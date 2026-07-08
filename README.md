@@ -73,7 +73,10 @@ This first milestone is intentionally small and honest:
   packet catalog where packet spans can be derived: PLT-backed OpenJPEG/Grok
   output, PLT-less default LRCP/no-precinct output from OpenJPEG/Grok/Kakadu,
   PLT-less OpenJPEG/Grok multi-layer lossless ladders, Kakadu reversible QCD
-  profiles, and 9/7 lossy output where the current narrow profile applies
+  profiles, and foreign OpenJPEG 9/7 lossy output (byte-identical to OpenJPEG
+  across a moderate rate ladder; pinned by an embedded-fixture regression test)
+- redundant COC/QCC component markers accepted when they byte-replicate the
+  main COD/QCD (genuine per-component overrides fail closed)
 - strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
   `COM` comments
 
