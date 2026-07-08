@@ -9644,6 +9644,86 @@ test "predictable termination debug sidecar roundtrips larger stream" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "malformed codestream corruption sweep never panics or reads out of bounds" {
+    const base_allocator = std.testing.allocator;
+    // A 16x16 image with 8x8 blocks, two resolutions, and SOP+EPH+TLM keeps
+    // every parse surface the strict decoder walks present (SIZ/COD/QCD, TLM,
+    // per-tile SOT/SOD, PLT, SOP/EPH framing, packet headers, tag-trees, T1
+    // payloads) while staying small enough to sweep byte by byte quickly. The
+    // gate is code-path coverage, not data volume.
+    const width = 16;
+    const height = 16;
+    const samples = try base_allocator.alloc(u16, width * height * 3);
+    defer base_allocator.free(samples);
+    var seed: u32 = 0x9e3779b9;
+    for (samples) |*s| {
+        seed = seed *% 1664525 +% 1013904223;
+        s.* = @intCast((seed >> 15) & 0xff);
+    }
+    const rgb = image.RgbImage{ .allocator = base_allocator, .width = width, .height = height, .bit_depth = 8, .samples = samples };
+
+    const codestream_bytes = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .sop = true,
+        .eph = true,
+        .tlm = true,
+    });
+    defer base_allocator.free(codestream_bytes);
+    const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, codestream_bytes);
+    defer base_allocator.free(wrapped);
+
+    // An OOB read or unchecked slice would abort the test binary (Debug and
+    // ReleaseSafe bounds checks; ReleaseFast would corrupt or crash), so
+    // simply reaching the end of every sweep is the assertion. Errors are
+    // caught and ignored — the gate is "no panic, no out-of-bounds".
+    var arena = std.heap.ArenaAllocator.init(base_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Case = struct { bytes: []const u8, jp2: bool };
+    const targets = [_]Case{ .{ .bytes = codestream_bytes, .jp2 = false }, .{ .bytes = wrapped, .jp2 = true } };
+
+    for (targets) |target| {
+        const n = target.bytes.len;
+
+        // 1) Truncation at every length (bounds-checks short buffers).
+        var len: usize = 0;
+        while (len <= n) : (len += 1) {
+            _ = arena.reset(.retain_capacity);
+            const buf = try a.dupe(u8, target.bytes[0..len]);
+            if (target.jp2) {
+                _ = jp2.parseInfo(buf) catch {};
+                if (jp2.extractCodestream(buf)) |cs| {
+                    _ = codestream.decodeLosslessTemporary(a, cs) catch {};
+                } else |_| {}
+            } else {
+                _ = codestream.decodeLosslessTemporary(a, buf) catch {};
+            }
+        }
+
+        // 2) Single-byte corruption at every other position, with values that
+        // hit marker prefixes (0xff) and zero lengths (0x00).
+        for ([_]u8{ 0xff, 0x00 }) |value| {
+            var i: usize = 0;
+            while (i < n) : (i += 2) {
+                _ = arena.reset(.retain_capacity);
+                const buf = try a.dupe(u8, target.bytes);
+                buf[i] = value;
+                if (target.jp2) {
+                    _ = jp2.parseInfo(buf) catch {};
+                    if (jp2.extractCodestream(buf)) |cs| {
+                        _ = codestream.decodeLosslessTemporary(a, cs) catch {};
+                    } else |_| {}
+                } else {
+                    _ = codestream.decodeLosslessTemporary(a, buf) catch {};
+                }
+            }
+        }
+    }
+}
+
 test "terminated styled T1 streams fail closed on corruption" {
     const allocator = std.testing.allocator;
     // A varied 24x24 image with 8x8 blocks and two levels produces several

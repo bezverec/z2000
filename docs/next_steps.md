@@ -16,9 +16,17 @@ The old tier list below is intentionally preserved as implementation history,
 but many of its "next" items have since landed. The current high-signal order
 for more ISO coverage is:
 
-1. **Malformed corpus / fuzzing gate.** Add targeted corruptions for JP2 boxes,
-   COD/QCD, SOT/TLM/PLT, SOP/EPH, packet headers, and tile-part boundaries.
-   Treat jpylyzer/valid2000-style findings as diagnostics, not absolute truth.
+1. **Malformed corpus / fuzzing gate.** ✅ First gate landed (2026-07-08): the
+   test "malformed codestream corruption sweep never panics or reads out of
+   bounds" builds a valid archival codestream (SOP+EPH+TLM, two resolutions,
+   8x8 blocks) and its JP2 wrapper, then sweeps truncation at every length plus
+   single-byte corruption across every parse surface (SIZ/COD/QCD/TLM/SOT/SOD/
+   PLT/SOP/EPH/packet-header/tag-tree/T1), asserting bounded handling with no
+   panic or OOB under Debug, ReleaseSafe, and ReleaseFast. An out-of-process
+   ReleaseSafe sweep (byte-flip, truncation, multi-value over the full 32 KB
+   smoke JP2) also found zero crashes. Scorecard: full interop/conformance row
+   4→5 (66→67). Remaining: broaden to multiple profiles (multi-tile, 9/7,
+   styled T1) and treat jpylyzer/valid2000 findings as diagnostics.
 2. **Styled T1/T2 corruption matrix.** ✅ First slice landed: the test
    "terminated styled T1 streams fail closed on corruption" runs, for each of
    TERMALL / RESET+TERMALL / ERTERM, a clean roundtrip plus three corruptions —

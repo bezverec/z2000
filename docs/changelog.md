@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Malformed-Input Fuzzing Gate
+
+- Added a CI-enforced corruption-sweep test that fuzzes every strict-decode
+  parse surface. It builds a valid archival codestream (SOP+EPH+TLM, two
+  resolutions, 8x8 blocks) and its JP2 wrapper, then sweeps truncation at
+  every length plus single-byte corruption across SIZ/COD/QCD/TLM/SOT/SOD/
+  PLT/SOP/EPH framing, packet headers, tag-trees, and T1 payloads, asserting
+  every case is handled with a bounded error and no panic or out-of-bounds
+  read under Debug, ReleaseSafe, and ReleaseFast. An out-of-process
+  ReleaseSafe sweep over the full smoke JP2 (byte-flip, truncation, and
+  multi-value corruption, ~96 K malformed inputs) independently found zero
+  crashes, confirming the bounds-checked readers and fail-closed validation
+  hold across the whole file. Scorecard: full-codec interop/conformance row
+  4→5 (66→67).
+
 ### Balanced Low-Thread Decode
 
 - Strict decode now routes every multi-thread run (2 threads and up) through
