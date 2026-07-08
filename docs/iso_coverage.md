@@ -8,12 +8,12 @@ interop or strict-reader check when the feature is externally visible.
 
 ## Current Snapshot
 
-Last updated: 2026-07-07.
+Last updated: 2026-07-08.
 
 | Target | Score | Meaning |
 | --- | ---: | --- |
 | Narrow RGB lossless JP2 target | 90 / 100 | Single-tile RGB TIFF 6.0 to JP2, RCT, reversible 5/3, RPCL, BYPASS, one or more quality layers, PLT/TLM, strict z2000 decode, and OpenJPEG/Grok/Kakadu/jpylyzer smoke acceptance. |
-| Full JPEG2000 Part 1 codec family | 66 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
+| Full JPEG2000 Part 1 codec family | 67 / 100 | Broad Part 1 encode/decode coverage across tiles, progressions, quantization, irreversible profiles, code-block styles, rate allocation, and robust interop. |
 
 The narrow target is intentionally much closer than the full-codec target. It
 measures the practical archival path we are building first. The full-codec
@@ -47,8 +47,8 @@ exist.
 | Lossy encode/decode | 15 | 7 | ICT/9-7 with scalar-expounded and scalar-derived quantization exists for the narrow single-tile path with OpenJPEG-matching reconstruction, and rate-driven layers use global PCRD allocation (J.14) that lands on byte targets within 0.2-0.4 dB of OpenJPEG's allocator at matched sizes. Arbitrary decode and broader error-bound validation remain missing. |
 | T1 completeness | 15 | 10 | BYPASS, terminate-all, vertical-causal, segmentation symbols, TERMALL-scoped reset-context, and TERMALL-scoped predictable termination are public opt-in profiles with focused local coverage; BYPASS/terminate-all/vertical-causal/segmentation-symbols have OpenJPEG/Grok lossless interop, RESET+TERMALL has z2000/OpenJPEG/Grok/Kakadu pixel-exact smoke coverage, and ERTERM is pixel-exact through z2000 strict decode, OpenJPEG, Grok, and Kakadu on the current larger smoke. Standalone RESET, standalone ERTERM, BYPASS+TERMALL, and more termination rules still need public profile coverage. |
 | T2 completeness | 10 | 8 | All five Part 1 progression orders are public with OpenJPEG/Grok lossless interop (single- and multi-layer); packet parser breadth and tile-part divisions beyond none/R remain. |
-| Interop and conformance gates | 5 | 4 | Reproducible OpenJPEG/Grok/Kakadu/jpylyzer matrix exists locally for the narrow smoke file; malformed corpus, fuzzing, and broader profile gates remain incomplete. |
-| **Total** | **100** | **66** |  |
+| Interop and conformance gates | 5 | 5 | Reproducible OpenJPEG/Grok/Kakadu/jpylyzer matrix exists locally for the narrow smoke file, and a CI-enforced corruption-sweep gate fuzzes every parse surface (raw codestream and JP2-wrapped): truncation at every length plus single-byte corruption across SIZ/COD/QCD/TLM/SOT/SOD/PLT/SOP/EPH/packet-header/tag-tree/T1 regions, asserting bounded handling with no panic or out-of-bounds read under Debug, ReleaseSafe, and ReleaseFast. Broader multi-profile/corpus fuzzing can still expand. |
+| **Total** | **100** | **67** |  |
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more
