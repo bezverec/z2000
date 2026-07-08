@@ -90,24 +90,21 @@ items are preserved further below as implementation history.
 ### N4. Lossy breadth — two precisely-characterized foreign-9/7 gaps — M · Med
 
 - **Impact:** full "Lossy encode/decode" +2 (now 8/15 after the OpenJPEG 9/7
-  decode gate landed; two concrete gaps remain, characterized 2026-07-08).
+  decode gate landed; the heavy-truncation smoke is now pinned, but the broader
+  reference-relative lossy matrix still blocks the next score claim).
 - **ISO clause:** E (quantization), G (9/7), J.14 (rate-distortion).
 - **State:** ICT/9-7 encode/decode locally; **foreign OpenJPEG 9/7 lossy now
   decodes byte-identically across `-r 1..8` / `-q`** (embedded-fixture
-  regression gate). Two specific gaps remain:
-  - **(a) Heavy truncation.** OpenJPEG `-r 10` fails with `InvalidBlock`: those
-    blocks carry *fewer* coding passes than the full bitplane count, and the
-    strict decoder's `pass_count != expected_passes` (five sites in
-    `ebcot.zig`) rejects them. Fix: accept a packet-header pass count below the
-    full expected and decode only those passes on the single-layer strict path
-    (z2000 already truncates per-layer for its own `--rates` streams — reuse
-    that partial-pass machinery here). Test: the existing embedded fixture at
-    higher `-r`. **Progress:** the continuous inferred T1 decoders now accept
-    pass prefixes for both legacy MQ and ISO-MQ, and strict irreversible QCD
-    decode carries the signalled exponent table into `Mb` sizing. A local
-    OpenJPEG 2.5.4 `-I -r 10` smoke now decodes without `InvalidBlock`; next is
-    pinning that as a fixture with an explicit PSNR/error-bound gate because
-    reconstruction is not byte-identical to OpenJPEG at heavy truncation.
+  regression gate). The heavy-truncation OpenJPEG 2.5.4 `-I -r 10` corner also
+  decodes through the strict ISO-MQ path and is pinned by an embedded fixture
+  with deterministic FNV output plus an explicit reconstruction-error bound.
+  Two broader gaps remain:
+  - **(a) Heavy-truncation reference matrix.** The focused `-r 10` fixture no
+    longer fails with `InvalidBlock`, but reconstruction is not byte-identical
+    to OpenJPEG at that severe truncation (local diagnostic: about 30.67 dB
+    z2000-vs-OpenJPEG PSNR, max byte diff 41). Next: expand this into a lossy
+    fixture matrix over foreign OpenJPEG/Grok/Kakadu streams and assert a tight
+    reference-relative PSNR/error bound rather than byte identity.
   - **(b) Foreign 9/7 QCD step tables.** Grok 9/7 fails with
     `UnsupportedProfile`: its scalar-expounded QCD step values differ from
     z2000's OpenJPEG-pinned 9/7 norm table, so `validateStrictQcdScalarValue`
@@ -116,7 +113,6 @@ items are preserved further below as implementation history.
     (E-2) — the same relaxation the reversible foreign-QCD and scalar-derived
     work already applied, extended to the irreversible expounded path, using
     the signalled steps for dequantization. Test: a Grok/Kakadu 9/7 fixture.
-- **What to add (was):** a decode fixture matrix over foreign 9/7 lossy JP2s
 - **What to add:** a decode fixture matrix over foreign 9/7 lossy JP2s
   (OpenJPEG/Grok/Kakadu at several rate ladders) asserting z2000's PSNR is
   within a tight bound of each reference decoder's own output; a PCRD PSNR
