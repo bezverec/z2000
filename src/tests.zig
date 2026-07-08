@@ -9777,6 +9777,29 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
         defer base_allocator.free(wrapped);
         try fuzzCorruptionSweep(base_allocator, cs, wrapped, 4, 4);
     }
+
+    // Profile 4: terminate-all (TERMALL) code-block style. Exercises the
+    // per-pass terminated-segment T1 decoder and the multi-segment PLT/packet
+    // path, which the plain-style profiles above never reach.
+    {
+        const samples = try base_allocator.alloc(u16, 24 * 24 * 3);
+        defer base_allocator.free(samples);
+        fillFuzzSamples(samples, 4);
+        const rgb = image.RgbImage{ .allocator = base_allocator, .width = 24, .height = 24, .bit_depth = 8, .samples = samples };
+        const cs = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{
+            .levels = 2,
+            .block_width = 8,
+            .block_height = 8,
+            .terminate_all = true,
+            .sop = true,
+            .eph = true,
+            .tlm = true,
+        });
+        defer base_allocator.free(cs);
+        const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, cs);
+        defer base_allocator.free(wrapped);
+        try fuzzCorruptionSweep(base_allocator, cs, wrapped, 4, 4);
+    }
 }
 
 test "terminated styled T1 streams fail closed on corruption" {
