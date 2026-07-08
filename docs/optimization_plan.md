@@ -334,3 +334,5 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | 2026-07-08 | O3 MQ sig/ref decode index strength-reduction (`bench-rgb-2048`) | — | — | -2.1% | noisy | kept; MQ-sig -3.2%, MQ-ref -5.5% |
 | 2026-07-08 | O3 markDecodedSignificantNbfKnown swap in plain sig decode (Mac M4) | — | — | +0.9% | — | reverted; reload already hoisted, A/B 462.1 vs 466.3 |
 | 2026-07-08 | O4/O5 full-core parallel forward+inverse DWT (Mac M4) | 539 | **-15.4%** | 469 | **-4.2%** | kept; t1 unchanged, byte-exact, Grok decodes |
+| 2026-07-08 | O5 parallel forward RCT (encode only) (Mac M4) | unchanged | **-3.5%** | — | — | kept; reproducible across 2 A/Bs, variance ±4.5→±1.7, sigma marginally overlaps (base noise); t1 unchanged, byte-exact |
+| 2026-07-08 | O5 parallel inverse RCT (decode) (Mac M4) | — | — | — | +1.2% | reverted; 3.4 ms phase too small, spawn+error-check cancels the gain |

@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Parallel Forward RCT
+
+- The forward reversible color transform now splits its per-pixel work across
+  the requested workers (bands aligned to the SIMD width, last band taking the
+  scalar tail), the same "parallelize the phases the full-core DWT left as a
+  serial tail" cleanup. Byte-identical to the serial transform (unit test
+  across dimensions x worker counts). Measured encode t10 on the 2048 noise
+  image (M4): ~123.6 -> 119.3 ms (-3.5% mean, reproducible across two A/B
+  runs, and much tighter variance ±4.5 -> ±1.7); encode t1 unchanged. The
+  inverse RCT (decode) was tried too but reverted — at ~3.4 ms the phase is
+  too small for the thread-spawn + range-error-check overhead to pay off.
+
 ### Full-Core Parallel DWT
 
 - The reversible 5/3 DWT now distributes each of the three components'

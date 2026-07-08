@@ -1297,7 +1297,7 @@ fn encodeLosslessWithOptionsMeasured(
         .reversible_5_3 => if (options.mct == .none)
             try color.forwardNoTransform(allocator, rgb)
         else
-            try color.forwardRct(allocator, rgb),
+            try color.forwardRctThreaded(allocator, rgb, options.threads),
         .irreversible_9_7 => try forwardIrreversibleQuantizedPlanes(allocator, rgb, levels, options),
     };
     defer planes.deinit();
