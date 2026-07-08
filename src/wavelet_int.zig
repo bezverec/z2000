@@ -169,6 +169,247 @@ fn rowSlice(data: []i32, stride: usize, row: usize, len: usize) []i32 {
     return data[start .. start + len];
 }
 
+/// Forward 5/3 column pass restricted to columns [`col_begin`, `col_end`).
+/// `col_begin` must be a multiple of `vertical_lanes`; the scalar tail is
+/// only emitted by the band whose `col_end == width`. Each column transform
+/// is independent, so banding is byte-identical to `forward53Columns`.
+fn forward53ColumnBand(data: []i32, stride: usize, col_begin: usize, col_end: usize, width: usize, height: usize, scratch: []i32) void {
+    if (height < 2) return;
+    var col = col_begin;
+    while (col + vertical_lanes <= col_end) : (col += vertical_lanes) {
+        forward53ColumnVector(data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+    }
+    if (col_end == width) {
+        while (col < width) : (col += 1) {
+            forward53ColumnScalar(data, stride, col, height, scratch[0..height]);
+        }
+    }
+}
+
+fn inverse53ColumnBand(data: []i32, stride: usize, col_begin: usize, col_end: usize, width: usize, height: usize, scratch: []i32) void {
+    if (height < 2) return;
+    var col = col_begin;
+    while (col + vertical_lanes <= col_end) : (col += vertical_lanes) {
+        inverse53ColumnVector(data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+    }
+    if (col_end == width) {
+        while (col < width) : (col += 1) {
+            inverse53ColumnScalar(data, stride, col, height, scratch[0..height]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel multi-component 5/3 DWT.
+//
+// The per-level cascade is inherently sequential (level n+1 filters level n's
+// LL), but within a level the column transforms are mutually independent and
+// so are the row transforms. The serial path caps parallelism at three
+// component threads; on machines with more cores the DWT phase (up to 30% of
+// a threaded encode) then starves. This driver keeps the exact serial
+// operation order per column/row but distributes the three components' column
+// bands and row bands across `thread_count` workers, each with private
+// scratch. Output is byte-identical to running `forward53WithWorkspace` /
+// `inverse53WithWorkspace` on each component (covered by a unit test).
+// ---------------------------------------------------------------------------
+
+const max_dwt_workers = 32;
+
+const DwtPhase = enum { forward_columns, forward_rows, inverse_columns, inverse_rows };
+
+const DwtBandJob = struct {
+    planes: [3][]i32,
+    stride: usize,
+    cur_width: usize,
+    cur_height: usize,
+    scratch: []i32,
+    begin: usize,
+    end: usize,
+    phase: DwtPhase,
+
+    fn run(job: *const DwtBandJob) void {
+        switch (job.phase) {
+            .forward_columns => for (job.planes) |plane| {
+                forward53ColumnBand(plane, job.stride, job.begin, job.end, job.cur_width, job.cur_height, job.scratch);
+            },
+            .inverse_columns => for (job.planes) |plane| {
+                inverse53ColumnBand(plane, job.stride, job.begin, job.end, job.cur_width, job.cur_height, job.scratch);
+            },
+            .forward_rows => for (job.planes) |plane| {
+                var row = job.begin;
+                while (row < job.end) : (row += 1) {
+                    forward53Line(rowSlice(plane, job.stride, row, job.cur_width), job.scratch[0..job.cur_width]);
+                }
+            },
+            .inverse_rows => for (job.planes) |plane| {
+                var row = job.begin;
+                while (row < job.end) : (row += 1) {
+                    inverse53Line(rowSlice(plane, job.stride, row, job.cur_width), job.scratch[0..job.cur_width]);
+                }
+            },
+        }
+    }
+};
+
+fn dwtBandWorker(job: *DwtBandJob) void {
+    job.run();
+}
+
+/// Runs one DWT phase across `worker_count` bands. Column phases split the
+/// column index at `vertical_lanes` boundaries (the final band absorbs the
+/// scalar tail); row phases split the row index evenly. Bands touch disjoint
+/// output regions, so no synchronization beyond the join is needed.
+fn runDwtPhase(
+    planes: [3][]i32,
+    stride: usize,
+    cur_width: usize,
+    cur_height: usize,
+    scratches: []const []i32,
+    worker_count: usize,
+    phase: DwtPhase,
+) void {
+    const is_columns = phase == .forward_columns or phase == .inverse_columns;
+    // Split the driving dimension into `worker_count` bands.
+    const span = if (is_columns) cur_width else cur_height;
+    if (span == 0) return;
+
+    var jobs: [max_dwt_workers]DwtBandJob = undefined;
+    var threads: [max_dwt_workers]std.Thread = undefined;
+    var job_count: usize = 0;
+
+    if (is_columns) {
+        // Distribute full vector groups; the last populated band runs to
+        // `cur_width` so it emits the scalar tail.
+        const vec_groups = cur_width / vertical_lanes;
+        if (vec_groups == 0) {
+            // Only a scalar tail exists — one worker handles it.
+            jobs[0] = .{ .planes = planes, .stride = stride, .cur_width = cur_width, .cur_height = cur_height, .scratch = scratches[0], .begin = 0, .end = cur_width, .phase = phase };
+            job_count = 1;
+        } else {
+            const bands = @min(worker_count, vec_groups);
+            const base = vec_groups / bands;
+            const extra = vec_groups % bands;
+            var group_start: usize = 0;
+            var b: usize = 0;
+            while (b < bands) : (b += 1) {
+                const groups = base + (if (b < extra) @as(usize, 1) else 0);
+                const col_begin = group_start * vertical_lanes;
+                const is_last = b == bands - 1;
+                const col_end = if (is_last) cur_width else (group_start + groups) * vertical_lanes;
+                jobs[b] = .{ .planes = planes, .stride = stride, .cur_width = cur_width, .cur_height = cur_height, .scratch = scratches[b], .begin = col_begin, .end = col_end, .phase = phase };
+                group_start += groups;
+                job_count += 1;
+            }
+        }
+    } else {
+        const bands = @min(worker_count, cur_height);
+        const base = cur_height / bands;
+        const extra = cur_height % bands;
+        var row_start: usize = 0;
+        var b: usize = 0;
+        while (b < bands) : (b += 1) {
+            const rows = base + (if (b < extra) @as(usize, 1) else 0);
+            jobs[b] = .{ .planes = planes, .stride = stride, .cur_width = cur_width, .cur_height = cur_height, .scratch = scratches[b], .begin = row_start, .end = row_start + rows, .phase = phase };
+            row_start += rows;
+            job_count += 1;
+        }
+    }
+
+    if (job_count <= 1) {
+        jobs[0].run();
+        return;
+    }
+
+    var spawned: usize = 0;
+    while (spawned < job_count - 1) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, dwtBandWorker, .{&jobs[spawned]}) catch {
+            // Fall back to running the rest inline on spawn failure.
+            break;
+        };
+    }
+    var remaining = spawned;
+    while (remaining < job_count) : (remaining += 1) jobs[remaining].run();
+    for (threads[0..spawned]) |thread| thread.join();
+}
+
+fn dwtWorkerCount(thread_count: usize) usize {
+    return @max(1, @min(thread_count, max_dwt_workers));
+}
+
+pub fn forward53Parallel(
+    allocator: std.mem.Allocator,
+    planes: [3][]i32,
+    width: usize,
+    height: usize,
+    requested_levels: u8,
+    thread_count: usize,
+) !u8 {
+    for (planes) |plane| {
+        if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
+    }
+    const workers = dwtWorkerCount(thread_count);
+    const max_dim = @max(width, height);
+    const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
+
+    const scratches = try allocator.alloc([]i32, workers);
+    defer allocator.free(scratches);
+    var allocated: usize = 0;
+    defer for (scratches[0..allocated]) |s| allocator.free(s);
+    while (allocated < workers) : (allocated += 1) scratches[allocated] = try allocator.alloc(i32, scratch_len);
+
+    var cur_width = width;
+    var cur_height = height;
+    var done: u8 = 0;
+    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        runDwtPhase(planes, width, cur_width, cur_height, scratches, workers, .forward_columns);
+        runDwtPhase(planes, width, cur_width, cur_height, scratches, workers, .forward_rows);
+        cur_width = lowCount(cur_width);
+        cur_height = lowCount(cur_height);
+    }
+    return done;
+}
+
+pub fn inverse53Parallel(
+    allocator: std.mem.Allocator,
+    planes: [3][]i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    thread_count: usize,
+) !void {
+    for (planes) |plane| {
+        if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
+    }
+    if (levels > 32) return TransformError.TooManyLevels;
+    const workers = dwtWorkerCount(thread_count);
+    const max_dim = @max(width, height);
+    const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
+
+    const scratches = try allocator.alloc([]i32, workers);
+    defer allocator.free(scratches);
+    var allocated: usize = 0;
+    defer for (scratches[0..allocated]) |s| allocator.free(s);
+    while (allocated < workers) : (allocated += 1) scratches[allocated] = try allocator.alloc(i32, scratch_len);
+
+    var shapes: [32]LevelShape = undefined;
+    var cur_width = width;
+    var cur_height = height;
+    var actual_levels: u8 = 0;
+    while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
+        shapes[actual_levels] = .{ .width = cur_width, .height = cur_height };
+        cur_width = lowCount(cur_width);
+        cur_height = lowCount(cur_height);
+    }
+
+    var level = actual_levels;
+    while (level > 0) {
+        level -= 1;
+        const shape = shapes[level];
+        runDwtPhase(planes, width, shape.width, shape.height, scratches, workers, .inverse_rows);
+        runDwtPhase(planes, width, shape.width, shape.height, scratches, workers, .inverse_columns);
+    }
+}
+
 fn forward53Line(data: []i32, scratch: []i32) void {
     if (data.len < 2) return;
 

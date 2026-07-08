@@ -376,14 +376,6 @@ const ComponentSlices = struct {
     }
 };
 
-const DwtJob = struct {
-    plane: []i32,
-    width: usize,
-    height: usize,
-    levels: u8,
-    result: anyerror!void = {},
-};
-
 fn forwardComponents53(
     allocator: std.mem.Allocator,
     planes: *color.RctPlanes,
@@ -406,17 +398,18 @@ fn forwardComponents53(
         return levels;
     }
 
-    var jobs: [3]DwtJob = undefined;
-    for (&jobs, 0..) |*job, component| {
-        job.* = .{
-            .plane = slices.get(component),
-            .width = planes.width,
-            .height = planes.height,
-            .levels = levels,
-        };
-    }
-
-    try runComponentJobs(DwtJob, &jobs, componentThreadCount(options), dwtWorker);
+    // Multi-thread: distribute the three components' row/column bands across
+    // all requested workers instead of capping at 3 component threads. On
+    // >4-core machines the DWT is up to ~30% of a threaded encode and the
+    // 3-way cap left most cores idle.
+    _ = try wavelet_int.forward53Parallel(
+        allocator,
+        .{ slices.get(0), slices.get(1), slices.get(2) },
+        planes.width,
+        planes.height,
+        levels,
+        options.threads,
+    );
     return levels;
 }
 
@@ -502,32 +495,6 @@ fn dequantizeBandRegion(src: []const i32, dst: []f32, stride: usize, rect: subba
     }
 }
 
-fn dwtWorker(job: *DwtJob) void {
-    var workspace = wavelet_int.Workspace.init(std.heap.smp_allocator, @max(job.width, job.height)) catch |err| {
-        job.result = err;
-        return;
-    };
-    defer workspace.deinit();
-    _ = wavelet_int.forward53WithWorkspace(&workspace, job.plane, job.width, job.height, job.levels) catch |err| {
-        job.result = err;
-        return;
-    };
-    job.result = {};
-}
-
-fn inverseDwtWorker(job: *DwtJob) void {
-    var workspace = wavelet_int.Workspace.init(std.heap.smp_allocator, @max(job.width, job.height)) catch |err| {
-        job.result = err;
-        return;
-    };
-    defer workspace.deinit();
-    wavelet_int.inverse53WithWorkspace(&workspace, job.plane, job.width, job.height, job.levels) catch |err| {
-        job.result = err;
-        return;
-    };
-    job.result = {};
-}
-
 fn inverseComponents53(
     allocator: std.mem.Allocator,
     slices: ComponentSlices,
@@ -551,17 +518,15 @@ fn inverseComponents53(
         return;
     }
 
-    var jobs: [3]DwtJob = undefined;
-    for (&jobs, 0..) |*job, component| {
-        job.* = .{
-            .plane = slices.get(component),
-            .width = width,
-            .height = height,
-            .levels = levels,
-        };
-    }
-
-    try runComponentJobs(DwtJob, &jobs, componentThreadCountFor(options.threads), inverseDwtWorker);
+    // Multi-thread: full-core parallel inverse DWT (see forwardComponents53).
+    try wavelet_int.inverse53Parallel(
+        allocator,
+        .{ slices.get(0), slices.get(1), slices.get(2) },
+        width,
+        height,
+        levels,
+        options.threads,
+    );
 }
 
 fn runComponentJobs(
