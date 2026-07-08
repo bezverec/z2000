@@ -4509,6 +4509,49 @@ test "odd and edge dimensions roundtrip losslessly through archival encode/decod
     }
 }
 
+test "16-bit RGB roundtrips losslessly through the archival encode/decode" {
+    const allocator = std.testing.allocator;
+    // Content spanning the full 16-bit range (a gradient across all three
+    // components plus a spatial pattern) so the 5/3 DWT and T1 carry high
+    // bitplanes and the QCD guard/exponent for 16-bit depth is exercised.
+    // The equivalent 80x64 16-bit TIFF was confirmed to decode losslessly
+    // through OpenJPEG 2.5.4 and Grok 20.3.6 (jpylyzer-valid) out-of-process.
+    const width = 80;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const i = (y * width + x) * 3;
+            const r: u32 = @intCast((x * 65535) / @max(width - 1, 1));
+            const g: u32 = @intCast(((y * 40000) / @max(height - 1, 1)) ^ ((x * 97 + y * 131) & 0x3ff));
+            samples[i + 0] = @intCast(r & 0xffff);
+            samples[i + 1] = @intCast(g & 0xffff);
+            samples[i + 2] = @intCast((65535 - r) & 0xffff);
+        }
+    }
+    const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 16, .samples = samples };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 4,
+        .sop = true,
+        .eph = true,
+        .tlm = true,
+    });
+    defer allocator.free(bytes);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(u8, 16), decoded.bit_depth);
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    // The JP2 wrapper carries the 16-bit depth (ihdr bit-depth = 15).
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u8, 16), info.bits_per_component);
+}
+
 test "lossless codestream skeleton contains JPEG2000 markers" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{

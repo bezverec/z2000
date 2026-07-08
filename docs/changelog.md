@@ -5,6 +5,17 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### 16-bit RGB End-to-End
+
+- Confirmed and locked in the full 16-bit RGB archival pipeline. A new test
+  encodes a 16-bit gradient image (content spanning the full 16-bit range,
+  SOP+EPH+TLM, four resolutions) and reconstructs it byte-exactly through
+  z2000 strict decode, with the JP2 wrapper carrying the 16-bit depth. The
+  equivalent 80x64 16-bit TIFF was verified out-of-process to decode
+  losslessly through OpenJPEG 2.5.4 and Grok 20.3.6 and to be jpylyzer-valid,
+  closing the 16-bit leg of the interop evidence (previously only the 8-bit
+  smoke profile was interop-confirmed).
+
 ### Odd/Edge Dimension Coverage
 
 - Added an odd/thin/minimal-dimension roundtrip matrix (1x1, 5x5, 17x13,
