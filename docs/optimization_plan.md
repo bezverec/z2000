@@ -300,6 +300,58 @@ encode passes the same way); candidates: SIMD magnitude/bitplane extraction
   candidate reject path less predictable unless generated-code inspection
   shows a real fallthrough win.
 
+## Campaign checkpoint (2026-07-08, post-parallel-DWT)
+
+After the full-core DWT landed, the Mac/M4 t10 profile is:
+
+| phase | encode t10 (~116 ms) | decode t10 (~108 ms) |
+| --- | ---: | ---: |
+| block payload (T1/MQ) | 88.5 ms (76%) | 85.0 ms (78%) |
+| DWT 5/3 | 18.1 ms (16%) | 10.2 ms (9%) |
+| RCT / inverse MCT | 4.7 ms | 3.4 ms |
+| packet catalog | — | 3.9 ms |
+| TIFF read/write | 3.0 ms | 3.9 ms |
+
+**The parallel side is spent.** Block-payload scales ~4.9x on the M4's
+4P+6E (≈7 P-equivalent cores → ~70% efficiency, near the practical ceiling);
+the DWT is parallel; the remaining serial phases (RCT/MCT ~3–5 ms, catalog
+~4 ms, TIFF ~4 ms) are each individually below the 3% t10 gate, so
+parallelizing any one of them in isolation would be reverted by the keep
+rule. Thread-spawn overhead was estimated and dismissed (~1 ms total across
+all phases; a persistent pool would save < 1%).
+
+**The single-thread MQ is at a local optimum for the u16 nbf structure.**
+Verified this pass: all three MQ decode passes are index-strength-reduced,
+use `Known`-flag/stride helpers, and the packed-flag marking
+(`decodeMarkPackedT1Significant`) is `comptime`-gated to nothing when the
+packed path is off. The `markDecodedSignificantNbfKnown` reload-elimination
+in the plain significance decode was tried and reverted (A/B 462.1 vs
+466.3 ms — the compiler already hoists the `nb_flags.items` slice load).
+
+**Why micro-opts have run out and what the decisive lever now is.** MQ
+arithmetic decode is inherently sequential — each symbol depends on the
+running (a, c) decoder registers, so it cannot be vectorized or reordered;
+only the *surrounding* per-symbol work (flag load, context lookup, neighbor
+update) is improvable, and those wins are individually small (3–5%) with a
+~50% gate-failure rate observed. The one structural single-thread lever left
+is the O3 packed-column reformulation (process a stripe column's four rows
+from packed flag words), but the incremental neighbor updates between
+adjacent columns carry a real data dependency, which is exactly why the
+prior wholesale packed-word path (`-Dpacked-t1-context-flags`) measured
+*slower*. Making it faster than the current tight u16 loop is a research
+effort (new context-modeling layout, careful byte-exact gating over multiple
+iterations), not a one-shot gated change.
+
+**Recommendation for the next iteration.** Either (a) commit to the O3
+packed-column research as a dedicated multi-step effort with the byte-equality
+harness, accepting it may not beat the u16 loop; or (b) accept the current
+Grok t10 gap (encode ~1.13x, decode ~1.40x after the DWT win; t1 ~1.29x/1.30x)
+as the practical floor for this algorithm/data-structure and redirect effort
+to feature/scorecard work in `next_steps.md`. The parallel and micro-opt
+levers this plan enumerated are now spent; do not re-attempt the reverted
+items above (Known swap, all-significant skip, RCT/MCT-only parallelization,
+DWT spawn-gating, generic MQ branch hints) without a new angle.
+
 ## Milestones
 
 - **M1 — decode t1 beats Grok** (< 360 ms): O1 + O2 + O3 stacked.
