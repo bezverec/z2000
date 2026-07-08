@@ -9,20 +9,16 @@ entries are grouped by development milestone rather than semantic version.
 
 - z2000 now decodes foreign OpenJPEG 2.5.4 irreversible 9/7 lossy JP2s
   byte-identically to OpenJPEG's own decode across a moderate rate ladder
-  (`opj_compress -I` at `-r 1..8`, plus `-q`). A new regression test embeds a
-  32x32 OpenJPEG 9/7 file and asserts z2000's strict decode matches the
-  reference by an FNV-1a hash over the decoded samples. This is the first
-  "arbitrary lossy decode" capability (Lossy row 7->8, full 68->69). Heavy
-  truncation (e.g. `-r 10`) still fails: those blocks carry fewer coding
-  passes than the full bitplane count and the strict decoder's
-  `pass_count != expected_passes` check rejects them — the truncated-block
-  decode path is the recorded follow-up (see next_steps N4).
+  (`opj_compress -I` at `-r 1..8`, plus `-q`). A regression test embeds a 32x32
+  OpenJPEG 9/7 file and asserts z2000's strict decode matches the reference by
+  an FNV-1a hash over the decoded samples. This is the first "arbitrary lossy
+  decode" capability (Lossy row 7->8, full 68->69).
 - The continuous inferred T1 decoders now accept rate-truncated pass prefixes
   instead of requiring the full coding-pass count. A focused regression covers
   both legacy MQ and ISO-MQ inferred decode with two-pass prefixes, which
   removes the local T1-side blocker for heavily truncated foreign 9/7 packets;
-  the real OpenJPEG `-r 10` fixture remains the interop gate before claiming
-  this N4 slice complete.
+  the embedded OpenJPEG `-r 10` fixture below now pins the real interop corner
+  that motivated that partial-pass relaxation.
 - Strict decode now also carries signalled QCD exponents into the irreversible
   scalar-expounded/scalar-derived `Mb = G + epsilon_b - 1` calculation instead
   of falling back to a locally re-derived table after validation. A local
@@ -31,6 +27,11 @@ entries are grouped by development milestone rather than semantic version.
   that tiny fixture (about 30.67 dB PSNR, max byte diff 41), so the formal N4
   follow-up is a pinned PSNR/error-bound fixture matrix rather than a score
   claim.
+- A focused embedded regression now pins the same heavily truncated OpenJPEG
+  2.5.4 `opj_compress -I -r 10` JP2 on the strict ISO-MQ decode path. The test
+  asserts deterministic decoded samples by FNV-1a and a bounded reconstruction
+  error against the original synthetic gradient, keeping this interop corner
+  covered without requiring OpenJPEG at unit-test runtime.
 
 ### Redundant COC/QCC Component Markers
 
