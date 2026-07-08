@@ -10,6 +10,121 @@ Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 the subsequent JP2/T2/T1/profile work is **90/100 narrow, 66/100 full** as of
 2026-07-07. First drafted at `ba66799`.
 
+## Next Working Sequence (2026-07-08)
+
+Scorecard now **91/100 narrow, 67/100 full**. Landed since the 2026-07-07
+sequence below: the malformed-input fuzzing gate (four profiles: single-tile
+RCT/5-3, multi-tile RCT/5-3, ICT/9-7, TERMALL — full interop row 4→5), the
+odd/thin/minimal-dimension roundtrip matrix (narrow RCT/DWT 9→10, narrow
+90→91), 16-bit RGB end-to-end interop confirmation, plus the perf pass
+(full-core parallel DWT, parallel forward RCT, balanced low-thread decode —
+see `optimization_plan.md`).
+
+The remaining levers are larger and structural. Ordered by *value per unit
+risk*; each names the ISO clause, the current code state, exactly what is
+missing, a test plan, and a score delta. Detailed tier notes for already-landed
+items are preserved further below as implementation history.
+
+### N1. Core codestream syntax — accept redundant COC/QCC (foreign decode) — M · Low–Med
+
+- **Impact:** full "Core codestream syntax" +1–2, "Lossless decode" +1. (+2–3)
+- **ISO clause:** A.6.2 (COC), A.6.5 (QCC) — component-specific coding/
+  quantization that *overrides* the main COD/QCD for one component.
+- **State:** `isUnsupportedMainHeaderMarker` / `isUnsupportedTilePartHeaderMarker`
+  in `codestream.zig` fail-close COC and QCC. Some encoders emit a COC/QCC per
+  component even when identical to the main COD/QCD, so real files are rejected.
+- **What to add:** parse COC/QCC in the strict main-header walk; accept only
+  when the component's coding/quantization is byte-equivalent to the main
+  COD/QCD (same style, levels, block size, precincts / same guard bits and
+  step sizes); fail closed on any genuine per-component override (z2000 has no
+  per-component coding path). JP2 wrapper follows suit.
+- **Test plan:** splice a redundant COC/QCC into a valid z2000 codestream and
+  assert byte-identical decode; a genuinely different COC (different block
+  size) must return `UnsupportedPayload`; malformed COC length → bounded error
+  (feed it to the corruption sweep). Then decode a real OpenJPEG/Grok/Kakadu
+  file that emits redundant COC/QCC (generate with the reference encoders).
+- **Why first:** unblocks more foreign files with a bounded, byte-equivalence-
+  gated addition — no new coding path, so risk stays low.
+
+### N2. Multi-tile v2 — one axis at a time — L · High
+
+- **Impact:** full "Lossless encode" 9→11, "Lossless decode" 10→12, "Core
+  syntax" +1. (+5, the single biggest full-target lever)
+- **ISO clause:** B.3–B.12 (tile grid, per-tile SOT/SOD, tile-part order).
+- **State:** multi-tile v1 is interop-proven for aligned grids, RCT/5-3, one
+  quality layer, plain style, one tile-part per tile, RPCL. Gates:
+  `validateMultiTileCodingPath` / `validateMultiTileGeometry` in `codestream.zig`.
+- **What to add (staged, each its own PR, single-tile byte-identical at every
+  step):**
+  - **v2a — non-RPCL progressions in multi-tile.** The permutation machinery
+    (`buildStreamPacketSequence`) already covers all five orders single-tile;
+    thread it through the per-tile packet build + strict per-tile slot walk.
+    Interop: OpenJPEG/Grok/Kakadu on a 2×2 LRCP multi-tile file.
+  - **v2b — quality layers per tile.** Remove the `layers != 1` gate; the PCRD
+    allocator and per-tile packet plan already handle layers single-tile.
+  - **v2c — reference-grid partition anchoring.** Drop the "tile-size multiple
+    of 2^levels × precinct" fail-closed guard by anchoring precinct/code-block
+    partitions to the reference grid (ISO B.6/B.7) instead of the tile-local
+    origin — the conformance trap noted in `multi_tile_plan.md`.
+- **Test plan:** per-stage public encode→decode byte-exact on 2×2 and 3×3
+  edge-tile grids; `tile == image` byte-identical to the single-tile path;
+  OpenJPEG/Grok/Kakadu decode of each genuinely multi-tile file.
+- **Risk:** High (per-tile T2/T1 scheduling); keep the single-tile path a
+  passing special case at every step.
+
+### N3. T1 completeness — BYPASS+TERMALL, then standalone RESET/ERTERM — M–L · Med
+
+- **Impact:** full "T1 completeness" +2–3. (+2–3)
+- **ISO clause:** D.4.5 (per-pass termination), D.7 (bypass), the ER-TERM annex.
+- **State:** BYPASS (raw segments) and TERMALL (per-pass ISO-MQ termination)
+  are each public and interop-proven, but their *combination* and standalone
+  RESET/ERTERM stay fail-closed (`validateCodingPath`).
+- **What to add:** BYPASS+TERMALL first — raw bypass segments that are also
+  per-pass terminated (the segment table already carries per-pass spans for
+  both); encoder emits, strict decoder consumes, then OpenJPEG/Grok/Kakadu
+  interop. Standalone RESET / standalone ERTERM need the same writer + strict
+  reader + interop before their gates open.
+- **Test plan:** local byte-exact roundtrip + a fail-closed corruption case per
+  combination (extend the styled-T1 matrix), then external `-M` interop.
+
+### N4. Lossy breadth — foreign 9/7 decode fixtures + PCRD PSNR gate — M · Med
+
+- **Impact:** full "Lossy encode/decode" +2–3 (the largest single gap, 7/15).
+- **ISO clause:** E (quantization), G (9/7), J.14 (rate-distortion).
+- **State:** ICT/9-7 with scalar-expounded and scalar-derived QCD encode/decode
+  locally; z2000 decodes OpenJPEG 9/7 lossy at max-diff 1. Missing: a
+  PSNR-gated interop fixture set and broader error-bound validation.
+- **What to add:** a decode fixture matrix over foreign 9/7 lossy JP2s
+  (OpenJPEG/Grok/Kakadu at several rate ladders) asserting z2000's PSNR is
+  within a tight bound of each reference decoder's own output; a PCRD PSNR
+  regression check on a shared corpus at matched byte ladders.
+- **Test plan:** generate foreign 9/7 fixtures, decode with z2000 and the
+  reference, compare PSNR (not byte-exact — 9/7 is lossy); assert deterministic
+  z2000 output across thread counts.
+
+### N5. Perf — single-thread MQ column-pipeline (decisive Grok lever) — L · High
+
+- **Impact:** the only remaining lever that beats Grok single-thread (decode t1
+  ~1.26× Grok is the floor; parallelism is spent — see `optimization_plan.md`).
+- **State:** all three MQ decode passes are at a local optimum for the u16 nbf
+  structure; the packed-column path (`-Dpacked-t1-context-flags`) is correct
+  but slower. This is a research effort (new context-modeling layout, byte-exact
+  gated over many iterations), not a one-shot change; a prior wholesale attempt
+  regressed.
+- **Test plan:** the byte-equality harness (direct-vs-symbol coder) plus the
+  benchmark keep rule from `optimization_plan.md` on every sub-step.
+
+### N6. Arbitrary component layouts (grayscale / >3 components) — L · High
+
+- **Impact:** full "Core syntax" +1, "Lossless encode/decode" +1 each. (+3)
+- **State:** the pipeline is hard-wired to 3 RGB components with MCT; SIZ
+  validation requires `components == 3`. Single-component (grayscale) and
+  N-component (no MCT) are a common real gap.
+- **What to add:** a component-count-generic path (no MCT for ≠3 or when
+  `--mct none`), SIZ/COD/QCD for arbitrary component counts, TIFF grayscale
+  I/O. Large vertical feature (like multi-tile was); scope as its own multi-PR
+  effort with single-tile RGB byte-identical at every step.
+
 ## Current Working Sequence (2026-07-07 docs sync)
 
 The old tier list below is intentionally preserved as implementation history,
