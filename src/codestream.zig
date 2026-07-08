@@ -1297,7 +1297,7 @@ fn encodeLosslessWithOptionsMeasured(
         .reversible_5_3 => if (options.mct == .none)
             try color.forwardNoTransform(allocator, rgb)
         else
-            try color.forwardRct(allocator, rgb),
+            try color.forwardRctThreaded(allocator, rgb, options.threads),
         .irreversible_9_7 => try forwardIrreversibleQuantizedPlanes(allocator, rgb, levels, options),
     };
     defer planes.deinit();
@@ -4254,19 +4254,6 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     return color.inverseIct(allocator, ict);
 }
 
-const StrictComponentDecodeJob = struct {
-    allocator: std.mem.Allocator,
-    width: usize,
-    height: usize,
-    catalog: *const StrictPacketBlockCatalog,
-    component: usize,
-    options: DecodeOptions,
-    plane: []i32,
-    collect_t1_stats: bool = false,
-    t1_stats: ebcot.DecodePassStats = .{},
-    result: anyerror!void = {},
-};
-
 const StrictBlockDecodeJob = struct {
     width: usize,
     height: usize,
@@ -4283,24 +4270,6 @@ const StrictBlockDecodeJob = struct {
     worker_stats: StrictBlockWorkerStats = .{},
     result: anyerror!void = {},
 };
-
-fn strictComponentDecodeWorker(job: *StrictComponentDecodeJob) void {
-    fillStrictComponentCoefficientsFromBlockCatalog(
-        job.allocator,
-        job.width,
-        job.height,
-        job.catalog.*,
-        job.component,
-        job.options,
-        job.plane,
-        if (job.collect_t1_stats) &job.t1_stats else null,
-        null,
-    ) catch |err| {
-        job.result = err;
-        return;
-    };
-    job.result = {};
-}
 
 fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
     const worker_start = if (job.profile_worker) monotonicNs() else 0;
@@ -4436,46 +4405,12 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !color.RctPlanes {
-    if (options.threads <= 3 and componentThreadCountFor(options.threads) >= 2) {
-        const pixels = try std.math.mul(usize, header.width, header.height);
-        const y = try allocator.alloc(i32, pixels);
-        errdefer allocator.free(y);
-        const cb = try allocator.alloc(i32, pixels);
-        errdefer allocator.free(cb);
-        const cr = try allocator.alloc(i32, pixels);
-        errdefer allocator.free(cr);
-        const targets = [3][]i32{ y, cb, cr };
-
-        var jobs: [3]StrictComponentDecodeJob = undefined;
-        for (&jobs, 0..) |*job, component| {
-            job.* = .{
-                .allocator = std.heap.smp_allocator,
-                .width = header.width,
-                .height = header.height,
-                .catalog = &catalog,
-                .component = component,
-                .options = options,
-                .plane = targets[component],
-                .collect_t1_stats = timings != null,
-            };
-        }
-        try runComponentJobs(StrictComponentDecodeJob, &jobs, componentThreadCountFor(options.threads), strictComponentDecodeWorker);
-        if (timings) |t| {
-            const stats = &t.t1_pass_stats;
-            for (jobs) |job| stats.merge(job.t1_stats);
-        }
-
-        return .{
-            .allocator = allocator,
-            .width = header.width,
-            .height = header.height,
-            .bit_depth = header.bit_depth,
-            .y = y,
-            .cb = cb,
-            .cr = cr,
-        };
-    }
-
+    // All multi-thread decode goes through the per-component block-level
+    // atomic scheduler (sequential components, balanced within each). The
+    // former component-parallel path (one thread per component) was only
+    // load-balanced at exactly 3 threads and left a 2:1 imbalance at 2
+    // threads (~1.31x); block-level balancing raises 2 threads to ~1.66x and
+    // keeps scaling monotone across thread counts.
     const y = try reconstructStrictComponentCoefficientsFromBlockCatalog(
         allocator,
         header.width,
@@ -4682,7 +4617,7 @@ fn strictBlocksRequireZeroInitializedPlane(blocks: []const StrictPacketBlock) bo
 }
 
 fn strictDecodeBlockThreadCount(options: DecodeOptions, block_count: usize) usize {
-    if (options.threads <= 3 or block_count < 2) return 1;
+    if (options.threads < 2 or block_count < 2) return 1;
     return @min(@as(usize, options.threads), block_count);
 }
 

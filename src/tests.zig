@@ -4176,6 +4176,44 @@ test "RCT transform matches JPEG2000 reversible equations" {
     try std.testing.expectEqualSlices(u16, rgb.samples, reconstructed.samples);
 }
 
+test "threaded forward RCT matches the serial transform byte-for-byte" {
+    const allocator = std.testing.allocator;
+    // Sizes that cover vector groups, scalar tails, and odd pixel counts.
+    const dims = [_][2]usize{ .{ 64, 64 }, .{ 65, 63 }, .{ 1, 7 }, .{ 129, 128 }, .{ 200, 100 } };
+    const thread_counts = [_]usize{ 1, 2, 4, 8, 16 };
+
+    for (dims) |dim| {
+        const width = dim[0];
+        const height = dim[1];
+        const pixels = width * height;
+        const samples = try allocator.alloc(u16, pixels * 3);
+        defer allocator.free(samples);
+
+        var seed: u32 = @intCast(width * 6151 + height * 389);
+        for (samples) |*s| {
+            seed = seed *% 1664525 +% 1013904223;
+            s.* = @intCast((seed >> 16) & 0xff);
+        }
+        const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .samples = samples };
+
+        var serial = try color.forwardRct(allocator, rgb);
+        defer serial.deinit();
+
+        for (thread_counts) |threads| {
+            var threaded = try color.forwardRctThreaded(allocator, rgb, threads);
+            defer threaded.deinit();
+            try std.testing.expectEqualSlices(i32, serial.y, threaded.y);
+            try std.testing.expectEqualSlices(i32, serial.cb, threaded.cb);
+            try std.testing.expectEqualSlices(i32, serial.cr, threaded.cr);
+
+            // Roundtrip through the serial inverse restores the input.
+            var back = try color.inverseRct(allocator, threaded);
+            defer back.deinit();
+            try std.testing.expectEqualSlices(u16, rgb.samples, back.samples);
+        }
+    }
+}
+
 test "RCT transform roundtrips a small RGB image" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{

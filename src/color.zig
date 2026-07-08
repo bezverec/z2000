@@ -153,12 +153,20 @@ const ict_lanes = simd.i32_lanes;
 const IctVector = @Vector(ict_lanes, f32);
 
 fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels: usize, level_shift: i32) void {
+    forwardRctRange(samples, y, cb, cr, 0, pixels, level_shift);
+}
+
+/// Forward RCT over the pixel range [`begin`, `end`). `begin` is a multiple
+/// of `rct_lanes`; the scalar tail is emitted only when `end` is the real
+/// pixel count. Each pixel is independent, so banding is byte-identical to a
+/// single full pass.
+fn forwardRctRange(samples: []const u16, y: []i32, cb: []i32, cr: []i32, begin: usize, end: usize, level_shift: i32) void {
     // ISO/IEC 15444-1 B.1.1 DC level shift: unsigned samples are shifted by
     // 2^(Ssiz-1) before the component transform. Cb/Cr are component
     // differences, so the shift cancels there; only Y needs it.
     const shift_vec: RctVector = @splat(level_shift);
-    var i: usize = 0;
-    while (i + rct_lanes <= pixels) : (i += rct_lanes) {
+    var i: usize = begin;
+    while (i + rct_lanes <= end) : (i += rct_lanes) {
         const rgb = loadRgbVector(samples, i);
         const two_g = rgb.g << rct_shift_1;
         const y_vec = floorQuarterVector(rgb.r + two_g + rgb.b) - shift_vec;
@@ -169,7 +177,7 @@ fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels
         cr[i..][0..rct_lanes].* = @as([rct_lanes]i32, cr_vec);
     }
 
-    while (i < pixels) : (i += 1) {
+    while (i < end) : (i += 1) {
         const r = @as(i32, samples[i * 3]);
         const g = @as(i32, samples[i * 3 + 1]);
         const b = @as(i32, samples[i * 3 + 2]);
@@ -180,13 +188,17 @@ fn forwardRctVector(samples: []const u16, y: []i32, cb: []i32, cr: []i32, pixels
 }
 
 fn inverseRctVector(samples: []u16, planes: RctPlanes, pixels: usize, max_sample: i32) !void {
+    const level_shift = try dcLevelShift(planes.bit_depth);
+    try inverseRctRange(samples, planes, 0, pixels, max_sample, level_shift);
+}
+
+fn inverseRctRange(samples: []u16, planes: RctPlanes, begin: usize, end: usize, max_sample: i32, level_shift: i32) !void {
     const zero: RctVector = @splat(0);
     const max: RctVector = @splat(max_sample);
-    const level_shift = try dcLevelShift(planes.bit_depth);
     const shift_vec: RctVector = @splat(level_shift);
 
-    var i: usize = 0;
-    while (i + rct_lanes <= pixels) : (i += rct_lanes) {
+    var i: usize = begin;
+    while (i + rct_lanes <= end) : (i += rct_lanes) {
         const y: RctVector = @as(RctVector, planes.y[i..][0..rct_lanes].*) + shift_vec;
         const cb: RctVector = planes.cb[i..][0..rct_lanes].*;
         const cr: RctVector = planes.cr[i..][0..rct_lanes].*;
@@ -201,7 +213,7 @@ fn inverseRctVector(samples: []u16, planes: RctPlanes, pixels: usize, max_sample
         storeRgbVector(samples, i, r, g, b);
     }
 
-    while (i < pixels) : (i += 1) {
+    while (i < end) : (i += 1) {
         const g = planes.y[i] + level_shift - floorQuarter(planes.cb[i] + planes.cr[i]);
         const r = planes.cr[i] + g;
         const b = planes.cb[i] + g;
@@ -216,6 +228,90 @@ fn inverseRctVector(samples: []u16, planes: RctPlanes, pixels: usize, max_sample
         samples[i * 3 + 1] = @intCast(g);
         samples[i * 3 + 2] = @intCast(b);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel RCT: the color transform is per-pixel independent, so the pixel
+// range splits cleanly across workers (bands aligned to rct_lanes, the last
+// band taking the scalar tail). Output is byte-identical to the serial pass.
+// Small phases (~3-5 ms at high thread counts) that were a serial tail once
+// the DWT went full-core.
+// ---------------------------------------------------------------------------
+
+const max_rct_workers = 32;
+
+const RctForwardJob = struct {
+    samples: []const u16,
+    y: []i32,
+    cb: []i32,
+    cr: []i32,
+    begin: usize,
+    end: usize,
+    level_shift: i32,
+};
+
+fn rctForwardWorker(job: *RctForwardJob) void {
+    forwardRctRange(job.samples, job.y, job.cb, job.cr, job.begin, job.end, job.level_shift);
+}
+
+/// Splits [0, pixels) into up to `thread_count` bands aligned to rct_lanes
+/// (last band → pixels). Writes band [begin,end) pairs into `out` and returns
+/// the count. A single scalar-only band is produced when there are no full
+/// vector groups.
+fn rctBands(pixels: usize, thread_count: usize, out: *[max_rct_workers][2]usize) usize {
+    const groups = pixels / rct_lanes;
+    if (groups == 0) {
+        out[0] = .{ 0, pixels };
+        return 1;
+    }
+    const bands = @max(1, @min(@min(thread_count, max_rct_workers), groups));
+    const base = groups / bands;
+    const extra = groups % bands;
+    var group_start: usize = 0;
+    var b: usize = 0;
+    while (b < bands) : (b += 1) {
+        const g = base + (if (b < extra) @as(usize, 1) else 0);
+        const begin = group_start * rct_lanes;
+        const is_last = b == bands - 1;
+        out[b] = .{ begin, if (is_last) pixels else (group_start + g) * rct_lanes };
+        group_start += g;
+    }
+    return bands;
+}
+
+pub fn forwardRctThreaded(allocator: std.mem.Allocator, rgb: image.RgbImage, thread_count: usize) !RctPlanes {
+    if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
+    const pixels = try std.math.mul(usize, rgb.width, rgb.height);
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
+
+    const y = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(y);
+    const cb = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(cb);
+    const cr = try allocator.alloc(i32, pixels);
+    errdefer allocator.free(cr);
+
+    const level_shift = try dcLevelShift(rgb.bit_depth);
+    var ranges: [max_rct_workers][2]usize = undefined;
+    const band_count = rctBands(pixels, thread_count, &ranges);
+
+    if (band_count <= 1) {
+        forwardRctRange(rgb.samples, y, cb, cr, 0, pixels, level_shift);
+    } else {
+        var jobs: [max_rct_workers]RctForwardJob = undefined;
+        for (0..band_count) |b| jobs[b] = .{ .samples = rgb.samples, .y = y, .cb = cb, .cr = cr, .begin = ranges[b][0], .end = ranges[b][1], .level_shift = level_shift };
+        var threads: [max_rct_workers]std.Thread = undefined;
+        var spawned: usize = 0;
+        while (spawned < band_count - 1) : (spawned += 1) {
+            threads[spawned] = std.Thread.spawn(.{}, rctForwardWorker, .{&jobs[spawned]}) catch break;
+        }
+        var remaining = spawned;
+        while (remaining < band_count) : (remaining += 1) rctForwardWorker(&jobs[remaining]);
+        for (threads[0..spawned]) |thread| thread.join();
+    }
+
+    return .{ .allocator = allocator, .width = rgb.width, .height = rgb.height, .bit_depth = rgb.bit_depth, .y = y, .cb = cb, .cr = cr };
 }
 
 const RgbVector = struct {
