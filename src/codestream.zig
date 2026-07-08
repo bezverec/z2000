@@ -2110,10 +2110,11 @@ const StrictQcdInfo = struct {
     /// Signalled guard bit count G (E-2). z2000 writes 2; foreign reversible
     /// streams (Kakadu uses 1) are accepted in 1..7.
     guard_bits: u8 = strict_guard_bits,
-    /// Signalled per-band epsilon_b for the reversible no-quantization path,
-    /// in QCD order: LL, then HL/LH/HH per decomposition level from `levels`
-    /// down to 1. Zero count means "derive from the z2000 formula"
-    /// (irreversible styles and the sidecar path).
+    /// Signalled epsilon_b values from QCD. Scalar-expounded and reversible
+    /// no-quantization store one value per band in QCD order: LL, then
+    /// HL/LH/HH per decomposition level from `levels` down to 1.
+    /// Scalar-derived stores the single LL value and derives the rest via E-5.
+    /// Zero count means "derive from the z2000 formula" (sidecar path).
     exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands,
     exponent_count: u8 = 0,
 };
@@ -2132,23 +2133,33 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
         // The irreversible step tables are validated against z2000's exact
         // OpenJPEG-compatible values, which assume the z2000 guard count.
         if (guard_bits != strict_guard_bits) return CodestreamError.UnsupportedPayload;
+        var info = StrictQcdInfo{
+            .bands = bands,
+            .quantization = quantization,
+            .guard_bits = guard_bits,
+        };
         if (quantization == .scalar_derived) {
             if (segment.len != 1 + 2) return CodestreamError.InvalidCodestream;
             var cursor: usize = 1;
-            try validateStrictQcdScalarValue(segment, &cursor, bit_depth, .ll, levels);
-            return .{ .bands = bands, .quantization = quantization };
+            info.exponents[0] = try validateStrictQcdScalarValue(segment, &cursor, bit_depth, .ll, levels);
+            info.exponent_count = 1;
+            return info;
         }
         if (quantization != .scalar_expounded) return CodestreamError.UnsupportedPayload;
         if (segment.len != 1 + 2 * bands) return CodestreamError.InvalidCodestream;
         var cursor: usize = 1;
-        try validateStrictQcdScalarValue(segment, &cursor, bit_depth, .ll, levels);
+        var band_index: usize = 0;
+        info.exponents[band_index] = try validateStrictQcdScalarValue(segment, &cursor, bit_depth, .ll, levels);
+        band_index += 1;
         var level: u8 = levels;
         while (level > 0) : (level -= 1) {
             inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
-                try validateStrictQcdScalarValue(segment, &cursor, bit_depth, kind, level);
+                info.exponents[band_index] = try validateStrictQcdScalarValue(segment, &cursor, bit_depth, kind, level);
+                band_index += 1;
             }
         }
-        return .{ .bands = bands, .quantization = quantization };
+        info.exponent_count = @intCast(band_index);
+        return info;
     }
 
     if (quantization != .none) return CodestreamError.UnsupportedPayload;
@@ -2208,21 +2219,40 @@ fn signalledBandEpsilon(
     return exponents[index];
 }
 
+fn signalledHeaderBandEpsilon(
+    header: TemporaryHeader,
+    kind: subband.Kind,
+    band_level: u8,
+) ?u8 {
+    const exponents = header.qcd_exponents[0..header.qcd_exponent_count];
+    return switch (header.quantization) {
+        .none, .scalar_expounded => signalledBandEpsilon(exponents, header.levels, kind, band_level),
+        .scalar_derived => {
+            if (exponents.len != 1) return null;
+            const base = exponents[0];
+            if (kind == .ll) return base;
+            if (band_level == 0 or band_level > header.levels) return null;
+            const drop = header.levels - band_level;
+            if (base <= drop) return null;
+            return base - drop;
+        },
+    };
+}
+
 /// Mb for a band on the strict decode path: reversible streams follow the
-/// signalled QCD epsilon_b and guard bits (E-2); everything else falls back
-/// to the z2000 formula.
+/// signalled QCD epsilon_b and guard bits (E-2) whenever the main header
+/// captured QCD exponents; the sidecar path falls back to the z2000 formula.
 fn bandNominalBitplanesForHeader(
     header: TemporaryHeader,
     kind: subband.Kind,
     band_level: u8,
     levels: u8,
 ) !u8 {
-    if (header.transform == .reversible_5_3 and header.qcd_exponent_count != 0) {
+    if (header.qcd_exponent_count != 0) {
         // The QCD entry count follows the signalled NL (header.levels); the
         // caller-derived level count can be smaller when empty subbands were
         // skipped by the band builder, so the mapping must use the NL.
-        const exponents = header.qcd_exponents[0..header.qcd_exponent_count];
-        const epsilon = signalledBandEpsilon(exponents, header.levels, kind, band_level) orelse
+        const epsilon = signalledHeaderBandEpsilon(header, kind, band_level) orelse
             return CodestreamError.InvalidCodestream;
         if (header.guard_bits == 0) return CodestreamError.InvalidCodestream;
         const total = @as(u16, epsilon) + header.guard_bits - 1;
@@ -2246,11 +2276,13 @@ fn validateStrictQcdScalarValue(
     bit_depth: u8,
     kind: subband.Kind,
     band_level: u8,
-) !void {
+) !u8 {
     const step = try irreversibleBandStepSize(bit_depth, kind, band_level);
     const expected = (@as(u16, step.exponent) << 11) | step.mantissa;
-    if (readU16Be(segment, cursor.*) != expected) return CodestreamError.UnsupportedPayload;
+    const actual = readU16Be(segment, cursor.*);
+    if (actual != expected) return CodestreamError.UnsupportedPayload;
     cursor.* += 2;
+    return @intCast(actual >> 11);
 }
 
 pub fn hasMarker(bytes: []const u8, marker: u16) bool {

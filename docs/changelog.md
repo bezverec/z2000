@@ -17,6 +17,20 @@ entries are grouped by development milestone rather than semantic version.
   passes than the full bitplane count and the strict decoder's
   `pass_count != expected_passes` check rejects them — the truncated-block
   decode path is the recorded follow-up (see next_steps N4).
+- The continuous inferred T1 decoders now accept rate-truncated pass prefixes
+  instead of requiring the full coding-pass count. A focused regression covers
+  both legacy MQ and ISO-MQ inferred decode with two-pass prefixes, which
+  removes the local T1-side blocker for heavily truncated foreign 9/7 packets;
+  the real OpenJPEG `-r 10` fixture remains the interop gate before claiming
+  this N4 slice complete.
+- Strict decode now also carries signalled QCD exponents into the irreversible
+  scalar-expounded/scalar-derived `Mb = G + epsilon_b - 1` calculation instead
+  of falling back to a locally re-derived table after validation. A local
+  diagnostic OpenJPEG 2.5.4 `-I -r 10` smoke now decodes through z2000 without
+  `InvalidBlock`; reconstruction still differs from OpenJPEG's own decode on
+  that tiny fixture (about 30.67 dB PSNR, max byte diff 41), so the formal N4
+  follow-up is a pinned PSNR/error-bound fixture matrix rather than a score
+  claim.
 
 ### Redundant COC/QCC Component Markers
 

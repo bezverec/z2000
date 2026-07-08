@@ -3175,7 +3175,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     }
 
     const expected_passes = expectedCodingPasses(bitplanes);
-    if (pass_count != expected_passes) return EbcotError.InvalidBlock;
+    if (pass_count > expected_passes) return EbcotError.InvalidBlock;
 
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.significant_words.items, 0);
@@ -3272,7 +3272,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorr
     }
 
     const expected_passes = expectedCodingPasses(bitplanes);
-    if (pass_count != expected_passes) return EbcotError.InvalidBlock;
+    if (pass_count > expected_passes) return EbcotError.InvalidBlock;
 
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.significant_words.items, 0);
