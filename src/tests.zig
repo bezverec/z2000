@@ -7166,6 +7166,68 @@ test "scalar-derived quantization signals one QCD step and roundtrips within los
     try std.testing.expect(mse < 16.0);
 }
 
+test "irreversible QCD scalar-expounded decode follows signalled mantissas" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = row * width + col;
+            samples[i * 3 + 0] = @intCast((col * 5 + row * 3) % 256);
+            samples[i * 3 + 1] = @intCast((col * 2 + row * 7 + 19) % 256);
+            samples[i * 3 + 2] = @intCast((col * 9 + row + 31) % 256);
+        }
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+        .emit_temporary_payload_sidecar = false,
+    });
+    defer allocator.free(bytes);
+
+    var baseline = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
+    defer baseline.deinit();
+
+    const rewritten = try allocator.dupe(u8, bytes);
+    defer allocator.free(rewritten);
+    const qcd = findMarker(rewritten, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const lqcd = readU16BeTest(rewritten, qcd + 2);
+    try std.testing.expectEqual(@as(u8, (2 << 5) | 2), rewritten[qcd + 4]);
+    const step_count = (@as(usize, lqcd) - 3) / 2;
+    var step_index: usize = 0;
+    while (step_index < step_count) : (step_index += 1) {
+        const offset = qcd + 5 + step_index * 2;
+        const value = readU16BeTest(rewritten, offset);
+        const exponent = value & 0xf800;
+        writeU16BeTest(rewritten, offset, exponent | 0x07ff);
+    }
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, rewritten, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(rgb.width, decoded.width);
+    try std.testing.expectEqual(rgb.height, decoded.height);
+    try std.testing.expectEqual(rgb.bit_depth, decoded.bit_depth);
+
+    var changed_samples: usize = 0;
+    for (baseline.samples, decoded.samples) |base, actual| {
+        if (base != actual) changed_samples += 1;
+    }
+    try std.testing.expect(changed_samples > 0);
+}
+
 test "lossy options fail closed for inconsistent combinations" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });

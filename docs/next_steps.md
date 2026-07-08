@@ -107,12 +107,13 @@ items are preserved further below as implementation history.
     reference-relative PSNR/error bound rather than byte identity.
   - **(b) Foreign 9/7 QCD step tables.** Grok 9/7 fails with
     `UnsupportedProfile`: its scalar-expounded QCD step values differ from
-    z2000's OpenJPEG-pinned 9/7 norm table, so `validateStrictQcdScalarValue`
-    rejects them. Fix: for irreversible scalar-expounded QCD, accept foreign
-    (exponent, mantissa) pairs and derive Mb from the *signalled* exponents
-    (E-2) — the same relaxation the reversible foreign-QCD and scalar-derived
-    work already applied, extended to the irreversible expounded path, using
-    the signalled steps for dequantization. Test: a Grok/Kakadu 9/7 fixture.
+    z2000's OpenJPEG-pinned 9/7 norm table. **Progress:** the strict
+    irreversible QCD parser now accepts signalled scalar-expounded/scalar-
+    derived `(exponent, mantissa)` pairs, derives `Mb` from the signalled
+    exponents (E-2), and uses the signalled mantissas for 9/7 dequantization;
+    a synthetic mantissa-rewrite regression pins that local behavior. Next:
+    replace the synthetic gate with a real Grok/Kakadu 9/7 fixture and a
+    reference-relative PSNR bound.
 - **What to add:** a decode fixture matrix over foreign 9/7 lossy JP2s
   (OpenJPEG/Grok/Kakadu at several rate ladders) asserting z2000's PSNR is
   within a tight bound of each reference decoder's own output; a PCRD PSNR
