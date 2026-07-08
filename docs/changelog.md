@@ -19,6 +19,12 @@ entries are grouped by development milestone rather than semantic version.
   crashes, confirming the bounds-checked readers and fail-closed validation
   hold across the whole file. Scorecard: full-codec interop/conformance row
   4→5 (66→67).
+- Broadened the corruption-sweep gate to three profiles: single-tile archival
+  RCT/5-3, multi-tile RCT/5-3 (exercising the per-tile SOT/PLT walk and
+  multi-tile strict decode), and irreversible ICT/9-7 (QCD step-size parsing
+  plus the float inverse-DWT/ICT path). All green in Debug/ReleaseSafe/
+  ReleaseFast; out-of-process ReleaseSafe sweeps of the multi-tile and 9/7
+  smoke JP2s independently found zero crashes.
 
 ### Balanced Low-Thread Decode
 

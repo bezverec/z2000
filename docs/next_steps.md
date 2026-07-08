@@ -25,8 +25,13 @@ for more ISO coverage is:
    panic or OOB under Debug, ReleaseSafe, and ReleaseFast. An out-of-process
    ReleaseSafe sweep (byte-flip, truncation, multi-value over the full 32 KB
    smoke JP2) also found zero crashes. Scorecard: full interop/conformance row
-   4→5 (66→67). Remaining: broaden to multiple profiles (multi-tile, 9/7,
-   styled T1) and treat jpylyzer/valid2000 findings as diagnostics.
+   4→5 (66→67). Broadened (2026-07-08) to three profiles in one test —
+   single-tile archival RCT/5-3, multi-tile RCT/5-3 (per-tile SOT/PLT walk),
+   and irreversible ICT/9-7 (QCD step-size parse + float inverse DWT/ICT) —
+   all green in Debug/ReleaseSafe/ReleaseFast; out-of-process ReleaseSafe
+   sweeps of the multi-tile and 9/7 smoke JP2s also found zero crashes.
+   Remaining: styled-T1 profiles (already have a dedicated corruption matrix)
+   and treating jpylyzer/valid2000 findings as diagnostics.
 2. **Styled T1/T2 corruption matrix.** ✅ First slice landed: the test
    "terminated styled T1 streams fail closed on corruption" runs, for each of
    TERMALL / RESET+TERMALL / ERTERM, a clean roundtrip plus three corruptions —
