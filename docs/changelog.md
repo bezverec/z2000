@@ -32,6 +32,13 @@ entries are grouped by development milestone rather than semantic version.
   asserts deterministic decoded samples by FNV-1a and a bounded reconstruction
   error against the original synthetic gradient, keeping this interop corner
   covered without requiring OpenJPEG at unit-test runtime.
+- The strict irreversible QCD parser now accepts signalled scalar-expounded and
+  scalar-derived `(epsilon_b, mu_b)` step sizes instead of requiring z2000's
+  locally generated OpenJPEG-compatible table byte-for-byte. Strict decode uses
+  those signalled mantissas for 9/7 dequantization and still derives `Mb` from
+  the signalled exponents. A synthetic mantissa-rewrite regression keeps the
+  parser and dequantization path tied together; a real Grok/Kakadu 9/7 fixture
+  remains the next interop gate.
 
 ### Redundant COC/QCC Component Markers
 

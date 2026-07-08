@@ -1776,6 +1776,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var parsed_guard_bits: u8 = strict_guard_bits;
     var parsed_qcd_exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands;
     var parsed_qcd_exponent_count: u8 = 0;
+    var parsed_qcd_steps: [max_qcd_bands]BandStepSize = [_]BandStepSize{.{ .exponent = 0, .mantissa = 0 }} ** max_qcd_bands;
+    var parsed_qcd_step_count: u8 = 0;
     var precincts = defaultPrecincts();
     var precinct_count: u8 = 0;
     var parsed_grid: ?tile_grid.Grid = null;
@@ -1927,6 +1929,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             parsed_guard_bits = qcd_info.guard_bits;
             parsed_qcd_exponents = qcd_info.exponents;
             parsed_qcd_exponent_count = qcd_info.exponent_count;
+            parsed_qcd_steps = qcd_info.steps;
+            parsed_qcd_step_count = qcd_info.step_count;
             qcd_payload = segment;
             saw_qcd = true;
         } else if (marker == @intFromEnum(Marker.coc)) {
@@ -2023,6 +2027,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .guard_bits = parsed_guard_bits,
             .qcd_exponents = parsed_qcd_exponents,
             .qcd_exponent_count = parsed_qcd_exponent_count,
+            .qcd_steps = parsed_qcd_steps,
+            .qcd_step_count = parsed_qcd_step_count,
             .tile_part_divisions = null,
             .tile_part_plan_count = 0,
             .tile_part_plan = [_]u8{0} ** 33,
@@ -2057,6 +2063,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .guard_bits = parsed_guard_bits,
         .qcd_exponents = parsed_qcd_exponents,
         .qcd_exponent_count = parsed_qcd_exponent_count,
+        .qcd_steps = parsed_qcd_steps,
+        .qcd_step_count = parsed_qcd_step_count,
         .tile_part_divisions = if (tile_part_plan.count > 0) 'R' else null,
         .tile_part_plan_count = tile_part_plan.count,
         .tile_part_plan = tile_part_plan.entries,
@@ -2117,11 +2125,17 @@ const StrictQcdInfo = struct {
     /// Zero count means "derive from the z2000 formula" (sidecar path).
     exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands,
     exponent_count: u8 = 0,
+    /// Signalled irreversible (epsilon_b, mu_b) QCD step sizes. Scalar-
+    /// expounded stores one value per band; scalar-derived stores the single
+    /// LL value and derives the other bands via E-5. Reversible streams leave
+    /// this empty.
+    steps: [max_qcd_bands]BandStepSize = [_]BandStepSize{.{ .exponent = 0, .mantissa = 0 }} ** max_qcd_bands,
+    step_count: u8 = 0,
 };
 
 fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, transform: WaveletTransform) !StrictQcdInfo {
+    _ = bit_depth;
     if (segment.len < 2) return CodestreamError.InvalidCodestream;
-    if (bit_depth == 0) return CodestreamError.InvalidCodestream;
     const bands = 1 + 3 * @as(usize, levels);
     const style = segment[0];
     const quantization_value = style & 0x1f;
@@ -2130,8 +2144,9 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
     const guard_bits = style >> 5;
 
     if (transform == .irreversible_9_7) {
-        // The irreversible step tables are validated against z2000's exact
-        // OpenJPEG-compatible values, which assume the z2000 guard count.
+        // Irreversible streams may carry foreign but legal step mantissas;
+        // keep the narrow guard-bit policy while following the signalled
+        // (epsilon_b, mu_b) pairs for Mb sizing and dequantization.
         if (guard_bits != strict_guard_bits) return CodestreamError.UnsupportedPayload;
         var info = StrictQcdInfo{
             .bands = bands,
@@ -2141,24 +2156,32 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
         if (quantization == .scalar_derived) {
             if (segment.len != 1 + 2) return CodestreamError.InvalidCodestream;
             var cursor: usize = 1;
-            info.exponents[0] = try validateStrictQcdScalarValue(segment, &cursor, bit_depth, .ll, levels);
+            const step = try readStrictQcdScalarStep(segment, &cursor, guard_bits);
+            info.exponents[0] = step.exponent;
+            info.steps[0] = step;
             info.exponent_count = 1;
+            info.step_count = 1;
             return info;
         }
         if (quantization != .scalar_expounded) return CodestreamError.UnsupportedPayload;
         if (segment.len != 1 + 2 * bands) return CodestreamError.InvalidCodestream;
         var cursor: usize = 1;
         var band_index: usize = 0;
-        info.exponents[band_index] = try validateStrictQcdScalarValue(segment, &cursor, bit_depth, .ll, levels);
+        var step = try readStrictQcdScalarStep(segment, &cursor, guard_bits);
+        info.exponents[band_index] = step.exponent;
+        info.steps[band_index] = step;
         band_index += 1;
         var level: u8 = levels;
         while (level > 0) : (level -= 1) {
-            inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
-                info.exponents[band_index] = try validateStrictQcdScalarValue(segment, &cursor, bit_depth, kind, level);
+            inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |_| {
+                step = try readStrictQcdScalarStep(segment, &cursor, guard_bits);
+                info.exponents[band_index] = step.exponent;
+                info.steps[band_index] = step;
                 band_index += 1;
             }
         }
         info.exponent_count = @intCast(band_index);
+        info.step_count = @intCast(band_index);
         return info;
     }
 
@@ -2204,8 +2227,18 @@ fn signalledBandEpsilon(
     kind: subband.Kind,
     band_level: u8,
 ) ?u8 {
-    if (exponents.len == 0) return null;
-    if (kind == .ll) return exponents[0];
+    const index = signalledBandIndex(exponents.len, levels, kind, band_level) orelse return null;
+    return exponents[index];
+}
+
+fn signalledBandIndex(
+    count: usize,
+    levels: u8,
+    kind: subband.Kind,
+    band_level: u8,
+) ?usize {
+    if (count == 0) return null;
+    if (kind == .ll) return 0;
     if (band_level == 0 or band_level > levels) return null;
     const level_offset = @as(usize, levels - band_level);
     const kind_offset: usize = switch (kind) {
@@ -2215,8 +2248,8 @@ fn signalledBandEpsilon(
         .hh => 2,
     };
     const index = 1 + 3 * level_offset + kind_offset;
-    if (index >= exponents.len) return null;
-    return exponents[index];
+    if (index >= count) return null;
+    return index;
 }
 
 fn signalledHeaderBandEpsilon(
@@ -2235,6 +2268,33 @@ fn signalledHeaderBandEpsilon(
             const drop = header.levels - band_level;
             if (base <= drop) return null;
             return base - drop;
+        },
+    };
+}
+
+fn signalledHeaderBandStep(
+    header: TemporaryHeader,
+    kind: subband.Kind,
+    band_level: u8,
+) ?BandStepSize {
+    const steps = header.qcd_steps[0..header.qcd_step_count];
+    return switch (header.quantization) {
+        .none => null,
+        .scalar_expounded => {
+            const index = signalledBandIndex(steps.len, header.levels, kind, band_level) orelse return null;
+            return steps[index];
+        },
+        .scalar_derived => {
+            if (steps.len != 1) return null;
+            const base = steps[0];
+            if (kind == .ll) return base;
+            if (band_level == 0 or band_level > header.levels) return null;
+            const drop = header.levels - band_level;
+            if (base.exponent <= drop) return null;
+            return .{
+                .exponent = base.exponent - drop,
+                .mantissa = base.mantissa,
+            };
         },
     };
 }
@@ -2270,19 +2330,19 @@ fn bandNominalBitplanesForHeader(
     );
 }
 
-fn validateStrictQcdScalarValue(
+fn readStrictQcdScalarStep(
     segment: []const u8,
     cursor: *usize,
-    bit_depth: u8,
-    kind: subband.Kind,
-    band_level: u8,
-) !u8 {
-    const step = try irreversibleBandStepSize(bit_depth, kind, band_level);
-    const expected = (@as(u16, step.exponent) << 11) | step.mantissa;
+    guard_bits: u8,
+) !BandStepSize {
     const actual = readU16Be(segment, cursor.*);
-    if (actual != expected) return CodestreamError.UnsupportedPayload;
     cursor.* += 2;
-    return @intCast(actual >> 11);
+    const exponent: u8 = @intCast(actual >> 11);
+    const mantissa = actual & 0x07ff;
+    if (exponent == 0) return CodestreamError.InvalidCodestream;
+    const nominal = @as(u16, exponent) + guard_bits - 1;
+    if (nominal == 0 or nominal > 31) return CodestreamError.InvalidCodestream;
+    return .{ .exponent = exponent, .mantissa = mantissa };
 }
 
 pub fn hasMarker(bytes: []const u8, marker: u16) bool {
@@ -4282,10 +4342,12 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
 
     const wavelet_start = monotonicNs();
     for (bands) |band| {
+        const step = signalledHeaderBandStep(header, band.kind, band.level) orelse
+            try irreversibleBandStepSizeFor(header.quantization, header.bit_depth, band.kind, band.level, header.levels);
         const delta = irreversibleBandDelta(
             header.bit_depth,
             band.kind,
-            try irreversibleBandStepSizeFor(header.quantization, header.bit_depth, band.kind, band.level, header.levels),
+            step,
         );
         dequantizeBandRegion(quantized.y, y_f, header.width, band.rect, delta);
         dequantizeBandRegion(quantized.cb, cb_f, header.width, band.rect, delta);
@@ -6088,12 +6150,15 @@ const TemporaryHeader = struct {
     /// the tile grid.
     tile_width: u32 = 0,
     tile_height: u32 = 0,
-    /// Signalled QCD guard bits and per-band epsilon_b (reversible path);
-    /// zero exponent count means "derive Mb from the z2000 formula"
-    /// (sidecar/legacy paths and irreversible styles).
+    /// Signalled QCD guard bits and per-band epsilon_b for strict streams;
+    /// zero exponent count means "derive Mb from the z2000 formula" (sidecar
+    /// and legacy paths). Irreversible streams also carry step mantissas below
+    /// so dequantization follows the wire values instead of z2000 defaults.
     guard_bits: u8 = strict_guard_bits,
     qcd_exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands,
     qcd_exponent_count: u8 = 0,
+    qcd_steps: [max_qcd_bands]BandStepSize = [_]BandStepSize{.{ .exponent = 0, .mantissa = 0 }} ** max_qcd_bands,
+    qcd_step_count: u8 = 0,
     tile_part_divisions: ?u8,
     tile_part_plan_count: u8,
     tile_part_plan: [33]u8,
