@@ -8888,20 +8888,19 @@ fn validateBlockSize(width: u16, height: u16) !void {
     if (@as(u32, width) * @as(u32, height) > 4096) return CodestreamError.InvalidCodestream;
 }
 
-/// Multi-tile v1 constraints (docs/multi_tile_plan.md §3): the tile pipeline
-/// currently covers reversible 5/3 + RCT, a single quality layer, the plain
-/// code-block style, and one tile-part per tile in row-major order. Everything
-/// outside that fails closed so the COD/SIZ markers never advertise behavior
-/// the tile encoder does not implement.
+/// Multi-tile constraints (docs/multi_tile_plan.md §3): the tile pipeline
+/// currently covers reversible 5/3 + RCT, a single quality layer, plain or
+/// TERMALL code-block style, and one tile-part per tile in row-major order.
+/// Everything outside that fails closed so the COD/SIZ markers never advertise
+/// behavior the tile encoder does not implement.
 fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     if (options.progression != .rpcl) return CodestreamError.UnsupportedPayload;
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
     if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
     if (options.layers != 1 or options.rate_count != 0) return CodestreamError.UnsupportedPayload;
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
-    if (options.bypass or options.reset_context or options.terminate_all or
-        options.vertical_causal or options.predictable_termination or
-        options.segmentation_symbols)
+    if (options.bypass or options.reset_context or options.vertical_causal or
+        options.predictable_termination or options.segmentation_symbols)
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -8986,6 +8985,14 @@ fn encodeLosslessMultiTileMeasured(
     }
 
     const payload_start = monotonicNs();
+    const block_style = ebcot.CodeBlockStyle{
+        .bypass = encode_options.bypass,
+        .reset_context = encode_options.reset_context,
+        .terminate_all = encode_options.terminate_all,
+        .vertical_causal = encode_options.vertical_causal,
+        .predictable_termination = encode_options.predictable_termination,
+        .segmentation_symbols = encode_options.segmentation_symbols,
+    };
     var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
         allocator,
         rgb,
@@ -8997,7 +9004,7 @@ fn encodeLosslessMultiTileMeasured(
             .block_height = encode_options.block_height,
             .precincts = scaffold_precincts[0..encode_options.precinct_count],
         },
-        .{},
+        block_style,
         encode_options.threads,
     );
     defer artifacts.deinit();

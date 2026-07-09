@@ -7,6 +7,13 @@ entries are grouped by development milestone rather than semantic version.
 
 ### T1 Code-Block Styles
 
+- Multi-tile lossless encode now accepts TERMALL (`COD` code-block style
+  `0x04`) inside the aligned v1 tile envelope. The tile encoder routes
+  TERMALL blocks through the per-pass ISO-MQ segment writer, the tile-packet
+  readback validator understands the resulting one-length-per-pass packet
+  headers, and strict single-threaded/threaded decode reconstructs the source
+  byte-exactly. The malformed-input fuzz sweep now includes a multi-tile
+  TERMALL profile.
 - BYPASS+TERMALL (`COD` code-block style `0x05`) is now locally public for the
   ISO-MQ path. The encoder emits one terminated segment per coding pass, using
   D.6 raw bypass for eligible significance/refinement passes and MQ for
@@ -15,7 +22,10 @@ entries are grouped by development milestone rather than semantic version.
   those segment models have their own tests and interop gates. A 256x256
   single-layer RPCL/RCT/5-3 smoke decodes losslessly through z2000 strict
   decode, OpenJPEG 2.5.4, and Grok 20.3.6; Kakadu remains the next external
-  check for this style combination.
+  check for this style combination. BYPASS+TERMALL now also participates in the
+  malformed-input fuzz sweep and terminated-style corruption matrix, and T2
+  packet-header decoding rejects terminated segment counts above the fixed
+  per-block segment table capacity before reading segment lengths.
 
 ### JP2 Container Metadata
 

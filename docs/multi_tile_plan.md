@@ -74,16 +74,16 @@ dimension) never hit this; degenerate-resolution tiles are a v2 concern.
 ## 3. v1 scope (what multi-tile means in the first shipped slice)
 
 Supported: reversible 5/3 + RCT, `layers == 1`, default/explicit precincts,
-plain code-block style (no bypass/style bits), one tile-part per tile in
-row-major order (`TPsot=0`, `TNsot=1`), TLM on, SOP/EPH as today, PLT per
-tile-part as the scaffold builds it.
+plain or TERMALL code-block style, one tile-part per tile in row-major order
+(`TPsot=0`, `TNsot=1`), TLM on, SOP/EPH as today, PLT per tile-part as the
+scaffold builds it.
 
 Fail-closed in multi-tile mode (each lifted later, separately): `--rates`
 (byte targets are image-global), `layers > 1`, `--tile-parts R` (R-divisions
-compose with multi-tile later), bypass + resilience style bits, `--mct none`,
-9/7/lossy, tiles that clamp DWT levels (§2.3). Single-tile behavior stays
-**byte-identical** — every increment keeps `tile == image` on the exact
-current code path.
+compose with multi-tile later), BYPASS, RESET, ERTERM and untested resilience
+style combinations, `--mct none`, 9/7/lossy, tiles that clamp DWT levels
+(§2.3). Single-tile behavior stays **byte-identical** — every increment keeps
+`tile == image` on the exact current code path.
 
 ## 4. Staged plan (each stage = one PR, green tests, narrow path untouched)
 
@@ -112,12 +112,14 @@ per-tile SOP restart, TLM cross-check).
 
 *Tests:* "multi-tile encode emits row-major single-part tiles with TLM"
 (SIZ/TLM/SOT structure, Psot chaining to EOC, thread-count determinism, JP2
-wrap acceptance, and decode still failing closed pending Stages B/C);
-"multi-tile encode fails closed outside the v1 envelope" (layers, mct none,
-bypass, style bits, sidecar, 9/7, misaligned tile size); "multi-tile encode
-rejects tiles that clamp the global DWT level count" (18×18 with 16×16 tiles).
-Single-tile output is byte-identical (branch only taken when multi-tile; full
-suite green in Debug + ReleaseFast).
+wrap acceptance, and strict decode); "multi-tile terminate-all roundtrips
+losslessly" (COD style `0x04`, deterministic encode across worker counts,
+strict single-threaded/threaded decode, JP2 wrapper acceptance); "multi-tile
+encode fails closed outside the v1 envelope" (layers, mct none,
+BYPASS/RESET-style combinations, sidecar, 9/7, misaligned tile size);
+"multi-tile encode rejects tiles that clamp the global DWT level count" (18×18
+with 16×16 tiles). Single-tile output is byte-identical (branch only taken when
+multi-tile; full suite green in Debug + ReleaseFast).
 
 ### Stage B — Decode: SOT walk + per-tile packet spans — ✅ DONE
 `readStrictCodestreamMetadata` accepts multi-tile SIZ (the `isSingleTile`

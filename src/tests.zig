@@ -508,6 +508,54 @@ test "T2 coding pass count coder roundtrips ISO packet header ranges" {
     }
 }
 
+test "T2 terminated packet header rejects segment counts above table capacity" {
+    const allocator = std.testing.allocator;
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+    try writer.writeBit(true); // previously included block remains included
+    try t2.writeCodingPassCount(&writer, ebcot.max_block_segments + 1);
+    try writer.finish();
+
+    const cases = [_]struct {
+        label: []const u8,
+        bypass: bool,
+        terminate_all: bool,
+    }{
+        .{ .label = "TERMALL", .bypass = false, .terminate_all = true },
+        .{ .label = "BYPASS+TERMALL", .bypass = true, .terminate_all = true },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("terminated packet-header segment-count case failed: {s}\n", .{case.label});
+        var reader = t2.PacketHeaderReader.init(bytes.items);
+        var inclusion = try t2.TagTreeDecoder.init(allocator, 1, 1);
+        defer inclusion.deinit();
+        var zero_bitplanes = try t2.TagTreeDecoder.init(allocator, 1, 1);
+        defer zero_bitplanes.deinit();
+        var length_state = t2.SegmentLengthState{};
+
+        try std.testing.expectError(
+            t2.PacketHeaderError.InvalidPacketHeader,
+            t2.readCodeBlockPacketHeader(
+                &reader,
+                &inclusion,
+                &zero_bitplanes,
+                &length_state,
+                0,
+                0,
+                0,
+                true,
+                0,
+                case.bypass,
+                case.terminate_all,
+                0,
+            ),
+        );
+    }
+}
+
 test "T2 segment length coder preserves Lblock state" {
     const allocator = std.testing.allocator;
     const Segment = struct {
@@ -11166,6 +11214,55 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
         defer base_allocator.free(wrapped);
         try fuzzCorruptionSweep(base_allocator, cs, wrapped, 4, 4);
     }
+
+    // Profile 5: BYPASS+TERMALL. This mixes raw bypass significance/refinement
+    // segments with per-pass terminated MQ cleanup segments.
+    {
+        const samples = try base_allocator.alloc(u16, 24 * 24 * 3);
+        defer base_allocator.free(samples);
+        fillFuzzSamples(samples, 5);
+        const rgb = image.RgbImage{ .allocator = base_allocator, .width = 24, .height = 24, .bit_depth = 8, .samples = samples };
+        const cs = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{
+            .levels = 2,
+            .block_width = 8,
+            .block_height = 8,
+            .bypass = true,
+            .terminate_all = true,
+            .sop = true,
+            .eph = true,
+            .tlm = true,
+        });
+        defer base_allocator.free(cs);
+        const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, cs);
+        defer base_allocator.free(wrapped);
+        try fuzzCorruptionSweep(base_allocator, cs, wrapped, 4, 4);
+    }
+
+    // Profile 6: multi-tile TERMALL. Exercises per-tile packet walks together
+    // with per-pass terminated segment lengths in the strict multi-tile path.
+    {
+        const samples = try base_allocator.alloc(u16, 48 * 48 * 3);
+        defer base_allocator.free(samples);
+        fillFuzzSamples(samples, 6);
+        const rgb = image.RgbImage{ .allocator = base_allocator, .width = 48, .height = 48, .bit_depth = 8, .samples = samples };
+        const cs = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{
+            .levels = 2,
+            .tile_width = 32,
+            .tile_height = 32,
+            .block_width = 4,
+            .block_height = 4,
+            .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+            .precinct_count = 1,
+            .terminate_all = true,
+            .sop = true,
+            .eph = true,
+            .tlm = true,
+        });
+        defer base_allocator.free(cs);
+        const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, cs);
+        defer base_allocator.free(wrapped);
+        try fuzzCorruptionSweep(base_allocator, cs, wrapped, 32, 32);
+    }
 }
 
 test "terminated styled T1 streams fail closed on corruption" {
@@ -11200,10 +11297,14 @@ test "terminated styled T1 streams fail closed on corruption" {
     var erterm = base;
     erterm.terminate_all = true;
     erterm.predictable_termination = true;
+    var bypass_termall = base;
+    bypass_termall.bypass = true;
+    bypass_termall.terminate_all = true;
     const styles = [_]Style{
         .{ .label = "TERMALL", .options = termall },
         .{ .label = "RESET+TERMALL", .options = reset_termall },
         .{ .label = "ERTERM", .options = erterm },
+        .{ .label = "BYPASS+TERMALL", .options = bypass_termall },
     };
 
     for (styles) |style| {
@@ -11610,6 +11711,49 @@ test "multi-tile encode emits row-major single-part tiles with TLM" {
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
+test "multi-tile terminate-all roundtrips losslessly" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.terminate_all = true;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x04), bytes[cod + 12] & 0x04);
+    try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var threaded_decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = 4 });
+    defer threaded_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, threaded_decoded.samples);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(usize, width), info.width);
+}
+
 test "multi-tile encode fails closed outside the v1 envelope" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -11644,9 +11788,10 @@ test "multi-tile encode fails closed outside the v1 envelope" {
                 options.bypass = true;
             }
         }.mutate },
-        .{ .label = "terminate-all", .mutate = struct {
+        .{ .label = "reset-context terminate-all", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.terminate_all = true;
+                options.reset_context = true;
             }
         }.mutate },
         .{ .label = "vertical causal", .mutate = struct {

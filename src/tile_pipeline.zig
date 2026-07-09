@@ -1336,17 +1336,27 @@ pub fn encodeComponentBlockIsoMq(
     view: ComponentBlockView,
     style: ebcot.CodeBlockStyle,
 ) !EncodedComponentBlock {
-    var scratch = ebcot.DirectBlockScratch.init(allocator);
-    defer scratch.deinit();
     var actual_style = style;
     actual_style.band_kind = view.job.band.kind;
-    const segment = try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
-        &scratch,
-        view.plane,
-        view.stride,
-        view.rect,
-        actual_style,
-    );
+    const segment = if (actual_style.terminate_all)
+        try ebcot.encodeCodeBlockSegmentIsoMqTerminatedWithStyle(
+            allocator,
+            view.plane,
+            view.stride,
+            view.rect,
+            actual_style,
+        )
+    else blk: {
+        var scratch = ebcot.DirectBlockScratch.init(allocator);
+        defer scratch.deinit();
+        break :blk try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
+            &scratch,
+            view.plane,
+            view.stride,
+            view.rect,
+            actual_style,
+        );
+    };
     return .{
         .job = view.job,
         .segment = segment,
@@ -2669,6 +2679,7 @@ fn initTilePacketReaderBandGroup(
     );
     var reader_moved = false;
     errdefer if (!reader_moved) reader_state.deinit();
+    reader_state.terminate_all = try encodedLayerBlocksUseTerminateAll(encoded);
 
     encoded_moved = true;
     locations_moved = true;
@@ -2683,6 +2694,18 @@ fn initTilePacketReaderBandGroup(
         .payloads = payloads,
         .max_zero_bitplanes = max_zero_bitplanes,
     };
+}
+
+fn encodedLayerBlocksUseTerminateAll(encoded: []const t2.EncodedLayerBlock) !bool {
+    var saw_terminated_block = false;
+    for (encoded) |block| {
+        if (block.segments.len == 0) continue;
+        saw_terminated_block = true;
+        for (block.segments) |segment| {
+            if (segment.pass_count != 1) return PacketScaffoldError.InvalidPacket;
+        }
+    }
+    return saw_terminated_block;
 }
 
 fn validateTileRpclPacketForGroups(

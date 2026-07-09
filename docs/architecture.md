@@ -329,7 +329,7 @@ tile descriptors. It also provides tile-local RGB sample extraction and
 copy-back helpers so per-tile encode/decode work can move rectangular image
 regions without ad hoc row math. Multi-tile support is intentionally bounded:
 lossless RCT/5-3, one quality layer, one tile-part per tile, row-major tile
-order, plain code-block style, and ISO B.6/B.7-aligned geometry.
+order, plain or TERMALL code-block style, and ISO B.6/B.7-aligned geometry.
 
 `src/tile_pipeline.zig` is the tile-local implementation layer. It runs the
 reversible component transform, tile-local 5/3 DWT/inverse-DWT, T1 code-block
