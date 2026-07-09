@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **90/100 narrow, 66/100 full** as of
-2026-07-07. First drafted at `ba66799`.
+the subsequent JP2/T2/T1/profile work is **91/100 narrow, 71/100 full** as of
+2026-07-09. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-08)
 
-Scorecard now **91/100 narrow, 67/100 full**. Landed since the 2026-07-07
+Scorecard now **91/100 narrow, 71/100 full**. Landed since the 2026-07-07
 sequence below: the malformed-input fuzzing gate (four profiles: single-tile
 RCT/5-3, multi-tile RCT/5-3, ICT/9-7, TERMALL — full interop row 4→5), the
 odd/thin/minimal-dimension roundtrip matrix (narrow RCT/DWT 9→10, narrow
@@ -70,20 +70,24 @@ items are preserved further below as implementation history.
 - **Risk:** High (per-tile T2/T1 scheduling); keep the single-tile path a
   passing special case at every step.
 
-### N3. T1 completeness — BYPASS+TERMALL, then standalone RESET/ERTERM — M–L · Med
+### N3. T1 completeness — BYPASS+TERMALL Kakadu, then standalone RESET/ERTERM — M–L · Med
 
-- **Impact:** full "T1 completeness" +2–3. (+2–3)
+- **Impact:** full "T1 completeness" +1–2 remaining. (+1–2)
 - **ISO clause:** D.4.5 (per-pass termination), D.7 (bypass), the ER-TERM annex.
 - **State:** BYPASS (raw segments) and TERMALL (per-pass ISO-MQ termination)
-  are each public and interop-proven, but their *combination* and standalone
-  RESET/ERTERM stay fail-closed (`validateCodingPath`).
-- **What to add:** BYPASS+TERMALL first — raw bypass segments that are also
-  per-pass terminated (the segment table already carries per-pass spans for
-  both); encoder emits, strict decoder consumes, then OpenJPEG/Grok/Kakadu
-  interop. Standalone RESET / standalone ERTERM need the same writer + strict
-  reader + interop before their gates open.
-- **Test plan:** local byte-exact roundtrip + a fail-closed corruption case per
-  combination (extend the styled-T1 matrix), then external `-M` interop.
+  are each public and interop-proven. **BYPASS+TERMALL is now locally public**:
+  the encoder emits one terminated segment per pass, raw for D.6 bypass
+  significance/refinement passes and MQ for cleanup/non-bypass passes; the
+  strict decoder consumes the same per-pass segment table and the JP2 wrapper
+  accepts COD style `0x05`. OpenJPEG 2.5.4 and Grok 20.3.6 decode the current
+  256x256 smoke losslessly; Kakadu remains to be checked. Standalone
+  RESET/ERTERM and BYPASS combined with RESET or ERTERM stay fail-closed.
+- **What to add:** Kakadu interop for BYPASS+TERMALL, then standalone RESET /
+  standalone ERTERM with the same writer + strict reader + interop gate before
+  opening their public profiles.
+- **Test plan:** Kakadu `Cmodes=BYPASS`/termination-style interop for
+  BYPASS+TERMALL, then local byte-exact roundtrip + fail-closed corruption
+  cases per remaining combination (extend the styled-T1 matrix).
 
 ### N4. Lossy breadth — two precisely-characterized foreign-9/7 gaps — M · Med
 
@@ -184,9 +188,9 @@ for more ISO coverage is:
 4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.
-5. **T1 style policy.** Keep standalone RESET/ERTERM, BYPASS+TERMALL, and
-   untested combinations fail-closed until each has writer, strict reader,
-   tests, and interop coverage.
+5. **T1 style policy.** Keep standalone RESET/ERTERM and untested combinations
+   fail-closed until each has writer, strict reader, tests, and interop
+   coverage; BYPASS+TERMALL now needs the Kakadu decoder leg.
 
 ## Status 2026-07-07 (ERTERM OpenJPEG/Grok interop) — PASSED
 
@@ -553,10 +557,11 @@ oracle, wrong for a real stream. What was added:
 `--reset-context` only together with `--terminate-all`, where every coding pass
 has an explicit T2 segment length and MQ byte boundary. The ISO-MQ encoder and
 strict decoder reset JPEG2000 MQ context states between pass-terminated
-segments. Standalone RESET, BYPASS+TERMALL, multi-layer TERMALL, and multi-tile
-style combinations remain fail-closed. A larger no-sidecar `0002.tif` smoke
-roundtrips pixel-exactly through z2000 strict decode, Kakadu, OpenJPEG, and
-Grok.
+segments. Standalone RESET, multi-layer TERMALL, and multi-tile style
+combinations remain fail-closed. BYPASS+TERMALL has since moved to a local
+strict path and still needs external decoder interop. A larger no-sidecar
+`0002.tif` smoke roundtrips pixel-exactly through z2000 strict decode, Kakadu,
+OpenJPEG, and Grok.
 
 **`predictable_termination` (0x10) — wired for the TERMALL path.** `mq_iso`
 now has an OpenJPEG/Grok-style `finishErterm` path that treats the final

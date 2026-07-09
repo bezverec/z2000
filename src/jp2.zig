@@ -29,6 +29,10 @@ const BoxType = enum(u32) {
     image_header = fourcc("ihdr"),
     bits_per_component = fourcc("bpcc"),
     color = fourcc("colr"),
+    palette = fourcc("pclr"),
+    component_mapping = fourcc("cmap"),
+    channel_definition = fourcc("cdef"),
+    resolution = fourcc("res "),
     contiguous_codestream = fourcc("jp2c"),
 };
 
@@ -262,7 +266,9 @@ fn extractIccProfileFromJp2Header(allocator: std.mem.Allocator, bytes: []const u
 fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var cursor: usize = 0;
     var saw_ihdr = false;
+    var saw_bpcc = false;
     var saw_colr = false;
+    var requires_bpcc = false;
     var box_index: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, false);
@@ -284,16 +290,46 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 if (compression_type != 7 or colorspace_unknown > 1 or intellectual_property != 0) {
                     return Jp2Error.UnsupportedProfile;
                 }
-                if ((bpc & 0x80) != 0) return Jp2Error.UnsupportedProfile;
-                info.bits_per_component = bpc + 1;
-                if (info.components != 3 or (info.bits_per_component != 8 and info.bits_per_component != 16)) {
-                    return Jp2Error.UnsupportedColorSpace;
+                if (info.components != 3) return Jp2Error.UnsupportedColorSpace;
+                if (bpc == 0xff) {
+                    requires_bpcc = true;
+                    info.bits_per_component = 0;
+                } else {
+                    if ((bpc & 0x80) != 0) return Jp2Error.UnsupportedProfile;
+                    info.bits_per_component = bpc + 1;
+                    if (info.bits_per_component != 8 and info.bits_per_component != 16) {
+                        return Jp2Error.UnsupportedColorSpace;
+                    }
                 }
                 saw_ihdr = true;
             },
-            @intFromEnum(BoxType.bits_per_component) => return Jp2Error.UnsupportedProfile,
+            @intFromEnum(BoxType.bits_per_component) => {
+                if (!saw_ihdr or saw_bpcc or saw_colr) return Jp2Error.InvalidBox;
+                if (!requires_bpcc) return Jp2Error.InvalidBox;
+                if (box.payload.len != info.components) return Jp2Error.InvalidBox;
+                var bits_per_component: u8 = 0;
+                for (box.payload) |component_bpc| {
+                    if ((component_bpc & 0x80) != 0) return Jp2Error.UnsupportedProfile;
+                    const component_bits = (component_bpc & 0x7f) + 1;
+                    if (component_bits != 8 and component_bits != 16) {
+                        return Jp2Error.UnsupportedColorSpace;
+                    }
+                    if (bits_per_component == 0) {
+                        bits_per_component = component_bits;
+                    } else if (component_bits != bits_per_component) {
+                        return Jp2Error.UnsupportedColorSpace;
+                    }
+                }
+                if (bits_per_component == 0) return Jp2Error.InvalidBox;
+                info.bits_per_component = bits_per_component;
+                saw_bpcc = true;
+                if (info.components != 3) {
+                    return Jp2Error.UnsupportedColorSpace;
+                }
+            },
             @intFromEnum(BoxType.color) => {
                 if (!saw_ihdr or saw_colr) return Jp2Error.InvalidBox;
+                if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
                 if (box.payload.len < 3) return Jp2Error.InvalidBox;
                 const method = box.payload[0];
                 const precedence = box.payload[1];
@@ -316,16 +352,29 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 }
                 saw_colr = true;
             },
-            // Optional jp2h boxes we do not interpret (res, pclr, cmap, cdef
-            // from foreign encoders — Kakadu writes a res box) are skipped;
-            // the required ihdr-first and colr checks above stay authoritative.
+            @intFromEnum(BoxType.palette),
+            @intFromEnum(BoxType.component_mapping),
+            @intFromEnum(BoxType.channel_definition),
+            => {
+                if (!saw_ihdr) return Jp2Error.InvalidBox;
+                return Jp2Error.UnsupportedProfile;
+            },
+            @intFromEnum(BoxType.resolution) => {
+                if (!saw_ihdr) return Jp2Error.InvalidBox;
+                if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
+            },
+            // Other optional jp2h boxes are not benign for the narrow RGB
+            // profile until their component/colour semantics are implemented.
             else => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
+                if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
+                return Jp2Error.UnsupportedProfile;
             },
         }
         box_index += 1;
     }
     if (!saw_ihdr or !saw_colr) return Jp2Error.MissingRequiredBox;
+    if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
 }
 
 fn validateFileTypeBox(payload: []const u8) !void {
@@ -718,10 +767,13 @@ fn validateCodeBlockStyleByte(code_block_style: u8) !void {
     if ((code_block_style & 0x02) != 0 and (code_block_style & 0x04) == 0) {
         return Jp2Error.UnsupportedProfile;
     }
-    if ((code_block_style & 0x01) != 0 and (code_block_style & 0x04) != 0) {
+    if ((code_block_style & 0x01) != 0 and (code_block_style & 0x02) != 0) {
         return Jp2Error.UnsupportedProfile;
     }
     if ((code_block_style & 0x10) != 0 and (code_block_style & 0x04) == 0) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    if ((code_block_style & 0x01) != 0 and (code_block_style & 0x10) != 0) {
         return Jp2Error.UnsupportedProfile;
     }
 }

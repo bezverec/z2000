@@ -7877,7 +7877,9 @@ fn encodeCodeBlockSegmentForOptions(
                 .passes = block.passes,
                 .symbols = block.symbols,
             };
-            break :blk if (style.bypass)
+            break :blk if (style.terminate_all)
+                ebcot.encodeBlockSymbolsSegmentIsoMqTerminated(allocator, view, style)
+            else if (style.bypass)
                 ebcot.encodeBlockSymbolsSegmentIsoMqBypass(allocator, view, style)
             else
                 ebcot.encodeBlockSymbolsSegmentIsoMqContinuous(allocator, view);
@@ -9127,6 +9129,7 @@ fn validateCodingPath(options: LosslessOptions) !void {
         // it requires terminate_all — otherwise the COD marker would advertise
         // a termination pattern the encoder never produced.
         if (!options.terminate_all) return CodestreamError.UnsupportedPayload;
+        if (options.bypass) return CodestreamError.UnsupportedPayload;
     }
     if (options.terminate_all) {
         // The per-pass terminated encoder is only wired for the ISO MQ backend;
@@ -9139,7 +9142,7 @@ fn validateCodingPath(options: LosslessOptions) !void {
         if (options.layers != 1) return CodestreamError.UnsupportedPayload;
     }
     if (options.bypass) {
-        if (options.terminate_all) return CodestreamError.UnsupportedPayload;
+        if (options.reset_context) return CodestreamError.UnsupportedPayload;
         // BYPASS requires the ISO MQ backend; quality layers and rates are
         // supported with truncation points snapped to segment boundaries.
         if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
@@ -9202,10 +9205,11 @@ fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
     const supported_style_bits: u8 = 0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20;
     if ((parsed.toCodByte() & ~supported_style_bits) != 0) return CodestreamError.UnsupportedPayload;
     if (parsed.reset_context and !parsed.terminate_all) return CodestreamError.UnsupportedPayload;
-    if (parsed.bypass and parsed.terminate_all) return CodestreamError.UnsupportedPayload;
+    if (parsed.bypass and parsed.reset_context) return CodestreamError.UnsupportedPayload;
     // ER-TERM segments are only decodable through the per-pass terminated
     // machinery, so 0x10 is only valid together with 0x04.
     if (parsed.predictable_termination and !parsed.terminate_all) return CodestreamError.UnsupportedPayload;
+    if (parsed.bypass and parsed.predictable_termination) return CodestreamError.UnsupportedPayload;
     return parsed;
 }
 

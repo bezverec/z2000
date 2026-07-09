@@ -2569,6 +2569,99 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypass(
     };
 }
 
+/// BYPASS+TERMALL encoder: every coding pass is its own terminated codeword
+/// segment, but D.6 raw bypass still applies to significance/refinement passes
+/// below the bypass threshold. MQ contexts persist across MQ segments; raw
+/// segments carry no MQ state.
+pub fn encodeBlockSymbolsSegmentIsoMqBypassTerminated(
+    allocator: std.mem.Allocator,
+    block: EncodedBlockView,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
+    try validateImplementedStyleAllowBypass(style);
+    if (!style.bypass or !style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (block.passes.len == 0) {
+        const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
+        errdefer allocator.free(passes);
+        const bytes = try allocator.dupe(u8, &.{});
+        return .{
+            .bitplanes = block.bitplanes,
+            .non_zero_count = block.non_zero_count,
+            .pass_count = 0,
+            .byte_length = 0,
+            .passes = passes,
+            .bytes = bytes,
+        };
+    }
+    if (block.passes.len > max_block_segments) return EbcotError.InvalidBlock;
+
+    var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
+    errdefer pass_payloads.deinit(allocator);
+    var segments: std.ArrayList(SegmentSpan) = .empty;
+    errdefer segments.deinit(allocator);
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+
+    var encoder = try mq_iso.Encoder.init(allocator, mq_context_count);
+    defer encoder.deinit();
+    try encoder.resetJpeg2000Contexts();
+    var raw = RawBitWriter.init(allocator);
+    defer raw.deinit();
+
+    var symbol_offset: usize = 0;
+    for (block.passes) |pass| {
+        if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
+        const is_raw = passIsRaw(style, block.bitplanes, pass.magnitude_bitplane, pass.kind);
+        const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
+        if (is_raw) {
+            for (pass_symbols) |symbol| try raw.writeBit(symbol.bit);
+        } else {
+            for (pass_symbols) |symbol| {
+                try encoder.write(mqContextIndex(symbol.context), symbol.bit);
+            }
+        }
+
+        const encoded = if (is_raw) try raw.finish() else try encoder.finish();
+        defer allocator.free(encoded);
+        const byte_offset = bytes.items.len;
+        try bytes.appendSlice(allocator, encoded);
+        try pass_payloads.append(allocator, .{
+            .kind = pass.kind,
+            .magnitude_bitplane = pass.magnitude_bitplane,
+            .symbol_count = pass.symbol_count,
+            .byte_offset = byte_offset,
+            .byte_length = @intCast(encoded.len),
+            .cumulative_bytes = @intCast(bytes.items.len),
+        });
+        try segments.append(allocator, .{ .pass_count = 1, .byte_length = @intCast(encoded.len) });
+        symbol_offset += pass.symbol_count;
+
+        if (is_raw) {
+            raw.reset();
+        } else {
+            const previous_byte = if (bytes.items.len == 0) @as(u8, 0) else bytes.items[bytes.items.len - 1];
+            encoder.resetStreamAfterPreviousByte(previous_byte);
+        }
+    }
+    if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
+
+    const pass_slice = try pass_payloads.toOwnedSlice(allocator);
+    errdefer allocator.free(pass_slice);
+    const segment_slice = try segments.toOwnedSlice(allocator);
+    errdefer allocator.free(segment_slice);
+    const byte_slice = try bytes.toOwnedSlice(allocator);
+
+    return .{
+        .bitplanes = block.bitplanes,
+        .non_zero_count = block.non_zero_count,
+        .pass_count = @intCast(pass_slice.len),
+        .byte_length = @intCast(byte_slice.len),
+        .passes = pass_slice,
+        .bytes = byte_slice,
+        .segments = segment_slice,
+    };
+}
+
 /// ISO MQ terminate_all encoder: every coding pass is flushed into its own
 /// independently-terminated MQ codeword segment (ISO 15444-1 D.4.5). The
 /// adaptive contexts persist across passes (resetStream keeps them and only
@@ -2585,8 +2678,8 @@ pub fn encodeBlockSymbolsSegmentIsoMqTerminated(
     // terminate_all: every pass segment is flushed with the ER-TERM procedure
     // (D.4.2) instead of the standard setbits flush. RESET (D.4.3) is safe in
     // this per-pass segment path because every pass has an explicit byte
-    // boundary; BYPASS+TERMALL remains a separate segment model and stays
-    // fail-closed.
+    // boundary. BYPASS+TERMALL has a separate raw/MQ per-pass segment model.
+    if (style.bypass) return encodeBlockSymbolsSegmentIsoMqBypassTerminated(allocator, block, style);
     if (!style.terminate_all or style.bypass) return EbcotError.InvalidBlock;
     if (block.passes.len == 0) {
         const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
@@ -3408,6 +3501,9 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
     stats: ?*DecodePassStats,
 ) ![]const i32 {
     try validateImplementedStyleAllowBypass(style);
+    if (style.bypass and style.terminate_all) {
+        return decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrowed(scratch, bitplanes, pass_count, bytes, segment_lengths, width, height, style, stats);
+    }
     if (!style.bypass or style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
@@ -3526,6 +3622,122 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
     return scratch.coeffs.items;
 }
 
+/// BYPASS+TERMALL decode: packet headers provide one terminated segment length
+/// per pass; each pass is decoded through the BYPASS raw/MQ choice.
+pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrowed(
+    scratch: *DecodeBlockScratch,
+    bitplanes: u8,
+    pass_count: u16,
+    bytes: []const u8,
+    segment_lengths: []const u64,
+    width: usize,
+    height: usize,
+    style: CodeBlockStyle,
+    stats: ?*DecodePassStats,
+) ![]const i32 {
+    try validateImplementedStyleAllowBypass(style);
+    if (!style.bypass or !style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (width == 0 or height == 0) return EbcotError.InvalidBlock;
+    const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
+    if (area > max_codeblock_area) return EbcotError.InvalidBlock;
+    if (bitplanes == 0) {
+        if (pass_count != 0 or bytes.len != 0 or segment_lengths.len != 0) return EbcotError.InvalidBlock;
+        try scratch.ensureBlockState(width, height, area);
+        @memset(scratch.coeffs.items, 0);
+        return scratch.coeffs.items;
+    }
+
+    const expected_passes = expectedCodingPasses(bitplanes);
+    if (pass_count != expected_passes) return EbcotError.InvalidBlock;
+    if (segment_lengths.len != pass_count) return EbcotError.InvalidBlock;
+    var total_bytes: u64 = 0;
+    for (segment_lengths) |len| total_bytes = try std.math.add(u64, total_bytes, len);
+    if (total_bytes != bytes.len) return EbcotError.InvalidBlock;
+
+    try scratch.ensureBlockState(width, height, area);
+    @memset(scratch.flags.items, 0);
+    @memset(scratch.significant_words.items, 0);
+    @memset(scratch.nb_flags.items, 0);
+    if (comptime maintain_packed_t1_context_flags) @memset(scratch.packed_t1_flags.items, 0);
+    @memset(scratch.coeffs.items, 0);
+
+    var mq_decoder: ?*mq_iso.Decoder = null;
+    var raw_reader = RawBitReader.init(&.{});
+    const profiling = stats != null;
+
+    var seg_offset: usize = 0;
+    var seg_index: usize = 0;
+    var pass_index: u16 = 0;
+    var bitplane_index = bitplanes;
+    while (bitplane_index > 0 and pass_index < pass_count) {
+        bitplane_index -= 1;
+        const bitplane: u8 = @intCast(bitplane_index);
+        decodeClearNbfVisit(scratch);
+
+        const kinds: [3]PassKind = if (bitplane == bitplanes - 1)
+            .{ .cleanup, .cleanup, .cleanup }
+        else
+            .{ .significance, .refinement, .cleanup };
+        const passes_this_bitplane: u16 = if (bitplane == bitplanes - 1) 1 else 3;
+
+        var kind_index: u16 = 0;
+        while (kind_index < passes_this_bitplane and pass_index < pass_count) : (kind_index += 1) {
+            const kind = kinds[kind_index];
+            const is_raw = passIsRaw(style, bitplanes, bitplane, kind);
+            const len = std.math.cast(usize, segment_lengths[seg_index]) orelse return EbcotError.InvalidBlock;
+            const seg_end = try std.math.add(usize, seg_offset, len);
+            if (seg_end > bytes.len) return EbcotError.InvalidBlock;
+            const slice = bytes[seg_offset..seg_end];
+            if (is_raw) {
+                raw_reader = RawBitReader.init(slice);
+            } else if (mq_decoder) |d| {
+                d.reinitStream(slice);
+            } else {
+                mq_decoder = try scratch.isoMqDecoder(slice);
+            }
+            seg_offset = seg_end;
+            seg_index += 1;
+
+            switch (kind) {
+                .significance => {
+                    if (is_raw) {
+                        const pass_start = profileStart(stats);
+                        const symbols = try decodeSignificancePassRaw(scratch, &raw_reader, bitplane, style);
+                        profileRawPass(stats, .significance, symbols, pass_start);
+                    } else {
+                        var pass_profile = profileMqStart(stats);
+                        const symbols = try decodeSignificancePassInferredProfiled(scratch, mq_decoder.?, bitplane, style, &pass_profile, profiling);
+                        profileMqPass(stats, .significance, symbols, pass_profile);
+                    }
+                },
+                .refinement => {
+                    if (is_raw) {
+                        const pass_start = profileStart(stats);
+                        const symbols = try decodeRefinementPassRaw(scratch, &raw_reader, bitplane);
+                        profileRawPass(stats, .refinement, symbols, pass_start);
+                    } else {
+                        var pass_profile = profileMqStart(stats);
+                        const symbols = try decodeRefinementPassInferredProfiled(scratch, mq_decoder.?, bitplane, style, &pass_profile, profiling);
+                        profileMqPass(stats, .refinement, symbols, pass_profile);
+                    }
+                },
+                .cleanup => {
+                    if (is_raw) return EbcotError.InvalidBlock;
+                    var pass_profile = profileMqStart(stats);
+                    const symbols = try decodeCleanupPassInferredProfiled(scratch, mq_decoder.?, bitplane, style, &pass_profile, profiling);
+                    profileMqPass(stats, .cleanup, symbols, pass_profile);
+                },
+            }
+            pass_index += 1;
+        }
+    }
+    if (pass_index != pass_count or seg_index != segment_lengths.len) {
+        return EbcotError.InvalidBlock;
+    }
+
+    return scratch.coeffs.items;
+}
+
 /// terminate_all decode (ISO 15444-1 D.4.5): every coding pass is its own
 /// independently-terminated MQ codeword segment. Structurally this is the
 /// bypass decoder with all segments MQ (never raw) and exactly one pass per
@@ -3549,6 +3761,7 @@ pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
     // the standard decoder reads back. RESET is also safe in this path because
     // the segment table gives every pass an explicit boundary where the
     // adaptive MQ contexts can be reset.
+    if (style.bypass) return decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrowed(scratch, bitplanes, pass_count, bytes, segment_lengths, width, height, style, stats);
     if (!style.terminate_all or style.bypass) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;

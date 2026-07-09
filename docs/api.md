@@ -66,16 +66,17 @@ Supported public JP2 profiles are still narrow:
 - `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
   segments and packet-header segment length accounting
 - selected code-block style profiles where the payload model is implemented:
-  TERMALL, TERMALL-scoped RESET, vertical-causal, segmentation symbols, and
-  TERMALL-scoped predictable termination
+  TERMALL, BYPASS+TERMALL, TERMALL-scoped RESET, vertical-causal, segmentation
+  symbols, and TERMALL-scoped predictable termination
 
 Unsupported combinations still fail closed. Examples include standalone RESET,
-standalone ERTERM, BYPASS+TERMALL, tile-part divisions other than none/R, JPX
-features, unsupported component layouts, and multi-tile/profile mixes outside
-the v1 envelope. SOP is enabled by default for the current narrow profile. EPH
-is available via `--eph`; current OpenJPEG/Grok smoke tests cover the common
-no-EPH and archival EPH paths, while valid2000/jpylyzer-style validators remain
-diagnostic gates rather than absolute sources of truth.
+standalone ERTERM, BYPASS combined with RESET or ERTERM, tile-part divisions
+other than none/R, JPX features, unsupported component layouts, and multi-tile/
+profile mixes outside the v1 envelope. SOP is enabled by default for the
+current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
+smoke tests cover the common no-EPH and archival EPH paths, while
+valid2000/jpylyzer-style validators remain diagnostic gates rather than
+absolute sources of truth.
 
 ## `src/codestream.zig`
 
@@ -310,10 +311,13 @@ covered by oracle tests in the current narrow path. Segmentation-symbol cleanup
 trailers, terminate-all pass-terminated MQ slices, vertical-causal context
 formation, TERMALL-scoped reset-context, and TERMALL-scoped ERTERM are wired
 through public codestream paths where their payload behavior has writer,
-reader, tests, and interop coverage. Larger no-sidecar ERTERM files are
-accepted by z2000 strict decode, OpenJPEG, Grok, and Kakadu, including the
-block-parallel strict decode path. Unsupported combinations, such as
-standalone RESET or BYPASS+TERMALL, still return `UnsupportedPayload`.
+reader, tests, and interop coverage. BYPASS+TERMALL is locally public with
+per-pass raw/MQ segment lengths and strict decode; OpenJPEG and Grok decode the
+current smoke losslessly, with Kakadu still to check. Larger no-sidecar ERTERM
+files are accepted by z2000 strict decode, OpenJPEG, Grok, and Kakadu,
+including the block-parallel strict decode path. Unsupported combinations,
+such as standalone RESET or BYPASS with ERTERM/RESET, still return
+`UnsupportedPayload`.
 The inferred continuous payload decoder and partial coefficient decode helpers
 accept the same internal style state for future strict T2 audits and
 quality-layer prefix validation; inferred decode rejects terminate-all payloads
