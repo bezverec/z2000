@@ -185,9 +185,11 @@ for more ISO coverage is:
    and a payload byte-flip walk requiring at least one bounded rejection with
    no panic/OOB (green in Debug and ReleaseFast). The T2 unit gate also rejects
    over-capacity terminated packet-header segment counts before segment lengths
-   are read. Multi-tile TERMALL now has a strict roundtrip plus malformed-input
-   fuzz gate. Remaining: broaden style combinations beyond the terminated
-   multi-tile slice.
+   are read. Multi-tile TERMALL now has a strict roundtrip, malformed-input
+   fuzz gate, and dedicated packet-corruption matrix (second-tile PLT length,
+   final tile-part truncation, and second-tile SOD payload byte-flip walk).
+   Remaining: broaden style combinations beyond the terminated multi-tile
+   slice.
 3. **Multi-tile v2.** The v1 aligned envelope is real and interop-proven for
    the documented lossless profile. Expand one axis at a time: edge-tile
    fixtures, more progression orders, then quality layers/style bits only after

@@ -13,7 +13,9 @@ entries are grouped by development milestone rather than semantic version.
   readback validator understands the resulting one-length-per-pass packet
   headers, and strict single-threaded/threaded decode reconstructs the source
   byte-exactly. The malformed-input fuzz sweep now includes a multi-tile
-  TERMALL profile.
+  TERMALL profile, and a dedicated multi-tile TERMALL corruption matrix checks
+  second-tile PLT length damage, final tile-part truncation, and SOD payload
+  byte flips.
 - BYPASS+TERMALL (`COD` code-block style `0x05`) is now locally public for the
   ISO-MQ path. The encoder emits one terminated segment per coding pass, using
   D.6 raw bypass for eligible significance/refinement passes and MQ for
