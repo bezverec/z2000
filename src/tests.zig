@@ -11711,6 +11711,51 @@ test "multi-tile encode emits row-major single-part tiles with TLM" {
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
+test "multi-tile LRCP codestream roundtrips and permutes tile packets" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(rpcl);
+
+    var lrcp_options = multi_tile_test_options;
+    lrcp_options.progression = .lrcp;
+    const lrcp = try codestream.encodeLosslessWithOptions(allocator, rgb, lrcp_options);
+    defer allocator.free(lrcp);
+
+    const rpcl_cod = findMarker(rpcl, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const lrcp_cod = findMarker(lrcp, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 2), rpcl[rpcl_cod + 5]);
+    try std.testing.expectEqual(@as(u8, 0), lrcp[lrcp_cod + 5]);
+    try std.testing.expect(!std.mem.eql(u8, rpcl, lrcp));
+    try std.testing.expectEqual(@as(usize, 4), countMarker(lrcp, codestream.markerValue("sot")));
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, lrcp);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var threaded_options = lrcp_options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, lrcp, threaded);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, lrcp);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(usize, width), info.width);
+}
+
 test "multi-tile terminate-all roundtrips losslessly" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -12286,11 +12331,12 @@ test "unsupported JP2 profile marker options fail closed" {
         .{ .label = "scalar-derived quantization", .options = .{ .quantization = .scalar_derived } },
         .{ .label = "scalar-expounded quantization", .options = .{ .quantization = .scalar_expounded } },
         .{ .label = "multi-tile request", .options = .{ .tile_width = 1, .tile_height = 2 } },
-        // The multi-tile v1 envelope is RPCL-only; permuted orders fail closed.
-        .{ .label = "LRCP multi-tile", .options = .{ .progression = .lrcp, .tile_width = 1, .tile_height = 2 } },
-        .{ .label = "RLCP multi-tile", .options = .{ .progression = .rlcp, .tile_width = 1, .tile_height = 2 } },
-        .{ .label = "PCRL multi-tile", .options = .{ .progression = .pcrl, .tile_width = 1, .tile_height = 2 } },
-        .{ .label = "CPRL multi-tile", .options = .{ .progression = .cprl, .tile_width = 1, .tile_height = 2 } },
+        // The general multi-tile envelope is still narrow: tiny/misaligned
+        // grids and the remaining permuted orders fail closed.
+        .{ .label = "LRCP tiny multi-tile", .options = .{ .progression = .lrcp, .tile_width = 1, .tile_height = 2 } },
+        .{ .label = "RLCP tiny multi-tile", .options = .{ .progression = .rlcp, .tile_width = 1, .tile_height = 2 } },
+        .{ .label = "PCRL tiny multi-tile", .options = .{ .progression = .pcrl, .tile_width = 1, .tile_height = 2 } },
+        .{ .label = "CPRL tiny multi-tile", .options = .{ .progression = .cprl, .tile_width = 1, .tile_height = 2 } },
         // ISO B.7: 64x64 precincts leave a 32-sample band span above
         // resolution 0, so the default 64x64 block would cross precinct
         // boundaries; z2000 does not clamp block sizes, so this fails closed.

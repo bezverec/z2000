@@ -5,6 +5,16 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile Progressions
+
+- Multi-tile lossless encode/decode now accepts the single-layer LRCP packet
+  order inside the aligned RCT/5-3 tile envelope. The tile pipeline still
+  builds packets from the checked RPCL scaffold, then byte-preservingly
+  permutes each tile-part payload and PLT table into LRCP order; strict
+  multi-tile decode reads the tile-part in COD progression order and reorders
+  the packet catalog back to RPCL for the existing T2/T1 reconstruction path.
+  RLCP/PCRL/CPRL and multi-layer multi-tile progressions remain fail-closed.
+
 ### T1 Code-Block Styles
 
 - Multi-tile lossless encode now accepts TERMALL (`COD` code-block style

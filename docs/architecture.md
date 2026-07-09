@@ -322,7 +322,7 @@ mode. Debug builds retain the packed-context shadow assertions.
 ## Tile Grid Foundation
 
 `src/tile_grid.zig` owns the JPEG2000 reference-grid tile geometry used by the
-encoder, strict SIZ validation, and the v1 public multi-tile envelope. It
+encoder, strict SIZ validation, and the current public multi-tile envelope. It
 computes tile columns, rows, total tile count, clipped edge-tile rectangles for
 non-divisible image dimensions and non-zero reference origins, plus row-major
 tile descriptors. It also provides tile-local RGB sample extraction and

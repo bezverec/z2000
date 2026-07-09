@@ -19,11 +19,14 @@ pub const RctTile = struct {
     }
 };
 
+pub const PacketOrder = enum { rpcl, lrcp };
+
 pub const PacketScaffoldOptions = struct {
     layers: u16 = 1,
     block_width: usize = 64,
     block_height: usize = 64,
     precincts: []const packet_plan.Precinct,
+    packet_order: PacketOrder = .rpcl,
 };
 
 pub const PacketScaffold = struct {
@@ -1557,7 +1560,8 @@ pub fn buildTileRpclEncodeArtifactsIsoMq(
     var stream_moved = false;
     errdefer if (!stream_moved) stream.deinit();
 
-    try validateTileRpclPacketStream(allocator, scaffold, catalog, index, stream, bit_depth);
+    try reorderTilePacketStreamFromRpcl(allocator, &stream, scaffold.plan, scaffold.layers, options.packet_order);
+    try validateTilePacketStream(allocator, scaffold, catalog, index, stream, bit_depth, options.packet_order);
 
     scaffold_moved = true;
     catalog_moved = true;
@@ -2480,6 +2484,18 @@ pub fn validateTileRpclPacketStream(
     stream: TileRpclPacketStream,
     bit_depth: u8,
 ) !void {
+    try validateTilePacketStream(allocator, scaffold, catalog, index, stream, bit_depth, .rpcl);
+}
+
+pub fn validateTilePacketStream(
+    allocator: std.mem.Allocator,
+    scaffold: PacketScaffold,
+    catalog: EncodedBlockCatalog,
+    index: RpclPacketIndex,
+    stream: TileRpclPacketStream,
+    bit_depth: u8,
+    packet_order: PacketOrder,
+) !void {
     if (catalog.tile.index != scaffold.tile.index) return PacketScaffoldError.InvalidComponentBlock;
     if (catalog.component_block_count != scaffold.blocks.len) return PacketScaffoldError.InvalidComponentBlock;
     const packet_count = std.math.cast(usize, scaffold.plan.packets) orelse return PacketScaffoldError.InvalidPacket;
@@ -2495,19 +2511,23 @@ pub fn validateTileRpclPacketStream(
     var active_count: usize = 0;
     defer deinitTilePacketReaderGroups(active_storage[0..active_count], allocator);
 
-    var iterator = try packet_plan.RpclIterator.init(scaffold.plan, component_count, scaffold.layers);
+    const sequence = try buildPacketOrderSequence(allocator, packet_order, scaffold.plan, scaffold.layers);
+    defer allocator.free(sequence);
+    if (sequence.len != packet_count) return PacketScaffoldError.InvalidPacket;
+
     var packet_offset: usize = 0;
-    var decoded_packets: usize = 0;
-    while (iterator.next()) |packet| {
-        const packet_index = std.math.cast(usize, packet.sequence) orelse return PacketScaffoldError.InvalidPacket;
-        if (packet_index != decoded_packets) return PacketScaffoldError.InvalidPacket;
+    for (sequence, 0..) |packet, packet_index| {
+        const rpcl_sequence = packet_plan.rpclSequenceForPacket(scaffold.plan, component_count, scaffold.layers, packet) catch
+            return PacketScaffoldError.InvalidPacket;
+        const rpcl_slot = std.math.cast(usize, rpcl_sequence) orelse return PacketScaffoldError.InvalidPacket;
+        if (rpcl_slot >= index.entries.len) return PacketScaffoldError.InvalidPacket;
         const packet_length: usize = stream.packet_lengths[packet_index];
         const packet_end = try std.math.add(usize, packet_offset, packet_length);
         if (packet_end > stream.bytes.len) return PacketScaffoldError.InvalidPacket;
 
         if (packet.layer == 0) {
             if (active_count != 0) return PacketScaffoldError.InvalidPacket;
-            var groups = try index.bandGroupsForPacket(allocator, scaffold, packet.sequence);
+            var groups = try index.bandGroupsForPacket(allocator, scaffold, rpcl_sequence);
             defer groups.deinit();
             if (groups.groups.len > active_storage.len) return PacketScaffoldError.InvalidPacket;
             while (active_count < groups.groups.len) : (active_count += 1) {
@@ -2529,16 +2549,106 @@ pub fn validateTileRpclPacketStream(
             stream.packet_header_lengths[packet_index],
         );
         packet_offset = packet_end;
-        decoded_packets += 1;
 
         if (packet.layer + 1 == scaffold.layers) {
             deinitTilePacketReaderGroups(active_storage[0..active_count], allocator);
             active_count = 0;
         }
     }
-    if (decoded_packets != packet_count or packet_offset != stream.bytes.len or active_count != 0) {
+    if (packet_offset != stream.bytes.len or active_count != 0) {
         return PacketScaffoldError.InvalidPacket;
     }
+}
+
+fn buildPacketOrderSequence(
+    allocator: std.mem.Allocator,
+    packet_order: PacketOrder,
+    plan: packet_plan.Plan,
+    layers: u16,
+) ![]packet_plan.Packet {
+    const packet_count = std.math.cast(usize, plan.packets) orelse return PacketScaffoldError.InvalidPacket;
+    const sequence = try allocator.alloc(packet_plan.Packet, packet_count);
+    errdefer allocator.free(sequence);
+
+    var count: usize = 0;
+    switch (packet_order) {
+        .rpcl => {
+            var iterator = try packet_plan.RpclIterator.init(plan, component_count, layers);
+            while (iterator.next()) |packet| {
+                if (count >= sequence.len) return PacketScaffoldError.InvalidPacket;
+                sequence[count] = packet;
+                count += 1;
+            }
+        },
+        .lrcp => {
+            var iterator = try packet_plan.LrcpIterator.init(plan, component_count, layers);
+            while (iterator.next()) |packet| {
+                if (count >= sequence.len) return PacketScaffoldError.InvalidPacket;
+                sequence[count] = packet;
+                count += 1;
+            }
+        },
+    }
+    if (count != sequence.len) return PacketScaffoldError.InvalidPacket;
+    return sequence;
+}
+
+fn reorderTilePacketStreamFromRpcl(
+    allocator: std.mem.Allocator,
+    stream: *TileRpclPacketStream,
+    plan: packet_plan.Plan,
+    layers: u16,
+    packet_order: PacketOrder,
+) !void {
+    if (packet_order == .rpcl) return;
+    const packet_count = std.math.cast(usize, plan.packets) orelse return PacketScaffoldError.InvalidPacket;
+    if (stream.packet_lengths.len != packet_count or
+        stream.packet_header_lengths.len != packet_count)
+    {
+        return PacketScaffoldError.InvalidPacket;
+    }
+
+    const offsets = try allocator.alloc(usize, packet_count + 1);
+    defer allocator.free(offsets);
+    offsets[0] = 0;
+    for (stream.packet_lengths, 0..) |packet_length, index| {
+        offsets[index + 1] = try std.math.add(usize, offsets[index], packet_length);
+    }
+    if (offsets[packet_count] != stream.bytes.len) return PacketScaffoldError.InvalidPacket;
+
+    const lengths = try allocator.alloc(u32, packet_count);
+    errdefer allocator.free(lengths);
+    const header_lengths = try allocator.alloc(u32, packet_count);
+    errdefer allocator.free(header_lengths);
+    const bytes = try allocator.alloc(u8, stream.bytes.len);
+    errdefer allocator.free(bytes);
+
+    const sequence = try buildPacketOrderSequence(allocator, packet_order, plan, layers);
+    defer allocator.free(sequence);
+
+    var out_offset: usize = 0;
+    for (sequence, 0..) |packet, out_index| {
+        const source_sequence = packet_plan.rpclSequenceForPacket(plan, component_count, layers, packet) catch
+            return PacketScaffoldError.InvalidPacket;
+        const source = std.math.cast(usize, source_sequence) orelse return PacketScaffoldError.InvalidPacket;
+        if (source >= packet_count) return PacketScaffoldError.InvalidPacket;
+        const source_length: usize = stream.packet_lengths[source];
+        const source_end = try std.math.add(usize, offsets[source], source_length);
+        if (source_end > stream.bytes.len) return PacketScaffoldError.InvalidPacket;
+        lengths[out_index] = stream.packet_lengths[source];
+        header_lengths[out_index] = stream.packet_header_lengths[source];
+        @memcpy(bytes[out_offset..][0..source_length], stream.bytes[offsets[source]..source_end]);
+        out_offset += source_length;
+    }
+    if (out_offset != bytes.len) return PacketScaffoldError.InvalidPacket;
+
+    stream.deinit();
+    stream.* = .{
+        .allocator = allocator,
+        .bytes = bytes,
+        .packet_lengths = lengths,
+        .packet_header_lengths = header_lengths,
+    };
 }
 
 pub fn buildTileRpclPacketStream(
