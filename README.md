@@ -73,10 +73,13 @@ This first milestone is intentionally small and honest:
   packet catalog where packet spans can be derived: PLT-backed OpenJPEG/Grok
   output, PLT-less default LRCP/no-precinct output from OpenJPEG/Grok/Kakadu,
   PLT-less OpenJPEG/Grok multi-layer lossless ladders, Kakadu reversible QCD
-  profiles, and foreign OpenJPEG 9/7 lossy output (byte-identical to OpenJPEG
-  across a moderate rate ladder; pinned by an embedded-fixture regression test)
+  profiles, foreign OpenJPEG 9/7 lossy output (byte-identical to OpenJPEG
+  across a moderate rate ladder plus a heavy-truncation error-bound fixture),
+  and a foreign Grok 20.3.6 9/7 lossy fixture whose scalar-expounded QCD
+  mantissas differ from z2000's generated table
 - redundant COC/QCC component markers accepted when they byte-replicate the
-  main COD/QCD (genuine per-component overrides fail closed)
+  main COD/QCD (genuine per-component overrides plus malformed COC/QCC payloads
+  fail closed)
 - strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
   `COM` comments
 
@@ -90,8 +93,8 @@ and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported combinations still
 fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-07, the narrow RGB lossless JP2 target is estimated at 90/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 66/100.
+2026-07-09, the narrow RGB lossless JP2 target is estimated at 91/100, while
+the broader JPEG2000 Part 1 codec family is estimated at 70/100.
 
 ## Build
 
@@ -186,8 +189,9 @@ lines we are targeting:
   tile-parts.
 - `--mct rct` maps to COD multiple component transform 1 with the reversible
   5/3 path; `--mct ict` selects the irreversible ICT and requires
-  `--transform 9-7 --qstyle scalar-expounded`. `--mct none` codes the three
-  components independently on the reversible path (single-tile only).
+  `--transform 9-7` with scalar-expounded or scalar-derived quantization.
+  `--mct none` codes the three components independently on the reversible path
+  (single-tile only).
 - `--transform 5-3` maps to COD wavelet transform 1 (lossless RCT path).
   `--transform 9-7` maps to COD wavelet transform 0 and enables the
   irreversible ICT/9-7/scalar-quantization pipeline.
