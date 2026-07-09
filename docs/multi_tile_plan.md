@@ -114,8 +114,10 @@ per-tile SOP restart, TLM cross-check).
 (SIZ/TLM/SOT structure, Psot chaining to EOC, thread-count determinism, JP2
 wrap acceptance, and strict decode); "multi-tile terminate-all roundtrips
 losslessly" (COD style `0x04`, deterministic encode across worker counts,
-strict single-threaded/threaded decode, JP2 wrapper acceptance); "multi-tile
-encode fails closed outside the v1 envelope" (layers, mct none,
+strict single-threaded/threaded decode, JP2 wrapper acceptance);
+"multi-tile terminate-all fails closed on packet corruption" (second-tile PLT
+length mutation, final tile-part truncation, and second-tile SOD payload
+byte-flip walk); "multi-tile encode fails closed outside the v1 envelope" (layers, mct none,
 BYPASS/RESET-style combinations, sidecar, 9/7, misaligned tile size);
 "multi-tile encode rejects tiles that clamp the global DWT level count" (18×18
 with 16×16 tiles). Single-tile output is byte-identical (branch only taken when

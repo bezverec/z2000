@@ -11754,6 +11754,81 @@ test "multi-tile terminate-all roundtrips losslessly" {
     try std.testing.expectEqual(@as(usize, width), info.width);
 }
 
+test "multi-tile terminate-all fails closed on packet corruption" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.terminate_all = true;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const second_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
+    const second_plt = findMarkerAfter(bytes, codestream.markerValue("plt"), second_sot) orelse return error.MissingPlt;
+    const second_sod = findMarkerAfter(bytes, codestream.markerValue("sod"), second_sot) orelse return error.MissingSod;
+    try std.testing.expect(second_plt < second_sod);
+
+    // Sanity: the clean stream reconstructs through the strict multi-tile
+    // TERMALL path before corruptions are applied.
+    {
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+    }
+
+    // Corrupt the second tile's PLT packet-length byte. The tile-part payload
+    // span no longer matches the packet table, so the SOT/PLT walk must reject
+    // it before any unchecked packet payload access is possible.
+    {
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        const segment_length = readU16BeTest(corrupted, second_plt + 2);
+        if (segment_length < 4) return error.InvalidPlt;
+        const last_length_byte = second_plt + 2 + @as(usize, segment_length) - 1;
+        corrupted[last_length_byte] ^= 0x01;
+        try std.testing.expectError(
+            codestream.CodestreamError.InvalidCodestream,
+            codestream.decodeLosslessTemporary(allocator, corrupted),
+        );
+    }
+
+    // Truncating inside the final tile-part payload remains a bounded
+    // truncation error, even with one terminated segment per coding pass.
+    try std.testing.expectError(
+        codestream.CodestreamError.TruncatedData,
+        codestream.decodeLosslessTemporary(allocator, bytes[0 .. bytes.len - 8]),
+    );
+
+    // Walk payload flips in the second tile's SOD payload. Some corruptions may
+    // still decode to wrong pixels, but the decoder must never panic/OOB and at
+    // least one offset should be actively rejected by the per-pass segment path.
+    var rejected = false;
+    var offset = second_sod + 2;
+    while (offset < second_sod + 32 and offset < bytes.len) : (offset += 1) {
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        corrupted[offset] ^= 0x5a;
+        if (codestream.decodeLosslessTemporary(allocator, corrupted)) |decoded_image| {
+            var owned = decoded_image;
+            owned.deinit();
+        } else |_| {
+            rejected = true;
+        }
+    }
+    try std.testing.expect(rejected);
+}
+
 test "multi-tile encode fails closed outside the v1 envelope" {
     const allocator = std.testing.allocator;
     const width = 48;
