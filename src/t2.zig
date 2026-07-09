@@ -1591,14 +1591,12 @@ pub fn readCodeBlockPacketHeader(
 
     if (bypass or terminate_all) {
         var span_passes: [max_block_segments]u16 = undefined;
-        const segment_count = if (bypass)
-            try bypassSegmentPassCounts(first_pass, pass_count, &span_passes)
-        else blk: {
+        const segment_count = if (terminate_all) blk: {
             // terminate_all: each coding pass is its own terminated segment.
             if (pass_count > max_block_segments) return PacketHeaderError.InvalidPacketHeader;
             for (0..pass_count) |i| span_passes[i] = 1;
             break :blk @as(u8, @intCast(pass_count));
-        };
+        } else try bypassSegmentPassCounts(first_pass, pass_count, &span_passes);
         var block = DecodedPacketBlock{
             .included = true,
             .first_inclusion = first_inclusion,

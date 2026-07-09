@@ -13,7 +13,8 @@ This first milestone is intentionally small and honest:
 - CLI encode/decode roundtrip tests
 - safe narrow RGB TIFF 6.0 reader for uncompressed chunky RGB strips
 - JP2 box-level scaffold writer/parser for RGB metadata, including standard
-  length-to-EOF and 64-bit `XLBox` codestream box lengths
+  length-to-EOF and 64-bit `XLBox` codestream box lengths plus uniform RGB
+  `BPCC` precision boxes
 - reversible RGB color transform (RCT) for the future lossless 5/3 path
 - subband/code-block partitioning plus raw bit-plane block payloads
 - narrow RGB JP2 encode/decode roundtrip back to TIFF
@@ -66,8 +67,9 @@ This first milestone is intentionally small and honest:
   and PSNR at matched sizes tracks OpenJPEG's allocator within a few tenths
   of a dB.
 - explicit COD code-block style metadata for all six Part 1 style bits;
-  BYPASS, TERMALL, TERMALL-scoped RESET, vertical-causal, ERTERM, and
-  segmentation symbols are wired where their payload behavior is implemented
+  BYPASS, TERMALL, BYPASS+TERMALL, TERMALL-scoped RESET, vertical-causal,
+  ERTERM, and segmentation symbols are wired where their payload behavior is
+  implemented
 - strict no-sidecar RPCL/RCT/5-3 decode for z2000-produced codestreams
 - decode of foreign (OpenJPEG/Grok/Kakadu) JP2 profiles through the strict
   packet catalog where packet spans can be derived: PLT-backed OpenJPEG/Grok
@@ -209,14 +211,15 @@ lines we are targeting:
 - `--bypass` (Grok `-M 1`, Kakadu `Cmodes=BYPASS`) is implemented end to end
   for single-layer codestreams with the ISO MQ backend, including raw
   segment termination and multi-segment packet-header lengths.
-  `--terminate-all`, TERMALL-scoped `--reset-context`, `--vertical-causal`,
-  and `--segmentation-symbols` are public opt-in strict profiles with
-  end-to-end payload behavior. Predictable termination is wired only with
-  `--terminate-all --predictable-termination`: it emits COD style `0x10` and
-  ER-TERM-flushed per-pass MQ segments. The current larger single-tile
-  no-sidecar RESET+TERMALL smoke decodes pixel-exactly through z2000 strict
-  decode and independent decoders. The ERTERM smoke now decodes
-  pixel-exactly through z2000 strict decode, OpenJPEG, Grok, and Kakadu,
+  `--terminate-all`, `--bypass --terminate-all`, TERMALL-scoped
+  `--reset-context`, `--vertical-causal`, and `--segmentation-symbols` are
+  public opt-in strict profiles with end-to-end payload behavior. Predictable
+  termination is wired only with `--terminate-all --predictable-termination`:
+  it emits COD style `0x10` and ER-TERM-flushed per-pass MQ segments. The
+  current larger single-tile no-sidecar RESET+TERMALL smoke decodes
+  pixel-exactly through z2000 strict decode and independent decoders. The
+  ERTERM smoke now decodes pixel-exactly through z2000 strict decode,
+  OpenJPEG, Grok, and Kakadu,
   including the block-parallel strict decode path.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is

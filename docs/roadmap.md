@@ -23,10 +23,10 @@ interop gate.
 - T1/EBCOT: continue tightening the coding pass model after cleanup run mode,
   JPEG2000-style directional sign context/prediction, and more precise
   refinement contexts. BYPASS, terminate-all, TERMALL-scoped reset-context,
-  vertical-causal, TERMALL-scoped predictable termination, and
+  BYPASS+TERMALL, vertical-causal, TERMALL-scoped predictable termination, and
   segmentation-symbol behavior now have public payload paths where the required
-  segment model exists. Standalone RESET, standalone ERTERM, BYPASS+TERMALL,
-  and untested combinations remain fail-closed. Keep row-mask, stripe-mask,
+  segment model exists. Standalone RESET, standalone ERTERM, and untested
+  combinations remain fail-closed. Keep row-mask, stripe-mask,
   flag-word, and SIMD-aware T1 optimization going only when byte-for-byte
   oracle tests continue to pass.
 - T2 packet state: make include tag-tree state, zero-bitplane tag-tree state,
@@ -74,7 +74,7 @@ interop gate.
    `colr` box against OpenJPEG/Grok/Kakadu where applicable. The ICC-absent
    fixture already stays valid without inventing a profile.
 2. Harden JP2 reader diagnostics around duplicate or misplaced required boxes,
-   unsupported brands, ICC-vs-sRGB `colr` policy, variable bits-per-component,
+   unsupported brands, ICC-vs-sRGB `colr` policy, mixed variable bits-per-component,
    extra components, and multiple contiguous codestream boxes. Basic
    length-to-EOF, `XLBox`, sequential `SOT` tile-part auditing, and `TLM/Psot`
    length matching are now covered for codestream boxes. JP2-boundary `PLT`
@@ -90,9 +90,10 @@ interop gate.
    corrupted PLT/TLM/SOP/EPH/header cases that can be compared against
    OpenJPEG/Grok/Kakadu behavior without assuming any validator is final.
 4. Continue T1 style coverage after the JP2/T2 diagnostics are sharper:
-   keep the implemented public style combinations green and keep standalone
-   RESET/ERTERM, BYPASS+TERMALL, and untested combinations fail-closed until
-   each has writer, strict reader, oracle tests, and interop.
+   keep the implemented public style combinations green, add external
+   BYPASS+TERMALL interop, and keep standalone RESET/ERTERM plus untested
+   combinations fail-closed until each has writer, strict reader, oracle tests,
+   and interop.
 5. Run a comparative benchmark only after the above interop fixtures are green,
    so performance numbers are attached to output that external decoders accept.
 

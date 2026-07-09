@@ -98,8 +98,8 @@ The T1 work is split into two paths:
 - style-aware partial coefficient decoding for pass-prefix quality-layer
   validation;
 - explicit internal `CodeBlockStyle` metadata for all six COD style bits, with
-  BYPASS, TERMALL-scoped RESET, and TERMALL-scoped predictable termination
-  carried through the strict payload path;
+  BYPASS, BYPASS+TERMALL, TERMALL-scoped RESET, and TERMALL-scoped predictable
+  termination carried through the strict payload path;
 - MQ encode/decode roundtrip tests;
 - direct MQ emission with scratch-buffer reuse;
 - shared SIMD-aware code-block stats for the symbol oracle and direct MQ path;
@@ -109,14 +109,15 @@ The implementation is still not a complete Part 1 T1 coder. Strict codestream
 metadata policy is fail-closed per combination: a COD code-block style byte is
 accepted only when the matching payload model is wired through T1, T2 segment
 lengths, strict decode, tests, and interop smoke. BYPASS, TERMALL,
-TERMALL-scoped RESET, vertical-causal, TERMALL-scoped ERTERM, and
-segmentation-symbol profiles are public where their segment model exists;
-large no-sidecar ERTERM files are green through z2000 strict decode,
-OpenJPEG, Grok, and Kakadu.
-Standalone RESET/ERTERM, BYPASS+TERMALL, and untested combinations still return
-`UnsupportedPayload`. The next T1 work should continue tightening remaining
-cleanup edge cases, COD-driven termination combinations, and byte-for-byte
-oracle coverage.
+TERMALL-scoped RESET, BYPASS+TERMALL, vertical-causal, TERMALL-scoped ERTERM,
+and segmentation-symbol profiles are public where their segment model exists;
+large no-sidecar ERTERM files are green through z2000 strict decode, OpenJPEG,
+Grok, and Kakadu. BYPASS+TERMALL is strict-decode covered and lossless through
+OpenJPEG/Grok on the current smoke; Kakadu remains to be checked. Standalone
+RESET/ERTERM and untested
+combinations still return `UnsupportedPayload`. The next T1 work should
+continue tightening remaining cleanup edge cases, COD-driven termination
+combinations, and byte-for-byte oracle coverage.
 
 ## T2 Direction
 
@@ -348,8 +349,7 @@ These are intentionally not treated as complete yet:
 - multi-tile combinations outside the v1 envelope, including broader profile
   mixes, multiple quality layers, advanced style-bit combinations, and tile-part
   divisions beyond the current supported policy;
-- standalone RESET/ERTERM, BYPASS+TERMALL, and untested code-block style
-  combinations;
+- standalone RESET/ERTERM and untested code-block style combinations;
 - broader PLT-less foreign decode coverage beyond the current single-tile
   lossless OpenJPEG/Grok/Kakadu matrix;
 - general-purpose lossy decode/error-bound coverage beyond the current narrow

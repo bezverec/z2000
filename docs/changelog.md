@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### T1 Code-Block Styles
+
+- BYPASS+TERMALL (`COD` code-block style `0x05`) is now locally public for the
+  ISO-MQ path. The encoder emits one terminated segment per coding pass, using
+  D.6 raw bypass for eligible significance/refinement passes and MQ for
+  cleanup/non-bypass passes; the strict decoder consumes the same per-pass
+  segment table. RESET/ERTERM combined with BYPASS remains fail-closed until
+  those segment models have their own tests and interop gates. A 256x256
+  single-layer RPCL/RCT/5-3 smoke decodes losslessly through z2000 strict
+  decode, OpenJPEG 2.5.4, and Grok 20.3.6; Kakadu remains the next external
+  check for this style combination.
+
+### JP2 Container Metadata
+
+- The JP2 reader now accepts an `ihdr` BPC value of `255` when a matching
+  `bpcc` child box supplies uniform unsigned RGB component precision. The
+  supported boundary stays narrow and fail-closed: exactly three components,
+  all 8-bit or all 16-bit, `bpcc` immediately following `ihdr`, matching the
+  codestream SIZ component precision, with either enumerated sRGB or restricted
+  ICC colour boxes. Missing `bpcc`, signed components, mixed precision,
+  malformed lengths, and optional boxes inserted before required `bpcc` are
+  rejected explicitly.
+- The same JP2 header walk now treats only `res ` as safely ignorable metadata
+  in the narrow RGB profile. Palette, component-mapping, channel-definition,
+  and unknown `jp2h` boxes fail closed until their colour/component semantics
+  are implemented.
+
 ### Foreign 9/7 Lossy Decode
 
 - z2000 now decodes foreign OpenJPEG 2.5.4 irreversible 9/7 lossy JP2s
@@ -199,7 +226,9 @@ entries are grouped by development milestone rather than semantic version.
 - Opened COD style `RESET` (`0x02`) only in the implemented TERMALL ISO-MQ
   segment model: `--reset-context --terminate-all` resets JPEG2000 MQ context
   states between pass-terminated segments while preserving explicit T2 segment
-  lengths. Standalone RESET and BYPASS+TERMALL remain fail-closed.
+  lengths. At that milestone, standalone RESET and BYPASS+TERMALL still
+  remained fail-closed; BYPASS+TERMALL has since gained local strict coverage
+  in the Unreleased T1 style section above.
 - Added public roundtrip and strict COD mutation coverage. A larger no-sidecar
   single-tile smoke from `0002.tif` decodes pixel-exactly through z2000 strict
   decode, Kakadu, OpenJPEG, and Grok.

@@ -3563,6 +3563,27 @@ test "JP2 wrapper validates 16-bit z2000 codestream SIZ metadata" {
     try std.testing.expectEqual(codestream_bytes.len, info.codestream_bytes);
     try std.testing.expectEqualSlices(u8, codestream_bytes, try jp2.extractCodestream(wrapped));
 
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        const jp2h_payload = try findJp2BoxPayload(with_variable_ihdr, "jp2h");
+        const ihdr_payload = try findJp2ChildBoxPayload(with_variable_ihdr, jp2h_payload, "ihdr");
+        const colr_payload = try findJp2ChildBoxPayload(with_variable_ihdr, jp2h_payload, "colr");
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const with_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "bpcc",
+            &.{ 15, 15, 15 },
+        );
+        defer allocator.free(with_bpcc);
+        const bpcc_info = try jp2.parseInfo(with_bpcc);
+        try std.testing.expectEqual(@as(u8, 16), bpcc_info.bits_per_component);
+        try std.testing.expectEqualSlices(u8, codestream_bytes, try jp2.extractCodestream(with_bpcc));
+    }
+
     const corrupted = try allocator.dupe(u8, wrapped);
     defer allocator.free(corrupted);
     const jp2h_payload = try findJp2BoxPayload(corrupted, "jp2h");
@@ -3899,11 +3920,32 @@ test "JP2 wrapper preserves restricted ICC color profile" {
     try std.testing.expectEqualSlices(u8, icc, extracted.?);
 
     const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+    const ihdr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "ihdr");
     const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
     try std.testing.expectEqual(@as(u8, 2), wrapped[colr_payload.start]);
     try std.testing.expectEqual(@as(u8, 0), wrapped[colr_payload.start + 1]);
     try std.testing.expectEqual(@as(u8, 0), wrapped[colr_payload.start + 2]);
     try std.testing.expectEqualSlices(u8, icc, wrapped[colr_payload.start + 3 .. colr_payload.end]);
+
+    const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+    defer allocator.free(with_variable_ihdr);
+    with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+    const with_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+        allocator,
+        with_variable_ihdr,
+        jp2h_payload,
+        colr_payload.start - 8,
+        "bpcc",
+        &.{ 7, 7, 7 },
+    );
+    defer allocator.free(with_bpcc);
+    const bpcc_info = try jp2.parseInfo(with_bpcc);
+    try std.testing.expect(bpcc_info.has_icc_profile);
+    try std.testing.expectEqual(@as(u8, 8), bpcc_info.bits_per_component);
+    const bpcc_extracted = try jp2.extractIccProfile(allocator, with_bpcc);
+    defer if (bpcc_extracted) |profile| allocator.free(profile);
+    try std.testing.expect(bpcc_extracted != null);
+    try std.testing.expectEqualSlices(u8, icc, bpcc_extracted.?);
 }
 
 test "JP2 reader rejects malformed restricted ICC color boxes" {
@@ -4084,7 +4126,7 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
         defer allocator.free(corrupted);
         const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
         corrupted[ihdr_payload.start + 10] = 0xff;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+        try std.testing.expectError(jp2.Jp2Error.MissingRequiredBox, jp2.parseInfo(corrupted));
     }
 
     {
@@ -4109,21 +4151,48 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
     }
 
     {
-        // Unknown optional jp2h boxes after ihdr (Kakadu writes a res box) are
-        // skipped without failing the parse.
+        // Resolution metadata (Kakadu writes a res box) is skipped without
+        // changing the narrow RGB component interpretation.
         const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
-        const res_box = [_]u8{ 0, 0, 0, 10, 'r', 'e', 's', ' ', 0xaa, 0xbb };
         const with_res = try insertJp2BoxInsideJp2HeaderForTest(
             allocator,
             wrapped,
             jp2h_payload,
             colr_payload.end,
             "res ",
-            res_box[8..],
+            &.{ 0xaa, 0xbb },
         );
         defer allocator.free(with_res);
         const info = try jp2.parseInfo(with_res);
         try std.testing.expectEqual(@as(usize, 2), info.width);
+    }
+
+    {
+        const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+        const with_cdef = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "cdef",
+            &.{ 0, 0 },
+        );
+        defer allocator.free(with_cdef);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(with_cdef));
+    }
+
+    {
+        const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+        const with_unknown_jp2h = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "uuid",
+            &.{ 0xaa, 0xbb },
+        );
+        defer allocator.free(with_unknown_jp2h);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(with_unknown_jp2h));
     }
 
     {
@@ -4323,7 +4392,7 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
     }
 }
 
-test "JP2 reader rejects variable bits-per-component child box" {
+test "JP2 reader accepts uniform BPCC bits-per-component child box" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
     defer allocator.free(samples);
@@ -4339,12 +4408,170 @@ test "JP2 reader rejects variable bits-per-component child box" {
     const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
     defer allocator.free(wrapped);
     const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
-    const with_bpcc = try allocator.dupe(u8, wrapped);
-    defer allocator.free(with_bpcc);
-    const colr_payload = try findJp2ChildBoxPayload(with_bpcc, jp2h_payload, "colr");
-    @memcpy(with_bpcc[colr_payload.start - 4 ..][0..4], "bpcc");
+    const ihdr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "ihdr");
+    const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
 
-    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(with_bpcc));
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const with_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "bpcc",
+            &.{ 7, 7, 7 },
+        );
+        defer allocator.free(with_bpcc);
+        const info = try jp2.parseInfo(with_bpcc);
+        try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
+        try std.testing.expectEqual(@as(u16, 3), info.components);
+        try std.testing.expectEqualSlices(u8, minimal_jp2_codestream[0..], try jp2.extractCodestream(with_bpcc));
+    }
+
+    {
+        const missing_bpcc = try allocator.dupe(u8, wrapped);
+        defer allocator.free(missing_bpcc);
+        missing_bpcc[ihdr_payload.start + 10] = 0xff;
+        try std.testing.expectError(jp2.Jp2Error.MissingRequiredBox, jp2.parseInfo(missing_bpcc));
+    }
+
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const signed_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "bpcc",
+            &.{ 0x87, 7, 7 },
+        );
+        defer allocator.free(signed_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(signed_bpcc));
+    }
+
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const mixed_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "bpcc",
+            &.{ 7, 15, 7 },
+        );
+        defer allocator.free(mixed_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(mixed_bpcc));
+    }
+
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const short_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "bpcc",
+            &.{ 7, 7 },
+        );
+        defer allocator.free(short_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(short_bpcc));
+    }
+
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const with_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "bpcc",
+            &.{ 7, 7, 7 },
+        );
+        defer allocator.free(with_bpcc);
+        const with_bpcc_jp2h = try findJp2BoxPayload(with_bpcc, "jp2h");
+        const with_bpcc_colr = try findJp2ChildBoxPayload(with_bpcc, with_bpcc_jp2h, "colr");
+        const duplicate_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_bpcc,
+            with_bpcc_jp2h,
+            with_bpcc_colr.start - 8,
+            "bpcc",
+            &.{ 7, 7, 7 },
+        );
+        defer allocator.free(duplicate_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(duplicate_bpcc));
+    }
+
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const res_before_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "res ",
+            &.{ 0xaa, 0xbb },
+        );
+        defer allocator.free(res_before_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.MissingRequiredBox, jp2.parseInfo(res_before_bpcc));
+    }
+
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const late_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.end,
+            "bpcc",
+            &.{ 7, 7, 7 },
+        );
+        defer allocator.free(late_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.MissingRequiredBox, jp2.parseInfo(late_bpcc));
+    }
+
+    {
+        const with_variable_ihdr = try allocator.dupe(u8, wrapped);
+        defer allocator.free(with_variable_ihdr);
+        with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
+        const wrong_depth_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            with_variable_ihdr,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "bpcc",
+            &.{ 15, 15, 15 },
+        );
+        defer allocator.free(wrong_depth_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(wrong_depth_bpcc));
+    }
+
+    {
+        const unexpected_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "bpcc",
+            &.{ 7, 7, 7 },
+        );
+        defer allocator.free(unexpected_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(unexpected_bpcc));
+    }
 }
 
 test "RCT transform matches JPEG2000 reversible equations" {
@@ -10195,11 +10422,12 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported standalone RESET code-block style", .offset = 12, .value = 0x02, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported ERTERM code-block style", .offset = 12, .value = 0x10, .expected = codestream.CodestreamError.UnsupportedPayload },
-        // TERMALL (0x04), RESET+TERMALL (0x06), CAUSAL (0x08), ERTERM+TERMALL
-        // (0x14), and SEGMARK (0x20) are supported end-to-end, so they are
-        // intentionally absent here; their acceptance + roundtrip is covered by
-        // dedicated tests. The combined 0x3f case still exercises rejection of
-        // the unimplemented BYPASS+TERMALL segment model.
+        // TERMALL (0x04), BYPASS+TERMALL (0x05), RESET+TERMALL (0x06), CAUSAL
+        // (0x08), ERTERM+TERMALL (0x14), and SEGMARK (0x20) are supported on
+        // their documented paths, so they are intentionally absent here; their
+        // acceptance + roundtrip is covered by dedicated tests. The combined
+        // 0x3f case still exercises rejection of unsupported RESET/ERTERM
+        // combinations with BYPASS.
         .{ .label = "unsupported combined code-block style", .offset = 12, .value = 0x3f, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "reserved code-block style bit", .offset = 12, .value = 0x40, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
@@ -10420,10 +10648,12 @@ test "unsupported code-block style options fail closed" {
         .{ .label = "TERMALL+legacy", .options = .{ .terminate_all = true, .t1_backend = .legacy_mq } },
         // Multi-layer terminate_all is not yet wired; it must fail closed.
         .{ .label = "TERMALL+layers", .options = .{ .terminate_all = true, .layers = 2 } },
-        .{ .label = "BYPASS+TERMALL", .options = .{ .bypass = true, .terminate_all = true } },
+        .{ .label = "BYPASS+RESET+TERMALL", .options = .{ .bypass = true, .terminate_all = true, .reset_context = true } },
+        .{ .label = "BYPASS+ERTERM+TERMALL", .options = .{ .bypass = true, .terminate_all = true, .predictable_termination = true } },
         // CAUSAL (vertical_causal), SEGMARK (segmentation_symbols), and TERMALL
-        // (terminate_all, ISO MQ) are now wired end-to-end; see the dedicated
-        // roundtrip tests below. None of those is fail-closed any longer.
+        // (terminate_all, ISO MQ), including BYPASS+TERMALL, are now wired
+        // end-to-end; see the dedicated roundtrip tests below. None of those
+        // documented combinations is fail-closed any longer.
         .{ .label = "ERTERM", .options = .{ .predictable_termination = true } },
     };
 
@@ -10568,6 +10798,67 @@ test "terminate-all code-block style roundtrips losslessly and is deterministic"
     var decoded = try codestream.decodeLosslessTemporary(allocator, termall);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
+test "bypass with terminate-all roundtrips as per-pass raw and MQ segments" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37 + i / 3) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17 + i / 5) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5 + i / 7) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bypass_termall = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .bypass = true,
+        .terminate_all = true,
+    });
+    defer allocator.free(bypass_termall);
+    const bypass = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .bypass = true });
+    defer allocator.free(bypass);
+    const termall = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .terminate_all = true });
+    defer allocator.free(termall);
+
+    const bypass_termall_cod = findMarker(bypass_termall, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const bypass_cod = findMarker(bypass, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const termall_cod = findMarker(termall, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x05), bypass_termall[bypass_termall_cod + 12] & 0x05);
+    try std.testing.expectEqual(@as(u8, 0x01), bypass[bypass_cod + 12] & 0x05);
+    try std.testing.expectEqual(@as(u8, 0x04), termall[termall_cod + 12] & 0x05);
+
+    try std.testing.expect(!std.mem.eql(u8, bypass_termall, bypass));
+    try std.testing.expect(!std.mem.eql(u8, bypass_termall, termall));
+
+    const bypass_termall_again = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .bypass = true,
+        .terminate_all = true,
+    });
+    defer allocator.free(bypass_termall_again);
+    try std.testing.expectEqualSlices(u8, bypass_termall, bypass_termall_again);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bypass_termall);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var threaded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bypass_termall, .{ .threads = 4 });
+    defer threaded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, threaded.samples);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bypass_termall);
+    allocator.free(wrapped);
 }
 
 test "reset-context with terminate-all roundtrips losslessly and changes context state" {
