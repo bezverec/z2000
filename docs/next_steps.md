@@ -7,18 +7,20 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **91/100 narrow, 71/100 full** as of
+the subsequent JP2/T2/T1/profile work is **91/100 narrow, 72/100 full** as of
 2026-07-09. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-08)
 
-Scorecard now **91/100 narrow, 71/100 full**. Landed since the 2026-07-07
+Scorecard now **91/100 narrow, 72/100 full**. Landed since the 2026-07-07
 sequence below: the malformed-input fuzzing gate (four profiles: single-tile
 RCT/5-3, multi-tile RCT/5-3, ICT/9-7, TERMALL — full interop row 4→5), the
 odd/thin/minimal-dimension roundtrip matrix (narrow RCT/DWT 9→10, narrow
 90→91), 16-bit RGB end-to-end interop confirmation, plus the perf pass
 (full-core parallel DWT, parallel forward RCT, balanced low-thread decode —
-see `optimization_plan.md`).
+see `optimization_plan.md`). Multi-tile TERMALL has since opened as a narrow
+aligned-tile profile with deterministic strict roundtrip and malformed-input
+fuzz coverage (full lossless encode 9→10, full 71→72).
 
 The remaining levers are larger and structural. Ordered by *value per unit
 risk*; each names the ISO clause, the current code state, exactly what is
@@ -46,11 +48,11 @@ items are preserved further below as implementation history.
 
 ### N2. Multi-tile v2 — one axis at a time — L · High
 
-- **Impact:** full "Lossless encode" 9→11, "Lossless decode" 10→12, "Core
-  syntax" +1. (+5, the single biggest full-target lever)
+- **Impact:** full "Lossless encode" 10→11, "Lossless decode" 10→12, "Core
+  syntax" +1. (+4, the single biggest full-target lever)
 - **ISO clause:** B.3–B.12 (tile grid, per-tile SOT/SOD, tile-part order).
 - **State:** multi-tile v1 is interop-proven for aligned grids, RCT/5-3, one
-  quality layer, plain style, one tile-part per tile, RPCL. Gates:
+  quality layer, plain or TERMALL style, one tile-part per tile, RPCL. Gates:
   `validateMultiTileCodingPath` / `validateMultiTileGeometry` in `codestream.zig`.
 - **What to add (staged, each its own PR, single-tile byte-identical at every
   step):**
@@ -165,22 +167,27 @@ for more ISO coverage is:
    panic or OOB under Debug, ReleaseSafe, and ReleaseFast. An out-of-process
    ReleaseSafe sweep (byte-flip, truncation, multi-value over the full 32 KB
    smoke JP2) also found zero crashes. Scorecard: full interop/conformance row
-   4→5 (66→67). Broadened (2026-07-08) to four profiles in one test —
+   4→5 (66→67). Broadened (2026-07-08) to six profiles in one test —
    single-tile archival RCT/5-3, multi-tile RCT/5-3 (per-tile SOT/PLT walk),
-   irreversible ICT/9-7 (QCD step-size parse + float inverse DWT/ICT), and terminate-all (per-pass terminated-segment T1 decoder) —
+   irreversible ICT/9-7 (QCD step-size parse + float inverse DWT/ICT),
+   terminate-all (per-pass terminated-segment T1 decoder), BYPASS+TERMALL
+   (mixed raw/MQ per-pass segments), and multi-tile TERMALL (per-tile packet
+   walks plus per-pass terminated segment lengths) —
    all green in Debug/ReleaseSafe/ReleaseFast; out-of-process ReleaseSafe
    sweeps of the multi-tile and 9/7 smoke JP2s also found zero crashes.
-   Remaining: styled-T1 profiles (already have a dedicated corruption matrix)
-   and treating jpylyzer/valid2000 findings as diagnostics.
+   Remaining: treating jpylyzer/valid2000 findings as diagnostics and adding
+   broader external-corpus fuzz fixtures.
 2. **Styled T1/T2 corruption matrix.** ✅ First slice landed: the test
    "terminated styled T1 streams fail closed on corruption" runs, for each of
-   TERMALL / RESET+TERMALL / ERTERM, a clean roundtrip plus three corruptions —
+   TERMALL / RESET+TERMALL / ERTERM / BYPASS+TERMALL, a clean roundtrip plus three corruptions —
    a flipped per-pass PLT length byte → deterministic `InvalidCodestream`
    (segment-span accounting), a truncated final tile-part → `TruncatedData`,
    and a payload byte-flip walk requiring at least one bounded rejection with
-   no panic/OOB (green in Debug and ReleaseFast). Remaining: extend the same
-   fixtures to the multi-tile terminated path and to malformed *packet-header*
-   segment counts (not just PLT lengths), then broaden style combinations.
+   no panic/OOB (green in Debug and ReleaseFast). The T2 unit gate also rejects
+   over-capacity terminated packet-header segment counts before segment lengths
+   are read. Multi-tile TERMALL now has a strict roundtrip plus malformed-input
+   fuzz gate. Remaining: broaden style combinations beyond the terminated
+   multi-tile slice.
 3. **Multi-tile v2.** The v1 aligned envelope is real and interop-proven for
    the documented lossless profile. Expand one axis at a time: edge-tile
    fixtures, more progression orders, then quality layers/style bits only after
@@ -588,7 +595,7 @@ codestreams encode and decode byte-exactly through the public path (2×2 and
 genuine 4-tile JP2 to a byte-identical TIFF, `jp2 stats`/packet audit
 aggregate per tile, and the JP2 wrapper validates the multi-tile profile.
 v1 envelope: lossless RCT/5-3, one quality layer, one tile-part per tile
-(row-major), plain code-block style, ISO B.6/B.7-aligned geometry (enforced
+(row-major), plain or TERMALL code-block style, ISO B.6/B.7-aligned geometry (enforced
 fail-closed on both encode and decode). The full-target scorecard points
 (+4–5) stay **staged, not claimed**, until OpenJPEG/Grok/Kakadu decode a
 genuinely multi-tile z2000 file (verification protocol). Original scoping
