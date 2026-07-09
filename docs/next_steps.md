@@ -51,9 +51,9 @@ items are preserved further below as implementation history.
 - **Impact:** full "Lossless encode" 10→11, "Lossless decode" 10→12, "Core
   syntax" +1. (+4, the single biggest full-target lever)
 - **ISO clause:** B.3–B.12 (tile grid, per-tile SOT/SOD, tile-part order).
-- **State:** multi-tile v1/v2a is interop-proven for aligned RPCL grids and
-  locally strict for single-layer LRCP grids: RCT/5-3, one quality layer, plain
-  or TERMALL style, one tile-part per tile. Gates:
+- **State:** multi-tile v1/v2 is interop-proven for aligned RPCL grids and
+  locally strict for single-layer LRCP grids: RCT/5-3, one or more untargeted
+  RPCL quality layers, plain or TERMALL style, one tile-part per tile. Gates:
   `validateMultiTileCodingPath` / `validateMultiTileGeometry` in `codestream.zig`.
 - **What to add (staged, each its own PR, single-tile byte-identical at every
   step):**
@@ -61,8 +61,9 @@ items are preserved further below as implementation history.
     through per-tile packet build and strict per-tile slot walk. Remaining:
     OpenJPEG/Grok/Kakadu on a 2×2 LRCP multi-tile file, then RLCP/PCRL/CPRL
     once the stateful multi-layer/T2 constraints are explicit.
-  - **v2b — quality layers per tile.** Remove the `layers != 1` gate; the PCRD
-    allocator and per-tile packet plan already handle layers single-tile.
+  - **v2b — quality layers per tile.** Untargeted RPCL quality layers are
+    wired through encode and strict decode. Remaining: make PCRD/rate targets
+    tile-aware before accepting `--rates` in multi-tile mode.
   - **v2c — reference-grid partition anchoring.** Drop the "tile-size multiple
     of 2^levels × precinct" fail-closed guard by anchoring precinct/code-block
     partitions to the reference grid (ISO B.6/B.7) instead of the tile-local
@@ -597,9 +598,10 @@ codestreams encode and decode byte-exactly through the public path (2×2 and
 3×3 edge-tile grid oracles, real codestream bytes), the CLI roundtrips a
 genuine 4-tile JP2 to a byte-identical TIFF, `jp2 stats`/packet audit
 aggregate per tile, and the JP2 wrapper validates the multi-tile profile.
-v1 envelope: lossless RCT/5-3, one quality layer, one tile-part per tile
-(row-major), plain or TERMALL code-block style, ISO B.6/B.7-aligned geometry (enforced
-fail-closed on both encode and decode). The full-target scorecard points
+current bounded envelope: lossless RCT/5-3, untargeted RPCL quality layers,
+single-layer LRCP, one tile-part per tile (row-major), plain or TERMALL
+code-block style, ISO B.6/B.7-aligned geometry (enforced fail-closed on both
+encode and decode). The full-target scorecard points
 (+4–5) stay **staged, not claimed**, until OpenJPEG/Grok/Kakadu decode a
 genuinely multi-tile z2000 file (verification protocol). Original scoping
 notes follow.

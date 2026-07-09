@@ -13,7 +13,11 @@ entries are grouped by development milestone rather than semantic version.
   permutes each tile-part payload and PLT table into LRCP order; strict
   multi-tile decode reads the tile-part in COD progression order and reorders
   the packet catalog back to RPCL for the existing T2/T1 reconstruction path.
-  RLCP/PCRL/CPRL and multi-layer multi-tile progressions remain fail-closed.
+  RLCP/PCRL/CPRL and multi-layer LRCP remain fail-closed.
+- Multi-tile RPCL now accepts more than one untargeted quality layer. This
+  reuses the existing per-block layer truncation table and per-precinct RPCL
+  packet-state lifetime while keeping multi-tile compression-ratio targets
+  fail-closed until PCRD allocation is made tile-aware.
 
 ### T1 Code-Block Styles
 

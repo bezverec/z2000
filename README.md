@@ -88,16 +88,16 @@ This first milestone is intentionally small and honest:
 It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` codec, but the
 supported JP2 surface is now broader than the original single-tile RPCL slice:
 lossless RCT/5-3, lossy ICT/9-7 scalar quantization, all five Part 1
-progression orders on the documented single-tile path, a v1 aligned multi-tile
-lossless envelope with RPCL plus single-layer LRCP packet order, plain or
-TERMALL code-block style, BYPASS, selected error-resilience style bits, quality
-layers, and PCRD-style rate allocation all have local strict decode coverage
-and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported combinations still
-fail closed.
+progression orders on the documented single-tile path, an aligned multi-tile
+lossless envelope with multi-layer RPCL plus single-layer LRCP packet order,
+plain or TERMALL code-block style, BYPASS, selected error-resilience style
+bits, quality layers, and PCRD-style rate allocation all have local strict
+decode coverage and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported
+combinations still fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
 2026-07-09, the narrow RGB lossless JP2 target is estimated at 91/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 73/100.
+the broader JPEG2000 Part 1 codec family is estimated at 74/100.
 
 ## Build
 
@@ -176,9 +176,10 @@ The CLI now accepts the JPEG2000 profile knobs used by the Grok/Kakadu command
 lines we are targeting:
 
 - `--tile W,H` maps to Grok `-t` and Kakadu `Stiles`. Multi-tile encode and
-  decode work end-to-end in a v1 envelope (lossless RCT/5-3, one quality
-  layer, one tile-part per tile in row-major order, plain or TERMALL
-  code-block style); the geometry must satisfy ISO B.6/B.7 partition anchoring
+  decode work end-to-end in a bounded envelope (lossless RCT/5-3, untargeted
+  RPCL quality layers, single-layer LRCP, one tile-part per tile in row-major
+  order, plain or TERMALL code-block style); the geometry must satisfy ISO
+  B.6/B.7 partition anchoring
   (tile sizes a multiple of `2^levels x` the largest precinct, precincts >=
   code-blocks with the r>0 half-span rule) and every tile must achieve the
   global decomposition level count. Configurations outside the envelope fail
@@ -433,8 +434,8 @@ segment boundaries.
 - Keep parsers bounds-checked and allocation-limited.
 - Use checked integer math for dimensions, offsets, byte counts, and box sizes.
 - Keep hot image data in contiguous component buffers before DWT.
-- Keep tile-level parallelism conservative until the one-layer multi-tile
-  envelope is broadened. Real aligned multi-tile lossless payloads now
+- Keep tile-level parallelism conservative until the bounded multi-tile
+  envelope is broadened further. Real aligned multi-tile lossless payloads now
   encode/decode with per-tile DWT/T1/T2 state, but scheduling still uses
   deterministic component and code-block queues; the next step is tile/profile
   matrix expansion before
@@ -620,10 +621,10 @@ Optimization read from those numbers:
 
 Features:
 
-1. Broaden the multi-tile envelope beyond the current aligned RPCL/LRCP
-   one-layer slice: more layers, remaining progression orders, stricter
-   edge-tile fixtures, and then tile-parallel scheduling on top of the
-   per-worker scratch-buffer model.
+1. Broaden the multi-tile envelope beyond the current aligned multi-layer RPCL
+   and single-layer LRCP slice: rate-targeted layers, remaining progression
+   orders, stricter edge-tile fixtures, and then tile-parallel scheduling on
+   top of the per-worker scratch-buffer model.
 2. Expand the full profile matrix across OpenJPEG/Grok/Kakadu and
    valid2000/jpylyzer-style validators, treating validator warnings as
    diagnostic leads rather than authoritative failures until checked against

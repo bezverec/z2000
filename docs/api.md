@@ -59,9 +59,10 @@ Supported public JP2 profiles are still narrow:
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution
-- a v1/v2a aligned multi-tile lossless envelope: RCT/5-3, one quality layer,
-  RPCL or LRCP packet order, one tile-part per tile, row-major tiles, plain or
-  TERMALL code-block style, and ISO B.6/B.7 geometry constraints
+- a v1/v2 aligned multi-tile lossless envelope: RCT/5-3, one or more
+  untargeted quality layers for RPCL, single-layer LRCP packet order, one
+  tile-part per tile, row-major tiles, plain or TERMALL code-block style, and
+  ISO B.6/B.7 geometry constraints
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
 - `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
   segments and packet-header segment length accounting
@@ -72,7 +73,8 @@ Supported public JP2 profiles are still narrow:
 Unsupported combinations still fail closed. Examples include standalone RESET,
 standalone ERTERM, BYPASS combined with RESET or ERTERM, tile-part divisions
 other than none/R, JPX features, unsupported component layouts, and multi-tile/
-profile mixes outside the v1 envelope, such as multi-tile BYPASS/RESET/ERTERM.
+profile mixes outside the bounded envelope, such as multi-tile
+BYPASS/RESET/ERTERM.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
 smoke tests cover the common no-EPH and archival EPH paths, while
 valid2000/jpylyzer-style validators remain diagnostic gates rather than
@@ -313,9 +315,9 @@ formation, TERMALL-scoped reset-context, and TERMALL-scoped ERTERM are wired
 through public codestream paths where their payload behavior has writer,
 reader, tests, and interop coverage. BYPASS+TERMALL is locally public with
 per-pass raw/MQ segment lengths and strict decode; OpenJPEG and Grok decode the
-current smoke losslessly, with Kakadu still to check. TERMALL and single-layer
-LRCP packet order are also accepted inside the aligned multi-tile envelope.
-Larger no-sidecar ERTERM files are
+current smoke losslessly, with Kakadu still to check. TERMALL, RPCL quality
+layers, and single-layer LRCP packet order are also accepted inside the aligned
+multi-tile envelope. Larger no-sidecar ERTERM files are
 accepted by z2000 strict decode, OpenJPEG, Grok, and Kakadu, including the
 block-parallel strict decode path. Unsupported combinations, such as standalone
 RESET or BYPASS with ERTERM/RESET, still return `UnsupportedPayload`.

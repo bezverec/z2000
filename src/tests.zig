@@ -11756,6 +11756,41 @@ test "multi-tile LRCP codestream roundtrips and permutes tile packets" {
     try std.testing.expectEqual(@as(usize, width), info.width);
 }
 
+test "multi-tile RPCL quality layers roundtrip losslessly" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.layers = 3;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 2), bytes[cod + 5]);
+    try std.testing.expectEqual(@as(u16, 3), readU16BeTest(bytes, cod + 6));
+    try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+}
+
 test "multi-tile terminate-all roundtrips losslessly" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -11874,7 +11909,7 @@ test "multi-tile terminate-all fails closed on packet corruption" {
     try std.testing.expect(rejected);
 }
 
-test "multi-tile encode fails closed outside the v1 envelope" {
+test "multi-tile encode fails closed outside the bounded envelope" {
     const allocator = std.testing.allocator;
     const width = 48;
     const height = 48;
@@ -11893,9 +11928,17 @@ test "multi-tile encode fails closed outside the v1 envelope" {
         mutate: *const fn (options: *codestream.LosslessOptions) void,
     };
     const cases = [_]Case{
-        .{ .label = "quality layers", .mutate = struct {
+        .{ .label = "LRCP quality layers", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.layers = 2;
+                options.progression = .lrcp;
+            }
+        }.mutate },
+        .{ .label = "rate targets", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.layers = 2;
+                options.rate_count = 1;
+                options.rates[0] = 2.0;
             }
         }.mutate },
         .{ .label = "mct none", .mutate = struct {
