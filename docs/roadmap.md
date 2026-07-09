@@ -216,15 +216,15 @@ Tasks:
   decode checks.
 - Harden scalar-expounded quantization marker and inverse-quantization behavior
   against malformed QCD/QCC-style inputs.
-- Add scalar-derived support only when marker behavior and payload decode are
-  both covered.
+- Keep scalar-derived marker behavior and payload decode covered by strict
+  reader, JP2 wrapper, and reference-decoder checks.
 - Add PCRD-style rate-control tests that compare quality layers, output bytes,
   and decoded error bounds against Grok/OpenJPEG on shared corpora.
 
 Exit criteria:
 
-- `--mct ict`, `--transform 9-7`, and `--qstyle scalar-expounded` stay green
-  across z2000, OpenJPEG, Grok, and the local strict reader.
+- `--mct ict`, `--transform 9-7`, and scalar-expounded/scalar-derived QCD stay
+  green across z2000, OpenJPEG, Grok, and the local strict reader.
 - Access-profile output size and quality are close enough to Grok/OpenJPEG to
   make benchmark comparisons fair.
 

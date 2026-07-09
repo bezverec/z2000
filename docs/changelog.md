@@ -35,10 +35,26 @@ entries are grouped by development milestone rather than semantic version.
 - The strict irreversible QCD parser now accepts signalled scalar-expounded and
   scalar-derived `(epsilon_b, mu_b)` step sizes instead of requiring z2000's
   locally generated OpenJPEG-compatible table byte-for-byte. Strict decode uses
-  those signalled mantissas for 9/7 dequantization and still derives `Mb` from
-  the signalled exponents. A synthetic mantissa-rewrite regression keeps the
-  parser and dequantization path tied together; a real Grok/Kakadu 9/7 fixture
-  remains the next interop gate.
+  those signalled mantissas for 9/7 dequantization and derives `Mb` from the
+  signalled guard bits plus exponents (E-2). A synthetic mantissa-rewrite
+  regression plus scalar-expounded and scalar-derived guard-bit-one roundtrips
+  keep the parser and dequantization path tied together; scalar-derived now has
+  its own mantissa-rewrite regression proving the single signalled step reaches
+  dequantization.
+- The JP2 wrapper now applies the same signalled-step policy at the codestream
+  boundary instead of rejecting foreign irreversible QCD mantissas before strict
+  decode can see them. A new embedded Grok 20.3.6 `grk_compress -I -r 8`
+  fixture exercises JP2 extraction, strict ISO-MQ decode, and bounded
+  reconstruction on the shared 32x32 gradient. This closes the first real Grok
+  9/7 QCD-step interop gate (Lossy row 8->9, full 69->70); Kakadu and broader
+  reference-relative PSNR coverage remain open. The JP2 wrapper keeps malformed
+  irreversible QCD fail-closed with explicit zero-step and zero-guard
+  regressions, and now has positive scalar-derived metadata coverage plus
+  scalar-derived zero-step/length regressions too; scalar-expounded wrapper
+  coverage also rejects no-quantization, malformed scalar-derived, and invalid
+  qstyle rewrites. The strict reader also has a focused irreversible-QCD
+  corruption matrix for no-quantization style,
+  malformed scalar-derived length, invalid qstyle, and zero scalar steps.
 
 ### Redundant COC/QCC Component Markers
 
@@ -49,11 +65,21 @@ entries are grouped by development milestone rather than semantic version.
   per-component override fails closed, since z2000 has no per-component coding
   path. A splice-oracle test inserts a redundant COC (component 1) and QCC
   (component 2) into a valid codestream and asserts byte-exact decode plus JP2
-  acceptance, and a mismatched COC (flipped transform byte) returns
-  UnsupportedPayload. Scorecard: full "Core codestream syntax" 11→12
-  (full 67→68). Note: OpenJPEG/Grok do not emit COC/QCC for plain RGB, so this
-  is strict-reader-gated (no reference file on hand); the follow-up is a
-  Kakadu/tuned-encoder file that carries them.
+  acceptance. Mismatched COC and QCC overrides now fail closed in both the
+  strict reader and JP2 wrapper, as do COC/QCC component indexes outside the
+  RGB component set. COC `Scoc` plus SPcoc coding bytes are structurally
+  validated before byte-replica comparison, and both paths validate QCC's
+  QCD-style payload first too, so malformed COC/QCC qstyle/coding bytes report
+  a bad codestream instead of being treated as merely unsupported. Shortened
+  COC/QCC lengths are bounded as truncation in the raw reader and invalid at
+  the JP2 boundary; syntactically known but unsupported COC style combinations
+  still report `Unsupported*` rather than malformed input. COD/QCD and COC/QCC
+  in tile-part headers also fail closed as unsupported, since z2000 only
+  accepts redundant main-header component markers today.
+  Scorecard: full
+  "Core codestream syntax" 11→12 (full 67→68). Note: OpenJPEG/Grok do not emit
+  COC/QCC for plain RGB, so this is strict-reader-gated (no reference file on
+  hand); the follow-up is a Kakadu/tuned-encoder file that carries them.
 
 ### 16-bit RGB End-to-End
 

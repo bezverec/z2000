@@ -225,8 +225,8 @@ pub const T1Backend = enum {
     iso_mq,
 };
 
-/// The strict decode path fail-closes on any other QCD guard bit count, so
-/// decode-side Mb derivation can rely on this value.
+/// Default QCD guard bit count for z2000-written streams. Strict decode follows
+/// the signalled value when a codestream carries legal guard bits in 1..7.
 const strict_guard_bits: u8 = 2;
 
 pub const LosslessOptions = struct {
@@ -1941,9 +1941,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             // closed. Layout: Ccoc(1) Scoc(1) SPcoc(NL,xcb,ycb,cblk,transform,
             // precincts) — SPcoc mirrors the main COD's coding fields.
             if (!saw_cod) return CodestreamError.InvalidCodestream;
-            if (segment.len < 2) return CodestreamError.InvalidCodestream;
+            if (segment.len < 3) return CodestreamError.InvalidCodestream;
             if (segment[0] >= 3) return CodestreamError.UnsupportedPayload;
+            if ((segment[1] & ~@as(u8, 0x01)) != 0) return CodestreamError.InvalidCodestream;
             if ((segment[1] & 0x01) != (cod_scod & 0x01)) return CodestreamError.UnsupportedPayload;
+            try validateStrictCocCodingPayload(segment[2..], segment[1]);
             if (!std.mem.eql(u8, segment[2..], cod_coding)) return CodestreamError.UnsupportedPayload;
         } else if (marker == @intFromEnum(Marker.qcc)) {
             // ISO 15444-1 A.6.5: component-specific quantization. Same policy:
@@ -1953,6 +1955,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
             if (segment.len < 1) return CodestreamError.InvalidCodestream;
             if (segment[0] >= 3) return CodestreamError.UnsupportedPayload;
+            _ = try validateStrictQcdSegment(segment[1..], bit_depth, levels, parsed_transform);
             if (!std.mem.eql(u8, segment[1..], qcd_payload)) return CodestreamError.UnsupportedPayload;
         } else if (marker == @intFromEnum(Marker.tlm)) {
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
@@ -2106,6 +2109,33 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
     return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
 }
 
+fn validateStrictCocCodingPayload(segment: []const u8, scoc: u8) !void {
+    if (segment.len < 5) return CodestreamError.InvalidCodestream;
+    const levels = segment[0];
+    if (levels > 32) return CodestreamError.TooManyLevels;
+    const block_width = try codeBlockSizeFromCodExponent(segment[1]);
+    const block_height = try codeBlockSizeFromCodExponent(segment[2]);
+    try validateBlockSize(block_width, block_height);
+    _ = try parseCodeBlockStyleByte(segment[3]);
+    switch (segment[4]) {
+        @intFromEnum(WaveletTransform.irreversible_9_7),
+        @intFromEnum(WaveletTransform.reversible_5_3),
+        => {},
+        else => return CodestreamError.InvalidCodestream,
+    }
+    const precinct_count: usize = if ((scoc & 0x01) != 0) @as(usize, levels) + 1 else 0;
+    if (segment.len != 5 + precinct_count) return CodestreamError.InvalidCodestream;
+    for (segment[5..][0..precinct_count]) |byte| {
+        const precinct = .{
+            .width = @as(u16, 1) << @as(u4, @intCast(byte & 0x0f)),
+            .height = @as(u16, 1) << @as(u4, @intCast(byte >> 4)),
+        };
+        if (!isValidPrecinctEdge(precinct.width) or !isValidPrecinctEdge(precinct.height)) {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
+}
+
 /// Upper bound on QCD subband entries: 1 LL + 3 per decomposition level,
 /// with levels capped at 32 by the COD validation.
 const max_qcd_bands = 1 + 3 * 32;
@@ -2115,8 +2145,8 @@ const StrictQcdInfo = struct {
     /// scalar-derived style covers all bands with a single signalled value.
     bands: usize,
     quantization: QuantizationStyle,
-    /// Signalled guard bit count G (E-2). z2000 writes 2; foreign reversible
-    /// streams (Kakadu uses 1) are accepted in 1..7.
+    /// Signalled guard bit count G (E-2). z2000 writes 2 by default; foreign
+    /// reversible and irreversible streams may use any legal value in 1..7.
     guard_bits: u8 = strict_guard_bits,
     /// Signalled epsilon_b values from QCD. Scalar-expounded and reversible
     /// no-quantization store one value per band in QCD order: LL, then
@@ -2137,6 +2167,7 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
     _ = bit_depth;
     if (segment.len < 2) return CodestreamError.InvalidCodestream;
     const bands = 1 + 3 * @as(usize, levels);
+    if (bands > max_qcd_bands) return CodestreamError.InvalidCodestream;
     const style = segment[0];
     const quantization_value = style & 0x1f;
     if (quantization_value > @intFromEnum(QuantizationStyle.scalar_expounded)) return CodestreamError.InvalidCodestream;
@@ -2145,9 +2176,9 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
 
     if (transform == .irreversible_9_7) {
         // Irreversible streams may carry foreign but legal step mantissas;
-        // keep the narrow guard-bit policy while following the signalled
-        // (epsilon_b, mu_b) pairs for Mb sizing and dequantization.
-        if (guard_bits != strict_guard_bits) return CodestreamError.UnsupportedPayload;
+        // follow the signalled guard bits and (epsilon_b, mu_b) pairs for Mb
+        // sizing and dequantization.
+        if (guard_bits == 0 or guard_bits > 7) return CodestreamError.InvalidCodestream;
         var info = StrictQcdInfo{
             .bands = bands,
             .quantization = quantization,
@@ -2187,7 +2218,6 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
 
     if (quantization != .none) return CodestreamError.UnsupportedPayload;
     if (segment.len != 1 + bands) return CodestreamError.InvalidCodestream;
-    if (bands > max_qcd_bands) return CodestreamError.InvalidCodestream;
     // Reversible no-quantization: follow the *signalled* epsilon_b and guard
     // bits instead of requiring z2000's exact profile — foreign encoders
     // choose different legal values (Kakadu: 1 guard bit, RCT-widened

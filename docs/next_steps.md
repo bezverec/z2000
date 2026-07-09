@@ -25,26 +25,24 @@ risk*; each names the ISO clause, the current code state, exactly what is
 missing, a test plan, and a score delta. Detailed tier notes for already-landed
 items are preserved further below as implementation history.
 
-### N1. Core codestream syntax — accept redundant COC/QCC (foreign decode) — M · Low–Med
+### N1. Core codestream syntax — redundant COC/QCC — ✅ LANDED
 
-- **Impact:** full "Core codestream syntax" +1–2, "Lossless decode" +1. (+2–3)
 - **ISO clause:** A.6.2 (COC), A.6.5 (QCC) — component-specific coding/
-  quantization that *overrides* the main COD/QCD for one component.
-- **State:** `isUnsupportedMainHeaderMarker` / `isUnsupportedTilePartHeaderMarker`
-  in `codestream.zig` fail-close COC and QCC. Some encoders emit a COC/QCC per
-  component even when identical to the main COD/QCD, so real files are rejected.
-- **What to add:** parse COC/QCC in the strict main-header walk; accept only
-  when the component's coding/quantization is byte-equivalent to the main
-  COD/QCD (same style, levels, block size, precincts / same guard bits and
-  step sizes); fail closed on any genuine per-component override (z2000 has no
-  per-component coding path). JP2 wrapper follows suit.
-- **Test plan:** splice a redundant COC/QCC into a valid z2000 codestream and
-  assert byte-identical decode; a genuinely different COC (different block
-  size) must return `UnsupportedPayload`; malformed COC length → bounded error
-  (feed it to the corruption sweep). Then decode a real OpenJPEG/Grok/Kakadu
-  file that emits redundant COC/QCC (generate with the reference encoders).
-- **Why first:** unblocks more foreign files with a bounded, byte-equivalence-
-  gated addition — no new coding path, so risk stays low.
+  quantization markers.
+- **State:** the strict main-header walk and JP2 wrapper accept COC/QCC only
+  when they byte-replicate the main COD/QCD for a valid RGB component. Genuine
+  per-component overrides fail closed because z2000 still has no per-component
+  coding path.
+- **Coverage:** splice oracle inserts redundant COC/QCC into a valid z2000
+  codestream and asserts byte-exact strict decode plus JP2 acceptance.
+  Mismatched COC and QCC rewrites fail closed in both strict decode and JP2
+  wrapper validation. Malformed COC `Scoc`/SPcoc coding bytes and malformed QCC
+  qstyle cases are rejected as invalid codestream data by both paths. Shortened
+  COC/QCC lengths are bounded as truncation in the raw reader plus invalid at
+  the JP2 boundary. Tile-part COD/QCD and COC/QCC markers are explicitly
+  rejected as unsupported until per-tile/per-component overrides exist.
+- **Remaining follow-up:** add a real Kakadu/tuned-encoder fixture that emits
+  redundant COC/QCC, since OpenJPEG/Grok plain RGB output does not.
 
 ### N2. Multi-tile v2 — one axis at a time — L · High
 
@@ -89,31 +87,34 @@ items are preserved further below as implementation history.
 
 ### N4. Lossy breadth — two precisely-characterized foreign-9/7 gaps — M · Med
 
-- **Impact:** full "Lossy encode/decode" +2 (now 8/15 after the OpenJPEG 9/7
-  decode gate landed; the heavy-truncation smoke is now pinned, but the broader
-  reference-relative lossy matrix still blocks the next score claim).
+- **Impact:** full "Lossy encode/decode" +1-2 remaining (now 9/15 after the
+  OpenJPEG 9/7 decode gates and the first real Grok 9/7 QCD-step fixture
+  landed; broader reference-relative lossy validation still blocks the next
+  larger score claim).
 - **ISO clause:** E (quantization), G (9/7), J.14 (rate-distortion).
 - **State:** ICT/9-7 encode/decode locally; **foreign OpenJPEG 9/7 lossy now
   decodes byte-identically across `-r 1..8` / `-q`** (embedded-fixture
   regression gate). The heavy-truncation OpenJPEG 2.5.4 `-I -r 10` corner also
   decodes through the strict ISO-MQ path and is pinned by an embedded fixture
   with deterministic FNV output plus an explicit reconstruction-error bound.
-  Two broader gaps remain:
+  Grok 20.3.6 `-I -r 8` also decodes through the JP2 wrapper and strict ISO-MQ
+  path with a deterministic hash plus source-error bound. Two broader gaps
+  remain:
   - **(a) Heavy-truncation reference matrix.** The focused `-r 10` fixture no
     longer fails with `InvalidBlock`, but reconstruction is not byte-identical
     to OpenJPEG at that severe truncation (local diagnostic: about 30.67 dB
     z2000-vs-OpenJPEG PSNR, max byte diff 41). Next: expand this into a lossy
     fixture matrix over foreign OpenJPEG/Grok/Kakadu streams and assert a tight
     reference-relative PSNR/error bound rather than byte identity.
-  - **(b) Foreign 9/7 QCD step tables.** Grok 9/7 fails with
-    `UnsupportedProfile`: its scalar-expounded QCD step values differ from
-    z2000's OpenJPEG-pinned 9/7 norm table. **Progress:** the strict
-    irreversible QCD parser now accepts signalled scalar-expounded/scalar-
-    derived `(exponent, mantissa)` pairs, derives `Mb` from the signalled
-    exponents (E-2), and uses the signalled mantissas for 9/7 dequantization;
-    a synthetic mantissa-rewrite regression pins that local behavior. Next:
-    replace the synthetic gate with a real Grok/Kakadu 9/7 fixture and a
-    reference-relative PSNR bound.
+  - **(b) Foreign 9/7 QCD step tables.** **Progress:** the strict irreversible
+    QCD parser and JP2 wrapper now accept signalled scalar-expounded/scalar-
+    derived `(exponent, mantissa)` pairs, accept irreversible guard bits 1..7,
+    derive `Mb` from the signalled guard bits plus exponents (E-2), and use the
+    signalled mantissas for 9/7 dequantization. A synthetic mantissa-rewrite
+    regression, scalar-expounded/scalar-derived guard-bit-one roundtrips, and a
+    real embedded Grok 20.3.6 fixture pin this path. Next: add a Kakadu 9/7
+    fixture when available and turn the Grok/OpenJPEG/Kakadu set into a
+    reference-relative PSNR matrix.
 - **What to add:** a decode fixture matrix over foreign 9/7 lossy JP2s
   (OpenJPEG/Grok/Kakadu at several rate ladders) asserting z2000's PSNR is
   within a tight bound of each reference decoder's own output; a PCRD PSNR

@@ -412,13 +412,15 @@ fn validateCodestreamPayload(payload: []const u8, expected: CodestreamShape) !vo
             return Jp2Error.UnsupportedProfile;
         }
     }
-    try validateMainHeaderMarkers(payload, segment_end, bits_per_component, tile_count);
+    try validateMainHeaderMarkers(payload, segment_end, tile_count);
 }
 
-fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, bit_depth: u8, tile_count: u32) !void {
+fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_count: u32) !void {
     var cursor = cursor_after_siz;
     var cod_info: ?CodSegmentInfo = null;
+    var cod_payload: []const u8 = &.{};
     var saw_qcd = false;
+    var qcd_payload: []const u8 = &.{};
     var tlm_state = TlmState{};
     while (cursor < payload.len - 2) {
         const marker = try readU16Be(payload, cursor);
@@ -463,11 +465,17 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, bit_d
         const next = std.math.add(usize, length_offset, marker_length) catch return Jp2Error.InvalidCodestream;
         if (next > payload.len - 2) return Jp2Error.InvalidCodestream;
         switch (marker) {
-            marker_cod => cod_info = try validateCodSegment(payload, length_offset, marker_length),
+            marker_cod => {
+                cod_info = try validateCodSegment(payload, length_offset, marker_length);
+                cod_payload = payload[length_offset + 2 .. length_offset + marker_length];
+            },
             marker_qcd => {
-                try validateQcdSegment(payload, length_offset, marker_length, cod_info.?, bit_depth);
+                try validateQcdSegment(payload, length_offset, marker_length, cod_info.?);
+                qcd_payload = payload[length_offset + 2 .. length_offset + marker_length];
                 saw_qcd = true;
             },
+            marker_coc => try validateRedundantCocSegment(payload, length_offset, marker_length, cod_payload),
+            marker_qcc => try validateRedundantQccSegment(payload, length_offset, marker_length, cod_info.?, qcd_payload),
             else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state),
         }
         cursor = next;
@@ -670,21 +678,7 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     const block_width = try codeBlockSizeFromCodExponent(payload[length_offset + 8]);
     const block_height = try codeBlockSizeFromCodExponent(payload[length_offset + 9]);
     if (@as(u32, block_width) * @as(u32, block_height) > 4096) return Jp2Error.InvalidCodestream;
-    const code_block_style = payload[length_offset + 10];
-    if ((code_block_style & 0xc0) != 0) return Jp2Error.InvalidCodestream;
-    // BYPASS (0x01), RESET (0x02, only with TERMALL), TERMALL (0x04), CAUSAL
-    // (0x08), ERTERM (0x10, only with TERMALL), and SEGMARK (0x20) are accepted
-    // by the codestream layer only for implemented payload combinations.
-    if ((code_block_style & ~@as(u8, 0x3f)) != 0) return Jp2Error.UnsupportedProfile;
-    if ((code_block_style & 0x02) != 0 and (code_block_style & 0x04) == 0) {
-        return Jp2Error.UnsupportedProfile;
-    }
-    if ((code_block_style & 0x01) != 0 and (code_block_style & 0x04) != 0) {
-        return Jp2Error.UnsupportedProfile;
-    }
-    if ((code_block_style & 0x10) != 0 and (code_block_style & 0x04) == 0) {
-        return Jp2Error.UnsupportedProfile;
-    }
+    try validateCodeBlockStyleByte(payload[length_offset + 10]);
     const transform = payload[length_offset + 11];
     if (transform != 0 and transform != 1) return Jp2Error.InvalidCodestream;
     // Scod bit 0 unset (no precinct partition, ISO B.6) is a supported
@@ -715,16 +709,74 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
     return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
 }
 
-fn validateQcdSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, bit_depth: u8) !void {
-    const style = payload[length_offset + 2];
+fn validateCodeBlockStyleByte(code_block_style: u8) !void {
+    if ((code_block_style & 0xc0) != 0) return Jp2Error.InvalidCodestream;
+    // BYPASS (0x01), RESET (0x02, only with TERMALL), TERMALL (0x04), CAUSAL
+    // (0x08), ERTERM (0x10, only with TERMALL), and SEGMARK (0x20) are accepted
+    // by the codestream layer only for implemented payload combinations.
+    if ((code_block_style & ~@as(u8, 0x3f)) != 0) return Jp2Error.UnsupportedProfile;
+    if ((code_block_style & 0x02) != 0 and (code_block_style & 0x04) == 0) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    if ((code_block_style & 0x01) != 0 and (code_block_style & 0x04) != 0) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    if ((code_block_style & 0x10) != 0 and (code_block_style & 0x04) == 0) {
+        return Jp2Error.UnsupportedProfile;
+    }
+}
+
+fn validateRedundantCocSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod_payload: []const u8) !void {
+    if (cod_payload.len < 6) return Jp2Error.InvalidCodestream;
+    const component = payload[length_offset + 2];
+    if (component >= 3) return Jp2Error.UnsupportedProfile;
+    const scoc = payload[length_offset + 3];
+    if ((scoc & ~@as(u8, 0x01)) != 0) return Jp2Error.InvalidCodestream;
+    if ((scoc & 0x01) != (cod_payload[0] & 0x01)) return Jp2Error.UnsupportedProfile;
+    const coc_coding = payload[length_offset + 4 .. length_offset + marker_length];
+    try validateCocCodingPayload(coc_coding, scoc);
+    if (!std.mem.eql(u8, coc_coding, cod_payload[5..])) return Jp2Error.UnsupportedProfile;
+}
+
+fn validateCocCodingPayload(segment: []const u8, scoc: u8) !void {
+    if (segment.len < 5) return Jp2Error.InvalidCodestream;
+    const levels = segment[0];
+    if (levels > 32) return Jp2Error.InvalidCodestream;
+    const block_width = try codeBlockSizeFromCodExponent(segment[1]);
+    const block_height = try codeBlockSizeFromCodExponent(segment[2]);
+    if (@as(u32, block_width) * @as(u32, block_height) > 4096) return Jp2Error.InvalidCodestream;
+    try validateCodeBlockStyleByte(segment[3]);
+    const transform = segment[4];
+    if (transform != 0 and transform != 1) return Jp2Error.InvalidCodestream;
+    const precinct_bytes: usize = if ((scoc & 0x01) != 0) @as(usize, levels) + 1 else 0;
+    if (segment.len != 5 + precinct_bytes) return Jp2Error.InvalidCodestream;
+    try validateCodPrecinctBytes(segment, 5, @intCast(precinct_bytes));
+}
+
+fn validateRedundantQccSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, qcd_payload: []const u8) !void {
+    if (qcd_payload.len == 0) return Jp2Error.InvalidCodestream;
+    const component = payload[length_offset + 2];
+    if (component >= 3) return Jp2Error.UnsupportedProfile;
+    const qcc_quantization = payload[length_offset + 3 .. length_offset + marker_length];
+    try validateQcdPayloadBytes(qcc_quantization, cod);
+    if (!std.mem.eql(u8, qcc_quantization, qcd_payload)) return Jp2Error.UnsupportedProfile;
+}
+
+fn validateQcdSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo) !void {
+    try validateQcdPayloadBytes(payload[length_offset + 2 .. length_offset + marker_length], cod);
+}
+
+fn validateQcdPayloadBytes(segment: []const u8, cod: CodSegmentInfo) !void {
+    if (segment.len < 1) return Jp2Error.InvalidCodestream;
+    const style = segment[0];
     const guard_bits = style >> 5;
     const quantization_style = style & 0x1f;
     if (quantization_style > 2) return Jp2Error.InvalidCodestream;
-    // The irreversible step tables are pinned to z2000's OpenJPEG-compatible
-    // values, which assume two guard bits; the reversible path follows the
-    // signalled guard bits (foreign encoders use 1..7 — Kakadu writes 1).
+    // The JP2 boundary validates the QCD shape and bounds. Strict codestream
+    // decode consumes the signalled irreversible step sizes for Mb sizing and
+    // dequantization; the wrapper must not require z2000's local norm table.
     if (cod.transform != 1) {
-        if (guard_bits != 2) return Jp2Error.UnsupportedProfile;
+        if (guard_bits == 0 or guard_bits > 7) return Jp2Error.InvalidCodestream;
     } else if (guard_bits == 0 or guard_bits > 7) {
         return Jp2Error.InvalidCodestream;
     }
@@ -733,37 +785,36 @@ fn validateQcdSegment(payload: []const u8, length_offset: usize, marker_length: 
         if (quantization_style == 1) {
             // Scalar-derived (A.6.4): a single signalled step for the NL LL
             // band; every other subband is derived via E-5.
-            if (marker_length != 3 + 2) return Jp2Error.InvalidCodestream;
-            var cursor: usize = length_offset + 3;
-            try expectScalarExpoundedQcdValue(payload, &cursor, bit_depth, .ll, cod.levels);
+            if (segment.len != 1 + 2) return Jp2Error.InvalidCodestream;
+            var cursor: usize = 1;
+            try validateScalarQcdStep(segment, &cursor, guard_bits);
             return;
         }
         if (quantization_style != 2) return Jp2Error.UnsupportedProfile;
-        if (marker_length != 3 + 2 * bands) return Jp2Error.InvalidCodestream;
-        try validateScalarExpoundedQcdValues(payload, length_offset + 3, cod.levels, bit_depth);
+        if (segment.len != 1 + 2 * bands) return Jp2Error.InvalidCodestream;
+        try validateScalarQcdSteps(segment, 1, bands, guard_bits);
     } else {
         if (quantization_style != 0) return Jp2Error.UnsupportedProfile;
-        if (marker_length != 3 + bands) return Jp2Error.InvalidCodestream;
-        try validateReversibleQcdExponents(payload, length_offset + 3, bands, guard_bits);
+        if (segment.len != 1 + bands) return Jp2Error.InvalidCodestream;
+        try validateReversibleQcdExponents(segment, 1, bands, guard_bits);
     }
 }
 
-fn validateScalarExpoundedQcdValues(payload: []const u8, start: usize, levels: u8, bit_depth: u8) !void {
+fn validateScalarQcdSteps(payload: []const u8, start: usize, bands: u16, guard_bits: u8) !void {
     var cursor = start;
-    try expectScalarExpoundedQcdValue(payload, &cursor, bit_depth, .ll, levels);
-    var level = levels;
-    while (level > 0) : (level -= 1) {
-        inline for (.{ SubbandKind.hl, SubbandKind.lh, SubbandKind.hh }) |kind| {
-            try expectScalarExpoundedQcdValue(payload, &cursor, bit_depth, kind, level);
-        }
+    var band: u16 = 0;
+    while (band < bands) : (band += 1) {
+        try validateScalarQcdStep(payload, &cursor, guard_bits);
     }
 }
 
-fn expectScalarExpoundedQcdValue(payload: []const u8, cursor: *usize, bit_depth: u8, kind: SubbandKind, band_level: u8) !void {
-    if (try readU16Be(payload, cursor.*) != try scalarExpoundedQcdValue(bit_depth, kind, band_level)) {
-        return Jp2Error.UnsupportedProfile;
-    }
+fn validateScalarQcdStep(payload: []const u8, cursor: *usize, guard_bits: u8) !void {
+    const value = try readU16Be(payload, cursor.*);
     cursor.* += 2;
+    const epsilon: u8 = @intCast(value >> 11);
+    if (epsilon == 0) return Jp2Error.InvalidCodestream;
+    const nominal = @as(u16, epsilon) + guard_bits - 1;
+    if (nominal == 0 or nominal > 31) return Jp2Error.InvalidCodestream;
 }
 
 /// Reversible SPqcd values carry epsilon_b in bits 7..3 (low bits must be
@@ -796,42 +847,6 @@ fn reversibleQcdExponentByte(bit_depth: u8, kind: SubbandKind) !u8 {
     const exponent = std.math.add(u8, bit_depth, gain) catch return Jp2Error.InvalidCodestream;
     if (exponent > 31) return Jp2Error.InvalidCodestream;
     return exponent << 3;
-}
-
-const dwt97_norms = [4][10]f64{
-    .{ 1.000, 1.965, 4.177, 8.403, 16.90, 33.84, 67.69, 135.3, 270.6, 540.9 },
-    .{ 2.022, 3.989, 8.355, 17.04, 34.27, 68.63, 137.3, 274.6, 549.0, 549.0 },
-    .{ 2.022, 3.989, 8.355, 17.04, 34.27, 68.63, 137.3, 274.6, 549.0, 549.0 },
-    .{ 2.080, 3.865, 8.307, 17.18, 34.71, 69.59, 139.3, 278.6, 557.2, 557.2 },
-};
-
-fn scalarExpoundedQcdValue(bit_depth: u8, kind: SubbandKind, band_level: u8) !u16 {
-    const step = try irreversibleBandStepSize(bit_depth, kind, band_level);
-    return (@as(u16, step.exponent) << 11) | step.mantissa;
-}
-
-fn irreversibleBandStepSize(bit_depth: u8, kind: SubbandKind, band_level: u8) !struct { exponent: u8, mantissa: u16 } {
-    const opj_level: usize = if (kind == .ll) band_level else @as(usize, band_level) - 1;
-    const orient: usize = switch (kind) {
-        .ll => 0,
-        .hl => 1,
-        .lh => 2,
-        .hh => 3,
-    };
-    const clamped_level = if (orient == 0) @min(opj_level, 9) else @min(opj_level, 8);
-    const stepsize = 1.0 / dwt97_norms[orient][clamped_level];
-    const fixed: i32 = @intFromFloat(@floor(stepsize * 8192.0));
-    if (fixed <= 0) return Jp2Error.InvalidCodestream;
-    const log2_fixed: i32 = @as(i32, std.math.log2_int(u32, @intCast(fixed)));
-    const p = log2_fixed - 13;
-    const n = 11 - log2_fixed;
-    const mantissa: u16 = @intCast((if (n < 0)
-        fixed >> @intCast(-n)
-    else
-        fixed << @intCast(n)) & 0x7ff);
-    const exponent = @as(i32, bit_depth) - p;
-    if (exponent <= 0 or exponent > 31) return Jp2Error.InvalidCodestream;
-    return .{ .exponent = @intCast(exponent), .mantissa = mantissa };
 }
 
 fn validateTlmSegment(payload: []const u8, length_offset: usize, marker_length: u16, state: *TlmState) !void {
