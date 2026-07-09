@@ -74,16 +74,17 @@ dimension) never hit this; degenerate-resolution tiles are a v2 concern.
 ## 3. v1 scope (what multi-tile means in the first shipped slice)
 
 Supported: reversible 5/3 + RCT, `layers == 1`, default/explicit precincts,
-plain or TERMALL code-block style, one tile-part per tile in row-major order
-(`TPsot=0`, `TNsot=1`), TLM on, SOP/EPH as today, PLT per tile-part as the
-scaffold builds it.
+RPCL plus single-layer LRCP packet order, plain or TERMALL code-block style,
+one tile-part per tile in row-major order (`TPsot=0`, `TNsot=1`), TLM on,
+SOP/EPH as today, PLT per tile-part as the scaffold builds it.
 
 Fail-closed in multi-tile mode (each lifted later, separately): `--rates`
-(byte targets are image-global), `layers > 1`, `--tile-parts R` (R-divisions
-compose with multi-tile later), BYPASS, RESET, ERTERM and untested resilience
-style combinations, `--mct none`, 9/7/lossy, tiles that clamp DWT levels
-(§2.3). Single-tile behavior stays **byte-identical** — every increment keeps
-`tile == image` on the exact current code path.
+(byte targets are image-global), `layers > 1`, remaining non-RPCL progressions
+(RLCP/PCRL/CPRL), `--tile-parts R` (R-divisions compose with multi-tile later),
+BYPASS, RESET, ERTERM and untested resilience style combinations, `--mct none`,
+9/7/lossy, tiles that clamp DWT levels (§2.3). Single-tile behavior stays
+**byte-identical** — every increment keeps `tile == image` on the exact current
+code path.
 
 ## 4. Staged plan (each stage = one PR, green tests, narrow path untouched)
 
@@ -219,6 +220,6 @@ reference-grid anchoring coincide, but only an external decoder proves it.
 ## 6. Explicit non-goals for v1
 
 Tile-parts-within-tile (R divisions × tiles), per-tile COD/QCD overrides,
-`--mct none`/style-bits/bypass in multi-tile, quality layers > 1, lossy 9/7
-tiles, streaming (bounded-memory) assembly, PPM/PPT. Each is a separate,
-later increment on top of the v1 skeleton.
+`--mct none`/style-bits/bypass in multi-tile, quality layers > 1, remaining
+non-RPCL progressions, lossy 9/7 tiles, streaming (bounded-memory) assembly,
+PPM/PPT. Each is a separate, later increment on top of the v1 skeleton.

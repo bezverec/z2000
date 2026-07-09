@@ -51,15 +51,16 @@ items are preserved further below as implementation history.
 - **Impact:** full "Lossless encode" 10→11, "Lossless decode" 10→12, "Core
   syntax" +1. (+4, the single biggest full-target lever)
 - **ISO clause:** B.3–B.12 (tile grid, per-tile SOT/SOD, tile-part order).
-- **State:** multi-tile v1 is interop-proven for aligned grids, RCT/5-3, one
-  quality layer, plain or TERMALL style, one tile-part per tile, RPCL. Gates:
+- **State:** multi-tile v1/v2a is interop-proven for aligned RPCL grids and
+  locally strict for single-layer LRCP grids: RCT/5-3, one quality layer, plain
+  or TERMALL style, one tile-part per tile. Gates:
   `validateMultiTileCodingPath` / `validateMultiTileGeometry` in `codestream.zig`.
 - **What to add (staged, each its own PR, single-tile byte-identical at every
   step):**
-  - **v2a — non-RPCL progressions in multi-tile.** The permutation machinery
-    (`buildStreamPacketSequence`) already covers all five orders single-tile;
-    thread it through the per-tile packet build + strict per-tile slot walk.
-    Interop: OpenJPEG/Grok/Kakadu on a 2×2 LRCP multi-tile file.
+  - **v2a — non-RPCL progressions in multi-tile.** Single-layer LRCP is wired
+    through per-tile packet build and strict per-tile slot walk. Remaining:
+    OpenJPEG/Grok/Kakadu on a 2×2 LRCP multi-tile file, then RLCP/PCRL/CPRL
+    once the stateful multi-layer/T2 constraints are explicit.
   - **v2b — quality layers per tile.** Remove the `layers != 1` gate; the PCRD
     allocator and per-tile packet plan already handle layers single-tile.
   - **v2c — reference-grid partition anchoring.** Drop the "tile-size multiple

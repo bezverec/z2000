@@ -1992,9 +1992,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         // Multi-tile: validate the v1 tile-part discipline (one part per tile,
         // row-major, TPsot=0/TNsot=1, per-tile packet plans, TLM cross-check)
         // and the same geometry envelope the encoder enforces. The per-tile
-        // spans this produces feed the Stage C decode; the block-catalog stage
-        // still fails closed until then. The multi-tile envelope is RPCL-only.
-        if (parsed_progression != .rpcl) return CodestreamError.UnsupportedPayload;
+        // spans this produces feed the Stage C decode. The multi-tile envelope
+        // currently covers RPCL plus the single-layer LRCP permutation.
+        if (parsed_progression != .rpcl and parsed_progression != .lrcp) {
+            return CodestreamError.UnsupportedPayload;
+        }
         try validateMultiTileGeometry(grid, levels, options);
         var spans = try readStrictMultiTileTilePartSpans(
             allocator,
@@ -4089,7 +4091,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
 }
 
 /// Builds a per-tile packet catalog from one Stage B tile-part span: the
-/// tile's PLT packet lengths drive the tile-local RPCL iterator, and each
+/// tile's PLT packet lengths drive the tile-local packet iterator, and each
 /// framed packet (SOP/EPH per the COD policy, Nsop restarting at 0 for the
 /// tile) is stripped into the catalog's raw packet bytes.
 fn readStrictMultiTileTilePartPacketCatalog(
@@ -4098,6 +4100,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
     span: StrictMultiTileTilePartSpan,
     tile_plan: packet_plan.Plan,
     layers: u16,
+    progression: ProgressionOrder,
     marker_policy: MainHeaderPacketMarkers,
 ) !StrictPacketCatalog {
     var entries: std.ArrayList(StrictPacketEntry) = .empty;
@@ -4114,11 +4117,13 @@ fn readStrictMultiTileTilePartPacketCatalog(
     if (sod != span.sod) return CodestreamError.InvalidCodestream;
     if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
 
-    var iterator = try packet_plan.RpclIterator.init(tile_plan, 3, layers);
+    const sequence = try buildStreamPacketSequence(allocator, progression, tile_plan, layers);
+    defer allocator.free(sequence);
+    if (sequence.len != packet_capacity) return CodestreamError.InvalidCodestream;
+
     var cursor = span.sod + 2;
     var packet_sequence: u16 = 0;
-    for (packet_lengths.items) |packet_length| {
-        const packet = iterator.next() orelse return CodestreamError.InvalidCodestream;
+    for (packet_lengths.items, sequence) |packet_length, packet| {
         const byte_offset = packet_bytes.items.len;
         const byte_length = try appendStrictSodPacketPayload(
             allocator,
@@ -4138,11 +4143,13 @@ fn readStrictMultiTileTilePartPacketCatalog(
             .byte_length = byte_length,
         });
     }
-    if (iterator.next() != null) return CodestreamError.InvalidCodestream;
     if (cursor != span.end) return CodestreamError.InvalidCodestream;
 
     const owned_entries = try entries.toOwnedSlice(allocator);
     errdefer allocator.free(owned_entries);
+    if (progression != .rpcl) {
+        try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, layers);
+    }
     const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
     return .{
         .allocator = allocator,
@@ -4211,6 +4218,7 @@ fn readStrictMultiTileContext(
         .block_height = header.block_height,
         .precincts = precincts,
         .precinct_count = header.packet_plan_count,
+        .progression = header.progression,
     };
 
     var main_header = try readStrictMainHeaderIndex(allocator, bytes);
@@ -4273,6 +4281,7 @@ fn decodeStrictMultiTileImageMeasured(
             span,
             temporaryPacketPlan(tile_header),
             header.layers,
+            header.progression,
             context.main_header.packet_markers,
         );
         defer catalog.deinit();
@@ -4316,6 +4325,7 @@ fn auditStrictMultiTilePacketHeaders(
             span,
             temporaryPacketPlan(tile_header),
             header.layers,
+            header.progression,
             context.main_header.packet_markers,
         );
         defer catalog.deinit();
@@ -8890,11 +8900,15 @@ fn validateBlockSize(width: u16, height: u16) !void {
 
 /// Multi-tile constraints (docs/multi_tile_plan.md §3): the tile pipeline
 /// currently covers reversible 5/3 + RCT, a single quality layer, plain or
-/// TERMALL code-block style, and one tile-part per tile in row-major order.
-/// Everything outside that fails closed so the COD/SIZ markers never advertise
-/// behavior the tile encoder does not implement.
+/// TERMALL code-block style, RPCL or single-layer LRCP packet order, and one
+/// tile-part per tile in row-major order. Everything outside that fails closed
+/// so the COD/SIZ markers never advertise behavior the tile encoder does not
+/// implement.
 fn validateMultiTileCodingPath(options: LosslessOptions) !void {
-    if (options.progression != .rpcl) return CodestreamError.UnsupportedPayload;
+    switch (options.progression) {
+        .rpcl, .lrcp => {},
+        .rlcp, .pcrl, .cprl => return CodestreamError.UnsupportedPayload,
+    }
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
     if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
     if (options.layers != 1 or options.rate_count != 0) return CodestreamError.UnsupportedPayload;
@@ -8993,6 +9007,11 @@ fn encodeLosslessMultiTileMeasured(
         .predictable_termination = encode_options.predictable_termination,
         .segmentation_symbols = encode_options.segmentation_symbols,
     };
+    const packet_order: tile_pipeline.PacketOrder = switch (encode_options.progression) {
+        .rpcl => .rpcl,
+        .lrcp => .lrcp,
+        .rlcp, .pcrl, .cprl => unreachable,
+    };
     var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
         allocator,
         rgb,
@@ -9003,6 +9022,7 @@ fn encodeLosslessMultiTileMeasured(
             .block_width = encode_options.block_width,
             .block_height = encode_options.block_height,
             .precincts = scaffold_precincts[0..encode_options.precinct_count],
+            .packet_order = packet_order,
         },
         block_style,
         encode_options.threads,
