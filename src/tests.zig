@@ -11263,6 +11263,34 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
         defer base_allocator.free(wrapped);
         try fuzzCorruptionSweep(base_allocator, cs, wrapped, 32, 32);
     }
+
+    // Profile 7: multi-tile BYPASS+TERMALL. Exercises the strict per-tile T2
+    // walk with raw significance/refinement and MQ cleanup segments together.
+    {
+        const samples = try base_allocator.alloc(u16, 48 * 48 * 3);
+        defer base_allocator.free(samples);
+        fillFuzzSamples(samples, 7);
+        const rgb = image.RgbImage{ .allocator = base_allocator, .width = 48, .height = 48, .bit_depth = 8, .samples = samples };
+        const cs = try codestream.encodeLosslessWithOptions(base_allocator, rgb, .{
+            .levels = 2,
+            .tile_width = 32,
+            .tile_height = 32,
+            .block_width = 4,
+            .block_height = 4,
+            .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+            .precinct_count = 1,
+            .progression = .cprl,
+            .bypass = true,
+            .terminate_all = true,
+            .sop = true,
+            .eph = true,
+            .tlm = true,
+        });
+        defer base_allocator.free(cs);
+        const wrapped = try jp2.wrapRgbCodestream(base_allocator, rgb, cs);
+        defer base_allocator.free(wrapped);
+        try fuzzCorruptionSweep(base_allocator, cs, wrapped, 32, 32);
+    }
 }
 
 test "terminated styled T1 streams fail closed on corruption" {
@@ -11943,6 +11971,183 @@ test "multi-tile terminate-all roundtrips losslessly" {
     try std.testing.expectEqual(@as(usize, width), info.width);
 }
 
+test "multi-tile causal and segmentation profiles roundtrip losslessly" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Case = struct {
+        label: []const u8,
+        vertical_causal: bool = false,
+        segmentation_symbols: bool = false,
+        cod_style: u8,
+    };
+    const cases = [_]Case{
+        .{ .label = "CAUSAL", .vertical_causal = true, .cod_style = 0x08 },
+        .{ .label = "SEGMARK", .segmentation_symbols = true, .cod_style = 0x20 },
+        .{ .label = "CAUSAL+SEGMARK", .vertical_causal = true, .segmentation_symbols = true, .cod_style = 0x28 },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("multi-tile style case failed: {s}\n", .{scenario.label});
+        var options = multi_tile_test_options;
+        options.layers = 3;
+        options.progression = .lrcp;
+        options.vertical_causal = scenario.vertical_causal;
+        options.segmentation_symbols = scenario.segmentation_symbols;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(scenario.cod_style, bytes[cod + 12] & 0x28);
+        try std.testing.expectEqual(@as(u16, 3), readU16BeTest(bytes, cod + 6));
+        try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        var threaded_options = options;
+        threaded_options.threads = 3;
+        const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(@as(usize, width), info.width);
+    }
+}
+
+test "multi-tile terminated resilience profiles roundtrip and reject corrupt PLT" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Case = struct {
+        label: []const u8,
+        reset_context: bool = false,
+        predictable_termination: bool = false,
+        cod_style: u8,
+    };
+    const cases = [_]Case{
+        .{ .label = "RESET+TERMALL", .reset_context = true, .cod_style = 0x06 },
+        .{ .label = "ERTERM+TERMALL", .predictable_termination = true, .cod_style = 0x14 },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("multi-tile terminated style case failed: {s}\n", .{scenario.label});
+        var options = multi_tile_test_options;
+        options.progression = .rlcp;
+        options.terminate_all = true;
+        options.reset_context = scenario.reset_context;
+        options.predictable_termination = scenario.predictable_termination;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(scenario.cod_style, bytes[cod + 12] & 0x16);
+        try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        var threaded_options = options;
+        threaded_options.threads = 3;
+        const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+        const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+        const second_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
+        const second_plt = findMarkerAfter(bytes, codestream.markerValue("plt"), second_sot) orelse return error.MissingPlt;
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        const segment_length = readU16BeTest(corrupted, second_plt + 2);
+        if (segment_length < 4) return error.InvalidPlt;
+        const last_length_byte = second_plt + 2 + @as(usize, segment_length) - 1;
+        corrupted[last_length_byte] ^= 0x01;
+        try std.testing.expectError(
+            codestream.CodestreamError.InvalidCodestream,
+            codestream.decodeLosslessTemporary(allocator, corrupted),
+        );
+    }
+}
+
+test "multi-tile bypass terminate-all preserves raw and MQ segment framing" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.progression = .cprl;
+    options.bypass = true;
+    options.terminate_all = true;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x05), bytes[cod + 12] & 0x05);
+    try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    var threaded_decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = 4 });
+    defer threaded_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, threaded_decoded.samples);
+
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const second_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
+    const second_plt = findMarkerAfter(bytes, codestream.markerValue("plt"), second_sot) orelse return error.MissingPlt;
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const segment_length = readU16BeTest(corrupted, second_plt + 2);
+    if (segment_length < 4) return error.InvalidPlt;
+    const last_length_byte = second_plt + 2 + @as(usize, segment_length) - 1;
+    corrupted[last_length_byte] ^= 0x01;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, corrupted),
+    );
+}
+
 test "multi-tile terminate-all fails closed on packet corruption" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -12049,25 +12254,9 @@ test "multi-tile encode fails closed outside the bounded envelope" {
                 options.mct = .none;
             }
         }.mutate },
-        .{ .label = "bypass", .mutate = struct {
+        .{ .label = "bypass without terminate-all", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.bypass = true;
-            }
-        }.mutate },
-        .{ .label = "reset-context terminate-all", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                options.terminate_all = true;
-                options.reset_context = true;
-            }
-        }.mutate },
-        .{ .label = "vertical causal", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                options.vertical_causal = true;
-            }
-        }.mutate },
-        .{ .label = "segmentation symbols", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                options.segmentation_symbols = true;
             }
         }.mutate },
         .{ .label = "debug sidecar", .mutate = struct {
@@ -13240,6 +13429,7 @@ test "tile pipeline exposes encoded blocks as T2 layer blocks" {
         try std.testing.expectEqual(encoded.segment.bitplanes, t2_block.encoded_bitplanes);
         try std.testing.expectEqualSlices(t2.LayerTruncation, encoded.layers, t2_block.layers);
         try std.testing.expectEqualSlices(u8, encoded.segment.bytes, t2_block.payload);
+        try std.testing.expectEqual(encoded.bypass, t2_block.bypass);
 
         const final_layer = t2_block.layers[t2_block.layers.len - 1];
         const full_payload = try t2.layerPayloadSlice(

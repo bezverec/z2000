@@ -74,15 +74,17 @@ dimension) never hit this; degenerate-resolution tiles are a v2 concern.
 ## 3. v1 scope (what multi-tile means in the first shipped slice)
 
 Supported: reversible 5/3 + RCT, one or more untargeted quality layers across
-all five progression orders, default/explicit precincts, plain or TERMALL
-code-block style, one tile-part per tile in row-major order (`TPsot=0`,
-`TNsot=1`), TLM on, SOP/EPH as today, PLT per tile-part as the scaffold builds
-it.
+all five progression orders, default/explicit precincts, plain, CAUSAL,
+SEGMARK, CAUSAL+SEGMARK, TERMALL, RESET+TERMALL, ERTERM+TERMALL, and
+BYPASS+TERMALL code-block styles, one tile-part per tile in row-major order
+(`TPsot=0`, `TNsot=1`), TLM on, SOP/EPH as today, PLT per tile-part as the
+scaffold builds it.
 
 Fail-closed in multi-tile mode (each lifted later, separately): `--rates`
 (byte targets are image-global), `--tile-parts R` (R-divisions compose with
-multi-tile later), BYPASS, RESET, ERTERM and untested resilience style
-combinations, `--mct none`, 9/7/lossy, tiles that clamp DWT levels (§2.3).
+multi-tile later), BYPASS without TERMALL, standalone RESET/ERTERM, BYPASS
+combined with RESET/ERTERM, untested resilience combinations, `--mct none`,
+9/7/lossy, and tiles that clamp DWT levels (§2.3).
 Single-tile behavior stays **byte-identical** — every increment keeps
 `tile == image` on the exact current code path.
 
@@ -119,7 +121,7 @@ strict single-threaded/threaded decode, JP2 wrapper acceptance);
 "multi-tile terminate-all fails closed on packet corruption" (second-tile PLT
 length mutation, final tile-part truncation, and second-tile SOD payload
 byte-flip walk); "multi-tile encode fails closed outside the bounded envelope"
-(LRCP layers, rates, mct none, BYPASS/RESET-style combinations, sidecar, 9/7,
+(rates, mct none, sidecar, 9/7,
 misaligned tile size);
 "multi-tile encode rejects tiles that clamp the global DWT level count" (18×18
 with 16×16 tiles). Single-tile output is byte-identical (branch only taken when
@@ -179,7 +181,7 @@ block) on both encode and decode; the fixtures moved to 8×8 precincts with
 across worker counts; corrupted second-tile payload → bounded error, never a
 panic. 256/256 in Debug + ReleaseFast.
 
-### Stage D — Hardening + docs — ✅ DONE (score raise still interop-gated)
+### Stage D — Hardening + docs — ✅ DONE
 
 - **Real CLI verification:** `tiff-to-jp2 --tile 32,32 --levels 2 --block 4
   --precincts "[8,8]"` on a 48×48 TIFF produced a genuine 4-tile JP2 and
@@ -198,10 +200,22 @@ panic. 256/256 in Debug + ReleaseFast.
   time plus the full output image. Fine at v1 scale; streaming tile-part
   assembly (encode) and the Phase-4 peak-memory benchmark are the v2 follow-up.
 
-**Score raise remains gated** (verification protocol): OpenJPEG/Grok/Kakadu
-must decode a genuinely multi-tile z2000 file before the +4–5 full-target
-points are claimed. The alignment envelope was designed so tile-local and
-reference-grid anchoring coincide, but only an external decoder proves it.
+**Interop gate passed:** OpenJPEG and Grok decode genuine aligned multi-tile
+z2000 files losslessly across all five progression orders. The later
+resilience expansion is also pixel-exact in both decoders for CAUSAL+SEGMARK,
+RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL. Kakadu remains the breadth
+follow-up for this expanded matrix.
+
+### Stage E — Progression, layer, and resilience breadth — ✅ DONE
+
+The tile-local packet stream can now be permuted and read back in LRCP, RLCP,
+RPCL, PCRL, or CPRL order. Stateful reader groups preserve tag-tree and length
+state when multi-layer LRCP/RLCP revisit a precinct. T1 style metadata now
+survives the component-block to T2-layer-block conversion, so the readback
+validator uses the exact BYPASS/termination model rather than inferring it
+from segment sizes. Focused 2x2 tests cover deterministic threaded encode,
+strict single-/multi-thread decode, second-tile PLT corruption, and the
+multi-tile BYPASS+TERMALL malformed-input sweep.
 
 ## 5. Risks, ranked
 
@@ -221,7 +235,7 @@ reference-grid anchoring coincide, but only an external decoder proves it.
 ## 6. Explicit non-goals for v1
 
 Tile-parts-within-tile (R divisions × tiles), per-tile COD/QCD overrides,
-`--mct none`/style-bits/bypass in multi-tile, rate-targeted quality layers,
+`--mct none`, unsupported style combinations, rate-targeted quality layers,
 lossy 9/7 tiles,
 streaming (bounded-memory) assembly, PPM/PPT. Each is a separate, later
 increment on top of the v1 skeleton.

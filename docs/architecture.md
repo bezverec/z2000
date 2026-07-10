@@ -329,8 +329,9 @@ tile descriptors. It also provides tile-local RGB sample extraction and
 copy-back helpers so per-tile encode/decode work can move rectangular image
 regions without ad hoc row math. Multi-tile support is intentionally bounded:
 lossless RCT/5-3, untargeted quality layers across all five progression orders,
-one tile-part per tile, row-major tile order, plain or TERMALL code-block style,
-and ISO B.6/B.7-aligned geometry.
+one tile-part per tile, row-major tile order, plain coding and the implemented
+CAUSAL/SEGMARK/terminated resilience combinations, and ISO B.6/B.7-aligned
+geometry.
 
 `src/tile_pipeline.zig` is the tile-local implementation layer. It runs the
 reversible component transform, tile-local 5/3 DWT/inverse-DWT, T1 code-block
@@ -347,8 +348,8 @@ These are intentionally not treated as complete yet:
 - arbitrary JP2/JPX box families and JPX-only features;
 - arbitrary component layouts, subsampling, palettes, alpha channels, and
   variable bits-per-component;
-- multi-tile combinations outside the v1 envelope, including broader profile
-  mixes, multiple quality layers, advanced style-bit combinations, and tile-part
+- multi-tile combinations outside the bounded envelope, including rate-targeted
+  layers, BYPASS without TERMALL, unsupported style combinations, and tile-part
   divisions beyond the current supported policy;
 - standalone RESET/ERTERM and untested code-block style combinations;
 - broader PLT-less foreign decode coverage beyond the current single-tile

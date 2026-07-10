@@ -56,9 +56,10 @@ interop gate.
   broadening fixtures and reducing the access-profile size/quality gap against
   Grok/OpenJPEG/Kakadu.
 - Multi-tile: the v1 aligned-grid model is implemented for the reversible
-  RCT/5-3 profile with per-tile DWT, packet state, and strict decode. Next
-  expand the tile/profile matrix and scheduling while keeping unsupported
-  geometry/style combinations fail-closed.
+  RCT/5-3 profile with per-tile DWT, packet state, strict decode, all five
+  progression orders, untargeted layers, and the implemented resilience style
+  matrix. Next add tile-aware rate targets and scheduling while keeping
+  unsupported geometry/style combinations fail-closed.
 - Interop gate: for each major phase, keep OpenJPEG/Grok/Kakadu checks for
   encode/decode roundtrip, marker conformance, output size, strict reader
   validation, and single-thread plus multi-thread encode/decode benchmarks.
@@ -89,11 +90,11 @@ interop gate.
 3. Extend strict T2 audit fixtures from the current smoke file to deliberately
    corrupted PLT/TLM/SOP/EPH/header cases that can be compared against
    OpenJPEG/Grok/Kakadu behavior without assuming any validator is final.
-4. Continue T1 style coverage after the JP2/T2 diagnostics are sharper:
-   keep the implemented public style combinations green, add external
-   BYPASS+TERMALL interop, and keep standalone RESET/ERTERM plus untested
-   combinations fail-closed until each has writer, strict reader, oracle tests,
-   and interop.
+4. Continue T1 style coverage after the JP2/T2 diagnostics are sharper: keep
+   the implemented single- and multi-tile combinations green, add Kakadu to
+   the BYPASS+TERMALL interop row, and keep standalone RESET/ERTERM plus
+   untested combinations fail-closed until each has writer, strict reader,
+   oracle tests, and interop.
 5. Run a comparative benchmark only after the above interop fixtures are green,
    so performance numbers are attached to output that external decoders accept.
 
@@ -184,12 +185,12 @@ Tasks:
 
 - Keep the current positive multi-tile encode/decode path green: lossless
   RCT/5-3, untargeted quality layers across all five progression orders, one
-  tile-part per tile, row-major order, plain or TERMALL code-block style, and
-  ISO B.6/B.7-aligned geometry.
+  tile-part per tile, row-major order, CAUSAL/SEGMARK and the supported
+  TERMALL-scoped resilience combinations, and ISO B.6/B.7-aligned geometry.
 - Expand the tile/profile matrix one axis at a time: more fixtures for edge
   tiles and non-divisible dimensions, then rate-targeted quality layers and
-  selected style-bit combinations only after strict decode
-  and interop coverage exist.
+  reference-grid partition anchoring after strict decode and interop coverage
+  exist.
 - Preserve tile-component independence in DWT, T1, and T2 scheduling while
   keeping packet order deterministic.
 - Rework scratch pools for tile-local reuse and later persistent worker
