@@ -1983,6 +1983,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 return CodestreamError.UnsupportedPayload;
             }
         } else if (marker == @intFromEnum(Marker.tlm)) {
+            if (!saw_cod or !saw_qcd) return CodestreamError.InvalidCodestream;
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
             saw_tlm = true;
             next_tlm_index += 1;

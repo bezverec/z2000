@@ -96,7 +96,7 @@ decode coverage and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported
 combinations still fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-10, the narrow RGB lossless JP2 target is estimated at 94/100, while
+2026-07-10, the narrow RGB lossless JP2 target is estimated at 96/100, while
 the broader JPEG2000 Part 1 codec family is estimated at 80/100.
 
 ## Build
@@ -169,6 +169,15 @@ narrow path.
 without decoding RAW CFA data. It reports DNG version tags, camera strings, CFA
 metadata, the primary IFD, and SubIFD image summaries. This is the safe staging
 ground for a later narrow `dng-to-jp2` RGB/preview path.
+
+Longer term, z2000 should become a practical archival conversion tool, not only
+a JPEG2000 core. After the full Part 1 codec target, planned broadening includes
+JPEG, PNG, and BMP import paths first, then RAW/DNG demosaic-oriented workflows
+and OpenEXR/HDR workflows. The color roadmap should cover monochrome, sRGB,
+palette, YCC, extended YCC, CIELab, CMYK, ICC-based conversion, and eventually
+component depths beyond 16 bits where JPEG2000 and the source format can carry
+them honestly. Metadata preservation should grow from ICC into EXIF, IPTC, and
+XMP sidecar/box handling.
 
 ## Profile Mapping
 
@@ -636,6 +645,11 @@ Features:
 3. Add a malformed-corpus/fuzzing gate for the broader strict reader: JP2
    boxes, marker segments, packet headers, tile-part boundaries, and styled T1
    segment lengths.
+4. After the full JPEG2000 Part 1 target is credible, broaden z2000 into an
+   archival conversion tool: JPEG/PNG/BMP import, then RAW/DNG and OpenEXR;
+   monochrome/sRGB/palette/YCC/eYCC/CIELab/CMYK color handling; EXIF/IPTC/XMP
+   preservation; and higher-than-16-bit component paths where the container and
+   codestream profile support them.
 
 Performance (decode remains the larger Grok gap; ordered by current expected
 win per effort after the strict T2 profiling pass):
