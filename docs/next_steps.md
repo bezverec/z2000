@@ -51,16 +51,17 @@ items are preserved further below as implementation history.
 - **Impact:** full "Lossless encode" 10→11, "Lossless decode" 10→12, "Core
   syntax" +1. (+4, the single biggest full-target lever)
 - **ISO clause:** B.3–B.12 (tile grid, per-tile SOT/SOD, tile-part order).
-- **State:** multi-tile v1/v2 is interop-proven for aligned RPCL grids and
-  locally strict for single-layer LRCP grids: RCT/5-3, one or more untargeted
+- **State:** multi-tile v1/v2 is interop-proven for aligned RPCL and single-layer
+  RLCP grids and locally strict for single-layer LRCP grids: RCT/5-3, one or more untargeted
   RPCL quality layers, plain or TERMALL style, one tile-part per tile. Gates:
   `validateMultiTileCodingPath` / `validateMultiTileGeometry` in `codestream.zig`.
 - **What to add (staged, each its own PR, single-tile byte-identical at every
   step):**
-  - **v2a — non-RPCL progressions in multi-tile.** Single-layer LRCP is wired
-    through per-tile packet build and strict per-tile slot walk. Remaining:
-    OpenJPEG/Grok/Kakadu on a 2×2 LRCP multi-tile file, then RLCP/PCRL/CPRL
-    once the stateful multi-layer/T2 constraints are explicit.
+  - **v2a — non-RPCL progressions in multi-tile.** Single-layer LRCP and RLCP
+    are wired through per-tile packet build and strict per-tile slot walk.
+    OpenJPEG and Grok decode the 2x2 RLCP smoke losslessly. Remaining:
+    OpenJPEG/Grok on LRCP, Kakadu on LRCP/RLCP, then PCRL/CPRL and multi-layer
+    LRCP/RLCP once the stateful T2 constraints are explicit.
   - **v2b — quality layers per tile.** Untargeted RPCL quality layers are
     wired through encode and strict decode. Remaining: make PCRD/rate targets
     tile-aware before accepting `--rates` in multi-tile mode.
@@ -599,7 +600,7 @@ codestreams encode and decode byte-exactly through the public path (2×2 and
 genuine 4-tile JP2 to a byte-identical TIFF, `jp2 stats`/packet audit
 aggregate per tile, and the JP2 wrapper validates the multi-tile profile.
 current bounded envelope: lossless RCT/5-3, untargeted RPCL quality layers,
-single-layer LRCP, one tile-part per tile (row-major), plain or TERMALL
+single-layer LRCP/RLCP, one tile-part per tile (row-major), plain or TERMALL
 code-block style, ISO B.6/B.7-aligned geometry (enforced fail-closed on both
 encode and decode). The full-target scorecard points
 (+4–5) stay **staged, not claimed**, until OpenJPEG/Grok/Kakadu decode a

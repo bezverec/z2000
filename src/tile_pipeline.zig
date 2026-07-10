@@ -19,7 +19,7 @@ pub const RctTile = struct {
     }
 };
 
-pub const PacketOrder = enum { rpcl, lrcp };
+pub const PacketOrder = enum { rpcl, lrcp, rlcp };
 
 pub const PacketScaffoldOptions = struct {
     layers: u16 = 1,
@@ -2582,6 +2582,14 @@ fn buildPacketOrderSequence(
         },
         .lrcp => {
             var iterator = try packet_plan.LrcpIterator.init(plan, component_count, layers);
+            while (iterator.next()) |packet| {
+                if (count >= sequence.len) return PacketScaffoldError.InvalidPacket;
+                sequence[count] = packet;
+                count += 1;
+            }
+        },
+        .rlcp => {
+            var iterator = try packet_plan.RlcpIterator.init(plan, component_count, layers);
             while (iterator.next()) |packet| {
                 if (count >= sequence.len) return PacketScaffoldError.InvalidPacket;
                 sequence[count] = packet;

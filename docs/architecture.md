@@ -328,7 +328,7 @@ non-divisible image dimensions and non-zero reference origins, plus row-major
 tile descriptors. It also provides tile-local RGB sample extraction and
 copy-back helpers so per-tile encode/decode work can move rectangular image
 regions without ad hoc row math. Multi-tile support is intentionally bounded:
-lossless RCT/5-3, untargeted RPCL quality layers, single-layer LRCP packet
+lossless RCT/5-3, untargeted RPCL quality layers, single-layer LRCP/RLCP packet
 order, one tile-part per tile, row-major tile order, plain or TERMALL
 code-block style, and ISO B.6/B.7-aligned geometry.
 

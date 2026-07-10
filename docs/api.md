@@ -60,7 +60,7 @@ Supported public JP2 profiles are still narrow:
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution
 - a v1/v2 aligned multi-tile lossless envelope: RCT/5-3, one or more
-  untargeted quality layers for RPCL, single-layer LRCP packet order, one
+  untargeted quality layers for RPCL, single-layer LRCP/RLCP packet order, one
   tile-part per tile, row-major tiles, plain or TERMALL code-block style, and
   ISO B.6/B.7 geometry constraints
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
@@ -316,7 +316,7 @@ through public codestream paths where their payload behavior has writer,
 reader, tests, and interop coverage. BYPASS+TERMALL is locally public with
 per-pass raw/MQ segment lengths and strict decode; OpenJPEG and Grok decode the
 current smoke losslessly, with Kakadu still to check. TERMALL, RPCL quality
-layers, and single-layer LRCP packet order are also accepted inside the aligned
+layers, and single-layer LRCP/RLCP packet order are also accepted inside the aligned
 multi-tile envelope. Larger no-sidecar ERTERM files are
 accepted by z2000 strict decode, OpenJPEG, Grok, and Kakadu, including the
 block-parallel strict decode path. Unsupported combinations, such as standalone
