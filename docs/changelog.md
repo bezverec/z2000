@@ -5,6 +5,14 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Narrow Strict Decode Sidecar-Retirement Proof
+
+- Strengthened the BYPASS strict SOD roundtrip so it now asserts no BP8 sidecar
+  is present, reads the strict packet block catalog, verifies BYPASS style
+  metadata plus multi-segment lengths and non-empty payload views, then decodes
+  through the normal no-sidecar path. Scorecard: narrow strict decode 9->10
+  (97->98).
+
 ### Narrow T2 Consistent-Truncation Gate
 
 - Added a no-sidecar rate-targeted multi-layer RPCL regression that removes the

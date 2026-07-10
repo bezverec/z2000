@@ -9105,6 +9105,24 @@ test "BYPASS codestream roundtrips losslessly through strict SOD packets" {
         .bypass = true,
     });
     defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+    var catalog = try codestream.readStrictPacketBlockCatalog(allocator, bytes);
+    defer catalog.deinit();
+    var bypass_blocks: usize = 0;
+    var segmented_bypass_blocks: usize = 0;
+    for (catalog.components) |blocks| {
+        for (blocks) |block| {
+            if (!block.metadata_ready) continue;
+            if (!block.code_block_style.bypass) continue;
+            bypass_blocks += 1;
+            if (block.segment_count > 1) segmented_bypass_blocks += 1;
+            try std.testing.expect(block.payload_length > 0);
+            try std.testing.expect(block.cumulative_passes > 0);
+        }
+    }
+    try std.testing.expect(bypass_blocks > 0);
+    try std.testing.expect(segmented_bypass_blocks > 0);
 
     var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
     defer decoded.deinit();

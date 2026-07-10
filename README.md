@@ -8,7 +8,7 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-10, the narrow RGB lossless JP2 target is estimated at **97/100**;
+of 2026-07-10, the narrow RGB lossless JP2 target is estimated at **98/100**;
 the broader JPEG2000 Part 1 codec family is estimated at **80/100**.
 
 ## Features
