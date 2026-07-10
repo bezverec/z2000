@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Standalone RESET Code-Block Style
+
+- The COD RESET style bit (`0x02`, ISO 15444-1 D.4) is now a public opt-in
+  profile without requiring TERMALL: `--reset-context` restarts the MQ
+  contexts to the JPEG2000 initial states (Table D.7) at every coding-pass
+  boundary inside the continuous codeword stream. The direct ISO encoder,
+  the symbol-based reference encoder, the strict COD reader, and the JP2
+  wrapper all accept COD style `0x02`; the byte-for-byte direct-vs-symbols
+  equality matrix gained a RESET dimension.
+- The inferred continuous decoder's per-pass reset now restores the JPEG2000
+  initial context states (previously the all-default reset, unreachable
+  through public gates) to match the encoder and OpenJPEG's `resetstates`.
+- Interop: z2000 `--reset-context` streams decode losslessly in OpenJPEG
+  2.5.4 and Grok 20.3.6; OpenJPEG and Grok `-M 2` streams decode losslessly
+  in z2000 (all four legs pixel-exact on the 2048x2048 smoke; COD style byte
+  verified `0x02`; jpylyzer-valid).
+- BYPASS+RESET, RESET on the legacy T1 backend, and multi-tile standalone
+  RESET stay fail-closed.
+
 ### Truncated-Plane Midpoint Reconstruction
 
 - T1 decode now embeds the ISO-conventional uncertainty midpoint while

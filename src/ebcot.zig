@@ -2240,6 +2240,14 @@ pub fn encodeBlockSymbolsSegmentIsoMq(allocator: std.mem.Allocator, block: Encod
 }
 
 pub fn encodeBlockSymbolsSegmentIsoMqContinuous(allocator: std.mem.Allocator, block: EncodedBlockView) !CodeBlockSegment {
+    return encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(allocator, block, .{});
+}
+
+pub fn encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(
+    allocator: std.mem.Allocator,
+    block: EncodedBlockView,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
     if (block.passes.len == 0) {
         const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
         errdefer allocator.free(passes);
@@ -2262,8 +2270,9 @@ pub fn encodeBlockSymbolsSegmentIsoMqContinuous(allocator: std.mem.Allocator, bl
 
     var symbol_offset: usize = 0;
     var previous_bytes: u64 = 0;
-    for (block.passes) |pass| {
+    for (block.passes, 0..) |pass, pass_ordinal| {
         if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
+        if (style.reset_context and pass_ordinal != 0) try encoder.resetJpeg2000Contexts();
         const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
         for (pass_symbols) |symbol| {
             try encoder.write(mqContextIndex(symbol.context), symbol.bit);
@@ -4101,7 +4110,17 @@ fn resetContinuousPassContexts(
 }
 
 fn resetInferredContinuousPassContexts(style: CodeBlockStyle, decoder: anytype, pass_index: u16) void {
-    if (style.reset_context and pass_index != 0) decoder.resetContexts();
+    // D.4 RESET restores the default JPEG2000 initial states (Table D.7:
+    // UNIFORM=46, RUN-LENGTH=3, first significance context=4), matching the
+    // ISO encoder's per-pass resetJpeg2000Contexts and OpenJPEG's resetstates.
+    // The legacy decoder pairs the legacy encoder's all-default resetContexts.
+    if (style.reset_context and pass_index != 0) {
+        const DecoderType = @typeInfo(@TypeOf(decoder)).pointer.child;
+        if (@hasDecl(DecoderType, "resetJpeg2000Contexts"))
+            decoder.resetJpeg2000Contexts() catch unreachable
+        else
+            decoder.resetContexts();
+    }
 }
 
 fn expectedCodingPasses(bitplanes: u8) u16 {
@@ -5541,7 +5560,10 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
     style: CodeBlockStyle,
 ) !CodeBlockSegment {
     try validateImplementedStyleAllowBypass(style);
-    if (style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (style.terminate_all) return EbcotError.InvalidBlock;
+    // Standalone RESET is only wired for the all-MQ continuous stream: raw
+    // bypass segments carry no MQ contexts to reset at their boundaries.
+    if (style.reset_context and style.bypass) return EbcotError.InvalidBlock;
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
@@ -5589,6 +5611,10 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
             const is_raw = passIsRaw(style, bitplanes, bitplane, kind);
             if (segment_pass_count == 0) segment_is_raw = is_raw;
             if (is_raw != segment_is_raw) return EbcotError.InvalidBlock;
+            // Standalone RESET (D.4, COD 0x02 without TERMALL): the MQ
+            // contexts restart at every coding-pass boundary while the
+            // codeword stream stays continuous.
+            if (style.reset_context and pass_index != 0) try iso.resetJpeg2000Contexts();
 
             const symbol_count: usize = switch (kind) {
                 .significance => if (is_raw)

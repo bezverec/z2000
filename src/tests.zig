@@ -3190,9 +3190,9 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
                     bytes[cod + 11] = 8;
                 }
             }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
-            .{ .label = "unsupported style bit RESET", .mutate = struct {
+            .{ .label = "unsupported style bits BYPASS+RESET", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
-                    bytes[cod + 12] = 0x02;
+                    bytes[cod + 12] = 0x03;
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
             .{ .label = "unsupported style bit ERTERM", .mutate = struct {
@@ -7840,15 +7840,22 @@ test "direct ISO segment encoder matches the symbol-based encoder byte for byte"
 
     var seed: u32 = 77;
     const kinds = [_]subband.Kind{ .ll, .hl, .lh, .hh };
-    const bypass_modes = [_]bool{ false, true };
+    const StyleMode = struct { bypass: bool, reset: bool };
+    // BYPASS+RESET stays fail-closed, so the matrix skips that combination.
+    const style_modes = [_]StyleMode{
+        .{ .bypass = false, .reset = false },
+        .{ .bypass = true, .reset = false },
+        .{ .bypass = false, .reset = true },
+    };
     for (kinds) |kind| {
-        for (bypass_modes) |bypass| {
+        for (style_modes) |mode| {
+            const bypass = mode.bypass;
             for (&plane) |*value| {
                 seed = seed *% 1664525 +% 1013904223;
                 const magnitude: i32 = @intCast((seed >> 7) & 0x3ff);
                 value.* = if ((seed & 1) == 1) -magnitude else magnitude;
             }
-            const style = ebcot.CodeBlockStyle{ .band_kind = kind, .bypass = bypass };
+            const style = ebcot.CodeBlockStyle{ .band_kind = kind, .bypass = bypass, .reset_context = mode.reset };
             const rect = subband.Rect{ .x = 0, .y = 0, .width = w, .height = h };
 
             var block = try ebcot.encodeBlockWithStyle(allocator, &plane, w, rect, style);
@@ -7862,7 +7869,7 @@ test "direct ISO segment encoder matches the symbol-based encoder byte for byte"
             var expected = if (bypass)
                 try ebcot.encodeBlockSymbolsSegmentIsoMqBypass(allocator, view, style)
             else
-                try ebcot.encodeBlockSymbolsSegmentIsoMqContinuous(allocator, view);
+                try ebcot.encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(allocator, view, style);
             defer expected.deinit(allocator);
 
             var actual = try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(&scratch, &plane, w, rect, style);
@@ -10473,10 +10480,10 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "unsupported MCT", .offset = 8, .value = 2, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "too many decomposition levels", .offset = 9, .value = 33, .expected = codestream.CodestreamError.TooManyLevels },
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
-        .{ .label = "unsupported standalone RESET code-block style", .offset = 12, .value = 0x02, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported BYPASS+RESET code-block style", .offset = 12, .value = 0x03, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported ERTERM code-block style", .offset = 12, .value = 0x10, .expected = codestream.CodestreamError.UnsupportedPayload },
-        // TERMALL (0x04), BYPASS+TERMALL (0x05), RESET+TERMALL (0x06), CAUSAL
-        // (0x08), ERTERM+TERMALL (0x14), and SEGMARK (0x20) are supported on
+        // RESET (0x02), TERMALL (0x04), BYPASS+TERMALL (0x05), RESET+TERMALL
+        // (0x06), CAUSAL (0x08), ERTERM+TERMALL (0x14), and SEGMARK (0x20) are supported on
         // their documented paths, so they are intentionally absent here; their
         // acceptance + roundtrip is covered by dedicated tests. The combined
         // 0x3f case still exercises rejection of unsupported RESET/ERTERM
@@ -10694,7 +10701,8 @@ test "unsupported code-block style options fail closed" {
     };
     const cases = [_]UnsupportedCase{
         .{ .label = "BYPASS+legacy", .options = .{ .bypass = true, .t1_backend = .legacy_mq } },
-        .{ .label = "RESET without TERMALL", .options = .{ .reset_context = true } },
+        .{ .label = "RESET+legacy", .options = .{ .reset_context = true, .t1_backend = .legacy_mq } },
+        .{ .label = "BYPASS+RESET", .options = .{ .bypass = true, .reset_context = true } },
         // terminate_all is wired for the ISO MQ backend only; requesting it with
         // the legacy backend must still fail closed (the flag would otherwise be
         // silently dropped while the COD marker advertised it).
@@ -10966,6 +10974,53 @@ test "reset-context with terminate-all roundtrips losslessly and changes context
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 
     const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, reset_termall);
+    allocator.free(wrapped);
+}
+
+test "standalone reset-context roundtrips losslessly inside the continuous stream" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 19 + i / 7) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 41 + 23) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 73 + 11) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const reset_only = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .reset_context = true,
+    });
+    defer allocator.free(reset_only);
+    const plain = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+    });
+    defer allocator.free(plain);
+
+    // COD advertises RESET (0x02) without TERMALL (0x04), and the per-pass
+    // context restarts must actually change the continuous MQ payload.
+    const reset_cod = findMarker(reset_only, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const plain_cod = findMarker(plain, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0x02), reset_only[reset_cod + 12] & 0x06);
+    try std.testing.expectEqual(@as(u8, 0x00), plain[plain_cod + 12] & 0x06);
+    try std.testing.expect(!std.mem.eql(u8, reset_only, plain));
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, reset_only);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    // The JP2 wrapper's strict metadata validation must accept COD 0x02.
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, reset_only);
     allocator.free(wrapped);
 }
 

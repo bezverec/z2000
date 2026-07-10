@@ -78,7 +78,7 @@ items are preserved further below as implementation history.
 - **Risk:** High (per-tile T2/T1 scheduling); keep the single-tile path a
   passing special case at every step.
 
-### N3. T1 completeness — BYPASS+TERMALL Kakadu, then standalone RESET/ERTERM — M–L · Med
+### N3. T1 completeness — BYPASS+TERMALL Kakadu, then standalone ERTERM — M–L · Med
 
 - **Impact:** full "T1 completeness" +1–2 remaining. (+1–2)
 - **ISO clause:** D.4.5 (per-pass termination), D.7 (bypass), the ER-TERM annex.
@@ -89,11 +89,15 @@ items are preserved further below as implementation history.
   strict decoder consumes the same per-pass segment table and the JP2 wrapper
   accepts COD style `0x05`. OpenJPEG 2.5.4 and Grok 20.3.6 decode the current
   single-tile and 2x2 multi-tile smokes losslessly; Kakadu remains to be
-  checked. Standalone
-  RESET/ERTERM and BYPASS combined with RESET or ERTERM stay fail-closed.
-- **What to add:** Kakadu interop for BYPASS+TERMALL, then standalone RESET /
-  standalone ERTERM with the same writer + strict reader + interop gate before
-  opening their public profiles.
+  checked. **Standalone RESET (COD `0x02`) landed**: per-pass MQ context
+  restarts to the JPEG2000 initial states inside the continuous stream, with
+  the direct/symbols byte-equality matrix extended and bidirectional
+  OpenJPEG/Grok `-M 2` lossless interop. Standalone ERTERM and BYPASS
+  combined with RESET or ERTERM stay fail-closed (multi-tile standalone
+  RESET too).
+- **What to add:** Kakadu interop for BYPASS+TERMALL and standalone RESET
+  (`Cmodes=RESET`), then standalone ERTERM with the same writer + strict
+  reader + interop gate before opening its public profile.
 - **Test plan:** Kakadu `Cmodes=BYPASS`/termination-style interop for
   BYPASS+TERMALL, then local byte-exact roundtrip + fail-closed corruption
   cases per remaining combination (extend the styled-T1 matrix).
