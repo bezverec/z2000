@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **92/100 narrow, 80/100 full** as of
+the subsequent JP2/T2/T1/profile work is **94/100 narrow, 80/100 full** as of
 2026-07-10. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-10)
 
-Scorecard now **92/100 narrow, 80/100 full**. The aligned multi-tile path has
+Scorecard now **94/100 narrow, 80/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
@@ -28,6 +28,40 @@ The remaining levers are larger and structural. Ordered by *value per unit
 risk*; each names the ISO clause, the current code state, exactly what is
 missing, a test plan, and a score delta. Detailed tier notes for already-landed
 items are preserved further below as implementation history.
+
+### N0. Narrow 100 stabilization — first T2 slice — ✅ LANDED
+
+- **Scope:** no-sidecar strict T2 audit for rate-targeted multi-layer RPCL and
+  deterministic packet-header corruption rejection without the BP8 oracle.
+- **Coverage:** the new regression decodes a rate-targeted three-layer stream
+  from SOD packet state, verifies repeated block inclusions across layers via
+  `auditStrictPacketHeaders`, then flips the first real SOD packet-header byte
+  and requires both audit and decode to fail as `InvalidCodestream`.
+- **Score policy:** no score bump yet; this is the first slice toward raising
+  narrow T2/strict-decode rows after a broader packet-state corruption matrix
+  and interop pass.
+
+### N0b. Narrow TIFF fail-closed matrix — ✅ LANDED
+
+- **Scope:** pin the supported TIFF 6.0 input boundary for the narrow RGB path.
+- **Coverage:** uncompressed chunky RGB strips remain the accepted path;
+  compressed TIFF, palette/unsupported photometric data, planar RGB, extra
+  samples/alpha, mixed bit depth, signed sample format, and tile-only TIFFs
+  without strip tags now have explicit parser rejection tests.
+- **Score policy:** narrow TIFF input/output 6->7, moving the narrow target
+  92->93. Real tiled TIFF input is now a later broadening feature, not an
+  ambiguity in the narrow target.
+
+### N0c. Narrow core marker fail-closed matrix — ✅ LANDED
+
+- **Scope:** raw strict codestream rejection for unsupported Part 1 marker
+  segments that are known but outside the narrow profile.
+- **Coverage:** CAP, PLM, RGN, POC, PPM, and CRG in the main header now have
+  explicit strict-reader fail-closed tests, and tile-part RGN/POC join the
+  existing PPT/COC/QCC override rejection coverage.
+- **Score policy:** narrow core main markers 8->9, moving the narrow target
+  93->94. The final core-marker point still needs duplicate/order/length edge
+  cases across the currently supported marker set.
 
 ### N1. Core codestream syntax — redundant COC/QCC — ✅ LANDED
 
@@ -818,7 +852,7 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
 
 ## Scoreboard
 
-- **Current (`2026-07-10`):** narrow **92**, full **80** — matches
+- **Current (`2026-07-10`):** narrow **94**, full **80** — matches
   `docs/iso_coverage.md`.
 - **Recent claimed movement:** T1/EBCOT grew through BYPASS, TERMALL,
   vertical-causal, segmentation-symbols, TERMALL-scoped RESET, and

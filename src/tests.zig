@@ -2461,6 +2461,89 @@ test "TIFF parser rejects malformed multi-strip metadata" {
     try std.testing.expectError(tiff.TiffError.TruncatedData, tiff.parseRgb(allocator, truncated_second_strip));
 }
 
+test "TIFF parser fails closed for unsupported narrow RGB variants" {
+    const allocator = std.testing.allocator;
+
+    const base = try makeRgbTwoStripTiffForTest(allocator, 6, 6, 168, true);
+    defer allocator.free(base);
+
+    const UnsupportedTiffCase = struct {
+        label: []const u8,
+        expected: anyerror,
+        mutate: *const fn ([]u8) anyerror!void,
+    };
+    const cases = [_]UnsupportedTiffCase{
+        .{
+            .label = "compressed TIFF",
+            .expected = tiff.TiffError.UnsupportedCompression,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 259, 5);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "palette/unsupported photometric",
+            .expected = tiff.TiffError.UnsupportedPhotometric,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 262, 3);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "planar RGB",
+            .expected = tiff.TiffError.UnsupportedPlanarConfiguration,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 284, 2);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "extra alpha sample",
+            .expected = tiff.TiffError.InvalidTagValue,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 277, 4);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "mixed bit depths",
+            .expected = tiff.TiffError.UnsupportedBitsPerSample,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    const offset = try readTiffIfdValueOffsetForTest(bytes, 258);
+                    writeU16LeTest(bytes, offset + 2, 16);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "signed sample format",
+            .expected = tiff.TiffError.UnsupportedSampleFormat,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    const offset = try readTiffIfdValueOffsetForTest(bytes, 339);
+                    writeU16LeTest(bytes, offset, 2);
+                }
+            }.mutate,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("TIFF unsupported variant case failed: {s}\n", .{case.label});
+        const mutated = try allocator.dupe(u8, base);
+        defer allocator.free(mutated);
+        try case.mutate(mutated);
+        try std.testing.expectError(case.expected, tiff.parseRgb(allocator, mutated));
+    }
+
+    const tile_only = try makeTileOnlyRgbTiffForTest(allocator);
+    defer allocator.free(tile_only);
+    try std.testing.expectError(tiff.TiffError.MissingRequiredTag, tiff.parseRgb(allocator, tile_only));
+}
+
 test "TIFF writer roundtrips optimized 8-bit and 16-bit raster paths" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -7486,6 +7569,58 @@ test "multi-layer no-sidecar codestream decodes from strict SOD packets" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "rate-targeted no-sidecar layers decode from strict T2 packet state" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 24;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37 + 11) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 19 + 53) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 7 + 101) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = codestream.LosslessOptions{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .layers = 3,
+        .rate_count = 2,
+    };
+    options.rates[0] = 12.0;
+    options.rates[1] = 4.0;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+    const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expectEqual(audit.packets, audit.header_decoded_packets);
+    try std.testing.expect(audit.present_packets > 0);
+    try std.testing.expect(audit.included_blocks > audit.t1_ready_blocks);
+    try std.testing.expect(audit.assembled_passes > 0);
+    try std.testing.expect(audit.payload_bytes > 0);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(u16, 3), stats.layers);
+    try std.testing.expect(stats.components[0].quality_layers[0].cumulative_bytes <= stats.components[0].quality_layers[1].cumulative_bytes);
+    try std.testing.expect(stats.components[0].quality_layers[1].cumulative_bytes <= stats.components[0].quality_layers[2].cumulative_bytes);
+    try std.testing.expectEqual(stats.components[0].coding_passes, stats.components[0].quality_layers[2].cumulative_passes);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
 test "ISO MQ no-sidecar codestream decodes from strict SOD packets" {
     const allocator = std.testing.allocator;
     const width = 64;
@@ -9514,6 +9649,55 @@ test "temporary payload rejects SOD packet bytes that diverge from BP8 shadow st
     );
 }
 
+test "strict no-sidecar T2 packet header corruption fails without BP8 oracle" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 24;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 13 + 5) % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 29 + 17) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 43 + 23) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .layers = 2,
+    });
+    defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    var packet_header_byte = try firstSodPayloadOffsetForTest(corrupted);
+    if (readU16BeTest(corrupted, packet_header_byte) == codestream.markerValue("sop")) {
+        packet_header_byte += 6;
+    }
+    if (packet_header_byte >= corrupted.len) return error.Truncated;
+    corrupted[packet_header_byte] ^= 0x80;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.auditStrictPacketHeaders(allocator, corrupted),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, corrupted),
+    );
+}
+
 test "temporary payload rejects corrupt T2 packet header mirrored in BP8 shadow stream" {
     const allocator = std.testing.allocator;
     const width = 16;
@@ -10848,9 +11032,17 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         replacement: u16,
     };
     const cases = [_]UnsupportedMarkerCase{
+        .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
+        .{ .label = "PLM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("plm") },
+        .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
+        .{ .label = "POC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("poc") },
+        .{ .label = "PPM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppm") },
+        .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
         .{ .label = "PPT tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("ppt") },
         .{ .label = "COC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("coc") },
         .{ .label = "QCC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("qcc") },
+        .{ .label = "RGN tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("rgn") },
+        .{ .label = "POC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("poc") },
     };
 
     for (cases) |scenario| {
@@ -15418,6 +15610,68 @@ fn makeRgbTwoStripTiffForTest(
     return bytes.toOwnedSlice(allocator);
 }
 
+fn makeTileOnlyRgbTiffForTest(allocator: std.mem.Allocator) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+
+    const bits_offset: u32 = 146;
+    const tile_offset: u32 = 152;
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, 8);
+
+    try appendU16Le(allocator, &bytes, 11);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, bits_offset);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 322, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 323, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 324, 4, 1, tile_offset);
+    try appendIfdEntryLe(allocator, &bytes, 325, 4, 1, 6);
+    try appendU32Le(allocator, &bytes, 0);
+
+    try std.testing.expectEqual(@as(usize, bits_offset), bytes.items.len);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, 8);
+    try std.testing.expectEqual(@as(usize, tile_offset), bytes.items.len);
+    try bytes.appendSlice(allocator, &.{ 10, 20, 30, 40, 50, 60 });
+
+    return bytes.toOwnedSlice(allocator);
+}
+
+fn tiffIfdEntryOffsetForTest(bytes: []const u8, tag: u16) !usize {
+    if (bytes.len < 10 or !std.mem.eql(u8, bytes[0..2], "II")) return error.InvalidTiff;
+    const ifd_offset = readU32LeTest(bytes, 4);
+    if (ifd_offset + 2 > bytes.len) return error.InvalidTiff;
+    const entry_count = readU16LeTest(bytes, ifd_offset);
+    const entries_offset = ifd_offset + 2;
+    for (0..entry_count) |i| {
+        const entry_offset = entries_offset + @as(usize, i) * 12;
+        if (entry_offset + 12 > bytes.len) return error.InvalidTiff;
+        if (readU16LeTest(bytes, entry_offset) == tag) return entry_offset;
+    }
+    return error.MissingTiffTag;
+}
+
+fn readTiffIfdValueOffsetForTest(bytes: []const u8, tag: u16) !usize {
+    const entry_offset = try tiffIfdEntryOffsetForTest(bytes, tag);
+    const value_offset = readU32LeTest(bytes, entry_offset + 8);
+    if (value_offset > bytes.len) return error.InvalidTiff;
+    return value_offset;
+}
+
+fn writeTiffIfdInlineU16ForTest(bytes: []u8, tag: u16, value: u16) !void {
+    const entry_offset = try tiffIfdEntryOffsetForTest(bytes, tag);
+    writeU16LeTest(bytes, entry_offset + 8, value);
+    writeU16LeTest(bytes, entry_offset + 10, 0);
+}
+
 fn appendIfdEntryLe(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -16559,9 +16813,18 @@ fn readU16BeTest(bytes: []const u8, offset: usize) u16 {
     return (@as(u16, bytes[offset]) << 8) | bytes[offset + 1];
 }
 
+fn readU16LeTest(bytes: []const u8, offset: usize) u16 {
+    return @as(u16, bytes[offset]) | (@as(u16, bytes[offset + 1]) << 8);
+}
+
 fn writeU16BeTest(bytes: []u8, offset: usize, value: u16) void {
     bytes[offset] = @as(u8, @truncate(value >> 8));
     bytes[offset + 1] = @as(u8, @truncate(value));
+}
+
+fn writeU16LeTest(bytes: []u8, offset: usize, value: u16) void {
+    bytes[offset] = @as(u8, @truncate(value));
+    bytes[offset + 1] = @as(u8, @truncate(value >> 8));
 }
 
 fn readU32BeTest(bytes: []const u8, offset: usize) u32 {
@@ -16569,6 +16832,13 @@ fn readU32BeTest(bytes: []const u8, offset: usize) u32 {
         (@as(u32, bytes[offset + 1]) << 16) |
         (@as(u32, bytes[offset + 2]) << 8) |
         bytes[offset + 3];
+}
+
+fn readU32LeTest(bytes: []const u8, offset: usize) u32 {
+    return @as(u32, bytes[offset]) |
+        (@as(u32, bytes[offset + 1]) << 8) |
+        (@as(u32, bytes[offset + 2]) << 16) |
+        (@as(u32, bytes[offset + 3]) << 24);
 }
 
 fn writeU32BeTest(bytes: []u8, offset: usize, value: u32) void {

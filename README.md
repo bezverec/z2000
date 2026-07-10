@@ -96,7 +96,7 @@ decode coverage and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported
 combinations still fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-10, the narrow RGB lossless JP2 target is estimated at 92/100, while
+2026-07-10, the narrow RGB lossless JP2 target is estimated at 94/100, while
 the broader JPEG2000 Part 1 codec family is estimated at 80/100.
 
 ## Build

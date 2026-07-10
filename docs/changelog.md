@@ -5,6 +5,37 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Narrow Core Marker Fail-Closed Coverage
+
+- Extended the raw strict codestream marker regression to cover unsupported
+  main-header CAP, PLM, RGN, POC, PPM, and CRG marker segments, plus tile-part
+  RGN/POC alongside the existing PPT/COC/QCC override cases. These remain
+  `UnsupportedPayload` in the narrow profile instead of falling through to
+  ambiguous parse failures. Scorecard: narrow core main markers 8->9
+  (93->94).
+
+### Narrow TIFF 6.0 Fail-Closed Matrix
+
+- Added an explicit TIFF parser matrix for unsupported narrow RGB variants:
+  compressed TIFF, palette/unsupported photometric interpretation, planar RGB,
+  extra alpha/sample channels, mixed bit depths, signed sample format, and
+  tile-only TIFFs without strip tags. All now have focused fail-closed tests,
+  while the supported path remains uncompressed chunky RGB strips with 8/16-bit
+  unsigned samples and optional ICC preservation. Scorecard: narrow
+  TIFF input/output 6->7 (92->93).
+
+### Narrow T2 Strict Decode Hardening
+
+- Added no-sidecar strict T2 coverage for rate-targeted multi-layer streams:
+  the packet-header audit now exercises real RPCL layer deltas from SOD bytes,
+  confirms repeated block inclusions across layers, and the strict decoder
+  reconstructs the final lossless layer without the BP8 oracle.
+- Added a no-sidecar packet-header corruption regression that flips the first
+  real SOD packet-header byte after SOP framing and requires both
+  `auditStrictPacketHeaders` and normal strict decode to fail deterministically.
+  This locks the narrow path closer to a pure strict T2 reader before the next
+  scorecard bump.
+
 ### Kakadu Style and COC/QCC Interop Matrix
 
 - Added `tools/interop_kakadu_styles.ps1`, a reproducible Windows smoke that
