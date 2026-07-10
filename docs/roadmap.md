@@ -183,11 +183,11 @@ large-image memory scaling and tile-level parallelism.
 Tasks:
 
 - Keep the current positive multi-tile encode/decode path green: lossless
-  RCT/5-3, untargeted RPCL quality layers, single-layer LRCP/RLCP packet order, one
-  tile-part per tile, row-major order, plain or TERMALL code-block style, and
-  ISO B.6/B.7-aligned geometry.
+  RCT/5-3, untargeted RPCL/PCRL/CPRL quality layers, single-layer LRCP/RLCP,
+  one tile-part per tile, row-major order, plain or TERMALL code-block style,
+  and ISO B.6/B.7-aligned geometry.
 - Expand the tile/profile matrix one axis at a time: more fixtures for edge
-  tiles and non-divisible dimensions, then additional progression orders,
+  tiles and non-divisible dimensions, then multi-layer LRCP/RLCP, rate-targeted
   quality layers, and selected style-bit combinations only after strict decode
   and interop coverage exist.
 - Preserve tile-component independence in DWT, T1, and T2 scheduling while

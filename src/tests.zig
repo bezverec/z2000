@@ -11810,6 +11810,64 @@ test "multi-tile RLCP codestream roundtrips and permutes tile packets" {
     try std.testing.expectEqual(@as(usize, width), info.width);
 }
 
+test "multi-tile position-major quality layers roundtrip losslessly" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var rpcl_options = multi_tile_test_options;
+    rpcl_options.layers = 3;
+    const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, rpcl_options);
+    defer allocator.free(rpcl);
+
+    const Case = struct {
+        progression: codestream.ProgressionOrder,
+        cod_byte: u8,
+    };
+    const cases = [_]Case{
+        .{ .progression = .pcrl, .cod_byte = 3 },
+        .{ .progression = .cprl, .cod_byte = 4 },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("multi-tile position-major case failed: {s}\n", .{scenario.progression.label()});
+        var options = rpcl_options;
+        options.progression = scenario.progression;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(scenario.cod_byte, bytes[cod + 5]);
+        try std.testing.expectEqual(@as(u16, 3), readU16BeTest(bytes, cod + 6));
+        try std.testing.expect(!std.mem.eql(u8, rpcl, bytes));
+        try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        var threaded_options = options;
+        threaded_options.threads = 3;
+        const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(@as(usize, width), info.width);
+    }
+}
+
 test "multi-tile RPCL quality layers roundtrip losslessly" {
     const allocator = std.testing.allocator;
     const width = 48;

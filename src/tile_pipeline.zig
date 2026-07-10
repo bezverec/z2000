@@ -19,7 +19,7 @@ pub const RctTile = struct {
     }
 };
 
-pub const PacketOrder = enum { rpcl, lrcp, rlcp };
+pub const PacketOrder = enum { rpcl, lrcp, rlcp, pcrl, cprl };
 
 pub const PacketScaffoldOptions = struct {
     layers: u16 = 1,
@@ -2566,6 +2566,18 @@ fn buildPacketOrderSequence(
     plan: packet_plan.Plan,
     layers: u16,
 ) ![]packet_plan.Packet {
+    switch (packet_order) {
+        .pcrl => return packet_plan.positionOrderedPackets(allocator, plan, component_count, layers, .pcrl) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => PacketScaffoldError.InvalidPacket,
+        },
+        .cprl => return packet_plan.positionOrderedPackets(allocator, plan, component_count, layers, .cprl) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => PacketScaffoldError.InvalidPacket,
+        },
+        .rpcl, .lrcp, .rlcp => {},
+    }
+
     const packet_count = std.math.cast(usize, plan.packets) orelse return PacketScaffoldError.InvalidPacket;
     const sequence = try allocator.alloc(packet_plan.Packet, packet_count);
     errdefer allocator.free(sequence);
@@ -2596,6 +2608,7 @@ fn buildPacketOrderSequence(
                 count += 1;
             }
         },
+        .pcrl, .cprl => unreachable,
     }
     if (count != sequence.len) return PacketScaffoldError.InvalidPacket;
     return sequence;
