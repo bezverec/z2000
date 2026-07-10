@@ -73,15 +73,14 @@ dimension) never hit this; degenerate-resolution tiles are a v2 concern.
 
 ## 3. v1 scope (what multi-tile means in the first shipped slice)
 
-Supported: reversible 5/3 + RCT, one or more untargeted RPCL quality layers,
-single-layer LRCP/RLCP packet order, default/explicit precincts, plain or TERMALL
-code-block style, one tile-part per tile in row-major order (`TPsot=0`,
+Supported: reversible 5/3 + RCT, one or more untargeted RPCL/PCRL/CPRL quality
+layers, single-layer LRCP/RLCP packet order, default/explicit precincts, plain
+or TERMALL code-block style, one tile-part per tile in row-major order (`TPsot=0`,
 `TNsot=1`), TLM on, SOP/EPH as today, PLT per tile-part as the scaffold builds
 it.
 
 Fail-closed in multi-tile mode (each lifted later, separately): `--rates`
-(byte targets are image-global), multi-layer LRCP/RLCP, remaining non-RPCL
-progressions (PCRL/CPRL), `--tile-parts R` (R-divisions compose with
+(byte targets are image-global), multi-layer LRCP/RLCP, `--tile-parts R` (R-divisions compose with
 multi-tile later), BYPASS, RESET, ERTERM and untested resilience style
 combinations, `--mct none`, 9/7/lossy, tiles that clamp DWT levels (§2.3).
 Single-tile behavior stays **byte-identical** — every increment keeps
@@ -223,6 +222,6 @@ reference-grid anchoring coincide, but only an external decoder proves it.
 
 Tile-parts-within-tile (R divisions × tiles), per-tile COD/QCD overrides,
 `--mct none`/style-bits/bypass in multi-tile, rate-targeted quality layers,
-multi-layer LRCP/RLCP and remaining non-RPCL progressions, lossy 9/7 tiles,
+multi-layer LRCP/RLCP, lossy 9/7 tiles,
 streaming (bounded-memory) assembly, PPM/PPT. Each is a separate, later
 increment on top of the v1 skeleton.

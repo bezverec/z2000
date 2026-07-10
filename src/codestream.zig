@@ -8897,11 +8897,11 @@ fn validateBlockSize(width: u16, height: u16) !void {
 }
 
 /// Multi-tile constraints (docs/multi_tile_plan.md §3): the tile pipeline
-/// currently covers reversible 5/3 + RCT, untargeted quality layers for RPCL,
-/// plain or TERMALL code-block style, RPCL or single-layer LRCP/RLCP packet
-/// order, and one tile-part per tile in row-major order. Everything outside that
-/// fails closed so the COD/SIZ markers never advertise behavior the tile
-/// encoder does not implement.
+/// currently covers reversible 5/3 + RCT, untargeted RPCL/PCRL/CPRL quality
+/// layers, plain or TERMALL code-block style, all five Part 1 packet orders
+/// (LRCP/RLCP currently single-layer), and one tile-part per tile in row-major
+/// order. Everything outside that fails closed so the COD/SIZ markers never
+/// advertise behavior the tile encoder does not implement.
 fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     try validateMultiTileProgression(options.progression, options.layers);
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
@@ -8920,7 +8920,7 @@ fn validateMultiTileProgression(progression: ProgressionOrder, layers: u16) !voi
     switch (progression) {
         .rpcl => {},
         .lrcp, .rlcp => if (layers != 1) return CodestreamError.UnsupportedPayload,
-        .pcrl, .cprl => return CodestreamError.UnsupportedPayload,
+        .pcrl, .cprl => {},
     }
 }
 
@@ -9014,7 +9014,8 @@ fn encodeLosslessMultiTileMeasured(
         .rpcl => .rpcl,
         .lrcp => .lrcp,
         .rlcp => .rlcp,
-        .pcrl, .cprl => unreachable,
+        .pcrl => .pcrl,
+        .cprl => .cprl,
     };
     var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
         allocator,
