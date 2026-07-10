@@ -8348,6 +8348,79 @@ fn spliceMarkerSegmentForTest(
     return out.toOwnedSlice(allocator);
 }
 
+fn duplicateMarkerSegmentForTest(allocator: std.mem.Allocator, stream: []const u8, marker: u16) ![]u8 {
+    const start = findMarker(stream, marker) orelse return error.MissingMarker;
+    const end = try markerSegmentEndForTest(stream, start);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, stream[0..end]);
+    try out.appendSlice(allocator, stream[start..end]);
+    try out.appendSlice(allocator, stream[end..]);
+    return out.toOwnedSlice(allocator);
+}
+
+fn moveMarkerSegmentBeforeForTest(
+    allocator: std.mem.Allocator,
+    stream: []const u8,
+    moving_marker: u16,
+    before_marker: u16,
+) ![]u8 {
+    const moving_start = findMarker(stream, moving_marker) orelse return error.MissingMarker;
+    const moving_end = try markerSegmentEndForTest(stream, moving_start);
+    const before_start = findMarker(stream, before_marker) orelse return error.MissingMarker;
+    if (moving_start == before_start) return error.InvalidMarkerMove;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (moving_start > before_start) {
+        try out.appendSlice(allocator, stream[0..before_start]);
+        try out.appendSlice(allocator, stream[moving_start..moving_end]);
+        try out.appendSlice(allocator, stream[before_start..moving_start]);
+        try out.appendSlice(allocator, stream[moving_end..]);
+    } else {
+        try out.appendSlice(allocator, stream[0..moving_start]);
+        try out.appendSlice(allocator, stream[moving_end..before_start]);
+        try out.appendSlice(allocator, stream[moving_start..moving_end]);
+        try out.appendSlice(allocator, stream[before_start..]);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn moveMarkerSegmentAfterMarkerForTest(
+    allocator: std.mem.Allocator,
+    stream: []const u8,
+    moving_marker: u16,
+    after_marker: u16,
+) ![]u8 {
+    const moving_start = findMarker(stream, moving_marker) orelse return error.MissingMarker;
+    const moving_end = try markerSegmentEndForTest(stream, moving_start);
+    const after_start = findMarker(stream, after_marker) orelse return error.MissingMarker;
+    if (moving_start == after_start) return error.InvalidMarkerMove;
+    const after_end = after_start + 2;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (moving_start > after_start) {
+        try out.appendSlice(allocator, stream[0..after_end]);
+        try out.appendSlice(allocator, stream[moving_start..moving_end]);
+        try out.appendSlice(allocator, stream[after_end..moving_start]);
+        try out.appendSlice(allocator, stream[moving_end..]);
+    } else {
+        try out.appendSlice(allocator, stream[0..moving_start]);
+        try out.appendSlice(allocator, stream[moving_end..after_end]);
+        try out.appendSlice(allocator, stream[moving_start..moving_end]);
+        try out.appendSlice(allocator, stream[after_end..]);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn markerSegmentEndForTest(stream: []const u8, start: usize) !usize {
+    if (stream.len - start < 4) return error.TruncatedMarkerSegment;
+    const length = (@as(usize, stream[start + 2]) << 8) | stream[start + 3];
+    if (length < 2 or stream.len - (start + 2) < length) return error.TruncatedMarkerSegment;
+    return start + 2 + length;
+}
+
 test "uniform COC/QCC overrides across all components decode via the signalled values" {
     // Kakadu signals uniform per-component requests (Cmodes:C0..C2=RESET,
     // Qguard:C0..C2=2) as three identical COC/QCC markers whose values differ
@@ -10464,6 +10537,48 @@ test "strict SOD packet stream rejects duplicate SOP marker in one packet" {
     );
 }
 
+test "strict SOD packet stream rejects tile-part marker moved into packet payload" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(bytes);
+
+    const corrupted = try moveMarkerSegmentAfterMarkerForTest(
+        allocator,
+        bytes,
+        codestream.markerValue("plt"),
+        codestream.markerValue("sod"),
+    );
+    defer allocator.free(corrupted);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.readStrictPacketCatalog(allocator, corrupted),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, corrupted),
+    );
+}
+
 test "temporary payload omits tile-part plan when tile parts are disabled" {
     const allocator = std.testing.allocator;
     const width = 8;
@@ -11056,6 +11171,84 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
             codestream.auditStrictPacketHeaders(allocator, corrupted),
         );
     }
+}
+
+test "strict marker reader rejects duplicate and misordered supported main marker segments" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+        .tlm = true,
+    });
+    defer allocator.free(bytes);
+
+    const DuplicateMarkerCase = struct {
+        label: []const u8,
+        marker: u16,
+    };
+    const duplicate_cases = [_]DuplicateMarkerCase{
+        .{ .label = "duplicate SIZ", .marker = codestream.markerValue("siz") },
+        .{ .label = "duplicate COD", .marker = codestream.markerValue("cod") },
+        .{ .label = "duplicate QCD", .marker = codestream.markerValue("qcd") },
+        .{ .label = "duplicate TLM index", .marker = codestream.markerValue("tlm") },
+    };
+
+    for (duplicate_cases) |scenario| {
+        errdefer std.debug.print("duplicate marker case failed: {s}\n", .{scenario.label});
+        const corrupted = try duplicateMarkerSegmentForTest(allocator, bytes, scenario.marker);
+        defer allocator.free(corrupted);
+        try std.testing.expectError(
+            codestream.CodestreamError.InvalidCodestream,
+            codestream.auditStrictPacketHeaders(allocator, corrupted),
+        );
+    }
+
+    const tlm_before_cod = try moveMarkerSegmentBeforeForTest(
+        allocator,
+        bytes,
+        codestream.markerValue("tlm"),
+        codestream.markerValue("cod"),
+    );
+    defer allocator.free(tlm_before_cod);
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.auditStrictPacketHeaders(allocator, tlm_before_cod),
+    );
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidCodestream,
+        jp2.wrapRgbCodestream(allocator, rgb, tlm_before_cod),
+    );
+
+    const tlm_before_qcd = try moveMarkerSegmentBeforeForTest(
+        allocator,
+        bytes,
+        codestream.markerValue("tlm"),
+        codestream.markerValue("qcd"),
+    );
+    defer allocator.free(tlm_before_qcd);
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.auditStrictPacketHeaders(allocator, tlm_before_qcd),
+    );
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidCodestream,
+        jp2.wrapRgbCodestream(allocator, rgb, tlm_before_qcd),
+    );
 }
 
 test "unsupported code-block style options fail closed" {

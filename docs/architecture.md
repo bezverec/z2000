@@ -11,6 +11,14 @@ The current codebase has two codec surfaces:
 The project is intentionally fail-closed. Profile options that would require
 payload behavior not implemented yet are rejected with `UnsupportedPayload`.
 
+The codec-core roadmap is separate from the future conversion-tool roadmap. The
+current architecture optimizes for a correct JPEG2000 Part 1 core first; later
+input formats such as JPEG, PNG, BMP, RAW/DNG, and OpenEXR, broader color spaces
+such as monochrome, palette, YCC/eYCC, CIELab, and CMYK, richer metadata
+families such as EXIF/IPTC/XMP, and component depths above 16 bits should enter
+through explicit front-end modules and strict metadata/color-management
+contracts rather than ad hoc changes inside T1/T2.
+
 ## High-Level Pipeline
 
 Current RGB TIFF to JP2 encode:

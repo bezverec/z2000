@@ -80,6 +80,12 @@ smoke tests cover the common no-EPH and archival EPH paths, while
 valid2000/jpylyzer-style validators remain diagnostic gates rather than
 absolute sources of truth.
 
+Future conversion-surface goals are deliberately not part of the current CLI
+contract yet: JPEG/PNG/BMP input, RAW/DNG conversion, OpenEXR/HDR handling,
+monochrome/palette/YCC/eYCC/CIELab/CMYK color spaces, EXIF/IPTC/XMP metadata,
+and component precision above 16 bits. Each should get an explicit option,
+fail-closed parser policy, and interop fixture before becoming public.
+
 ## `src/codestream.zig`
 
 Primary public types:

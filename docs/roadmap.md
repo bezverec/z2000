@@ -100,6 +100,31 @@ interop gate.
 5. Run a comparative benchmark only after the above interop fixtures are green,
    so performance numbers are attached to output that external decoders accept.
 
+## Post-Part 1 Conversion Roadmap
+
+These items are intentionally outside the current ISO scorecard. They should
+start after the full JPEG2000 Part 1 codec target is much closer to complete, or
+when a small metadata/input-format slice is clearly isolated from codec
+correctness work.
+
+- Input formats: add JPEG, PNG, and BMP import before heavier camera/HDR
+  formats. Later, build RAW/DNG workflows around explicit demosaic/color
+  decisions and add OpenEXR for HDR/float-heavy production imagery.
+- Color spaces: broaden from the current RGB/sRGB and opaque ICC preservation
+  into monochrome, sRGB, palette color, YCC, extended YCC, CIELab, and CMYK.
+  ICC-based conversion should be an optional color-management layer rather than
+  hidden pixel mutation.
+- Metadata: preserve and validate EXIF, IPTC, and XMP alongside ICC. Keep a
+  clear policy for what is copied byte-for-byte, normalized into JP2/JPX boxes,
+  or rejected as ambiguous.
+- Component precision: keep 8/16-bit integer RGB as the stable baseline, then
+  evaluate higher-than-16-bit integer and float paths only where the source
+  format, JP2/JPX container, codestream precision, transform, and quantization
+  semantics are all explicit.
+- JPX boundary: many of the richer color/metadata cases may belong in JPX
+  rather than basic JP2. Keep JPX-only features rejected until box parsing,
+  writing, and interop tests are intentional.
+
 ## Phase 1: Finish The Narrow Lossless RPCL Path
 
 Goal: single-tile RGB lossless JP2 with RCT, 5/3, RPCL, no exotic code-block

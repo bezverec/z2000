@@ -493,7 +493,10 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
                 if (cod_info == null) return Jp2Error.InvalidCodestream;
                 if (saw_qcd) return Jp2Error.InvalidCodestream;
             },
-            marker_tlm, marker_com => {},
+            marker_tlm => {
+                if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
+            },
+            marker_com => {},
             // COC/QCC are accepted structurally here (after their main COD/QCD);
             // the strict codestream reader enforces that they byte-replicate the
             // main marker (z2000 has no per-component coding/quantization path).

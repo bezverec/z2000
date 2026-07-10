@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **94/100 narrow, 80/100 full** as of
+the subsequent JP2/T2/T1/profile work is **96/100 narrow, 80/100 full** as of
 2026-07-10. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-10)
 
-Scorecard now **94/100 narrow, 80/100 full**. The aligned multi-tile path has
+Scorecard now **96/100 narrow, 80/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
@@ -28,6 +28,12 @@ The remaining levers are larger and structural. Ordered by *value per unit
 risk*; each names the ISO clause, the current code state, exactly what is
 missing, a test plan, and a score delta. Detailed tier notes for already-landed
 items are preserved further below as implementation history.
+
+Separate from the ISO scorecard, keep a post-Part 1 conversion backlog: JPEG,
+PNG, and BMP input first; later RAW/DNG and OpenEXR; monochrome, sRGB, palette,
+YCC, extended YCC, CIELab, and CMYK color handling; EXIF/IPTC/XMP metadata
+preservation; and higher-than-16-bit component precision only when the source
+format, codestream profile, and container semantics are explicit.
 
 ### N0. Narrow 100 stabilization — first T2 slice — ✅ LANDED
 
@@ -60,8 +66,31 @@ items are preserved further below as implementation history.
   explicit strict-reader fail-closed tests, and tile-part RGN/POC join the
   existing PPT/COC/QCC override rejection coverage.
 - **Score policy:** narrow core main markers 8->9, moving the narrow target
-  93->94. The final core-marker point still needs duplicate/order/length edge
-  cases across the currently supported marker set.
+  93->94. This set the stage for the final duplicate/order hardening pass.
+
+### N0d. Narrow core marker duplicate/order hardening — ✅ LANDED
+
+- **Scope:** finish the narrow core-marker score by rejecting structurally
+  supported markers when their placement or repetition is invalid.
+- **Coverage:** the raw strict reader now rejects duplicate `SIZ`, `COD`,
+  `QCD`, and same-index `TLM` marker segments. `TLM` is accepted only after
+  `COD` and `QCD` have established the packet/tile-part context; the same
+  ordering rule is mirrored at the JP2 wrapper boundary.
+- **Score policy:** narrow core main markers 9->10, moving the narrow target
+  94->95. Future marker work should broaden supported profiles, not reopen
+  the narrow marker boundary.
+
+### N0e. Narrow tile-part marker phase hardening — ✅ LANDED
+
+- **Scope:** close the final narrow tile-part marker gap by proving that a
+  syntactically valid tile-part header marker is rejected when it appears in
+  the packet payload phase instead of before `SOD`.
+- **Coverage:** the regression moves the first `PLT` segment from the
+  tile-part header to immediately after `SOD`; both strict packet-catalog read
+  and normal strict decode fail deterministically as `InvalidCodestream`.
+- **Score policy:** narrow tile-part markers 9->10, moving the narrow target
+  95->96. Future tile-part work should focus on broader tile-part divisions and
+  external streams, not the current narrow marker boundary.
 
 ### N1. Core codestream syntax — redundant COC/QCC — ✅ LANDED
 
@@ -852,7 +881,7 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
 
 ## Scoreboard
 
-- **Current (`2026-07-10`):** narrow **94**, full **80** — matches
+- **Current (`2026-07-10`):** narrow **96**, full **80** — matches
   `docs/iso_coverage.md`.
 - **Recent claimed movement:** T1/EBCOT grew through BYPASS, TERMALL,
   vertical-causal, segmentation-symbols, TERMALL-scoped RESET, and

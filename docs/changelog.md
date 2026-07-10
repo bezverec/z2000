@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Narrow Tile-Part Marker Phase Hardening
+
+- Added a strict no-sidecar regression that moves a valid `PLT` segment out of
+  the tile-part header and into the packet payload after `SOD`; both strict
+  packet-catalog read and normal strict decode now reject the stream as
+  `InvalidCodestream`. Scorecard: narrow tile-part markers 9->10 (95->96).
+
+### Narrow Core Marker Duplicate/Ordering Hardening
+
+- Tightened the strict codestream and JP2 main-header policy for supported
+  marker segments: duplicate `SIZ`, `COD`, `QCD`, and same-index `TLM` are now
+  explicitly rejected, and `TLM` must appear only after `COD` and `QCD` have
+  established packet/tile-part context. Scorecard: narrow core main markers
+  9->10 (94->95).
+
 ### Narrow Core Marker Fail-Closed Coverage
 
 - Extended the raw strict codestream marker regression to cover unsupported
