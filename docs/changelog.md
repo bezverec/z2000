@@ -5,6 +5,15 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Narrow T2 Consistent-Truncation Gate
+
+- Added a no-sidecar rate-targeted multi-layer RPCL regression that removes the
+  final SOD payload byte while shortening the final `PLT` packet length and
+  `SOT`/`TLM` tile-part lengths consistently. Strict packet-catalog read and
+  normal strict decode now fail deterministically as `TruncatedData` once the
+  T2 packet reader reaches the incomplete packet. Scorecard: narrow T2 RPCL
+  packetization 13->14 (96->97).
+
 ### Narrow Tile-Part Marker Phase Hardening
 
 - Added a strict no-sidecar regression that moves a valid `PLT` segment out of
