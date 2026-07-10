@@ -7709,6 +7709,81 @@ test "ISO MQ no-sidecar codestream decodes from strict SOD packets" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "narrow T1 corpus decodes without sidecar across sparse dense and refinement-heavy blocks" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 32;
+
+    const Pattern = enum { sparse, sign_heavy, refinement_heavy };
+    const patterns = [_]Pattern{ .sparse, .sign_heavy, .refinement_heavy };
+    for (patterns) |pattern| {
+        const samples = try allocator.alloc(u16, width * height * 3);
+        defer allocator.free(samples);
+        for (0..width * height) |i| {
+            const x = i % width;
+            const y = i / width;
+            switch (pattern) {
+                .sparse => {
+                    const impulse: u16 = if ((x == 5 and y == 7) or (x == 19 and y == 23)) 240 else 16;
+                    samples[i * 3 + 0] = impulse;
+                    samples[i * 3 + 1] = if (x == y) 192 else 32;
+                    samples[i * 3 + 2] = if ((x + y) % 17 == 0) 224 else 48;
+                },
+                .sign_heavy => {
+                    samples[i * 3 + 0] = if (((x ^ y) & 1) == 0) 232 else 24;
+                    samples[i * 3 + 1] = if ((x & 2) == 0) 208 else 40;
+                    samples[i * 3 + 2] = if ((y & 2) == 0) 216 else 36;
+                },
+                .refinement_heavy => {
+                    samples[i * 3 + 0] = @as(u16, @intCast((x * 7 + y * 11 + 13) & 0xff));
+                    samples[i * 3 + 1] = @as(u16, @intCast((x * x + y * 5 + 29) & 0xff));
+                    samples[i * 3 + 2] = @as(u16, @intCast((x * 3 + y * y + 71) & 0xff));
+                },
+            }
+        }
+
+        const rgb = image.RgbImage{
+            .allocator = allocator,
+            .width = width,
+            .height = height,
+            .bit_depth = 8,
+            .samples = samples,
+        };
+
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+            .levels = 2,
+            .block_width = 8,
+            .block_height = 8,
+            .layers = 1,
+        });
+        defer allocator.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+        var catalog = try codestream.readStrictPacketBlockCatalog(allocator, bytes);
+        defer catalog.deinit();
+        var ready_blocks: usize = 0;
+        var multi_pass_blocks: usize = 0;
+        var multi_bitplane_blocks: usize = 0;
+        for (catalog.components) |blocks| {
+            for (blocks) |block| {
+                if (!block.metadata_ready) continue;
+                ready_blocks += 1;
+                try std.testing.expect(block.payload_length > 0);
+                try std.testing.expect(block.cumulative_bytes > 0);
+                if (block.cumulative_passes >= 4) multi_pass_blocks += 1;
+                if (block.encoded_bitplanes >= 2) multi_bitplane_blocks += 1;
+            }
+        }
+        try std.testing.expect(ready_blocks > 0);
+        try std.testing.expect(multi_pass_blocks > 0);
+        try std.testing.expect(multi_bitplane_blocks > 0);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+    }
+}
+
 test "ISO MQ debug sidecar validates against strict SOD packets" {
     const allocator = std.testing.allocator;
     const width = 64;
@@ -9825,6 +9900,59 @@ test "strict no-sidecar T2 packet header corruption fails without BP8 oracle" {
     }
     if (packet_header_byte >= corrupted.len) return error.Truncated;
     corrupted[packet_header_byte] ^= 0x80;
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.auditStrictPacketHeaders(allocator, corrupted),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, corrupted),
+    );
+}
+
+test "strict no-sidecar T2 later-layer packet header corruption preserves state safety" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 24;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 23 + 7) % 251));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 31 + 19) % 251));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 47 + 29) % 251));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = codestream.LosslessOptions{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .layers = 3,
+        .rate_count = 2,
+    };
+    options.rates[0] = 12.0;
+    options.rates[1] = 4.0;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+    const clean_audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expect(clean_audit.included_blocks > clean_audit.t1_ready_blocks);
+
+    var corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+
+    const later_packet_header = try nthPltPacketHeaderByteForTest(allocator, corrupted, 1);
+    corrupted[later_packet_header] ^= 0x80;
 
     try std.testing.expectError(
         codestream.CodestreamError.InvalidCodestream,
@@ -16225,6 +16353,76 @@ fn firstPacketByteNearMarkerForTest(allocator: std.mem.Allocator, bytes: []const
     }
 
     return error.MissingMarker;
+}
+
+fn nthPltPacketHeaderByteForTest(allocator: std.mem.Allocator, bytes: []const u8, packet_index: usize) !usize {
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const eoc = codestream.markerValue("eoc");
+    const plt = codestream.markerValue("plt");
+    const sop = codestream.markerValue("sop");
+
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len and readU16BeTest(bytes, cursor) != sot) {
+        if (readU16BeTest(bytes, cursor) == eoc) return error.MissingSot;
+        cursor += 2;
+        if (bytes.len - cursor < 2) return error.Truncated;
+        const segment_length = readU16BeTest(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) return error.Truncated;
+        cursor += segment_length;
+    }
+
+    var seen_packets: usize = 0;
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        if (marker_value == eoc) return error.MissingPacket;
+        if (marker_value != sot) return error.MissingSot;
+        if (bytes.len - cursor < 14) return error.Truncated;
+
+        const tile_part_start = cursor;
+        const segment_length = readU16BeTest(bytes, cursor + 2);
+        if (segment_length != 10) return error.InvalidSot;
+        const psot = readU32BeTest(bytes, cursor + 6);
+        const tile_part_end = tile_part_start + psot;
+        if (psot == 0 or tile_part_end > bytes.len) return error.InvalidSot;
+        cursor += 12;
+
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(allocator);
+        while (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) != sod) {
+            const tile_header_marker = readU16BeTest(bytes, cursor);
+            cursor += 2;
+            if (tile_part_end - cursor < 2) return error.Truncated;
+            const header_segment_length = readU16BeTest(bytes, cursor);
+            if (header_segment_length < 2 or tile_part_end - cursor < header_segment_length) return error.Truncated;
+            if (tile_header_marker == plt) {
+                try appendPltLengthsForTest(allocator, &packet_lengths, bytes[cursor + 2 .. cursor + header_segment_length]);
+            }
+            cursor += header_segment_length;
+        }
+        if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
+        cursor += 2;
+
+        for (packet_lengths.items) |packet_length| {
+            const packet_start = cursor;
+            const packet_end = packet_start + packet_length;
+            if (packet_end > tile_part_end) return error.Truncated;
+            if (seen_packets == packet_index) {
+                var header_start = packet_start;
+                if (packet_end - header_start >= 2 and readU16BeTest(bytes, header_start) == sop) {
+                    if (packet_end - header_start < 6) return error.Truncated;
+                    header_start += 6;
+                }
+                if (header_start >= packet_end) return error.InvalidPacketHeader;
+                return header_start;
+            }
+            seen_packets += 1;
+            cursor = packet_end;
+        }
+        if (cursor != tile_part_end) return error.InvalidCodestream;
+    }
+
+    return error.MissingPacket;
 }
 
 fn skipTemporaryPacketHeader(bytes: []const u8, cursor: *usize, end: usize) !void {

@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **98/100 narrow, 80/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 80/100 full** as of
 2026-07-10. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-10)
 
-Scorecard now **98/100 narrow, 80/100 full**. The aligned multi-tile path has
+Scorecard now **100/100 narrow, 80/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
@@ -117,6 +117,33 @@ format, codestream profile, and container semantics are explicit.
 - **Score policy:** narrow strict decode 9->10, moving the narrow target
   97->98. Future strict-decode work should protect this guarantee while adding
   broader packet orders and style combinations.
+
+### N0h. Narrow T2 later-layer state corruption gate — ✅ LANDED
+
+- **Scope:** close the narrow RPCL/T2 packetization row by proving packet-header
+  corruption is rejected after the reader has already carried RPCL packet state
+  across earlier layer packets.
+- **Coverage:** the regression encodes a no-sidecar, rate-targeted, three-layer
+  RPCL stream, verifies the clean audit has repeated block inclusions across
+  layers, then flips the header byte of packet index 1 using PLT-derived packet
+  boundaries. Both `auditStrictPacketHeaders` and normal strict decode reject
+  the stream as `InvalidCodestream`.
+- **Score policy:** narrow T2 RPCL packetization 14->15, moving the narrow
+  target 98->99. The remaining narrow point is T1/EBCOT/MQ.
+
+### N0i. Narrow T1 corpus closure — ✅ LANDED
+
+- **Scope:** close the final narrow point by proving the no-sidecar strict path
+  carries real T1/EBCOT payloads across representative sparse, dense/sign-heavy,
+  and refinement-heavy RGB inputs.
+- **Coverage:** the regression encodes three 32x32 RGB patterns with the narrow
+  RCT/5-3/RPCL profile, asserts no BP8 sidecar is present, reads the strict
+  packet block catalog, verifies metadata-ready blocks with non-empty payloads,
+  multi-pass and multi-bitplane T1 content, and then strict-decodes each image
+  byte-exactly.
+- **Score policy:** narrow T1/EBCOT/MQ 19->20, moving the narrow RGB lossless
+  JP2 target to 100/100. This is a narrow target claim only; the full Part 1
+  codec score remains separate.
 
 ### N1. Core codestream syntax — redundant COC/QCC — ✅ LANDED
 
@@ -907,7 +934,7 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
 
 ## Scoreboard
 
-- **Current (`2026-07-10`):** narrow **98**, full **80** — matches
+- **Current (`2026-07-10`):** narrow **100**, full **80** — matches
   `docs/iso_coverage.md`.
 - **Recent claimed movement:** T1/EBCOT grew through BYPASS, TERMALL,
   vertical-causal, segmentation-symbols, TERMALL-scoped RESET, and

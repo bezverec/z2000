@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Narrow RGB Lossless JP2 Target Reaches 100/100
+
+- Added a final no-sidecar strict T1 corpus regression over sparse,
+  dense/sign-heavy, and refinement-heavy RGB inputs. The test verifies strict
+  packet block catalogs contain metadata-ready, non-empty, multi-pass and
+  multi-bitplane T1 payloads before strict decode reconstructs each image
+  byte-exactly. Scorecard: narrow T1/EBCOT/MQ 19->20, bringing the narrow RGB
+  lossless JP2 target to 100/100. The full JPEG2000 Part 1 codec family remains
+  tracked separately.
+
+### Narrow T2 Later-Layer State Corruption Gate
+
+- Added a no-sidecar, rate-targeted, three-layer RPCL regression that verifies
+  repeated block inclusions across layers, flips the header byte of packet
+  index 1 using PLT-derived packet boundaries, and requires both strict packet
+  audit and normal strict decode to fail as `InvalidCodestream`. Scorecard:
+  narrow T2 RPCL packetization 14->15 (98->99).
+
 ### Narrow Strict Decode Sidecar-Retirement Proof
 
 - Strengthened the BYPASS strict SOD roundtrip so it now asserts no BP8 sidecar
