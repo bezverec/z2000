@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **96/100 narrow, 80/100 full** as of
+the subsequent JP2/T2/T1/profile work is **98/100 narrow, 80/100 full** as of
 2026-07-10. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-10)
 
-Scorecard now **96/100 narrow, 80/100 full**. The aligned multi-tile path has
+Scorecard now **98/100 narrow, 80/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
@@ -91,6 +91,32 @@ format, codestream profile, and container semantics are explicit.
 - **Score policy:** narrow tile-part markers 9->10, moving the narrow target
   95->96. Future tile-part work should focus on broader tile-part divisions and
   external streams, not the current narrow marker boundary.
+
+### N0f. Narrow T2 consistent-truncation gate — ✅ LANDED
+
+- **Scope:** strengthen the no-sidecar multi-layer RPCL path against packet
+  truncation that keeps marker accounting internally consistent.
+- **Coverage:** the regression removes the final SOD payload byte and shortens
+  the final `PLT` packet length plus `SOT/Psot` and `TLM/Ptlm` by the same
+  amount. The marker span check passes far enough to enter strict T2 packet
+  reading, where `readStrictPacketBlockCatalog` and normal strict decode fail
+  deterministically as `TruncatedData`.
+- **Score policy:** narrow T2 RPCL packetization 13->14, moving the narrow
+  target 96->97. The final T2 point should stay reserved for broader
+  progression-order and interop discipline.
+
+### N0g. Narrow strict decode sidecar-retirement proof — ✅ LANDED
+
+- **Scope:** close the strict-decode narrow row by proving the normal no-sidecar
+  path carries style-aware T2/T1 metadata for BYPASS without relying on BP8.
+- **Coverage:** the existing BYPASS strict SOD roundtrip now also asserts that
+  the codestream contains no `ZJ2K-CBLK-BP8` sidecar, that
+  `readStrictPacketBlockCatalog` yields metadata-ready BYPASS blocks, that
+  multi-segment block lengths are present, and that payload views are non-empty
+  before normal strict decode reconstructs the original pixels.
+- **Score policy:** narrow strict decode 9->10, moving the narrow target
+  97->98. Future strict-decode work should protect this guarantee while adding
+  broader packet orders and style combinations.
 
 ### N1. Core codestream syntax — redundant COC/QCC — ✅ LANDED
 
@@ -881,7 +907,7 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
 
 ## Scoreboard
 
-- **Current (`2026-07-10`):** narrow **96**, full **80** — matches
+- **Current (`2026-07-10`):** narrow **98**, full **80** — matches
   `docs/iso_coverage.md`.
 - **Recent claimed movement:** T1/EBCOT grew through BYPASS, TERMALL,
   vertical-causal, segmentation-symbols, TERMALL-scoped RESET, and

@@ -7621,6 +7621,53 @@ test "rate-targeted no-sidecar layers decode from strict T2 packet state" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "rate-targeted no-sidecar truncation fails after consistent PLT shortening" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 24;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 31 + 5) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 17 + 97) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 11 + 43) % 256));
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = codestream.LosslessOptions{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .layers = 3,
+        .rate_count = 2,
+    };
+    options.rates[0] = 12.0;
+    options.rates[1] = 4.0;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+    const truncated = try truncateLastPacketPayloadWithMatchingPltForTest(allocator, bytes);
+    defer allocator.free(truncated);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.TruncatedData,
+        codestream.readStrictPacketBlockCatalog(allocator, truncated),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.TruncatedData,
+        codestream.decodeLosslessTemporary(allocator, truncated),
+    );
+}
+
 test "ISO MQ no-sidecar codestream decodes from strict SOD packets" {
     const allocator = std.testing.allocator;
     const width = 64;
@@ -9058,6 +9105,24 @@ test "BYPASS codestream roundtrips losslessly through strict SOD packets" {
         .bypass = true,
     });
     defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ZJ2K-CBLK-BP8") == null);
+
+    var catalog = try codestream.readStrictPacketBlockCatalog(allocator, bytes);
+    defer catalog.deinit();
+    var bypass_blocks: usize = 0;
+    var segmented_bypass_blocks: usize = 0;
+    for (catalog.components) |blocks| {
+        for (blocks) |block| {
+            if (!block.metadata_ready) continue;
+            if (!block.code_block_style.bypass) continue;
+            bypass_blocks += 1;
+            if (block.segment_count > 1) segmented_bypass_blocks += 1;
+            try std.testing.expect(block.payload_length > 0);
+            try std.testing.expect(block.cumulative_passes > 0);
+        }
+    }
+    try std.testing.expect(bypass_blocks > 0);
+    try std.testing.expect(segmented_bypass_blocks > 0);
 
     var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
     defer decoded.deinit();
@@ -16758,6 +16823,73 @@ fn replaceFirstPltWithEmptySegmentForTest(allocator: std.mem.Allocator, bytes: [
     if (tlm_length < 9 or out.items[tlm + 4] != 0 or out.items[tlm + 5] != 0x50) return error.InvalidTlm;
     writeU32BeTest(out.items, tlm + 7, readU32BeTest(bytes, tlm + 7) - removed);
     return out.toOwnedSlice(allocator);
+}
+
+fn truncateLastPacketPayloadWithMatchingPltForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const psot = readU32BeTest(bytes, sot + 6);
+    const tile_part_end = sot + @as(usize, psot);
+    if (psot <= 1 or tile_part_end > bytes.len) return error.InvalidSot;
+    const sod = findMarkerAfter(bytes, codestream.markerValue("sod"), sot) orelse return error.MissingSod;
+    if (sod + 2 >= tile_part_end) return error.InvalidSod;
+    const plt = findMarkerAfter(bytes, codestream.markerValue("plt"), sot) orelse return error.MissingMarker;
+    if (plt > sod) return error.InvalidPlt;
+    const plt_length = readU16BeTest(bytes, plt + 2);
+    const plt_payload_start = plt + 5;
+    const plt_payload_end = plt + 2 + @as(usize, plt_length);
+    if (plt_length < 4 or plt_payload_end > sod) return error.InvalidPlt;
+
+    var entry_start = plt_payload_start;
+    var cursor = plt_payload_start;
+    var last_entry_start = cursor;
+    var last_entry_end = cursor;
+    var last_length: usize = 0;
+    while (cursor < plt_payload_end) {
+        entry_start = cursor;
+        var length: usize = 0;
+        while (cursor < plt_payload_end) {
+            const byte = bytes[cursor];
+            cursor += 1;
+            length = (length << 7) | @as(usize, byte & 0x7f);
+            if ((byte & 0x80) == 0) break;
+        } else {
+            return error.InvalidPlt;
+        }
+        last_entry_start = entry_start;
+        last_entry_end = cursor;
+        last_length = length;
+    }
+    if (last_entry_end == last_entry_start or last_length <= 1) return error.InvalidPlt;
+
+    const remove_at = tile_part_end - 1;
+    var out = try std.ArrayList(u8).initCapacity(allocator, bytes.len - 1);
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..remove_at]);
+    try out.appendSlice(allocator, bytes[remove_at + 1 ..]);
+
+    try writeFixedWidthPltLengthForTest(out.items[last_entry_start..last_entry_end], last_length - 1);
+    writeU32BeTest(out.items, sot + 6, psot - 1);
+    if (findMarker(bytes, codestream.markerValue("tlm"))) |tlm| {
+        const tlm_length = readU16BeTest(out.items, tlm + 2);
+        if (tlm_length < 9 or out.items[tlm + 4] != 0 or out.items[tlm + 5] != 0x50) return error.InvalidTlm;
+        writeU32BeTest(out.items, tlm + 7, readU32BeTest(bytes, tlm + 7) - 1);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn writeFixedWidthPltLengthForTest(slot: []u8, value: usize) !void {
+    if (slot.len == 0) return error.InvalidPlt;
+    var remaining = value;
+    var index = slot.len;
+    while (index > 0) {
+        index -= 1;
+        slot[index] = @as(u8, @intCast(remaining & 0x7f));
+        remaining >>= 7;
+    }
+    if (remaining != 0) return error.InvalidPlt;
+    for (slot[0 .. slot.len - 1]) |*byte| {
+        byte.* |= 0x80;
+    }
 }
 
 fn appendPltLengthsForTest(allocator: std.mem.Allocator, out: *std.ArrayList(usize), segment: []const u8) !void {
