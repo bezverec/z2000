@@ -236,6 +236,120 @@ const TilePacketReaderBandGroup = struct {
     }
 };
 
+const TilePacketReaderStateSlots = struct {
+    allocator: std.mem.Allocator,
+    scaffold: PacketScaffold,
+    catalog: EncodedBlockCatalog,
+    index: RpclPacketIndex,
+    bit_depth: u8,
+    slots: []?Slot,
+
+    const Slot = struct {
+        groups: [max_rpcl_packet_band_groups]TilePacketReaderBandGroup,
+        count: usize = 0,
+        next_layer: u16 = 0,
+    };
+
+    fn init(
+        allocator: std.mem.Allocator,
+        scaffold: PacketScaffold,
+        catalog: EncodedBlockCatalog,
+        index: RpclPacketIndex,
+        bit_depth: u8,
+    ) !TilePacketReaderStateSlots {
+        if (scaffold.layers == 0) return PacketScaffoldError.InvalidPacket;
+        const packet_count = std.math.cast(usize, scaffold.plan.packets) orelse return PacketScaffoldError.InvalidPacket;
+        const layer_count: usize = scaffold.layers;
+        if (packet_count % layer_count != 0) return PacketScaffoldError.InvalidPacket;
+        const slots = try allocator.alloc(?Slot, packet_count / layer_count);
+        @memset(slots, null);
+        return .{
+            .allocator = allocator,
+            .scaffold = scaffold,
+            .catalog = catalog,
+            .index = index,
+            .bit_depth = bit_depth,
+            .slots = slots,
+        };
+    }
+
+    fn deinit(self: *TilePacketReaderStateSlots) void {
+        for (self.slots) |*slot| {
+            if (slot.*) |*active| {
+                deinitTilePacketReaderGroups(active.groups[0..active.count], self.allocator);
+            }
+        }
+        self.allocator.free(self.slots);
+        self.* = undefined;
+    }
+
+    fn slotIndex(self: *const TilePacketReaderStateSlots, packet: packet_plan.Packet) !usize {
+        const sequence = packet_plan.rpclSequenceForPacket(
+            self.scaffold.plan,
+            component_count,
+            self.scaffold.layers,
+            packet,
+        ) catch return PacketScaffoldError.InvalidPacket;
+        const layer_count: u64 = self.scaffold.layers;
+        if (sequence % layer_count != packet.layer) return PacketScaffoldError.InvalidPacket;
+        const slot = std.math.cast(usize, sequence / layer_count) orelse return PacketScaffoldError.InvalidPacket;
+        if (slot >= self.slots.len) return PacketScaffoldError.InvalidPacket;
+        return slot;
+    }
+
+    fn groupsFor(self: *TilePacketReaderStateSlots, packet: packet_plan.Packet) ![]TilePacketReaderBandGroup {
+        const slot_index = try self.slotIndex(packet);
+        if (self.slots[slot_index] == null) {
+            if (packet.layer != 0) return PacketScaffoldError.InvalidPacket;
+            const rpcl_sequence = packet_plan.rpclSequenceForPacket(
+                self.scaffold.plan,
+                component_count,
+                self.scaffold.layers,
+                packet,
+            ) catch return PacketScaffoldError.InvalidPacket;
+            var descriptions = try self.index.bandGroupsForPacket(self.allocator, self.scaffold, rpcl_sequence);
+            defer descriptions.deinit();
+            if (descriptions.groups.len > max_rpcl_packet_band_groups) return PacketScaffoldError.InvalidPacket;
+
+            var slot = Slot{ .groups = undefined };
+            var moved = false;
+            errdefer if (!moved) deinitTilePacketReaderGroups(slot.groups[0..slot.count], self.allocator);
+            while (slot.count < descriptions.groups.len) : (slot.count += 1) {
+                slot.groups[slot.count] = try initTilePacketReaderBandGroup(
+                    self.allocator,
+                    descriptions,
+                    self.scaffold,
+                    self.catalog,
+                    slot.count,
+                    self.bit_depth,
+                );
+            }
+            self.slots[slot_index] = slot;
+            moved = true;
+        }
+
+        const active = if (self.slots[slot_index]) |*slot| slot else return PacketScaffoldError.InvalidPacket;
+        if (active.next_layer != packet.layer) return PacketScaffoldError.InvalidPacket;
+        return active.groups[0..active.count];
+    }
+
+    fn advance(self: *TilePacketReaderStateSlots, packet: packet_plan.Packet) !void {
+        const slot_index = try self.slotIndex(packet);
+        const active = if (self.slots[slot_index]) |*slot| slot else return PacketScaffoldError.InvalidPacket;
+        if (active.next_layer != packet.layer or active.next_layer >= self.scaffold.layers) {
+            return PacketScaffoldError.InvalidPacket;
+        }
+        active.next_layer += 1;
+    }
+
+    fn validateComplete(self: *const TilePacketReaderStateSlots) !void {
+        for (self.slots) |slot| {
+            const active = slot orelse return PacketScaffoldError.InvalidPacket;
+            if (active.next_layer != self.scaffold.layers) return PacketScaffoldError.InvalidPacket;
+        }
+    }
+};
+
 const PreparedTilePacketGroup = struct {
     packet_blocks: []t2.PacketBlock,
 
@@ -2515,6 +2629,18 @@ pub fn validateTilePacketStream(
     defer allocator.free(sequence);
     if (sequence.len != packet_count) return PacketScaffoldError.InvalidPacket;
 
+    if ((packet_order == .lrcp or packet_order == .rlcp) and scaffold.layers > 1) {
+        return validateTilePacketStreamStateful(
+            allocator,
+            scaffold,
+            catalog,
+            index,
+            stream,
+            bit_depth,
+            sequence,
+        );
+    }
+
     var packet_offset: usize = 0;
     for (sequence, 0..) |packet, packet_index| {
         const rpcl_sequence = packet_plan.rpclSequenceForPacket(scaffold.plan, component_count, scaffold.layers, packet) catch
@@ -2558,6 +2684,38 @@ pub fn validateTilePacketStream(
     if (packet_offset != stream.bytes.len or active_count != 0) {
         return PacketScaffoldError.InvalidPacket;
     }
+}
+
+fn validateTilePacketStreamStateful(
+    allocator: std.mem.Allocator,
+    scaffold: PacketScaffold,
+    catalog: EncodedBlockCatalog,
+    index: RpclPacketIndex,
+    stream: TileRpclPacketStream,
+    bit_depth: u8,
+    sequence: []const packet_plan.Packet,
+) !void {
+    var states = try TilePacketReaderStateSlots.init(allocator, scaffold, catalog, index, bit_depth);
+    defer states.deinit();
+
+    var packet_offset: usize = 0;
+    for (sequence, 0..) |packet, packet_index| {
+        const packet_length: usize = stream.packet_lengths[packet_index];
+        const packet_end = try std.math.add(usize, packet_offset, packet_length);
+        if (packet_end > stream.bytes.len) return PacketScaffoldError.InvalidPacket;
+
+        const groups = try states.groupsFor(packet);
+        try validateTileRpclPacketForGroups(
+            groups,
+            packet,
+            stream.bytes[packet_offset..packet_end],
+            stream.packet_header_lengths[packet_index],
+        );
+        try states.advance(packet);
+        packet_offset = packet_end;
+    }
+    if (packet_offset != stream.bytes.len) return PacketScaffoldError.InvalidPacket;
+    try states.validateComplete();
 }
 
 fn buildPacketOrderSequence(
