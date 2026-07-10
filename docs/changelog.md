@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Truncated-Plane Midpoint Reconstruction
+
+- T1 decode now embeds the ISO-conventional uncertainty midpoint while
+  decoding (matching OpenJPEG): a newly significant sample at plane p is
+  reconstructed at 1.5*2^p, and each refinement re-centers the half at the
+  new plane (+2^(p-1) for bit 1, -2^(p-1) for bit 0; exact at plane 0).
+  Fully decoded blocks are unchanged (the half vanishes at plane 0), so all
+  lossless byte-exactness invariants hold untouched; truncated blocks now
+  reconstruct at the interval midpoint instead of the floor. Foreign
+  truncated 9/7 decode agreement with the reference decoders jumps from
+  ~34-38 dB PSNR (max byte diff 13-20) to ~50-55 dB (max 1-3) across the
+  OpenJPEG and Grok -r 2..24 ladders, and z2000's own truncated-layer
+  reconstruction improves the same way. The two embedded truncated-fixture
+  gates were re-pinned with the new hashes and tightened error bounds
+  (OpenJPEG -r 10: 7.93M vs old 8.5M bound; Grok -r 8: 2.21M vs old 3M).
+  Scorecard: full "Lossy" 9->10 (77->78).
+
 ### Multi-Tile Progressions
 
 - Multi-tile LRCP and RLCP now accept multiple untargeted quality layers. A
