@@ -109,6 +109,65 @@ Useful debug option:
 This emits the private BP8 `COM` sidecar used as a diagnostic/oracle payload.
 Normal encode omits it.
 
+## Supported CLI Options
+
+Main conversion command:
+
+```sh
+z2000 tiff-to-jp2 input.tif output.jp2 [options]
+```
+
+Profile and transform options:
+
+| Option | Meaning |
+| --- | --- |
+| `--mct rct|ict|none` | Multi-component transform: reversible RGB color transform, irreversible color transform, or no color transform. |
+| `--transform 5-3|9-7` | Wavelet transform: reversible 5/3 for lossless, irreversible 9/7 for lossy experiments. |
+| `--qstyle none|scalar-derived|scalar-expounded` | Quantization marker style. Use `none` with 5/3 lossless; scalar styles belong to the 9/7 path. |
+| `--guard-bits N` | QCD guard bits. Defaults are chosen for the current profile; unusual values remain bounded by strict validation. |
+
+Packet, layer, and geometry options:
+
+| Option | Meaning |
+| --- | --- |
+| `--levels N` | Number of DWT decomposition levels. |
+| `--resolutions N` | Alternative to `--levels`; resolutions are levels + 1. |
+| `--progression RPCL|LRCP|RLCP|PCRL|CPRL` | JPEG2000 progression order. Supported paths are still profile-bounded and fail closed when unsafe. |
+| `--layers N` | Number of quality layers. |
+| `--rates R1,R2,...` | Rate targets for layered output. Multi-tile rate targeting is still fail-closed until tile-aware PCRD lands. |
+| `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |
+| `--block N` | Square code-block size. |
+| `--tile W,H` | Tile size. Multi-tile support is currently the aligned lossless envelope. |
+| `--tile-parts none|R` | Tile-part division mode. Other divisions stay fail-closed. |
+
+Marker, T1, and diagnostics:
+
+| Option | Meaning |
+| --- | --- |
+| `--sop` / `--no-sop` | Enable or disable SOP packet markers. SOP is enabled by default for the narrow archival profile. |
+| `--eph` / `--no-eph` | Enable or disable EPH packet-header markers. |
+| `--tlm` / `--no-tlm` | Enable or disable TLM tile-part length markers. |
+| `--t1-backend iso-mq|legacy-mq` | Select the T1 entropy backend. `iso-mq` is the normal JPEG2000-style path. |
+| `--bypass` / `--no-bypass` | Enable or disable BYPASS coding style where the payload model is implemented. |
+| `--reset-context` / `--no-reset-context` | Toggle RESET context style in supported envelopes. |
+| `--terminate-all` / `--no-terminate-all` | Toggle TERMALL pass termination. |
+| `--vertical-causal` / `--no-vertical-causal` | Toggle vertical-causal context behavior. |
+| `--predictable-termination` / `--no-predictable-termination` | Toggle predictable termination in the supported TERMALL-scoped path. |
+| `--segmentation-symbols` / `--no-segmentation-symbols` | Toggle segmentation symbols where supported. |
+| `--threads N` | Worker count. `0` means use all logical threads. |
+| `--timings` | Print encode/decode timing breakdowns. |
+| `--debug-temp-sidecar` | Emit the private BP8 sidecar for diagnostics; normal encode omits it. |
+
+Inspection and decode commands:
+
+| Command | Meaning |
+| --- | --- |
+| `tiff-info input.tif` | Print TIFF metadata accepted by the current parser. |
+| `dng-info input.dng` | Print DNG/TIFF-style metadata for inspection. |
+| `jp2-info output.jp2` | Print JP2 container and codestream summary. |
+| `jp2-stats output.jp2` | Audit packet headers, strict packet catalog, and payload statistics. |
+| `decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--timings]` | Strict-decode a JP2 into TIFF. The historical command name remains for compatibility. |
+
 ## Supported Input Boundary
 
 The production TIFF path is deliberately narrow:
