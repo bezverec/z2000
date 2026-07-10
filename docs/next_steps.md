@@ -113,12 +113,18 @@ items are preserved further below as implementation history.
   Grok 20.3.6 `-I -r 8` also decodes through the JP2 wrapper and strict ISO-MQ
   path with a deterministic hash plus source-error bound. Two broader gaps
   remain:
-  - **(a) Heavy-truncation reference matrix.** The focused `-r 10` fixture no
-    longer fails with `InvalidBlock`, but reconstruction is not byte-identical
-    to OpenJPEG at that severe truncation (local diagnostic: about 30.67 dB
-    z2000-vs-OpenJPEG PSNR, max byte diff 41). Next: expand this into a lossy
-    fixture matrix over foreign OpenJPEG/Grok/Kakadu streams and assert a tight
-    reference-relative PSNR/error bound rather than byte identity.
+  - **(a) Truncated-plane midpoint reconstruction — ✅ LANDED (2026-07-10).**
+    Root cause of the truncation divergence was the reconstruction rule:
+    OpenJPEG embeds the uncertainty midpoint during T1 decode (significance
+    at plane p reconstructs 1.5*2^p, refinements re-center the half), while
+    z2000 decoded exact floors. T1 decode now carries the in-loop midpoint
+    (`refineMagnitude` updates on both bit values; exact at plane 0, so all
+    lossless invariants held, 303/303). Reference-relative agreement moved
+    from ~34-38 dB / max byte diff 13-20 to **~50-55 dB / max 1-3** across
+    the OpenJPEG and Grok `-r 2..24` ladders; the two embedded truncated
+    fixtures were re-pinned with tightened bounds (opj `-r 10`: 7.93M vs old
+    8.5M; Grok `-r 8`: 2.21M vs old 3M). Remaining: turn the out-of-process
+    matrix into a CI fixture gate and add a Kakadu ladder.
   - **(b) Foreign 9/7 QCD step tables.** **Progress:** the strict irreversible
     QCD parser and JP2 wrapper now accept signalled scalar-expounded/scalar-
     derived `(exponent, mantissa)` pairs, accept irreversible guard bits 1..7,

@@ -5229,11 +5229,13 @@ test "decodes a heavily truncated foreign OpenJPEG 9/7 lossy JP2 through ISO-MQ"
     try std.testing.expectEqual(@as(usize, 32), decoded.height);
     try std.testing.expectEqual(@as(usize, 32 * 32 * 3), decoded.samples.len);
 
-    try std.testing.expectEqual(@as(u64, 0x0b4ced83cce840ff), fnv1a64DecodedSamples(decoded.samples));
-    // Equivalent to roughly 13.8 dB PSNR on this intentionally tiny 10:1
-    // fixture; enough to catch corrupt T1 reconstruction without requiring an
-    // external OpenJPEG decoder in the unit test.
-    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 8_500_000);
+    try std.testing.expectEqual(@as(u64, 0xa4b5809161f36c8b), fnv1a64DecodedSamples(decoded.samples));
+    // With midpoint reconstruction of truncated planes the decode agrees with
+    // OpenJPEG's own output at rounding level (verified out-of-process:
+    // ~53 dB / max byte diff 2 on the 96x96 diagnostic; this tiny 10:1
+    // fixture measures 7,934,302 against its source gradient, down from
+    // ~8.5M with the old floor reconstruction).
+    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 8_000_000);
 }
 
 test "decodes a foreign Grok 9/7 lossy JP2 with signalled QCD steps" {
@@ -5274,8 +5276,11 @@ test "decodes a foreign Grok 9/7 lossy JP2 with signalled QCD steps" {
     try std.testing.expectEqual(@as(usize, 32), decoded.height);
     try std.testing.expectEqual(@as(usize, 32 * 32 * 3), decoded.samples.len);
 
-    try std.testing.expectEqual(@as(u64, 0x99ec03eaabac4764), fnv1a64DecodedSamples(decoded.samples));
-    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 3_000_000);
+    try std.testing.expectEqual(@as(u64, 0x64783081d94ad53c), fnv1a64DecodedSamples(decoded.samples));
+    // Midpoint reconstruction: 2,206,273 against the source gradient, down
+    // from ~3M with the old floor reconstruction; reference-relative
+    // agreement with Grok is ~52 dB / max 2 on the 96x96 diagnostic.
+    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 2_300_000);
 }
 
 test "lossless codestream skeleton contains JPEG2000 markers" {

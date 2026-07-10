@@ -3925,7 +3925,7 @@ fn decodeRefinementPassRaw(
                     symbol_count += 1;
                     flags[sample_flags_index] |= nbf_refine;
                     decodeMarkPackedT1Refined(scratch, x, stripe_y + dy);
-                    if (bit) addMagnitudeBit(scratch, sample_coeff_index, bitplane);
+                    refineMagnitude(scratch, sample_coeff_index, bitplane, bit);
                 }
             }
         }
@@ -4507,7 +4507,7 @@ fn decodeRefinementPassSymbols(
         const bit = try mqRead(decoder, mqContextIndex(refinementContext(hasFlag(scratch.flags.items, index, .refined), neighborSignificanceRowsDecode(scratch, pos.x, pos.y, style))));
         symbol_count += 1;
         setFlag(scratch.flags.items, index, .refined);
-        if (bit) addMagnitudeBit(scratch, index, bitplane);
+        refineMagnitude(scratch, index, bitplane, bit);
     }
 
     if (symbol_count != pass.symbol_count) return EbcotError.InvalidBlock;
@@ -4552,7 +4552,7 @@ fn decodeRefinementPassInferred(
                     symbol_count += 1;
                     flags[p] |= nbf_refine;
                     decodeMarkPackedT1Refined(scratch, x, y);
-                    if (bit) addMagnitudeBit(scratch, localIndex(scratch.width, x, y), bitplane);
+                    refineMagnitude(scratch, localIndex(scratch.width, x, y), bitplane, bit);
                 }
             }
         }
@@ -4597,7 +4597,7 @@ fn decodeRefinementPassInferredPlain(
                     const bit = try mqRead(decoder, mqContextIndex(context));
                     symbol_count += 1;
                     flags[sample_flags_index] |= nbf_refine;
-                    if (bit) addMagnitudeBit(scratch, sample_coeff_index, bitplane);
+                    refineMagnitude(scratch, sample_coeff_index, bitplane, bit);
                 }
             }
         }
@@ -6812,7 +6812,14 @@ fn neighborSignificanceRowsDecode(scratch: *const DecodeBlockScratch, x: usize, 
 
 fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitplane: u8, negative: bool) void {
     const index = localIndex(scratch.width, x, y);
-    const magnitude_bit = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    // ISO-conventional midpoint reconstruction (matches OpenJPEG): a newly
+    // significant sample at plane p is reconstructed at 1.5 * 2^p, the
+    // midpoint of its uncertainty interval [2^p, 2^(p+1)). Each refinement
+    // re-centers the half at the new plane, so a fully decoded sample ends
+    // exact (half = 0 at plane 0) and a truncated one carries m + 2^(p-1).
+    const one = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    const half = if (bitplane > 0) @as(i32, 1) << @as(u5, @intCast(bitplane - 1)) else 0;
+    const magnitude_bit = one | half;
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setFlag(scratch.flags.items, index, .significant);
     setFlag(scratch.flags.items, index, .became_significant);
@@ -6823,7 +6830,14 @@ fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitp
 
 fn markDecodedSignificantNbf(scratch: *DecodeBlockScratch, x: usize, y: usize, bitplane: u8, negative: bool) void {
     const index = localIndex(scratch.width, x, y);
-    const magnitude_bit = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    // ISO-conventional midpoint reconstruction (matches OpenJPEG): a newly
+    // significant sample at plane p is reconstructed at 1.5 * 2^p, the
+    // midpoint of its uncertainty interval [2^p, 2^(p+1)). Each refinement
+    // re-centers the half at the new plane, so a fully decoded sample ends
+    // exact (half = 0 at plane 0) and a truncated one carries m + 2^(p-1).
+    const one = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    const half = if (bitplane > 0) @as(i32, 1) << @as(u5, @intCast(bitplane - 1)) else 0;
+    const magnitude_bit = one | half;
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
     nbfMarkSignificant(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
@@ -6840,19 +6854,34 @@ inline fn markDecodedSignificantNbfKnown(
     negative: bool,
 ) void {
     const index = localIndex(scratch.width, x, y);
-    const magnitude_bit = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    // ISO-conventional midpoint reconstruction (matches OpenJPEG): a newly
+    // significant sample at plane p is reconstructed at 1.5 * 2^p, the
+    // midpoint of its uncertainty interval [2^p, 2^(p+1)). Each refinement
+    // re-centers the half at the new plane, so a fully decoded sample ends
+    // exact (half = 0 at plane 0) and a truncated one carries m + 2^(p-1).
+    const one = @as(i32, 1) << @as(u5, @intCast(bitplane));
+    const half = if (bitplane > 0) @as(i32, 1) << @as(u5, @intCast(bitplane - 1)) else 0;
+    const magnitude_bit = one | half;
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
     nbfMarkSignificant(flags, nbs, x, y, negative);
     decodeMarkPackedT1Significant(scratch, x, y, negative);
 }
 
-inline fn addMagnitudeBit(scratch: *DecodeBlockScratch, index: usize, bitplane: u8) void {
-    const magnitude_bit = @as(i32, 1) << @as(u5, @intCast(bitplane));
+/// Refinement update with midpoint re-centering (matches OpenJPEG): before
+/// this pass the sample sits at the plane-(p+1) midpoint m_hi + 2^p; after
+/// reading bit b at plane p the new midpoint is m_hi + b*2^p + 2^(p-1), a
+/// delta of +2^(p-1) for b = 1 and -2^(p-1) for b = 0. At plane 0 the value
+/// becomes exact: +0 for b = 1, -1 for b = 0.
+inline fn refineMagnitude(scratch: *DecodeBlockScratch, index: usize, bitplane: u8, bit: bool) void {
+    const delta: i32 = if (bitplane > 0)
+        (if (bit) @as(i32, 1) << @as(u5, @intCast(bitplane - 1)) else -(@as(i32, 1) << @as(u5, @intCast(bitplane - 1))))
+    else
+        (if (bit) 0 else -1);
     if (scratch.coeffs.items[index] < 0) {
-        scratch.coeffs.items[index] -= magnitude_bit;
+        scratch.coeffs.items[index] -= delta;
     } else {
-        scratch.coeffs.items[index] += magnitude_bit;
+        scratch.coeffs.items[index] += delta;
     }
 }
 
