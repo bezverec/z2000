@@ -122,6 +122,7 @@ pub const EncodedComponentBlock = struct {
     job: ComponentBlock,
     segment: ebcot.CodeBlockSegment,
     layers: []t2.LayerTruncation = &.{},
+    bypass: bool = false,
 
     pub fn deinit(self: *EncodedComponentBlock, allocator: std.mem.Allocator) void {
         self.segment.deinit(allocator);
@@ -160,6 +161,7 @@ pub const EncodedComponentBlock = struct {
             .layers = self.layers,
             .payload = self.segment.bytes,
             .segments = if (self.segment.segments) |segments| segments else &.{},
+            .bypass = self.bypass,
         };
     }
 };
@@ -1477,6 +1479,7 @@ pub fn encodeComponentBlockIsoMq(
     return .{
         .job = view.job,
         .segment = segment,
+        .bypass = actual_style.bypass,
     };
 }
 
@@ -2969,6 +2972,7 @@ fn initTilePacketReaderBandGroup(
     var reader_moved = false;
     errdefer if (!reader_moved) reader_state.deinit();
     reader_state.terminate_all = try encodedLayerBlocksUseTerminateAll(encoded);
+    reader_state.bypass = try encodedLayerBlocksUseBypass(encoded);
 
     encoded_moved = true;
     locations_moved = true;
@@ -2995,6 +2999,19 @@ fn encodedLayerBlocksUseTerminateAll(encoded: []const t2.EncodedLayerBlock) !boo
         }
     }
     return saw_terminated_block;
+}
+
+fn encodedLayerBlocksUseBypass(encoded: []const t2.EncodedLayerBlock) !bool {
+    var bypass: ?bool = null;
+    for (encoded) |block| {
+        if (block.segments.len == 0) continue;
+        if (bypass) |expected| {
+            if (block.bypass != expected) return PacketScaffoldError.InvalidPacket;
+        } else {
+            bypass = block.bypass;
+        }
+    }
+    return bypass orelse false;
 }
 
 fn validateTileRpclPacketForGroups(

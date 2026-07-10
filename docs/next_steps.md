@@ -7,20 +7,19 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **91/100 narrow, 72/100 full** as of
-2026-07-09. First drafted at `ba66799`.
+the subsequent JP2/T2/T1/profile work is **91/100 narrow, 77/100 full** as of
+2026-07-10. First drafted at `ba66799`.
 
-## Next Working Sequence (2026-07-08)
+## Next Working Sequence (2026-07-10)
 
-Scorecard now **91/100 narrow, 72/100 full**. Landed since the 2026-07-07
-sequence below: the malformed-input fuzzing gate (four profiles: single-tile
-RCT/5-3, multi-tile RCT/5-3, ICT/9-7, TERMALL — full interop row 4→5), the
-odd/thin/minimal-dimension roundtrip matrix (narrow RCT/DWT 9→10, narrow
-90→91), 16-bit RGB end-to-end interop confirmation, plus the perf pass
-(full-core parallel DWT, parallel forward RCT, balanced low-thread decode —
-see `optimization_plan.md`). Multi-tile TERMALL has since opened as a narrow
-aligned-tile profile with deterministic strict roundtrip and malformed-input
-fuzz coverage (full lossless encode 9→10, full 71→72).
+Scorecard now **91/100 narrow, 77/100 full**. The aligned multi-tile path has
+all five progression orders, untargeted layers, and the implemented resilience
+matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
+roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok;
+T1 BYPASS mode is preserved explicitly into T2 readback. The
+malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
+profile. The next structural multi-tile gates are tile-aware PCRD targets,
+reference-grid partition anchoring, and tile-level scheduling.
 
 The remaining levers are larger and structural. Ordered by *value per unit
 risk*; each names the ISO clause, the current code state, exactly what is
@@ -53,7 +52,7 @@ items are preserved further below as implementation history.
 - **ISO clause:** B.3–B.12 (tile grid, per-tile SOT/SOD, tile-part order).
 - **State:** multi-tile v1/v2 is interop-proven for aligned RPCL and multi-layer
   LRCP/RLCP/PCRL/CPRL grids. The envelope is RCT/5-3, untargeted quality layers
-  across all five progression orders, plain or TERMALL style,
+  across all five progression orders, the implemented resilience style matrix,
   one tile-part per tile. Gates:
   `validateMultiTileCodingPath` / `validateMultiTileGeometry` in `codestream.zig`.
 - **What to add (staged, each its own PR, single-tile byte-identical at every
@@ -69,6 +68,10 @@ items are preserved further below as implementation history.
     of 2^levels × precinct" fail-closed guard by anchoring precinct/code-block
     partitions to the reference grid (ISO B.6/B.7) instead of the tile-local
     origin — the conformance trap noted in `multi_tile_plan.md`.
+  - **v2d — resilience styles.** LANDED: CAUSAL, SEGMARK,
+    RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL have deterministic strict
+    roundtrips; representative combined/terminated files are pixel-exact in
+    OpenJPEG and Grok. Remaining: Kakadu breadth and unsupported combinations.
 - **Test plan:** per-stage public encode→decode byte-exact on 2×2 and 3×3
   edge-tile grids; `tile == image` byte-identical to the single-tile path;
   OpenJPEG/Grok/Kakadu decode of each genuinely multi-tile file.
@@ -85,7 +88,8 @@ items are preserved further below as implementation history.
   significance/refinement passes and MQ for cleanup/non-bypass passes; the
   strict decoder consumes the same per-pass segment table and the JP2 wrapper
   accepts COD style `0x05`. OpenJPEG 2.5.4 and Grok 20.3.6 decode the current
-  256x256 smoke losslessly; Kakadu remains to be checked. Standalone
+  single-tile and 2x2 multi-tile smokes losslessly; Kakadu remains to be
+  checked. Standalone
   RESET/ERTERM and BYPASS combined with RESET or ERTERM stay fail-closed.
 - **What to add:** Kakadu interop for BYPASS+TERMALL, then standalone RESET /
   standalone ERTERM with the same writer + strict reader + interop gate before
@@ -174,8 +178,9 @@ for more ISO coverage is:
    single-tile archival RCT/5-3, multi-tile RCT/5-3 (per-tile SOT/PLT walk),
    irreversible ICT/9-7 (QCD step-size parse + float inverse DWT/ICT),
    terminate-all (per-pass terminated-segment T1 decoder), BYPASS+TERMALL
-   (mixed raw/MQ per-pass segments), and multi-tile TERMALL (per-tile packet
-   walks plus per-pass terminated segment lengths) —
+   (mixed raw/MQ per-pass segments), multi-tile TERMALL, and multi-tile
+   BYPASS+TERMALL (per-tile packet walks plus raw/MQ terminated segment
+   lengths) —
    all green in Debug/ReleaseSafe/ReleaseFast; out-of-process ReleaseSafe
    sweeps of the multi-tile and 9/7 smoke JP2s also found zero crashes.
    Remaining: treating jpylyzer/valid2000 findings as diagnostics and adding
@@ -188,15 +193,13 @@ for more ISO coverage is:
    and a payload byte-flip walk requiring at least one bounded rejection with
    no panic/OOB (green in Debug and ReleaseFast). The T2 unit gate also rejects
    over-capacity terminated packet-header segment counts before segment lengths
-   are read. Multi-tile TERMALL now has a strict roundtrip, malformed-input
-   fuzz gate, and dedicated packet-corruption matrix (second-tile PLT length,
-   final tile-part truncation, and second-tile SOD payload byte-flip walk).
-   Remaining: broaden style combinations beyond the terminated multi-tile
-   slice.
-3. **Multi-tile v2.** The v1 aligned envelope is real and interop-proven for
-   the documented lossless profile. Expand one axis at a time: edge-tile
-   fixtures, more progression orders, then quality layers/style bits only after
-   strict decode and independent decoder checks are green.
+   are read. Multi-tile TERMALL and BYPASS+TERMALL have strict roundtrip and
+   malformed-input coverage; the terminated multi-tile matrix also rejects a
+   damaged second-tile PLT length. Remaining: broader external corpus and
+   Kakadu coverage.
+3. **Multi-tile v2.** Progression, untargeted-layer, and resilience breadth is
+   now landed. Continue with tile-aware PCRD targets, reference-grid partition
+   anchoring, and then tile-level scheduling.
 4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.

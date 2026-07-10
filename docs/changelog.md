@@ -40,6 +40,14 @@ entries are grouped by development milestone rather than semantic version.
 
 ### T1 Code-Block Styles
 
+- The aligned multi-tile RCT/5-3 path now accepts CAUSAL, SEGMARK,
+  CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL. T1 BYPASS
+  metadata is preserved explicitly in the T2 layer-block view, so packet
+  readback uses the encoded raw/MQ segment mode without inferring it from
+  lengths. Focused 2x2 strict roundtrips cover threaded determinism, parallel
+  decode, and corrupt second-tile PLT rejection; OpenJPEG and Grok decode the
+  representative combined/terminated fixtures pixel-exactly. The malformed
+  corpus sweep now includes multi-tile BYPASS+TERMALL.
 - Multi-tile lossless encode now accepts TERMALL (`COD` code-block style
   `0x04`) inside the aligned v1 tile envelope. The tile encoder routes
   TERMALL blocks through the per-pass ISO-MQ segment writer, the tile-packet

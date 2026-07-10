@@ -669,6 +669,7 @@ pub const EncodedLayerBlock = struct {
     layers: []const LayerTruncation,
     payload: []const u8,
     segments: []const SegmentSpan = &.{},
+    bypass: bool = false,
 };
 
 pub const WrittenPacket = struct {

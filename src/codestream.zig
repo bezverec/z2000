@@ -8898,20 +8898,23 @@ fn validateBlockSize(width: u16, height: u16) !void {
 
 /// Multi-tile constraints (docs/multi_tile_plan.md §3): the tile pipeline
 /// currently covers reversible 5/3 + RCT, untargeted quality layers across all
-/// five Part 1 packet orders, plain or TERMALL code-block style, and one
-/// tile-part per tile in row-major order. Everything outside that fails closed
-/// so COD/SIZ never advertise behavior the tile encoder does not implement.
+/// five Part 1 packet orders, the supported resilience style combinations,
+/// and one tile-part per tile in row-major order. Everything outside that
+/// fails closed so COD/SIZ never advertise behavior the tile encoder does not
+/// implement.
 fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     try validateMultiTileProgression(options.progression, options.layers);
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
     if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
     if (options.rate_count != 0) return CodestreamError.UnsupportedPayload;
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
-    if (options.bypass or options.reset_context or options.vertical_causal or
-        options.predictable_termination or options.segmentation_symbols)
-    {
-        return CodestreamError.UnsupportedPayload;
-    }
+    if (options.bypass and !options.terminate_all) return CodestreamError.UnsupportedPayload;
+    // Repeated here from validateCodingPath as defense-in-depth: RESET and
+    // ERTERM are only implemented in the TERMALL segment model, and the tile
+    // pipeline has only been verified for those combinations. A future
+    // single-tile relaxation must not silently open the multi-tile path.
+    if (options.reset_context and !options.terminate_all) return CodestreamError.UnsupportedPayload;
+    if (options.predictable_termination and !options.terminate_all) return CodestreamError.UnsupportedPayload;
     if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
 }
 
