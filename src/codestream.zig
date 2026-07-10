@@ -1993,10 +1993,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         // row-major, TPsot=0/TNsot=1, per-tile packet plans, TLM cross-check)
         // and the same geometry envelope the encoder enforces. The per-tile
         // spans this produces feed the Stage C decode. The multi-tile envelope
-        // currently covers RPCL plus the single-layer LRCP permutation.
-        if (parsed_progression != .rpcl and parsed_progression != .lrcp) {
-            return CodestreamError.UnsupportedPayload;
-        }
+        // currently covers RPCL plus the single-layer LRCP/RLCP permutations.
+        try validateMultiTileProgression(parsed_progression, layers);
         try validateMultiTileGeometry(grid, levels, options);
         var spans = try readStrictMultiTileTilePartSpans(
             allocator,
@@ -8900,18 +8898,14 @@ fn validateBlockSize(width: u16, height: u16) !void {
 
 /// Multi-tile constraints (docs/multi_tile_plan.md §3): the tile pipeline
 /// currently covers reversible 5/3 + RCT, untargeted quality layers for RPCL,
-/// plain or TERMALL code-block style, RPCL or single-layer LRCP packet order,
-/// and one tile-part per tile in row-major order. Everything outside that
+/// plain or TERMALL code-block style, RPCL or single-layer LRCP/RLCP packet
+/// order, and one tile-part per tile in row-major order. Everything outside that
 /// fails closed so the COD/SIZ markers never advertise behavior the tile
 /// encoder does not implement.
 fn validateMultiTileCodingPath(options: LosslessOptions) !void {
-    switch (options.progression) {
-        .rpcl, .lrcp => {},
-        .rlcp, .pcrl, .cprl => return CodestreamError.UnsupportedPayload,
-    }
+    try validateMultiTileProgression(options.progression, options.layers);
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
     if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
-    if (options.progression == .lrcp and options.layers != 1) return CodestreamError.UnsupportedPayload;
     if (options.rate_count != 0) return CodestreamError.UnsupportedPayload;
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
     if (options.bypass or options.reset_context or options.vertical_causal or
@@ -8920,6 +8914,14 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
         return CodestreamError.UnsupportedPayload;
     }
     if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
+}
+
+fn validateMultiTileProgression(progression: ProgressionOrder, layers: u16) !void {
+    switch (progression) {
+        .rpcl => {},
+        .lrcp, .rlcp => if (layers != 1) return CodestreamError.UnsupportedPayload,
+        .pcrl, .cprl => return CodestreamError.UnsupportedPayload,
+    }
 }
 
 /// Multi-tile v1 conformance guards (docs/multi_tile_plan.md §2.3 and risk #2):
@@ -9011,7 +9013,8 @@ fn encodeLosslessMultiTileMeasured(
     const packet_order: tile_pipeline.PacketOrder = switch (encode_options.progression) {
         .rpcl => .rpcl,
         .lrcp => .lrcp,
-        .rlcp, .pcrl, .cprl => unreachable,
+        .rlcp => .rlcp,
+        .pcrl, .cprl => unreachable,
     };
     var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
         allocator,

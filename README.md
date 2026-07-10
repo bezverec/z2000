@@ -89,7 +89,7 @@ It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` codec, but the
 supported JP2 surface is now broader than the original single-tile RPCL slice:
 lossless RCT/5-3, lossy ICT/9-7 scalar quantization, all five Part 1
 progression orders on the documented single-tile path, an aligned multi-tile
-lossless envelope with multi-layer RPCL plus single-layer LRCP packet order,
+lossless envelope with multi-layer RPCL plus single-layer LRCP/RLCP packet order,
 plain or TERMALL code-block style, BYPASS, selected error-resilience style
 bits, quality layers, and PCRD-style rate allocation all have local strict
 decode coverage and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported
@@ -177,7 +177,7 @@ lines we are targeting:
 
 - `--tile W,H` maps to Grok `-t` and Kakadu `Stiles`. Multi-tile encode and
   decode work end-to-end in a bounded envelope (lossless RCT/5-3, untargeted
-  RPCL quality layers, single-layer LRCP, one tile-part per tile in row-major
+  RPCL quality layers, single-layer LRCP/RLCP, one tile-part per tile in row-major
   order, plain or TERMALL code-block style); the geometry must satisfy ISO
   B.6/B.7 partition anchoring
   (tile sizes a multiple of `2^levels x` the largest precinct, precincts >=
@@ -218,7 +218,7 @@ lines we are targeting:
   public opt-in strict profiles with end-to-end payload behavior. Predictable
   termination is wired only with `--terminate-all --predictable-termination`:
   it emits COD style `0x10` and ER-TERM-flushed per-pass MQ segments. The
-  aligned multi-tile envelope also accepts single-layer LRCP packet order and
+  aligned multi-tile envelope also accepts single-layer LRCP/RLCP packet order and
   plain TERMALL while keeping multi-tile BYPASS/RESET/ERTERM combinations
   fail-closed. The
   current larger single-tile no-sidecar RESET+TERMALL smoke decodes
@@ -622,7 +622,7 @@ Optimization read from those numbers:
 Features:
 
 1. Broaden the multi-tile envelope beyond the current aligned multi-layer RPCL
-   and single-layer LRCP slice: rate-targeted layers, remaining progression
+   and single-layer LRCP/RLCP slice: rate-targeted layers, remaining progression
    orders, stricter edge-tile fixtures, and then tile-parallel scheduling on
    top of the per-worker scratch-buffer model.
 2. Expand the full profile matrix across OpenJPEG/Grok/Kakadu and

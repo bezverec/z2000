@@ -11756,6 +11756,60 @@ test "multi-tile LRCP codestream roundtrips and permutes tile packets" {
     try std.testing.expectEqual(@as(usize, width), info.width);
 }
 
+test "multi-tile RLCP codestream roundtrips and permutes tile packets" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(rpcl);
+
+    var rlcp_options = multi_tile_test_options;
+    rlcp_options.progression = .rlcp;
+    const rlcp = try codestream.encodeLosslessWithOptions(allocator, rgb, rlcp_options);
+    defer allocator.free(rlcp);
+
+    const rpcl_cod = findMarker(rpcl, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const rlcp_cod = findMarker(rlcp, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 2), rpcl[rpcl_cod + 5]);
+    try std.testing.expectEqual(@as(u8, 1), rlcp[rlcp_cod + 5]);
+    try std.testing.expect(!std.mem.eql(u8, rpcl, rlcp));
+    try std.testing.expectEqual(@as(usize, 4), countMarker(rlcp, codestream.markerValue("sot")));
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, rlcp);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    const unsupported_layers = try allocator.dupe(u8, rlcp);
+    defer allocator.free(unsupported_layers);
+    unsupported_layers[rlcp_cod + 6] = 0;
+    unsupported_layers[rlcp_cod + 7] = 2;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, unsupported_layers),
+    );
+
+    var threaded_options = rlcp_options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, rlcp, threaded);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, rlcp);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(usize, width), info.width);
+}
+
 test "multi-tile RPCL quality layers roundtrip losslessly" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -11932,6 +11986,12 @@ test "multi-tile encode fails closed outside the bounded envelope" {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.layers = 2;
                 options.progression = .lrcp;
+            }
+        }.mutate },
+        .{ .label = "RLCP quality layers", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.layers = 2;
+                options.progression = .rlcp;
             }
         }.mutate },
         .{ .label = "rate targets", .mutate = struct {

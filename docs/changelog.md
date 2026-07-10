@@ -7,13 +7,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ### Multi-Tile Progressions
 
+- Multi-tile lossless encode/decode now also accepts single-layer RLCP. Each
+  tile's checked RPCL packet stream is permuted with the shared ISO B.12 RLCP
+  iterator, and strict decode maps the tile-local catalog back to RPCL before
+  the existing T2/T1 reconstruction. A generated 2x2 RLCP JP2 decodes
+  pixel-exactly through z2000, OpenJPEG 2.5.4, and Grok 20.3.6. Multi-layer RLCP
+  remains fail-closed until the tile-stream validator carries packet-header
+  state across revisited precincts.
 - Multi-tile lossless encode/decode now accepts the single-layer LRCP packet
   order inside the aligned RCT/5-3 tile envelope. The tile pipeline still
   builds packets from the checked RPCL scaffold, then byte-preservingly
   permutes each tile-part payload and PLT table into LRCP order; strict
   multi-tile decode reads the tile-part in COD progression order and reorders
   the packet catalog back to RPCL for the existing T2/T1 reconstruction path.
-  RLCP/PCRL/CPRL and multi-layer LRCP remain fail-closed.
+  PCRL/CPRL and multi-layer LRCP/RLCP remain fail-closed.
 - Multi-tile RPCL now accepts more than one untargeted quality layer. This
   reuses the existing per-block layer truncation table and per-precinct RPCL
   packet-state lifetime while keeping multi-tile compression-ratio targets
