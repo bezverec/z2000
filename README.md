@@ -89,7 +89,7 @@ It is not yet a full ISO/IEC 15444 compliant `.j2k` or `.jp2` codec, but the
 supported JP2 surface is now broader than the original single-tile RPCL slice:
 lossless RCT/5-3, lossy ICT/9-7 scalar quantization, all five Part 1
 progression orders on the documented single-tile path, an aligned multi-tile
-lossless envelope with multi-layer RPCL/PCRL/CPRL plus single-layer LRCP/RLCP,
+lossless envelope with untargeted quality layers across all five packet orders,
 plain or TERMALL code-block style, BYPASS, selected error-resilience style
 bits, quality layers, and PCRD-style rate allocation all have local strict
 decode coverage and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported
@@ -97,7 +97,7 @@ combinations still fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
 2026-07-10, the narrow RGB lossless JP2 target is estimated at 91/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 75/100.
+the broader JPEG2000 Part 1 codec family is estimated at 76/100.
 
 ## Build
 
@@ -177,8 +177,8 @@ lines we are targeting:
 
 - `--tile W,H` maps to Grok `-t` and Kakadu `Stiles`. Multi-tile encode and
   decode work end-to-end in a bounded envelope (lossless RCT/5-3, untargeted
-  RPCL/PCRL/CPRL quality layers, single-layer LRCP/RLCP, one tile-part per tile
-  in row-major order, plain or TERMALL code-block style); the geometry must
+  quality layers across all five progression orders, one tile-part per tile in
+  row-major order, plain or TERMALL code-block style); the geometry must
   satisfy ISO B.6/B.7 partition anchoring
   (tile sizes a multiple of `2^levels x` the largest precinct, precincts >=
   code-blocks with the r>0 half-span rule) and every tile must achieve the
@@ -218,8 +218,8 @@ lines we are targeting:
   public opt-in strict profiles with end-to-end payload behavior. Predictable
   termination is wired only with `--terminate-all --predictable-termination`:
   it emits COD style `0x10` and ER-TERM-flushed per-pass MQ segments. The
-  aligned multi-tile envelope accepts all five progression orders (LRCP/RLCP
-  single-layer), plus plain TERMALL, while keeping multi-tile
+  aligned multi-tile envelope accepts untargeted quality layers for all five
+  progression orders, plus plain TERMALL, while keeping multi-tile
   BYPASS/RESET/ERTERM combinations fail-closed. The
   current larger single-tile no-sidecar RESET+TERMALL smoke decodes
   pixel-exactly through z2000 strict decode and independent decoders. The
@@ -622,8 +622,8 @@ Optimization read from those numbers:
 Features:
 
 1. Broaden the multi-tile envelope beyond the current aligned progression
-   matrix: rate-targeted layers, multi-layer LRCP/RLCP, stricter edge-tile
-   fixtures, and then tile-parallel scheduling on
+   matrix: rate-targeted layers, stricter edge-tile fixtures, and then
+   tile-parallel scheduling on
    top of the per-worker scratch-buffer model.
 2. Expand the full profile matrix across OpenJPEG/Grok/Kakadu and
    valid2000/jpylyzer-style validators, treating validator warnings as

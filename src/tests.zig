@@ -11725,10 +11725,12 @@ test "multi-tile LRCP codestream roundtrips and permutes tile packets" {
         .samples = samples,
     };
 
-    const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    var rpcl_options = multi_tile_test_options;
+    rpcl_options.layers = 3;
+    const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, rpcl_options);
     defer allocator.free(rpcl);
 
-    var lrcp_options = multi_tile_test_options;
+    var lrcp_options = rpcl_options;
     lrcp_options.progression = .lrcp;
     const lrcp = try codestream.encodeLosslessWithOptions(allocator, rgb, lrcp_options);
     defer allocator.free(lrcp);
@@ -11737,6 +11739,7 @@ test "multi-tile LRCP codestream roundtrips and permutes tile packets" {
     const lrcp_cod = findMarker(lrcp, codestream.markerValue("cod")) orelse return error.MissingCod;
     try std.testing.expectEqual(@as(u8, 2), rpcl[rpcl_cod + 5]);
     try std.testing.expectEqual(@as(u8, 0), lrcp[lrcp_cod + 5]);
+    try std.testing.expectEqual(@as(u16, 3), readU16BeTest(lrcp, lrcp_cod + 6));
     try std.testing.expect(!std.mem.eql(u8, rpcl, lrcp));
     try std.testing.expectEqual(@as(usize, 4), countMarker(lrcp, codestream.markerValue("sot")));
 
@@ -11770,10 +11773,12 @@ test "multi-tile RLCP codestream roundtrips and permutes tile packets" {
         .samples = samples,
     };
 
-    const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    var rpcl_options = multi_tile_test_options;
+    rpcl_options.layers = 3;
+    const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, rpcl_options);
     defer allocator.free(rpcl);
 
-    var rlcp_options = multi_tile_test_options;
+    var rlcp_options = rpcl_options;
     rlcp_options.progression = .rlcp;
     const rlcp = try codestream.encodeLosslessWithOptions(allocator, rgb, rlcp_options);
     defer allocator.free(rlcp);
@@ -11782,21 +11787,13 @@ test "multi-tile RLCP codestream roundtrips and permutes tile packets" {
     const rlcp_cod = findMarker(rlcp, codestream.markerValue("cod")) orelse return error.MissingCod;
     try std.testing.expectEqual(@as(u8, 2), rpcl[rpcl_cod + 5]);
     try std.testing.expectEqual(@as(u8, 1), rlcp[rlcp_cod + 5]);
+    try std.testing.expectEqual(@as(u16, 3), readU16BeTest(rlcp, rlcp_cod + 6));
     try std.testing.expect(!std.mem.eql(u8, rpcl, rlcp));
     try std.testing.expectEqual(@as(usize, 4), countMarker(rlcp, codestream.markerValue("sot")));
 
     var decoded = try codestream.decodeLosslessTemporary(allocator, rlcp);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
-
-    const unsupported_layers = try allocator.dupe(u8, rlcp);
-    defer allocator.free(unsupported_layers);
-    unsupported_layers[rlcp_cod + 6] = 0;
-    unsupported_layers[rlcp_cod + 7] = 2;
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessTemporary(allocator, unsupported_layers),
-    );
 
     var threaded_options = rlcp_options;
     threaded_options.threads = 3;
@@ -12040,18 +12037,6 @@ test "multi-tile encode fails closed outside the bounded envelope" {
         mutate: *const fn (options: *codestream.LosslessOptions) void,
     };
     const cases = [_]Case{
-        .{ .label = "LRCP quality layers", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                options.layers = 2;
-                options.progression = .lrcp;
-            }
-        }.mutate },
-        .{ .label = "RLCP quality layers", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                options.layers = 2;
-                options.progression = .rlcp;
-            }
-        }.mutate },
         .{ .label = "rate targets", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.layers = 2;
