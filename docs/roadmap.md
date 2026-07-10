@@ -212,8 +212,9 @@ Tasks:
 
 - Keep the current positive multi-tile encode/decode path green: lossless
   RCT/5-3, untargeted quality layers across all five progression orders, one
-  tile-part per tile, row-major order, CAUSAL/SEGMARK and the supported
-  TERMALL-scoped resilience combinations, and ISO B.6/B.7-aligned geometry.
+  tile-part per tile, deterministic row-major encode plus reordered foreign
+  tile-part decode, CAUSAL/SEGMARK and the supported TERMALL-scoped resilience
+  combinations, and ISO B.6/B.7-aligned geometry.
 - Expand the tile/profile matrix one axis at a time: more fixtures for edge
   tiles and non-divisible dimensions, then rate-targeted quality layers and
   reference-grid partition anchoring after strict decode and interop coverage

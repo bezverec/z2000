@@ -61,8 +61,9 @@ Supported public JP2 profiles are still narrow:
   streams cannot be divided per resolution
 - a v1/v2 aligned multi-tile lossless envelope: RCT/5-3, one or more
   untargeted quality layers for all five progression orders, one tile-part per
-  tile, row-major tiles, the implemented CAUSAL/SEGMARK/terminated resilience
-  styles, and ISO B.6/B.7 geometry constraints
+  tile, deterministic row-major encode, reordered foreign tile-part decode, the
+  implemented CAUSAL/SEGMARK/terminated resilience styles, and ISO B.6/B.7
+  geometry constraints
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
 - `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
   segments and packet-header segment length accounting
@@ -138,8 +139,11 @@ Notes:
   z2000-produced RCT/5-3, ICT/9-7, progression-order, quality-layer, and v1
   multi-tile profiles, plus selected foreign OpenJPEG/Grok/Kakadu streams where
   packet spans can be derived, including the current PLT-less single-tile
-  lossless matrix. Debug BP8 sidecar files are still accepted as an oracle/compat
-  path for the reversible profile.
+  lossless matrix. Aligned PLT-less multi-tile streams are also covered by the
+  strict path, including an OpenJPEG/Grok/Kakadu smoke where Kakadu orders
+  tile-parts as `0,1,3,2`.
+  Debug BP8 sidecar files are still accepted as an oracle/compat path for the
+  reversible profile.
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
@@ -159,7 +163,8 @@ Notes:
   marker stuffing, and terminal `0xff` packet-header padding. It also has a
   PLT-less catalog branch that derives packet spans from packet headers; the
   current foreign-stream gate covers OpenJPEG/Grok/Kakadu default lossless
-  files and OpenJPEG/Grok multi-layer lossless ladders.
+  files, OpenJPEG/Grok multi-layer lossless ladders, and aligned PLT-less
+  multi-tile smokes from OpenJPEG/Grok/Kakadu.
 
 ## `src/jp2.zig`
 

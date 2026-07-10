@@ -4162,6 +4162,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     span: StrictMultiTileTilePartSpan,
+    tile_header: TemporaryHeader,
     tile_plan: packet_plan.Plan,
     layers: u16,
     progression: ProgressionOrder,
@@ -4179,7 +4180,9 @@ fn readStrictMultiTileTilePartPacketCatalog(
     defer packet_lengths.deinit(allocator);
     const sod = try readTilePartHeaderMarkers(allocator, bytes, span.sot_start + 12, span.end, &packet_lengths);
     if (sod != span.sod) return CodestreamError.InvalidCodestream;
-    if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
+    if (span.missing_plt) {
+        if (packet_lengths.items.len != 0) return CodestreamError.InvalidCodestream;
+    } else if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
 
     const sequence = try buildStreamPacketSequence(allocator, progression, tile_plan, layers);
     defer allocator.free(sequence);
@@ -4187,25 +4190,67 @@ fn readStrictMultiTileTilePartPacketCatalog(
 
     var cursor = span.sod + 2;
     var packet_sequence: u16 = 0;
-    for (packet_lengths.items, sequence) |packet_length, packet| {
-        const byte_offset = packet_bytes.items.len;
-        const byte_length = try appendStrictSodPacketPayload(
-            allocator,
-            &packet_bytes,
-            bytes,
-            &cursor,
-            span.end,
-            packet_length,
-            marker_policy,
-            &packet_sequence,
-        );
-        try entries.append(allocator, .{
-            .packet = packet,
-            .tile_index = span.tile_index,
-            .tile_part_index = 0,
-            .byte_offset = byte_offset,
-            .byte_length = byte_length,
-        });
+    if (span.missing_plt) {
+        var stateful = try StrictStatefulPrecinctGroups.init(allocator, tile_header, tile_plan);
+        defer stateful.deinit();
+
+        for (sequence) |packet| {
+            var packet_start = cursor;
+            if (marker_policy.sop) {
+                if (span.end - packet_start < 6) return CodestreamError.TruncatedData;
+                if (readU16Be(bytes, packet_start) != @intFromEnum(Marker.sop)) return CodestreamError.InvalidCodestream;
+                if (readU16Be(bytes, packet_start + 2) != 4) return CodestreamError.InvalidCodestream;
+                if (readU16Be(bytes, packet_start + 4) != packet_sequence) return CodestreamError.InvalidCodestream;
+                packet_sequence +%= 1;
+                packet_start += 6;
+            }
+
+            const groups = try stateful.groupsFor(packet);
+            const packet_span = try readStrictPacketHeaderSpan(bytes[packet_start..span.end], packet, groups);
+            const header_end = try std.math.add(usize, packet_start, packet_span.header_length);
+            var body_start = header_end;
+            if (marker_policy.eph) {
+                if (span.end - body_start < 2) return CodestreamError.TruncatedData;
+                if (readU16Be(bytes, body_start) != @intFromEnum(Marker.eph)) return CodestreamError.InvalidCodestream;
+                body_start += 2;
+            }
+            const packet_end = try std.math.add(usize, body_start, packet_span.payload_length);
+            if (packet_end > span.end) return CodestreamError.TruncatedData;
+
+            const byte_offset = packet_bytes.items.len;
+            try packet_bytes.appendSlice(allocator, bytes[packet_start..header_end]);
+            try packet_bytes.appendSlice(allocator, bytes[body_start..packet_end]);
+            const byte_length = std.math.cast(u32, packet_span.header_length + packet_span.payload_length) orelse return CodestreamError.InvalidCodestream;
+            try entries.append(allocator, .{
+                .packet = packet,
+                .tile_index = span.tile_index,
+                .tile_part_index = 0,
+                .byte_offset = byte_offset,
+                .byte_length = byte_length,
+            });
+            cursor = packet_end;
+        }
+    } else {
+        for (packet_lengths.items, sequence) |packet_length, packet| {
+            const byte_offset = packet_bytes.items.len;
+            const byte_length = try appendStrictSodPacketPayload(
+                allocator,
+                &packet_bytes,
+                bytes,
+                &cursor,
+                span.end,
+                packet_length,
+                marker_policy,
+                &packet_sequence,
+            );
+            try entries.append(allocator, .{
+                .packet = packet,
+                .tile_index = span.tile_index,
+                .tile_part_index = 0,
+                .byte_offset = byte_offset,
+                .byte_length = byte_length,
+            });
+        }
     }
     if (cursor != span.end) return CodestreamError.InvalidCodestream;
 
@@ -4343,6 +4388,7 @@ fn decodeStrictMultiTileImageMeasured(
             allocator,
             bytes,
             span,
+            tile_header,
             temporaryPacketPlan(tile_header),
             header.layers,
             header.progression,
@@ -4387,6 +4433,7 @@ fn auditStrictMultiTilePacketHeaders(
             allocator,
             bytes,
             span,
+            tile_header,
             temporaryPacketPlan(tile_header),
             header.layers,
             header.progression,
@@ -5711,15 +5758,16 @@ const StrictMultiTileTilePartSpan = struct {
     end: usize,
     packet_payload_bytes: usize,
     packet_count: usize,
+    missing_plt: bool = false,
 };
 
 /// Walks the tile-part sequence of a multi-tile stream and enforces the v1
-/// discipline: exactly one tile-part per tile in row-major order (Isot counts
-/// up from 0, TPsot = 0, TNsot = 1), Psot chaining ending exactly at EOC,
-/// PLT present, per-tile packet counts matching the tile's own packet plan,
-/// and TLM entries (when present) matching Isot/Psot per tile. Streams that
-/// are legal ISO but outside the v1 discipline (reordered tiles, multiple
-/// parts per tile) fail closed as UnsupportedPayload; structural damage is
+/// discipline: exactly one tile-part per tile (TPsot = 0, TNsot = 1), Psot
+/// chaining ending exactly at EOC, no duplicate tiles, and TLM entries (when
+/// present) matching the stream's tile-part order. PLT-backed streams validate
+/// per-tile packet counts here; PLT-less streams defer packet span validation
+/// to the tile-local T2 header walk. Streams with multiple parts per tile still
+/// fail closed as UnsupportedPayload; structural damage is
 /// InvalidCodestream/TruncatedData.
 fn readStrictMultiTileTilePartSpans(
     allocator: std.mem.Allocator,
@@ -5732,37 +5780,40 @@ fn readStrictMultiTileTilePartSpans(
 ) !std.ArrayList(StrictMultiTileTilePartSpan) {
     const tile_count = grid.tileCount();
     if (tile_count > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+    const tile_count_usize = std.math.cast(usize, tile_count) orelse return CodestreamError.UnsupportedPayload;
+    var seen_tiles = try allocator.alloc(bool, tile_count_usize);
+    defer allocator.free(seen_tiles);
+    @memset(seen_tiles, false);
 
     var spans: std.ArrayList(StrictMultiTileTilePartSpan) = .empty;
     errdefer spans.deinit(allocator);
 
     var scan = first_sot;
-    var tile_index: u64 = 0;
+    var tile_part_index: usize = 0;
     while (scan < bytes.len) {
         if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, scan);
         if (marker == @intFromEnum(Marker.eoc)) {
             scan += 2;
             if (scan != bytes.len) return CodestreamError.InvalidCodestream;
-            if (tile_index != tile_count) return CodestreamError.InvalidCodestream;
+            if (tile_part_index != tile_count_usize) return CodestreamError.InvalidCodestream;
             if (tlm_entries) |entries| {
-                if (entries.len != tile_count) return CodestreamError.InvalidCodestream;
+                if (entries.len != tile_count_usize) return CodestreamError.InvalidCodestream;
             }
             return spans;
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
-        if (tile_index >= tile_count) return CodestreamError.InvalidCodestream;
+        if (tile_part_index >= tile_count_usize) return CodestreamError.InvalidCodestream;
 
         const sot = try readStrictSotInfo(bytes, scan);
-        // TLM cross-check first: a SOT that contradicts the stream's own index
-        // is corruption (InvalidCodestream); a self-consistent stream that is
-        // merely outside the v1 row-major discipline fails closed below as
-        // UnsupportedPayload.
         if (tlm_entries) |entries| {
-            try validateStrictTlmEntry(entries, @intCast(tile_index), sot.tile_index, sot.psot);
+            try validateStrictTlmEntry(entries, tile_part_index, sot.tile_index, sot.psot);
         }
-        if (sot.tile_index != tile_index) return CodestreamError.UnsupportedPayload;
         if (sot.tile_part_index != 0 or sot.tile_part_count != 1) return CodestreamError.UnsupportedPayload;
+        if (sot.tile_index >= tile_count) return CodestreamError.InvalidCodestream;
+        const tile_index = @as(usize, sot.tile_index);
+        if (seen_tiles[tile_index]) return CodestreamError.InvalidCodestream;
+        seen_tiles[tile_index] = true;
 
         const tile_part_end = try std.math.add(usize, scan, sot.psot);
         if (tile_part_end > bytes.len or tile_part_end < scan + 12) {
@@ -5772,19 +5823,28 @@ fn readStrictMultiTileTilePartSpans(
         var packet_lengths: std.ArrayList(usize) = .empty;
         defer packet_lengths.deinit(allocator);
         const sod = try readTilePartHeaderMarkers(allocator, bytes, scan + 12, tile_part_end, &packet_lengths);
-        const packet_payload_bytes = try validateStrictTilePartPacketSpan(sod, tile_part_end, packet_lengths.items);
-        if (packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
 
-        const tile = grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
+        const tile = grid.tile(sot.tile_index) catch return CodestreamError.InvalidCodestream;
         const tile_plan = try makePacketPlan(
             @as(usize, tile.rect.width()),
             @as(usize, tile.rect.height()),
             levels,
             options,
         );
-        if (@as(u64, @intCast(packet_lengths.items.len)) != tile_plan.packets) {
-            return CodestreamError.InvalidCodestream;
-        }
+        const missing_plt = packet_lengths.items.len == 0;
+        const packet_payload_bytes = if (missing_plt) blk: {
+            const payload_start = try std.math.add(usize, sod, 2);
+            if (payload_start > tile_part_end) return CodestreamError.TruncatedData;
+            break :blk tile_part_end - payload_start;
+        } else try validateStrictTilePartPacketSpan(sod, tile_part_end, packet_lengths.items);
+        const packet_count = if (missing_plt)
+            std.math.cast(usize, tile_plan.packets) orelse return CodestreamError.InvalidCodestream
+        else blk: {
+            if (@as(u64, @intCast(packet_lengths.items.len)) != tile_plan.packets) {
+                return CodestreamError.InvalidCodestream;
+            }
+            break :blk packet_lengths.items.len;
+        };
 
         try spans.append(allocator, .{
             .tile_index = sot.tile_index,
@@ -5792,9 +5852,10 @@ fn readStrictMultiTileTilePartSpans(
             .sod = sod,
             .end = tile_part_end,
             .packet_payload_bytes = packet_payload_bytes,
-            .packet_count = packet_lengths.items.len,
+            .packet_count = packet_count,
+            .missing_plt = missing_plt,
         });
-        tile_index += 1;
+        tile_part_index += 1;
         scan = tile_part_end;
     }
 

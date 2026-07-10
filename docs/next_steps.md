@@ -7,21 +7,24 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 80/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 82/100 full** as of
 2026-07-10. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-10)
 
-Scorecard now **100/100 narrow, 80/100 full**. The aligned multi-tile path has
+Scorecard now **100/100 narrow, 82/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
 T1 BYPASS mode is preserved explicitly into T2 readback. Uniform Kakadu
 COC/QCC style and QCD overrides now decode through z2000 when all RGB
 components agree; partial/divergent overrides and standalone ERTERM fail closed.
-The
-malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
-profile. The next structural multi-tile gates are tile-aware PCRD targets,
+The malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
+profile, and aligned PLT-less multi-tile streams now strict-decode by deriving
+tile-local packet spans from T2 packet headers. The foreign OpenJPEG/Grok/Kakadu
+PLT-less multi-tile smoke is green, including Kakadu's reordered `0,1,3,2`
+tile-part sequence. The next structural multi-tile gates are default
+no-precinct PLT-less multi-tile geometry, tile-aware PCRD targets,
 reference-grid partition anchoring, and tile-level scheduling.
 
 The remaining levers are larger and structural. Ordered by *value per unit
@@ -145,6 +148,26 @@ format, codestream profile, and container semantics are explicit.
   JP2 target to 100/100. This is a narrow target claim only; the full Part 1
   codec score remains separate.
 
+### F1. PLT-less multi-tile strict decode and interop — ✅ LANDED
+
+- **Scope:** move the lossless decode row one step beyond the single-tile
+  PLT-less foreign matrix by allowing aligned z2000 multi-tile streams to omit
+  `PLT` while still decoding through the public strict path.
+- **Coverage:** the new regression strips every `PLT` segment from a 3x3
+  z2000 multi-tile codestream, adjusts `SOT/Psot` and 0x60 `TLM/Ptlm`
+  accounting, verifies the stream remains PLT-less, strict-decodes it
+  byte-exactly, and runs the strict packet-header audit. The multi-tile SOT
+  walk now records PLT-less tile spans, and the per-tile catalog derives
+  packet boundaries from tile-local T2 packet headers. A second regression
+  covers no-TLM/no-SOP/no-EPH framing, and a third accepts a unique reordered
+  tile-part sequence. `tools/interop_pltless_multitile.ps1` generates aligned
+  PLT-less multi-tile JP2s with OpenJPEG, Grok, and Kakadu and z2000
+  strict-decodes each pixel-exactly.
+- **Score policy:** full lossless decode profiles 10->12, moving the full
+  codec estimate 80->82. Remaining gates are default no-precinct PLT-less
+  multi-tile geometry, broader component/layout coverage, and more marker
+  combinations.
+
 ### N1. Core codestream syntax — redundant COC/QCC — ✅ LANDED
 
 - **ISO clause:** A.6.2 (COC), A.6.5 (QCC) — component-specific coding/
@@ -170,8 +193,9 @@ format, codestream profile, and container semantics are explicit.
 
 ### N2. Multi-tile v2 — one axis at a time — L · High
 
-- **Impact:** full "Lossless encode" 10→11, "Lossless decode" 10→12, "Core
-  syntax" +1. (+4, the single biggest full-target lever)
+- **Impact:** full "Lossless encode" 10→11, "Lossless decode" 12→13, "Core
+  syntax" +1. (+3 from the current score, still one of the biggest full-target
+  levers)
 - **ISO clause:** B.3–B.12 (tile grid, per-tile SOT/SOD, tile-part order).
 - **State:** multi-tile v1/v2 is interop-proven for aligned RPCL and multi-layer
   LRCP/RLCP/PCRL/CPRL grids. The envelope is RCT/5-3, untargeted quality layers
@@ -441,7 +465,9 @@ for the unchanged downstream assembler, exactly like the PLT path. Metadata
 skips the R-division plan validation when any part lacks PLT (the catalog
 stage validates the total against the plan). Tile-part boundaries fall on
 packet boundaries, so the walk continues seamlessly across R-parts.
-Multi-tile PLT-less stays fail-closed.
+At the time this stage landed, multi-tile PLT-less stayed fail-closed; the
+2026-07-10 local z2000-generated multi-tile gate later removed that local
+limitation, while foreign multi-tile PLT-less interop remains open.
 
 *Local oracle:* strip-PLT surgery on z2000 output (Psot + TLM adjusted) —
 RPCL with R tile-parts, **multi-layer LRCP** (the stateful case), PCRL,

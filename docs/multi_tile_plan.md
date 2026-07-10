@@ -110,8 +110,8 @@ precinct" — then every partition boundary aligns at every resolution.
 wrapper's profile validator was single-tile throughout. It now understands
 multi-tile: SIZ-derived tile count (≤ 256 for the wrapper profile), TLM Stlm
 `0x60` (u16 Ttlm + u32 Ptlm) alongside the single-tile `0x50`, and a
-`validateMultiTileTilePartSequence` walker (row-major Isot, TPsot=0, TNsot=1,
-per-tile SOP restart, TLM cross-check).
+`validateMultiTileTilePartSequence` walker (unique Isot in stream order,
+TPsot=0, TNsot=1, per-tile SOP restart, TLM cross-check).
 
 *Tests:* "multi-tile encode emits row-major single-part tiles with TLM"
 (SIZ/TLM/SOT structure, Psot chaining to EOC, thread-count determinism, JP2
@@ -130,27 +130,28 @@ multi-tile; full suite green in Debug + ReleaseFast).
 ### Stage B — Decode: SOT walk + per-tile packet spans — ✅ DONE
 `readStrictCodestreamMetadata` accepts multi-tile SIZ (the `isSingleTile`
 rejection is gone; the parsed grid is kept) and, for multi-tile grids, runs
-`readStrictMultiTileTilePartSpans`: one tile-part per tile, row-major `Isot`,
-`TPsot=0`/`TNsot=1`, `Psot` chaining ending exactly at EOC, PLT required,
-per-tile packet counts validated against each tile's own packet plan
-(`makePacketPlan` on the tile dims), and TLM `Ttlm`/`Ptlm` cross-checked per
-tile. The decode side also enforces the same `validateMultiTileGeometry`
+`readStrictMultiTileTilePartSpans`: one tile-part per tile, unique `Isot`,
+`TPsot=0`/`TNsot=1`, `Psot` chaining ending exactly at EOC, optional PLT,
+per-tile packet counts validated against each tile's own packet plan when PLT
+is present (`makePacketPlan` on the tile dims), and TLM `Ttlm`/`Ptlm`
+cross-checked in stream order when present. PLT-less streams derive packet
+spans from tile-local T2 packet headers. The decode side also enforces the same `validateMultiTileGeometry`
 envelope as the encoder (level clamping + partition anchoring), so metadata
 never accepts a stream Stage C cannot decode. `TemporaryHeader` gained
 `tile_width`/`tile_height` (0 = single tile) and multi-tile `packet_count` is
 the per-tile sum.
 
-*Error taxonomy:* the TLM cross-check runs before the ordering check — a SOT
-contradicting the stream's own TLM index is corruption (`InvalidCodestream`);
-a self-consistent stream outside the v1 discipline (reordered tiles, multiple
-parts per tile) fails closed as `UnsupportedPayload`; truncation surfaces as
-`TruncatedData`. The intact multi-tile stream passes metadata and still fails
-closed at the block-catalog stage (Stage C pending) — asserted by test.
+*Error taxonomy:* the TLM cross-check runs before tile-local decode — a SOT
+contradicting the stream's own TLM entry is corruption (`InvalidCodestream`);
+duplicate tiles are invalid, while reordered unique tile-parts are accepted for
+Kakadu interop. Multiple parts per tile still fail closed as
+`UnsupportedPayload`; truncation surfaces as `TruncatedData`.
 
 *Tests:* "multi-tile decode SOT walk validates the v1 tile-part discipline"
-(Isot-vs-TLM contradiction, self-consistent reordering, nonzero TPsot, TNsot
-of 2, TLM length mismatch, truncated final tile-part); the full existing
-suite covers the single-tile regression (253/253, Debug + ReleaseFast).
+(Isot-vs-TLM contradiction, duplicate tile sequence, nonzero TPsot, TNsot of
+2, TLM length mismatch, truncated final tile-part), plus PLT-less multi-tile
+strict decode tests for TLM/SOP/EPH-light streams and reordered unique tile
+parts.
 
 ### Stage C — Decode: per-tile strict T2+T1 — ✅ DONE
 Landed with a lighter refactor than sketched: instead of threading tile
@@ -158,8 +159,9 @@ geometry through every strict-reader function, each tile decodes as its own
 single-tile image via a **per-tile `TemporaryHeader`** (tile dims + the
 tile's own packet plan; precincts reconstructed from the whole-image plan's
 per-resolution dims). `decodeStrictMultiTileImageMeasured` loops the Stage B
-spans: `readStrictMultiTileTilePartPacketCatalog` (tile-local RPCL iterator
-over the PLT lengths, SOP restarting per tile) → the *unchanged*
+spans: `readStrictMultiTileTilePartPacketCatalog` (tile-local packet iterator
+over PLT lengths or PLT-less T2 header-derived spans, SOP restarting per tile)
+→ the *unchanged*
 `assembleStrictPacketCatalogHeaders` → block catalog →
 `decodeStrictRpclImageFromBlockCatalogMeasured` (T1 → DWT⁻¹ → MCT⁻¹, all
 header-driven) → `tile_grid.copyRgbTileInto`. Tiles decode serially; the

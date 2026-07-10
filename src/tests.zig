@@ -8820,9 +8820,10 @@ test "foreign reversible QCD profiles decode via the signalled Mb" {
 }
 
 /// Removes every PLT segment from every tile-part, adjusting each SOT Psot
-/// and the TLM entries (single-tile 0x50 layout) to match. The result is a
-/// PLT-less stream shaped like default OpenJPEG/Grok output, driving the
-/// Stage B in-stream-order packet-header span decoding.
+/// and the TLM entries (0x50 single-tile/R-parts or 0x60 multi-tile layout)
+/// to match. The result is a PLT-less stream shaped like default
+/// OpenJPEG/Grok output, driving the Stage B in-stream-order packet-header
+/// span decoding.
 fn stripAllPltForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     var out: std.ArrayList(u8) = .empty;
@@ -8860,14 +8861,51 @@ fn stripAllPltForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     }
     try out.appendSlice(allocator, bytes[cursor..]);
 
-    if (findMarker(out.items, codestream.markerValue("tlm"))) |tlm| {
-        if (out.items[tlm + 5] != 0x50) return error.InvalidTlm;
+    if (findMarker(out.items[0..first_sot], codestream.markerValue("tlm"))) |tlm| {
+        const stlm = out.items[tlm + 5];
+        const entry_size: usize = switch (stlm) {
+            0x50 => 5,
+            0x60 => 6,
+            else => return error.InvalidTlm,
+        };
+        const ptlm_offset: usize = if (stlm == 0x50) 1 else 2;
         var entry = tlm + 6;
         for (removed_per_part[0..part_count]) |removed| {
-            writeU32BeTest(out.items, entry + 1, readU32BeTest(out.items, entry + 1) - removed);
-            entry += 5;
+            writeU32BeTest(out.items, entry + ptlm_offset, readU32BeTest(out.items, entry + ptlm_offset) - removed);
+            entry += entry_size;
         }
     }
+    return out.toOwnedSlice(allocator);
+}
+
+fn reorderTilePartsForTest(allocator: std.mem.Allocator, bytes: []const u8, order: []const usize) ![]u8 {
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    var starts: [256]usize = undefined;
+    var ends: [256]usize = undefined;
+    var count: usize = 0;
+    var cursor = first_sot;
+    while (cursor + 2 <= bytes.len and readU16BeTest(bytes, cursor) == codestream.markerValue("sot")) {
+        if (count >= starts.len) return error.TooManyTileParts;
+        const psot = readU32BeTest(bytes, cursor + 6);
+        const part_end = cursor + @as(usize, psot);
+        if (part_end > bytes.len) return error.InvalidStream;
+        starts[count] = cursor;
+        ends[count] = part_end;
+        count += 1;
+        cursor = part_end;
+    }
+    if (order.len != count) return error.InvalidOrder;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..first_sot]);
+    var seen = [_]bool{false} ** 256;
+    for (order) |index| {
+        if (index >= count or seen[index]) return error.InvalidOrder;
+        seen[index] = true;
+        try out.appendSlice(allocator, bytes[starts[index]..ends[index]]);
+    }
+    try out.appendSlice(allocator, bytes[cursor..]);
     return out.toOwnedSlice(allocator);
 }
 
@@ -13173,10 +13211,11 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
             }.mutate,
         },
         .{
-            // Both TLM and SOT claim tile 1 first: structurally consistent but a
-            // legal ISO ordering outside the v1 row-major discipline.
-            .label = "reordered tile sequence",
-            .expected = codestream.CodestreamError.UnsupportedPayload,
+            // Both TLM and SOT claim tile 1 first, creating a duplicate tile
+            // later in the stream. True reordered-but-unique tile sequences are
+            // accepted for Kakadu interop; duplicates remain structural damage.
+            .label = "duplicate tile sequence",
+            .expected = codestream.CodestreamError.InvalidCodestream,
             .mutate = struct {
                 fn mutate(stream: []u8, sot0: usize, sot1: usize, tlm_start: usize) void {
                     _ = sot1;
@@ -13268,6 +13307,118 @@ test "multi-tile codestream roundtrips a 3x3 edge-tile grid byte-exactly" {
     var threaded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = 3 });
     defer threaded.deinit();
     try std.testing.expectEqualSlices(u16, decoded.samples, threaded.samples);
+}
+
+test "PLT-less multi-tile strict decode derives tile packet spans from headers" {
+    const allocator = std.testing.allocator;
+    const width = 80;
+    const height = 80;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+    try std.testing.expect(findMarker(bytes, codestream.markerValue("plt")) != null);
+
+    const stripped = try stripAllPltForTest(allocator, bytes);
+    defer allocator.free(stripped);
+    try std.testing.expect(findMarker(stripped, codestream.markerValue("plt")) == null);
+    try std.testing.expectEqual(@as(usize, 9), countMarker(stripped, codestream.markerValue("sot")));
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, stripped);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    const audit = try codestream.auditStrictPacketHeaders(allocator, stripped);
+    try std.testing.expect(audit.packets > 0);
+    try std.testing.expectEqual(audit.packets, audit.header_decoded_packets);
+}
+
+test "PLT-less multi-tile strict decode accepts no TLM SOP or EPH framing" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.tlm = false;
+    options.sop = false;
+    options.eph = false;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    try std.testing.expect(findMarker(bytes[0..first_sot], codestream.markerValue("tlm")) == null);
+    const scod = bytes[try codScodOffsetForTest(bytes)];
+    try std.testing.expectEqual(@as(u8, 0), scod & 0x06);
+
+    const stripped = try stripAllPltForTest(allocator, bytes);
+    defer allocator.free(stripped);
+    try std.testing.expect(findMarker(stripped, codestream.markerValue("plt")) == null);
+    const stripped_first_sot = findMarker(stripped, codestream.markerValue("sot")) orelse return error.MissingSot;
+    try std.testing.expect(findMarker(stripped[0..stripped_first_sot], codestream.markerValue("tlm")) == null);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, stripped);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    const audit = try codestream.auditStrictPacketHeaders(allocator, stripped);
+    try std.testing.expect(audit.packets > 0);
+    try std.testing.expectEqual(audit.packets, audit.header_decoded_packets);
+}
+
+test "PLT-less multi-tile strict decode accepts unique reordered tile-parts" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.tlm = false;
+    options.sop = false;
+    options.eph = false;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    const stripped = try stripAllPltForTest(allocator, bytes);
+    defer allocator.free(stripped);
+    const reordered = try reorderTilePartsForTest(allocator, stripped, &.{ 0, 1, 3, 2 });
+    defer allocator.free(reordered);
+    try std.testing.expect(!std.mem.eql(u8, stripped, reordered));
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, reordered);
+    defer allocator.free(wrapped);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, reordered);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    const audit = try codestream.auditStrictPacketHeaders(allocator, reordered);
+    try std.testing.expect(audit.packets > 0);
+    try std.testing.expectEqual(audit.packets, audit.header_decoded_packets);
 }
 
 test "multi-tile decode matches the single-tile decode when the tile covers the image" {

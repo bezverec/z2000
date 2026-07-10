@@ -338,7 +338,8 @@ tile descriptors. It also provides tile-local RGB sample extraction and
 copy-back helpers so per-tile encode/decode work can move rectangular image
 regions without ad hoc row math. Multi-tile support is intentionally bounded:
 lossless RCT/5-3, untargeted quality layers across all five progression orders,
-one tile-part per tile, row-major tile order, plain coding and the implemented
+one tile-part per tile, deterministic row-major encode, reordered foreign
+tile-part decode, plain coding and the implemented
 CAUSAL/SEGMARK/terminated resilience combinations, and ISO B.6/B.7-aligned
 geometry.
 
@@ -363,7 +364,8 @@ These are intentionally not treated as complete yet:
 - standalone ERTERM, unsupported RESET envelopes, and untested code-block style
   combinations;
 - broader PLT-less foreign decode coverage beyond the current single-tile
-  lossless OpenJPEG/Grok/Kakadu matrix;
+  lossless OpenJPEG/Grok/Kakadu matrix and aligned OpenJPEG/Grok/Kakadu
+  multi-tile PLT-less smoke;
 - general-purpose lossy decode/error-bound coverage beyond the current narrow
   ICT/9-7/scalar-quantization gates.
 

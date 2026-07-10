@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### PLT-less Multi-Tile Strict Decode And Interop
+
+- Extended the aligned multi-tile strict path so z2000-generated streams can
+  omit `PLT`: Stage B records PLT-less tile spans, and the per-tile catalog now
+  derives packet boundaries from tile-local T2 packet headers. Added a 3x3
+  multi-tile regression that strips every `PLT` segment, adjusts `SOT/Psot` and
+  0x60 `TLM/Ptlm`, strict-decodes byte-exactly, and audits packet headers, plus
+  no-TLM/no-SOP/no-EPH and reordered unique tile-part regressions. Added
+  `tools/interop_pltless_multitile.ps1`, which generates aligned PLT-less
+  multi-tile JP2s with OpenJPEG, Grok, and Kakadu and verifies z2000 strict
+  decode pixel-exactly. Scorecard: full lossless decode profiles 10->12,
+  moving the full codec estimate to 82/100.
+
 ### Narrow RGB Lossless JP2 Target Reaches 100/100
 
 - Added a final no-sidecar strict T1 corpus regression over sparse,
@@ -444,10 +457,9 @@ entries are grouped by development milestone rather than semantic version.
   default LRCP/no-precinct files, plus OpenJPEG/Grok `-r 20,10,1` multi-layer
   lossless-final ladders. The full scorecard estimate moves from 63/100 to
   65/100 by raising the lossless decode profile row from 8 to 10.
-  PLT-less foreign streams remain fail-closed (packet-length derivation
-  from header parsing is the next stage). Local oracle: splicing the
-  precinct bytes out of a maximal-precinct z2000 stream decodes
-  byte-exactly.
+  Broader PLT-less foreign streams, especially multi-tile, remain a later
+  matrix. Local oracle: splicing the precinct bytes out of a
+  maximal-precinct z2000 stream decodes byte-exactly.
 
 ### Scalar-Derived Quantization
 
