@@ -8193,6 +8193,197 @@ test "redundant COC/QCC that byte-replicate the main COD/QCD decode byte-exactly
     try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(bad_wrapped_qcc_component));
 }
 
+fn spliceMarkerSegmentForTest(
+    allocator: std.mem.Allocator,
+    stream: []const u8,
+    insert_at: usize,
+    marker: u16,
+    payload: []const u8,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, stream[0..insert_at]);
+    try out.append(allocator, @intCast(marker >> 8));
+    try out.append(allocator, @intCast(marker & 0xff));
+    const seg_len: u16 = @intCast(payload.len + 2);
+    try out.append(allocator, @intCast(seg_len >> 8));
+    try out.append(allocator, @intCast(seg_len & 0xff));
+    try out.appendSlice(allocator, payload);
+    try out.appendSlice(allocator, stream[insert_at..]);
+    return out.toOwnedSlice(allocator);
+}
+
+test "uniform COC/QCC overrides across all components decode via the signalled values" {
+    // Kakadu signals uniform per-component requests (Cmodes:C0..C2=RESET,
+    // Qguard:C0..C2=2) as three identical COC/QCC markers whose values differ
+    // from the main COD/QCD. The decoder must follow the override when every
+    // component agrees, and fail closed when the set is partial or divergent.
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 32;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .samples = samples };
+
+    // --- COC style override oracle: encode with RESET so the payload really
+    // uses context reset, then move the style bit from the COD into three
+    // uniform COCs. Decode must follow the COC style to reconstruct.
+    const reset_stream = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .reset_context = true });
+    defer allocator.free(reset_stream);
+    const cod = findMarker(reset_stream, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const cod_len = (@as(usize, reset_stream[cod + 2]) << 8) | reset_stream[cod + 3];
+    // COD payload: Scod(1) SGcod(4) NL(1) xcb(1) ycb(1) style(1) transform...
+    const cod_style_offset = cod + 4 + 8;
+    try std.testing.expectEqual(@as(u8, 0x02), reset_stream[cod_style_offset]);
+
+    var with_cocs = try allocator.dupe(u8, reset_stream);
+    // Clear the COD style: the RESET signal now lives only in the COCs.
+    with_cocs[cod_style_offset] = 0x00;
+    const cod_scod = with_cocs[cod + 4];
+    const cod_coding_len = cod_len - 2 - 5;
+    var component: u8 = 0;
+    while (component < 3) : (component += 1) {
+        var coc_payload: std.ArrayList(u8) = .empty;
+        defer coc_payload.deinit(allocator);
+        try coc_payload.append(allocator, component);
+        try coc_payload.append(allocator, cod_scod & 0x01);
+        try coc_payload.appendSlice(allocator, with_cocs[cod + 4 + 5 ..][0..cod_coding_len]);
+        coc_payload.items[2 + 3] = 0x02; // SPcoc style byte carries RESET
+        const insert_at = cod + 4 + (cod_len - 2);
+        const next = try spliceMarkerSegmentForTest(allocator, with_cocs, insert_at, codestream.markerValue("coc"), coc_payload.items);
+        allocator.free(with_cocs);
+        with_cocs = next;
+    }
+    defer allocator.free(with_cocs);
+
+    {
+        var decoded = try codestream.decodeLosslessTemporary(allocator, with_cocs);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, with_cocs);
+        allocator.free(wrapped);
+    }
+
+    // Partial override (drop the third COC) must fail closed.
+    {
+        const third_coc_start = blk: {
+            var offset: usize = 0;
+            var found: usize = 0;
+            while (findMarkerAfter(with_cocs, codestream.markerValue("coc"), offset)) |at| {
+                found += 1;
+                if (found == 3) break :blk at;
+                offset = at + 2;
+            }
+            return error.MissingCoc;
+        };
+        const third_len = (@as(usize, with_cocs[third_coc_start + 2]) << 8) | with_cocs[third_coc_start + 3];
+        var partial: std.ArrayList(u8) = .empty;
+        defer partial.deinit(allocator);
+        try partial.appendSlice(allocator, with_cocs[0..third_coc_start]);
+        try partial.appendSlice(allocator, with_cocs[third_coc_start + 2 + third_len ..]);
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.decodeLosslessTemporary(allocator, partial.items),
+        );
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, rgb, partial.items));
+    }
+
+    // Divergent override (one COC styles differently) must fail closed.
+    {
+        const divergent = try allocator.dupe(u8, with_cocs);
+        defer allocator.free(divergent);
+        const first_coc = findMarker(divergent, codestream.markerValue("coc")) orelse return error.MissingCoc;
+        divergent[first_coc + 4 + 2 + 3] = 0x08; // CAUSAL on component 0 only
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.decodeLosslessTemporary(allocator, divergent),
+        );
+    }
+
+    // --- QCC quantization override oracle: rewrite the QCD to the equivalent
+    // guard-1 form (guard 2->1, exponents +1 keeps Mb identical), then hang
+    // the original guard-2 values on three uniform QCCs. The decode must use
+    // the QCC values; since both describe the same Mb the pixels must match.
+    const base = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(base);
+    const qcd = findMarker(base, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const qcd_len = (@as(usize, base[qcd + 2]) << 8) | base[qcd + 3];
+    const qcd_payload_len = qcd_len - 2;
+
+    var with_qccs = try allocator.dupe(u8, base);
+    // Keep a copy of the original QCD payload for the QCC bodies.
+    const original_qcd = try allocator.dupe(u8, base[qcd + 4 ..][0..qcd_payload_len]);
+    defer allocator.free(original_qcd);
+    // Rewrite QCD: guard 2 -> 1, every exponent +1 (equivalent Mb).
+    with_qccs[qcd + 4] = 1 << 5;
+    for (1..qcd_payload_len) |index| {
+        with_qccs[qcd + 4 + index] += 8;
+    }
+    component = 0;
+    while (component < 3) : (component += 1) {
+        var qcc_payload: std.ArrayList(u8) = .empty;
+        defer qcc_payload.deinit(allocator);
+        try qcc_payload.append(allocator, component);
+        try qcc_payload.appendSlice(allocator, original_qcd);
+        const qcd_at = findMarker(with_qccs, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+        const insert_at = qcd_at + 4 + qcd_payload_len;
+        const next = try spliceMarkerSegmentForTest(allocator, with_qccs, insert_at, codestream.markerValue("qcc"), qcc_payload.items);
+        allocator.free(with_qccs);
+        with_qccs = next;
+    }
+    defer allocator.free(with_qccs);
+
+    {
+        var decoded = try codestream.decodeLosslessTemporary(allocator, with_qccs);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, with_qccs);
+        allocator.free(wrapped);
+    }
+
+    // A QCC override is only representable by the current uniform-component
+    // decode path when all RGB components carry the same payload.
+    {
+        const third_qcc_start = blk: {
+            var offset: usize = 0;
+            var found: usize = 0;
+            while (findMarkerAfter(with_qccs, codestream.markerValue("qcc"), offset)) |at| {
+                found += 1;
+                if (found == 3) break :blk at;
+                offset = at + 2;
+            }
+            return error.MissingQcc;
+        };
+        const third_len = (@as(usize, with_qccs[third_qcc_start + 2]) << 8) | with_qccs[third_qcc_start + 3];
+        var partial: std.ArrayList(u8) = .empty;
+        defer partial.deinit(allocator);
+        try partial.appendSlice(allocator, with_qccs[0..third_qcc_start]);
+        try partial.appendSlice(allocator, with_qccs[third_qcc_start + 2 + third_len ..]);
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.decodeLosslessTemporary(allocator, partial.items),
+        );
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, rgb, partial.items));
+    }
+
+    {
+        const divergent = try allocator.dupe(u8, with_qccs);
+        defer allocator.free(divergent);
+        const first_qcc = findMarker(divergent, codestream.markerValue("qcc")) orelse return error.MissingQcc;
+        divergent[first_qcc + 5] = 1 << 5; // component 0 uses guard 1; the others use guard 2
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.decodeLosslessTemporary(allocator, divergent),
+        );
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, rgb, divergent));
+    }
+}
+
 test "precinct-less COD maps to maximal precincts and decodes byte-exactly" {
     const allocator = std.testing.allocator;
     const width = 32;

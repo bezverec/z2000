@@ -25,7 +25,8 @@ interop gate.
   refinement contexts. BYPASS, terminate-all, TERMALL-scoped reset-context,
   BYPASS+TERMALL, vertical-causal, TERMALL-scoped predictable termination, and
   segmentation-symbol behavior now have public payload paths where the required
-  segment model exists. Standalone RESET, standalone ERTERM, and untested
+  segment model exists. Standalone RESET is public on the single-tile ISO-MQ
+  envelope; standalone ERTERM, unsupported RESET envelopes, and untested
   combinations remain fail-closed. Keep row-mask, stripe-mask,
   flag-word, and SIMD-aware T1 optimization going only when byte-for-byte
   oracle tests continue to pass.
@@ -91,10 +92,11 @@ interop gate.
    corrupted PLT/TLM/SOP/EPH/header cases that can be compared against
    OpenJPEG/Grok/Kakadu behavior without assuming any validator is final.
 4. Continue T1 style coverage after the JP2/T2 diagnostics are sharper: keep
-   the implemented single- and multi-tile combinations green, add Kakadu to
-   the BYPASS+TERMALL interop row, and keep standalone RESET/ERTERM plus
-   untested combinations fail-closed until each has writer, strict reader,
-   oracle tests, and interop.
+   the implemented single- and multi-tile combinations green in the
+   OpenJPEG/Grok/Kakadu matrix, then open standalone ERTERM only after it has a
+   writer, strict reader, oracle tests, and interop. Keep BYPASS+RESET,
+   BYPASS+ERTERM, unsupported RESET envelopes, and other untested combinations
+   fail-closed.
 5. Run a comparative benchmark only after the above interop fixtures are green,
    so performance numbers are attached to output that external decoders accept.
 

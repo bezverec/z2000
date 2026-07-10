@@ -471,12 +471,14 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
     var saw_qcd = false;
     var qcd_payload: []const u8 = &.{};
     var tlm_state = TlmState{};
+    var override_state = ComponentOverrideState{};
     while (cursor < payload.len - 2) {
         const marker = try readU16Be(payload, cursor);
         if ((marker >> 8) != 0xff) return Jp2Error.InvalidCodestream;
         switch (marker) {
             marker_sot => {
                 if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
+                try validateUniformComponentOverrides(&override_state, cod_payload, qcd_payload);
                 if (tile_count == 1) {
                     try validateTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null);
                 } else {
@@ -523,8 +525,8 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
                 qcd_payload = payload[length_offset + 2 .. length_offset + marker_length];
                 saw_qcd = true;
             },
-            marker_coc => try validateRedundantCocSegment(payload, length_offset, marker_length, cod_payload),
-            marker_qcc => try validateRedundantQccSegment(payload, length_offset, marker_length, cod_info.?, qcd_payload),
+            marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, &override_state),
+            marker_qcc => try validateUniformQccSegment(payload, length_offset, marker_length, cod_info.?, &override_state),
             else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state),
         }
         cursor = next;
@@ -775,7 +777,19 @@ fn validateCodeBlockStyleByte(code_block_style: u8) !void {
     }
 }
 
-fn validateRedundantCocSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod_payload: []const u8) !void {
+/// Cross-marker state for COC/QCC handling: z2000 accepts them either as
+/// byte-replications of the main COD/QCD or as a *uniform override* where
+/// every RGB component carries identical data (Kakadu signals uniform
+/// per-component Cmodes/Qguard requests this way). Genuinely per-component
+/// divergence fails closed in validateUniformComponentOverrides.
+const ComponentOverrideState = struct {
+    coc_seen: [3]bool = .{ false, false, false },
+    coc_first: []const u8 = &.{},
+    qcc_seen: [3]bool = .{ false, false, false },
+    qcc_first: []const u8 = &.{},
+};
+
+fn validateUniformCocSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod_payload: []const u8, state: *ComponentOverrideState) !void {
     if (cod_payload.len < 6) return Jp2Error.InvalidCodestream;
     const component = payload[length_offset + 2];
     if (component >= 3) return Jp2Error.UnsupportedProfile;
@@ -784,7 +798,46 @@ fn validateRedundantCocSegment(payload: []const u8, length_offset: usize, marker
     if ((scoc & 0x01) != (cod_payload[0] & 0x01)) return Jp2Error.UnsupportedProfile;
     const coc_coding = payload[length_offset + 4 .. length_offset + marker_length];
     try validateCocCodingPayload(coc_coding, scoc);
-    if (!std.mem.eql(u8, coc_coding, cod_payload[5..])) return Jp2Error.UnsupportedProfile;
+    if (state.coc_seen[component]) return Jp2Error.InvalidCodestream;
+    state.coc_seen[component] = true;
+    const coc_body = payload[length_offset + 3 .. length_offset + marker_length];
+    if (state.coc_first.len == 0) {
+        state.coc_first = coc_body;
+    } else if (!std.mem.eql(u8, coc_body, state.coc_first)) {
+        return Jp2Error.UnsupportedProfile;
+    }
+}
+
+fn validateUniformComponentOverrides(state: *ComponentOverrideState, cod_payload: []const u8, qcd_payload: []const u8) !void {
+    if (state.coc_first.len != 0) {
+        const spcoc = state.coc_first[1..];
+        const cod_coding = cod_payload[5..];
+        if (!std.mem.eql(u8, spcoc, cod_coding)) {
+            // A uniform override requires every component and may differ from
+            // the COD only in the code-block style byte; the style itself must
+            // be implemented. Redundant byte-replication is fine on its own.
+            if (!state.coc_seen[0] or !state.coc_seen[1] or !state.coc_seen[2]) {
+                return Jp2Error.UnsupportedProfile;
+            }
+            if (spcoc.len != cod_coding.len or spcoc.len < 5) return Jp2Error.UnsupportedProfile;
+            for (spcoc, cod_coding, 0..) |coc_byte, cod_byte, index| {
+                if (index == 3) continue;
+                if (coc_byte != cod_byte) return Jp2Error.UnsupportedProfile;
+            }
+            try validateCodeBlockStyleByte(spcoc[3]);
+        }
+    }
+    if (state.qcc_first.len != 0) {
+        // A uniform QCC override replaces the QCD wholesale and requires all
+        // components; each segment was already bounds-validated, so the JP2
+        // boundary only enforces the uniformity (strict decode consumes the
+        // signalled values). Redundant byte-replication is fine on its own.
+        if (!std.mem.eql(u8, state.qcc_first, qcd_payload)) {
+            if (!state.qcc_seen[0] or !state.qcc_seen[1] or !state.qcc_seen[2]) {
+                return Jp2Error.UnsupportedProfile;
+            }
+        }
+    }
 }
 
 fn validateCocCodingPayload(segment: []const u8, scoc: u8) !void {
@@ -802,13 +855,18 @@ fn validateCocCodingPayload(segment: []const u8, scoc: u8) !void {
     try validateCodPrecinctBytes(segment, 5, @intCast(precinct_bytes));
 }
 
-fn validateRedundantQccSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, qcd_payload: []const u8) !void {
-    if (qcd_payload.len == 0) return Jp2Error.InvalidCodestream;
+fn validateUniformQccSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, state: *ComponentOverrideState) !void {
     const component = payload[length_offset + 2];
     if (component >= 3) return Jp2Error.UnsupportedProfile;
     const qcc_quantization = payload[length_offset + 3 .. length_offset + marker_length];
     try validateQcdPayloadBytes(qcc_quantization, cod);
-    if (!std.mem.eql(u8, qcc_quantization, qcd_payload)) return Jp2Error.UnsupportedProfile;
+    if (state.qcc_seen[component]) return Jp2Error.InvalidCodestream;
+    state.qcc_seen[component] = true;
+    if (state.qcc_first.len == 0) {
+        state.qcc_first = qcc_quantization;
+    } else if (!std.mem.eql(u8, qcc_quantization, state.qcc_first)) {
+        return Jp2Error.UnsupportedProfile;
+    }
 }
 
 fn validateQcdSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo) !void {

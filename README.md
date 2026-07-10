@@ -79,9 +79,9 @@ This first milestone is intentionally small and honest:
   across a moderate rate ladder plus a heavy-truncation error-bound fixture),
   and a foreign Grok 20.3.6 9/7 lossy fixture whose scalar-expounded QCD
   mantissas differ from z2000's generated table
-- redundant COC/QCC component markers accepted when they byte-replicate the
-  main COD/QCD (genuine per-component overrides plus malformed COC/QCC payloads
-  fail closed)
+- COC/QCC component markers accepted when they either byte-replicate the main
+  COD/QCD or provide a uniform override across all RGB components; partial or
+  divergent per-component overrides plus malformed COC/QCC payloads fail closed
 - strict marker checks for SOT/TLM/PLT/SOP/EPH packet metadata and tile-part
   `COM` comments
 
@@ -96,8 +96,8 @@ decode coverage and targeted OpenJPEG/Grok/Kakadu smoke gates. Unsupported
 combinations still fail closed.
 
 The current ISO readiness estimate is tracked in `docs/iso_coverage.md`. As of
-2026-07-10, the narrow RGB lossless JP2 target is estimated at 91/100, while
-the broader JPEG2000 Part 1 codec family is estimated at 77/100.
+2026-07-10, the narrow RGB lossless JP2 target is estimated at 92/100, while
+the broader JPEG2000 Part 1 codec family is estimated at 80/100.
 
 ## Build
 
@@ -222,12 +222,12 @@ lines we are targeting:
   aligned multi-tile envelope accepts untargeted quality layers for all five
   progression orders plus CAUSAL, SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and
   BYPASS+TERMALL. BYPASS without TERMALL and BYPASS combined with RESET or
-  ERTERM remain fail-closed. The
-  current larger single-tile no-sidecar RESET+TERMALL smoke decodes
-  pixel-exactly through z2000 strict decode and independent decoders. The
-  ERTERM smoke now decodes pixel-exactly through z2000 strict decode,
-  OpenJPEG, Grok, and Kakadu,
-  including the block-parallel strict decode path.
+  ERTERM remain fail-closed. The current Kakadu style matrix covers single-tile
+  RESET, TERMALL, RESET+TERMALL, ERTERM+TERMALL, BYPASS+TERMALL, and
+  CAUSAL+SEGMARK plus aligned multi-tile CAUSAL+SEGMARK, RESET+TERMALL,
+  ERTERM+TERMALL, and BYPASS+TERMALL. Reverse Kakadu streams with uniform
+  COC/QCC style/QCD overrides also decode pixel-exactly when the signalled
+  style is implemented; standalone ERTERM still fails closed.
 - `--sop` and `--eph` map to COD `Scod` flags and Kakadu `Cuse_sop=yes` /
   `Cuse_eph=yes` at marker/config level. SOP is enabled by default; EPH is
   disabled by default for the current independent-decoder interop path. Use
@@ -286,8 +286,9 @@ actual coding-pass truncation points. The optional BP8 debug sidecar mirrors the
 same metadata for oracle checks; it is no longer emitted by default or required
 for normal z2000 decode. Code-block style options remain fail-closed until their
 payload behavior is implemented; currently supported combinations include
-BYPASS without TERMALL and RESET only when TERMALL supplies explicit pass
-segment boundaries.
+BYPASS, standalone RESET on the single-tile ISO-MQ path, TERMALL,
+RESET+TERMALL, ERTERM+TERMALL, BYPASS+TERMALL, vertical-causal, and
+segmentation symbols within the documented profile envelopes.
 
 ## Performance Notes (current pass)
 

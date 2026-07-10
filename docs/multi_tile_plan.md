@@ -195,16 +195,19 @@ panic. 256/256 in Debug + ReleaseFast.
   multi-tile streams instead of failing closed.
 - **Docs:** README `--tile` / `--mct none` bullets updated; `next_steps.md`
   §3.1 marked landed-pending-interop.
+- **Kakadu style matrix:** the aligned multi-tile style envelope now has a
+  reproducible `tools/interop_kakadu_styles.ps1` gate for CAUSAL+SEGMARK,
+  RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL; all four decode
+  pixel-exactly through Kakadu on the 3520x5115 smoke image.
 - **Memory note:** the grid encoder holds *all* tile artifacts in memory
   before tile-part assembly, and the decoder holds one tile's catalogs at a
   time plus the full output image. Fine at v1 scale; streaming tile-part
   assembly (encode) and the Phase-4 peak-memory benchmark are the v2 follow-up.
 
-**Interop gate passed:** OpenJPEG and Grok decode genuine aligned multi-tile
-z2000 files losslessly across all five progression orders. The later
-resilience expansion is also pixel-exact in both decoders for CAUSAL+SEGMARK,
-RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL. Kakadu remains the breadth
-follow-up for this expanded matrix.
+**Interop gate passed:** OpenJPEG, Grok, and Kakadu decode genuine aligned
+multi-tile z2000 files losslessly across the implemented progression/style
+matrix. The resilience expansion is pixel-exact for CAUSAL+SEGMARK,
+RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL.
 
 ### Stage E — Progression, layer, and resilience breadth — ✅ DONE
 

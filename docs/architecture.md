@@ -113,9 +113,10 @@ TERMALL-scoped RESET, BYPASS+TERMALL, vertical-causal, TERMALL-scoped ERTERM,
 and segmentation-symbol profiles are public where their segment model exists;
 large no-sidecar ERTERM files are green through z2000 strict decode, OpenJPEG,
 Grok, and Kakadu. BYPASS+TERMALL is strict-decode covered and lossless through
-OpenJPEG/Grok on the current smoke; Kakadu remains to be checked. Standalone
-RESET/ERTERM and untested
-combinations still return `UnsupportedPayload`. The next T1 work should
+OpenJPEG/Grok/Kakadu on the current smoke, and the aligned multi-tile style
+matrix has a reproducible Kakadu gate. Standalone RESET is public only on the
+single-tile ISO-MQ envelope; standalone ERTERM and untested combinations still
+return `UnsupportedPayload`. The next T1 work should
 continue tightening remaining cleanup edge cases, COD-driven termination
 combinations, and byte-for-byte oracle coverage.
 
@@ -351,7 +352,8 @@ These are intentionally not treated as complete yet:
 - multi-tile combinations outside the bounded envelope, including rate-targeted
   layers, BYPASS without TERMALL, unsupported style combinations, and tile-part
   divisions beyond the current supported policy;
-- standalone RESET/ERTERM and untested code-block style combinations;
+- standalone ERTERM, unsupported RESET envelopes, and untested code-block style
+  combinations;
 - broader PLT-less foreign decode coverage beyond the current single-tile
   lossless OpenJPEG/Grok/Kakadu matrix;
 - general-purpose lossy decode/error-bound coverage beyond the current narrow

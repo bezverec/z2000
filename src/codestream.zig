@@ -1789,6 +1789,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var cod_scod: u8 = 0;
     var cod_coding: []const u8 = &.{};
     var qcd_payload: []const u8 = &.{};
+    var coc_component_seen = [_]bool{false} ** 3;
+    var coc_payload_first: []const u8 = &.{};
+    var qcc_component_seen = [_]bool{false} ** 3;
+    var qcc_payload_first: []const u8 = &.{};
+    var qcc_override_info: StrictQcdInfo = undefined;
     var qcd_band_count: usize = 0;
     var tlm_entries: std.ArrayList(TlmEntry) = .empty;
     defer tlm_entries.deinit(allocator);
@@ -1935,28 +1940,48 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             saw_qcd = true;
         } else if (marker == @intFromEnum(Marker.coc)) {
             // ISO 15444-1 A.6.2: component-specific coding style. z2000 has no
-            // per-component coding path, so accept only a COC that byte-
-            // replicates the main COD for a valid component (some encoders
-            // emit a redundant COC per component); any genuine override fails
-            // closed. Layout: Ccoc(1) Scoc(1) SPcoc(NL,xcb,ycb,cblk,transform,
-            // precincts) — SPcoc mirrors the main COD's coding fields.
+            // per-component coding path, so a COC is accepted only when it
+            // byte-replicates the main COD, or as a *uniform override*: every
+            // RGB component carries an identical COC whose SPcoc differs from
+            // the COD only in the code-block style byte (Kakadu signals
+            // per-component Cmodes this way even when the request is uniform).
+            // Genuinely per-component divergence fails closed. Layout:
+            // Ccoc(1) Scoc(1) SPcoc(NL,xcb,ycb,cblk,transform,precincts).
             if (!saw_cod) return CodestreamError.InvalidCodestream;
             if (segment.len < 3) return CodestreamError.InvalidCodestream;
             if (segment[0] >= 3) return CodestreamError.UnsupportedPayload;
             if ((segment[1] & ~@as(u8, 0x01)) != 0) return CodestreamError.InvalidCodestream;
             if ((segment[1] & 0x01) != (cod_scod & 0x01)) return CodestreamError.UnsupportedPayload;
             try validateStrictCocCodingPayload(segment[2..], segment[1]);
-            if (!std.mem.eql(u8, segment[2..], cod_coding)) return CodestreamError.UnsupportedPayload;
+            const coc_component = segment[0];
+            if (coc_component_seen[coc_component]) return CodestreamError.InvalidCodestream;
+            coc_component_seen[coc_component] = true;
+            if (coc_payload_first.len == 0) {
+                coc_payload_first = segment[1..];
+            } else if (!std.mem.eql(u8, segment[1..], coc_payload_first)) {
+                // Components disagree with each other: genuine per-component
+                // coding, which z2000 cannot decode.
+                return CodestreamError.UnsupportedPayload;
+            }
         } else if (marker == @intFromEnum(Marker.qcc)) {
-            // ISO 15444-1 A.6.5: component-specific quantization. Same policy:
-            // accept only a QCC that byte-replicates the main QCD (Sqcc+steps
-            // mirror Sqcd+steps) for a valid component. Layout: Cqcc(1) then
-            // the QCD-style Sqcc + step data.
+            // ISO 15444-1 A.6.5: component-specific quantization. Same policy
+            // as COC: byte-replication of the main QCD, or a uniform override
+            // where all components carry identical QCC data — Kakadu writes
+            // per-component Qguard this way, leaving the QCD at its default
+            // (the signalled-Mb decode path consumes whichever values win).
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
             if (segment.len < 1) return CodestreamError.InvalidCodestream;
             if (segment[0] >= 3) return CodestreamError.UnsupportedPayload;
-            _ = try validateStrictQcdSegment(segment[1..], bit_depth, levels, parsed_transform);
-            if (!std.mem.eql(u8, segment[1..], qcd_payload)) return CodestreamError.UnsupportedPayload;
+            const qcc_component = segment[0];
+            const qcc_info = try validateStrictQcdSegment(segment[1..], bit_depth, levels, parsed_transform);
+            if (qcc_component_seen[qcc_component]) return CodestreamError.InvalidCodestream;
+            qcc_component_seen[qcc_component] = true;
+            if (qcc_payload_first.len == 0) {
+                qcc_payload_first = segment[1..];
+                qcc_override_info = qcc_info;
+            } else if (!std.mem.eql(u8, segment[1..], qcc_payload_first)) {
+                return CodestreamError.UnsupportedPayload;
+            }
         } else if (marker == @intFromEnum(Marker.tlm)) {
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
             saw_tlm = true;
@@ -1974,6 +1999,46 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         return CodestreamError.InvalidCodestream;
     }
     if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
+
+    if (coc_payload_first.len != 0) {
+        // A COC that byte-replicates the COD is redundant and fine on its own.
+        // A *uniform override* — SPcoc differing from the COD only in the
+        // code-block style byte — requires every component to carry the
+        // identical COC, and the style then becomes effective for all of them
+        // (Kakadu's uniform per-component Cmodes signalling).
+        const spcoc = coc_payload_first[1..];
+        if (!std.mem.eql(u8, spcoc, cod_coding)) {
+            if (!coc_component_seen[0] or !coc_component_seen[1] or !coc_component_seen[2]) {
+                return CodestreamError.UnsupportedPayload;
+            }
+            if (spcoc.len != cod_coding.len or spcoc.len < 5) return CodestreamError.UnsupportedPayload;
+            for (spcoc, cod_coding, 0..) |coc_byte, cod_byte, index| {
+                if (index == 3) continue;
+                if (coc_byte != cod_byte) return CodestreamError.UnsupportedPayload;
+            }
+            parsed_code_block_style = try parseCodeBlockStyleByte(spcoc[3]);
+        }
+    }
+    if (qcc_payload_first.len != 0) {
+        // A QCC that byte-replicates the QCD is redundant and fine on its own.
+        // A uniform divergence requires all components and swaps in the QCC
+        // quantization wholesale — the signalled-Mb/step decode path already
+        // consumes arbitrary legal values (Kakadu's per-component Qguard
+        // signalling leaves the QCD at its default).
+        if (!std.mem.eql(u8, qcc_payload_first, qcd_payload)) {
+            if (!qcc_component_seen[0] or !qcc_component_seen[1] or !qcc_component_seen[2]) {
+                return CodestreamError.UnsupportedPayload;
+            }
+            qcd_band_count = qcc_override_info.bands;
+            parsed_quantization = qcc_override_info.quantization;
+            parsed_guard_bits = qcc_override_info.guard_bits;
+            parsed_qcd_exponents = qcc_override_info.exponents;
+            parsed_qcd_exponent_count = qcc_override_info.exponent_count;
+            parsed_qcd_steps = qcc_override_info.steps;
+            parsed_qcd_step_count = qcc_override_info.step_count;
+            if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
+        }
+    }
 
     const options = LosslessOptions{
         .levels = levels,

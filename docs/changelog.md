@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Kakadu Style and COC/QCC Interop Matrix
+
+- Added `tools/interop_kakadu_styles.ps1`, a reproducible Windows smoke that
+  exercises z2000 -> Kakadu and Kakadu -> z2000 code-block style profiles on
+  `C:\temp\tools\images\0004.tif`. The current run is pixel-exact for z2000
+  RESET, TERMALL, RESET+TERMALL, ERTERM+TERMALL, BYPASS+TERMALL,
+  CAUSAL+SEGMARK, and the aligned multi-tile CAUSAL+SEGMARK,
+  RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL profiles. The reverse
+  direction is pixel-exact for Kakadu RESTART, RESET+RESTART,
+  ERTERM+RESTART, BYPASS+RESTART, CAUSAL+SEGMARK, and a uniform QCD guard-bit
+  override fixture.
+- The strict codestream reader and JP2 wrapper now accept main-header COC/QCC
+  markers as uniform overrides across all RGB components when the signalled
+  COD/QCD style is otherwise supported. Partial or divergent COC/QCC override
+  sets fail closed in both paths; a standalone Kakadu ERTERM stream is also
+  intentionally rejected until non-terminated ER-TERM payload behavior exists.
+  Scorecard: narrow T1/EBCOT 18->19 (91->92), full T1 completeness 12->13
+  (79->80).
+
 ### Standalone RESET Code-Block Style
 
 - The COD RESET style bit (`0x02`, ISO 15444-1 D.4) is now a public opt-in
@@ -100,8 +119,8 @@ entries are grouped by development milestone rather than semantic version.
   segment table. RESET/ERTERM combined with BYPASS remains fail-closed until
   those segment models have their own tests and interop gates. A 256x256
   single-layer RPCL/RCT/5-3 smoke decodes losslessly through z2000 strict
-  decode, OpenJPEG 2.5.4, and Grok 20.3.6; Kakadu remains the next external
-  check for this style combination. BYPASS+TERMALL now also participates in the
+  decode, OpenJPEG 2.5.4, Grok 20.3.6, and Kakadu 8.4.1. BYPASS+TERMALL now
+  also participates in the
   malformed-input fuzz sweep and terminated-style corruption matrix, and T2
   packet-header decoding rejects terminated segment counts above the fixed
   per-block segment table capacity before reading segment lengths.

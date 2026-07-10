@@ -7,16 +7,19 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **91/100 narrow, 77/100 full** as of
+the subsequent JP2/T2/T1/profile work is **92/100 narrow, 80/100 full** as of
 2026-07-10. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-10)
 
-Scorecard now **91/100 narrow, 77/100 full**. The aligned multi-tile path has
+Scorecard now **92/100 narrow, 80/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
-roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok;
-T1 BYPASS mode is preserved explicitly into T2 readback. The
+roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
+T1 BYPASS mode is preserved explicitly into T2 readback. Uniform Kakadu
+COC/QCC style and QCD overrides now decode through z2000 when all RGB
+components agree; partial/divergent overrides and standalone ERTERM fail closed.
+The
 malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
 profile. The next structural multi-tile gates are tile-aware PCRD targets,
 reference-grid partition anchoring, and tile-level scheduling.
@@ -31,9 +34,11 @@ items are preserved further below as implementation history.
 - **ISO clause:** A.6.2 (COC), A.6.5 (QCC) — component-specific coding/
   quantization markers.
 - **State:** the strict main-header walk and JP2 wrapper accept COC/QCC only
-  when they byte-replicate the main COD/QCD for a valid RGB component. Genuine
-  per-component overrides fail closed because z2000 still has no per-component
-  coding path.
+  when they byte-replicate the main COD/QCD for a valid RGB component, or when
+  they provide a uniform override across all three RGB components for an
+  otherwise supported COD/QCD payload model. Partial or divergent
+  per-component overrides fail closed because z2000 still has no independent
+  per-component coding path.
 - **Coverage:** splice oracle inserts redundant COC/QCC into a valid z2000
   codestream and asserts byte-exact strict decode plus JP2 acceptance.
   Mismatched COC and QCC rewrites fail closed in both strict decode and JP2
@@ -42,8 +47,10 @@ items are preserved further below as implementation history.
   COC/QCC lengths are bounded as truncation in the raw reader plus invalid at
   the JP2 boundary. Tile-part COD/QCD and COC/QCC markers are explicitly
   rejected as unsupported until per-tile/per-component overrides exist.
-- **Remaining follow-up:** add a real Kakadu/tuned-encoder fixture that emits
-  redundant COC/QCC, since OpenJPEG/Grok plain RGB output does not.
+- **Coverage:** real Kakadu style/QCD files now exercise this path through
+  `tools/interop_kakadu_styles.ps1`; the reverse matrix is pixel-exact for
+  RESTART, RESET+RESTART, ERTERM+RESTART, BYPASS+RESTART, CAUSAL+SEGMARK, and
+  a uniform QCD guard-bit override.
 
 ### N2. Multi-tile v2 — one axis at a time — L · High
 
@@ -71,14 +78,14 @@ items are preserved further below as implementation history.
   - **v2d — resilience styles.** LANDED: CAUSAL, SEGMARK,
     RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL have deterministic strict
     roundtrips; representative combined/terminated files are pixel-exact in
-    OpenJPEG and Grok. Remaining: Kakadu breadth and unsupported combinations.
+    OpenJPEG, Grok, and Kakadu. Remaining: unsupported combinations.
 - **Test plan:** per-stage public encode→decode byte-exact on 2×2 and 3×3
   edge-tile grids; `tile == image` byte-identical to the single-tile path;
   OpenJPEG/Grok/Kakadu decode of each genuinely multi-tile file.
 - **Risk:** High (per-tile T2/T1 scheduling); keep the single-tile path a
   passing special case at every step.
 
-### N3. T1 completeness — BYPASS+TERMALL Kakadu, then standalone ERTERM — M–L · Med
+### N3. T1 completeness — standalone ERTERM after the style matrix — M–L · Med
 
 - **Impact:** full "T1 completeness" +1–2 remaining. (+1–2)
 - **ISO clause:** D.4.5 (per-pass termination), D.7 (bypass), the ER-TERM annex.
@@ -87,20 +94,20 @@ items are preserved further below as implementation history.
   the encoder emits one terminated segment per pass, raw for D.6 bypass
   significance/refinement passes and MQ for cleanup/non-bypass passes; the
   strict decoder consumes the same per-pass segment table and the JP2 wrapper
-  accepts COD style `0x05`. OpenJPEG 2.5.4 and Grok 20.3.6 decode the current
-  single-tile and 2x2 multi-tile smokes losslessly; Kakadu remains to be
-  checked. **Standalone RESET (COD `0x02`) landed**: per-pass MQ context
+  accepts COD style `0x05`. OpenJPEG 2.5.4, Grok 20.3.6, and Kakadu 8.4.1
+  decode the current single-tile and 2x2 multi-tile smokes losslessly.
+  **Standalone RESET (COD `0x02`) landed**: per-pass MQ context
   restarts to the JPEG2000 initial states inside the continuous stream, with
   the direct/symbols byte-equality matrix extended and bidirectional
   OpenJPEG/Grok `-M 2` lossless interop. Standalone ERTERM and BYPASS
   combined with RESET or ERTERM stay fail-closed (multi-tile standalone
   RESET too).
-- **What to add:** Kakadu interop for BYPASS+TERMALL and standalone RESET
-  (`Cmodes=RESET`), then standalone ERTERM with the same writer + strict
-  reader + interop gate before opening its public profile.
-- **Test plan:** Kakadu `Cmodes=BYPASS`/termination-style interop for
-  BYPASS+TERMALL, then local byte-exact roundtrip + fail-closed corruption
-  cases per remaining combination (extend the styled-T1 matrix).
+- **What to add:** standalone ERTERM with a writer + strict reader + interop
+  gate before opening its public profile. Keep BYPASS+RESET and BYPASS+ERTERM
+  fail-closed until their segment models are implemented.
+- **Test plan:** local byte-exact roundtrip + fail-closed corruption cases per
+  remaining combination (extend the styled-T1 matrix), then OpenJPEG/Grok/Kakadu
+  interop before lifting any gate.
 
 ### N4. Lossy breadth — two precisely-characterized foreign-9/7 gaps — M · Med
 
@@ -213,9 +220,10 @@ for more ISO coverage is:
 4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.
-5. **T1 style policy.** Keep standalone RESET/ERTERM and untested combinations
-   fail-closed until each has writer, strict reader, tests, and interop
-   coverage; BYPASS+TERMALL now needs the Kakadu decoder leg.
+5. **T1 style policy.** Keep standalone ERTERM, BYPASS+RESET, BYPASS+ERTERM,
+   unsupported RESET envelopes, and other untested combinations fail-closed
+   until each has writer, strict reader, tests, and interop coverage. The
+   BYPASS+TERMALL Kakadu decoder leg is now closed.
 
 ## Status 2026-07-07 (ERTERM OpenJPEG/Grok interop) — PASSED
 
@@ -810,13 +818,14 @@ authoritative — reduce any disagreement to a minimal packet/marker case first.
 
 ## Scoreboard
 
-- **Current (`2026-07-07`):** narrow **90**, full **66** — matches
+- **Current (`2026-07-10`):** narrow **92**, full **80** — matches
   `docs/iso_coverage.md`.
 - **Recent claimed movement:** T1/EBCOT grew through BYPASS, TERMALL,
   vertical-causal, segmentation-symbols, TERMALL-scoped RESET, and
-  TERMALL-scoped ERTERM; broad-codec score also moved through multi-tile v1,
-  additional progression orders, foreign PLT/PLT-less decode, ICT/9-7,
-  scalar-derived/scalar-expounded quantization, and PCRD-style rate allocation.
+  TERMALL-scoped ERTERM, standalone RESET, and the Kakadu style matrix;
+  broad-codec score also moved through multi-tile v1, additional progression
+  orders, foreign PLT/PLT-less decode, ICT/9-7, scalar-derived/scalar-expounded
+  quantization, PCRD-style rate allocation, and uniform COC/QCC overrides.
 - **Next score levers:** add more malformed-corpus/fuzzing coverage, expand
   styled T1/T2 corruption fixtures, expand multi-tile/profile fixtures, and
   keep pushing arbitrary external decode breadth.
