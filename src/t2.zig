@@ -576,11 +576,29 @@ pub const CodeBlockGrid = struct {
     height: usize,
     block_width: usize,
     block_height: usize,
+    partition_offset_x: usize,
+    partition_offset_y: usize,
     leaves_x: usize,
     leaves_y: usize,
 
     pub fn init(origin_x: usize, origin_y: usize, width: usize, height: usize, block_width: usize, block_height: usize) !CodeBlockGrid {
+        return initAnchored(origin_x, origin_y, width, height, block_width, block_height, 0, 0);
+    }
+
+    pub fn initAnchored(
+        origin_x: usize,
+        origin_y: usize,
+        width: usize,
+        height: usize,
+        block_width: usize,
+        block_height: usize,
+        partition_offset_x: usize,
+        partition_offset_y: usize,
+    ) !CodeBlockGrid {
         if (width == 0 or height == 0 or block_width == 0 or block_height == 0) return PacketHeaderError.InvalidPacketHeader;
+        if (partition_offset_x >= block_width or partition_offset_y >= block_height) return PacketHeaderError.InvalidPacketHeader;
+        const partition_width = std.math.add(usize, partition_offset_x, width) catch return PacketHeaderError.InvalidPacketHeader;
+        const partition_height = std.math.add(usize, partition_offset_y, height) catch return PacketHeaderError.InvalidPacketHeader;
         return .{
             .origin_x = origin_x,
             .origin_y = origin_y,
@@ -588,8 +606,10 @@ pub const CodeBlockGrid = struct {
             .height = height,
             .block_width = block_width,
             .block_height = block_height,
-            .leaves_x = ceilDiv(width, block_width),
-            .leaves_y = ceilDiv(height, block_height),
+            .partition_offset_x = partition_offset_x,
+            .partition_offset_y = partition_offset_y,
+            .leaves_x = ceilDiv(partition_width, block_width),
+            .leaves_y = ceilDiv(partition_height, block_height),
         };
     }
 
@@ -599,11 +619,27 @@ pub const CodeBlockGrid = struct {
         const rel_x = rect.x - self.origin_x;
         const rel_y = rect.y - self.origin_y;
         if (rel_x >= self.width or rel_y >= self.height) return PacketHeaderError.InvalidPacketHeader;
-        if (rel_x % self.block_width != 0 or rel_y % self.block_height != 0) return PacketHeaderError.InvalidPacketHeader;
+        const partition_x = std.math.add(usize, self.partition_offset_x, rel_x) catch return PacketHeaderError.InvalidPacketHeader;
+        const partition_y = std.math.add(usize, self.partition_offset_y, rel_y) catch return PacketHeaderError.InvalidPacketHeader;
+        if ((rel_x != 0 and partition_x % self.block_width != 0) or
+            (rel_y != 0 and partition_y % self.block_height != 0))
+        {
+            return PacketHeaderError.InvalidPacketHeader;
+        }
         if (rect.width > self.block_width or rect.height > self.block_height) return PacketHeaderError.InvalidPacketHeader;
-        if (rel_x + rect.width > self.width or rel_y + rect.height > self.height) return PacketHeaderError.InvalidPacketHeader;
-        const leaf_x = rel_x / self.block_width;
-        const leaf_y = rel_y / self.block_height;
+        const rect_right = std.math.add(usize, rel_x, rect.width) catch return PacketHeaderError.InvalidPacketHeader;
+        const rect_bottom = std.math.add(usize, rel_y, rect.height) catch return PacketHeaderError.InvalidPacketHeader;
+        if (rect_right > self.width or rect_bottom > self.height) return PacketHeaderError.InvalidPacketHeader;
+        const partition_right = std.math.add(usize, partition_x, rect.width) catch return PacketHeaderError.InvalidPacketHeader;
+        const partition_bottom = std.math.add(usize, partition_y, rect.height) catch return PacketHeaderError.InvalidPacketHeader;
+        if (rect_right != self.width and partition_right % self.block_width != 0) {
+            return PacketHeaderError.InvalidPacketHeader;
+        }
+        if (rect_bottom != self.height and partition_bottom % self.block_height != 0) {
+            return PacketHeaderError.InvalidPacketHeader;
+        }
+        const leaf_x = partition_x / self.block_width;
+        const leaf_y = partition_y / self.block_height;
         if (leaf_x >= self.leaves_x or leaf_y >= self.leaves_y) return PacketHeaderError.InvalidPacketHeader;
         return .{ .leaf_x = leaf_x, .leaf_y = leaf_y };
     }
@@ -1100,14 +1136,27 @@ fn codeBlockSubbandPacketRect(band: subband.Band, block: subband.CodeBlock) !pac
 fn bandPrecinctRect(plan: packet_plan.Plan, packet: packet_plan.Packet, band: subband.Band) !packet_plan.Rect {
     const precinct = try packet_plan.precinctRect(plan, packet.resolution, packet.precinct_index);
     if (band.kind == .ll) return precinct;
-    const x_range = subbandAxisRange(precinct.x, precinct.x + precinct.width, bandUsesHighX(band.kind));
-    const y_range = subbandAxisRange(precinct.y, precinct.y + precinct.height, bandUsesHighY(band.kind));
+    if (packet.resolution >= plan.resolution_count) return PacketHeaderError.InvalidPacketHeader;
+    const resolution = plan.resolutions[packet.resolution];
+    const global_x0 = std.math.add(u32, resolution.x0, precinct.x) catch return PacketHeaderError.InvalidPacketHeader;
+    const global_y0 = std.math.add(u32, resolution.y0, precinct.y) catch return PacketHeaderError.InvalidPacketHeader;
+    const global_x1 = std.math.add(u32, global_x0, precinct.width) catch return PacketHeaderError.InvalidPacketHeader;
+    const global_y1 = std.math.add(u32, global_y0, precinct.height) catch return PacketHeaderError.InvalidPacketHeader;
+    const global_x_range = subbandAxisRange(global_x0, global_x1, bandUsesHighX(band.kind));
+    const global_y_range = subbandAxisRange(global_y0, global_y1, bandUsesHighY(band.kind));
     const width = std.math.cast(u32, band.rect.width) orelse return PacketHeaderError.InvalidPacketHeader;
     const height = std.math.cast(u32, band.rect.height) orelse return PacketHeaderError.InvalidPacketHeader;
-    const start_x = @min(x_range.start, width);
-    const end_x = @min(x_range.end, width);
-    const start_y = @min(y_range.start, height);
-    const end_y = @min(y_range.end, height);
+    const band_x1 = std.math.add(u32, band.origin_x, width) catch return PacketHeaderError.InvalidPacketHeader;
+    const band_y1 = std.math.add(u32, band.origin_y, height) catch return PacketHeaderError.InvalidPacketHeader;
+    const clipped_x0 = @max(global_x_range.start, band.origin_x);
+    const clipped_y0 = @max(global_y_range.start, band.origin_y);
+    const clipped_x1 = @min(global_x_range.end, band_x1);
+    const clipped_y1 = @min(global_y_range.end, band_y1);
+    if (clipped_x1 < clipped_x0 or clipped_y1 < clipped_y0) return PacketHeaderError.InvalidPacketHeader;
+    const start_x = clipped_x0 - band.origin_x;
+    const end_x = clipped_x1 - band.origin_x;
+    const start_y = clipped_y0 - band.origin_y;
+    const end_y = clipped_y1 - band.origin_y;
     if (end_x < start_x or end_y < start_y) return PacketHeaderError.InvalidPacketHeader;
     return .{
         .x = start_x,

@@ -59,11 +59,12 @@ Supported public JP2 profiles are still narrow:
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution
-- a v1/v2 aligned multi-tile lossless envelope: RCT/5-3, one or more
-  untargeted quality layers for all five progression orders, one tile-part per
-  tile, deterministic row-major encode, reordered foreign tile-part decode, the
-  implemented CAUSAL/SEGMARK/terminated resilience styles, and ISO B.6/B.7
-  geometry constraints
+- a bounded multi-tile lossless envelope: RCT/5-3, one or more
+  quality layers for all five progression orders, deterministic row-major
+  encode, reordered foreign one-part tile decode, and PLT-backed RPCL
+  `--tile-parts R` with one tile-part per resolution; plus the
+  implemented CAUSAL/SEGMARK/terminated resilience styles, reference-grid
+  precinct/code-block/tag-tree partitions, and origin-aware reversible 5/3 lifting
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
 - `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
   segments and packet-header segment length accounting
@@ -75,7 +76,8 @@ Unsupported combinations still fail closed. Examples include standalone ERTERM,
 BYPASS combined with RESET or ERTERM, standalone RESET outside the single-tile
 ISO-MQ envelope, tile-part divisions other than none/R, JPX features,
 unsupported component layouts, and profile mixes outside the bounded envelope.
-In multi-tile mode, BYPASS without TERMALL also remains unsupported.
+In multi-tile mode, BYPASS without TERMALL, PLT-less resolution tile-parts,
+and `R` divisions with non-RPCL progression also remain unsupported.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
 smoke tests cover the common no-EPH and archival EPH paths, while
 valid2000/jpylyzer-style validators remain diagnostic gates rather than
@@ -130,7 +132,7 @@ Notes:
   payloads in `SOD`. Despite the historical name, it now covers the reversible
   RCT/5-3 path, reversible `mct none`, the irreversible ICT/9-7 scalar
   quantization path, all five progression orders on the documented single-tile
-  path, and the v1 aligned multi-tile lossless envelope.
+  path, and the v1 bounded multi-tile lossless envelope.
 - The latest private payload is BP8 and is emitted only when
   `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
 - `decodeLosslessTemporary*` decodes normal no-sidecar codestreams by
@@ -139,8 +141,8 @@ Notes:
   z2000-produced RCT/5-3, ICT/9-7, progression-order, quality-layer, and v1
   multi-tile profiles, plus selected foreign OpenJPEG/Grok/Kakadu streams where
   packet spans can be derived, including the current PLT-less single-tile
-  lossless matrix. Aligned PLT-less multi-tile streams are also covered by the
-  strict path, including an OpenJPEG/Grok/Kakadu smoke where Kakadu orders
+  lossless matrix. Reference-grid-aware PLT-less multi-tile streams are also
+  covered for explicit and default precincts, including an OpenJPEG/Grok/Kakadu smoke where Kakadu orders
   tile-parts as `0,1,3,2`.
   Debug BP8 sidecar files are still accepted as an oracle/compat path for the
   reversible profile.
@@ -163,8 +165,8 @@ Notes:
   marker stuffing, and terminal `0xff` packet-header padding. It also has a
   PLT-less catalog branch that derives packet spans from packet headers; the
   current foreign-stream gate covers OpenJPEG/Grok/Kakadu default lossless
-  files, OpenJPEG/Grok multi-layer lossless ladders, and aligned PLT-less
-  multi-tile smokes from OpenJPEG/Grok/Kakadu.
+  files, OpenJPEG/Grok multi-layer lossless ladders, and explicit/default-
+  precinct PLT-less multi-tile smokes from OpenJPEG/Grok/Kakadu.
 
 ## `src/jp2.zig`
 
@@ -326,7 +328,7 @@ formation, TERMALL-scoped reset-context, and TERMALL-scoped ERTERM are wired
 through public codestream paths where their payload behavior has writer,
 reader, tests, and interop coverage. BYPASS+TERMALL is public with per-pass
 raw/MQ segment lengths and strict decode; OpenJPEG, Grok, and Kakadu decode the
-current smoke losslessly. The aligned multi-tile
+current smoke losslessly. The bounded multi-tile
 envelope accepts all five progression orders with untargeted quality layers,
 CAUSAL, SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL.
 Larger no-sidecar ERTERM files are
@@ -357,7 +359,7 @@ keep even and compression-ratio allocation available for tests, while the
 current rate-driven path uses PCRD-style slope allocation over per-block
 distortion metadata. The single-tile codestream layer charges measured packet
 header overhead against non-final layer budgets, then T2 converts the chosen
-cumulative points into per-layer deltas. The aligned multi-tile path has a
+cumulative points into per-layer deltas. The bounded multi-tile path has a
 tile-local PCRD slice for the bounded reversible profile; the first LRCP smoke
 is lossless through z2000 strict decode, OpenJPEG, Grok, and Kakadu. Cross-tile
 global budgeting and broader rate-targeted matrix coverage are still follow-up

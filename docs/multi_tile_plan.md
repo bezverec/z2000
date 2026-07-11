@@ -76,16 +76,17 @@ dimension) never hit this; degenerate-resolution tiles are a v2 concern.
 Supported: reversible 5/3 + RCT, one or more quality layers across
 all five progression orders, default/explicit precincts, plain, CAUSAL,
 SEGMARK, CAUSAL+SEGMARK, TERMALL, RESET+TERMALL, ERTERM+TERMALL, and
-BYPASS+TERMALL code-block styles, one tile-part per tile in row-major order
-(`TPsot=0`, `TNsot=1`), TLM on, SOP/EPH as today, PLT per tile-part as the
-scaffold builds it. Rate-targeted layers now have a tile-local PCRD slice for
+BYPASS+TERMALL code-block styles, one tile-part per tile in row-major order or
+PLT-backed RPCL resolution divisions (`TPsot=0..NL`, `TNsot=NL+1`), TLM on,
+SOP/EPH as today, and PLT per tile-part. Rate-targeted layers now have a
+tile-local PCRD slice for
 the bounded reversible profile; global cross-tile byte budgeting and external
 interop are follow-up gates.
 
-Fail-closed in multi-tile mode (each lifted later, separately): `--tile-parts R`
-(R-divisions compose with multi-tile later), BYPASS without TERMALL, BYPASS
-combined with RESET/ERTERM, untested resilience combinations, `--mct none`,
-9/7/lossy, and tiles that clamp DWT levels (§2.3).
+Fail-closed in multi-tile mode: PLT-less multi-part tiles, `--tile-parts R`
+with non-RPCL progression, BYPASS without TERMALL, BYPASS combined with
+RESET/ERTERM, untested resilience combinations, `--mct none`, 9/7/lossy, and
+tiles that clamp DWT levels (§2.3).
 Single-tile behavior stays **byte-identical** — every increment keeps
 `tile == image` on the exact current code path.
 
@@ -97,22 +98,26 @@ Landed as implemented (with two deviations from the sketch, both noted below):
 `encodeLosslessMultiTileMeasured`, which routes through
 `buildTileGridRpclEncodeArtifactsIsoMqParallel` → tile-part layout / TLM / PLT
 plans → `buildTilePartSequence`, and emits SOC/SIZ/COD/QCD + sequence (TLM +
-one SOT..SOD part per tile, row-major) + EOC. `validateTileSize` is gone
+one SOT..SOD part per tile, or `NL+1` parts per tile for RPCL `R`) + EOC.
+`validateTileSize` is gone
 (grid computed at the entry); `validateMultiTileCodingPath` enforces the §3
 envelope and `validateMultiTileGeometry` enforces §2.3 (no per-tile level
-clamping) plus the anchoring guard below.
+clamping).
 
-*Deviation 1 — alignment guard:* scoping's per-resolution origin check was
-refined: the tile pipeline anchors precinct **and code-block** partitions at
-the tile-local origin, so the v1 sufficient condition is "every precinct ≥
-the code-block size, and XTSiz/YTSiz are multiples of 2^levels × the largest
-precinct" — then every partition boundary aligns at every resolution.
+*Deviation 1 — reference-grid geometry:* the initial implementation used a
+conservative tile-size alignment guard. The completed slice instead retains
+resolution origins in each packet plan, anchors precinct/code-block/tag-tree
+partitions to the component reference grid, and carries low/high subband
+origins plus lifting parity through reversible 5/3. Tile sizes therefore need
+not be multiples of `2^levels` or precinct dimensions; only edge tiles that
+cannot carry the globally signalled decomposition count fail closed.
 *Deviation 2 — JP2 wrapper:* relaxing `jp2.zig:378` alone was not enough; the
 wrapper's profile validator was single-tile throughout. It now understands
 multi-tile: SIZ-derived tile count (≤ 256 for the wrapper profile), TLM Stlm
 `0x60` (u16 Ttlm + u32 Ptlm) alongside the single-tile `0x50`, and a
-`validateMultiTileTilePartSequence` walker (unique Isot in stream order,
-TPsot=0, TNsot=1, per-tile SOP restart, TLM cross-check).
+`validateMultiTileTilePartSequence` walker (unique one-part tiles or
+consecutive per-resolution parts, continuous per-tile SOP numbering, TLM
+cross-check).
 
 *Tests:* "multi-tile encode emits row-major single-part tiles with TLM"
 (SIZ/TLM/SOT structure, Psot chaining to EOC, thread-count determinism, JP2
@@ -122,8 +127,7 @@ strict single-threaded/threaded decode, JP2 wrapper acceptance);
 "multi-tile terminate-all fails closed on packet corruption" (second-tile PLT
 length mutation, final tile-part truncation, and second-tile SOD payload
 byte-flip walk); "multi-tile encode fails closed outside the bounded envelope"
-(rates, mct none, sidecar, 9/7,
-misaligned tile size);
+(rates, mct none, sidecar, 9/7);
 "multi-tile encode rejects tiles that clamp the global DWT level count" (18×18
 with 16×16 tiles). Single-tile output is byte-identical (branch only taken when
 multi-tile; full suite green in Debug + ReleaseFast).
@@ -131,22 +135,29 @@ multi-tile; full suite green in Debug + ReleaseFast).
 ### Stage B — Decode: SOT walk + per-tile packet spans — ✅ DONE
 `readStrictCodestreamMetadata` accepts multi-tile SIZ (the `isSingleTile`
 rejection is gone; the parsed grid is kept) and, for multi-tile grids, runs
-`readStrictMultiTileTilePartSpans`: one tile-part per tile, unique `Isot`,
-`TPsot=0`/`TNsot=1`, `Psot` chaining ending exactly at EOC, optional PLT,
+`readStrictMultiTileTilePartSpans`: one tile-part per tile or `NL+1` RPCL
+resolution parts, per-tile `TPsot` sequencing, `Psot` chaining ending exactly
+at EOC, optional PLT for one-part streams and required PLT for multi-part,
 per-tile packet counts validated against each tile's own packet plan when PLT
 is present (`makePacketPlan` on the tile dims), and TLM `Ttlm`/`Ptlm`
 cross-checked in stream order when present. PLT-less streams derive packet
-spans from tile-local T2 packet headers. The decode side also enforces the same `validateMultiTileGeometry`
-envelope as the encoder (level clamping + partition anchoring), so metadata
-never accepts a stream Stage C cannot decode. `TemporaryHeader` gained
+spans from tile-local T2 packet headers. The original decode side enforced the
+same aligned `validateMultiTileGeometry` envelope as the encoder. A later
+reference-grid slice replaced the alignment part of that decode gate: per-tile
+packet plans retain resolution origins and first global precinct indexes,
+while common DWT-level and B.7 block-span checks remain. OpenJPEG/Grok/Kakadu
+PLT-less explicit-precinct, default-precinct, and 17x17 odd-origin multi-tile
+files now decode pixel-exactly; their present geometry-empty edge packets are
+accepted only when they contribute no blocks and no payload.
+`TemporaryHeader` gained
 `tile_width`/`tile_height` (0 = single tile) and multi-tile `packet_count` is
 the per-tile sum.
 
 *Error taxonomy:* the TLM cross-check runs before tile-local decode — a SOT
 contradicting the stream's own TLM entry is corruption (`InvalidCodestream`);
-duplicate tiles are invalid, while reordered unique tile-parts are accepted for
-Kakadu interop. Multiple parts per tile still fail closed as
-`UnsupportedPayload`; truncation surfaces as `TruncatedData`.
+duplicate tiles are invalid, while reordered unique one-part tiles are accepted
+for Kakadu interop. PLT-less multi-part tiles remain `UnsupportedPayload`;
+truncation surfaces as `TruncatedData`.
 
 *Tests:* "multi-tile decode SOT walk validates the v1 tile-part discipline"
 (Isot-vs-TLM contradiction, duplicate tile sequence, nonzero TPsot, TNsot of
@@ -160,9 +171,9 @@ geometry through every strict-reader function, each tile decodes as its own
 single-tile image via a **per-tile `TemporaryHeader`** (tile dims + the
 tile's own packet plan; precincts reconstructed from the whole-image plan's
 per-resolution dims). `decodeStrictMultiTileImageMeasured` loops the Stage B
-spans: `readStrictMultiTileTilePartPacketCatalog` (tile-local packet iterator
-over PLT lengths or PLT-less T2 header-derived spans, SOP restarting per tile)
-→ the *unchanged*
+spans: one-part catalogs or per-resolution catalogs joined by
+`readStrictMultiTilePacketCatalogForTile` (continuous per-tile SOP sequence and
+packet identity) → the *unchanged*
 `assembleStrictPacketCatalogHeaders` → block catalog →
 `decodeStrictRpclImageFromBlockCatalogMeasured` (T1 → DWT⁻¹ → MCT⁻¹, all
 header-driven) → `tile_grid.copyRgbTileInto`. Tiles decode serially; the
@@ -238,7 +249,10 @@ multi-tile JP2 and verifies final-layer lossless decode through z2000 strict
 decode, OpenJPEG, Grok, and Kakadu.
 
 Remaining before scorecard promotion: global cross-tile budget refinement and
-broader style/progression combinations.
+broader style/progression combinations. Reference-grid packet, code-block, and
+tag-tree geometry plus origin-aware reversible 5/3 lifting are landed on encode
+and decode. Geometry now fails closed only when an edge tile-component cannot
+carry the globally signalled decomposition count.
 
 ## 5. Risks, ranked
 

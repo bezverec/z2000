@@ -501,8 +501,26 @@ fn inverseComponents53(
     width: usize,
     height: usize,
     levels: u8,
+    x0: u32,
+    y0: u32,
     options: DecodeOptions,
 ) !void {
+    if (x0 != 0 or y0 != 0) {
+        var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+        defer wavelet_workspace.deinit();
+        inline for (0..3) |component| {
+            try wavelet_int.inverse53WithWorkspaceOrigin(
+                &wavelet_workspace,
+                slices.get(component),
+                width,
+                height,
+                levels,
+                x0,
+                y0,
+            );
+        }
+        return;
+    }
     if (componentThreadCountFor(options.threads) < 2) {
         var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
         defer wavelet_workspace.deinit();
@@ -1370,7 +1388,7 @@ fn encodeLosslessWithOptionsMeasured(
         const packet_header_lengths = rpcl_stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
         const packet_bytes_start = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start);
         const packet_bytes_end = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start + packet_range.count);
-        try appendSot(allocator, &out, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
+        try appendSot(allocator, &out, 0, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
         try appendPltFromRpclPacketLengths(allocator, &out, encode_options, packet_lengths);
         try appendMarker(allocator, &out, .sod);
         try appendRpclPackets(
@@ -1502,7 +1520,7 @@ fn decodeTemporaryPayloadWithOptionsMeasured(
     if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(legacy_start);
 
     const wavelet_start = monotonicNs();
-    try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, options);
+    try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, 0, 0, options);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     var planes = color.RctPlanes{
@@ -2055,13 +2073,13 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     try validatePrecinctBlockSpans(options);
     const grid = parsed_grid orelse return CodestreamError.InvalidCodestream;
     if (!grid.isSingleTile()) {
-        // Multi-tile: validate the v1 tile-part discipline (one part per tile,
-        // row-major, TPsot=0/TNsot=1, per-tile packet plans, TLM cross-check)
-        // and the same geometry envelope the encoder enforces. The per-tile
+        // Multi-tile: validate one-part tiles or PLT-backed RPCL resolution
+        // divisions, per-tile packet plans, TLM cross-check, and the same
+        // geometry envelope the encoder enforces. The per-tile
         // spans this produces feed the Stage C decode. The multi-tile envelope
         // currently covers RPCL plus the single-layer LRCP/RLCP permutations.
         try validateMultiTileProgression(parsed_progression, layers);
-        try validateMultiTileGeometry(grid, levels, options);
+        try validateMultiTileDecodeGeometry(grid, levels, options);
         var spans = try readStrictMultiTileTilePartSpans(
             allocator,
             bytes,
@@ -2073,8 +2091,10 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         );
         defer spans.deinit(allocator);
         var total_packets: u64 = 0;
+        var resolution_tile_parts = false;
         for (spans.items) |span| {
             total_packets = try std.math.add(u64, total_packets, span.packet_count);
+            resolution_tile_parts = resolution_tile_parts or span.tile_part_count > 1;
         }
         const plan = try makePacketPlan(width, height, levels, options);
         return .{
@@ -2098,7 +2118,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .qcd_exponent_count = parsed_qcd_exponent_count,
             .qcd_steps = parsed_qcd_steps,
             .qcd_step_count = parsed_qcd_step_count,
-            .tile_part_divisions = null,
+            .tile_part_divisions = if (resolution_tile_parts) 'R' else null,
             .tile_part_plan_count = 0,
             .tile_part_plan = [_]u8{0} ** 33,
             .packet_plan_count = plan.resolution_count,
@@ -3089,7 +3109,18 @@ fn decodeStrictRpclImageFromPackets(
     }
     var strict_planes = try reconstructStrictComponentCoefficientPlanes(allocator, header, catalogs, assemblies, options);
     defer strict_planes.deinit();
-    try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
+    if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
+    const full_resolution = plan.resolutions[plan.resolution_count - 1];
+    try inverseComponents53(
+        allocator,
+        .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr },
+        header.width,
+        header.height,
+        header.levels,
+        full_resolution.x0,
+        full_resolution.y0,
+        options,
+    );
     var strict_image = if (header.mct == .none)
         try color.inverseNoTransform(allocator, strict_planes)
     else
@@ -3241,9 +3272,9 @@ fn assembleStrictPacketCatalogHeaders(
     audit: *StrictPacketHeaderAudit,
 ) !StrictComponentAssemblySet {
     const plan = temporaryPacketPlan(header);
-    const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
+    const bands = try makeBandsForPacketPlan(allocator, plan, header.levels);
     defer allocator.free(bands);
-    const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
+    const blocks = try makeCodeBlocksForPacketPlan(allocator, bands, header.block_width, header.block_height, plan);
     defer allocator.free(blocks);
 
     var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
@@ -3295,11 +3326,15 @@ fn assembleStrictPacketCatalogHeaders(
 
         if (selected.len == 0) {
             const read = try readStrictPacketHeaderForAudit(packet_bytes, entry.packet, &.{}, null, &.{});
-            if (read.present or read.included_blocks != 0 or read.payload_length != 0) {
+            if (read.included_blocks != 0 or read.payload_length != 0) {
                 return CodestreamError.InvalidCodestream;
             }
             audit.geometry_empty_packets += 1;
-            audit.absent_packets += 1;
+            if (read.present) {
+                audit.present_packets += 1;
+            } else {
+                audit.absent_packets += 1;
+            }
             audit.header_decoded_packets += 1;
             audit.header_bytes += read.header_length;
             continue;
@@ -3345,7 +3380,6 @@ fn readStrictPacketHeaderForAudit(
     var reader = t2.PacketHeaderReader.init(bytes);
     const packet_included = reader.readBit() catch return CodestreamError.InvalidCodestream;
     if (packet_included) {
-        if (groups.len == 0) return CodestreamError.InvalidCodestream;
         for (groups) |*group| {
             t2.readPrecinctPacketHeaderBody(
                 &reader,
@@ -3653,13 +3687,15 @@ fn buildStrictPacketAuditBandGroup(
     header: TemporaryHeader,
 ) !StrictPacketAuditBandGroup {
     if (selected.len == 0) return CodestreamError.InvalidCodestream;
-    const grid = try t2.CodeBlockGrid.init(
+    const grid = try t2.CodeBlockGrid.initAnchored(
         band.rect.x,
         band.rect.y,
         band.rect.width,
         band.rect.height,
         header.block_width,
         header.block_height,
+        @as(usize, band.origin_x) % header.block_width,
+        @as(usize, band.origin_y) % header.block_height,
     );
 
     var min_x: usize = std.math.maxInt(usize);
@@ -4141,7 +4177,19 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     }
 
     const wavelet_start = monotonicNs();
-    try inverseComponents53(allocator, .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr }, header.width, header.height, header.levels, options);
+    const plan = temporaryPacketPlan(header);
+    if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
+    const full_resolution = plan.resolutions[plan.resolution_count - 1];
+    try inverseComponents53(
+        allocator,
+        .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr },
+        header.width,
+        header.height,
+        header.levels,
+        full_resolution.x0,
+        full_resolution.y0,
+        options,
+    );
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     const color_start = monotonicNs();
@@ -4170,7 +4218,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
 ) !StrictPacketCatalog {
     var entries: std.ArrayList(StrictPacketEntry) = .empty;
     errdefer entries.deinit(allocator);
-    const packet_capacity = std.math.cast(usize, tile_plan.packets) orelse return CodestreamError.InvalidCodestream;
+    const packet_capacity = span.packet_count;
     try entries.ensureTotalCapacity(allocator, packet_capacity);
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
@@ -4184,12 +4232,14 @@ fn readStrictMultiTileTilePartPacketCatalog(
         if (packet_lengths.items.len != 0) return CodestreamError.InvalidCodestream;
     } else if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
 
-    const sequence = try buildStreamPacketSequence(allocator, progression, tile_plan, layers);
-    defer allocator.free(sequence);
-    if (sequence.len != packet_capacity) return CodestreamError.InvalidCodestream;
+    const full_sequence = try buildStreamPacketSequence(allocator, progression, tile_plan, layers);
+    defer allocator.free(full_sequence);
+    const sequence_end = try std.math.add(usize, span.first_packet, packet_capacity);
+    if (sequence_end > full_sequence.len) return CodestreamError.InvalidCodestream;
+    const sequence = full_sequence[span.first_packet..sequence_end];
 
     var cursor = span.sod + 2;
-    var packet_sequence: u16 = 0;
+    var packet_sequence: u16 = @truncate(span.first_packet);
     if (span.missing_plt) {
         var stateful = try StrictStatefulPrecinctGroups.init(allocator, tile_header, tile_plan);
         defer stateful.deinit();
@@ -4224,7 +4274,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
             try entries.append(allocator, .{
                 .packet = packet,
                 .tile_index = span.tile_index,
-                .tile_part_index = 0,
+                .tile_part_index = span.tile_part_index,
                 .byte_offset = byte_offset,
                 .byte_length = byte_length,
             });
@@ -4246,7 +4296,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
             try entries.append(allocator, .{
                 .packet = packet,
                 .tile_index = span.tile_index,
-                .tile_part_index = 0,
+                .tile_part_index = span.tile_part_index,
                 .byte_offset = byte_offset,
                 .byte_length = byte_length,
             });
@@ -4256,9 +4306,66 @@ fn readStrictMultiTileTilePartPacketCatalog(
 
     const owned_entries = try entries.toOwnedSlice(allocator);
     errdefer allocator.free(owned_entries);
-    if (progression != .rpcl) {
+    if (progression != .rpcl and span.tile_part_count == 1) {
         try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, layers);
     }
+    const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
+    return .{
+        .allocator = allocator,
+        .entries = owned_entries,
+        .packet_bytes = owned_packet_bytes,
+    };
+}
+
+fn readStrictMultiTilePacketCatalogForTile(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    spans: []const StrictMultiTileTilePartSpan,
+    tile_index: u16,
+    tile_header: TemporaryHeader,
+    tile_plan: packet_plan.Plan,
+    layers: u16,
+    progression: ProgressionOrder,
+    marker_policy: MainHeaderPacketMarkers,
+) !StrictPacketCatalog {
+    var entries: std.ArrayList(StrictPacketEntry) = .empty;
+    errdefer entries.deinit(allocator);
+    var packet_bytes: std.ArrayList(u8) = .empty;
+    errdefer packet_bytes.deinit(allocator);
+
+    var expected_first_packet: usize = 0;
+    var part_count: usize = 0;
+    for (spans) |span| {
+        if (span.tile_index != tile_index) continue;
+        if (span.first_packet != expected_first_packet) return CodestreamError.InvalidCodestream;
+        var part = try readStrictMultiTileTilePartPacketCatalog(
+            allocator,
+            bytes,
+            span,
+            tile_header,
+            tile_plan,
+            layers,
+            progression,
+            marker_policy,
+        );
+        defer part.deinit();
+
+        const byte_base = packet_bytes.items.len;
+        try packet_bytes.appendSlice(allocator, part.packet_bytes);
+        for (part.entries) |entry| {
+            var joined = entry;
+            joined.byte_offset = try std.math.add(usize, byte_base, entry.byte_offset);
+            try entries.append(allocator, joined);
+        }
+        expected_first_packet = try std.math.add(usize, expected_first_packet, span.packet_count);
+        part_count += 1;
+    }
+
+    if (part_count == 0 or expected_first_packet != tile_plan.packets) {
+        return CodestreamError.InvalidCodestream;
+    }
+    const owned_entries = try entries.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_entries);
     const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
     return .{
         .allocator = allocator,
@@ -4289,7 +4396,7 @@ const StrictMultiTileContext = struct {
     fn tileHeader(self: StrictMultiTileContext, header: TemporaryHeader, tile: tile_grid.Tile) !TemporaryHeader {
         const tile_width = @as(usize, tile.rect.width());
         const tile_height = @as(usize, tile.rect.height());
-        const tile_plan = try makePacketPlan(tile_width, tile_height, header.levels, self.plan_options);
+        const tile_plan = try makePacketPlanForTile(tile, header.levels, self.plan_options);
         var tile_header = header;
         tile_header.width = tile_width;
         tile_header.height = tile_height;
@@ -4379,17 +4486,20 @@ fn decodeStrictMultiTileImageMeasured(
         .samples = samples,
     };
 
-    for (context.spans.items) |span| {
-        const tile = context.grid.tile(span.tile_index) catch return CodestreamError.InvalidCodestream;
+    var tile_index: u32 = 0;
+    while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
+        const tile = context.grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
         const tile_header = try context.tileHeader(header, tile);
+        const tile_plan = temporaryPacketPlan(tile_header);
 
         const catalog_start = monotonicNs();
-        var catalog = try readStrictMultiTileTilePartPacketCatalog(
+        var catalog = try readStrictMultiTilePacketCatalogForTile(
             allocator,
             bytes,
-            span,
+            context.spans.items,
+            @intCast(tile_index),
             tile_header,
-            temporaryPacketPlan(tile_header),
+            tile_plan,
             header.layers,
             header.progression,
             context.main_header.packet_markers,
@@ -4426,15 +4536,18 @@ fn auditStrictMultiTilePacketHeaders(
     defer context.deinit();
 
     var total = StrictPacketHeaderAudit{};
-    for (context.spans.items) |span| {
-        const tile = context.grid.tile(span.tile_index) catch return CodestreamError.InvalidCodestream;
+    var tile_index: u32 = 0;
+    while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
+        const tile = context.grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
         const tile_header = try context.tileHeader(header, tile);
-        var catalog = try readStrictMultiTileTilePartPacketCatalog(
+        const tile_plan = temporaryPacketPlan(tile_header);
+        var catalog = try readStrictMultiTilePacketCatalogForTile(
             allocator,
             bytes,
-            span,
+            context.spans.items,
+            @intCast(tile_index),
             tile_header,
-            temporaryPacketPlan(tile_header),
+            tile_plan,
             header.layers,
             header.progression,
             context.main_header.packet_markers,
@@ -5442,9 +5555,9 @@ const StrictStatefulPrecinctGroups = struct {
     };
 
     fn init(allocator: std.mem.Allocator, header: TemporaryHeader, plan: packet_plan.Plan) !StrictStatefulPrecinctGroups {
-        const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
+        const bands = try makeBandsForPacketPlan(allocator, plan, header.levels);
         errdefer allocator.free(bands);
-        const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
+        const blocks = try makeCodeBlocksForPacketPlan(allocator, bands, header.block_width, header.block_height, plan);
         errdefer allocator.free(blocks);
         var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
         errdefer rpcl_index.deinit();
@@ -5517,7 +5630,7 @@ const StrictPacketSpanRead = struct {
 /// path: decodes one packet header from the remaining tile-part bytes
 /// (mutating the persistent per-precinct states) and reports the header and
 /// payload byte lengths so the caller can locate the packet's end without a
-/// PLT entry. Geometry-empty packets must be signalled absent.
+/// PLT entry. A present geometry-empty packet is valid and has no body.
 fn readStrictPacketHeaderSpan(
     bytes: []const u8,
     packet: packet_plan.Packet,
@@ -5526,7 +5639,6 @@ fn readStrictPacketHeaderSpan(
     var reader = t2.PacketHeaderReader.init(bytes);
     const packet_included = reader.readBit() catch return CodestreamError.InvalidCodestream;
     if (packet_included) {
-        if (groups.len == 0) return CodestreamError.InvalidCodestream;
         for (groups) |*group| {
             t2.readPrecinctPacketHeaderBody(
                 &reader,
@@ -5753,6 +5865,9 @@ fn readStrictTilePartPacketPlan(
 /// tile's own packet plan. Stage C consumes these spans for per-tile decode.
 const StrictMultiTileTilePartSpan = struct {
     tile_index: u16,
+    tile_part_index: u8,
+    tile_part_count: u8,
+    first_packet: usize,
     sot_start: usize,
     sod: usize,
     end: usize,
@@ -5761,14 +5876,11 @@ const StrictMultiTileTilePartSpan = struct {
     missing_plt: bool = false,
 };
 
-/// Walks the tile-part sequence of a multi-tile stream and enforces the v1
-/// discipline: exactly one tile-part per tile (TPsot = 0, TNsot = 1), Psot
-/// chaining ending exactly at EOC, no duplicate tiles, and TLM entries (when
-/// present) matching the stream's tile-part order. PLT-backed streams validate
-/// per-tile packet counts here; PLT-less streams defer packet span validation
-/// to the tile-local T2 header walk. Streams with multiple parts per tile still
-/// fail closed as UnsupportedPayload; structural damage is
-/// InvalidCodestream/TruncatedData.
+/// Walks a multi-tile tile-part sequence. One-part tiles remain accepted in
+/// any unique tile order. RPCL resolution divisions additionally accept
+/// `levels + 1` consecutive parts per tile and validate each part against the
+/// corresponding resolution packet range. PLT-less multi-part streams remain
+/// fail-closed until cross-part open-ended T2 span derivation is implemented.
 fn readStrictMultiTileTilePartSpans(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -5781,9 +5893,15 @@ fn readStrictMultiTileTilePartSpans(
     const tile_count = grid.tileCount();
     if (tile_count > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
     const tile_count_usize = std.math.cast(usize, tile_count) orelse return CodestreamError.UnsupportedPayload;
-    var seen_tiles = try allocator.alloc(bool, tile_count_usize);
-    defer allocator.free(seen_tiles);
-    @memset(seen_tiles, false);
+    const next_parts = try allocator.alloc(u8, tile_count_usize);
+    defer allocator.free(next_parts);
+    @memset(next_parts, 0);
+    const expected_parts = try allocator.alloc(u8, tile_count_usize);
+    defer allocator.free(expected_parts);
+    @memset(expected_parts, 0);
+    const completed_tiles = try allocator.alloc(bool, tile_count_usize);
+    defer allocator.free(completed_tiles);
+    @memset(completed_tiles, false);
 
     var spans: std.ArrayList(StrictMultiTileTilePartSpan) = .empty;
     errdefer spans.deinit(allocator);
@@ -5796,24 +5914,32 @@ fn readStrictMultiTileTilePartSpans(
         if (marker == @intFromEnum(Marker.eoc)) {
             scan += 2;
             if (scan != bytes.len) return CodestreamError.InvalidCodestream;
-            if (tile_part_index != tile_count_usize) return CodestreamError.InvalidCodestream;
+            for (completed_tiles) |completed| if (!completed) return CodestreamError.InvalidCodestream;
             if (tlm_entries) |entries| {
-                if (entries.len != tile_count_usize) return CodestreamError.InvalidCodestream;
+                if (entries.len != tile_part_index) return CodestreamError.InvalidCodestream;
             }
             return spans;
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
-        if (tile_part_index >= tile_count_usize) return CodestreamError.InvalidCodestream;
-
         const sot = try readStrictSotInfo(bytes, scan);
         if (tlm_entries) |entries| {
             try validateStrictTlmEntry(entries, tile_part_index, sot.tile_index, sot.psot);
         }
-        if (sot.tile_part_index != 0 or sot.tile_part_count != 1) return CodestreamError.UnsupportedPayload;
         if (sot.tile_index >= tile_count) return CodestreamError.InvalidCodestream;
         const tile_index = @as(usize, sot.tile_index);
-        if (seen_tiles[tile_index]) return CodestreamError.InvalidCodestream;
-        seen_tiles[tile_index] = true;
+        if (sot.tile_part_count == 0) return CodestreamError.InvalidCodestream;
+        if (completed_tiles[tile_index]) return CodestreamError.InvalidCodestream;
+        if (expected_parts[tile_index] == 0) {
+            expected_parts[tile_index] = sot.tile_part_count;
+        } else if (expected_parts[tile_index] != sot.tile_part_count) {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (sot.tile_part_index != next_parts[tile_index]) return CodestreamError.InvalidCodestream;
+        if (sot.tile_part_count != 1) {
+            if (options.progression != .rpcl or sot.tile_part_count != @as(u8, levels) + 1) {
+                return CodestreamError.UnsupportedPayload;
+            }
+        }
 
         const tile_part_end = try std.math.add(usize, scan, sot.psot);
         if (tile_part_end > bytes.len or tile_part_end < scan + 12) {
@@ -5825,29 +5951,42 @@ fn readStrictMultiTileTilePartSpans(
         const sod = try readTilePartHeaderMarkers(allocator, bytes, scan + 12, tile_part_end, &packet_lengths);
 
         const tile = grid.tile(sot.tile_index) catch return CodestreamError.InvalidCodestream;
-        const tile_plan = try makePacketPlan(
-            @as(usize, tile.rect.width()),
-            @as(usize, tile.rect.height()),
-            levels,
-            options,
-        );
+        const tile_plan = try makePacketPlanForTile(tile, levels, options);
         const missing_plt = packet_lengths.items.len == 0;
+        if (missing_plt and sot.tile_part_count != 1) return CodestreamError.UnsupportedPayload;
+        var first_packet: usize = 0;
+        var expected_packet_count = std.math.cast(usize, tile_plan.packets) orelse return CodestreamError.InvalidCodestream;
+        if (sot.tile_part_count != 1) {
+            var resolution_index: usize = 0;
+            while (resolution_index < sot.tile_part_index) : (resolution_index += 1) {
+                first_packet = try std.math.add(
+                    usize,
+                    first_packet,
+                    std.math.cast(usize, tile_plan.resolutions[resolution_index].packets) orelse return CodestreamError.InvalidCodestream,
+                );
+            }
+            expected_packet_count = std.math.cast(
+                usize,
+                tile_plan.resolutions[sot.tile_part_index].packets,
+            ) orelse return CodestreamError.InvalidCodestream;
+        }
         const packet_payload_bytes = if (missing_plt) blk: {
             const payload_start = try std.math.add(usize, sod, 2);
             if (payload_start > tile_part_end) return CodestreamError.TruncatedData;
             break :blk tile_part_end - payload_start;
         } else try validateStrictTilePartPacketSpan(sod, tile_part_end, packet_lengths.items);
         const packet_count = if (missing_plt)
-            std.math.cast(usize, tile_plan.packets) orelse return CodestreamError.InvalidCodestream
+            expected_packet_count
         else blk: {
-            if (@as(u64, @intCast(packet_lengths.items.len)) != tile_plan.packets) {
-                return CodestreamError.InvalidCodestream;
-            }
+            if (packet_lengths.items.len != expected_packet_count) return CodestreamError.InvalidCodestream;
             break :blk packet_lengths.items.len;
         };
 
         try spans.append(allocator, .{
             .tile_index = sot.tile_index,
+            .tile_part_index = sot.tile_part_index,
+            .tile_part_count = sot.tile_part_count,
+            .first_packet = first_packet,
             .sot_start = scan,
             .sod = sod,
             .end = tile_part_end,
@@ -5855,6 +5994,8 @@ fn readStrictMultiTileTilePartSpans(
             .packet_count = packet_count,
             .missing_plt = missing_plt,
         });
+        next_parts[tile_index] = std.math.add(u8, next_parts[tile_index], 1) catch return CodestreamError.InvalidCodestream;
+        if (next_parts[tile_index] == expected_parts[tile_index]) completed_tiles[tile_index] = true;
         tile_part_index += 1;
         scan = tile_part_end;
     }
@@ -6973,13 +7114,14 @@ fn appendLegacyTemporaryPacketPayload(
 fn appendSot(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
+    tile_index: u16,
     psot: u32,
     tile_part_index: u8,
     tile_part_count: u8,
 ) !void {
     try appendMarker(allocator, out, .sot);
     try appendU16Be(allocator, out, 10);
-    try appendU16Be(allocator, out, 0);
+    try appendU16Be(allocator, out, tile_index);
     try appendU32Be(allocator, out, psot);
     try out.append(allocator, tile_part_index);
     try out.append(allocator, tile_part_count);
@@ -8511,6 +8653,52 @@ fn makePacketPlan(width: usize, height: usize, levels: u8, options: LosslessOpti
     );
 }
 
+fn makePacketPlanForTile(tile: tile_grid.Tile, levels: u8, options: LosslessOptions) !packet_plan.Plan {
+    var precincts: [33]packet_plan.Precinct = undefined;
+    var index: usize = 0;
+    while (index < options.precinct_count) : (index += 1) {
+        precincts[index] = .{
+            .width = options.precincts[index].width,
+            .height = options.precincts[index].height,
+        };
+    }
+    return packet_plan.rpclTileRegion(
+        tile.rect.x0,
+        tile.rect.y0,
+        tile.rect.x1,
+        tile.rect.y1,
+        levels,
+        3,
+        options.layers,
+        precincts[0..options.precinct_count],
+    );
+}
+
+fn makeCodeBlocksForPacketPlan(
+    allocator: std.mem.Allocator,
+    bands: []const subband.Band,
+    block_width: usize,
+    block_height: usize,
+    plan: packet_plan.Plan,
+) ![]subband.CodeBlock {
+    if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
+    return subband.makeCodeBlocks(allocator, bands, block_width, block_height);
+}
+
+fn makeBandsForPacketPlan(
+    allocator: std.mem.Allocator,
+    plan: packet_plan.Plan,
+    levels: u8,
+) ![]subband.Band {
+    if (plan.resolution_count == 0 or plan.resolution_count != @as(u8, levels) + 1) {
+        return CodestreamError.InvalidCodestream;
+    }
+    const full = plan.resolutions[plan.resolution_count - 1];
+    const x1 = std.math.add(u32, full.x0, full.width) catch return CodestreamError.InvalidCodestream;
+    const y1 = std.math.add(u32, full.y0, full.height) catch return CodestreamError.InvalidCodestream;
+    return subband.makeBandsForRegion(allocator, full.x0, full.y0, x1, y1, levels);
+}
+
 const PacketRange = struct {
     start: usize,
     count: usize,
@@ -9024,13 +9212,16 @@ fn validateBlockSize(width: u16, height: u16) !void {
 }
 
 /// Multi-tile constraints (docs/multi_tile_plan.md §3): the tile pipeline
-/// currently covers reversible 5/3 + RCT, untargeted quality layers across all
-/// five Part 1 packet orders, the supported resilience style combinations,
-/// and one tile-part per tile in row-major order. Everything outside that
+/// currently covers reversible 5/3 + RCT, quality layers across all five Part
+/// 1 packet orders, the supported resilience style combinations, one tile-part
+/// per tile, and PLT-backed RPCL resolution divisions. Everything outside that
 /// fails closed so COD/SIZ never advertise behavior the tile encoder does not
 /// implement.
 fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     try validateMultiTileProgression(options.progression, options.layers);
+    if (options.tile_part_divisions == 'R' and options.progression != .rpcl) {
+        return CodestreamError.UnsupportedPayload;
+    }
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
     if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
@@ -9051,21 +9242,6 @@ fn validateMultiTileProgression(progression: ProgressionOrder, layers: u16) !voi
     }
 }
 
-/// Multi-tile v1 conformance guards (docs/multi_tile_plan.md §2.3 and risk #2):
-///
-/// (a) COD's NL is global, so every tile must achieve exactly the image-level
-/// decomposition count — tiles small enough to clamp are rejected.
-///
-/// (b) The tile pipeline anchors precinct and code-block partitions at the
-/// tile-local origin, while ISO B.6/B.7 anchor them to the reference grid.
-/// Both derivations coincide when every tile origin lands on a partition
-/// boundary at every resolution. With XTOSiz = 0 and power-of-two precincts,
-/// a sufficient condition (expects `options` pre-normalized so the precinct
-/// list covers all resolutions): every precinct is at least the code-block
-/// size, and XTSiz/YTSiz are multiples of 2^levels x the largest precinct —
-/// then tile origins are multiples of every partition step at every
-/// resolution. Misaligned grids fail closed until reference-grid anchoring
-/// is implemented.
 /// ISO 15444-1 B.7: the effective code-block size is bounded by the precinct
 /// span in band coordinates — the full precinct at resolution 0, half of it
 /// at higher resolutions. z2000 does not implement the block-size clamping
@@ -9085,28 +9261,148 @@ fn validatePrecinctBlockSpans(options: LosslessOptions) !void {
 
 fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: LosslessOptions) !void {
     try validatePrecinctBlockSpans(options);
-    var max_precinct_width: u32 = 1;
-    var max_precinct_height: u32 = 1;
-    for (options.precincts[0..options.precinct_count]) |precinct| {
-        max_precinct_width = @max(max_precinct_width, precinct.width);
-        max_precinct_height = @max(max_precinct_height, precinct.height);
-    }
     if (levels > 32) return CodestreamError.UnsupportedPayload;
-    const level_scale = @as(u64, 1) << @as(u6, @intCast(levels));
-    const x_step = level_scale * max_precinct_width;
-    const y_step = level_scale * max_precinct_height;
-    if (grid.params.xtsiz % x_step != 0 or grid.params.ytsiz % y_step != 0) {
-        return CodestreamError.UnsupportedPayload;
-    }
 
     var iterator = grid.iterator();
     while (iterator.next() catch return CodestreamError.InvalidCodestream) |tile| {
-        const tile_width = @as(usize, tile.rect.width());
-        const tile_height = @as(usize, tile.rect.height());
-        if (actualDwtLevels(tile_width, tile_height, levels) != levels) {
+        if (!wavelet_int.canDecompose53Region(tile.rect.x0, tile.rect.y0, tile.rect.x1, tile.rect.y1, levels)) {
             return CodestreamError.UnsupportedPayload;
         }
     }
+}
+
+/// Strict decode uses reference-grid-anchored packet plans, so foreign tile
+/// origins do not need the encoder's temporary partition-alignment rule.
+/// Keep the profile bounds that are independent of that implementation
+/// detail: legal precinct/block spans and one global DWT level count.
+fn validateMultiTileDecodeGeometry(grid: tile_grid.Grid, levels: u8, options: LosslessOptions) !void {
+    try validatePrecinctBlockSpans(options);
+    if (levels > 32) return CodestreamError.UnsupportedPayload;
+
+    var iterator = grid.iterator();
+    while (iterator.next() catch return CodestreamError.InvalidCodestream) |tile| {
+        if (!wavelet_int.canDecompose53Region(tile.rect.x0, tile.rect.y0, tile.rect.x1, tile.rect.y1, levels)) {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+}
+
+const MultiTileResolutionPart = struct {
+    tile_index: u16,
+    tile_part_index: u8,
+    tile_part_count: u8,
+    first_packet: usize,
+    packet_count: usize,
+    psot: u32,
+};
+
+fn buildMultiTileResolutionParts(
+    allocator: std.mem.Allocator,
+    artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
+    levels: u8,
+    options: LosslessOptions,
+) ![]MultiTileResolutionPart {
+    const parts_per_tile = try std.math.add(usize, levels, 1);
+    if (parts_per_tile > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
+    const total_parts = try std.math.mul(usize, artifacts.tiles.len, parts_per_tile);
+    const parts = try allocator.alloc(MultiTileResolutionPart, total_parts);
+    errdefer allocator.free(parts);
+
+    var out_index: usize = 0;
+    for (artifacts.tiles) |tile_artifacts| {
+        if (tile_artifacts.tile.index > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+        if (tile_artifacts.scaffold.plan.resolution_count != parts_per_tile) return CodestreamError.InvalidCodestream;
+        var first_packet: usize = 0;
+        for (tile_artifacts.scaffold.plan.resolutions[0..parts_per_tile], 0..) |resolution, resolution_index| {
+            const packet_count = std.math.cast(usize, resolution.packets) orelse return CodestreamError.InvalidCodestream;
+            if (packet_count == 0) return CodestreamError.InvalidCodestream;
+            const packet_end = try std.math.add(usize, first_packet, packet_count);
+            if (packet_end > tile_artifacts.stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
+            const packet_lengths = tile_artifacts.stream.packet_lengths[first_packet..packet_end];
+            const framed_bytes = try rpclPacketPayloadByteCount(options, packet_lengths);
+            const plt_bytes = try pltBytesForRpclPacketLengths(options, packet_lengths);
+            const psot_usize = try std.math.add(usize, 14, try std.math.add(usize, plt_bytes, framed_bytes));
+            const psot = std.math.cast(u32, psot_usize) orelse return CodestreamError.UnsupportedPayload;
+            parts[out_index] = .{
+                .tile_index = @intCast(tile_artifacts.tile.index),
+                .tile_part_index = @intCast(resolution_index),
+                .tile_part_count = @intCast(parts_per_tile),
+                .first_packet = first_packet,
+                .packet_count = packet_count,
+                .psot = psot,
+            };
+            out_index += 1;
+            first_packet = packet_end;
+        }
+        if (first_packet != tile_artifacts.stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
+    }
+    if (out_index != parts.len) return CodestreamError.InvalidCodestream;
+    return parts;
+}
+
+fn appendMultiTileTlm(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    parts: []const MultiTileResolutionPart,
+) !void {
+    if (parts.len == 0) return CodestreamError.InvalidCodestream;
+    if (parts.len > 256) return CodestreamError.UnsupportedPayload;
+    const payload_bytes = try std.math.mul(usize, parts.len, 6);
+    const ltlm_usize = try std.math.add(usize, 4, payload_bytes);
+    const ltlm = std.math.cast(u16, ltlm_usize) orelse return CodestreamError.UnsupportedPayload;
+    try appendMarker(allocator, out, .tlm);
+    try appendU16Be(allocator, out, ltlm);
+    try out.append(allocator, 0);
+    try out.append(allocator, 0x60);
+    for (parts) |part| {
+        try appendU16Be(allocator, out, part.tile_index);
+        try appendU32Be(allocator, out, part.psot);
+    }
+}
+
+fn appendMultiTileResolutionPartSequence(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
+    parts: []const MultiTileResolutionPart,
+    options: LosslessOptions,
+) !void {
+    var part_index: usize = 0;
+    for (artifacts.tiles) |tile_artifacts| {
+        var packet_sequence: u16 = 0;
+        var local_part: usize = 0;
+        while (local_part < @as(usize, tile_artifacts.levels) + 1) : (local_part += 1) {
+            if (part_index >= parts.len) return CodestreamError.InvalidCodestream;
+            const part = parts[part_index];
+            if (part.tile_index != tile_artifacts.tile.index or part.tile_part_index != local_part) {
+                return CodestreamError.InvalidCodestream;
+            }
+            const packet_end = try std.math.add(usize, part.first_packet, part.packet_count);
+            if (packet_end > tile_artifacts.stream.packet_lengths.len or
+                packet_end > tile_artifacts.stream.packet_header_lengths.len)
+            {
+                return CodestreamError.InvalidCodestream;
+            }
+            const packet_lengths = tile_artifacts.stream.packet_lengths[part.first_packet..packet_end];
+            const packet_header_lengths = tile_artifacts.stream.packet_header_lengths[part.first_packet..packet_end];
+            const bytes_start = try rpclPacketByteOffset(tile_artifacts.stream.packet_lengths, part.first_packet);
+            const bytes_end = try rpclPacketByteOffset(tile_artifacts.stream.packet_lengths, packet_end);
+            try appendSot(allocator, out, part.tile_index, part.psot, part.tile_part_index, part.tile_part_count);
+            try appendPltFromRpclPacketLengths(allocator, out, options, packet_lengths);
+            try appendMarker(allocator, out, .sod);
+            try appendRpclPackets(
+                allocator,
+                out,
+                options,
+                packet_lengths,
+                packet_header_lengths,
+                tile_artifacts.stream.bytes[bytes_start..bytes_end],
+                &packet_sequence,
+            );
+            part_index += 1;
+        }
+    }
+    if (part_index != parts.len) return CodestreamError.InvalidCodestream;
 }
 
 fn encodeLosslessMultiTileMeasured(
@@ -9170,9 +9466,27 @@ fn encodeLosslessMultiTileMeasured(
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
 
     const marker_start = monotonicNs();
-    // Multi-tile v1 emits exactly one tile-part per tile in row-major order
-    // (TPsot = 0, TNsot = 1); resolution tile-part divisions compose with the
-    // tile grid in a later slice, so options.tile_part_divisions is ignored.
+    if (encode_options.tile_part_divisions == 'R') {
+        const parts = try buildMultiTileResolutionParts(allocator, artifacts, levels, encode_options);
+        defer allocator.free(parts);
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try appendMarker(allocator, &out, .soc);
+        try appendSiz(allocator, &out, rgb, encode_options);
+        try appendCod(allocator, &out, levels, encode_options);
+        try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+        if (encode_options.tlm) try appendMultiTileTlm(allocator, &out, parts);
+        try appendMultiTileResolutionPartSequence(allocator, &out, artifacts, parts, encode_options);
+        try appendMarker(allocator, &out, .eoc);
+        if (timings) |t| {
+            t.marker_ns = elapsedNs(marker_start);
+            t.total_ns = elapsedNs(total_start);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    // The default multi-tile layout remains one tile-part per tile.
     const layout_options = tile_pipeline.TilePartLayoutOptions{
         .sop = encode_options.sop,
         .eph = encode_options.eph,

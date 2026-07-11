@@ -141,13 +141,17 @@ pub const EncodedComponentBlock = struct {
         if (self.layers.len != @as(usize, @intCast(scaffold.layers))) return PacketScaffoldError.InvalidLayer;
         if (self.segment.bitplanes > nominal_bitplanes) return PacketScaffoldError.InvalidLayer;
 
-        const grid = try t2.CodeBlockGrid.init(
+        const band_x0: usize = self.job.band.origin_x;
+        const band_y0: usize = self.job.band.origin_y;
+        const grid = try t2.CodeBlockGrid.initAnchored(
             self.job.band.rect.x,
             self.job.band.rect.y,
             self.job.band.rect.width,
             self.job.band.rect.height,
             scaffold.block_width,
             scaffold.block_height,
+            band_x0 % scaffold.block_width,
+            band_y0 % scaffold.block_height,
         );
         const location = try grid.locationForRect(.{
             .x = self.job.rect.x,
@@ -1426,9 +1430,11 @@ pub fn forward53TileInPlace(allocator: std.mem.Allocator, rct_tile: *RctTile, re
     var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
     defer workspace.deinit();
 
-    const y_levels = try wavelet_int.forward53WithWorkspace(&workspace, rct_tile.planes.y, width, height, requested_levels);
-    const cb_levels = try wavelet_int.forward53WithWorkspace(&workspace, rct_tile.planes.cb, width, height, requested_levels);
-    const cr_levels = try wavelet_int.forward53WithWorkspace(&workspace, rct_tile.planes.cr, width, height, requested_levels);
+    const x0 = rct_tile.tile.rect.x0;
+    const y0 = rct_tile.tile.rect.y0;
+    const y_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.y, width, height, requested_levels, x0, y0);
+    const cb_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.cb, width, height, requested_levels, x0, y0);
+    const cr_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.cr, width, height, requested_levels, x0, y0);
     if (cb_levels != y_levels or cr_levels != y_levels) return wavelet_int.TransformError.InvalidDimensions;
     return y_levels;
 }
@@ -1439,9 +1445,11 @@ pub fn inverse53TileInPlace(allocator: std.mem.Allocator, rct_tile: *RctTile, le
     var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
     defer workspace.deinit();
 
-    try wavelet_int.inverse53WithWorkspace(&workspace, rct_tile.planes.y, width, height, levels);
-    try wavelet_int.inverse53WithWorkspace(&workspace, rct_tile.planes.cb, width, height, levels);
-    try wavelet_int.inverse53WithWorkspace(&workspace, rct_tile.planes.cr, width, height, levels);
+    const x0 = rct_tile.tile.rect.x0;
+    const y0 = rct_tile.tile.rect.y0;
+    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.y, width, height, levels, x0, y0);
+    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.cb, width, height, levels, x0, y0);
+    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.cr, width, height, levels, x0, y0);
 }
 
 pub fn buildPacketScaffold(
@@ -1457,8 +1465,24 @@ pub fn buildPacketScaffold(
         return packet_plan.PacketPlanError.InvalidDimensions;
     }
 
-    const plan = try packet_plan.rpclSingleTile(width, height, levels, component_count, options.layers, options.precincts);
-    const bands = try subband.makeBands(allocator, width, height, levels);
+    const plan = try packet_plan.rpclTileRegion(
+        rct_tile.tile.rect.x0,
+        rct_tile.tile.rect.y0,
+        rct_tile.tile.rect.x1,
+        rct_tile.tile.rect.y1,
+        levels,
+        component_count,
+        options.layers,
+        options.precincts,
+    );
+    const bands = try subband.makeBandsForRegion(
+        allocator,
+        rct_tile.tile.rect.x0,
+        rct_tile.tile.rect.y0,
+        rct_tile.tile.rect.x1,
+        rct_tile.tile.rect.y1,
+        levels,
+    );
     errdefer allocator.free(bands);
     const blocks = try subband.makeCodeBlocks(allocator, bands, options.block_width, options.block_height);
     errdefer allocator.free(blocks);

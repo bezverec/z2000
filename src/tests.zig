@@ -383,6 +383,13 @@ test "T2 packet header reader rejects missing stuff bit after 0xff" {
     try std.testing.expectError(t2.PacketHeaderError.InvalidMarkerStuffing, reader.readBit());
 }
 
+test "T2 present geometry-empty packet header consumes no payload" {
+    var reader = t2.PacketHeaderReader.init(&[_]u8{0x80});
+    try std.testing.expect(try reader.readBit());
+    try reader.byteAlign();
+    try std.testing.expectEqual(@as(usize, 1), reader.bytesConsumed());
+}
+
 test "T2 packet header readBits crosses stuffed byte boundaries" {
     const allocator = std.testing.allocator;
     var out = std.ArrayList(u8).empty;
@@ -899,6 +906,38 @@ test "T2 code-block grid maps subband block rects to tag-tree leaves" {
     try std.testing.expectError(
         t2.PacketHeaderError.InvalidPacketHeader,
         grid.locationForRect(.{ .x = 8, .y = 4, .width = 3, .height = 2 }),
+    );
+}
+
+test "T2 code-block grid maps reference-clipped first blocks" {
+    const allocator = std.testing.allocator;
+    const bands = try subband.makeBandsForRegion(allocator, 21, 21, 38, 30, 1);
+    defer allocator.free(bands);
+    const blocks = try subband.makeCodeBlocks(allocator, bands, 4, 4);
+    defer allocator.free(blocks);
+
+    const ll_band = bands[0];
+    const grid = try t2.CodeBlockGrid.initAnchored(
+        ll_band.rect.x,
+        ll_band.rect.y,
+        ll_band.rect.width,
+        ll_band.rect.height,
+        4,
+        4,
+        3,
+        3,
+    );
+    try std.testing.expectEqual(@as(usize, 3), grid.leaves_x);
+    try std.testing.expectEqual(@as(usize, 2), grid.leaves_y);
+    try std.testing.expectEqual(@as(usize, 1), blocks[0].rect.width);
+    try std.testing.expectEqual(@as(usize, 1), blocks[0].rect.height);
+    try std.testing.expectEqual(
+        t2.PacketBlockLocation{ .leaf_x = 0, .leaf_y = 0 },
+        try grid.locationForRect(.{ .x = blocks[0].rect.x, .y = blocks[0].rect.y, .width = blocks[0].rect.width, .height = blocks[0].rect.height }),
+    );
+    try std.testing.expectEqual(
+        t2.PacketBlockLocation{ .leaf_x = 1, .leaf_y = 0 },
+        try grid.locationForRect(.{ .x = blocks[1].rect.x, .y = blocks[1].rect.y, .width = blocks[1].rect.width, .height = blocks[1].rect.height }),
     );
 }
 
@@ -4901,6 +4940,49 @@ test "integer 5/3 DWT workspace roundtrips signed component plane" {
     try std.testing.expectEqualSlices(i32, original[0..], data[0..]);
 }
 
+test "integer 5/3 origin-aware workspace roundtrips odd tile origins" {
+    const allocator = std.testing.allocator;
+    const width = 9;
+    const height = 7;
+    const pixels = width * height;
+    const original = try allocator.alloc(i32, pixels);
+    defer allocator.free(original);
+    for (original, 0..) |*sample, index| {
+        sample.* = @intCast((@as(i64, @intCast(index * 37 % 251)) - 125) * 3);
+    }
+
+    inline for (.{
+        .{ @as(u32, 1), @as(u32, 1) },
+        .{ @as(u32, 3), @as(u32, 2) },
+        .{ @as(u32, 2), @as(u32, 5) },
+    }) |origin| {
+        const data = try allocator.dupe(i32, original);
+        defer allocator.free(data);
+        var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+        defer workspace.deinit();
+        const levels = try wavelet_int.forward53WithWorkspaceOrigin(
+            &workspace,
+            data,
+            width,
+            height,
+            2,
+            origin[0],
+            origin[1],
+        );
+        try std.testing.expectEqual(@as(u8, 2), levels);
+        try wavelet_int.inverse53WithWorkspaceOrigin(
+            &workspace,
+            data,
+            width,
+            height,
+            levels,
+            origin[0],
+            origin[1],
+        );
+        try std.testing.expectEqualSlices(i32, original, data);
+    }
+}
+
 test "integer 5/3 DWT roundtrips small odd and even dimensions" {
     const allocator = std.testing.allocator;
     for (1..18) |width| {
@@ -6646,7 +6728,6 @@ const foreign_97_matrix_cases = [_]Foreign97MatrixCase{
             0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
         },
     },
-
 };
 
 test "foreign 9/7 decode matrix stays reference-relative within tight bounds" {
@@ -10844,6 +10925,48 @@ test "RPCL precinct rectangles clip edge precincts and test block overlap" {
     try std.testing.expectError(packet_plan.PacketPlanError.InvalidDimensions, packet_plan.precinctRect(plan, 2, 6));
 }
 
+test "RPCL tile packet plan anchors precincts to the reference grid" {
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 4, .height = 4 },
+        .{ .width = 8, .height = 8 },
+    };
+    const plan = try packet_plan.rpclTileRegion(9, 3, 18, 10, 1, 3, 1, &precincts);
+
+    try std.testing.expectEqual(@as(u32, 5), plan.resolutions[0].x0);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[0].y0);
+    try std.testing.expectEqual(@as(u32, 1), plan.resolutions[0].precinct_x0);
+    try std.testing.expectEqual(@as(u32, 0), plan.resolutions[0].precinct_y0);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[0].precincts_x);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[0].precincts_y);
+    try std.testing.expectEqual(
+        packet_plan.Rect{ .x = 0, .y = 0, .width = 3, .height = 2 },
+        try packet_plan.precinctRect(plan, 0, 0),
+    );
+
+    try std.testing.expectEqual(@as(u32, 9), plan.resolutions[1].x0);
+    try std.testing.expectEqual(@as(u32, 3), plan.resolutions[1].y0);
+    try std.testing.expectEqual(@as(u32, 1), plan.resolutions[1].precinct_x0);
+    try std.testing.expectEqual(@as(u32, 0), plan.resolutions[1].precinct_y0);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[1].precincts_x);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[1].precincts_y);
+    try std.testing.expectEqual(
+        packet_plan.Rect{ .x = 0, .y = 0, .width = 7, .height = 5 },
+        try packet_plan.precinctRect(plan, 1, 0),
+    );
+
+    var iterator = try packet_plan.RpclIterator.init(plan, 3, 1);
+    const first = iterator.next().?;
+    try std.testing.expectEqual(@as(u32, 1), first.precinct_x);
+    try std.testing.expectEqual(@as(u32, 0), first.precinct_y);
+
+    var inconsistent = plan;
+    inconsistent.resolutions[0].precinct_x0 = 0;
+    try std.testing.expectError(
+        packet_plan.PacketPlanError.InvalidDimensions,
+        packet_plan.RpclIterator.init(inconsistent, 3, 1),
+    );
+}
+
 test "RPCL packet iterator emits resolution precinct component layer order" {
     const precincts = [_]packet_plan.Precinct{
         .{ .width = 4, .height = 4 },
@@ -12541,7 +12664,7 @@ test "strict SIZ marker reader rejects unsupported component layout" {
             fn mutate(corrupted: []u8, siz: usize) void {
                 writeU32BeTest(corrupted, siz + 22, 4);
             }
-        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "tile origin offset", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
                 writeU32BeTest(corrupted, siz + 30, 1);
@@ -13677,6 +13800,7 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
             .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
             .precinct_count = 1,
             .progression = .cprl,
+            .tile_part_divisions = null,
             .bypass = true,
             .terminate_all = true,
             .sop = true,
@@ -14053,8 +14177,8 @@ fn makeMultiTileTestImage(allocator: std.mem.Allocator, width: usize, height: us
 
 // Multi-tile fixture geometry: 8x8 precincts with 4x4 blocks satisfy the ISO
 // B.7 bound (blocks never cross precinct boundaries: 8 >= 4 at resolution 0,
-// 8/2 >= 4 above it), and 32-wide tiles satisfy the partition-anchoring guard
-// (32 % (2^2 * 8) == 0).
+// 8/2 >= 4 above it). Most existing tests retain one part per tile; dedicated
+// tests opt into resolution divisions.
 const multi_tile_test_options = codestream.LosslessOptions{
     .levels = 2,
     .tile_width = 32,
@@ -14063,13 +14187,13 @@ const multi_tile_test_options = codestream.LosslessOptions{
     .block_height = 4,
     .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
     .precinct_count = 1,
+    .tile_part_divisions = null,
 };
 
 test "multi-tile encode emits row-major single-part tiles with TLM" {
     const allocator = std.testing.allocator;
     // 48x48 with 32x32 tiles: a 2x2 grid whose right/bottom tiles are 16-wide
-    // edge tiles. Alignment holds (32 % (2^2 * 8) == 0) and every tile achieves
-    // the global two decomposition levels.
+    // edge tiles. Every tile achieves the global two decomposition levels.
     const width = 48;
     const height = 48;
     const samples = try makeMultiTileTestImage(allocator, width, height);
@@ -14134,6 +14258,129 @@ test "multi-tile encode emits row-major single-part tiles with TLM" {
     var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+}
+
+test "multi-tile RPCL resolution tile-parts roundtrip with continuous T2 state" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.layers = 3;
+    options.tile_part_divisions = 'R';
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const parts_per_tile: usize = options.levels + 1;
+    const total_parts = 4 * parts_per_tile;
+    try std.testing.expectEqual(total_parts, countMarker(bytes, codestream.markerValue("sot")));
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingTlm;
+    try std.testing.expectEqual(@as(u16, @intCast(4 + total_parts * 6)), readU16BeTest(bytes, tlm + 2));
+
+    var sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    for (0..4) |tile_index| {
+        for (0..parts_per_tile) |resolution| {
+            try std.testing.expectEqual(@as(u16, @intCast(tile_index)), readU16BeTest(bytes, sot + 4));
+            try std.testing.expectEqual(@as(u8, @intCast(resolution)), bytes[sot + 10]);
+            try std.testing.expectEqual(@as(u8, @intCast(parts_per_tile)), bytes[sot + 11]);
+            const next = sot + @as(usize, readU32BeTest(bytes, sot + 6));
+            if (tile_index + 1 == 4 and resolution + 1 == parts_per_tile) {
+                try std.testing.expectEqual(codestream.markerValue("eoc"), readU16BeTest(bytes, next));
+                try std.testing.expectEqual(bytes.len, next + 2);
+            } else {
+                try std.testing.expectEqual(codestream.markerValue("sot"), readU16BeTest(bytes, next));
+                sot = next;
+            }
+        }
+    }
+
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const second_sot = first_sot + @as(usize, readU32BeTest(bytes, first_sot + 6));
+    const second_sod = findMarkerAfter(bytes, codestream.markerValue("sod"), second_sot) orelse return error.MissingSod;
+    try std.testing.expectEqual(codestream.markerValue("sop"), readU16BeTest(bytes, second_sod + 2));
+    // Tile 0 R0 has one precinct x three components x three layers.
+    try std.testing.expectEqual(@as(u16, 9), readU16BeTest(bytes, second_sod + 6));
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(?u8, 'R'), stats.tile_part_divisions);
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u32, width), info.width);
+
+    var threaded_options = options;
+    threaded_options.threads = 4;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    var marker_light_options = options;
+    marker_light_options.tlm = false;
+    marker_light_options.sop = false;
+    marker_light_options.eph = false;
+    const marker_light = try codestream.encodeLosslessWithOptions(allocator, rgb, marker_light_options);
+    defer allocator.free(marker_light);
+    const marker_light_sot = findMarker(marker_light, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const marker_light_tlm = findMarker(marker_light[0..marker_light_sot], codestream.markerValue("tlm"));
+    try std.testing.expect(marker_light_tlm == null);
+    const marker_light_cod = findMarker(marker_light[0..marker_light_sot], codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0), marker_light[marker_light_cod + 4] & 0x06);
+    var marker_light_decoded = try codestream.decodeLosslessTemporary(allocator, marker_light);
+    defer marker_light_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, marker_light_decoded.samples);
+}
+
+test "multi-tile resolution tile-parts reject inconsistent SOT state" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    var options = multi_tile_test_options;
+    options.tile_part_divisions = 'R';
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const second_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
+    {
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        corrupted[second_sot + 10] = 2;
+        try std.testing.expectError(
+            codestream.CodestreamError.InvalidCodestream,
+            codestream.analyzeLosslessTemporary(corrupted),
+        );
+    }
+    {
+        const corrupted = try allocator.dupe(u8, bytes);
+        defer allocator.free(corrupted);
+        corrupted[second_sot + 11] = 2;
+        try std.testing.expectError(
+            codestream.CodestreamError.InvalidCodestream,
+            codestream.analyzeLosslessTemporary(corrupted),
+        );
+    }
 }
 
 test "multi-tile LRCP codestream roundtrips and permutes tile packets" {
@@ -14321,6 +14568,40 @@ test "multi-tile RPCL quality layers roundtrip losslessly" {
     var threaded_options = options;
     threaded_options.threads = 3;
     const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+}
+
+test "multi-tile reference-grid precinct and code-block partitions roundtrip" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    // 17 is aligned with neither the DWT scale nor the precinct step.
+    // Interior tiles exercise odd lifting parity plus clipped precinct,
+    // code-block, and tag-tree partitions.
+    options.tile_width = 17;
+    options.tile_height = 17;
+    options.layers = 2;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
     defer allocator.free(threaded);
     try std.testing.expectEqualSlices(u8, bytes, threaded);
 }
@@ -14788,13 +15069,17 @@ test "multi-tile encode fails closed outside the bounded envelope" {
                 options.quantization = .scalar_expounded;
             }
         }.mutate },
+        .{ .label = "resolution tile-parts with non-RPCL progression", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.tile_part_divisions = 'R';
+                options.progression = .lrcp;
+            }
+        }.mutate },
         .{
-            .label = "misaligned tile size",
+            .label = "tile cannot carry the global DWT level count",
             .mutate = struct {
                 fn mutate(options: *codestream.LosslessOptions) void {
-                    // 20 is not a multiple of 2^levels x precinct (32), so tile
-                    // origins would not land on partition boundaries.
-                    options.tile_width = 20;
+                    options.tile_width = 2;
                 }
             }.mutate,
         },
@@ -14876,7 +15161,7 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
         },
         .{
             .label = "nonzero TPsot",
-            .expected = codestream.CodestreamError.UnsupportedPayload,
+            .expected = codestream.CodestreamError.InvalidCodestream,
             .mutate = struct {
                 fn mutate(stream: []u8, sot0: usize, sot1: usize, tlm_start: usize) void {
                     _ = sot1;
@@ -15185,10 +15470,8 @@ test "multi-tile stats and header audit aggregate across tiles" {
 
 test "multi-tile encode rejects tiles that clamp the global DWT level count" {
     const allocator = std.testing.allocator;
-    // 34x34 with 32x32 tiles keeps the alignment guard satisfied
-    // (16 % (2^2 * 4) == 0) but produces 2-wide edge tiles that can only
-    // achieve one decomposition level against the global two, so COD would
-    // lie about them (docs/multi_tile_plan.md section 2.3).
+    // The 2-wide edge tiles can only achieve one decomposition level against
+    // the global two, so COD would lie about them (multi_tile_plan §2.3).
     const width = 34;
     const height = 34;
     const samples = try makeMultiTileTestImage(allocator, width, height);

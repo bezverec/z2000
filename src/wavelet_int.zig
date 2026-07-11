@@ -9,6 +9,8 @@ pub const TransformError = error{
 const LevelShape = struct {
     width: usize,
     height: usize,
+    x0: u32 = 0,
+    y0: u32 = 0,
 };
 
 const vertical_lanes = simd.i32_lanes;
@@ -21,6 +23,7 @@ const HorizontalPairVector = @Vector(horizontal_pair_lanes, i32);
 const HorizontalShiftVector = @Vector(horizontal_lanes, u5);
 const horizontal_even_mask = makeHorizontalEvenMask();
 const horizontal_interleave_mask = makeHorizontalInterleaveMask();
+const workspace_lanes = @max(vertical_lanes, 2);
 
 pub const Workspace = struct {
     allocator: std.mem.Allocator,
@@ -28,7 +31,7 @@ pub const Workspace = struct {
 
     pub fn init(allocator: std.mem.Allocator, max_dim: usize) !Workspace {
         if (max_dim == 0) return TransformError.InvalidDimensions;
-        const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
+        const scratch_len = try std.math.mul(usize, max_dim, workspace_lanes);
         const scratch = try allocator.alloc(i32, scratch_len);
         errdefer allocator.free(scratch);
         return .{
@@ -43,12 +46,30 @@ pub const Workspace = struct {
     }
 
     fn require(self: Workspace, max_dim: usize) !void {
-        const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
+        const scratch_len = try std.math.mul(usize, max_dim, workspace_lanes);
         if (self.scratch.len < scratch_len) {
             return TransformError.InvalidDimensions;
         }
     }
 };
+
+pub fn canDecompose53Region(x0: u32, y0: u32, x1: u32, y1: u32, levels: u8) bool {
+    if (x1 <= x0 or y1 <= y0 or levels > 32) return false;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    var cur_x1 = x1;
+    var cur_y1 = y1;
+    var level: u8 = 0;
+    while (level < levels) : (level += 1) {
+        if (cur_x1 - cur_x0 <= 1 and cur_y1 - cur_y0 <= 1) return false;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+        cur_x1 = ceilDiv2(cur_x1);
+        cur_y1 = ceilDiv2(cur_y1);
+        if (cur_x1 <= cur_x0 or cur_y1 <= cur_y0) return false;
+    }
+    return true;
+}
 
 pub fn forward53(
     allocator: std.mem.Allocator,
@@ -75,6 +96,18 @@ pub fn forward53WithWorkspace(
     height: usize,
     requested_levels: u8,
 ) !u8 {
+    return forward53WithWorkspaceOrigin(workspace, data, width, height, requested_levels, 0, 0);
+}
+
+pub fn forward53WithWorkspaceOrigin(
+    workspace: *Workspace,
+    data: []i32,
+    width: usize,
+    height: usize,
+    requested_levels: u8,
+    x0: u32,
+    y0: u32,
+) !u8 {
     if (width == 0 or height == 0 or data.len != width * height) {
         return TransformError.InvalidDimensions;
     }
@@ -85,20 +118,27 @@ pub fn forward53WithWorkspace(
 
     var cur_width = width;
     var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
     var done: u8 = 0;
     while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        const next_width = lowCountOrigin(cur_width, cur_x0);
+        const next_height = lowCountOrigin(cur_height, cur_y0);
+        if (next_width == 0 or next_height == 0) break;
         // ISO/IEC 15444-1 F.4.8: the forward 2D transform filters vertically
         // first, then horizontally. The 5/3 lifting steps use floor
         // operations, so the direction order changes coefficients by +-1 and
         // must match independent codecs.
-        forward53Columns(data, width, cur_width, cur_height, scratch);
+        forward53ColumnsOrigin(data, width, cur_width, cur_height, scratch, cur_y0);
 
         for (0..cur_height) |row| {
-            forward53Line(rowSlice(data, width, row, cur_width), scratch[0..cur_width]);
+            forward53LineOrigin(rowSlice(data, width, row, cur_width), scratch[0..cur_width], cur_x0);
         }
 
-        cur_width = lowCount(cur_width);
-        cur_height = lowCount(cur_height);
+        cur_width = next_width;
+        cur_height = next_height;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
     }
 
     return done;
@@ -129,6 +169,18 @@ pub fn inverse53WithWorkspace(
     height: usize,
     levels: u8,
 ) !void {
+    return inverse53WithWorkspaceOrigin(workspace, data, width, height, levels, 0, 0);
+}
+
+pub fn inverse53WithWorkspaceOrigin(
+    workspace: *Workspace,
+    data: []i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    x0: u32,
+    y0: u32,
+) !void {
     if (width == 0 or height == 0 or data.len != width * height) {
         return TransformError.InvalidDimensions;
     }
@@ -138,11 +190,16 @@ pub fn inverse53WithWorkspace(
 
     var cur_width = width;
     var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
     var actual_levels: u8 = 0;
     while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
-        shapes[actual_levels] = .{ .width = cur_width, .height = cur_height };
-        cur_width = lowCount(cur_width);
-        cur_height = lowCount(cur_height);
+        shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+        cur_width = lowCountOrigin(cur_width, cur_x0);
+        cur_height = lowCountOrigin(cur_height, cur_y0);
+        if (cur_width == 0 or cur_height == 0) return TransformError.InvalidDimensions;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
     }
 
     const max_dim = @max(width, height);
@@ -157,10 +214,10 @@ pub fn inverse53WithWorkspace(
         // Mirror of the ISO forward order (vertical then horizontal): the
         // inverse runs horizontally first, then vertically (F.3.8 2D_SR).
         for (0..shape.height) |row| {
-            inverse53Line(rowSlice(data, width, row, shape.width), scratch[0..shape.width]);
+            inverse53LineOrigin(rowSlice(data, width, row, shape.width), scratch[0..shape.width], shape.x0);
         }
 
-        inverse53Columns(data, width, shape.width, shape.height, scratch);
+        inverse53ColumnsOrigin(data, width, shape.width, shape.height, scratch, shape.y0);
     }
 }
 
@@ -620,6 +677,74 @@ fn inverse53ColumnScalar(data: []i32, stride: usize, col: usize, height: usize, 
     }
 }
 
+fn forward53ColumnsOrigin(data: []i32, stride: usize, width: usize, height: usize, scratch: []i32, y0: u32) void {
+    if ((y0 & 1) == 0) return forward53Columns(data, stride, width, height, scratch);
+    const line = scratch[0..height];
+    const temp = scratch[height .. height * 2];
+    for (0..width) |col| {
+        for (0..height) |row| line[row] = data[row * stride + col];
+        forward53LineOrigin(line, temp, y0);
+        for (0..height) |row| data[row * stride + col] = line[row];
+    }
+}
+
+fn inverse53ColumnsOrigin(data: []i32, stride: usize, width: usize, height: usize, scratch: []i32, y0: u32) void {
+    if ((y0 & 1) == 0) return inverse53Columns(data, stride, width, height, scratch);
+    const line = scratch[0..height];
+    const temp = scratch[height .. height * 2];
+    for (0..width) |col| {
+        for (0..height) |row| line[row] = data[row * stride + col];
+        inverse53LineOrigin(line, temp, y0);
+        for (0..height) |row| data[row * stride + col] = line[row];
+    }
+}
+
+fn forward53LineOrigin(data: []i32, scratch: []i32, origin: u32) void {
+    if ((origin & 1) == 0) return forward53Line(data, scratch);
+    if (data.len == 1) {
+        data[0] *= 2;
+        return;
+    }
+
+    // Odd reference origin: local even indexes are high-pass samples and
+    // local odd indexes are low-pass samples.
+    var i: usize = 0;
+    while (i < data.len) : (i += 2) {
+        const left = if (i > 0) data[i - 1] else data[i + 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] -= floorHalf(left + right);
+    }
+    i = 1;
+    while (i < data.len) : (i += 2) {
+        const left = data[i - 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] += floorQuarterBiased(left + right);
+    }
+    packOddEven(data, scratch);
+}
+
+fn inverse53LineOrigin(data: []i32, scratch: []i32, origin: u32) void {
+    if ((origin & 1) == 0) return inverse53Line(data, scratch);
+    if (data.len == 1) {
+        data[0] = @divExact(data[0], 2);
+        return;
+    }
+
+    unpackOddEven(data, scratch);
+    var i: usize = 1;
+    while (i < data.len) : (i += 2) {
+        const left = data[i - 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] -= floorQuarterBiased(left + right);
+    }
+    i = 0;
+    while (i < data.len) : (i += 2) {
+        const left = if (i > 0) data[i - 1] else data[i + 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] += floorHalf(left + right);
+    }
+}
+
 fn inverse53Line(data: []i32, scratch: []i32) void {
     if (data.len < 2) return;
     unpackEvenOdd(data, scratch);
@@ -741,8 +866,48 @@ fn unpackEvenOdd(data: []i32, scratch: []i32) void {
     @memcpy(data, scratch[0..data.len]);
 }
 
+fn packOddEven(data: []i32, scratch: []i32) void {
+    var out: usize = 0;
+    var i: usize = 1;
+    while (i < data.len) : (i += 2) {
+        scratch[out] = data[i];
+        out += 1;
+    }
+    i = 0;
+    while (i < data.len) : (i += 2) {
+        scratch[out] = data[i];
+        out += 1;
+    }
+    @memcpy(data, scratch[0..data.len]);
+}
+
+fn unpackOddEven(data: []i32, scratch: []i32) void {
+    const lows = data.len / 2;
+    var local: usize = 1;
+    var packed_index: usize = 0;
+    while (local < data.len) : (local += 2) {
+        scratch[local] = data[packed_index];
+        packed_index += 1;
+    }
+    local = 0;
+    packed_index = lows;
+    while (local < data.len) : (local += 2) {
+        scratch[local] = data[packed_index];
+        packed_index += 1;
+    }
+    @memcpy(data, scratch[0..data.len]);
+}
+
 fn lowCount(n: usize) usize {
     return (n + 1) / 2;
+}
+
+fn lowCountOrigin(n: usize, origin: u32) usize {
+    return if ((origin & 1) == 0) (n + 1) / 2 else n / 2;
+}
+
+fn ceilDiv2(value: u32) u32 {
+    return (value / 2) + @intFromBool((value & 1) != 0);
 }
 
 fn makeHorizontalEvenMask() [horizontal_lanes]i32 {

@@ -564,10 +564,9 @@ fn validateTilePartSequence(
     }
 }
 
-/// Multi-tile v1 tile-part discipline (docs/multi_tile_plan.md §3): exactly one
-/// tile-part per tile, no duplicate Isot values, TPsot = 0, TNsot = 1, and SOP
-/// packet numbering restarts per tile. Tile-parts may appear in any stream
-/// order; Kakadu writes some small grids as 0,1,3,2.
+/// Multi-tile tile-part discipline: one-part tiles may appear in any unique
+/// tile order (Kakadu writes some small grids as 0,1,3,2). Resolution-divided
+/// tiles carry exactly NL+1 consecutive parts with TPsot increasing from zero.
 fn validateMultiTileTilePartSequence(
     payload: []const u8,
     first_sot_offset: usize,
@@ -576,9 +575,12 @@ fn validateMultiTileTilePartSequence(
     tile_count: u32,
 ) !void {
     if (tile_count > 256) return Jp2Error.UnsupportedProfile;
-    var seen_tiles = [_]bool{false} ** 256;
+    var next_parts = [_]u8{0} ** 256;
+    var expected_parts = [_]u8{0} ** 256;
+    var completed_tiles = [_]bool{false} ** 256;
+    var packet_sequences = [_]u16{0} ** 256;
     var cursor = first_sot_offset;
-    var tile_part_index: u32 = 0;
+    var sequence_index: u32 = 0;
     while (cursor < payload.len - 2) {
         if (try readU16Be(payload, cursor) != marker_sot) return Jp2Error.InvalidCodestream;
         const length_offset = std.math.add(usize, cursor, 2) catch return Jp2Error.InvalidCodestream;
@@ -589,29 +591,35 @@ fn validateMultiTileTilePartSequence(
         const tile_part_length = try readU32Be(payload, cursor + 6);
         const sot_tile_part_index = payload[cursor + 10];
         const tile_part_total = payload[cursor + 11];
-        if (tile_part_index >= tile_count) return Jp2Error.InvalidCodestream;
         if (sot_tile_index >= tile_count) return Jp2Error.InvalidCodestream;
-        if (sot_tile_part_index != 0 or tile_part_total != 1) return Jp2Error.UnsupportedProfile;
-        const seen_index = @as(usize, sot_tile_index);
-        if (seen_tiles[seen_index]) return Jp2Error.InvalidCodestream;
-        seen_tiles[seen_index] = true;
+        if (tile_part_total == 0) return Jp2Error.InvalidCodestream;
+        if (tile_part_total != 1 and tile_part_total != cod.levels + 1) return Jp2Error.UnsupportedProfile;
+        const state_index = @as(usize, sot_tile_index);
+        if (completed_tiles[state_index]) return Jp2Error.InvalidCodestream;
+        if (expected_parts[state_index] == 0) {
+            expected_parts[state_index] = tile_part_total;
+        } else if (expected_parts[state_index] != tile_part_total) {
+            return Jp2Error.InvalidCodestream;
+        }
+        if (sot_tile_part_index != next_parts[state_index]) return Jp2Error.InvalidCodestream;
         if (tile_part_length == 0) return Jp2Error.UnsupportedProfile;
         if (tlm_state) |state| {
-            if (tile_part_index >= state.count) return Jp2Error.InvalidCodestream;
-            if (state.tile_indices[tile_part_index] != sot_tile_index) return Jp2Error.InvalidCodestream;
-            if (state.lengths[tile_part_index] != tile_part_length) return Jp2Error.InvalidCodestream;
+            if (sequence_index >= state.count) return Jp2Error.InvalidCodestream;
+            if (state.tile_indices[sequence_index] != sot_tile_index) return Jp2Error.InvalidCodestream;
+            if (state.lengths[sequence_index] != tile_part_length) return Jp2Error.InvalidCodestream;
         }
         const tile_part_end = std.math.add(usize, cursor, tile_part_length) catch return Jp2Error.InvalidCodestream;
         if (tile_part_end > payload.len - 2) return Jp2Error.InvalidCodestream;
-        var packet_sequence: u16 = 0;
-        try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, &packet_sequence);
+        try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, &packet_sequences[state_index]);
         cursor = tile_part_end;
-        tile_part_index += 1;
+        next_parts[state_index] = std.math.add(u8, next_parts[state_index], 1) catch return Jp2Error.InvalidCodestream;
+        if (next_parts[state_index] == expected_parts[state_index]) completed_tiles[state_index] = true;
+        sequence_index += 1;
     }
     if (cursor != payload.len - 2) return Jp2Error.InvalidCodestream;
-    if (tile_part_index != tile_count) return Jp2Error.InvalidCodestream;
+    for (completed_tiles[0..tile_count]) |completed| if (!completed) return Jp2Error.InvalidCodestream;
     if (tlm_state) |state| {
-        if (state.count != tile_count) return Jp2Error.InvalidCodestream;
+        if (state.count != sequence_index) return Jp2Error.InvalidCodestream;
     }
 }
 

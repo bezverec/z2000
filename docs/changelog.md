@@ -5,6 +5,40 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile Resolution Parts
+
+- Added PLT-backed RPCL `R` divisions to the bounded multi-tile encoder and
+  strict decoder. Each tile emits `NL+1` SOT/SOD parts, TLM/PLT lengths are
+  validated per resolution, SOP numbering remains continuous across a tile's
+  parts, and the reader joins packet views into one tile catalog before T2/T1
+  reconstruction. The JP2 boundary validates per-tile `TPsot`/`TNsot` state;
+  malformed part indexes/counts fail deterministically. The 17x17 odd-origin
+  gate decodes pixel-exactly through z2000, OpenJPEG, Grok, and Kakadu.
+  PLT-less multi-part streams and non-RPCL `R` combinations remain fail-closed.
+  This broadens the existing `R` profile without changing the 88/100 score.
+
+### Reference-Grid Multi-Tile Strict Decode
+
+- Added tile-region packet plans that retain each resolution's reference-grid
+  bounds and first precinct indexes, so clipped precinct rectangles no longer
+  assume a tile-local partition origin. Strict multi-tile metadata, PLT-less
+  span derivation, packet audit, and decode now use those plans. Encode now
+  partitions code-blocks and tag-tree leaves from each subband's global origin,
+  removing the old `2^levels * precinct` tile-size guard. Origin-aware 5/3
+  lifting, low/high subband origins, and global-to-band precinct projection
+  then remove the remaining `2^levels` parity guard. Extended
+  `tools/interop_pltless_multitile.ps1` with default-precinct and 17x17
+  odd-origin OpenJPEG, Grok, and Kakadu files. All explicit, default, and
+  odd-origin cases strict-audit and decode pixel-exactly. The strict T2 reader
+  accepts the present geometry-empty edge packets emitted by the reference
+  encoders while requiring zero block contributions and zero payload. The same
+  gate encodes a 17x17 z2000 tile grid whose lifting parity starts inside
+  precinct/code-block partitions and verifies pixel-exact decode through
+  z2000, OpenJPEG, Grok, and Kakadu. Scorecard: the initial reference-grid
+  decode slice moved lossless decode profiles 12->13 and the reconciled total
+  86->87/100; bidirectional foreign odd-origin coverage moves that row 13->14
+  and the total 87->88/100.
+
 ### Multi-Tile Rate Targets
 
 - Opened `--rates` for the aligned multi-tile reversible profile with a

@@ -18,10 +18,17 @@ pub const Rect = struct {
 };
 
 pub const Resolution = struct {
+    /// Bounds of this tile-component resolution on the component reference
+    /// grid. Single-tile plans start at zero; tile plans retain their ISO
+    /// B.6 partition origin so edge precincts can be clipped locally.
+    x0: u32 = 0,
+    y0: u32 = 0,
     width: u32,
     height: u32,
     precinct_width: u32,
     precinct_height: u32,
+    precinct_x0: u32 = 0,
+    precinct_y0: u32 = 0,
     precincts_x: u32,
     precincts_y: u32,
     precincts: u64,
@@ -91,8 +98,8 @@ pub const RpclIterator = struct {
             const packet = Packet{
                 .sequence = self.sequence,
                 .resolution = self.resolution,
-                .precinct_x = @intCast(self.precinct_index % resolution.precincts_x),
-                .precinct_y = @intCast(self.precinct_index / resolution.precincts_x),
+                .precinct_x = resolution.precinct_x0 + @as(u32, @intCast(self.precinct_index % resolution.precincts_x)),
+                .precinct_y = resolution.precinct_y0 + @as(u32, @intCast(self.precinct_index / resolution.precincts_x)),
                 .precinct_index = self.precinct_index,
                 .component = self.component,
                 .layer = self.layer,
@@ -160,8 +167,8 @@ pub const LrcpIterator = struct {
             const packet = Packet{
                 .sequence = self.sequence,
                 .resolution = self.resolution,
-                .precinct_x = @intCast(self.precinct_index % resolution.precincts_x),
-                .precinct_y = @intCast(self.precinct_index / resolution.precincts_x),
+                .precinct_x = resolution.precinct_x0 + @as(u32, @intCast(self.precinct_index % resolution.precincts_x)),
+                .precinct_y = resolution.precinct_y0 + @as(u32, @intCast(self.precinct_index / resolution.precincts_x)),
                 .precinct_index = self.precinct_index,
                 .component = self.component,
                 .layer = self.layer,
@@ -219,8 +226,8 @@ pub const RlcpIterator = struct {
             const packet = Packet{
                 .sequence = self.sequence,
                 .resolution = self.resolution,
-                .precinct_x = @intCast(self.precinct_index % resolution.precincts_x),
-                .precinct_y = @intCast(self.precinct_index / resolution.precincts_x),
+                .precinct_x = resolution.precinct_x0 + @as(u32, @intCast(self.precinct_index % resolution.precincts_x)),
+                .precinct_y = resolution.precinct_y0 + @as(u32, @intCast(self.precinct_index / resolution.precincts_x)),
                 .precinct_index = self.precinct_index,
                 .component = self.component,
                 .layer = self.layer,
@@ -349,8 +356,8 @@ pub fn rpclPacketAt(plan: Plan, components: u16, layers: u16, sequence: u64) !?P
         return .{
             .sequence = sequence,
             .resolution = @intCast(resolution_index),
-            .precinct_x = @intCast(precinct_index % resolution.precincts_x),
-            .precinct_y = @intCast(precinct_index / resolution.precincts_x),
+            .precinct_x = resolution.precinct_x0 + @as(u32, @intCast(precinct_index % resolution.precincts_x)),
+            .precinct_y = resolution.precinct_y0 + @as(u32, @intCast(precinct_index / resolution.precincts_x)),
             .precinct_index = precinct_index,
             .component = @intCast(component),
             .layer = @intCast(layer),
@@ -364,18 +371,23 @@ pub fn precinctRect(plan: Plan, resolution_index: u8, precinct_index: u64) !Rect
     const resolution = plan.resolutions[resolution_index];
     if (precinct_index >= resolution.precincts) return PacketPlanError.InvalidDimensions;
 
-    const precinct_x = @as(u32, @intCast(precinct_index % resolution.precincts_x));
-    const precinct_y = @as(u32, @intCast(precinct_index / resolution.precincts_x));
-    const x = precinct_x * resolution.precinct_width;
-    const y = precinct_y * resolution.precinct_height;
-    const right = @min(resolution.width, x + resolution.precinct_width);
-    const bottom = @min(resolution.height, y + resolution.precinct_height);
+    const precinct_x = resolution.precinct_x0 + @as(u32, @intCast(precinct_index % resolution.precincts_x));
+    const precinct_y = resolution.precinct_y0 + @as(u32, @intCast(precinct_index / resolution.precincts_x));
+    const precinct_left = @as(u64, precinct_x) * resolution.precinct_width;
+    const precinct_top = @as(u64, precinct_y) * resolution.precinct_height;
+    const resolution_right = @as(u64, resolution.x0) + resolution.width;
+    const resolution_bottom = @as(u64, resolution.y0) + resolution.height;
+    const left = @max(@as(u64, resolution.x0), precinct_left);
+    const top = @max(@as(u64, resolution.y0), precinct_top);
+    const right = @min(resolution_right, precinct_left + resolution.precinct_width);
+    const bottom = @min(resolution_bottom, precinct_top + resolution.precinct_height);
+    if (right <= left or bottom <= top) return PacketPlanError.InvalidDimensions;
 
     return .{
-        .x = x,
-        .y = y,
-        .width = right - x,
-        .height = bottom - y,
+        .x = @intCast(left - resolution.x0),
+        .y = @intCast(top - resolution.y0),
+        .width = @intCast(right - left),
+        .height = @intCast(bottom - top),
     };
 }
 
@@ -399,7 +411,26 @@ pub fn rpclSingleTile(
     layers: u16,
     precincts: []const Precinct,
 ) !Plan {
-    if (width == 0 or height == 0 or components == 0 or layers == 0 or precincts.len == 0) {
+    if (width > std.math.maxInt(u32) or height > std.math.maxInt(u32)) {
+        return PacketPlanError.InvalidDimensions;
+    }
+    return rpclTileRegion(0, 0, @intCast(width), @intCast(height), levels, components, layers, precincts);
+}
+
+/// Builds a packet plan for a tile-component region while retaining the
+/// reference-grid precinct partition. Coordinates are component-grid sample
+/// coordinates (the current codec uses XRsiz/YRsiz = 1).
+pub fn rpclTileRegion(
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    levels: u8,
+    components: u16,
+    layers: u16,
+    precincts: []const Precinct,
+) !Plan {
+    if (x1 <= x0 or y1 <= y0 or components == 0 or layers == 0 or precincts.len == 0) {
         return PacketPlanError.InvalidDimensions;
     }
     if (levels > 32) return PacketPlanError.TooManyResolutions;
@@ -413,20 +444,34 @@ pub fn rpclSingleTile(
     var resolution: u8 = 0;
     while (resolution <= levels) : (resolution += 1) {
         const decomp = levels - resolution;
-        const res_width = ceilDivPow2(width, decomp);
-        const res_height = ceilDivPow2(height, decomp);
+        const res_x0 = ceilDivPow2U32(x0, decomp);
+        const res_y0 = ceilDivPow2U32(y0, decomp);
+        const res_x1 = ceilDivPow2U32(x1, decomp);
+        const res_y1 = ceilDivPow2U32(y1, decomp);
+        if (res_x1 <= res_x0 or res_y1 <= res_y0) return PacketPlanError.InvalidDimensions;
+        const res_width = res_x1 - res_x0;
+        const res_height = res_y1 - res_y0;
         const precinct = precinctForResolution(precincts, resolution);
-        const precincts_x = ceilDiv(u32, res_width, precinct.width);
-        const precincts_y = ceilDiv(u32, res_height, precinct.height);
+        if (precinct.width == 0 or precinct.height == 0) return PacketPlanError.InvalidDimensions;
+        const precinct_x0 = res_x0 / precinct.width;
+        const precinct_y0 = res_y0 / precinct.height;
+        const precinct_x1 = ceilDiv(u32, res_x1, precinct.width);
+        const precinct_y1 = ceilDiv(u32, res_y1, precinct.height);
+        const precincts_x = precinct_x1 - precinct_x0;
+        const precincts_y = precinct_y1 - precinct_y0;
         const precinct_count = try std.math.mul(u64, precincts_x, precincts_y);
         const precinct_packets = try std.math.mul(u64, precinct_count, components);
         const packets = try std.math.mul(u64, precinct_packets, layers);
 
         plan.resolutions[resolution] = .{
+            .x0 = res_x0,
+            .y0 = res_y0,
             .width = res_width,
             .height = res_height,
             .precinct_width = precinct.width,
             .precinct_height = precinct.height,
+            .precinct_x0 = precinct_x0,
+            .precinct_y0 = precinct_y0,
             .precincts_x = precincts_x,
             .precincts_y = precincts_y,
             .precincts = precinct_count,
@@ -442,6 +487,21 @@ fn validateResolution(resolution: Resolution, components: u16, layers: u16) !voi
     if (resolution.width == 0 or resolution.height == 0) return PacketPlanError.InvalidDimensions;
     if (resolution.precinct_width == 0 or resolution.precinct_height == 0) return PacketPlanError.InvalidDimensions;
     if (resolution.precincts_x == 0 or resolution.precincts_y == 0) return PacketPlanError.InvalidDimensions;
+    const right = @as(u64, resolution.x0) + resolution.width;
+    const bottom = @as(u64, resolution.y0) + resolution.height;
+    if (right > std.math.maxInt(u32) or bottom > std.math.maxInt(u32)) return PacketPlanError.InvalidDimensions;
+    const expected_x0 = resolution.x0 / resolution.precinct_width;
+    const expected_y0 = resolution.y0 / resolution.precinct_height;
+    const expected_x1 = ceilDiv(u64, right, resolution.precinct_width);
+    const expected_y1 = ceilDiv(u64, bottom, resolution.precinct_height);
+    if (resolution.precinct_x0 != expected_x0 or resolution.precinct_y0 != expected_y0) {
+        return PacketPlanError.InvalidDimensions;
+    }
+    if (expected_x1 - expected_x0 != resolution.precincts_x or
+        expected_y1 - expected_y0 != resolution.precincts_y)
+    {
+        return PacketPlanError.InvalidDimensions;
+    }
     const precinct_count = try std.math.mul(u64, resolution.precincts_x, resolution.precincts_y);
     if (resolution.precincts != precinct_count) return PacketPlanError.InvalidDimensions;
     const precinct_packets = try std.math.mul(u64, resolution.precincts, components);
@@ -460,6 +520,12 @@ fn emptyResolution() Resolution {
         .precincts = 0,
         .packets = 0,
     };
+}
+
+fn ceilDivPow2U32(value: u32, shift: u8) u32 {
+    if (shift == 0) return value;
+    const divisor = @as(u64, 1) << @as(u6, @intCast(shift));
+    return @intCast((@as(u64, value) + divisor - 1) / divisor);
 }
 
 fn precinctForResolution(precincts: []const Precinct, resolution: usize) Precinct {

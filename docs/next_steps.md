@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 85/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 88/100 full** as of
 2026-07-11 (evening). First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-11)
 
-Scorecard now **100/100 narrow, 85/100 full**. The aligned multi-tile path has
+Scorecard now **100/100 narrow, 88/100 full**. The bounded multi-tile path has
 all five progression orders, quality layers including the first tile-local
 rate-target slice, and the implemented resilience matrix. CAUSAL+SEGMARK,
 RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
@@ -25,14 +25,21 @@ interop, and the multi-tile gate admits standalone RESET/ERTERM as well
 (strict roundtrip plus pixel-exact kdu_expand decode of genuine multi-tile
 output); BYPASS+RESET and BYPASS+ERTERM stay fail-closed.
 The malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
-profile, and aligned PLT-less multi-tile streams now strict-decode by deriving
+profile, and PLT-less multi-tile streams now strict-decode by deriving
 tile-local packet spans from T2 packet headers. The foreign OpenJPEG/Grok/Kakadu
-PLT-less multi-tile smoke is green, including Kakadu's reordered `0,1,3,2`
-tile-part sequence. A first tile-local PCRD `--rates` slice is now wired for
+PLT-less multi-tile smoke is green for explicit and COD-default precincts,
+including Kakadu's reordered `0,1,3,2` tile-part sequence. A first tile-local PCRD `--rates` slice is now wired for
 the bounded reversible multi-tile path and has a z2000/OpenJPEG/Grok/Kakadu
-LRCP smoke gate; the next structural multi-tile gates are default no-precinct
-PLT-less multi-tile geometry, global cross-tile rate-budget refinement,
-reference-grid partition anchoring, and tile-level scheduling.
+LRCP smoke gate. Reference-grid precinct/code-block/tag-tree anchoring and odd-
+origin reversible 5/3 lifting are now bidirectionally interop-green for
+PLT-less OpenJPEG, Grok, and Kakadu inputs and z2000 output. The strict T2
+reader also accepts present geometry-empty edge packets while still requiring
+zero contributions and zero payload. The next
+structural gates are global cross-tile rate-budget refinement, PLT-less
+cross-part packet-state decode, broader progression/tile-part combinations,
+and tile-level scheduling. PLT-backed RPCL `R` divisions now emit and decode
+one part per resolution per tile, with z2000/OpenJPEG/Grok/Kakadu pixel-exact
+interop on the 17x17 odd-origin gate.
 
 The remaining levers are larger and structural. Ordered by *value per unit
 risk*; each names the ISO clause, the current code state, exactly what is
@@ -167,13 +174,15 @@ format, codestream profile, and container semantics are explicit.
   walk now records PLT-less tile spans, and the per-tile catalog derives
   packet boundaries from tile-local T2 packet headers. A second regression
   covers no-TLM/no-SOP/no-EPH framing, and a third accepts a unique reordered
-  tile-part sequence. `tools/interop_pltless_multitile.ps1` generates aligned
-  PLT-less multi-tile JP2s with OpenJPEG, Grok, and Kakadu and z2000
-  strict-decodes each pixel-exactly.
-- **Score policy:** full lossless decode profiles 10->12, moving the full
-  codec estimate 80->82. Remaining gates are default no-precinct PLT-less
-  multi-tile geometry, broader component/layout coverage, and more marker
-  combinations.
+  tile-part sequence. `tools/interop_pltless_multitile.ps1` generates
+  explicit- and default-precinct PLT-less multi-tile JP2s with OpenJPEG, Grok,
+  and Kakadu; z2000 strict-decodes every case pixel-exactly. Reference-grid-
+  aware tile packet plans provide the default-precinct geometry without
+  relaxing encoder policy.
+- **Score policy:** full lossless decode profiles 10->13 across the two landed
+  slices. The default-precinct foreign matrix moves the reconciled full estimate
+  86->87;
+  broader component/layout coverage and more marker combinations remain.
 
 ### N1. Core codestream syntax — redundant COC/QCC — ✅ LANDED
 
@@ -207,7 +216,7 @@ format, codestream profile, and container semantics are explicit.
 - **State:** multi-tile v1/v2 is interop-proven for aligned RPCL and multi-layer
   LRCP/RLCP/PCRL/CPRL grids. The envelope is RCT/5-3, untargeted quality layers
   across all five progression orders, the implemented resilience style matrix,
-  one tile-part per tile. Gates:
+  one tile-part per tile plus PLT-backed RPCL resolution divisions. Gates:
   `validateMultiTileCodingPath` / `validateMultiTileGeometry` in `codestream.zig`.
 - **What to add (staged, each its own PR, single-tile byte-identical at every
   step):**
@@ -221,10 +230,19 @@ format, codestream profile, and container semantics are explicit.
     deterministic threaded encode, and a z2000/OpenJPEG/Grok/Kakadu LRCP
     smoke. Remaining: cross-tile/global byte-target refinement and broader
     style/progression matrix coverage before counting a score bump.
-  - **v2c — reference-grid partition anchoring.** Drop the "tile-size multiple
-    of 2^levels × precinct" fail-closed guard by anchoring precinct/code-block
-    partitions to the reference grid (ISO B.6/B.7) instead of the tile-local
-    origin — the conformance trap noted in `multi_tile_plan.md`.
+  - **v2c — reference-grid partition anchoring.** Packet plans retain
+    per-resolution reference bounds and first precinct indexes; code-block
+    partitions and tag-tree leaves use global subband origins. Foreign default-
+    precinct streams strict-decode, and z2000 17x17 tiles with odd lifting
+    parity decode pixel-exactly through OpenJPEG/Grok/Kakadu. Both the old
+    `2^levels * precinct` guard and the later `2^levels` parity guard are gone;
+    only tile-components that cannot carry the signalled global `NL` fail
+    closed (ISO B.6/B.7 and Annex F).
+  - **v2d — RPCL resolution tile-parts.** ✅ PLT-backed `R` divisions emit
+    `NL+1` parts per tile, strict decode joins all parts before T2/T1, and the
+    17x17 odd-origin output is pixel-exact through z2000, OpenJPEG, Grok, and
+    Kakadu. Remaining: PLT-less cross-part span derivation and non-RPCL
+    progression/division combinations.
   - **v2d — resilience styles.** LANDED: CAUSAL, SEGMARK,
     RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL have deterministic strict
     roundtrips; representative combined/terminated files are pixel-exact in
@@ -415,8 +433,8 @@ for more ISO coverage is:
    Kakadu coverage.
 3. **Multi-tile v2.** Progression, untargeted-layer, and resilience breadth is
    now landed. Continue with multi-tile PCRD global-budget targets, broader
-   rate-targeted matrix coverage, reference-grid partition anchoring, and then
-   tile-level scheduling.
+   rate-targeted matrix coverage, PLT-less multi-part decode, broader
+   progression/division combinations, and then tile-level scheduling.
 4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.

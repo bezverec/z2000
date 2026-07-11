@@ -122,10 +122,10 @@ TERMALL-scoped RESET, BYPASS+TERMALL, vertical-causal, TERMALL-scoped ERTERM,
 and segmentation-symbol profiles are public where their segment model exists;
 large no-sidecar ERTERM files are green through z2000 strict decode, OpenJPEG,
 Grok, and Kakadu. BYPASS+TERMALL is strict-decode covered and lossless through
-OpenJPEG/Grok/Kakadu on the current smoke, and the aligned multi-tile style
-matrix has a reproducible Kakadu gate. Standalone RESET is public only on the
-single-tile ISO-MQ envelope; standalone ERTERM and untested combinations still
-return `UnsupportedPayload`. The next T1 work should
+OpenJPEG/Grok/Kakadu on the current smoke, and the bounded multi-tile style
+matrix has a reproducible Kakadu gate. Standalone RESET and ERTERM are public
+on their tested single- and multi-tile ISO-MQ envelopes; BYPASS+RESET,
+BYPASS+ERTERM, and untested combinations still return `UnsupportedPayload`. The next T1 work should
 continue tightening remaining cleanup edge cases, COD-driven termination
 combinations, and byte-for-byte oracle coverage.
 
@@ -340,10 +340,12 @@ copy-back helpers so per-tile encode/decode work can move rectangular image
 regions without ad hoc row math. Multi-tile support is intentionally bounded:
 lossless RCT/5-3, quality layers across all five progression orders,
 tile-local rate targets in the bounded reversible profile, one tile-part per
-tile, deterministic row-major encode, reordered foreign tile-part decode,
+tile or PLT-backed RPCL resolution divisions, deterministic row-major encode,
+reordered foreign one-part tile decode,
 plain coding and the implemented
-CAUSAL/SEGMARK/terminated resilience combinations, and ISO B.6/B.7-aligned
-geometry.
+CAUSAL/SEGMARK/terminated resilience combinations, reference-grid precinct/
+code-block/tag-tree geometry, and origin-aware reversible 5/3 lifting for odd
+tile origins.
 
 `src/tile_pipeline.zig` is the tile-local implementation layer. It runs the
 reversible component transform, tile-local 5/3 DWT/inverse-DWT, T1 code-block
@@ -365,9 +367,8 @@ These are intentionally not treated as complete yet:
   budgeting, and tile-part divisions beyond the current supported policy;
 - BYPASS combined with standalone RESET/ERTERM, other unsupported style
   envelopes, and untested code-block style combinations;
-- broader PLT-less foreign decode coverage beyond the current single-tile
-  lossless OpenJPEG/Grok/Kakadu matrix and aligned OpenJPEG/Grok/Kakadu
-  multi-tile PLT-less smoke;
+- broader PLT-less foreign decode coverage beyond the current single-tile and
+  explicit/default-precinct multi-tile OpenJPEG/Grok/Kakadu lossless matrices;
 - general-purpose lossy decode/error-bound coverage beyond the current narrow
   ICT/9-7/scalar-quantization gates.
 

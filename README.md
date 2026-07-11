@@ -8,8 +8,8 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-10, the narrow RGB lossless JP2 target is estimated at **100/100**;
-the broader JPEG2000 Part 1 codec family is estimated at **82/100**.
+of 2026-07-11, the narrow RGB lossless JP2 target is estimated at **100/100**;
+the broader JPEG2000 Part 1 codec family is estimated at **88/100**.
 
 ## Features
 
@@ -23,14 +23,17 @@ the broader JPEG2000 Part 1 codec family is estimated at **82/100**.
 - Selected JPEG2000 code-block styles where payload behavior is implemented,
   including BYPASS, terminate-all, vertical-causal, segmentation symbols, and
   standalone and TERMALL-scoped reset/predictable-termination profiles.
-- Aligned multi-tile lossless envelope with per-tile strict decode and
-  OpenJPEG/Grok/Kakadu smoke coverage for supported profiles.
+- Reference-grid-aware multi-tile lossless encode/decode with origin-aware
+  reversible 5/3 lifting, OpenJPEG/Grok/Kakadu smoke coverage for supported
+  profiles, and foreign PLT-less streams using explicit, default, or odd-origin
+  precinct/tile partitions.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, general component layouts,
-standalone ERTERM, full multi-tile rate allocation, broad color management,
+full multi-tile rate allocation, PLT-less multi-part tiles,
+broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and full metadata handling beyond the staged ICC
 path.
 
@@ -134,7 +137,7 @@ Packet, layer, and geometry options:
 | `--resolutions N` | Alternative to `--levels`; resolutions are levels + 1. |
 | `--progression RPCL|LRCP|RLCP|PCRL|CPRL` | JPEG2000 progression order. Supported paths are still profile-bounded and fail closed when unsafe. |
 | `--layers N` | Number of quality layers. |
-| `--rates R1,R2,...` | Rate targets for layered output. Single-tile uses global PCRD with packet-header charging; aligned multi-tile uses tile-local PCRD in the bounded lossless path. |
+| `--rates R1,R2,...` | Rate targets for layered output. Single-tile uses global PCRD with packet-header charging; bounded multi-tile uses tile-local PCRD in the lossless path. |
 | `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |
 | `--block N` | Square code-block size. |
 | `--tile W,H` | Tile size. Multi-tile support is currently the aligned lossless envelope. |
