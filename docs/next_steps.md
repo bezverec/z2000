@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 84/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 85/100 full** as of
 2026-07-11 (evening). First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-11)
 
-Scorecard now **100/100 narrow, 84/100 full**. The aligned multi-tile path has
+Scorecard now **100/100 narrow, 85/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
@@ -286,13 +286,18 @@ format, codestream profile, and container semantics are explicit.
   remaining combination (extend the styled-T1 matrix), then OpenJPEG/Grok/Kakadu
   interop before lifting any gate.
 
-### N4. Lossy breadth — foreign-9/7 decode validation — M · Med
+### N4. Lossy breadth — foreign-9/7 decode validation — ✅ DECODE SIDE CLOSED (2026-07-11)
 
-- **Impact:** full "Lossy encode/decode" now 11/15 (2026-07-11: the Kakadu
-  8.4.1 fixture and the Kakadu reference-relative ladder landed, completing
-  pinned decode fixtures from all three reference encoders and moving the
-  full estimate 83->84). Remaining +1-2 requires a CI reference-relative
-  PSNR matrix and broader encoder-side lossy validation.
+- **Impact:** full "Lossy encode/decode" now 12/15. 2026-07-11 landed, in
+  order: the Kakadu 8.4.1 fixture plus the Kakadu reference-relative ladder
+  (11/15, full estimate 83->84), then the **CI reference-relative decode
+  matrix** (12/15, 84->85): six embedded foreign 9/7 JP2s — OpenJPEG `-r
+  4/16`, Grok `-r 4/16`, Kakadu `-rate 4/1` — each paired with the reference
+  decoder's own decoded raster; the test recomputes z2000-vs-reference
+  agreement on every run (max byte diff <= 3, PSNR >= 50 dB when not
+  byte-identical, cross-thread determinism; measured max 0-2 / 55 dB-exact).
+  Remaining +1-3 in this row is encoder-side: PCRD PSNR regression at
+  matched byte ladders on a shared corpus, then tile-aware rate targets.
 - **ISO clause:** E (quantization), G (9/7), J.14 (rate-distortion).
 - **State:** ICT/9-7 encode/decode locally; **foreign OpenJPEG 9/7 lossy now
   decodes byte-identically across `-r 1..8` / `-q`** (embedded-fixture
@@ -315,8 +320,9 @@ format, codestream profile, and container semantics are explicit.
     8.5M; Grok `-r 8`: 2.21M vs old 3M). **The Kakadu ladder is now measured
     (2026-07-11):** kdu `Creversible=no -rate 1..8` on the 2048² noise smoke
     decodes through z2000 within max byte diff 2-3 / 51-55 dB of kdu_expand's
-    own output. Remaining: turn the out-of-process matrix into a CI fixture
-    gate.
+    own output. **The CI fixture gate landed the same day** — see the Impact
+    note above; the out-of-process ladders remain the broader diagnostic, the
+    embedded matrix is the always-on regression floor.
   - **(b) Foreign 9/7 QCD step tables.** **Progress:** the strict irreversible
     QCD parser and JP2 wrapper now accept signalled scalar-expounded/scalar-
     derived `(exponent, mantissa)` pairs, accept irreversible guard bits 1..7,
@@ -328,15 +334,11 @@ format, codestream profile, and container semantics are explicit.
     494 bytes): it signals scalar-expounded QCD with one guard bit and
     Kakadu's own mantissas, LRCP, no PLT, plus `res `/`resc` wrapper boxes —
     deterministic FNV hash, source-error bound, and out-of-process
-    kdu_expand agreement max byte diff 1 / 56.4 dB. Next: turn the
-    Grok/OpenJPEG/Kakadu set into a CI reference-relative PSNR matrix.
-- **What to add:** a decode fixture matrix over foreign 9/7 lossy JP2s
-  (OpenJPEG/Grok/Kakadu at several rate ladders) asserting z2000's PSNR is
-  within a tight bound of each reference decoder's own output; a PCRD PSNR
-  regression check on a shared corpus at matched byte ladders.
-- **Test plan:** generate foreign 9/7 fixtures, decode with z2000 and the
-  reference, compare PSNR (not byte-exact — 9/7 is lossy); assert deterministic
-  z2000 output across thread counts.
+    kdu_expand agreement max byte diff 1 / 56.4 dB. **The CI
+    reference-relative matrix landed the same day** (see Impact note above),
+    closing this sub-gap.
+- **What remains (encoder side):** a PCRD PSNR regression check on a shared
+  corpus at matched byte ladders, then tile-aware rate targets (N2 v2b).
 
 ### N5. Perf — single-thread MQ column-pipeline (decisive Grok lever) — L · High
 
