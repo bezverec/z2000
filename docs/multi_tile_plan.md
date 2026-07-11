@@ -73,16 +73,17 @@ dimension) never hit this; degenerate-resolution tiles are a v2 concern.
 
 ## 3. v1 scope (what multi-tile means in the first shipped slice)
 
-Supported: reversible 5/3 + RCT, one or more untargeted quality layers across
+Supported: reversible 5/3 + RCT, one or more quality layers across
 all five progression orders, default/explicit precincts, plain, CAUSAL,
 SEGMARK, CAUSAL+SEGMARK, TERMALL, RESET+TERMALL, ERTERM+TERMALL, and
 BYPASS+TERMALL code-block styles, one tile-part per tile in row-major order
 (`TPsot=0`, `TNsot=1`), TLM on, SOP/EPH as today, PLT per tile-part as the
-scaffold builds it.
+scaffold builds it. Rate-targeted layers now have a tile-local PCRD slice for
+the bounded reversible profile; global cross-tile byte budgeting and external
+interop are follow-up gates.
 
-Fail-closed in multi-tile mode (each lifted later, separately): `--rates`
-(byte targets are image-global), `--tile-parts R` (R-divisions compose with
-multi-tile later), BYPASS without TERMALL, standalone RESET/ERTERM, BYPASS
+Fail-closed in multi-tile mode (each lifted later, separately): `--tile-parts R`
+(R-divisions compose with multi-tile later), BYPASS without TERMALL, BYPASS
 combined with RESET/ERTERM, untested resilience combinations, `--mct none`,
 9/7/lossy, and tiles that clamp DWT levels (§2.3).
 Single-tile behavior stays **byte-identical** — every increment keeps
@@ -222,6 +223,23 @@ from segment sizes. Focused 2x2 tests cover deterministic threaded encode,
 strict single-/multi-thread decode, second-tile PLT corruption, and the
 multi-tile BYPASS+TERMALL malformed-input sweep.
 
+### Stage F — Tile-local rate targets — ✅ LOCAL SLICE LANDED
+
+The bounded multi-tile reversible path now accepts `--rates`. Each tile builds
+its encoded block catalog once, extracts per-pass distortion metadata from the
+same EBCOT symbol model used by the single-tile PCRD path, applies a tile-local
+slope allocation, rewrites T2 layer truncations, then assembles the packet
+stream normally. A focused regression verifies that rate-targeted output differs
+from even layer splitting, strict-decodes byte-exactly, carries non-final PLT
+payload contributions, and is byte-deterministic across worker counts.
+
+Interop: `tools/interop_rate_multitile.ps1` encodes a 2x2 LRCP/rate-targeted
+multi-tile JP2 and verifies final-layer lossless decode through z2000 strict
+decode, OpenJPEG, Grok, and Kakadu.
+
+Remaining before scorecard promotion: global cross-tile budget refinement and
+broader style/progression combinations.
+
 ## 5. Risks, ranked
 
 1. **Stage C refactor blast radius** — the strict reader is the green narrow
@@ -240,7 +258,6 @@ multi-tile BYPASS+TERMALL malformed-input sweep.
 ## 6. Explicit non-goals for v1
 
 Tile-parts-within-tile (R divisions × tiles), per-tile COD/QCD overrides,
-`--mct none`, unsupported style combinations, rate-targeted quality layers,
-lossy 9/7 tiles,
+`--mct none`, unsupported style combinations, lossy 9/7 tiles,
 streaming (bounded-memory) assembly, PPM/PPT. Each is a separate, later
 increment on top of the v1 skeleton.

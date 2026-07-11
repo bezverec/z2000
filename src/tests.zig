@@ -10466,6 +10466,133 @@ test "rate-driven layers work on the irreversible 9/7 path" {
     try std.testing.expect(max_diff <= 8);
 }
 
+test "rate-targeted layer byte accounting stays pinned on the PCRD corpus" {
+    // Mirrors tools/pcrd_psnr_ladder.ps1: the same 256x256 integer-only
+    // mixed corpus (smooth gradient / sawtooth / checkerboard+hash-noise),
+    // 9/7 ICT with five LRCP quality layers targeted at compression ratios
+    // 80/40/20/10 of the total compressed payload (the final layer is always
+    // complete). LRCP keeps the layer as the outermost packet loop, so the
+    // per-layer PLT prefix sums are the assembled layer payload sizes; the
+    // global PCRD allocator plus packet-header charging must land each
+    // cumulative layer size on its byte target. The reference-relative
+    // quality of these truncation points is measured out-of-process by the
+    // ladder tool (2026-07-11: 0.7-1.8 dB behind OpenJPEG at matched bytes).
+    const allocator = std.testing.allocator;
+    const width = 256;
+    const height = 256;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const i = (y * width + x) * 3;
+            samples[i + 0] = @intCast((x + y) >> 1);
+            samples[i + 1] = @intCast(((x % 64) * 4 + (y % 32) * 2) & 0xff);
+            const checker: u64 = if (((x / 32) + (y / 32)) % 2 == 0) 200 else 56;
+            const noise = (((@as(u64, x) * 73856093) ^ (@as(u64, y) * 19349663)) >> 13) & 15;
+            samples[i + 2] = @intCast((checker + noise) & 0xff);
+        }
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = codestream.LosslessOptions{
+        .levels = 5,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+        .progression = .lrcp,
+        .sop = false,
+        .tlm = false,
+        .tile_part_divisions = null,
+    };
+    const rates = [_]f64{ 80, 40, 20, 10, 5 };
+    @memcpy(options.rates[0..rates.len], &rates);
+    options.rate_count = rates.len;
+    options.layers = rates.len;
+
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    // Byte-deterministic across encode thread counts.
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    // Collect the PLT packet lengths of the single tile-part in stream order.
+    var packet_lengths: std.ArrayList(u64) = .empty;
+    defer packet_lengths.deinit(allocator);
+    {
+        const plt_marker = codestream.markerValue("plt");
+        const sod = codestream.markerValue("sod");
+        const sot = codestream.markerValue("sot");
+        var cursor: usize = 2;
+        while (readU16BeTest(bytes, cursor) != sot) {
+            cursor += 2 + readU16BeTest(bytes, cursor + 2);
+        }
+        cursor += 12;
+        while (readU16BeTest(bytes, cursor) != sod) {
+            const marker_value = readU16BeTest(bytes, cursor);
+            const segment_length = readU16BeTest(bytes, cursor + 2);
+            if (marker_value == plt_marker) {
+                var value: u64 = 0;
+                for (bytes[cursor + 5 .. cursor + 2 + segment_length]) |byte| {
+                    value = (value << 7) | (byte & 0x7f);
+                    if ((byte & 0x80) == 0) {
+                        try packet_lengths.append(allocator, value);
+                        value = 0;
+                    }
+                }
+            }
+            cursor += 2 + segment_length;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), packet_lengths.items.len % rates.len);
+    const packets_per_layer = packet_lengths.items.len / rates.len;
+
+    var total_packet_bytes: u64 = 0;
+    for (packet_lengths.items) |length| total_packet_bytes += length;
+
+    // Every intermediate cumulative layer size must land near its target
+    // (total payload / ratio). The allocator charges measured packet-header
+    // bytes against the targets, so actual sizes sit at or slightly under
+    // them; 15% covers pass-boundary snapping on this corpus.
+    var cumulative: u64 = 0;
+    for (0..rates.len - 1) |layer| {
+        var layer_sum: u64 = 0;
+        for (0..packets_per_layer) |k| layer_sum += packet_lengths.items[layer * packets_per_layer + k];
+        cumulative += layer_sum;
+        const target = @as(f64, @floatFromInt(total_packet_bytes)) / rates[layer];
+        const actual = @as(f64, @floatFromInt(cumulative));
+        errdefer std.debug.print(
+            "layer {} cumulative {} target {d:.0} (total {})\n",
+            .{ layer + 1, cumulative, target, total_packet_bytes },
+        );
+        try std.testing.expect(@abs(actual - target) <= target * 0.15);
+    }
+
+    // Full-stream reconstruction quality floor (measured 51.7 dB, max 3).
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    var sse: u64 = 0;
+    var max_diff: u32 = 0;
+    for (samples, decoded.samples) |expected, actual| {
+        const delta = @abs(@as(i32, @intCast(expected)) - @as(i32, @intCast(actual)));
+        max_diff = @max(max_diff, @as(u32, @intCast(delta)));
+        sse += @as(u64, @intCast(delta * delta));
+    }
+    try std.testing.expect(max_diff <= 4);
+    const mse = @as(f64, @floatFromInt(sse)) / @as(f64, @floatFromInt(samples.len));
+    const psnr = 10.0 * std.math.log10(255.0 * 255.0 / mse);
+    try std.testing.expect(psnr >= 51.0);
+}
+
 test "multi-layer BYPASS codestream roundtrips losslessly (NDK MC style)" {
     const allocator = std.testing.allocator;
     const width = 96;
@@ -14198,6 +14325,67 @@ test "multi-tile RPCL quality layers roundtrip losslessly" {
     try std.testing.expectEqualSlices(u8, bytes, threaded);
 }
 
+test "multi-tile rate-targeted quality layers roundtrip deterministically" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.layers = 3;
+    options.progression = .lrcp;
+    options.rate_count = 2;
+    options.rates[0] = 16.0;
+    options.rates[1] = 4.0;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    var even_options = options;
+    even_options.rate_count = 0;
+    @memset(&even_options.rates, 0);
+    const even = try codestream.encodeLosslessWithOptions(allocator, rgb, even_options);
+    defer allocator.free(even);
+    try std.testing.expect(!std.mem.eql(u8, even, bytes));
+
+    const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u16, 3), readU16BeTest(bytes, cod + 6));
+    try std.testing.expectEqual(@as(u8, 0), bytes[cod + 12]);
+    try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    const packet_lengths = try collectCodestreamPltLengthsForTest(allocator, bytes);
+    defer allocator.free(packet_lengths);
+    try std.testing.expectEqual(@as(usize, 0), packet_lengths.len % @as(usize, options.layers));
+    var early_bytes: u64 = 0;
+    var final_bytes: u64 = 0;
+    for (packet_lengths, 0..) |length, index| {
+        if (index % options.layers == options.layers - 1) {
+            final_bytes += length;
+        } else {
+            early_bytes += length;
+        }
+    }
+    try std.testing.expect(early_bytes > 0);
+    try std.testing.expect(final_bytes > 0);
+}
+
 test "multi-tile terminate-all roundtrips losslessly" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -14578,13 +14766,6 @@ test "multi-tile encode fails closed outside the bounded envelope" {
         mutate: *const fn (options: *codestream.LosslessOptions) void,
     };
     const cases = [_]Case{
-        .{ .label = "rate targets", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                options.layers = 2;
-                options.rate_count = 1;
-                options.rates[0] = 2.0;
-            }
-        }.mutate },
         .{ .label = "mct none", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.mct = .none;
@@ -17754,6 +17935,67 @@ fn findMarkerAfter(bytes: []const u8, marker: u16, start: usize) ?usize {
     if (start >= bytes.len) return null;
     if (findMarker(bytes[start..], marker)) |relative| return start + relative;
     return null;
+}
+
+fn collectCodestreamPltLengthsForTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u64 {
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const plt = codestream.markerValue("plt");
+    const eoc = codestream.markerValue("eoc");
+
+    var out: std.ArrayList(u64) = .empty;
+    errdefer out.deinit(allocator);
+
+    if (bytes.len < 2 or readU16BeTest(bytes, 0) != codestream.markerValue("soc")) return error.InvalidCodestream;
+    var cursor: usize = 2;
+    while (cursor + 1 < bytes.len and readU16BeTest(bytes, cursor) != sot) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        if (marker_value == eoc) return error.MissingSot;
+        if (bytes.len - cursor < 4) return error.Truncated;
+        cursor += 2 + @as(usize, readU16BeTest(bytes, cursor + 2));
+    }
+
+    while (cursor + 1 < bytes.len) {
+        const marker_value = readU16BeTest(bytes, cursor);
+        if (marker_value == eoc) return out.toOwnedSlice(allocator);
+        if (marker_value != sot) return error.MissingSot;
+        if (bytes.len - cursor < 12) return error.Truncated;
+        const psot = readU32BeTest(bytes, cursor + 6);
+        if (psot < 14 or cursor + @as(usize, psot) > bytes.len) return error.InvalidSot;
+        const tile_part_end = cursor + @as(usize, psot);
+        cursor += 12;
+        while (cursor + 1 < tile_part_end and readU16BeTest(bytes, cursor) != sod) {
+            const tile_header_marker = readU16BeTest(bytes, cursor);
+            if (bytes.len - cursor < 4) return error.Truncated;
+            const segment_length = readU16BeTest(bytes, cursor + 2);
+            if (segment_length < 2 or cursor + 2 + @as(usize, segment_length) > tile_part_end) {
+                return error.InvalidCodestream;
+            }
+            if (tile_header_marker == plt) {
+                if (segment_length < 3) return error.InvalidPlt;
+                var payload_cursor = cursor + 5;
+                const segment_end = cursor + 2 + @as(usize, segment_length);
+                var value: u64 = 0;
+                var pending = false;
+                while (payload_cursor < segment_end) : (payload_cursor += 1) {
+                    const byte = bytes[payload_cursor];
+                    value = (value << 7) | @as(u64, byte & 0x7f);
+                    pending = true;
+                    if ((byte & 0x80) == 0) {
+                        try out.append(allocator, value);
+                        value = 0;
+                        pending = false;
+                    }
+                }
+                if (pending) return error.InvalidPlt;
+            }
+            cursor += 2 + @as(usize, segment_length);
+        }
+        if (cursor + 1 >= tile_part_end or readU16BeTest(bytes, cursor) != sod) return error.MissingSod;
+        cursor = tile_part_end;
+    }
+
+    return error.MissingEoc;
 }
 
 fn codScodOffsetForTest(bytes: []const u8) !usize {

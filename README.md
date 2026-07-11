@@ -134,7 +134,7 @@ Packet, layer, and geometry options:
 | `--resolutions N` | Alternative to `--levels`; resolutions are levels + 1. |
 | `--progression RPCL|LRCP|RLCP|PCRL|CPRL` | JPEG2000 progression order. Supported paths are still profile-bounded and fail closed when unsafe. |
 | `--layers N` | Number of quality layers. |
-| `--rates R1,R2,...` | Rate targets for layered output. Multi-tile rate targeting is still fail-closed until tile-aware PCRD lands. |
+| `--rates R1,R2,...` | Rate targets for layered output. Single-tile uses global PCRD with packet-header charging; aligned multi-tile uses tile-local PCRD in the bounded lossless path. |
 | `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |
 | `--block N` | Square code-block size. |
 | `--tile W,H` | Tile size. Multi-tile support is currently the aligned lossless envelope. |

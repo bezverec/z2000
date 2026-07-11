@@ -35,7 +35,8 @@ Current RGB TIFF to JP2 encode:
 6. `src/ebcot.zig` builds EBCOT-style coding passes and MQ-backed code-block
    segment bytes used by the current RPCL packet payload.
 7. `src/rate_alloc.zig` maps quality layers or target rates to cumulative
-   code-block truncation points.
+   code-block truncation points; the rate-targeted path uses global PCRD over
+   per-pass distortion metadata and then charges measured T2 header overhead.
 8. `src/packet_plan.zig` describes packet order and precinct geometry for the
    implemented progression orders.
 9. `src/t2.zig` owns packet-header primitives, tag-trees, layer deltas,
@@ -337,9 +338,10 @@ non-divisible image dimensions and non-zero reference origins, plus row-major
 tile descriptors. It also provides tile-local RGB sample extraction and
 copy-back helpers so per-tile encode/decode work can move rectangular image
 regions without ad hoc row math. Multi-tile support is intentionally bounded:
-lossless RCT/5-3, untargeted quality layers across all five progression orders,
-one tile-part per tile, deterministic row-major encode, reordered foreign
-tile-part decode, plain coding and the implemented
+lossless RCT/5-3, quality layers across all five progression orders,
+tile-local rate targets in the bounded reversible profile, one tile-part per
+tile, deterministic row-major encode, reordered foreign tile-part decode,
+plain coding and the implemented
 CAUSAL/SEGMARK/terminated resilience combinations, and ISO B.6/B.7-aligned
 geometry.
 
@@ -358,11 +360,11 @@ These are intentionally not treated as complete yet:
 - arbitrary JP2/JPX box families and JPX-only features;
 - arbitrary component layouts, subsampling, palettes, alpha channels, and
   variable bits-per-component;
-- multi-tile combinations outside the bounded envelope, including rate-targeted
-  layers, BYPASS without TERMALL, unsupported style combinations, and tile-part
-  divisions beyond the current supported policy;
-- standalone ERTERM, unsupported RESET envelopes, and untested code-block style
-  combinations;
+- multi-tile combinations outside the bounded envelope, including BYPASS
+  without TERMALL, unsupported style combinations, global cross-tile rate
+  budgeting, and tile-part divisions beyond the current supported policy;
+- BYPASS combined with standalone RESET/ERTERM, other unsupported style
+  envelopes, and untested code-block style combinations;
 - broader PLT-less foreign decode coverage beyond the current single-tile
   lossless OpenJPEG/Grok/Kakadu matrix and aligned OpenJPEG/Grok/Kakadu
   multi-tile PLT-less smoke;

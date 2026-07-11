@@ -354,9 +354,16 @@ Primary public functions:
 
 The allocator works on cumulative pass and byte targets. The legacy helpers
 keep even and compression-ratio allocation available for tests, while the
-current rate-driven path uses PCRD-style global slope allocation over
-per-block distortion metadata. T2 then converts the chosen cumulative points
-into per-layer deltas.
+current rate-driven path uses PCRD-style slope allocation over per-block
+distortion metadata. The single-tile codestream layer charges measured packet
+header overhead against non-final layer budgets, then T2 converts the chosen
+cumulative points into per-layer deltas. The aligned multi-tile path has a
+tile-local PCRD slice for the bounded reversible profile; the first LRCP smoke
+is lossless through z2000 strict decode, OpenJPEG, Grok, and Kakadu. Cross-tile
+global budgeting and broader rate-targeted matrix coverage are still follow-up
+work.
+`tools/pcrd_psnr_ladder.ps1` is the current matched-byte quality diagnostic
+for future allocator improvements.
 
 ## `src/subband.zig`
 

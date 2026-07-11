@@ -13,8 +13,9 @@ the subsequent JP2/T2/T1/profile work is **100/100 narrow, 85/100 full** as of
 ## Next Working Sequence (2026-07-11)
 
 Scorecard now **100/100 narrow, 85/100 full**. The aligned multi-tile path has
-all five progression orders, untargeted layers, and the implemented resilience
-matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
+all five progression orders, quality layers including the first tile-local
+rate-target slice, and the implemented resilience matrix. CAUSAL+SEGMARK,
+RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
 T1 BYPASS mode is preserved explicitly into T2 readback. Uniform Kakadu
 COC/QCC style and QCD overrides now decode through z2000 when all RGB
@@ -27,8 +28,10 @@ The malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
 profile, and aligned PLT-less multi-tile streams now strict-decode by deriving
 tile-local packet spans from T2 packet headers. The foreign OpenJPEG/Grok/Kakadu
 PLT-less multi-tile smoke is green, including Kakadu's reordered `0,1,3,2`
-tile-part sequence. The next structural multi-tile gates are default
-no-precinct PLT-less multi-tile geometry, tile-aware PCRD targets,
+tile-part sequence. A first tile-local PCRD `--rates` slice is now wired for
+the bounded reversible multi-tile path and has a z2000/OpenJPEG/Grok/Kakadu
+LRCP smoke gate; the next structural multi-tile gates are default no-precinct
+PLT-less multi-tile geometry, global cross-tile rate-budget refinement,
 reference-grid partition anchoring, and tile-level scheduling.
 
 The remaining levers are larger and structural. Ordered by *value per unit
@@ -213,8 +216,11 @@ format, codestream profile, and container semantics are explicit.
     Grok decode three-layer LRCP/RLCP/PCRL/CPRL smokes losslessly. Remaining:
     Kakadu across the matrix.
   - **v2b — quality layers per tile.** Untargeted quality layers are wired for
-    all five progression orders. Remaining: make PCRD/rate
-    targets tile-aware before accepting `--rates` in multi-tile mode.
+    all five progression orders. First tile-local PCRD/rate-target slice is
+    now wired for the bounded reversible profile with strict local roundtrip,
+    deterministic threaded encode, and a z2000/OpenJPEG/Grok/Kakadu LRCP
+    smoke. Remaining: cross-tile/global byte-target refinement and broader
+    style/progression matrix coverage before counting a score bump.
   - **v2c — reference-grid partition anchoring.** Drop the "tile-size multiple
     of 2^levels × precinct" fail-closed guard by anchoring precinct/code-block
     partitions to the reference grid (ISO B.6/B.7) instead of the tile-local
@@ -296,8 +302,9 @@ format, codestream profile, and container semantics are explicit.
   decoder's own decoded raster; the test recomputes z2000-vs-reference
   agreement on every run (max byte diff <= 3, PSNR >= 50 dB when not
   byte-identical, cross-thread determinism; measured max 0-2 / 55 dB-exact).
-  Remaining +1-3 in this row is encoder-side: PCRD PSNR regression at
-  matched byte ladders on a shared corpus, then tile-aware rate targets.
+  Remaining +1-3 in this row is encoder-side: shrinking the newly pinned PCRD
+  PSNR deficit at matched byte ladders, then global/interoperable multi-tile
+  rate targets.
 - **ISO clause:** E (quantization), G (9/7), J.14 (rate-distortion).
 - **State:** ICT/9-7 encode/decode locally; **foreign OpenJPEG 9/7 lossy now
   decodes byte-identically across `-r 1..8` / `-q`** (embedded-fixture
@@ -337,8 +344,13 @@ format, codestream profile, and container semantics are explicit.
     kdu_expand agreement max byte diff 1 / 56.4 dB. **The CI
     reference-relative matrix landed the same day** (see Impact note above),
     closing this sub-gap.
-- **What remains (encoder side):** a PCRD PSNR regression check on a shared
-  corpus at matched byte ladders, then tile-aware rate targets (N2 v2b).
+- **What remains (encoder side):** the PCRD PSNR ladder is now pinned on a
+  shared 256x256 mixed corpus (`tools/pcrd_psnr_ladder.ps1`, mirrored by an
+  in-tree byte-accounting/quality regression). Current 2026-07-11 baseline:
+  z2000 trails OpenJPEG by 1.78 / 0.69 / 1.21 / 1.78 dB at matched layer
+  prefix sizes. Next: reduce that deficit without violating byte targets or
+  cross-thread determinism, and extend the new multi-tile tile-local rate
+  target slice through interop/global-budget gates.
 
 ### N5. Perf — single-thread MQ column-pipeline (decisive Grok lever) — L · High
 
@@ -402,8 +414,9 @@ for more ISO coverage is:
    damaged second-tile PLT length. Remaining: broader external corpus and
    Kakadu coverage.
 3. **Multi-tile v2.** Progression, untargeted-layer, and resilience breadth is
-   now landed. Continue with tile-aware PCRD targets, reference-grid partition
-   anchoring, and then tile-level scheduling.
+   now landed. Continue with multi-tile PCRD global-budget targets, broader
+   rate-targeted matrix coverage, reference-grid partition anchoring, and then
+   tile-level scheduling.
 4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.
@@ -971,8 +984,10 @@ catalog layer truncations after the parallel block encode (single-threaded →
 thread-count independent, covered by a determinism test). Measured on a
 1024x1024 natural-statistics image at rates 100/50/20/8: layer payloads land
 on target (old split overshot layer 1 by ~10x), first-layer PSNR 32.2 dB vs
-13.8 dB for the old allocator, and within 0.2–0.4 dB of OpenJPEG's own PCRD
-at matched byte sizes. Full stream still lossless (opj/grk/jpylyzer).
+13.8 dB for the old allocator. The newer 256x256 mixed-corpus ladder now pins
+the remaining quality gap more explicitly: at matched layer-prefix byte sizes,
+z2000 trails OpenJPEG by 1.78 / 0.69 / 1.21 / 1.78 dB for layers 1-4. Full
+stream still lossless (opj/grk/jpylyzer).
 Both follow-ups landed the same day: layer targets now charge measured
 packet-header overhead (probe assembly + one refinement round; assembled
 layer sizes land under the ladder headers-included), and the distortion

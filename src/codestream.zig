@@ -9033,7 +9033,6 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     try validateMultiTileProgression(options.progression, options.layers);
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
     if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
-    if (options.rate_count != 0) return CodestreamError.UnsupportedPayload;
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
     if (options.bypass and !options.terminate_all) return CodestreamError.UnsupportedPayload;
     // Standalone RESET and standalone ERTERM ride the same continuous ISO-MQ
@@ -9156,6 +9155,8 @@ fn encodeLosslessMultiTileMeasured(
             .block_height = encode_options.block_height,
             .precincts = scaffold_precincts[0..encode_options.precinct_count],
             .packet_order = packet_order,
+            .rates = encode_options.rates,
+            .rate_count = encode_options.rate_count,
         },
         block_style,
         encode_options.threads,

@@ -27,6 +27,8 @@ pub const PacketScaffoldOptions = struct {
     block_height: usize = 64,
     precincts: []const packet_plan.Precinct,
     packet_order: PacketOrder = .rpcl,
+    rates: [rate_alloc.max_layers]f64 = [_]f64{0} ** rate_alloc.max_layers,
+    rate_count: u8 = 0,
 };
 
 pub const PacketScaffold = struct {
@@ -1111,6 +1113,30 @@ pub fn reversible53NominalBitplanes(bit_depth: u8, kind: subband.Kind) !u8 {
     return bit_depth + gain + 1;
 }
 
+const dwt53_norms = [4][10]f64{
+    .{ 1.000, 1.500, 2.750, 5.375, 10.68, 21.34, 42.67, 85.33, 170.7, 341.3 },
+    .{ 1.038, 1.592, 2.919, 5.703, 11.33, 22.64, 45.25, 90.48, 180.9, 362.0 },
+    .{ 1.038, 1.592, 2.919, 5.703, 11.33, 22.64, 45.25, 90.48, 180.9, 362.0 },
+    .{ 0.7186, 0.9218, 1.586, 3.043, 6.019, 12.01, 24.00, 47.97, 95.93, 191.9 },
+};
+
+fn dwt53Norm(level: usize, orient: usize) f64 {
+    const clamped = if (orient == 0) @min(level, 9) else @min(level, 8);
+    return dwt53_norms[orient][clamped];
+}
+
+fn pcrdBandWeight(band: subband.Band) f64 {
+    const opj_level: usize = if (band.kind == .ll) band.level else @as(usize, band.level) - 1;
+    const orient: usize = switch (band.kind) {
+        .ll => 0,
+        .hl => 1,
+        .lh => 2,
+        .hh => 3,
+    };
+    const norm = dwt53Norm(opj_level, orient);
+    return norm * norm;
+}
+
 fn markCoveredBlock(covered: []bool, stride: usize, rect: subband.Rect) !void {
     try validateRectInPlane(rect, stride, covered.len / stride);
     for (0..rect.height) |row| {
@@ -1520,6 +1546,101 @@ pub fn buildEncodedBlockCatalogIsoMq(
     };
 }
 
+const PcrdSpan = struct { start: usize, count: usize };
+
+fn applyTilePcrdTargets(
+    allocator: std.mem.Allocator,
+    scaffold: PacketScaffold,
+    rct_tile: RctTile,
+    catalog: *EncodedBlockCatalog,
+    style: ebcot.CodeBlockStyle,
+    options: PacketScaffoldOptions,
+) !void {
+    const layer_count: usize = @intCast(scaffold.layers);
+    if (options.rate_count == 0 or layer_count <= 1) return;
+    if (options.rate_count > scaffold.layers or layer_count > rate_alloc.max_layers) return PacketScaffoldError.InvalidLayer;
+
+    const block_count = catalog.blocks.len;
+    const spans = try allocator.alloc(PcrdSpan, block_count);
+    defer allocator.free(spans);
+
+    var total_passes: usize = 0;
+    var total_bytes: u64 = 0;
+    for (catalog.blocks, 0..) |encoded, block_index| {
+        spans[block_index] = .{ .start = total_passes, .count = encoded.segment.pass_count };
+        total_passes += encoded.segment.pass_count;
+        total_bytes = std.math.add(u64, total_bytes, encoded.segment.byte_length) catch
+            return PacketScaffoldError.InvalidLayer;
+    }
+
+    const pcrd_blocks = try allocator.alloc(rate_alloc.PcrdBlock, block_count);
+    defer allocator.free(pcrd_blocks);
+    const pass_bytes = try allocator.alloc(u64, total_passes);
+    defer allocator.free(pass_bytes);
+    const distortions = try allocator.alloc(f64, total_passes);
+    defer allocator.free(distortions);
+
+    var scratch = ebcot.BlockScratch.init(allocator);
+    defer scratch.deinit();
+    var distortion_scratch: [164]f64 = undefined;
+    for (catalog.blocks, spans, 0..) |encoded, span, block_index| {
+        for (0..span.count) |pass_index| {
+            pass_bytes[span.start + pass_index] = encoded.segment.passes[pass_index].cumulative_bytes;
+        }
+
+        if (span.count > 0) {
+            const plane = componentPlane(rct_tile, encoded.job.component) orelse return PacketScaffoldError.InvalidComponentBlock;
+            var actual_style = style;
+            actual_style.band_kind = encoded.job.band.kind;
+            const distortion_passes = ebcot.passDistortions(
+                &scratch,
+                plane,
+                rct_tile.planes.width,
+                encoded.job.rect,
+                actual_style,
+                distortion_scratch[0..],
+            ) catch return PacketScaffoldError.InvalidLayer;
+            if (distortion_passes != span.count) return PacketScaffoldError.InvalidLayer;
+            const weight = pcrdBandWeight(encoded.job.band);
+            for (0..span.count) |pass_index| {
+                distortions[span.start + pass_index] = distortion_scratch[pass_index] * weight;
+            }
+        }
+
+        pcrd_blocks[block_index] = .{
+            .pass_bytes = pass_bytes[span.start..][0..span.count],
+            .pass_distortion = distortions[span.start..][0..span.count],
+        };
+    }
+
+    var targets: [rate_alloc.max_layers]u64 = undefined;
+    rate_alloc.layerTargetsFromRates(
+        targets[0..layer_count],
+        total_bytes,
+        options.rates[0..options.rate_count],
+    ) catch return PacketScaffoldError.InvalidLayer;
+
+    const out_passes = try allocator.alloc(u16, block_count * layer_count);
+    defer allocator.free(out_passes);
+    rate_alloc.allocatePcrdPasses(allocator, pcrd_blocks, targets[0..layer_count], out_passes) catch
+        return PacketScaffoldError.InvalidLayer;
+
+    for (catalog.blocks, 0..) |*encoded, block_index| {
+        if (encoded.layers.len != layer_count) return PacketScaffoldError.InvalidLayer;
+        var previous = t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 };
+        for (encoded.layers, 0..) |*layer, layer_index| {
+            const is_final = layer_index == layer_count - 1;
+            layer.* = try normalizedLayerTruncation(
+                encoded.segment,
+                out_passes[block_index * layer_count + layer_index],
+                previous,
+                is_final,
+            );
+            previous = layer.*;
+        }
+    }
+}
+
 pub fn validateEncodedBlockCatalogCoversTile(
     allocator: std.mem.Allocator,
     scaffold: PacketScaffold,
@@ -1667,6 +1788,7 @@ pub fn buildTileRpclEncodeArtifactsIsoMq(
     var catalog = try buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, style);
     var catalog_moved = false;
     errdefer if (!catalog_moved) catalog.deinit();
+    try applyTilePcrdTargets(allocator, scaffold, rct_tile, &catalog, style, options);
     try validateEncodedBlockCatalogCoversTile(allocator, scaffold, catalog);
 
     var index = try buildRpclPacketIndex(allocator, scaffold);

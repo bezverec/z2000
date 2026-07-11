@@ -58,9 +58,11 @@ interop gate.
   Grok/OpenJPEG/Kakadu.
 - Multi-tile: the v1 aligned-grid model is implemented for the reversible
   RCT/5-3 profile with per-tile DWT, packet state, strict decode, all five
-  progression orders, untargeted layers, and the implemented resilience style
-  matrix. Next add tile-aware rate targets and scheduling while keeping
-  unsupported geometry/style combinations fail-closed.
+  progression orders, tile-local rate-targeted layers, and the implemented
+  resilience style matrix. The first rate-targeted LRCP smoke is lossless
+  through z2000 strict decode, OpenJPEG, Grok, and Kakadu. Next add global
+  cross-tile budget validation, broader rate-targeted matrix coverage, and
+  scheduling while keeping unsupported geometry/style combinations fail-closed.
 - Interop gate: for each major phase, keep OpenJPEG/Grok/Kakadu checks for
   encode/decode roundtrip, marker conformance, output size, strict reader
   validation, and single-thread plus multi-thread encode/decode benchmarks.
@@ -211,14 +213,14 @@ large-image memory scaling and tile-level parallelism.
 Tasks:
 
 - Keep the current positive multi-tile encode/decode path green: lossless
-  RCT/5-3, untargeted quality layers across all five progression orders, one
-  tile-part per tile, deterministic row-major encode plus reordered foreign
-  tile-part decode, CAUSAL/SEGMARK and the supported TERMALL-scoped resilience
-  combinations, and ISO B.6/B.7-aligned geometry.
+  RCT/5-3, quality layers including tile-local rate targets across the bounded
+  profile, one tile-part per tile, deterministic row-major encode plus
+  reordered foreign tile-part decode, CAUSAL/SEGMARK and the supported
+  TERMALL-scoped resilience combinations, and ISO B.6/B.7-aligned geometry.
 - Expand the tile/profile matrix one axis at a time: more fixtures for edge
-  tiles and non-divisible dimensions, then rate-targeted quality layers and
-  reference-grid partition anchoring after strict decode and interop coverage
-  exist.
+  tiles and non-divisible dimensions, then external/global-budget rate-target
+  coverage and reference-grid partition anchoring after strict decode and
+  interop coverage exist.
 - Preserve tile-component independence in DWT, T1, and T2 scheduling while
   keeping packet order deterministic.
 - Rework scratch pools for tile-local reuse and later persistent worker

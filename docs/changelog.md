@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile Rate Targets
+
+- Opened `--rates` for the aligned multi-tile reversible profile with a
+  tile-local PCRD allocation pass. Each tile now rewrites its T2 layer
+  truncations from per-pass distortion metadata instead of even per-block
+  splits, while preserving strict decode roundtrip and cross-thread
+  deterministic encode output. Added `tools/interop_rate_multitile.ps1`, which
+  encodes a 2x2 LRCP/rate-targeted multi-tile JP2 and verifies final-layer
+  lossless decode through z2000 strict decode, OpenJPEG, Grok, and Kakadu.
+  Cross-tile/global byte-target refinement and broader progression/style
+  coverage remain before raising the scorecard.
+
+### PCRD PSNR Ladder
+
+- Added `tools/pcrd_psnr_ladder.ps1` plus an in-tree regression over the same
+  256x256 mixed corpus. The test pins rate-targeted layer byte accounting,
+  cross-thread deterministic output, and final-layer 9/7 reconstruction quality.
+  The script decodes z2000 layer prefixes with OpenJPEG and compares them with
+  OpenJPEG encodes at matched byte sizes. Current 2026-07-11 baseline:
+  z2000 trails OpenJPEG by 1.78 / 0.69 / 1.21 / 1.78 dB across layers 1-4.
+  No scorecard bump yet; this gives future PCRD changes a concrete quality gate.
+
 ### CI Reference-Relative 9/7 Decode Matrix
 
 - Added a six-case embedded decode matrix that turns the out-of-process
@@ -247,7 +269,8 @@ entries are grouped by development milestone rather than semantic version.
 - Multi-tile RPCL now accepts more than one untargeted quality layer. This
   reuses the existing per-block layer truncation table and per-precinct RPCL
   packet-state lifetime while keeping multi-tile compression-ratio targets
-  fail-closed until PCRD allocation is made tile-aware.
+  fail-closed at that point; the later tile-local PCRD slice in Unreleased now
+  lifts the bounded reversible `--rates` gate.
 
 ### T1 Code-Block Styles
 
