@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### CI Reference-Relative 9/7 Decode Matrix
+
+- Added a six-case embedded decode matrix that turns the out-of-process
+  foreign-9/7 comparisons into an always-on CI gate: OpenJPEG 2.5.4 `-I -r
+  4/16`, Grok 20.3.6 `-I -r 4/16`, and Kakadu 8.4.1 `Creversible=no -rate
+  4/1` files of the shared 32x32 gradient, each paired with the reference
+  decoder's own decoded RGB8 raster. The test decodes every fixture through
+  the strict ISO-MQ path, asserts cross-thread determinism (1 vs 4 threads),
+  and recomputes reference-relative agreement on every run: max byte diff
+  <= 3 and PSNR >= 50 dB when not byte-identical (measured max 0-2 with
+  55 dB up to byte-exact for `kdu -rate 1`). Scorecard: full lossy
+  encode/decode 11->12, moving the full codec estimate to 85/100; the
+  remaining lossy gap is encoder-side (PCRD PSNR regression at matched byte
+  ladders, tile-aware rate targets).
+
 ### Kakadu 9/7 Lossy Decode Fixture And Ladder
 
 - Added an embedded Kakadu 8.4.1 9/7 lossy decode fixture (32x32 gradient,
