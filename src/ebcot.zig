@@ -220,11 +220,15 @@ pub const CodeBlockStyle = struct {
     }
 
     pub fn hasUnsupportedPayloadMode(self: CodeBlockStyle) bool {
-        // ER-TERM is implemented for pure-MQ streams (continuous flush and
-        // per-pass terminated segments). Combined with BYPASS it would also
-        // require predictable termination of raw segments, which has no
-        // writer or reader yet.
-        return self.predictable_termination and self.bypass;
+        // Every Part 1 style-bit combination has an implemented ISO-MQ
+        // payload model now: RESET restarts the MQ contexts at coding-pass
+        // boundaries in the continuous, BYPASS, TERMALL, and BYPASS+TERMALL
+        // segment models, and ER-TERM flushes every termination point
+        // predictably (ER-TERM MQ flush, alternating-bit raw padding).
+        // Backend-specific limits (legacy MQ) are enforced by the public
+        // codestream gates, not here.
+        _ = self;
+        return false;
     }
 };
 
@@ -2406,6 +2410,38 @@ const RawBitWriter = struct {
         }
     }
 
+    /// Predictable termination of a raw segment (ERTERM with BYPASS),
+    /// mirroring opj_mqc_bypass_flush_enc with erterm set: any pending
+    /// partial byte is completed with the alternating 0,1,... sequence, and
+    /// the empty 7-bit byte after a stuffed 0xff — which the plain flush
+    /// discards together with the 0xff — is emitted as 0x2a instead, so a
+    /// resilient decoder can verify the termination (Kakadu checks this in
+    /// fussy mode).
+    fn finishErterm(self: *RawBitWriter) ![]u8 {
+        std.debug.assert(self.output == null);
+        try self.finishActiveStreamErterm();
+        return self.buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn finishErtermInto(self: *RawBitWriter, output: *std.ArrayList(u8)) !usize {
+        std.debug.assert(self.output == output);
+        const start = self.output_start;
+        try self.finishActiveStreamErterm();
+        return output.items.len - start;
+    }
+
+    fn finishActiveStreamErterm(self: *RawBitWriter) !void {
+        if (self.remaining < 8) {
+            var bit_value: u8 = 0;
+            while (self.remaining > 0) {
+                self.remaining -= 1;
+                self.byte |= bit_value << @intCast(self.remaining);
+                bit_value = 1 - bit_value;
+            }
+            try self.appendByte(self.byte);
+        }
+    }
+
     fn emittedByteCount(self: RawBitWriter) usize {
         return self.activeByteCount();
     }
@@ -2488,7 +2524,7 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypass(
     style: CodeBlockStyle,
 ) !CodeBlockSegment {
     try validateImplementedStyleAllowBypass(style);
-    if (!style.bypass or style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (!style.bypass or style.terminate_all) return EbcotError.InvalidBlock;
     if (block.passes.len == 0) {
         const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
         errdefer allocator.free(passes);
@@ -2528,6 +2564,10 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypass(
         } else if (is_raw != segment_is_raw) {
             return EbcotError.InvalidBlock;
         }
+        // RESET (D.4) restarts the MQ contexts at every coding-pass
+        // boundary; raw passes carry no contexts, so the reset before them
+        // is a no-op that keeps the pass accounting uniform.
+        if (style.reset_context and ordinal != 0) try encoder.resetJpeg2000Contexts();
         const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
         if (is_raw) {
             for (pass_symbols) |symbol| try raw.writeBit(symbol.bit);
@@ -2552,7 +2592,13 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypass(
 
         const last_pass = ordinal + 1 == block.passes.len;
         if (last_pass or passEndsBypassSegment(style, block.bitplanes, pass.magnitude_bitplane, pass.kind)) {
-            const encoded = if (segment_is_raw) try raw.finish() else try encoder.finish();
+            // ERTERM (D.4.2 with BYPASS): every codeword segment terminates
+            // predictably — MQ segments with the ER-TERM flush, raw segments
+            // with the alternating-bit padding.
+            const encoded = if (segment_is_raw)
+                (if (style.predictable_termination) try raw.finishErterm() else try raw.finish())
+            else
+                (if (style.predictable_termination) try encoder.finishErterm() else try encoder.finish());
             defer allocator.free(encoded);
             try bytes.appendSlice(allocator, encoded);
             try segments.append(allocator, .{
@@ -2599,7 +2645,7 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypassTerminated(
     style: CodeBlockStyle,
 ) !CodeBlockSegment {
     try validateImplementedStyleAllowBypass(style);
-    if (!style.bypass or !style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (!style.bypass or !style.terminate_all) return EbcotError.InvalidBlock;
     if (block.passes.len == 0) {
         const passes = try allocator.dupe(CodeBlockPassPayload, &.{});
         errdefer allocator.free(passes);
@@ -2629,9 +2675,12 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypassTerminated(
     defer raw.deinit();
 
     var symbol_offset: usize = 0;
-    for (block.passes) |pass| {
+    for (block.passes, 0..) |pass, ordinal| {
         if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
         const is_raw = passIsRaw(style, block.bitplanes, pass.magnitude_bitplane, pass.kind);
+        // RESET restarts the MQ contexts at every coding-pass boundary; raw
+        // passes carry no contexts, so resetting before them is a no-op.
+        if (style.reset_context and ordinal != 0) try encoder.resetJpeg2000Contexts();
         const pass_symbols = block.symbols[symbol_offset..][0..pass.symbol_count];
         if (is_raw) {
             for (pass_symbols) |symbol| try raw.writeBit(symbol.bit);
@@ -2641,7 +2690,11 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypassTerminated(
             }
         }
 
-        const encoded = if (is_raw) try raw.finish() else try encoder.finish();
+        // ERTERM: every per-pass segment terminates predictably.
+        const encoded = if (is_raw)
+            (if (style.predictable_termination) try raw.finishErterm() else try raw.finish())
+        else
+            (if (style.predictable_termination) try encoder.finishErterm() else try encoder.finish());
         defer allocator.free(encoded);
         const byte_offset = bytes.items.len;
         try bytes.appendSlice(allocator, encoded);
@@ -3526,7 +3579,7 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
     if (style.bypass and style.terminate_all) {
         return decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrowed(scratch, bitplanes, pass_count, bytes, segment_lengths, width, height, style, stats);
     }
-    if (!style.bypass or style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (!style.bypass or style.terminate_all) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
@@ -3602,6 +3655,9 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
                 seg_index += 1;
             }
             if (is_raw != seg_is_raw) return EbcotError.InvalidBlock;
+            // RESET restarts the MQ contexts at every coding-pass boundary;
+            // raw passes carry no contexts.
+            if (!is_raw) resetInferredContinuousPassContexts(style, mq_decoder.?, pass_index);
 
             switch (kind) {
                 .significance => {
@@ -3658,7 +3714,7 @@ pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrow
     stats: ?*DecodePassStats,
 ) ![]const i32 {
     try validateImplementedStyleAllowBypass(style);
-    if (!style.bypass or !style.terminate_all or style.reset_context) return EbcotError.InvalidBlock;
+    if (!style.bypass or !style.terminate_all) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
@@ -3719,6 +3775,9 @@ pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrow
             }
             seg_offset = seg_end;
             seg_index += 1;
+            // RESET restarts the MQ contexts at every coding-pass boundary;
+            // raw passes carry no contexts.
+            if (!is_raw) resetInferredContinuousPassContexts(style, mq_decoder.?, pass_index);
 
             switch (kind) {
                 .significance => {
@@ -5574,9 +5633,6 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
 ) !CodeBlockSegment {
     try validateImplementedStyleAllowBypass(style);
     if (style.terminate_all) return EbcotError.InvalidBlock;
-    // Standalone RESET is only wired for the all-MQ continuous stream: raw
-    // bypass segments carry no MQ contexts to reset at their boundaries.
-    if (style.reset_context and style.bypass) return EbcotError.InvalidBlock;
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
@@ -5657,11 +5713,15 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
 
             const last_pass = pass_index == total_passes;
             if (last_pass or passEndsBypassSegment(style, bitplanes, bitplane, kind)) {
-                // Standalone ERTERM (D.4.2 without TERMALL): BYPASS is
-                // rejected above, so the only termination point is the final
-                // MQ flush, which must use the predictable ER-TERM procedure.
+                // ERTERM (D.4.2): every termination point flushes
+                // predictably — the ER-TERM procedure for MQ segments, the
+                // alternating-bit padding for raw BYPASS segments. Without
+                // BYPASS the final MQ flush is the only termination point.
                 const encoded_len = if (segment_is_raw)
-                    try raw.finishInto(&scratch.bytes)
+                    (if (style.predictable_termination)
+                        try raw.finishErtermInto(&scratch.bytes)
+                    else
+                        try raw.finishInto(&scratch.bytes))
                 else if (style.predictable_termination)
                     try iso.finishErtermInto(&scratch.bytes)
                 else

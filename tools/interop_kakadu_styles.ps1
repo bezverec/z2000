@@ -206,6 +206,11 @@ $forwardSingle = @(
     @{ Name = "erterm-standalone"; Args = @("--predictable-termination") },
     @{ Name = "erterm-reset-standalone"; Args = @("--predictable-termination", "--reset-context") },
     @{ Name = "bypass-termall"; Args = @("--bypass", "--terminate-all") },
+    @{ Name = "bypass-reset"; Args = @("--bypass", "--reset-context") },
+    @{ Name = "bypass-erterm"; Args = @("--bypass", "--predictable-termination") },
+    @{ Name = "bypass-reset-termall"; Args = @("--bypass", "--terminate-all", "--reset-context") },
+    @{ Name = "bypass-erterm-termall"; Args = @("--bypass", "--terminate-all", "--predictable-termination") },
+    @{ Name = "all-six-style-bits"; Args = @("--bypass", "--terminate-all", "--reset-context", "--predictable-termination", "--vertical-causal", "--segmentation-symbols") },
     @{ Name = "causal-segmark"; Args = @("--vertical-causal", "--segmentation-symbols") }
 )
 foreach ($case in $forwardSingle) {
@@ -234,38 +239,16 @@ $reverse = @(
     @{ Name = "erterm-reset"; Mode = "ERTERM|RESET" },
     @{ Name = "erterm-causal-segmark"; Mode = "ERTERM|CAUSAL|SEGMARK" },
     @{ Name = "bypass-restart"; Mode = "BYPASS|RESTART" },
+    @{ Name = "bypass-reset"; Mode = "BYPASS|RESET" },
+    @{ Name = "bypass-erterm"; Mode = "BYPASS|ERTERM" },
+    @{ Name = "bypass-reset-erterm"; Mode = "BYPASS|RESET|ERTERM" },
+    @{ Name = "bypass-reset-restart"; Mode = "BYPASS|RESET|RESTART" },
+    @{ Name = "bypass-erterm-restart"; Mode = "BYPASS|ERTERM|RESTART" },
+    @{ Name = "all-six-style-bits"; Mode = "BYPASS|RESET|RESTART|ERTERM|CAUSAL|SEGMARK" },
     @{ Name = "causal-segmark"; Mode = "CAUSAL|SEGMARK" }
 )
 foreach ($case in $reverse) {
     $results += Invoke-KakaduReverseCase $case.Name $case.Mode $caseDir $source $z2000 $pythonExe $threadCount
-}
-
-# BYPASS+ERTERM needs predictable raw-segment termination, which z2000 has no
-# writer or reader model for yet — the decode must fail closed.
-$bypassErterm = Join-Path $caseDir "kakadu-bypass-erterm.jp2"
-Invoke-NativeChecked "Kakadu encode BYPASS+ERTERM" $KduCompress @(
-    "-i", $source,
-    "-o", $bypassErterm,
-    "Creversible=yes",
-    "Cycc=yes",
-    "Clevels=5",
-    "Corder=RPCL",
-    "Cprecincts={256,256},{256,256},{128,128},{128,128},{128,128},{128,128}",
-    "Cblk={64,64}",
-    "Cmodes:C0=BYPASS|ERTERM", "Cmodes:C1=BYPASS|ERTERM", "Cmodes:C2=BYPASS|ERTERM",
-    "Qguard:C0=2", "Qguard:C1=2", "Qguard:C2=2",
-    "ORGgen_plt=yes",
-    "-quiet"
-)
-Invoke-NativeExpectUnsupported "z2000 reject Kakadu BYPASS+ERTERM" $z2000 @(
-    "decode-temp-jp2", $bypassErterm, (Join-Path $caseDir "unexpected-bypass-erterm.tif"),
-    "--threads", "$threadCount"
-)
-$results += [pscustomobject]@{
-    Direction = "Kakadu -> z2000"
-    Profile = "bypass-erterm"
-    Bytes = (Get-Item -LiteralPath $bypassErterm).Length
-    Result = "FAIL-CLOSED"
 }
 
 Write-Host ""

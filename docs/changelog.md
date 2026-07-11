@@ -5,6 +5,29 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Complete Code-Block Style Matrix (BYPASS+RESET, BYPASS+ERTERM)
+
+- Landed the last two missing style-bit payload models, so every one of the
+  64 combinations of the six Part 1 code-block style bits (0x00..0x3f) now
+  has an implemented writer and strict reader. Raw BYPASS segments gained
+  the predictable ER-TERM termination (ported from opj_mqc_bypass_flush_enc
+  with erterm: partial bytes fill with the alternating 0,1 sequence, and
+  the empty post-0xff byte is emitted as 0x2a instead of dropping the
+  0xff — Kakadu verifies this in fussy mode). RESET now restarts the MQ
+  contexts at every coding-pass boundary of the BYPASS and BYPASS+TERMALL
+  segment models on both encode and decode. The direct/symbols byte-equality
+  matrix gained the BYPASS+RESET/ERTERM rows, roundtrip tests cover 0x03,
+  0x11, 0x13, 0x07, 0x15, and the full 0x3f, and the JP2 wrapper accepts
+  every style byte up to 0x3f (reserved bits still rejected). Interop on
+  the 2048x2048 noise smoke, all pixel-exact: the encode leg decodes through
+  kdu_expand, opj_decompress, AND grk_decompress for BYPASS+RESET,
+  BYPASS+ERTERM, BYPASS+RESET+ERTERM, both TERMALL triples, and the
+  all-six-bit style; the decode leg reconstructs seven kdu Cmodes
+  combinations up to {BYPASS|RESET|RESTART|ERTERM|CAUSAL|SEGMARK}.
+  tools/interop_kakadu_styles.ps1 carries the new cases and drops the old
+  BYPASS+ERTERM fail-closed assertion. Scorecard: full T1 completeness
+  14->15 (row complete), moving the full codec estimate to 90/100.
+
 ### Foreign Multi-Part Tile Sequences
 
 - Generalized the strict multi-tile SOT walk beyond z2000's own layouts:

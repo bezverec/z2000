@@ -803,15 +803,9 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
 fn validateCodeBlockStyleByte(code_block_style: u8) !void {
     if ((code_block_style & 0xc0) != 0) return Jp2Error.InvalidCodestream;
     // BYPASS (0x01), RESET (0x02), TERMALL (0x04), CAUSAL (0x08), ERTERM
-    // (0x10, standalone or with TERMALL), and SEGMARK (0x20) are accepted by
-    // the codestream layer only for implemented payload combinations.
+    // (0x10), and SEGMARK (0x20) all have implemented payload models in
+    // every combination; only the two reserved bits stay rejected.
     if ((code_block_style & ~@as(u8, 0x3f)) != 0) return Jp2Error.UnsupportedProfile;
-    if ((code_block_style & 0x01) != 0 and (code_block_style & 0x02) != 0) {
-        return Jp2Error.UnsupportedProfile;
-    }
-    if ((code_block_style & 0x01) != 0 and (code_block_style & 0x10) != 0) {
-        return Jp2Error.UnsupportedProfile;
-    }
 }
 
 /// Cross-marker state for COC/QCC handling: z2000 accepts them either as
