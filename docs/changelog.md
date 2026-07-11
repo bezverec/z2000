@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Kakadu 9/7 Lossy Decode Fixture And Ladder
+
+- Added an embedded Kakadu 8.4.1 9/7 lossy decode fixture (32x32 gradient,
+  `kdu_compress Creversible=no -rate 3`, 494 bytes): Kakadu signals
+  scalar-expounded QCD with one guard bit and its own step mantissas
+  (different from both z2000's generated OpenJPEG table and the Grok
+  fixture), LRCP order, no PLT, and `res `/`resc` wrapper boxes. The
+  regression pins a deterministic FNV-1a-64 hash of the decoded samples plus
+  a source-error bound; out-of-process, z2000's decode agrees with
+  kdu_expand's own within max byte diff 1 / 56.4 dB. The wider Kakadu
+  reference-relative ladder (`-rate 1..8` on the 2048x2048 noise smoke) is
+  within max byte diff 2-3 / 51-55 dB of kdu_expand — the same band as the
+  documented OpenJPEG/Grok ladders. All three reference encoders now have
+  pinned 9/7 decode fixtures. Scorecard: full lossy encode/decode 10->11,
+  moving the full codec estimate to 84/100.
+
 ### Multi-Tile Standalone RESET/ERTERM
 
 - Opened `validateMultiTileCodingPath` for standalone RESET (COD `0x02`),

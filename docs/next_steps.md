@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 83/100 full** as of
-2026-07-11. First drafted at `ba66799`.
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 84/100 full** as of
+2026-07-11 (evening). First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-11)
 
-Scorecard now **100/100 narrow, 83/100 full**. The aligned multi-tile path has
+Scorecard now **100/100 narrow, 84/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
@@ -286,12 +286,13 @@ format, codestream profile, and container semantics are explicit.
   remaining combination (extend the styled-T1 matrix), then OpenJPEG/Grok/Kakadu
   interop before lifting any gate.
 
-### N4. Lossy breadth — two precisely-characterized foreign-9/7 gaps — M · Med
+### N4. Lossy breadth — foreign-9/7 decode validation — M · Med
 
-- **Impact:** full "Lossy encode/decode" +1-2 remaining (now 9/15 after the
-  OpenJPEG 9/7 decode gates and the first real Grok 9/7 QCD-step fixture
-  landed; broader reference-relative lossy validation still blocks the next
-  larger score claim).
+- **Impact:** full "Lossy encode/decode" now 11/15 (2026-07-11: the Kakadu
+  8.4.1 fixture and the Kakadu reference-relative ladder landed, completing
+  pinned decode fixtures from all three reference encoders and moving the
+  full estimate 83->84). Remaining +1-2 requires a CI reference-relative
+  PSNR matrix and broader encoder-side lossy validation.
 - **ISO clause:** E (quantization), G (9/7), J.14 (rate-distortion).
 - **State:** ICT/9-7 encode/decode locally; **foreign OpenJPEG 9/7 lossy now
   decodes byte-identically across `-r 1..8` / `-q`** (embedded-fixture
@@ -311,17 +312,24 @@ format, codestream profile, and container semantics are explicit.
     from ~34-38 dB / max byte diff 13-20 to **~50-55 dB / max 1-3** across
     the OpenJPEG and Grok `-r 2..24` ladders; the two embedded truncated
     fixtures were re-pinned with tightened bounds (opj `-r 10`: 7.93M vs old
-    8.5M; Grok `-r 8`: 2.21M vs old 3M). Remaining: turn the out-of-process
-    matrix into a CI fixture gate and add a Kakadu ladder.
+    8.5M; Grok `-r 8`: 2.21M vs old 3M). **The Kakadu ladder is now measured
+    (2026-07-11):** kdu `Creversible=no -rate 1..8` on the 2048² noise smoke
+    decodes through z2000 within max byte diff 2-3 / 51-55 dB of kdu_expand's
+    own output. Remaining: turn the out-of-process matrix into a CI fixture
+    gate.
   - **(b) Foreign 9/7 QCD step tables.** **Progress:** the strict irreversible
     QCD parser and JP2 wrapper now accept signalled scalar-expounded/scalar-
     derived `(exponent, mantissa)` pairs, accept irreversible guard bits 1..7,
     derive `Mb` from the signalled guard bits plus exponents (E-2), and use the
     signalled mantissas for 9/7 dequantization. A synthetic mantissa-rewrite
-    regression, scalar-expounded/scalar-derived guard-bit-one roundtrips, and a
-    real embedded Grok 20.3.6 fixture pin this path. Next: add a Kakadu 9/7
-    fixture when available and turn the Grok/OpenJPEG/Kakadu set into a
-    reference-relative PSNR matrix.
+    regression, scalar-expounded/scalar-derived guard-bit-one roundtrips, and
+    real embedded Grok 20.3.6 **and Kakadu 8.4.1 fixtures** pin this path.
+    **The Kakadu fixture landed 2026-07-11** (`Creversible=no -rate 3`,
+    494 bytes): it signals scalar-expounded QCD with one guard bit and
+    Kakadu's own mantissas, LRCP, no PLT, plus `res `/`resc` wrapper boxes —
+    deterministic FNV hash, source-error bound, and out-of-process
+    kdu_expand agreement max byte diff 1 / 56.4 dB. Next: turn the
+    Grok/OpenJPEG/Kakadu set into a CI reference-relative PSNR matrix.
 - **What to add:** a decode fixture matrix over foreign 9/7 lossy JP2s
   (OpenJPEG/Grok/Kakadu at several rate ladders) asserting z2000's PSNR is
   within a tight bound of each reference decoder's own output; a PCRD PSNR
