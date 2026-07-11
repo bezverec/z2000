@@ -5,6 +5,40 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Foreign Multi-Part Tile Sequences
+
+- Generalized the strict multi-tile SOT walk beyond z2000's own layouts:
+  multi-part tiles are accepted in any progression when every non-empty part
+  carries PLT — each part's packet count comes from its own PLT, parts
+  consume the tile's packet sequence in TPsot order (grouped or interleaved
+  across tiles), and the completed tile must land exactly on the tile packet
+  plan. TNsot 0 ("count not signalled", ISO A.4.2) is supported: a later
+  part may carry the real count, and unsignalled tiles complete via packet
+  accounting at EOC. Empty SOT+SOD padding parts (Kakadu pads tiles to a
+  fixed TNsot) need no PLT; joined non-RPCL tiles reorder to RPCL once
+  assembled; the JP2 wrapper mirrors the TNsot rules and its TLM capacity is
+  now tile-part sized (4096 entries). Non-empty PLT-less multi-part tiles
+  stay fail-closed. Coverage: two embedded Kakadu 8.4.1 fixtures
+  (ORGtparts=L interleaved TNsot-0 layer parts with genuine packet splits;
+  ORGgen_tlm=8 empty-padding parts with a 32-entry TLM) decode the 64x64
+  four-tile gradient exactly at 1 and 4 threads, with fail-closed negatives
+  for stripped PLT, undershooting TNsot, and unsatisfied TNsot; the live
+  Kakadu matrix (16- and 32-part 512x512 tiles, LRCP/RPCL/CPRL-3layers/
+  ERTERM over 2048x2048 noise) decodes pixel-exactly, closing the historical
+  kdu-multitile interop gap. Scorecard: full lossless decode profiles
+  14->15, moving the full codec estimate to 89/100.
+
+### Documentation And CLI Reference Fixes
+
+- Corrected the README rate-layering example (`--rates` sets the layer count;
+  a trailing `1` makes the lossless-final ladder explicit) and documented the
+  `--rates` semantics: ratios reference the total compressed payload, unlike
+  OpenJPEG's `-r`, which references the uncompressed size. Refreshed the
+  `--tile` wording to the reference-grid envelope, updated the project
+  direction note (narrow target is 100/100 and must stay green), and added
+  the missing `--tile-parts`, `--sop`, and `--eph` options to the CLI usage
+  text.
+
 ### Multi-Tile Resolution Parts
 
 - Added PLT-backed RPCL `R` divisions to the bounded multi-tile encoder and
