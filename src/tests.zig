@@ -11976,19 +11976,8 @@ test "standalone predictable termination roundtrips losslessly and changes the f
         allocator.free(wrapped);
     }
 
-    // Multi-tile standalone ERTERM stays fail-closed until the tile matrix
-    // is verified; TERMALL-scoped ERTERM remains the supported tile path.
-    var tiled = scenarios[0].options;
-    tiled.tile_width = 8;
-    tiled.tile_height = 8;
-    tiled.precincts[0] = .{ .width = 4, .height = 4 };
-    tiled.precinct_count = 1;
-    tiled.block_width = 4;
-    tiled.block_height = 4;
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, tiled),
-    );
+    // Multi-tile standalone RESET/ERTERM coverage lives in "multi-tile
+    // standalone reset and predictable termination roundtrip losslessly".
 }
 
 test "predictable termination debug sidecar roundtrips larger stream" {
@@ -12979,6 +12968,72 @@ test "multi-tile causal and segmentation profiles roundtrip losslessly" {
         var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
         defer decoded.deinit();
         try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        var threaded_options = options;
+        threaded_options.threads = 3;
+        const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(@as(usize, width), info.width);
+    }
+}
+
+test "multi-tile standalone reset and predictable termination roundtrip losslessly" {
+    // Standalone RESET (0x02), standalone ERTERM (0x10), and their
+    // combination (0x12) are continuous-stream styles: the tile pipeline
+    // routes them through the same direct ISO-MQ block encoder as the
+    // single-tile path, so opening the multi-tile gate must preserve the
+    // byte-exact roundtrip, cross-thread determinism, and JP2 acceptance.
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Case = struct {
+        label: []const u8,
+        reset_context: bool = false,
+        predictable_termination: bool = false,
+        cod_style: u8,
+    };
+    const cases = [_]Case{
+        .{ .label = "RESET", .reset_context = true, .cod_style = 0x02 },
+        .{ .label = "ERTERM", .predictable_termination = true, .cod_style = 0x10 },
+        .{ .label = "ERTERM+RESET", .reset_context = true, .predictable_termination = true, .cod_style = 0x12 },
+    };
+
+    for (cases) |scenario| {
+        errdefer std.debug.print("multi-tile standalone style case failed: {s}\n", .{scenario.label});
+        var options = multi_tile_test_options;
+        options.layers = 3;
+        options.progression = .lrcp;
+        options.reset_context = scenario.reset_context;
+        options.predictable_termination = scenario.predictable_termination;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(scenario.cod_style, bytes[cod + 12]);
+        try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        var threaded_decode = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = 3 });
+        defer threaded_decode.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, threaded_decode.samples);
 
         var threaded_options = options;
         threaded_options.threads = 3;

@@ -19,8 +19,10 @@ roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kaka
 T1 BYPASS mode is preserved explicitly into T2 readback. Uniform Kakadu
 COC/QCC style and QCD overrides now decode through z2000 when all RGB
 components agree; partial/divergent overrides fail closed. Standalone ERTERM
-(COD `0x10`, plus `0x12` with RESET) is public single-tile with bidirectional
-Kakadu interop; BYPASS+RESET and BYPASS+ERTERM stay fail-closed.
+(COD `0x10`, plus `0x12` with RESET) is public with bidirectional Kakadu
+interop, and the multi-tile gate admits standalone RESET/ERTERM as well
+(strict roundtrip plus pixel-exact kdu_expand decode of genuine multi-tile
+output); BYPASS+RESET and BYPASS+ERTERM stay fail-closed.
 The malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
 profile, and aligned PLT-less multi-tile streams now strict-decode by deriving
 tile-local packet spans from T2 packet headers. The foreign OpenJPEG/Grok/Kakadu
@@ -242,16 +244,24 @@ format, codestream profile, and container semantics are explicit.
   decodes with standard byte-in padding); `parseCodeBlockStyleByte` and the
   JP2 wrapper accept `0x10` standalone, including `0x12` with standalone
   RESET. The legacy backend and BYPASS combinations stay fail-closed
-  (`hasUnsupportedPayloadMode` is now ERTERM+BYPASS), and multi-tile
-  standalone ERTERM remains gated in `validateMultiTileCodingPath`.
+  (`hasUnsupportedPayloadMode` is now ERTERM+BYPASS). **Follow-up
+  (2026-07-11): the multi-tile gate now admits standalone RESET/ERTERM/
+  ERTERM+RESET too** — the tile pipeline routes non-TERMALL styles through
+  the same direct ISO-MQ block encoder, so `validateMultiTileCodingPath`
+  no longer repeats the standalone guards; a 2x2 LRCP 3-layer multi-tile
+  roundtrip matrix (COD `0x02`/`0x10`/`0x12`, byte determinism at 1 and 3
+  threads, JP2 acceptance) plus pixel-exact kdu_expand decode of genuine
+  512x512-tile multi-tile output cover it.
 - **Interop (Kakadu 8.4.1, this machine, 2048² RGB noise):** kdu_expand
   decodes z2000 `--predictable-termination` and
-  `--predictable-termination --reset-context` output pixel-exactly; z2000
-  strict decode reconstructs kdu `Cmodes=ERTERM`, `Cmodes={ERTERM|RESET}`,
-  and `Cmodes={ERTERM|CAUSAL|SEGMARK}` files pixel-exactly.
+  `--predictable-termination --reset-context` output pixel-exactly — both
+  single-tile and `--tile 512,512` multi-tile (plus multi-tile standalone
+  `--reset-context`); z2000 strict decode reconstructs kdu `Cmodes=ERTERM`,
+  `Cmodes={ERTERM|RESET}`, and `Cmodes={ERTERM|CAUSAL|SEGMARK}` files
+  pixel-exactly.
 - **Remaining in this area:** BYPASS+RESET and BYPASS+ERTERM segment models
-  (raw-segment predictable termination), multi-tile standalone
-  ERTERM/RESET verification, OpenJPEG/Grok legs for the standalone profile.
+  (raw-segment predictable termination), OpenJPEG/Grok legs for the
+  standalone profiles.
 
 #### Original N3 scoping (implementation history)
 
@@ -388,10 +398,11 @@ for more ISO coverage is:
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.
 5. **T1 style policy.** Standalone ERTERM landed 2026-07-11 with bidirectional
-   Kakadu interop. Keep BYPASS+RESET, BYPASS+ERTERM, multi-tile standalone
-   ERTERM/RESET, and other untested combinations fail-closed until each has
-   writer, strict reader, tests, and interop coverage. The BYPASS+TERMALL
-   Kakadu decoder leg is closed.
+   Kakadu interop, and the multi-tile gate now admits standalone RESET/ERTERM
+   with roundtrip plus kdu_expand coverage. Keep BYPASS+RESET, BYPASS+ERTERM,
+   and other untested combinations fail-closed until each has writer, strict
+   reader, tests, and interop coverage. The BYPASS+TERMALL Kakadu decoder leg
+   is closed.
 
 ## Status 2026-07-07 (ERTERM OpenJPEG/Grok interop) — PASSED
 
