@@ -9648,10 +9648,9 @@ fn validateCodingPath(options: LosslessOptions) !void {
     if (options.predictable_termination) {
         // ER-TERM (D.4.2) is wired for the ISO MQ coder only: standalone it
         // replaces the final continuous flush, with terminate_all it flushes
-        // every per-pass segment. Combined with BYPASS it would also require
-        // predictable raw-segment termination, which has no writer yet.
+        // every per-pass segment, and with BYPASS every raw/MQ segment
+        // boundary terminates predictably (alternating-bit raw padding).
         if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
-        if (options.bypass) return CodestreamError.UnsupportedPayload;
     }
     if (options.terminate_all) {
         // The per-pass terminated encoder is only wired for the ISO MQ backend;
@@ -9664,9 +9663,10 @@ fn validateCodingPath(options: LosslessOptions) !void {
         if (options.layers != 1) return CodestreamError.UnsupportedPayload;
     }
     if (options.bypass) {
-        if (options.reset_context) return CodestreamError.UnsupportedPayload;
         // BYPASS requires the ISO MQ backend; quality layers and rates are
         // supported with truncation points snapped to segment boundaries.
+        // RESET and ERTERM ride both the non-TERMALL and the per-pass
+        // TERMALL BYPASS segment models.
         if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
         if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
     }
@@ -9726,12 +9726,11 @@ fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
     // only for combinations whose payload model is implemented.
     const supported_style_bits: u8 = 0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20;
     if ((parsed.toCodByte() & ~supported_style_bits) != 0) return CodestreamError.UnsupportedPayload;
-    if (parsed.bypass and parsed.reset_context) return CodestreamError.UnsupportedPayload;
-    // ER-TERM only changes MQ flush bytes, so standalone 0x10 decodes through
-    // the continuous path and 0x14 through the per-pass terminated machinery.
-    // With BYPASS the raw segments would also need predictable termination,
-    // which has no reader model yet.
-    if (parsed.bypass and parsed.predictable_termination) return CodestreamError.UnsupportedPayload;
+    // Every combination of the six Part 1 style bits decodes now: RESET
+    // restarts contexts at MQ pass boundaries in all four segment models
+    // (continuous, BYPASS, TERMALL, BYPASS+TERMALL), and ER-TERM only
+    // changes flush bytes, which the MQ/raw readers consume
+    // padding-independently.
     return parsed;
 }
 

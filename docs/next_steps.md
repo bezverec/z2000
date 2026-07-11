@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 89/100 full** as of
-2026-07-11 (evening). First drafted at `ba66799`.
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 90/100 full** as of
+2026-07-12. First drafted at `ba66799`.
 
-## Next Working Sequence (2026-07-11)
+## Next Working Sequence (2026-07-12)
 
-Scorecard now **100/100 narrow, 89/100 full**. The bounded multi-tile path has
+Scorecard now **100/100 narrow, 90/100 full**. The bounded multi-tile path has
 all five progression orders, quality layers including the first tile-local
 rate-target slice, and the implemented resilience matrix. CAUSAL+SEGMARK,
 RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
@@ -23,7 +23,13 @@ components agree; partial/divergent overrides fail closed. Standalone ERTERM
 (COD `0x10`, plus `0x12` with RESET) is public with bidirectional Kakadu
 interop, and the multi-tile gate admits standalone RESET/ERTERM as well
 (strict roundtrip plus pixel-exact kdu_expand decode of genuine multi-tile
-output); BYPASS+RESET and BYPASS+ERTERM stay fail-closed.
+output). **All six code-block style bits are now public in every
+combination (2026-07-12, T1 completeness 14->15, full estimate 89->90):**
+BYPASS carries RESET (context restarts at MQ pass boundaries) and ERTERM
+(predictable alternating-bit raw termination, ER-TERM MQ flush) in both the
+non-TERMALL and per-pass TERMALL segment models, encode-leg verified through
+kdu_expand/opj_decompress/grk_decompress and decode-leg verified against
+seven kdu Cmodes combinations up to the full six-bit style, all pixel-exact.
 The malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
 profile, and PLT-less multi-tile streams now strict-decode by deriving
 tile-local packet spans from T2 packet headers. The foreign OpenJPEG/Grok/Kakadu
@@ -293,9 +299,20 @@ format, codestream profile, and container semantics are explicit.
   `--reset-context`); z2000 strict decode reconstructs kdu `Cmodes=ERTERM`,
   `Cmodes={ERTERM|RESET}`, and `Cmodes={ERTERM|CAUSAL|SEGMARK}` files
   pixel-exactly.
-- **Remaining in this area:** BYPASS+RESET and BYPASS+ERTERM segment models
-  (raw-segment predictable termination), OpenJPEG/Grok legs for the
-  standalone profiles.
+- **Follow-up (2026-07-12): BYPASS+RESET and BYPASS+ERTERM landed**, closing
+  the T1 completeness row at 15/15. The raw segments gained the predictable
+  alternating-bit termination (ported from opj_mqc_bypass_flush_enc with
+  erterm: the post-0xff empty byte is emitted as 0x2a instead of dropping
+  the 0xff), RESET restarts MQ contexts at coding-pass boundaries in the
+  BYPASS and BYPASS+TERMALL segment models, and every one of the 64 style
+  combinations (0x00..0x3f) now has an implemented payload model. Interop:
+  encode leg pixel-exact through kdu_expand, opj_decompress, and
+  grk_decompress (including the full 0x3f style); decode leg pixel-exact for
+  seven kdu Cmodes combinations up to {BYPASS|RESET|RESTART|ERTERM|CAUSAL|
+  SEGMARK}. `tools/interop_kakadu_styles.ps1` carries the new forward and
+  reverse cases and the old BYPASS+ERTERM fail-closed assertion is gone.
+- **Remaining in this area:** nothing for the T1 completeness row; the
+  legacy MQ backend keeps its own fail-closed gates by design.
 
 #### Original N3 scoping (implementation history)
 
@@ -448,12 +465,12 @@ for more ISO coverage is:
 4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.
-5. **T1 style policy.** Standalone ERTERM landed 2026-07-11 with bidirectional
-   Kakadu interop, and the multi-tile gate now admits standalone RESET/ERTERM
-   with roundtrip plus kdu_expand coverage. Keep BYPASS+RESET, BYPASS+ERTERM,
-   and other untested combinations fail-closed until each has writer, strict
-   reader, tests, and interop coverage. The BYPASS+TERMALL Kakadu decoder leg
-   is closed.
+5. **T1 style policy.** ✅ COMPLETE (2026-07-12): all 64 combinations of the
+   six Part 1 style bits have implemented payload models with roundtrip
+   tests and three-decoder interop (BYPASS+RESET/ERTERM landed last, with
+   predictable raw-segment termination). The single-tile style matrix is
+   closed; only the legacy MQ backend keeps its own fail-closed gates by
+   design. Future T1 work is performance (N5), not coverage.
 
 ## Status 2026-07-07 (ERTERM OpenJPEG/Grok interop) — PASSED
 

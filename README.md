@@ -8,8 +8,8 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-11, the narrow RGB lossless JP2 target is estimated at **100/100**;
-the broader JPEG2000 Part 1 codec family is estimated at **88/100**.
+of 2026-07-12, the narrow RGB lossless JP2 target is estimated at **100/100**;
+the broader JPEG2000 Part 1 codec family is estimated at **90/100**.
 
 ## Features
 
@@ -20,9 +20,9 @@ the broader JPEG2000 Part 1 codec family is estimated at **88/100**.
   progression orders, quality layers, PLT/TLM, strict no-sidecar decode.
 - Lossy experimental path: ICT, irreversible 9/7 DWT, scalar-derived or
   scalar-expounded quantization.
-- Selected JPEG2000 code-block styles where payload behavior is implemented,
-  including BYPASS, terminate-all, vertical-causal, segmentation symbols, and
-  standalone and TERMALL-scoped reset/predictable-termination profiles.
+- All six JPEG2000 code-block style bits (BYPASS, RESET, terminate-all,
+  vertical-causal, predictable termination, segmentation symbols) in every
+  combination, with three-decoder interop coverage on the ISO-MQ path.
 - Reference-grid-aware multi-tile lossless encode/decode with origin-aware
   reversible 5/3 lifting, OpenJPEG/Grok/Kakadu smoke coverage for supported
   profiles, foreign PLT-less streams using explicit, default, or odd-origin

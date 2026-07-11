@@ -3312,16 +3312,11 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
                     bytes[cod + 11] = 8;
                 }
             }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
-            .{ .label = "unsupported style bits BYPASS+RESET", .mutate = struct {
+            .{ .label = "reserved code-block style bit", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
-                    bytes[cod + 12] = 0x03;
+                    bytes[cod + 12] = 0x40;
                 }
-            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
-            .{ .label = "unsupported style bits BYPASS+ERTERM", .mutate = struct {
-                fn mutate(bytes: []u8, cod: usize) void {
-                    bytes[cod + 12] = 0x11;
-                }
-            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "unknown transform", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
                     bytes[cod + 13] = 2;
@@ -8221,7 +8216,8 @@ test "EBCOT code-block style maps all COD style bits explicitly" {
     try std.testing.expect(style.vertical_causal);
     try std.testing.expect(style.predictable_termination);
     try std.testing.expect(style.segmentation_symbols);
-    try std.testing.expect(style.hasUnsupportedPayloadMode());
+    // Every style-bit combination has an implemented payload model now.
+    try std.testing.expect(!style.hasUnsupportedPayloadMode());
     try std.testing.expectEqual(@as(u8, 0x3f), style.toCodByte());
     try std.testing.expect(ebcot.CodeBlockStyle.fromCodByte(0x40) == null);
 }
@@ -10420,14 +10416,15 @@ test "direct ISO segment encoder matches the symbol-based encoder byte for byte"
     var seed: u32 = 77;
     const kinds = [_]subband.Kind{ .ll, .hl, .lh, .hh };
     const StyleMode = struct { bypass: bool, reset: bool, erterm: bool = false };
-    // BYPASS+RESET and BYPASS+ERTERM stay fail-closed, so the matrix skips
-    // those combinations.
     const style_modes = [_]StyleMode{
         .{ .bypass = false, .reset = false },
         .{ .bypass = true, .reset = false },
         .{ .bypass = false, .reset = true },
         .{ .bypass = false, .reset = false, .erterm = true },
         .{ .bypass = false, .reset = true, .erterm = true },
+        .{ .bypass = true, .reset = true },
+        .{ .bypass = true, .reset = false, .erterm = true },
+        .{ .bypass = true, .reset = true, .erterm = true },
     };
     for (kinds) |kind| {
         for (style_modes) |mode| {
@@ -13700,15 +13697,9 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "unsupported MCT", .offset = 8, .value = 2, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "too many decomposition levels", .offset = 9, .value = 33, .expected = codestream.CodestreamError.TooManyLevels },
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
-        .{ .label = "unsupported BYPASS+RESET code-block style", .offset = 12, .value = 0x03, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "unsupported BYPASS+ERTERM code-block style", .offset = 12, .value = 0x11, .expected = codestream.CodestreamError.UnsupportedPayload },
-        // RESET (0x02), TERMALL (0x04), BYPASS+TERMALL (0x05), RESET+TERMALL
-        // (0x06), CAUSAL (0x08), ERTERM (0x10, standalone or with TERMALL),
-        // and SEGMARK (0x20) are supported on their documented paths, so they
-        // are intentionally absent here; their acceptance + roundtrip is
-        // covered by dedicated tests. The combined 0x3f case still exercises
-        // rejection of unsupported RESET/ERTERM combinations with BYPASS.
-        .{ .label = "unsupported combined code-block style", .offset = 12, .value = 0x3f, .expected = codestream.CodestreamError.UnsupportedPayload },
+        // Every combination of the six style bits (0x00..0x3f) parses now;
+        // acceptance + roundtrip is covered by dedicated tests. Only the
+        // reserved bits stay rejected.
         .{ .label = "reserved code-block style bit", .offset = 12, .value = 0x40, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
     };
@@ -14008,23 +13999,17 @@ test "unsupported code-block style options fail closed" {
     const cases = [_]UnsupportedCase{
         .{ .label = "BYPASS+legacy", .options = .{ .bypass = true, .t1_backend = .legacy_mq } },
         .{ .label = "RESET+legacy", .options = .{ .reset_context = true, .t1_backend = .legacy_mq } },
-        .{ .label = "BYPASS+RESET", .options = .{ .bypass = true, .reset_context = true } },
         // terminate_all is wired for the ISO MQ backend only; requesting it with
         // the legacy backend must still fail closed (the flag would otherwise be
         // silently dropped while the COD marker advertised it).
         .{ .label = "TERMALL+legacy", .options = .{ .terminate_all = true, .t1_backend = .legacy_mq } },
         // Multi-layer terminate_all is not yet wired; it must fail closed.
         .{ .label = "TERMALL+layers", .options = .{ .terminate_all = true, .layers = 2 } },
-        .{ .label = "BYPASS+RESET+TERMALL", .options = .{ .bypass = true, .terminate_all = true, .reset_context = true } },
-        .{ .label = "BYPASS+ERTERM+TERMALL", .options = .{ .bypass = true, .terminate_all = true, .predictable_termination = true } },
-        // CAUSAL (vertical_causal), SEGMARK (segmentation_symbols), TERMALL
-        // (terminate_all, ISO MQ) including BYPASS+TERMALL, and ERTERM
-        // (standalone or TERMALL-scoped) are now wired end-to-end; see the
-        // dedicated roundtrip tests below. ERTERM still fails closed with the
-        // legacy backend (no ER-TERM flush) and with BYPASS (raw segments
-        // have no predictable-termination model).
+        // Every RESET/ERTERM style-bit combination (continuous, BYPASS,
+        // TERMALL, BYPASS+TERMALL) is wired end-to-end with dedicated
+        // roundtrip tests below; only the backend-specific legacy gates
+        // remain fail-closed here.
         .{ .label = "ERTERM+legacy", .options = .{ .predictable_termination = true, .t1_backend = .legacy_mq } },
-        .{ .label = "BYPASS+ERTERM", .options = .{ .bypass = true, .predictable_termination = true } },
     };
 
     for (cases) |scenario| {
@@ -14469,6 +14454,103 @@ test "standalone predictable termination roundtrips losslessly and changes the f
 
     // Multi-tile standalone RESET/ERTERM coverage lives in "multi-tile
     // standalone reset and predictable termination roundtrip losslessly".
+}
+
+test "bypass reset and predictable termination roundtrip losslessly" {
+    // Non-TERMALL BYPASS carries RESET and ERTERM now: RESET restarts the MQ
+    // contexts at every coding-pass boundary of the MQ segments (raw
+    // segments carry no contexts), and ERTERM terminates every raw/MQ
+    // segment predictably (alternating-bit raw padding, ER-TERM MQ flush).
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Scenario = struct { label: []const u8, options: codestream.LosslessOptions, cod_style: u8 };
+    const scenarios = [_]Scenario{
+        .{
+            .label = "BYPASS+RESET",
+            .options = .{ .levels = 2, .bypass = true, .reset_context = true },
+            .cod_style = 0x03,
+        },
+        .{
+            .label = "BYPASS+ERTERM",
+            .options = .{ .levels = 2, .bypass = true, .predictable_termination = true },
+            .cod_style = 0x11,
+        },
+        .{
+            .label = "BYPASS+RESET+ERTERM",
+            .options = .{ .levels = 2, .bypass = true, .reset_context = true, .predictable_termination = true },
+            .cod_style = 0x13,
+        },
+        .{
+            .label = "BYPASS+RESET+TERMALL",
+            .options = .{ .levels = 2, .bypass = true, .terminate_all = true, .reset_context = true },
+            .cod_style = 0x07,
+        },
+        .{
+            .label = "BYPASS+ERTERM+TERMALL",
+            .options = .{ .levels = 2, .bypass = true, .terminate_all = true, .predictable_termination = true },
+            .cod_style = 0x15,
+        },
+        .{
+            .label = "all six style bits",
+            .options = .{
+                .levels = 2,
+                .bypass = true,
+                .reset_context = true,
+                .terminate_all = true,
+                .vertical_causal = true,
+                .predictable_termination = true,
+                .segmentation_symbols = true,
+            },
+            .cod_style = 0x3f,
+        },
+    };
+
+    const plain_bypass = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2, .bypass = true });
+    defer allocator.free(plain_bypass);
+
+    for (scenarios) |scenario| {
+        errdefer std.debug.print("bypass style scenario failed: {s}\n", .{scenario.label});
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options);
+        defer allocator.free(bytes);
+
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(scenario.cod_style, bytes[cod + 12]);
+
+        // RESET changes the MQ statistics and ERTERM changes the segment
+        // flush bytes, so each stream must differ from plain BYPASS.
+        try std.testing.expect(!std.mem.eql(u8, bytes, plain_bypass));
+
+        const again = try codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options);
+        defer allocator.free(again);
+        try std.testing.expectEqualSlices(u8, bytes, again);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        var threaded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = 4 });
+        defer threaded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, threaded.samples);
+
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+        allocator.free(wrapped);
+    }
 }
 
 test "predictable termination debug sidecar roundtrips larger stream" {
