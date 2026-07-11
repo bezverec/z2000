@@ -22,7 +22,7 @@ the broader JPEG2000 Part 1 codec family is estimated at **82/100**.
   scalar-expounded quantization.
 - Selected JPEG2000 code-block styles where payload behavior is implemented,
   including BYPASS, terminate-all, vertical-causal, segmentation symbols, and
-  scoped reset/predictable-termination profiles.
+  standalone and TERMALL-scoped reset/predictable-termination profiles.
 - Aligned multi-tile lossless envelope with per-tile strict decode and
   OpenJPEG/Grok/Kakadu smoke coverage for supported profiles.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
@@ -152,7 +152,7 @@ Marker, T1, and diagnostics:
 | `--reset-context` / `--no-reset-context` | Toggle RESET context style in supported envelopes. |
 | `--terminate-all` / `--no-terminate-all` | Toggle TERMALL pass termination. |
 | `--vertical-causal` / `--no-vertical-causal` | Toggle vertical-causal context behavior. |
-| `--predictable-termination` / `--no-predictable-termination` | Toggle predictable termination in the supported TERMALL-scoped path. |
+| `--predictable-termination` / `--no-predictable-termination` | Toggle predictable (ER-TERM) termination, standalone or TERMALL-scoped. |
 | `--segmentation-symbols` / `--no-segmentation-symbols` | Toggle segmentation symbols where supported. |
 | `--threads N` | Worker count. `0` means use all logical threads. |
 | `--timings` | Print encode/decode timing breakdowns. |

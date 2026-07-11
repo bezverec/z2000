@@ -220,14 +220,19 @@ pub const CodeBlockStyle = struct {
     }
 
     pub fn hasUnsupportedPayloadMode(self: CodeBlockStyle) bool {
-        return self.predictable_termination;
+        // ER-TERM is implemented for pure-MQ streams (continuous flush and
+        // per-pass terminated segments). Combined with BYPASS it would also
+        // require predictable termination of raw segments, which has no
+        // writer or reader yet.
+        return self.predictable_termination and self.bypass;
     }
 };
 
-/// Legacy single-segment coders do not understand BYPASS payload layout, so
-/// they keep rejecting it; only the bypass-aware segment coders accept it.
+/// Legacy single-segment coders do not understand BYPASS payload layout or the
+/// ISO ER-TERM flush, so they keep rejecting both; only the ISO-MQ segment
+/// coders accept them.
 fn validateImplementedStyle(style: CodeBlockStyle) !void {
-    if (style.hasUnsupportedPayloadMode() or style.bypass) return EbcotError.InvalidBlock;
+    if (style.predictable_termination or style.bypass) return EbcotError.InvalidBlock;
 }
 
 fn validateImplementedStyleAllowBypass(style: CodeBlockStyle) !void {
@@ -2291,7 +2296,13 @@ pub fn encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(
     }
     if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
 
-    const encoded = try encoder.finish();
+    // Standalone ERTERM (D.4.2 without TERMALL): the only termination point
+    // in the continuous stream is the final flush, which must use the
+    // predictable ER-TERM procedure instead of the standard flush.
+    const encoded = if (style.predictable_termination)
+        try encoder.finishErterm()
+    else
+        try encoder.finish();
     errdefer allocator.free(encoded);
     if (pass_payloads.items.len > 0) {
         const last = &pass_payloads.items[pass_payloads.items.len - 1];
@@ -2775,12 +2786,8 @@ pub fn encodeCodeBlockSegmentIsoMqTerminatedWithStyle(
     style: CodeBlockStyle,
 ) !CodeBlockSegment {
     // Symbol generation is termination-independent — predictable_termination
-    // only changes how each per-pass segment is flushed. Mask it off for
-    // symbol coding (whose validator treats it as an unsupported payload
-    // mode) and keep the full style for the segment encoder's flush choice.
-    var symbol_style = style;
-    symbol_style.predictable_termination = false;
-    var block = try encodeBlockWithStyle(allocator, plane, stride, rect, symbol_style);
+    // only changes how each per-pass segment is flushed.
+    var block = try encodeBlockWithStyle(allocator, plane, stride, rect, style);
     defer block.deinit(allocator);
     return encodeBlockSymbolsSegmentIsoMqTerminated(allocator, .{
         .bitplanes = block.bitplanes,
@@ -3190,7 +3197,10 @@ pub fn decodeCodeBlockSegmentCoefficientsIsoMqScratchWithStyle(
     height: usize,
     style: CodeBlockStyle,
 ) ![]i32 {
-    try validateImplementedStyle(style);
+    // Continuous MQ decode is flush-independent: an ER-TERM tail decodes with
+    // the standard byte-in padding, so standalone ERTERM is accepted here.
+    // BYPASS payloads need the segment-aware readers.
+    if (style.bypass) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
@@ -3361,7 +3371,10 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorr
     style: CodeBlockStyle,
     stats: ?*DecodePassStats,
 ) ![]const i32 {
-    try validateImplementedStyle(style);
+    // Continuous MQ decode is flush-independent: an ER-TERM tail decodes with
+    // the standard byte-in padding, so standalone ERTERM is accepted here.
+    // BYPASS payloads need the segment-aware readers.
+    if (style.bypass) return EbcotError.InvalidBlock;
     if (style.terminate_all) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
@@ -5644,8 +5657,13 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
 
             const last_pass = pass_index == total_passes;
             if (last_pass or passEndsBypassSegment(style, bitplanes, bitplane, kind)) {
+                // Standalone ERTERM (D.4.2 without TERMALL): BYPASS is
+                // rejected above, so the only termination point is the final
+                // MQ flush, which must use the predictable ER-TERM procedure.
                 const encoded_len = if (segment_is_raw)
                     try raw.finishInto(&scratch.bytes)
+                else if (style.predictable_termination)
+                    try iso.finishErtermInto(&scratch.bytes)
                 else
                     try iso.finishInto(&scratch.bytes);
                 try scratch.segments.append(scratch.allocator, .{

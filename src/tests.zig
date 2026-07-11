@@ -3278,9 +3278,9 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
                     bytes[cod + 12] = 0x03;
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
-            .{ .label = "unsupported style bit ERTERM", .mutate = struct {
+            .{ .label = "unsupported style bits BYPASS+ERTERM", .mutate = struct {
                 fn mutate(bytes: []u8, cod: usize) void {
-                    bytes[cod + 12] = 0x10;
+                    bytes[cod + 12] = 0x11;
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
             .{ .label = "unknown transform", .mutate = struct {
@@ -8097,12 +8097,15 @@ test "direct ISO segment encoder matches the symbol-based encoder byte for byte"
 
     var seed: u32 = 77;
     const kinds = [_]subband.Kind{ .ll, .hl, .lh, .hh };
-    const StyleMode = struct { bypass: bool, reset: bool };
-    // BYPASS+RESET stays fail-closed, so the matrix skips that combination.
+    const StyleMode = struct { bypass: bool, reset: bool, erterm: bool = false };
+    // BYPASS+RESET and BYPASS+ERTERM stay fail-closed, so the matrix skips
+    // those combinations.
     const style_modes = [_]StyleMode{
         .{ .bypass = false, .reset = false },
         .{ .bypass = true, .reset = false },
         .{ .bypass = false, .reset = true },
+        .{ .bypass = false, .reset = false, .erterm = true },
+        .{ .bypass = false, .reset = true, .erterm = true },
     };
     for (kinds) |kind| {
         for (style_modes) |mode| {
@@ -8112,7 +8115,12 @@ test "direct ISO segment encoder matches the symbol-based encoder byte for byte"
                 const magnitude: i32 = @intCast((seed >> 7) & 0x3ff);
                 value.* = if ((seed & 1) == 1) -magnitude else magnitude;
             }
-            const style = ebcot.CodeBlockStyle{ .band_kind = kind, .bypass = bypass, .reset_context = mode.reset };
+            const style = ebcot.CodeBlockStyle{
+                .band_kind = kind,
+                .bypass = bypass,
+                .reset_context = mode.reset,
+                .predictable_termination = mode.erterm,
+            };
             const rect = subband.Rect{ .x = 0, .y = 0, .width = w, .height = h };
 
             var block = try ebcot.encodeBlockWithStyle(allocator, &plane, w, rect, style);
@@ -11202,13 +11210,13 @@ test "strict COD marker reader rejects unsupported coding profile bytes" {
         .{ .label = "too many decomposition levels", .offset = 9, .value = 33, .expected = codestream.CodestreamError.TooManyLevels },
         .{ .label = "oversized code-block width exponent", .offset = 10, .value = 9, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported BYPASS+RESET code-block style", .offset = 12, .value = 0x03, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "unsupported ERTERM code-block style", .offset = 12, .value = 0x10, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "unsupported BYPASS+ERTERM code-block style", .offset = 12, .value = 0x11, .expected = codestream.CodestreamError.UnsupportedPayload },
         // RESET (0x02), TERMALL (0x04), BYPASS+TERMALL (0x05), RESET+TERMALL
-        // (0x06), CAUSAL (0x08), ERTERM+TERMALL (0x14), and SEGMARK (0x20) are supported on
-        // their documented paths, so they are intentionally absent here; their
-        // acceptance + roundtrip is covered by dedicated tests. The combined
-        // 0x3f case still exercises rejection of unsupported RESET/ERTERM
-        // combinations with BYPASS.
+        // (0x06), CAUSAL (0x08), ERTERM (0x10, standalone or with TERMALL),
+        // and SEGMARK (0x20) are supported on their documented paths, so they
+        // are intentionally absent here; their acceptance + roundtrip is
+        // covered by dedicated tests. The combined 0x3f case still exercises
+        // rejection of unsupported RESET/ERTERM combinations with BYPASS.
         .{ .label = "unsupported combined code-block style", .offset = 12, .value = 0x3f, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "reserved code-block style bit", .offset = 12, .value = 0x40, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported wavelet transform", .offset = 13, .value = 0, .expected = codestream.CodestreamError.UnsupportedPayload },
@@ -11518,11 +11526,14 @@ test "unsupported code-block style options fail closed" {
         .{ .label = "TERMALL+layers", .options = .{ .terminate_all = true, .layers = 2 } },
         .{ .label = "BYPASS+RESET+TERMALL", .options = .{ .bypass = true, .terminate_all = true, .reset_context = true } },
         .{ .label = "BYPASS+ERTERM+TERMALL", .options = .{ .bypass = true, .terminate_all = true, .predictable_termination = true } },
-        // CAUSAL (vertical_causal), SEGMARK (segmentation_symbols), and TERMALL
-        // (terminate_all, ISO MQ), including BYPASS+TERMALL, are now wired
-        // end-to-end; see the dedicated roundtrip tests below. None of those
-        // documented combinations is fail-closed any longer.
-        .{ .label = "ERTERM", .options = .{ .predictable_termination = true } },
+        // CAUSAL (vertical_causal), SEGMARK (segmentation_symbols), TERMALL
+        // (terminate_all, ISO MQ) including BYPASS+TERMALL, and ERTERM
+        // (standalone or TERMALL-scoped) are now wired end-to-end; see the
+        // dedicated roundtrip tests below. ERTERM still fails closed with the
+        // legacy backend (no ER-TERM flush) and with BYPASS (raw segments
+        // have no predictable-termination model).
+        .{ .label = "ERTERM+legacy", .options = .{ .predictable_termination = true, .t1_backend = .legacy_mq } },
+        .{ .label = "BYPASS+ERTERM", .options = .{ .bypass = true, .predictable_termination = true } },
     };
 
     for (cases) |scenario| {
@@ -11892,6 +11903,92 @@ test "predictable termination roundtrips losslessly and changes the flush" {
     // The JP2 wrapper accepts the ERTERM+TERMALL profile.
     const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, erterm);
     allocator.free(wrapped);
+}
+
+test "standalone predictable termination roundtrips losslessly and changes the flush" {
+    // ISO 15444-1 D.4.2: with ERTERM (0x10) and no TERMALL, the only
+    // termination point in a continuous MQ code-block is the final flush,
+    // which must use the predictable ER-TERM procedure. The stream still
+    // decodes through the ordinary continuous path because the spilled
+    // register bits equal the byte-in padding a decoder supplies.
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @as(u16, @intCast((i * 37) % 256));
+        samples[i * 3 + 1] = @as(u16, @intCast((i * 53 + 17) % 256));
+        samples[i * 3 + 2] = @as(u16, @intCast((i * 91 + 5) % 256));
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Scenario = struct { label: []const u8, options: codestream.LosslessOptions, cod_style: u8 };
+    const scenarios = [_]Scenario{
+        .{
+            .label = "ERTERM",
+            .options = .{ .levels = 2, .predictable_termination = true },
+            .cod_style = 0x10,
+        },
+        .{
+            .label = "ERTERM+RESET",
+            .options = .{ .levels = 2, .predictable_termination = true, .reset_context = true },
+            .cod_style = 0x12,
+        },
+    };
+
+    const plain = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(plain);
+
+    for (scenarios) |scenario| {
+        errdefer std.debug.print("standalone ERTERM scenario failed: {s}\n", .{scenario.label});
+        const erterm = try codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options);
+        defer allocator.free(erterm);
+
+        const cod = findMarker(erterm, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(scenario.cod_style, erterm[cod + 12]);
+
+        // The ER-TERM flush produces a different byte layout than the
+        // standard flush of the otherwise identical stream.
+        try std.testing.expect(!std.mem.eql(u8, erterm, plain));
+
+        // Encoding stays deterministic.
+        const again = try codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options);
+        defer allocator.free(again);
+        try std.testing.expectEqualSlices(u8, erterm, again);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, erterm);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+        var threaded = try codestream.decodeLosslessTemporaryWithOptions(allocator, erterm, .{ .threads = 4 });
+        defer threaded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, threaded.samples);
+
+        // The JP2 wrapper accepts the standalone ERTERM profile.
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, erterm);
+        allocator.free(wrapped);
+    }
+
+    // Multi-tile standalone ERTERM stays fail-closed until the tile matrix
+    // is verified; TERMALL-scoped ERTERM remains the supported tile path.
+    var tiled = scenarios[0].options;
+    tiled.tile_width = 8;
+    tiled.tile_height = 8;
+    tiled.precincts[0] = .{ .width = 4, .height = 4 };
+    tiled.precinct_count = 1;
+    tiled.block_width = 4;
+    tiled.block_height = 4;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, tiled),
+    );
 }
 
 test "predictable termination debug sidecar roundtrips larger stream" {

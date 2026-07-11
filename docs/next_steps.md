@@ -7,18 +7,20 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 82/100 full** as of
-2026-07-10. First drafted at `ba66799`.
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 83/100 full** as of
+2026-07-11. First drafted at `ba66799`.
 
-## Next Working Sequence (2026-07-10)
+## Next Working Sequence (2026-07-11)
 
-Scorecard now **100/100 narrow, 82/100 full**. The aligned multi-tile path has
+Scorecard now **100/100 narrow, 83/100 full**. The aligned multi-tile path has
 all five progression orders, untargeted layers, and the implemented resilience
 matrix. CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
 roundtrip through strict decode and decode pixel-exactly with OpenJPEG/Grok/Kakadu;
 T1 BYPASS mode is preserved explicitly into T2 readback. Uniform Kakadu
 COC/QCC style and QCD overrides now decode through z2000 when all RGB
-components agree; partial/divergent overrides and standalone ERTERM fail closed.
+components agree; partial/divergent overrides fail closed. Standalone ERTERM
+(COD `0x10`, plus `0x12` with RESET) is public single-tile with bidirectional
+Kakadu interop; BYPASS+RESET and BYPASS+ERTERM stay fail-closed.
 The malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
 profile, and aligned PLT-less multi-tile streams now strict-decode by deriving
 tile-local packet spans from T2 packet headers. The foreign OpenJPEG/Grok/Kakadu
@@ -225,9 +227,34 @@ format, codestream profile, and container semantics are explicit.
 - **Risk:** High (per-tile T2/T1 scheduling); keep the single-tile path a
   passing special case at every step.
 
-### N3. T1 completeness — standalone ERTERM after the style matrix — M–L · Med
+### N3. T1 completeness — standalone ERTERM — ✅ LANDED (2026-07-11)
 
-- **Impact:** full "T1 completeness" +1–2 remaining. (+1–2)
+- **Impact:** full "T1 completeness" 13->14, moving the full estimate 82->83.
+- **ISO clause:** D.4.5 (per-pass termination), D.4.2 (predictable
+  termination), D.7 (bypass).
+- **Landed:** standalone ERTERM (COD `0x10` without TERMALL) is public
+  single-tile. The only termination point in a continuous MQ code-block is
+  the final flush, so the continuous ISO-MQ encoders (both the symbol-based
+  and the hot direct-scratch path, kept byte-identical by the extended
+  direct/symbols equality matrix) now flush with the interop-verified
+  `finishErterm` when the style requests it. The strict continuous decoders
+  accept the style because MQ decode is flush-independent (the ER-TERM tail
+  decodes with standard byte-in padding); `parseCodeBlockStyleByte` and the
+  JP2 wrapper accept `0x10` standalone, including `0x12` with standalone
+  RESET. The legacy backend and BYPASS combinations stay fail-closed
+  (`hasUnsupportedPayloadMode` is now ERTERM+BYPASS), and multi-tile
+  standalone ERTERM remains gated in `validateMultiTileCodingPath`.
+- **Interop (Kakadu 8.4.1, this machine, 2048² RGB noise):** kdu_expand
+  decodes z2000 `--predictable-termination` and
+  `--predictable-termination --reset-context` output pixel-exactly; z2000
+  strict decode reconstructs kdu `Cmodes=ERTERM`, `Cmodes={ERTERM|RESET}`,
+  and `Cmodes={ERTERM|CAUSAL|SEGMARK}` files pixel-exactly.
+- **Remaining in this area:** BYPASS+RESET and BYPASS+ERTERM segment models
+  (raw-segment predictable termination), multi-tile standalone
+  ERTERM/RESET verification, OpenJPEG/Grok legs for the standalone profile.
+
+#### Original N3 scoping (implementation history)
+
 - **ISO clause:** D.4.5 (per-pass termination), D.7 (bypass), the ER-TERM annex.
 - **State:** BYPASS (raw segments) and TERMALL (per-pass ISO-MQ termination)
   are each public and interop-proven. **BYPASS+TERMALL is now locally public**:
@@ -360,10 +387,11 @@ for more ISO coverage is:
 4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.
-5. **T1 style policy.** Keep standalone ERTERM, BYPASS+RESET, BYPASS+ERTERM,
-   unsupported RESET envelopes, and other untested combinations fail-closed
-   until each has writer, strict reader, tests, and interop coverage. The
-   BYPASS+TERMALL Kakadu decoder leg is now closed.
+5. **T1 style policy.** Standalone ERTERM landed 2026-07-11 with bidirectional
+   Kakadu interop. Keep BYPASS+RESET, BYPASS+ERTERM, multi-tile standalone
+   ERTERM/RESET, and other untested combinations fail-closed until each has
+   writer, strict reader, tests, and interop coverage. The BYPASS+TERMALL
+   Kakadu decoder leg is closed.
 
 ## Status 2026-07-07 (ERTERM OpenJPEG/Grok interop) — PASSED
 
