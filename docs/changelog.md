@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Standalone Predictable Termination (ERTERM)
+
+- Opened COD code-block style `0x10` without TERMALL as a public single-tile
+  opt-in: the continuous ISO-MQ encoders (symbol-based and hot direct-scratch,
+  kept byte-identical by the extended direct/symbols equality matrix) flush
+  the code-block's single termination point with the interop-verified ER-TERM
+  procedure (ISO 15444-1 D.4.2), and the strict continuous decoders accept the
+  style because MQ decode is flush-independent. `0x12` (ERTERM+RESET) is
+  public as well; the legacy backend, BYPASS+ERTERM, and multi-tile standalone
+  ERTERM stay fail-closed. Verified bidirectionally against Kakadu 8.4.1:
+  kdu_expand decodes z2000 `--predictable-termination` (and `--reset-context`)
+  output pixel-exactly, and z2000 strict decode reconstructs kdu
+  `Cmodes=ERTERM`, `{ERTERM|RESET}`, and `{ERTERM|CAUSAL|SEGMARK}` files
+  pixel-exactly. Scorecard: full T1 completeness 13->14, moving the full
+  codec estimate to 83/100.
+
 ### PLT-less Multi-Tile Strict Decode And Interop
 
 - Extended the aligned multi-tile strict path so z2000-generated streams can

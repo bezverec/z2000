@@ -203,6 +203,8 @@ $forwardSingle = @(
     @{ Name = "termall"; Args = @("--terminate-all") },
     @{ Name = "reset-termall"; Args = @("--reset-context", "--terminate-all") },
     @{ Name = "erterm"; Args = @("--terminate-all", "--predictable-termination") },
+    @{ Name = "erterm-standalone"; Args = @("--predictable-termination") },
+    @{ Name = "erterm-reset-standalone"; Args = @("--predictable-termination", "--reset-context") },
     @{ Name = "bypass-termall"; Args = @("--bypass", "--terminate-all") },
     @{ Name = "causal-segmark"; Args = @("--vertical-causal", "--segmentation-symbols") }
 )
@@ -225,6 +227,9 @@ $reverse = @(
     @{ Name = "restart"; Mode = "RESTART" },
     @{ Name = "reset-restart"; Mode = "RESET|RESTART" },
     @{ Name = "erterm-restart"; Mode = "ERTERM|RESTART" },
+    @{ Name = "erterm-standalone"; Mode = "ERTERM" },
+    @{ Name = "erterm-reset"; Mode = "ERTERM|RESET" },
+    @{ Name = "erterm-causal-segmark"; Mode = "ERTERM|CAUSAL|SEGMARK" },
     @{ Name = "bypass-restart"; Mode = "BYPASS|RESTART" },
     @{ Name = "causal-segmark"; Mode = "CAUSAL|SEGMARK" }
 )
@@ -232,29 +237,31 @@ foreach ($case in $reverse) {
     $results += Invoke-KakaduReverseCase $case.Name $case.Mode $caseDir $source $z2000 $pythonExe $threadCount
 }
 
-$standaloneErterm = Join-Path $caseDir "kakadu-standalone-erterm.jp2"
-Invoke-NativeChecked "Kakadu encode standalone ERTERM" $KduCompress @(
+# BYPASS+ERTERM needs predictable raw-segment termination, which z2000 has no
+# writer or reader model for yet — the decode must fail closed.
+$bypassErterm = Join-Path $caseDir "kakadu-bypass-erterm.jp2"
+Invoke-NativeChecked "Kakadu encode BYPASS+ERTERM" $KduCompress @(
     "-i", $source,
-    "-o", $standaloneErterm,
+    "-o", $bypassErterm,
     "Creversible=yes",
     "Cycc=yes",
     "Clevels=5",
     "Corder=RPCL",
     "Cprecincts={256,256},{256,256},{128,128},{128,128},{128,128},{128,128}",
     "Cblk={64,64}",
-    "Cmodes:C0=ERTERM", "Cmodes:C1=ERTERM", "Cmodes:C2=ERTERM",
+    "Cmodes:C0=BYPASS|ERTERM", "Cmodes:C1=BYPASS|ERTERM", "Cmodes:C2=BYPASS|ERTERM",
     "Qguard:C0=2", "Qguard:C1=2", "Qguard:C2=2",
     "ORGgen_plt=yes",
     "-quiet"
 )
-Invoke-NativeExpectUnsupported "z2000 reject standalone Kakadu ERTERM" $z2000 @(
-    "decode-temp-jp2", $standaloneErterm, (Join-Path $caseDir "unexpected-standalone-erterm.tif"),
+Invoke-NativeExpectUnsupported "z2000 reject Kakadu BYPASS+ERTERM" $z2000 @(
+    "decode-temp-jp2", $bypassErterm, (Join-Path $caseDir "unexpected-bypass-erterm.tif"),
     "--threads", "$threadCount"
 )
 $results += [pscustomobject]@{
     Direction = "Kakadu -> z2000"
-    Profile = "standalone-erterm"
-    Bytes = (Get-Item -LiteralPath $standaloneErterm).Length
+    Profile = "bypass-erterm"
+    Bytes = (Get-Item -LiteralPath $bypassErterm).Length
     Result = "FAIL-CLOSED"
 }
 
