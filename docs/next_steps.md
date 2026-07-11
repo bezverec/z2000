@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 88/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 89/100 full** as of
 2026-07-11 (evening). First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-11)
 
-Scorecard now **100/100 narrow, 88/100 full**. The bounded multi-tile path has
+Scorecard now **100/100 narrow, 89/100 full**. The bounded multi-tile path has
 all five progression orders, quality layers including the first tile-local
 rate-target slice, and the implemented resilience matrix. CAUSAL+SEGMARK,
 RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
@@ -34,12 +34,22 @@ LRCP smoke gate. Reference-grid precinct/code-block/tag-tree anchoring and odd-
 origin reversible 5/3 lifting are now bidirectionally interop-green for
 PLT-less OpenJPEG, Grok, and Kakadu inputs and z2000 output. The strict T2
 reader also accepts present geometry-empty edge packets while still requiring
-zero contributions and zero payload. The next
-structural gates are global cross-tile rate-budget refinement, PLT-less
-cross-part packet-state decode, broader progression/tile-part combinations,
-and tile-level scheduling. PLT-backed RPCL `R` divisions now emit and decode
-one part per resolution per tile, with z2000/OpenJPEG/Grok/Kakadu pixel-exact
-interop on the 17x17 odd-origin gate.
+zero contributions and zero payload. PLT-backed RPCL `R` divisions emit and
+decode one part per resolution per tile, with z2000/OpenJPEG/Grok/Kakadu
+pixel-exact interop on the 17x17 odd-origin gate. **Foreign multi-part tile
+sequences now decode (2026-07-11, full lossless-decode row 14->15, estimate
+88->89):** per-part PLT packet accounting joins each tile's parts in TPsot
+order whether grouped or interleaved across tiles, TNsot 0 "count not
+signalled" (A.4.2) completes via packet accounting at EOC, empty SOT+SOD
+padding parts need no PLT, joined non-RPCL tiles reorder once assembled, and
+the JP2 TLM capacity is tile-part sized (4096). Two embedded Kakadu fixtures
+(ORGtparts=L interleaved TNsot-0 layer parts; TNsot=8 empty padding + 32-entry
+TLM) decode the 64x64 gradient exactly with fail-closed accounting negatives,
+and the live kdu matrix (16/32-part tiles, LRCP/RPCL/CPRL-3layers/ERTERM on
+2048x2048 noise) is pixel-exact. This closes the historical kdu-multitile
+interop GAP. The next structural gates are global cross-tile rate-budget
+refinement, non-empty PLT-less cross-part packet-state decode, and
+tile-level scheduling.
 
 The remaining levers are larger and structural. Ordered by *value per unit
 risk*; each names the ISO clause, the current code state, exactly what is

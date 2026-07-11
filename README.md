@@ -25,14 +25,15 @@ the broader JPEG2000 Part 1 codec family is estimated at **88/100**.
   standalone and TERMALL-scoped reset/predictable-termination profiles.
 - Reference-grid-aware multi-tile lossless encode/decode with origin-aware
   reversible 5/3 lifting, OpenJPEG/Grok/Kakadu smoke coverage for supported
-  profiles, and foreign PLT-less streams using explicit, default, or odd-origin
-  precinct/tile partitions.
+  profiles, foreign PLT-less streams using explicit, default, or odd-origin
+  precinct/tile partitions, and foreign multi-part tile sequences (grouped or
+  interleaved PLT-backed parts, TNsot 0, empty padding parts).
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, general component layouts,
-full multi-tile rate allocation, PLT-less multi-part tiles,
+full multi-tile rate allocation, non-empty PLT-less multi-part tiles,
 broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and full metadata handling beyond the staged ICC
 path.
@@ -80,12 +81,14 @@ zig build run -- tiff-to-jp2 input.tif output.jp2 \
   --levels 5 --progression RPCL --block 64 --layers 1 --tlm
 ```
 
-Convert TIFF to a rate-layered JP2:
+Convert TIFF to a rate-layered JP2 (the `--rates` list sets the layer count;
+the final layer always carries the complete stream, so a trailing `1` makes
+the lossless-final intent explicit):
 
 ```sh
 zig build run -- tiff-to-jp2 input.tif output.jp2 \
   --mct rct --transform 5-3 --qstyle none \
-  --layers 3 --rates 16,8 --threads 0 --timings
+  --rates 16,8,1 --threads 0 --timings
 ```
 
 Inspect and decode a JP2 produced by z2000:
@@ -136,11 +139,11 @@ Packet, layer, and geometry options:
 | `--levels N` | Number of DWT decomposition levels. |
 | `--resolutions N` | Alternative to `--levels`; resolutions are levels + 1. |
 | `--progression RPCL|LRCP|RLCP|PCRL|CPRL` | JPEG2000 progression order. Supported paths are still profile-bounded and fail closed when unsafe. |
-| `--layers N` | Number of quality layers. |
-| `--rates R1,R2,...` | Rate targets for layered output. Single-tile uses global PCRD with packet-header charging; bounded multi-tile uses tile-local PCRD in the lossless path. |
+| `--layers N` | Number of quality layers (untargeted even split). When `--rates` is given, the rate-list length sets the layer count and overrides `--layers`. |
+| `--rates R1,R2,...` | Compression-ratio targets for layered output, referenced to the total compressed payload (unlike OpenJPEG's `-r`, which references the uncompressed size). The final layer always carries the complete stream, so end the list with `1` for an explicit lossless-final ladder. Single-tile uses global PCRD with packet-header charging; bounded multi-tile uses tile-local PCRD in the lossless path. |
 | `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |
 | `--block N` | Square code-block size. |
-| `--tile W,H` | Tile size. Multi-tile support is currently the aligned lossless envelope. |
+| `--tile W,H` | Tile size. Multi-tile support is the bounded reference-grid lossless envelope (explicit, default, or odd-origin partitions). |
 | `--tile-parts none|R` | Tile-part division mode. Other divisions stay fail-closed. |
 
 Marker, T1, and diagnostics:
@@ -201,8 +204,9 @@ Detailed notes live in `docs/`:
 
 ## Project Direction
 
-Near term: keep closing the narrow RGB lossless JP2 target, especially strict
-T2/T1 behavior and interop gates.
+Near term: hold the narrow RGB lossless JP2 target at 100/100 (strict T2/T1
+behavior and interop gates must stay green) while broadening the full Part 1
+coverage tracked in the scorecard.
 
 Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.

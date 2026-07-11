@@ -4366,6 +4366,12 @@ fn readStrictMultiTilePacketCatalogForTile(
     }
     const owned_entries = try entries.toOwnedSlice(allocator);
     errdefer allocator.free(owned_entries);
+    // Single-part tiles were already reordered per part; multi-part tiles
+    // join their parts in stream (progression) order first, so non-RPCL
+    // sequences reorder here once the whole tile is assembled.
+    if (progression != .rpcl and part_count > 1) {
+        try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, layers);
+    }
     const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
     return .{
         .allocator = allocator,
@@ -5902,6 +5908,18 @@ fn readStrictMultiTileTilePartSpans(
     const completed_tiles = try allocator.alloc(bool, tile_count_usize);
     defer allocator.free(completed_tiles);
     @memset(completed_tiles, false);
+    // Running packet cursor per tile: multi-part tiles consume their packet
+    // sequence across parts in TPsot order, each part's packet count coming
+    // from its own PLT.
+    const tile_next_packet = try allocator.alloc(usize, tile_count_usize);
+    defer allocator.free(tile_next_packet);
+    @memset(tile_next_packet, 0);
+    // Tile plan packet totals recorded on first sight, so tiles whose part
+    // count is never signalled (TNsot stays 0) can be completed by packet
+    // accounting at EOC.
+    const tile_plan_totals = try allocator.alloc(usize, tile_count_usize);
+    defer allocator.free(tile_plan_totals);
+    @memset(tile_plan_totals, 0);
 
     var spans: std.ArrayList(StrictMultiTileTilePartSpan) = .empty;
     errdefer spans.deinit(allocator);
@@ -5914,7 +5932,18 @@ fn readStrictMultiTileTilePartSpans(
         if (marker == @intFromEnum(Marker.eoc)) {
             scan += 2;
             if (scan != bytes.len) return CodestreamError.InvalidCodestream;
-            for (completed_tiles) |completed| if (!completed) return CodestreamError.InvalidCodestream;
+            for (completed_tiles, 0..) |completed, index| {
+                if (completed) continue;
+                // A tile whose part count was never signalled (TNsot 0 in
+                // every part, ISO A.4.2) is complete once its parts consumed
+                // the whole tile packet plan.
+                if (expected_parts[index] == 0 and next_parts[index] > 0 and
+                    tile_next_packet[index] == tile_plan_totals[index])
+                {
+                    continue;
+                }
+                return CodestreamError.InvalidCodestream;
+            }
             if (tlm_entries) |entries| {
                 if (entries.len != tile_part_index) return CodestreamError.InvalidCodestream;
             }
@@ -5927,19 +5956,20 @@ fn readStrictMultiTileTilePartSpans(
         }
         if (sot.tile_index >= tile_count) return CodestreamError.InvalidCodestream;
         const tile_index = @as(usize, sot.tile_index);
-        if (sot.tile_part_count == 0) return CodestreamError.InvalidCodestream;
         if (completed_tiles[tile_index]) return CodestreamError.InvalidCodestream;
-        if (expected_parts[tile_index] == 0) {
-            expected_parts[tile_index] = sot.tile_part_count;
-        } else if (expected_parts[tile_index] != sot.tile_part_count) {
-            return CodestreamError.InvalidCodestream;
-        }
-        if (sot.tile_part_index != next_parts[tile_index]) return CodestreamError.InvalidCodestream;
-        if (sot.tile_part_count != 1) {
-            if (options.progression != .rpcl or sot.tile_part_count != @as(u8, levels) + 1) {
-                return CodestreamError.UnsupportedPayload;
+        // TNsot == 0 means "part count not signalled in this part"
+        // (ISO A.4.2); a later part of the tile may carry the real count.
+        // Once any part signals a nonzero count, every later nonzero value
+        // must agree and must exceed the current part index.
+        if (sot.tile_part_count != 0) {
+            if (sot.tile_part_count <= sot.tile_part_index) return CodestreamError.InvalidCodestream;
+            if (expected_parts[tile_index] == 0) {
+                expected_parts[tile_index] = sot.tile_part_count;
+            } else if (expected_parts[tile_index] != sot.tile_part_count) {
+                return CodestreamError.InvalidCodestream;
             }
         }
+        if (sot.tile_part_index != next_parts[tile_index]) return CodestreamError.InvalidCodestream;
 
         const tile_part_end = try std.math.add(usize, scan, sot.psot);
         if (tile_part_end > bytes.len or tile_part_end < scan + 12) {
@@ -5952,23 +5982,31 @@ fn readStrictMultiTileTilePartSpans(
 
         const tile = grid.tile(sot.tile_index) catch return CodestreamError.InvalidCodestream;
         const tile_plan = try makePacketPlanForTile(tile, levels, options);
+        const plan_packets = std.math.cast(usize, tile_plan.packets) orelse return CodestreamError.InvalidCodestream;
+        tile_plan_totals[tile_index] = plan_packets;
         const missing_plt = packet_lengths.items.len == 0;
-        if (missing_plt and sot.tile_part_count != 1) return CodestreamError.UnsupportedPayload;
+        // Multi-part tiles are accepted in any progression when every
+        // non-empty part carries PLT: each part's packet count comes from
+        // its own PLT, the parts consume the tile's packet sequence in TPsot
+        // order, and the completed tile must land exactly on the tile plan
+        // total (z2000's own per-resolution `R` divisions are one instance
+        // of this rule). Empty padding parts (SOT+SOD only, zero packets —
+        // Kakadu pads tiles to a fixed TNsot this way) need no PLT.
+        // Non-empty PLT-less multi-part tiles stay fail-closed until
+        // cross-part packet-state span derivation exists.
+        if (missing_plt and sot.tile_part_count != 1) {
+            const payload_start = try std.math.add(usize, sod, 2);
+            if (payload_start != tile_part_end) return CodestreamError.UnsupportedPayload;
+        }
         var first_packet: usize = 0;
-        var expected_packet_count = std.math.cast(usize, tile_plan.packets) orelse return CodestreamError.InvalidCodestream;
+        var expected_packet_count = plan_packets;
         if (sot.tile_part_count != 1) {
-            var resolution_index: usize = 0;
-            while (resolution_index < sot.tile_part_index) : (resolution_index += 1) {
-                first_packet = try std.math.add(
-                    usize,
-                    first_packet,
-                    std.math.cast(usize, tile_plan.resolutions[resolution_index].packets) orelse return CodestreamError.InvalidCodestream,
-                );
-            }
-            expected_packet_count = std.math.cast(
-                usize,
-                tile_plan.resolutions[sot.tile_part_index].packets,
-            ) orelse return CodestreamError.InvalidCodestream;
+            first_packet = tile_next_packet[tile_index];
+            expected_packet_count = packet_lengths.items.len;
+            const end_packet = try std.math.add(usize, first_packet, expected_packet_count);
+            if (end_packet > plan_packets) return CodestreamError.InvalidCodestream;
+            const is_last_part = next_parts[tile_index] + 1 == expected_parts[tile_index];
+            if (is_last_part and end_packet != plan_packets) return CodestreamError.InvalidCodestream;
         }
         const packet_payload_bytes = if (missing_plt) blk: {
             const payload_start = try std.math.add(usize, sod, 2);
@@ -5994,8 +6032,11 @@ fn readStrictMultiTileTilePartSpans(
             .packet_count = packet_count,
             .missing_plt = missing_plt,
         });
+        tile_next_packet[tile_index] = try std.math.add(usize, first_packet, packet_count);
         next_parts[tile_index] = std.math.add(u8, next_parts[tile_index], 1) catch return CodestreamError.InvalidCodestream;
-        if (next_parts[tile_index] == expected_parts[tile_index]) completed_tiles[tile_index] = true;
+        if (expected_parts[tile_index] != 0 and next_parts[tile_index] == expected_parts[tile_index]) {
+            completed_tiles[tile_index] = true;
+        }
         tile_part_index += 1;
         scan = tile_part_end;
     }

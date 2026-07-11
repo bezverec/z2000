@@ -73,10 +73,16 @@ const CodSegmentInfo = struct {
     eph: bool,
 };
 
+// Multi-part tiles multiply the tile-part count (e.g. Kakadu pads every tile
+// to a fixed TNsot), so the TLM capacity is tile-part-count sized rather than
+// tile-count sized. 4096 covers 256 tiles x 16 parts with headroom while
+// keeping the parser state a fixed-size stack value.
+const max_tlm_entries = 4096;
+
 const TlmState = struct {
     next_segment_index: u8 = 0,
-    lengths: [256]u32 = [_]u32{0} ** 256,
-    tile_indices: [256]u16 = [_]u16{0} ** 256,
+    lengths: [max_tlm_entries]u32 = [_]u32{0} ** max_tlm_entries,
+    tile_indices: [max_tlm_entries]u16 = [_]u16{0} ** max_tlm_entries,
     count: u16 = 0,
     saw: bool = false,
 };
@@ -592,14 +598,21 @@ fn validateMultiTileTilePartSequence(
         const sot_tile_part_index = payload[cursor + 10];
         const tile_part_total = payload[cursor + 11];
         if (sot_tile_index >= tile_count) return Jp2Error.InvalidCodestream;
-        if (tile_part_total == 0) return Jp2Error.InvalidCodestream;
-        if (tile_part_total != 1 and tile_part_total != cod.levels + 1) return Jp2Error.UnsupportedProfile;
+        // Any TNsot is structurally acceptable here: 0 means "count not
+        // signalled in this part" (ISO A.4.2), nonzero values must agree
+        // across the tile and exceed the current part index. Each part's
+        // header is validated below, and the strict decoder enforces the
+        // per-part PLT packet accounting (non-empty PLT-less multi-part
+        // tiles still fail closed there).
         const state_index = @as(usize, sot_tile_index);
         if (completed_tiles[state_index]) return Jp2Error.InvalidCodestream;
-        if (expected_parts[state_index] == 0) {
-            expected_parts[state_index] = tile_part_total;
-        } else if (expected_parts[state_index] != tile_part_total) {
-            return Jp2Error.InvalidCodestream;
+        if (tile_part_total != 0) {
+            if (tile_part_total <= sot_tile_part_index) return Jp2Error.InvalidCodestream;
+            if (expected_parts[state_index] == 0) {
+                expected_parts[state_index] = tile_part_total;
+            } else if (expected_parts[state_index] != tile_part_total) {
+                return Jp2Error.InvalidCodestream;
+            }
         }
         if (sot_tile_part_index != next_parts[state_index]) return Jp2Error.InvalidCodestream;
         if (tile_part_length == 0) return Jp2Error.UnsupportedProfile;
@@ -613,11 +626,20 @@ fn validateMultiTileTilePartSequence(
         try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, &packet_sequences[state_index]);
         cursor = tile_part_end;
         next_parts[state_index] = std.math.add(u8, next_parts[state_index], 1) catch return Jp2Error.InvalidCodestream;
-        if (next_parts[state_index] == expected_parts[state_index]) completed_tiles[state_index] = true;
+        if (expected_parts[state_index] != 0 and next_parts[state_index] == expected_parts[state_index]) {
+            completed_tiles[state_index] = true;
+        }
         sequence_index += 1;
     }
     if (cursor != payload.len - 2) return Jp2Error.InvalidCodestream;
-    for (completed_tiles[0..tile_count]) |completed| if (!completed) return Jp2Error.InvalidCodestream;
+    // Tiles whose count was never signalled (TNsot 0 everywhere) are
+    // structurally complete with at least one part; the strict decoder's
+    // packet accounting decides whether the data is actually whole.
+    for (completed_tiles[0..tile_count], next_parts[0..tile_count], expected_parts[0..tile_count]) |completed, next, expected| {
+        if (completed) continue;
+        if (expected == 0 and next > 0) continue;
+        return Jp2Error.InvalidCodestream;
+    }
     if (tlm_state) |state| {
         if (state.count != sequence_index) return Jp2Error.InvalidCodestream;
     }
