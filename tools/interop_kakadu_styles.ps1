@@ -216,6 +216,9 @@ $forwardMulti = @(
     @{ Name = "multitile-causal-segmark"; Args = @("--vertical-causal", "--segmentation-symbols") },
     @{ Name = "multitile-reset-termall"; Args = @("--reset-context", "--terminate-all") },
     @{ Name = "multitile-erterm"; Args = @("--terminate-all", "--predictable-termination") },
+    @{ Name = "multitile-reset-standalone"; Args = @("--reset-context") },
+    @{ Name = "multitile-erterm-standalone"; Args = @("--predictable-termination") },
+    @{ Name = "multitile-erterm-reset-standalone"; Args = @("--predictable-termination", "--reset-context") },
     @{ Name = "multitile-bypass-termall"; Args = @("--bypass", "--terminate-all") }
 )
 foreach ($case in $forwardMulti) {

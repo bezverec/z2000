@@ -9036,12 +9036,12 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     if (options.rate_count != 0) return CodestreamError.UnsupportedPayload;
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
     if (options.bypass and !options.terminate_all) return CodestreamError.UnsupportedPayload;
-    // Repeated here from validateCodingPath as defense-in-depth: RESET and
-    // ERTERM are only implemented in the TERMALL segment model, and the tile
-    // pipeline has only been verified for those combinations. A future
-    // single-tile relaxation must not silently open the multi-tile path.
-    if (options.reset_context and !options.terminate_all) return CodestreamError.UnsupportedPayload;
-    if (options.predictable_termination and !options.terminate_all) return CodestreamError.UnsupportedPayload;
+    // Standalone RESET and standalone ERTERM ride the same continuous ISO-MQ
+    // block encoder/decoder pair as the single-tile path
+    // (encodeComponentBlockIsoMq routes non-TERMALL styles through the direct
+    // scratch encoder), so they are open here with their own multi-tile
+    // roundtrip and Kakadu interop coverage. The global validateCodingPath
+    // gates (legacy backend, BYPASS combinations) run before this validator.
     if (options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
 }
 

@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile Standalone RESET/ERTERM
+
+- Opened `validateMultiTileCodingPath` for standalone RESET (COD `0x02`),
+  standalone ERTERM (`0x10`), and their combination (`0x12`): the tile
+  pipeline already routes non-TERMALL styles through the same direct ISO-MQ
+  block encoder as the single-tile path, so the guards were pure
+  defense-in-depth duplicates. Added a 2x2 LRCP three-layer multi-tile
+  roundtrip matrix (COD style byte, byte determinism at 1 and 3 encode
+  threads, 1- and 3-thread strict decode, JP2 acceptance) and extended
+  `tools/interop_kakadu_styles.ps1` with the three multi-tile standalone
+  forward legs. Verified live: kdu_expand decodes genuine 512x512-tile
+  z2000 output for all three profiles pixel-exactly, and z2000 strict
+  decode roundtrips the same files. No scorecard change; this is breadth
+  inside the already-counted multi-tile resilience rows.
+
 ### Standalone Predictable Termination (ERTERM)
 
 - Opened COD code-block style `0x10` without TERMALL as a public single-tile
