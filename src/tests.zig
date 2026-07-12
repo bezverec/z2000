@@ -11,6 +11,7 @@ const jp2 = @import("jp2.zig");
 const mq = @import("mq.zig");
 const mq_iso = @import("mq_iso.zig");
 const packet_plan = @import("packet_plan.zig");
+const poc = @import("poc.zig");
 const ppm = @import("ppm.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const simd = @import("simd.zig");
@@ -102,6 +103,311 @@ test "PPM framing rejects malformed segment and group state" {
     defer too_many.deinit();
     for (0..256) |index| try too_many.append(&.{ @intCast(index), 0 });
     try std.testing.expectError(ppm.PpmError.TooManySegments, too_many.append(&.{ 0, 0 }));
+}
+
+test "POC parser and scheduler compose overlapping progression intervals" {
+    const allocator = std.testing.allocator;
+    // Genuine Kakadu main-header POC payload: layer 0 in LRCP, then all
+    // unsequenced packets through layer 1 in RPCL.
+    const payload = [_]u8{
+        0, 0, 0, 1, 3, 3, 0,
+        0, 0, 0, 2, 3, 3, 2,
+    };
+    var records: std.ArrayList(poc.Record) = .empty;
+    defer records.deinit(allocator);
+    try poc.appendSegment(allocator, &records, &payload, 3, 3, 2);
+    try std.testing.expectEqual(@as(usize, 2), records.items.len);
+    try std.testing.expectEqual(poc.Progression.lrcp, records.items[0].progression);
+    try std.testing.expectEqual(poc.Progression.rpcl, records.items[1].progression);
+    var encoded_payload: std.ArrayList(u8) = .empty;
+    defer encoded_payload.deinit(allocator);
+    try poc.appendSegmentPayload(allocator, &encoded_payload, records.items, 3, 3, 2);
+    try std.testing.expectEqualSlices(u8, &payload, encoded_payload.items);
+
+    var resolutions = [_]packet_plan.Resolution{.{
+        .width = 4,
+        .height = 2,
+        .precinct_width = 2,
+        .precinct_height = 2,
+        .precincts_x = 2,
+        .precincts_y = 1,
+        .precincts = 2,
+        .packets = 12,
+    }} ++ [_]packet_plan.Resolution{.{
+        .width = 0,
+        .height = 0,
+        .precinct_width = 1,
+        .precinct_height = 1,
+        .precincts_x = 0,
+        .precincts_y = 0,
+        .precincts = 0,
+        .packets = 0,
+    }} ** 32;
+    resolutions[1] = resolutions[0];
+    resolutions[2] = resolutions[0];
+    const plan = packet_plan.Plan{
+        .resolution_count = 3,
+        .resolutions = resolutions,
+        .packets = 36,
+    };
+    const sequence = try poc.buildSequence(allocator, plan, 3, 2, records.items);
+    defer allocator.free(sequence);
+    try std.testing.expectEqual(@as(usize, 36), sequence.len);
+    for (sequence[0..18]) |packet| try std.testing.expectEqual(@as(u16, 0), packet.layer);
+    for (sequence[18..]) |packet| try std.testing.expectEqual(@as(u16, 1), packet.layer);
+}
+
+test "POC parser and scheduler fail closed on malformed or incomplete ranges" {
+    const allocator = std.testing.allocator;
+    var records: std.ArrayList(poc.Record) = .empty;
+    defer records.deinit(allocator);
+    try std.testing.expectError(
+        poc.PocError.InvalidSegment,
+        poc.appendSegment(allocator, &records, &.{ 0, 0, 0, 1, 0, 3, 0 }, 3, 3, 2),
+    );
+    try std.testing.expectError(
+        poc.PocError.InvalidSegment,
+        poc.appendSegment(allocator, &records, &.{ 0, 0, 0, 1, 3, 3, 9 }, 3, 3, 2),
+    );
+
+    var resolutions = [_]packet_plan.Resolution{.{
+        .width = 0,
+        .height = 0,
+        .precinct_width = 1,
+        .precinct_height = 1,
+        .precincts_x = 0,
+        .precincts_y = 0,
+        .precincts = 0,
+        .packets = 0,
+    }} ** 33;
+    resolutions[0] = .{
+        .width = 1,
+        .height = 1,
+        .precinct_width = 1,
+        .precinct_height = 1,
+        .precincts_x = 1,
+        .precincts_y = 1,
+        .precincts = 1,
+        .packets = 6,
+    };
+    const plan = packet_plan.Plan{
+        .resolution_count = 1,
+        .resolutions = resolutions,
+        .packets = 6,
+    };
+    const incomplete = [_]poc.Record{.{
+        .resolution_start = 0,
+        .component_start = 0,
+        .layer_end = 1,
+        .resolution_end = 1,
+        .component_end = 3,
+        .progression = .lrcp,
+    }};
+    try std.testing.expectError(
+        poc.PocError.InvalidSchedule,
+        poc.buildSequence(allocator, plan, 3, 2, &incomplete),
+    );
+}
+
+test "strict decode consumes single- and multi-tile main-header POC schedules" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 24;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const base = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .layers = 2,
+        .progression = .lrcp,
+        .block_width = 4,
+        .block_height = 4,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precinct_count = 3,
+    });
+    defer allocator.free(base);
+    const sot = findMarker(base, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const poc_payload = [_]u8{ 0, 0, 0, 2, 3, 3, 0 };
+    const with_poc = try spliceMarkerSegmentForTest(
+        allocator,
+        base,
+        sot,
+        codestream.markerValue("poc"),
+        &poc_payload,
+    );
+    defer allocator.free(with_poc);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, with_poc);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    const audit = try codestream.auditStrictPacketHeaders(allocator, with_poc);
+    try std.testing.expect(audit.packets > 0);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, with_poc);
+    defer allocator.free(wrapped);
+    _ = try jp2.parseInfo(wrapped);
+
+    const malformed = try allocator.dupe(u8, with_poc);
+    defer allocator.free(malformed);
+    const poc_marker = findMarker(malformed, codestream.markerValue("poc")) orelse return error.MissingMarker;
+    malformed[poc_marker + 6] = 3;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, malformed),
+    );
+
+    const multi_tile_base = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .layers = 2,
+        .progression = .lrcp,
+        .tile_width = 16,
+        .tile_height = 12,
+        .tile_part_divisions = null,
+        .block_width = 4,
+        .block_height = 4,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precinct_count = 3,
+    });
+    defer allocator.free(multi_tile_base);
+    const multi_sot = findMarker(multi_tile_base, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const multi_tile_poc = try spliceMarkerSegmentForTest(
+        allocator,
+        multi_tile_base,
+        multi_sot,
+        codestream.markerValue("poc"),
+        &poc_payload,
+    );
+    defer allocator.free(multi_tile_poc);
+    var multi_decoded = try codestream.decodeLosslessTemporary(allocator, multi_tile_poc);
+    defer multi_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, multi_decoded.samples);
+    const multi_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, multi_tile_poc);
+    defer allocator.free(multi_wrapped);
+    _ = try jp2.parseInfo(multi_wrapped);
+
+    const divided_base = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .layers = 2,
+        .progression = .rpcl,
+        .tile_width = 16,
+        .tile_height = 12,
+        .tile_part_divisions = 'R',
+        .block_width = 4,
+        .block_height = 4,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precinct_count = 3,
+    });
+    defer allocator.free(divided_base);
+    const divided_sot = findMarker(divided_base, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const rpcl_poc_payload = [_]u8{ 0, 0, 0, 2, 3, 3, 2 };
+    const divided_poc = try spliceMarkerSegmentForTest(
+        allocator,
+        divided_base,
+        divided_sot,
+        codestream.markerValue("poc"),
+        &rpcl_poc_payload,
+    );
+    defer allocator.free(divided_poc);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, divided_poc),
+    );
+}
+
+test "POC writer emits scheduled single- and multi-tile packet streams" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 24;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const records = [_]codestream.PocRecord{
+        .{
+            .resolution_start = 0,
+            .component_start = 0,
+            .layer_end = 1,
+            .resolution_end = 3,
+            .component_end = 3,
+            .progression = .lrcp,
+        },
+        .{
+            .resolution_start = 0,
+            .component_start = 0,
+            .layer_end = 2,
+            .resolution_end = 3,
+            .component_end = 3,
+            .progression = .rpcl,
+        },
+    };
+    const options = codestream.LosslessOptions{
+        .levels = 2,
+        .layers = 2,
+        .progression = .rpcl,
+        .poc_records = &records,
+        .tile_part_divisions = null,
+        .block_width = 4,
+        .block_height = 4,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precinct_count = 3,
+    };
+    const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(encoded);
+    const marker = findMarker(encoded, codestream.markerValue("poc")) orelse return error.MissingMarker;
+    const lpoc = (@as(u16, encoded[marker + 2]) << 8) | encoded[marker + 3];
+    try std.testing.expectEqual(@as(u16, 16), lpoc);
+    const expected_payload = [_]u8{
+        0, 0, 0, 1, 3, 3, 0,
+        0, 0, 0, 2, 3, 3, 2,
+    };
+    try std.testing.expectEqualSlices(u8, &expected_payload, encoded[marker + 4 .. marker + 18]);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, encoded);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, encoded);
+    defer allocator.free(wrapped);
+    _ = try jp2.parseInfo(wrapped);
+
+    var bad_options = options;
+    bad_options.poc_records = records[0..1];
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.encodeLosslessWithOptions(allocator, rgb, bad_options),
+    );
+    bad_options = options;
+    bad_options.tile_part_divisions = 'R';
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, bad_options),
+    );
+    bad_options = options;
+    bad_options.tile_width = 16;
+    bad_options.tile_height = 12;
+    const multi_encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, bad_options);
+    defer allocator.free(multi_encoded);
+    var multi_decoded = try codestream.decodeLosslessTemporary(allocator, multi_encoded);
+    defer multi_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, multi_decoded.samples);
+    const multi_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, multi_encoded);
+    defer allocator.free(multi_wrapped);
+    _ = try jp2.parseInfo(multi_wrapped);
+
+    bad_options.tile_part_divisions = 'R';
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, bad_options),
+    );
 }
 
 test "5/3 wavelet roundtrips integer-like samples" {
@@ -3193,7 +3499,6 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
         const unsupported_main_marker_cases = [_]UnsupportedMainMarkerCase{
             .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
             .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
-            .{ .label = "POC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("poc") },
             .{ .label = "PPT main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppt") },
             .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
         };
@@ -14198,7 +14503,6 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
         .{ .label = "PLM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("plm") },
         .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
-        .{ .label = "POC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("poc") },
         .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
         .{ .label = "PPT tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("ppt") },
         .{ .label = "COC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("coc") },

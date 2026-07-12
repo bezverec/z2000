@@ -19,13 +19,13 @@ probed on 2026-07-12; findings inline. Ordered by *value per unit risk*.
 | Row | Gap | Size | Risk | Verifiable here? |
 | --- | --- | --- | --- | --- |
 | Core syntax 14→15 · Containers 8→10 | **N6: component-generic pipeline** (grayscale/1-component then N-component, palette expansion) | LARGE (multi-PR, like the multi-tile campaign) | HIGH — reworks the `color.RctPlanes` y/cb/cr representation (87 call sites) the 100/100 narrow path rides on | Yes: TIFF grayscale I/O + OpenJPEG/Grok/Kakadu grayscale interop |
-| T2 9→10 · Core syntax +1 | **POC** (progression-order-change marker + multi-chunk packet scheduling) | Medium (1–2 PRs) | Medium (new encode+decode path; narrow path untouched) | Weak: OpenJPEG `-POC` is finicky and did not emit a `POC` marker in a single-tile probe; needs a reliable POC fixture source before claiming interop |
+| T2 9→10 · Core syntax +1 | **POC tile-part breadth** (single- and multi-tile one-part writer + strict decode landed) | Medium (divided tile-part state) | Medium (progression intervals across part boundaries; narrow path untouched) | Partial: z2000/OpenJPEG/Kakadu decode z2000's single- and 2x2-tile LRCP-layer-0 then RPCL output pixel-exactly; Grok 20.3.6 misdecodes both z2000- and Kakadu-produced versions of that schedule |
 | T2 9→10 | **Close multi-part PPM interop** (global group order, PLT-less body derivation, and per-tile T2 state landed 2026-07-12) | Small investigation or upstream decoder issue | Low code risk | Partial: z2000/OpenJPEG/Kakadu decode the 16-tile/48-part output losslessly; Grok 20.3.6 passes single-tile and one-part-per-tile PPM but misdecodes multiple groups per tile; no independent foreign PPM producer fixture yet |
 | Lossy 14→15 | **PCRD PSNR gap** (encoder distortion model); odd-origin 9/7 lifting is now landed | PCRD = research (0.7–1.8 dB vs OpenJPEG at matched bytes, `tools/pcrd_psnr_ladder.ps1`) | PCRD medium/uncertain (no guaranteed linear progress) | Yes: matched-byte ladder; odd-origin 9/7 is bidirectionally reference-relative within max byte diff 1 |
 | Containers 8→10 | mixed per-component precision (`BPCC`) + alpha channels | Medium; couples to N6's per-component depth work | Medium | Yes: reference grayscale/mixed-precision files |
 
-Recommended order when resuming the push: **POC** (best contained value if a
-reliable fixture source is found) or **N6** (biggest unlock but budget it as a
+Recommended order when resuming the push: **POC tile-part breadth** (extend
+the landed multi-tile writer across divided parts) or **N6** (biggest unlock but budget it as a
 multi-PR campaign that keeps the single-tile RGB path byte-identical at every
 step). The PCRD PSNR gap is the one item with no guaranteed linear progress and
 should be treated as research, measured against `pcrd_psnr_ladder.ps1`.

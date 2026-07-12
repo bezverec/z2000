@@ -194,6 +194,8 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
     }
 
     var options = codestream.LosslessOptions{};
+    var poc_storage: [64]codestream.PocRecord = undefined;
+    var tile_parts_explicit = false;
     var show_timings = false;
     var index: usize = 2;
     while (index < args.len) {
@@ -217,6 +219,11 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.progression = try parseProgression(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--poc")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            if (options.poc_records.len != 0) return error.InvalidValue;
+            options.poc_records = try parsePocRecords(args[index], &poc_storage);
         } else if (std.mem.eql(u8, args[index], "--mct")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -294,6 +301,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         } else if (std.mem.eql(u8, args[index], "--tile-parts")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
+            tile_parts_explicit = true;
             if (std.mem.eql(u8, args[index], "none") or std.mem.eql(u8, args[index], "0")) {
                 options.tile_part_divisions = null;
             } else {
@@ -322,6 +330,9 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             return error.UnknownOption;
         }
         index += 1;
+    }
+    if (options.poc_records.len != 0 and !tile_parts_explicit) {
+        options.tile_part_divisions = null;
     }
 
     var command_timings = TiffToJp2Timings{};
@@ -353,7 +364,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         command_timings.write_ns;
 
     std.debug.print(
-        "wrote JP2 marker skeleton {s} -> {s} ({}x{}, {} bits/channel, levels {}, tile {}x{}, block {}x{}, progression {s}, layers {}, MCT {s}, transform {s}, QCD {s}/guard {}, tile-parts {s}, TLM {}, PPM {}, PPT {}, T1 {s}, threads {}, debug sidecar {})\n",
+        "wrote JP2 marker skeleton {s} -> {s} ({}x{}, {} bits/channel, levels {}, tile {}x{}, block {}x{}, progression {s}, POC records {}, layers {}, MCT {s}, transform {s}, QCD {s}/guard {}, tile-parts {s}, TLM {}, PPM {}, PPT {}, T1 {s}, threads {}, debug sidecar {})\n",
         .{
             args[0],
             args[1],
@@ -366,6 +377,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             options.block_width,
             options.block_height,
             options.progression.label(),
+            options.poc_records.len,
             options.layers,
             options.mct.label(),
             options.transform.label(),
@@ -915,6 +927,37 @@ fn parseProgression(value: []const u8) !codestream.ProgressionOrder {
     return error.InvalidValue;
 }
 
+fn parsePocRecords(value: []const u8, storage: []codestream.PocRecord) ![]const codestream.PocRecord {
+    var count: usize = 0;
+    var encoded_records = std.mem.splitScalar(u8, value, ';');
+    while (encoded_records.next()) |encoded_record| {
+        if (count >= storage.len) return error.InvalidValue;
+        var fields: [6][]const u8 = undefined;
+        var field_count: usize = 0;
+        var encoded_fields = std.mem.splitScalar(u8, encoded_record, ',');
+        while (encoded_fields.next()) |encoded_field| {
+            if (field_count >= fields.len) return error.InvalidValue;
+            const field = std.mem.trim(u8, encoded_field, " \t\r\n");
+            if (field.len == 0) return error.InvalidValue;
+            fields[field_count] = field;
+            field_count += 1;
+        }
+        if (field_count != fields.len) return error.InvalidValue;
+        const progression = try parseProgression(fields[5]);
+        storage[count] = .{
+            .resolution_start = try std.fmt.parseInt(u8, fields[0], 10),
+            .component_start = try std.fmt.parseInt(u16, fields[1], 10),
+            .layer_end = try std.fmt.parseInt(u16, fields[2], 10),
+            .resolution_end = try std.fmt.parseInt(u8, fields[3], 10),
+            .component_end = try std.fmt.parseInt(u16, fields[4], 10),
+            .progression = @enumFromInt(@intFromEnum(progression)),
+        };
+        count += 1;
+    }
+    if (count == 0) return error.InvalidValue;
+    return storage[0..count];
+}
+
 fn parseMct(value: []const u8) !codestream.MultipleComponentTransform {
     if (std.ascii.eqlIgnoreCase(value, "yes") or
         std.ascii.eqlIgnoreCase(value, "on") or
@@ -1071,7 +1114,7 @@ fn usage() void {
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
         \\  z2000 dng-info <input.dng>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL] [--poc RECORDS] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq] [--timings]
@@ -1080,6 +1123,7 @@ fn usage() void {
         \\  PGM input must be binary P5 with max value 255.
         \\  .z2000 is an educational codestream, not ISO JPEG2000 yet.
         \\  tiff-to-jp2 writes strict RPCL packet payloads; --debug-temp-sidecar adds the legacy BP8 COM payload for diagnostics.
+        \\  --poc uses quoted ISO records: RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;... and currently requires one tile-part per tile.
         \\
     , .{});
 }

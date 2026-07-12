@@ -73,6 +73,7 @@ const CodestreamShape = struct {
 
 const CodSegmentInfo = struct {
     levels: u8,
+    layers: u16,
     transform: u8,
     sop: bool,
     eph: bool,
@@ -589,10 +590,10 @@ fn validateCodestreamPayload(payload: []const u8, expected: CodestreamShape) !vo
             return Jp2Error.UnsupportedProfile;
         }
     }
-    try validateMainHeaderMarkers(payload, segment_end, tile_count);
+    try validateMainHeaderMarkers(payload, segment_end, tile_count, components);
 }
 
-fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_count: u32) !void {
+fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_count: u32, components: u16) !void {
     var cursor = cursor_after_siz;
     var cod_info: ?CodSegmentInfo = null;
     var cod_payload: []const u8 = &.{};
@@ -638,7 +639,10 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
             marker_ppm => {
                 if (!saw_qcd) return Jp2Error.InvalidCodestream;
             },
-            marker_cap, marker_rgn, marker_poc, marker_ppt, marker_crg => {
+            marker_poc => {
+                if (!saw_qcd) return Jp2Error.InvalidCodestream;
+            },
+            marker_cap, marker_rgn, marker_ppt, marker_crg => {
                 return Jp2Error.UnsupportedProfile;
             },
             marker_soc, marker_siz, marker_sod, marker_eoc => return Jp2Error.InvalidCodestream,
@@ -662,7 +666,7 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
             },
             marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, &override_state),
             marker_qcc => try validateUniformQccSegment(payload, length_offset, marker_length, cod_info.?, &override_state),
-            else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state, &ppm_state),
+            else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state, &ppm_state, cod_info, components),
         }
         cursor = next;
     }
@@ -875,6 +879,7 @@ fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
         marker_qcd => 4,
         marker_coc => 5, // Lcoc(2) Ccoc(1) Scoc(1) + >=1 SPcoc byte
         marker_qcc => 4, // Lqcc(2) Cqcc(1) Sqcc(1)
+        marker_poc => 9,
         marker_tlm => 9,
         marker_plt => 4,
         marker_ppm => 4,
@@ -892,6 +897,8 @@ fn validateMainHeaderMarkerSegment(
     marker_length: u16,
     tlm_state: *TlmState,
     ppm_state: *PpmState,
+    cod: ?CodSegmentInfo,
+    components: u16,
 ) !void {
     switch (marker) {
         marker_tlm => try validateTlmSegment(payload, length_offset, marker_length, tlm_state),
@@ -904,7 +911,49 @@ fn validateMainHeaderMarkerSegment(
             ppm_state.expected_segment_index += 1;
             ppm_state.saw = true;
         },
+        marker_poc => try validatePocSegment(payload, length_offset, marker_length, cod orelse return Jp2Error.InvalidCodestream, components),
         else => {},
+    }
+}
+
+fn validatePocSegment(
+    payload: []const u8,
+    length_offset: usize,
+    marker_length: u16,
+    cod: CodSegmentInfo,
+    components: u16,
+) !void {
+    if (components == 0) return Jp2Error.InvalidCodestream;
+    const component_bytes: usize = if (components <= 256) 1 else 2;
+    const record_bytes = 5 + 2 * component_bytes;
+    const data_start = length_offset + 2;
+    const data_end = length_offset + @as(usize, marker_length);
+    if (data_end > payload.len or data_end - data_start == 0 or
+        (data_end - data_start) % record_bytes != 0)
+    {
+        return Jp2Error.InvalidCodestream;
+    }
+    var cursor = data_start;
+    while (cursor < data_end) : (cursor += record_bytes) {
+        const resolution_start = payload[cursor];
+        const component_start = if (component_bytes == 1)
+            @as(u16, payload[cursor + 1])
+        else
+            try readU16Be(payload, cursor + 1);
+        const layer_offset = cursor + 1 + component_bytes;
+        const layer_end = try readU16Be(payload, layer_offset);
+        const resolution_end = payload[layer_offset + 2];
+        const component_end = if (component_bytes == 1)
+            @as(u16, payload[layer_offset + 3])
+        else
+            try readU16Be(payload, layer_offset + 3);
+        const progression = payload[layer_offset + 3 + component_bytes];
+        if (resolution_start >= resolution_end or resolution_end > cod.levels + 1 or
+            component_start >= component_end or component_end > components or
+            layer_end == 0 or layer_end > cod.layers or progression > 4)
+        {
+            return Jp2Error.InvalidCodestream;
+        }
     }
 }
 
@@ -935,6 +984,7 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     try validateCodPrecinctBytes(payload, length_offset + 12, precinct_bytes);
     return .{
         .levels = levels,
+        .layers = layers,
         .transform = transform,
         .sop = (scod & 0x02) != 0,
         .eph = (scod & 0x04) != 0,

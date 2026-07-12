@@ -41,6 +41,11 @@ Current RGB TIFF to JP2 encode:
    implemented progression orders.
 9. `src/t2.zig` owns packet-header primitives, tag-trees, layer deltas,
    packet read/write state, and RPCL packet assembly helpers.
+   `src/poc.zig` owns checked POC records and composes overlapping progression
+   intervals into one complete, duplicate-free packet sequence. The bounded
+   single- and multi-tile writer serializes that schedule and permutes each
+   tile's real packet stream to match it; strict decode consumes the records
+   in tile-local T2 state and reorders each decoded catalog back to RPCL.
    `src/ppm.zig` owns the main-header packed-packet framing layer:
    ordered `Zppm` segment collection, cross-segment `Nppm/Ippm` parsing, and
    bounded marker-payload construction. RPCL codestream paths map one globally

@@ -6,6 +6,7 @@ const ebcot = @import("ebcot.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const packet_plan = @import("packet_plan.zig");
+const poc = @import("poc.zig");
 const ppm = @import("ppm.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const subband = @import("subband.zig");
@@ -176,6 +177,9 @@ pub const ProgressionOrder = enum(u8) {
     }
 };
 
+pub const PocProgression = poc.Progression;
+pub const PocRecord = poc.Record;
+
 pub const PrecinctSize = struct {
     width: u16,
     height: u16,
@@ -236,6 +240,7 @@ pub const LosslessOptions = struct {
     rates: [max_quality_layers]f64 = [_]f64{0} ** max_quality_layers,
     rate_count: u8 = 0,
     progression: ProgressionOrder = .rpcl,
+    poc_records: []const PocRecord = &.{},
     mct: MultipleComponentTransform = .rct,
     transform: WaveletTransform = .reversible_5_3,
     quantization: QuantizationStyle = .none,
@@ -1000,10 +1005,12 @@ const StrictMainHeaderIndex = struct {
     packet_markers: MainHeaderPacketMarkers,
     tlm_entries: ?[]TlmEntry = null,
     ppm_headers: ?ppm.PackedHeaders = null,
+    poc_records: ?[]poc.Record = null,
 
     fn deinit(self: *StrictMainHeaderIndex) void {
         if (self.tlm_entries) |entries| self.allocator.free(entries);
         if (self.ppm_headers) |*headers| headers.deinit();
+        if (self.poc_records) |records| self.allocator.free(records);
         self.* = undefined;
     }
 };
@@ -1431,6 +1438,12 @@ fn encodeLosslessWithOptionsMeasured(
         tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
     };
     if (options.ppm and options.ppt) return CodestreamError.UnsupportedPayload;
+    if (options.poc_records.len != 0 and
+        (options.tile_part_divisions != null or options.ppm or options.ppt or
+            options.emit_temporary_payload_sidecar))
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
     if (options.ppm or options.ppt) {
         if (options.progression != .rpcl or options.sop or options.eph or options.emit_temporary_payload_sidecar) {
             return CodestreamError.UnsupportedPayload;
@@ -1500,7 +1513,15 @@ fn encodeLosslessWithOptionsMeasured(
     const payload_start = monotonicNs();
     try appendTemporaryPayload(allocator, &tile_payload, planes, levels, encode_options, &rpcl_stream);
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
-    if (encode_options.progression != .rpcl) {
+    const packets = try makePacketPlan(rgb.width, rgb.height, levels, encode_options);
+    if (encode_options.poc_records.len != 0) {
+        const sequence = poc.buildSequence(allocator, packets, 3, encode_options.layers, encode_options.poc_records) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return CodestreamError.InvalidCodestream,
+        };
+        defer allocator.free(sequence);
+        try reorderPacketStreamFromRpclSequence(allocator, &rpcl_stream, packets, encode_options.layers, sequence);
+    } else if (encode_options.progression != .rpcl) {
         try reorderPacketStreamFromRpcl(allocator, &rpcl_stream, rgb.width, rgb.height, levels, encode_options);
     }
 
@@ -1512,10 +1533,12 @@ fn encodeLosslessWithOptionsMeasured(
     try appendSiz(allocator, &out, rgb, encode_options);
     try appendCod(allocator, &out, levels, encode_options);
     try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+    if (encode_options.poc_records.len != 0) {
+        try appendPoc(allocator, &out, levels, encode_options);
+    }
     if (encode_options.emit_temporary_payload_sidecar) {
         try appendTemporaryPayloadComments(allocator, &out, tile_payload.items);
     }
-    const packets = try makePacketPlan(rgb.width, rgb.height, levels, encode_options);
     if (rpcl_stream.packet_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
     if (rpcl_stream.packet_header_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
     const tile_parts = tilePartCountForOptions(levels, encode_options);
@@ -2040,6 +2063,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var next_tlm_index: usize = 0;
     var ppm_collector = ppm.SegmentCollector.init(allocator);
     defer ppm_collector.deinit();
+    var poc_records: std.ArrayList(poc.Record) = .empty;
+    defer poc_records.deinit(allocator);
 
     var cursor: usize = 2;
     while (cursor < bytes.len) {
@@ -2234,6 +2259,12 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
+        } else if (marker == @intFromEnum(Marker.poc)) {
+            if (!saw_qcd) return CodestreamError.InvalidCodestream;
+            poc.appendSegment(allocator, &poc_records, segment, 3, levels + 1, layers) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return CodestreamError.InvalidCodestream,
+            };
         } else if (marker == @intFromEnum(Marker.com)) {
             // COM is ignored by the restricted decoder profile.
         } else if (isUnsupportedMainHeaderMarker(marker)) {
@@ -2334,6 +2365,19 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             total_packets = try std.math.add(u64, total_packets, span.packet_count);
             has_multiple_tile_parts = has_multiple_tile_parts or span.tile_part_count > 1;
         }
+        if (poc_records.items.len != 0) {
+            if (has_multiple_tile_parts or ppm_headers != null) return CodestreamError.UnsupportedPayload;
+            var tile_index: u32 = 0;
+            while (tile_index < grid.tileCount()) : (tile_index += 1) {
+                const tile = grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
+                const tile_plan = try makePacketPlanForTile(tile, levels, options);
+                const sequence = poc.buildSequence(allocator, tile_plan, 3, layers, poc_records.items) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => return CodestreamError.InvalidCodestream,
+                };
+                allocator.free(sequence);
+            }
+        }
         const plan = try makePacketPlan(width, height, levels, options);
         return .{
             .version = 8,
@@ -2414,7 +2458,6 @@ fn isUnsupportedMainHeaderMarker(marker: u16) bool {
         @intFromEnum(Marker.cap),
         @intFromEnum(Marker.plm),
         @intFromEnum(Marker.rgn),
-        @intFromEnum(Marker.poc),
         @intFromEnum(Marker.crg),
         => true,
         else => false,
@@ -4459,6 +4502,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
     tile_plan: packet_plan.Plan,
     layers: u16,
     progression: ProgressionOrder,
+    poc_records: ?[]const poc.Record,
     marker_policy: MainHeaderPacketMarkers,
     expected_ppt_index: *u16,
     stateful: *StrictStatefulPrecinctGroups,
@@ -4494,7 +4538,13 @@ fn readStrictMultiTileTilePartPacketCatalog(
         if (packet_lengths.items.len != 0) return CodestreamError.InvalidCodestream;
     } else if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
 
-    const full_sequence = try buildStreamPacketSequence(allocator, progression, tile_plan, layers);
+    const full_sequence = if (poc_records) |records|
+        poc.buildSequence(allocator, tile_plan, 3, layers, records) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return CodestreamError.InvalidCodestream,
+        }
+    else
+        try buildStreamPacketSequence(allocator, progression, tile_plan, layers);
     defer allocator.free(full_sequence);
     const sequence_end = try std.math.add(usize, span.first_packet, packet_capacity);
     if (sequence_end > full_sequence.len) return CodestreamError.InvalidCodestream;
@@ -4617,7 +4667,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
 
     const owned_entries = try entries.toOwnedSlice(allocator);
     errdefer allocator.free(owned_entries);
-    if (progression != .rpcl and span.tile_part_count == 1) {
+    if ((progression != .rpcl or poc_records != null) and span.tile_part_count == 1) {
         try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, layers);
     }
     const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
@@ -4637,6 +4687,7 @@ fn readStrictMultiTilePacketCatalogForTile(
     tile_plan: packet_plan.Plan,
     layers: u16,
     progression: ProgressionOrder,
+    poc_records: ?[]const poc.Record,
     marker_policy: MainHeaderPacketMarkers,
     ppm_headers: ?ppm.PackedHeaders,
 ) !StrictPacketCatalog {
@@ -4664,6 +4715,7 @@ fn readStrictMultiTilePacketCatalogForTile(
             tile_plan,
             layers,
             progression,
+            poc_records,
             marker_policy,
             &expected_ppt_index,
             &stateful,
@@ -4690,7 +4742,8 @@ fn readStrictMultiTilePacketCatalogForTile(
     // Single-part tiles were already reordered per part; multi-part tiles
     // join their parts in stream (progression) order first, so non-RPCL
     // sequences reorder here once the whole tile is assembled.
-    if (progression != .rpcl and part_count > 1) {
+    if (poc_records != null and part_count > 1) return CodestreamError.UnsupportedPayload;
+    if ((progression != .rpcl or poc_records != null) and part_count > 1) {
         try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, layers);
     }
     const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
@@ -4830,6 +4883,7 @@ fn decodeStrictMultiTileImageMeasured(
             tile_plan,
             header.layers,
             header.progression,
+            context.main_header.poc_records,
             context.main_header.packet_markers,
             if (context.main_header.ppm_headers) |headers| headers else null,
         );
@@ -4879,6 +4933,7 @@ fn auditStrictMultiTilePacketHeaders(
             tile_plan,
             header.layers,
             header.progression,
+            context.main_header.poc_records,
             context.main_header.packet_markers,
             if (context.main_header.ppm_headers) |headers| headers else null,
         );
@@ -6048,11 +6103,17 @@ fn readStrictSodPacketCatalog(
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
 
-    const sequence = try buildStreamPacketSequence(allocator, progression, plan, layers);
-    defer allocator.free(sequence);
-    var sequence_index: usize = 0;
     var main_header = try readStrictMainHeaderIndex(allocator, bytes);
     defer main_header.deinit();
+    const sequence = if (main_header.poc_records) |records|
+        poc.buildSequence(allocator, plan, 3, layers, records) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return CodestreamError.InvalidCodestream,
+        }
+    else
+        try buildStreamPacketSequence(allocator, progression, plan, layers);
+    defer allocator.free(sequence);
+    var sequence_index: usize = 0;
     var stateful: ?StrictStatefulPrecinctGroups = null;
     defer if (stateful) |*groups| groups.deinit();
     var cursor = main_header.first_sot;
@@ -6076,7 +6137,7 @@ fn readStrictSodPacketCatalog(
 
             const owned_entries = try entries.toOwnedSlice(allocator);
             errdefer allocator.free(owned_entries);
-            if (progression != .rpcl) {
+            if (progression != .rpcl or main_header.poc_records != null) {
                 try reorderStrictEntriesToRpcl(allocator, owned_entries, plan, layers);
             }
             const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
@@ -6678,8 +6739,12 @@ fn readStrictMainHeaderIndex(allocator: std.mem.Allocator, bytes: []const u8) !S
     var saw_tlm = false;
     var next_tlm_index: usize = 0;
     var packet_markers: ?MainHeaderPacketMarkers = null;
+    var cod_levels: ?u8 = null;
+    var cod_layers: ?u16 = null;
     var ppm_collector = ppm.SegmentCollector.init(allocator);
     defer ppm_collector.deinit();
+    var poc_records: std.ArrayList(poc.Record) = .empty;
+    defer poc_records.deinit(allocator);
 
     var cursor: usize = 2;
     while (cursor < bytes.len) {
@@ -6690,6 +6755,8 @@ fn readStrictMainHeaderIndex(allocator: std.mem.Allocator, bytes: []const u8) !S
             const markers = packet_markers orelse return CodestreamError.InvalidCodestream;
             const owned_entries = if (saw_tlm) try entries.toOwnedSlice(allocator) else null;
             errdefer if (owned_entries) |owned| allocator.free(owned);
+            const owned_poc = if (poc_records.items.len != 0) try poc_records.toOwnedSlice(allocator) else null;
+            errdefer if (owned_poc) |owned| allocator.free(owned);
             const ppm_headers = if (ppm_collector.expected_index != 0)
                 ppm_collector.finish() catch |err| switch (err) {
                     error.OutOfMemory => return err,
@@ -6703,6 +6770,7 @@ fn readStrictMainHeaderIndex(allocator: std.mem.Allocator, bytes: []const u8) !S
                 .packet_markers = markers,
                 .tlm_entries = owned_entries,
                 .ppm_headers = ppm_headers,
+                .poc_records = owned_poc,
             };
         }
         if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
@@ -6715,17 +6783,26 @@ fn readStrictMainHeaderIndex(allocator: std.mem.Allocator, bytes: []const u8) !S
         }
         const segment = bytes[cursor + 2 .. cursor + segment_length];
         if (marker == @intFromEnum(Marker.cod)) {
-            if (packet_markers != null or segment.len < 1) return CodestreamError.InvalidCodestream;
+            if (packet_markers != null or segment.len < 10) return CodestreamError.InvalidCodestream;
             packet_markers = .{
                 .sop = (segment[0] & 0x02) != 0,
                 .eph = (segment[0] & 0x04) != 0,
             };
+            cod_layers = readU16Be(segment, 2);
+            cod_levels = segment[5];
         } else if (marker == @intFromEnum(Marker.tlm)) {
             try appendStrictTlmEntries(allocator, &entries, segment, next_tlm_index);
             saw_tlm = true;
             next_tlm_index += 1;
         } else if (marker == @intFromEnum(Marker.ppm)) {
             ppm_collector.append(segment) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return CodestreamError.InvalidCodestream,
+            };
+        } else if (marker == @intFromEnum(Marker.poc)) {
+            const levels = cod_levels orelse return CodestreamError.InvalidCodestream;
+            const layers = cod_layers orelse return CodestreamError.InvalidCodestream;
+            poc.appendSegment(allocator, &poc_records, segment, 3, levels + 1, layers) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
@@ -7500,6 +7577,30 @@ fn appendQcd(
             try out.append(allocator, try qcdReversibleExponentByteForBand(bit_depth, kind));
         }
     }
+}
+
+fn appendPoc(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    levels: u8,
+    options: LosslessOptions,
+) !void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    poc.appendSegmentPayload(
+        allocator,
+        &payload,
+        options.poc_records,
+        3,
+        levels + 1,
+        options.layers,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return CodestreamError.InvalidCodestream,
+    };
+    try appendMarker(allocator, out, .poc);
+    try appendU16Be(allocator, out, @intCast(payload.items.len + 2));
+    try out.appendSlice(allocator, payload.items);
 }
 
 fn appendQcdScalarValue(
@@ -9489,6 +9590,18 @@ fn reorderPacketStreamFromRpcl(
     options: LosslessOptions,
 ) !void {
     const plan = try makePacketPlan(width, height, levels, options);
+    const sequence = try buildStreamPacketSequence(allocator, options.progression, plan, options.layers);
+    defer allocator.free(sequence);
+    try reorderPacketStreamFromRpclSequence(allocator, stream, plan, options.layers, sequence);
+}
+
+fn reorderPacketStreamFromRpclSequence(
+    allocator: std.mem.Allocator,
+    stream: *RpclPacketStream,
+    plan: packet_plan.Plan,
+    layers: u16,
+    sequence: []const packet_plan.Packet,
+) !void {
     const packet_count = std.math.cast(usize, plan.packets) orelse return CodestreamError.InvalidCodestream;
     if (stream.packet_lengths.len != packet_count or
         stream.packet_header_lengths.len != packet_count)
@@ -9511,12 +9624,10 @@ fn reorderPacketStreamFromRpcl(
     const bytes = try allocator.alloc(u8, stream.packet_bytes.len);
     errdefer allocator.free(bytes);
 
-    const sequence = try buildStreamPacketSequence(allocator, options.progression, plan, options.layers);
-    defer allocator.free(sequence);
     if (sequence.len != packet_count) return CodestreamError.InvalidCodestream;
     var out_offset: usize = 0;
     for (sequence, 0..) |packet, out_index| {
-        const source_sequence = packet_plan.rpclSequenceForPacket(plan, 3, options.layers, packet) catch
+        const source_sequence = packet_plan.rpclSequenceForPacket(plan, 3, layers, packet) catch
             return CodestreamError.InvalidCodestream;
         const source = std.math.cast(usize, source_sequence) orelse return CodestreamError.InvalidCodestream;
         if (source >= packet_count) return CodestreamError.InvalidCodestream;
@@ -9534,6 +9645,60 @@ fn reorderPacketStreamFromRpcl(
         .packet_lengths = lengths,
         .packet_header_lengths = header_lengths,
         .packet_bytes = bytes,
+    };
+}
+
+fn reorderTilePacketStreamFromRpclSequence(
+    allocator: std.mem.Allocator,
+    stream: *tile_pipeline.TileRpclPacketStream,
+    plan: packet_plan.Plan,
+    layers: u16,
+    sequence: []const packet_plan.Packet,
+) !void {
+    const packet_count = std.math.cast(usize, plan.packets) orelse return CodestreamError.InvalidCodestream;
+    if (sequence.len != packet_count or stream.packet_lengths.len != packet_count or
+        stream.packet_header_lengths.len != packet_count)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    const offsets = try allocator.alloc(usize, packet_count + 1);
+    defer allocator.free(offsets);
+    offsets[0] = 0;
+    for (stream.packet_lengths, 0..) |packet_length, index| {
+        offsets[index + 1] = try std.math.add(usize, offsets[index], packet_length);
+    }
+    if (offsets[packet_count] != stream.bytes.len) return CodestreamError.InvalidCodestream;
+
+    const lengths = try allocator.alloc(u32, packet_count);
+    errdefer allocator.free(lengths);
+    const header_lengths = try allocator.alloc(u32, packet_count);
+    errdefer allocator.free(header_lengths);
+    const bytes = try allocator.alloc(u8, stream.bytes.len);
+    errdefer allocator.free(bytes);
+
+    var out_offset: usize = 0;
+    for (sequence, 0..) |packet, out_index| {
+        const source_sequence = packet_plan.rpclSequenceForPacket(plan, 3, layers, packet) catch
+            return CodestreamError.InvalidCodestream;
+        const source = std.math.cast(usize, source_sequence) orelse return CodestreamError.InvalidCodestream;
+        if (source >= packet_count) return CodestreamError.InvalidCodestream;
+        const source_length: usize = stream.packet_lengths[source];
+        const source_end = try std.math.add(usize, offsets[source], source_length);
+        if (source_end > stream.bytes.len) return CodestreamError.InvalidCodestream;
+        lengths[out_index] = stream.packet_lengths[source];
+        header_lengths[out_index] = stream.packet_header_lengths[source];
+        @memcpy(bytes[out_offset..][0..source_length], stream.bytes[offsets[source]..source_end]);
+        out_offset += source_length;
+    }
+    if (out_offset != bytes.len) return CodestreamError.InvalidCodestream;
+
+    stream.deinit();
+    stream.* = .{
+        .allocator = allocator,
+        .bytes = bytes,
+        .packet_lengths = lengths,
+        .packet_header_lengths = header_lengths,
     };
 }
 
@@ -10489,7 +10654,9 @@ fn encodeLosslessMultiTileMeasured(
         .predictable_termination = encode_options.predictable_termination,
         .segmentation_symbols = encode_options.segmentation_symbols,
     };
-    const packet_order: tile_pipeline.PacketOrder = switch (encode_options.progression) {
+    const packet_order: tile_pipeline.PacketOrder = if (encode_options.poc_records.len != 0)
+        .rpcl
+    else switch (encode_options.progression) {
         .rpcl => .rpcl,
         .lrcp => .lrcp,
         .rlcp => .rlcp,
@@ -10536,6 +10703,28 @@ fn encodeLosslessMultiTileMeasured(
     // per-tile clamping impossible, but verify what the pipeline achieved.
     for (artifacts.tiles) |tile_artifacts| {
         if (tile_artifacts.levels != levels) return CodestreamError.InvalidCodestream;
+    }
+    if (encode_options.poc_records.len != 0) {
+        for (artifacts.tiles) |*tile_artifacts| {
+            const sequence = poc.buildSequence(
+                allocator,
+                tile_artifacts.scaffold.plan,
+                3,
+                encode_options.layers,
+                encode_options.poc_records,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return CodestreamError.InvalidCodestream,
+            };
+            defer allocator.free(sequence);
+            try reorderTilePacketStreamFromRpclSequence(
+                allocator,
+                &tile_artifacts.stream,
+                tile_artifacts.scaffold.plan,
+                encode_options.layers,
+                sequence,
+            );
+        }
     }
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
 
@@ -10599,6 +10788,9 @@ fn encodeLosslessMultiTileMeasured(
     try appendSiz(allocator, &out, rgb, encode_options);
     try appendCod(allocator, &out, levels, encode_options);
     try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+    if (encode_options.poc_records.len != 0) {
+        try appendPoc(allocator, &out, levels, encode_options);
+    }
     try out.appendSlice(allocator, sequence.bytes);
     try appendMarker(allocator, &out, .eoc);
     if (timings) |t| {

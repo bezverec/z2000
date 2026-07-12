@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### POC Scheduling Foundation
+
+- Added a standalone POC parser and packet scheduler. It handles Part 1's
+  one- or two-byte component indices, validates resolution/component/layer
+  bounds and progression values, applies overlapping records in order while
+  skipping already-sequenced packets, and requires complete packet coverage.
+  Tests use the exact two-record payload emitted by Kakadu for an LRCP first
+  layer followed by RPCL and cover malformed and incomplete schedules.
+- Connected main-header POC to the single-tile strict reader. The main-header
+  index owns parsed records, the packet catalog walks their composed stream
+  order, and downstream reconstruction receives the entries reordered to its
+  internal RPCL grouping. A generated Kakadu LRCP-layer-0 then RPCL JP2 decodes
+  pixel-exactly against `kdu_expand`; a self-contained CI test covers valid and
+  malformed POC through raw decode, packet audit, and JP2 wrapping.
+- Added the bounded single-tile main-header POC writer. `LosslessOptions` and
+  CLI `--poc` accept checked records, the encoder permutes the real packet
+  stream to their complete duplicate-free schedule, and the marker payload is
+  serialized by the same standalone component as the reader. z2000,
+  OpenJPEG 2.5.4, and Kakadu decode the two-layer LRCP-to-RPCL output
+  pixel-exactly. Grok 20.3.6 misdecodes both this output and an equivalent
+  Kakadu-produced POC file; this is tracked as an external interop limitation.
+  The same main-header schedule now applies independently to every tile in the
+  one-part-per-tile multi-tile path; strict decode preserves tile-local T2
+  state and normalizes each catalog to RPCL. A 2x2-tile CLI fixture is
+  pixel-exact through z2000, OpenJPEG, and Kakadu. POC across divided
+  tile-parts remains fail-closed. Score: 95/100.
+
 ### PPM Framing Foundation
 
 - Added an owned PPM framing component. It joins ordered `Zppm`
