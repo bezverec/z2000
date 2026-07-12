@@ -415,6 +415,57 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     defer allocator.free(layer_part_wrapped);
     _ = try jp2.parseInfo(layer_part_wrapped);
 
+    const component_records = [_]codestream.PocRecord{
+        .{
+            .resolution_start = 0,
+            .component_start = 0,
+            .layer_end = 2,
+            .resolution_end = 3,
+            .component_end = 1,
+            .progression = .cprl,
+        },
+        .{
+            .resolution_start = 0,
+            .component_start = 1,
+            .layer_end = 2,
+            .resolution_end = 3,
+            .component_end = 2,
+            .progression = .cprl,
+        },
+        .{
+            .resolution_start = 0,
+            .component_start = 2,
+            .layer_end = 2,
+            .resolution_end = 3,
+            .component_end = 3,
+            .progression = .cprl,
+        },
+    };
+    var component_part_options = bad_options;
+    component_part_options.progression = .cprl;
+    component_part_options.tile_part_divisions = 'C';
+    component_part_options.poc_records = &component_records;
+    const component_part_encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, component_part_options);
+    defer allocator.free(component_part_encoded);
+    var component_part_decoded = try codestream.decodeLosslessTemporary(allocator, component_part_encoded);
+    defer component_part_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, component_part_decoded.samples);
+    const component_part_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, component_part_encoded);
+    defer allocator.free(component_part_wrapped);
+    _ = try jp2.parseInfo(component_part_wrapped);
+
+    component_part_options.poc_records = &records;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, component_part_options),
+    );
+    component_part_options.poc_records = &component_records;
+    component_part_options.tile_part_divisions = 'P';
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, component_part_options),
+    );
+
     layer_part_options.tile_part_divisions = 'R';
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,

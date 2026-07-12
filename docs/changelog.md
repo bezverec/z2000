@@ -35,7 +35,12 @@ entries are grouped by development milestone rather than semantic version.
   packet sequence against each part boundary and preserve tile-local T2 state
   across parts; incompatible/interleaved schedules fail closed. A dense 2x2
   tile fixture with 8x8 precincts and 4x4 blocks is pixel-exact through z2000,
-  OpenJPEG, and Kakadu. `R`/`C`/`P` POC divisions remain gated. Score: 95/100.
+  OpenJPEG, and Kakadu.
+- Added component-contiguous POC across `C` tile-parts. Three checked records
+  delimit RGB component ranges, encode/decode validate the composed sequence
+  against the three PLT/TLM part spans, and tile-local T2 state persists across
+  every boundary. The dense 2x2-tile fixture is pixel-exact through z2000,
+  OpenJPEG, Grok, and Kakadu. `R`/`P` POC divisions remain gated. Score: 95/100.
 
 ### PPM Framing Foundation
 

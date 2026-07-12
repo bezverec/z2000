@@ -1444,7 +1444,9 @@ fn encodeLosslessWithOptionsMeasured(
         }
         if (grid.isSingleTile()) {
             if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
-        } else if (options.tile_part_divisions != null and options.tile_part_divisions != 'L') {
+        } else if (options.tile_part_divisions != null and
+            options.tile_part_divisions != 'L' and options.tile_part_divisions != 'C')
+        {
             return CodestreamError.UnsupportedPayload;
         }
     }
@@ -2371,8 +2373,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         }
         if (poc_records.items.len != 0) {
             if (ppm_headers != null) return CodestreamError.UnsupportedPayload;
-            if (has_multiple_tile_parts and parsed_progression != .lrcp) {
-                return CodestreamError.UnsupportedPayload;
+            if (has_multiple_tile_parts) {
+                switch (parsed_progression) {
+                    .lrcp, .cprl => {},
+                    else => return CodestreamError.UnsupportedPayload,
+                }
             }
             var tile_index: u32 = 0;
             while (tile_index < grid.tileCount()) : (tile_index += 1) {
@@ -2383,8 +2388,17 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                     else => return CodestreamError.InvalidCodestream,
                 };
                 if (has_multiple_tile_parts) {
-                    try validatePocLayerTilePartSequence(sequence, layers);
-                    try validatePocLayerTilePartSpans(spans.items, @intCast(tile_index), sequence.len, layers);
+                    switch (parsed_progression) {
+                        .lrcp => {
+                            try validatePocLayerTilePartSequence(sequence, layers);
+                            try validatePocLayerTilePartSpans(spans.items, @intCast(tile_index), sequence.len, layers);
+                        },
+                        .cprl => {
+                            try validatePocComponentTilePartSequence(sequence);
+                            try validatePocComponentTilePartSpans(spans.items, @intCast(tile_index), sequence.len);
+                        },
+                        else => unreachable,
+                    }
                 }
                 allocator.free(sequence);
             }
@@ -10279,6 +10293,39 @@ fn validatePocLayerTilePartSpans(
     if (part_index != layer_count) return CodestreamError.InvalidCodestream;
 }
 
+fn validatePocComponentTilePartSequence(sequence: []const packet_plan.Packet) !void {
+    if (sequence.len == 0 or sequence.len % 3 != 0) return CodestreamError.UnsupportedPayload;
+    const packets_per_component = sequence.len / 3;
+    for (0..3) |component| {
+        const start = component * packets_per_component;
+        for (sequence[start..][0..packets_per_component]) |packet| {
+            if (packet.component != @as(u16, @intCast(component))) return CodestreamError.UnsupportedPayload;
+        }
+    }
+}
+
+fn validatePocComponentTilePartSpans(
+    spans: []const StrictMultiTileTilePartSpan,
+    tile_index: u16,
+    packet_count: usize,
+) !void {
+    if (packet_count == 0 or packet_count % 3 != 0) return CodestreamError.InvalidCodestream;
+    const packets_per_component = packet_count / 3;
+    var part_index: usize = 0;
+    for (spans) |span| {
+        if (span.tile_index != tile_index) continue;
+        if (part_index >= 3 or span.tile_part_count != 3 or
+            span.tile_part_index != @as(u8, @intCast(part_index)) or
+            span.first_packet != part_index * packets_per_component or
+            span.packet_count != packets_per_component)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        part_index += 1;
+    }
+    if (part_index != 3) return CodestreamError.InvalidCodestream;
+}
+
 const MultiTilePacketPart = struct {
     tile_index: u16,
     tile_part_index: u8,
@@ -10769,8 +10816,10 @@ fn encodeLosslessMultiTileMeasured(
                 else => return CodestreamError.InvalidCodestream,
             };
             defer allocator.free(sequence);
-            if (encode_options.tile_part_divisions == 'L') {
-                try validatePocLayerTilePartSequence(sequence, encode_options.layers);
+            switch (encode_options.tile_part_divisions orelse 0) {
+                'L' => try validatePocLayerTilePartSequence(sequence, encode_options.layers),
+                'C' => try validatePocComponentTilePartSequence(sequence),
+                else => {},
             }
             try reorderTilePacketStreamFromRpclSequence(
                 allocator,

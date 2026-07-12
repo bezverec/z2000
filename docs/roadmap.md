@@ -75,11 +75,11 @@ interop gate.
 ## Next Implementation Slice
 
 1. Extend the landed single-/multi-tile main-header POC writer/reader from
-   compatible `L` layer parts to `R`, `C`, and `P` divided layouts. The
-   one-part and dense `L` profiles are lossless through z2000, OpenJPEG, and
-   Kakadu; Grok 20.3.6 misdecodes the same schedule from both z2000 and Kakadu.
-   Keep each remaining division fail-closed until its schedule boundaries and
-   persistent T2 state roundtrip through independent decoders.
+   compatible `L` layer and `C` component parts to `R` and `P` layouts. The
+   dense `C` profile is lossless through z2000, OpenJPEG, Grok, and Kakadu;
+   Grok 20.3.6 still misdecodes the tested LRCP-to-RPCL `L` schedule from both
+   z2000 and Kakadu. Keep each remaining division fail-closed until its
+   boundaries and persistent T2 state roundtrip independently.
 2. Obtain or generate an independent foreign multi-tile/multi-part PPM fixture
    and isolate Grok 20.3.6's remaining mismatch; z2000/OpenJPEG/Kakadu already
    agree on the PLT-less output. Keep SOP/EPH combinations fail-closed until

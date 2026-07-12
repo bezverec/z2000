@@ -1123,7 +1123,7 @@ fn usage() void {
         \\  PGM input must be binary P5 with max value 255.
         \\  .z2000 is an educational codestream, not ISO JPEG2000 yet.
         \\  tiff-to-jp2 writes strict RPCL packet payloads; --debug-temp-sidecar adds the legacy BP8 COM payload for diagnostics.
-        \\  --poc uses quoted ISO records: RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;... and supports tile-parts none or compatible layer-contiguous L.
+        \\  --poc uses quoted ISO records: RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;... and supports tile-parts none or compatible contiguous L/C.
         \\
     , .{});
 }
