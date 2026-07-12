@@ -9,7 +9,7 @@ implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
 of 2026-07-12, the narrow RGB lossless JP2 target is estimated at **100/100**;
-the broader JPEG2000 Part 1 codec family is estimated at **90/100**.
+the broader JPEG2000 Part 1 codec family is estimated at **91/100**.
 
 ## Features
 

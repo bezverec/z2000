@@ -33,7 +33,12 @@ const BoxType = enum(u32) {
     component_mapping = fourcc("cmap"),
     channel_definition = fourcc("cdef"),
     resolution = fourcc("res "),
+    capture_resolution = fourcc("resc"),
+    display_resolution = fourcc("resd"),
     contiguous_codestream = fourcc("jp2c"),
+    xml = fourcc("xml "),
+    uuid = fourcc("uuid"),
+    uuid_info = fourcc("uinf"),
 };
 
 const signature_payload = [_]u8{ 0x0d, 0x0a, 0x87, 0x0a };
@@ -214,6 +219,20 @@ pub fn parseInfo(bytes: []const u8) !Info {
                 info.codestream_bytes = box.payload.len;
                 saw_jp2c = true;
             },
+            // Top-level metadata boxes (ISO 15444-1 I.7): `xml `, `uuid`,
+            // and `uinf` may appear anywhere after the file type box. Their
+            // content is opaque to the codec; the box framing is validated
+            // by nextBox and a uuid payload must at least carry its 16-byte
+            // identifier.
+            @intFromEnum(BoxType.xml),
+            @intFromEnum(BoxType.uuid_info),
+            => {
+                if (!saw_ftyp) return Jp2Error.InvalidBox;
+            },
+            @intFromEnum(BoxType.uuid) => {
+                if (!saw_ftyp) return Jp2Error.InvalidBox;
+                if (box.payload.len < 16) return Jp2Error.InvalidBox;
+            },
             else => return Jp2Error.InvalidBox,
         }
         box_index += 1;
@@ -257,14 +276,24 @@ const Box = struct {
 };
 
 fn extractIccProfileFromJp2Header(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
+    // Mirrors parseJp2Header's colr choice: the first *supported*
+    // specification wins (method 1 sRGB carries no profile; method 2 carries
+    // the restricted ICC bytes); unsupported colr boxes are skipped.
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, false);
         if (box.kind != @intFromEnum(BoxType.color)) continue;
         if (box.payload.len < 3) return Jp2Error.InvalidBox;
-        if (box.payload[0] != 2) return null;
-        if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
-        return try allocator.dupe(u8, box.payload[3..]);
+        switch (box.payload[0]) {
+            1 => {
+                if (box.payload.len == 7 and (try readU32Be(box.payload, 3)) == 16) return null;
+            },
+            2 => {
+                if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
+                return try allocator.dupe(u8, box.payload[3..]);
+            },
+            else => {},
+        }
     }
     return Jp2Error.MissingRequiredBox;
 }
@@ -274,6 +303,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var saw_ihdr = false;
     var saw_bpcc = false;
     var saw_colr = false;
+    var chose_colr = false;
     var requires_bpcc = false;
     var box_index: usize = 0;
     while (cursor < bytes.len) {
@@ -334,33 +364,49 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 }
             },
             @intFromEnum(BoxType.color) => {
-                if (!saw_ihdr or saw_colr) return Jp2Error.InvalidBox;
+                if (!saw_ihdr) return Jp2Error.InvalidBox;
                 if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
                 if (box.payload.len < 3) return Jp2Error.InvalidBox;
-                const method = box.payload[0];
-                const precedence = box.payload[1];
-                const approximation = box.payload[2];
-                if (precedence != 0 or approximation != 0) return Jp2Error.UnsupportedProfile;
-                switch (method) {
-                    1 => {
-                        if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
-                        const enum_cs = try readU32Be(box.payload, 3);
-                        if (enum_cs != 16) return Jp2Error.UnsupportedColorSpace;
-                        info.has_icc_profile = false;
-                        info.icc_profile_bytes = 0;
-                    },
-                    2 => {
-                        if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
-                        info.has_icc_profile = true;
-                        info.icc_profile_bytes = box.payload.len - 3;
-                    },
-                    else => return Jp2Error.UnsupportedColorSpace,
-                }
                 saw_colr = true;
+                const method = box.payload[0];
+                // PREC is advisory ordering information and APPROX has the
+                // defined values 0..4 (ISO 15444-1 I.5.3.3); both are
+                // accepted as informative. A file may carry several colr
+                // boxes; a reader uses one it supports. z2000 keeps the
+                // first supported specification and skips the rest, matching
+                // extractIccProfileFromJp2Header.
+                const approximation = box.payload[2];
+                if (approximation > 4) return Jp2Error.InvalidBox;
+                if (!chose_colr) {
+                    switch (method) {
+                        1 => {
+                            if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
+                            const enum_cs = try readU32Be(box.payload, 3);
+                            if (enum_cs == 16) {
+                                info.has_icc_profile = false;
+                                info.icc_profile_bytes = 0;
+                                chose_colr = true;
+                            }
+                            // Other enumerated colourspaces are skipped; a
+                            // later colr box may still be supported.
+                        },
+                        2 => {
+                            if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
+                            info.has_icc_profile = true;
+                            info.icc_profile_bytes = box.payload.len - 3;
+                            chose_colr = true;
+                        },
+                        else => {},
+                    }
+                }
+            },
+            @intFromEnum(BoxType.channel_definition) => {
+                if (!saw_ihdr) return Jp2Error.InvalidBox;
+                if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
+                try validateIdentityChannelDefinition(box.payload, info.components);
             },
             @intFromEnum(BoxType.palette),
             @intFromEnum(BoxType.component_mapping),
-            @intFromEnum(BoxType.channel_definition),
             => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
                 return Jp2Error.UnsupportedProfile;
@@ -368,6 +414,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
             @intFromEnum(BoxType.resolution) => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
                 if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
+                try validateResolutionBox(box.payload);
             },
             // Other optional jp2h boxes are not benign for the narrow RGB
             // profile until their component/colour semantics are implemented.
@@ -380,7 +427,71 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
         box_index += 1;
     }
     if (!saw_ihdr or !saw_colr) return Jp2Error.MissingRequiredBox;
+    // colr boxes were present but none carried a supported specification.
+    if (!chose_colr) return Jp2Error.UnsupportedColorSpace;
     if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
+}
+
+/// ISO 15444-1 I.5.3.6: the channel definition box is accepted when it
+/// describes exactly the identity colour mapping the RGB profile already
+/// implies — every codestream channel k is colour component k (Typ 0)
+/// associated with colour k+1 (R=1, G=2, B=3), in any entry order. Alpha or
+/// auxiliary channel definitions imply component semantics the codec does
+/// not implement and fail closed.
+fn validateIdentityChannelDefinition(payload: []const u8, components: u16) !void {
+    if (payload.len < 2) return Jp2Error.InvalidBox;
+    const entry_count = try readU16Be(payload, 0);
+    if (payload.len != 2 + @as(usize, entry_count) * 6) return Jp2Error.InvalidBox;
+    if (entry_count != components or components != 3) return Jp2Error.UnsupportedProfile;
+    var seen = [_]bool{false} ** 3;
+    var index: usize = 0;
+    while (index < entry_count) : (index += 1) {
+        const offset = 2 + index * 6;
+        const channel = try readU16Be(payload, offset);
+        const channel_type = try readU16Be(payload, offset + 2);
+        const association = try readU16Be(payload, offset + 4);
+        if (channel >= 3) return Jp2Error.UnsupportedProfile;
+        if (seen[channel]) return Jp2Error.InvalidBox;
+        seen[channel] = true;
+        if (channel_type != 0) return Jp2Error.UnsupportedProfile;
+        if (association != channel + 1) return Jp2Error.UnsupportedProfile;
+    }
+}
+
+/// ISO 15444-1 I.5.3.7: the resolution superbox holds at most one capture
+/// (`resc`) and one display (`resd`) resolution box, each a fixed 10-byte
+/// record of nonzero numerator/denominator pairs plus exponents. The values
+/// are informative for the codec, but the structure is validated so garbage
+/// framed as `res ` no longer passes.
+fn validateResolutionBox(payload: []const u8) !void {
+    if (payload.len == 0) return Jp2Error.InvalidBox;
+    var cursor: usize = 0;
+    var saw_capture = false;
+    var saw_display = false;
+    while (cursor < payload.len) {
+        const box = try nextBox(payload, &cursor, false);
+        switch (box.kind) {
+            @intFromEnum(BoxType.capture_resolution) => {
+                if (saw_capture) return Jp2Error.InvalidBox;
+                saw_capture = true;
+            },
+            @intFromEnum(BoxType.display_resolution) => {
+                if (saw_display) return Jp2Error.InvalidBox;
+                saw_display = true;
+            },
+            else => return Jp2Error.InvalidBox,
+        }
+        if (box.payload.len != 10) return Jp2Error.InvalidBox;
+        const vertical_numerator = try readU16Be(box.payload, 0);
+        const vertical_denominator = try readU16Be(box.payload, 2);
+        const horizontal_numerator = try readU16Be(box.payload, 4);
+        const horizontal_denominator = try readU16Be(box.payload, 6);
+        if (vertical_numerator == 0 or vertical_denominator == 0 or
+            horizontal_numerator == 0 or horizontal_denominator == 0)
+        {
+            return Jp2Error.InvalidBox;
+        }
+    }
 }
 
 fn validateFileTypeBox(payload: []const u8) !void {

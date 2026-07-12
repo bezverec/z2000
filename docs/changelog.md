@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### JP2 Container Metadata Breadth
+
+- Broadened the JP2 reader beyond the minimal box set while keeping the
+  fail-closed policy for semantics the codec does not implement:
+  - Top-level `xml `, `uuid` (16-byte identifier enforced), and `uinf`
+    metadata boxes are accepted anywhere after `ftyp` — before `jp2h`,
+    between `jp2h` and `jp2c`, and after the codestream (Photoshop-style
+    XMP / GeoJP2 placement). A jpylyzer-valid metadata-rich fixture decodes
+    through z2000.
+  - Multiple `colr` boxes follow the ISO I.5.3.3 rule: the reader keeps the
+    first supported specification (method 1 sRGB or method 2 restricted
+    ICC) and skips unsupported ones; PREC and APPROX (0..4) are treated as
+    informative, APPROX > 4 is malformed. `extractIccProfile` mirrors the
+    same choice.
+  - Identity RGB `cdef` channel definitions (Cn=k, Typ=0, Asoc=k+1 in any
+    order) are accepted; alpha, auxiliary, or reassociated channels fail
+    closed, duplicates are malformed.
+  - `res ` resolution superboxes are structurally validated (at most one
+    `resc`/`resd`, 10-byte records, nonzero numerators/denominators)
+    instead of blindly skipped.
+  - Palette (`pclr`/`cmap`) stays fail-closed until palette expansion is
+    implemented. Scorecard: containers/metadata 7->8, moving the full codec
+    estimate to 91/100.
+
 ### Complete Code-Block Style Matrix (BYPASS+RESET, BYPASS+ERTERM)
 
 - Landed the last two missing style-bit payload models, so every one of the

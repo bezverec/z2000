@@ -4140,21 +4140,26 @@ test "JP2 reader rejects malformed restricted ICC color boxes" {
     }
 
     {
-        const corrupted = try allocator.dupe(u8, wrapped);
-        defer allocator.free(corrupted);
-        const corrupted_jp2h = try findJp2BoxPayload(corrupted, "jp2h");
-        const corrupted_colr = try findJp2ChildBoxPayload(corrupted, corrupted_jp2h, "colr");
-        corrupted[corrupted_colr.start + 1] = 1;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+        // PREC is advisory and APPROX 1..4 are defined values (I.5.3.3):
+        // both parse as informative fields on a supported colr box.
+        const modified = try allocator.dupe(u8, wrapped);
+        defer allocator.free(modified);
+        const modified_jp2h = try findJp2BoxPayload(modified, "jp2h");
+        const modified_colr = try findJp2ChildBoxPayload(modified, modified_jp2h, "colr");
+        modified[modified_colr.start + 1] = 1;
+        modified[modified_colr.start + 2] = 1;
+        const info = try jp2.parseInfo(modified);
+        try std.testing.expect(info.has_icc_profile);
     }
 
     {
+        // APPROX above the defined 0..4 range is malformed.
         const corrupted = try allocator.dupe(u8, wrapped);
         defer allocator.free(corrupted);
         const corrupted_jp2h = try findJp2BoxPayload(corrupted, "jp2h");
         const corrupted_colr = try findJp2ChildBoxPayload(corrupted, corrupted_jp2h, "colr");
-        corrupted[corrupted_colr.start + 2] = 1;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(corrupted));
+        corrupted[corrupted_colr.start + 2] = 5;
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(corrupted));
     }
 }
 
@@ -4316,10 +4321,28 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
     }
 
     {
-        // Resolution metadata (Kakadu writes a res box) is skipped without
-        // changing the narrow RGB component interpretation.
+        // Resolution metadata (Kakadu writes a res box) is accepted when its
+        // resc/resd structure is valid, and skipped for component
+        // interpretation; garbage framed as `res ` no longer passes.
         const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+        const valid_res = [_]u8{
+            0x00, 0x00, 0x00, 0x12, 'r', 'e', 's', 'c',
+            0x01, 0x2c, 0x00, 0x01, 0x01, 0x2c, 0x00, 0x01,
+            0x00, 0x00,
+        };
         const with_res = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "res ",
+            &valid_res,
+        );
+        defer allocator.free(with_res);
+        const info = try jp2.parseInfo(with_res);
+        try std.testing.expectEqual(@as(usize, 2), info.width);
+
+        const with_garbage_res = try insertJp2BoxInsideJp2HeaderForTest(
             allocator,
             wrapped,
             jp2h_payload,
@@ -4327,9 +4350,90 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
             "res ",
             &.{ 0xaa, 0xbb },
         );
-        defer allocator.free(with_res);
-        const info = try jp2.parseInfo(with_res);
+        defer allocator.free(with_garbage_res);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(with_garbage_res));
+
+        // A zero denominator inside an otherwise well-formed resc fails.
+        var zero_denominator = valid_res;
+        zero_denominator[10] = 0;
+        zero_denominator[11] = 0;
+        const with_zero_denominator = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "res ",
+            &zero_denominator,
+        );
+        defer allocator.free(with_zero_denominator);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(with_zero_denominator));
+    }
+
+    {
+        // A channel definition box describing exactly the identity RGB
+        // mapping (Cn=k, Typ=0, Asoc=k+1, any entry order) is accepted;
+        // alpha or reassociated channels stay fail-closed.
+        const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+        const identity_cdef = [_]u8{
+            0x00, 0x03,
+            0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
+        };
+        const with_cdef_ok = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "cdef",
+            &identity_cdef,
+        );
+        defer allocator.free(with_cdef_ok);
+        const info = try jp2.parseInfo(with_cdef_ok);
         try std.testing.expectEqual(@as(usize, 2), info.width);
+
+        // Alpha channel definition (Typ=1) fails closed.
+        var alpha_cdef = identity_cdef;
+        alpha_cdef[5] = 1;
+        const with_alpha = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "cdef",
+            &alpha_cdef,
+        );
+        defer allocator.free(with_alpha);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(with_alpha));
+
+        // Reassociated colours (Asoc not matching Cn+1) fail closed.
+        var swapped_cdef = identity_cdef;
+        swapped_cdef[7] = 1;
+        const with_swapped = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "cdef",
+            &swapped_cdef,
+        );
+        defer allocator.free(with_swapped);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(with_swapped));
+
+        // A duplicate channel entry is malformed.
+        var duplicate_cdef = identity_cdef;
+        duplicate_cdef[3] = 0;
+        duplicate_cdef[7] = 1;
+        const with_duplicate = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.end,
+            "cdef",
+            &duplicate_cdef,
+        );
+        defer allocator.free(with_duplicate);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(with_duplicate));
     }
 
     {
@@ -4543,6 +4647,10 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
     }
 
     {
+        // Multiple colr boxes are legal (ISO 15444-1 I.5.3.3): a reader
+        // uses one specification it supports. z2000 keeps the first
+        // supported one, so a second identical colr parses and an
+        // unsupported-method colr before the supported one is skipped.
         const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
         const duplicate_colr = try insertJp2BoxInsideJp2HeaderForTest(
             allocator,
@@ -4553,7 +4661,94 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
             wrapped[colr_payload.start..colr_payload.end],
         );
         defer allocator.free(duplicate_colr);
-        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(duplicate_colr));
+        const info = try jp2.parseInfo(duplicate_colr);
+        try std.testing.expectEqual(@as(usize, 2), info.width);
+
+        const vendor_colr = [_]u8{ 3, 0, 0, 0xde, 0xad, 0xbe, 0xef };
+        const leading_unsupported = try insertJp2BoxInsideJp2HeaderForTest(
+            allocator,
+            wrapped,
+            jp2h_payload,
+            colr_payload.start - 8,
+            "colr",
+            &vendor_colr,
+        );
+        defer allocator.free(leading_unsupported);
+        const info_skipped = try jp2.parseInfo(leading_unsupported);
+        try std.testing.expectEqual(@as(usize, 2), info_skipped.width);
+
+        // A file whose only colr boxes are unsupported still fails closed.
+        const replaced = try replaceJp2ChildBoxForTest(allocator, wrapped, jp2h_payload, colr_payload, "colr", &vendor_colr);
+        defer allocator.free(replaced);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(replaced));
+    }
+}
+
+test "JP2 reader accepts top-level xml uuid and uinf metadata boxes" {
+    // ISO 15444-1 I.7: `xml `, `uuid`, and `uinf` boxes may appear anywhere
+    // after the file type box; their content is opaque to the codec. Real
+    // encoders (Photoshop-style XMP, GeoJP2) place them before jp2h, between
+    // jp2h and jp2c, and after the codestream.
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
+    defer allocator.free(wrapped);
+    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+    const jp2h_start = jp2h_payload.start - 8;
+
+    const xml_payload = "<?xml version=\"1.0\"?><info>z2000</info>";
+    // A 16-byte UUID identifier plus opaque vendor data.
+    const uuid_payload = [_]u8{
+        0xb1, 0x4b, 0xf8, 0xbd, 0x08, 0x3d, 0x4b, 0x43,
+        0xa5, 0xae, 0x8c, 0xd7, 0xd5, 0xa6, 0xce, 0x03,
+        0x01, 0x02,
+    };
+
+    // xml before jp2h.
+    {
+        const with_xml = try insertJp2BoxForTest(allocator, wrapped, jp2h_start, "xml ", xml_payload);
+        defer allocator.free(with_xml);
+        const info = try jp2.parseInfo(with_xml);
+        try std.testing.expectEqual(@as(usize, 2), info.width);
+    }
+    // uuid between jp2h and jp2c, and appended after the codestream.
+    {
+        const jp2c_payload = try findJp2BoxPayload(wrapped, "jp2c");
+        const with_uuid = try insertJp2BoxForTest(allocator, wrapped, jp2c_payload.start - 8, "uuid", &uuid_payload);
+        defer allocator.free(with_uuid);
+        const trailing = try insertJp2BoxForTest(allocator, with_uuid, with_uuid.len, "uuid", &uuid_payload);
+        defer allocator.free(trailing);
+        const info = try jp2.parseInfo(trailing);
+        try std.testing.expectEqual(@as(usize, 2), info.width);
+        // The codestream still extracts with metadata boxes around it.
+        const cs = try jp2.extractCodestream(trailing);
+        try std.testing.expectEqualSlices(u8, minimal_jp2_codestream[0..], cs);
+    }
+    // uinf after jp2c.
+    {
+        const with_uinf = try insertJp2BoxForTest(allocator, wrapped, wrapped.len, "uinf", "");
+        defer allocator.free(with_uinf);
+        const info = try jp2.parseInfo(with_uinf);
+        try std.testing.expectEqual(@as(usize, 2), info.width);
+    }
+    // A uuid box shorter than its 16-byte identifier is malformed, and
+    // metadata may not precede the file type box.
+    {
+        const short_uuid = try insertJp2BoxForTest(allocator, wrapped, jp2h_start, "uuid", "short");
+        defer allocator.free(short_uuid);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(short_uuid));
+
+        const early_xml = try insertJp2BoxForTest(allocator, wrapped, 12, "xml ", xml_payload);
+        defer allocator.free(early_xml);
+        try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(early_xml));
     }
 }
 
