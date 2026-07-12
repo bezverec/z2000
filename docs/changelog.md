@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Global Cross-Tile PCRD Rate Targets
+
+- Replaced the tile-local `--rates` allocation with a global cross-tile PCRD
+  pass: every tile stores its blocks' band-weighted per-pass distortions
+  while its RCT planes are alive, and after all tiles are encoded one slope
+  threshold is allocated over every code-block of every tile with layer
+  byte targets referenced to the whole-image compressed payload
+  (`applyGridPcrdTargets`). Each tile's packet stream is rebuilt from the
+  global truncations; a single-tile grid reduces exactly to the former
+  tile-local allocation, so single-tile output is unchanged. A new
+  heterogeneous-grid regression (one noisy tile, three shallow-gradient
+  tiles) pins the cumulative layer-1 payload landing at or under the global
+  /8 target while individual tiles deviate from the proportional shares the
+  old allocation produced. Live interop: the 2048x2048 `--tile 512,512
+  --progression LRCP --tile-parts none --rates 20,10,1` smoke decodes
+  pixel-exactly through z2000 strict decode, kdu_expand, opj_decompress,
+  and grk_decompress, and `opj -l 1` decodes the layer prefix. Scorecard:
+  full lossless encode profiles 14->15 (row complete), moving the full
+  codec estimate to 92/100.
+
 ### JP2 Container Metadata Breadth
 
 - Broadened the JP2 reader beyond the minimal box set while keeping the

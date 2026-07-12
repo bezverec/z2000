@@ -15807,6 +15807,130 @@ test "multi-tile reference-grid precinct and code-block partitions roundtrip" {
     try std.testing.expectEqualSlices(u8, bytes, threaded);
 }
 
+test "multi-tile rate targets allocate one global budget across tiles" {
+    // Four 32x32 tiles with strongly heterogeneous content: tile 0 carries
+    // high-amplitude noise, the others a shallow gradient. The global PCRD
+    // pass (applyGridPcrdTargets) spends one slope threshold over every
+    // block of every tile, so the cumulative layer-1 size must land on the
+    // whole-image byte target while individual tiles deviate from the
+    // proportional per-tile split the old tile-local allocation produced.
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    var seed: u32 = 12345;
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const i = (y * width + x) * 3;
+            if (x < 32 and y < 32) {
+                seed = seed *% 1664525 +% 1013904223;
+                samples[i + 0] = @intCast((seed >> 8) & 0xff);
+                samples[i + 1] = @intCast((seed >> 16) & 0xff);
+                samples[i + 2] = @intCast((seed >> 24) & 0xff);
+            } else {
+                samples[i + 0] = @intCast(96 + ((x >> 2) & 15));
+                samples[i + 1] = @intCast(112 + ((y >> 2) & 15));
+                samples[i + 2] = @intCast(128 + (((x + y) >> 3) & 7));
+            }
+        }
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.layers = 2;
+    options.progression = .lrcp;
+    options.rate_count = 2;
+    options.rates[0] = 8.0;
+    options.rates[1] = 1.0;
+    options.sop = false;
+    options.tlm = false;
+    options.tile_part_divisions = null;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    // Lossless final layer, deterministic across encode threads.
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    // Measure the allocation at the artifact level (block payload bytes,
+    // before packet-header framing): the layer targets reference the
+    // compressed block payload, so the catalog truncations are the exact
+    // quantity the allocator budgets.
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 32, 32);
+    const precincts = [_]packet_plan.Precinct{.{ .width = 8, .height = 8 }};
+    var grid_options = tile_pipeline.PacketScaffoldOptions{
+        .layers = 2,
+        .block_width = 4,
+        .block_height = 4,
+        .precincts = &precincts,
+        .packet_order = .lrcp,
+    };
+    grid_options.rates[0] = 8.0;
+    grid_options.rates[1] = 1.0;
+    grid_options.rate_count = 2;
+    var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMq(
+        allocator,
+        rgb,
+        grid,
+        2,
+        grid_options,
+        .{},
+    );
+    defer artifacts.deinit();
+    try std.testing.expectEqual(@as(usize, 4), artifacts.tiles.len);
+
+    var tile_layer0 = [_]u64{0} ** 4;
+    var tile_total = [_]u64{0} ** 4;
+    for (artifacts.tiles, 0..) |tile, tile_index| {
+        for (tile.catalog.blocks) |encoded| {
+            tile_layer0[tile_index] += encoded.layers[0].cumulative_bytes;
+            tile_total[tile_index] += encoded.segment.byte_length;
+        }
+    }
+
+    var total_layer0: u64 = 0;
+    var total_payload: u64 = 0;
+    for (tile_layer0) |value| total_layer0 += value;
+    for (tile_total) |value| total_payload += value;
+    try std.testing.expect(total_layer0 > 0);
+
+    // The cumulative first-layer payload lands on the global byte target
+    // (total compressed payload / 8), never exceeding it and staying within
+    // pass-snapping tolerance below it.
+    const target = @as(f64, @floatFromInt(total_payload)) / 8.0;
+    const actual = @as(f64, @floatFromInt(total_layer0));
+    errdefer std.debug.print(
+        "global layer-0 {} vs target {d:.0} (payload {}); per tile layer0 {any} total {any}\n",
+        .{ total_layer0, target, total_payload, tile_layer0, tile_total },
+    );
+    try std.testing.expect(actual <= target + 1.0);
+    try std.testing.expect(actual >= target * 0.7);
+
+    // One global slope threshold: with this heterogeneous content at least
+    // one tile must deviate clearly from its own proportional /8 share,
+    // which is exactly what the old tile-local allocation pinned.
+    var deviated = false;
+    for (tile_layer0, tile_total) |layer0, total| {
+        if (total == 0) continue;
+        const share = @as(f64, @floatFromInt(total)) / 8.0;
+        if (@abs(@as(f64, @floatFromInt(layer0)) - share) > share * 0.25) deviated = true;
+    }
+    try std.testing.expect(deviated);
+}
+
 test "multi-tile rate-targeted quality layers roundtrip deterministically" {
     const allocator = std.testing.allocator;
     const width = 64;

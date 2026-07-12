@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 91/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 92/100 full** as of
 2026-07-12. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-12)
 
-Scorecard now **100/100 narrow, 91/100 full**. The bounded multi-tile path has
+Scorecard now **100/100 narrow, 92/100 full**. The bounded multi-tile path has
 all five progression orders, quality layers including the first tile-local
 rate-target slice, and the implemented resilience matrix. CAUSAL+SEGMARK,
 RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
@@ -53,9 +53,13 @@ the JP2 TLM capacity is tile-part sized (4096). Two embedded Kakadu fixtures
 TLM) decode the 64x64 gradient exactly with fail-closed accounting negatives,
 and the live kdu matrix (16/32-part tiles, LRCP/RPCL/CPRL-3layers/ERTERM on
 2048x2048 noise) is pixel-exact. This closes the historical kdu-multitile
-interop GAP. The next structural gates are global cross-tile rate-budget
-refinement, non-empty PLT-less cross-part packet-state decode, and
-tile-level scheduling.
+interop GAP. **Global cross-tile PCRD rate targets landed 2026-07-12
+(lossless-encode row 15/15, estimate 91->92):** one slope threshold over
+every tile's blocks with whole-image byte targets, a heterogeneous-grid
+regression pinning the budget and per-tile deviation from proportional
+splits, and a pixel-exact z2000/kdu/opj/grok rate-targeted multi-tile smoke.
+The next structural gates are non-empty PLT-less cross-part packet-state
+decode and tile-level scheduling.
 
 The remaining levers are larger and structural. Ordered by *value per unit
 risk*; each names the ISO clause, the current code state, exactly what is
@@ -458,10 +462,10 @@ for more ISO coverage is:
    malformed-input coverage; the terminated multi-tile matrix also rejects a
    damaged second-tile PLT length. Remaining: broader external corpus and
    Kakadu coverage.
-3. **Multi-tile v2.** Progression, untargeted-layer, and resilience breadth is
-   now landed. Continue with multi-tile PCRD global-budget targets, broader
-   rate-targeted matrix coverage, PLT-less multi-part decode, broader
-   progression/division combinations, and then tile-level scheduling.
+3. **Multi-tile v2.** Progression, untargeted-layer, resilience, and global
+   cross-tile PCRD rate breadth is now landed. Continue with broader
+   rate-targeted matrix coverage, non-empty PLT-less multi-part decode,
+   broader progression/division combinations, and then tile-level scheduling.
 4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
    public on the narrow path. The next work is broader error-bound and foreign
    decode fixtures, not more parser-only options.

@@ -125,10 +125,15 @@ pub const EncodedComponentBlock = struct {
     segment: ebcot.CodeBlockSegment,
     layers: []t2.LayerTruncation = &.{},
     bypass: bool = false,
+    /// Band-weighted per-pass distortion reductions, stored while the tile's
+    /// RCT planes are alive so the grid-level global PCRD pass can run after
+    /// every tile has been encoded. Freed once the allocation is applied.
+    pass_distortions: []f64 = &.{},
 
     pub fn deinit(self: *EncodedComponentBlock, allocator: std.mem.Allocator) void {
         self.segment.deinit(allocator);
         if (self.layers.len > 0) allocator.free(self.layers);
+        if (self.pass_distortions.len > 0) allocator.free(self.pass_distortions);
         self.* = undefined;
     }
 
@@ -1572,69 +1577,90 @@ pub fn buildEncodedBlockCatalogIsoMq(
 
 const PcrdSpan = struct { start: usize, count: usize };
 
-fn applyTilePcrdTargets(
+/// Computes and stores each block's band-weighted per-pass distortion
+/// reductions while the tile's RCT planes are still alive; the grid-level
+/// global PCRD pass consumes them once every tile has been encoded.
+fn storeCatalogPassDistortions(
     allocator: std.mem.Allocator,
-    scaffold: PacketScaffold,
     rct_tile: RctTile,
     catalog: *EncodedBlockCatalog,
     style: ebcot.CodeBlockStyle,
+) !void {
+    var scratch = ebcot.BlockScratch.init(allocator);
+    defer scratch.deinit();
+    var distortion_scratch: [164]f64 = undefined;
+    for (catalog.blocks) |*encoded| {
+        const pass_count: usize = encoded.segment.pass_count;
+        if (pass_count == 0) continue;
+        const plane = componentPlane(rct_tile, encoded.job.component) orelse return PacketScaffoldError.InvalidComponentBlock;
+        var actual_style = style;
+        actual_style.band_kind = encoded.job.band.kind;
+        const distortion_passes = ebcot.passDistortions(
+            &scratch,
+            plane,
+            rct_tile.planes.width,
+            encoded.job.rect,
+            actual_style,
+            distortion_scratch[0..],
+        ) catch return PacketScaffoldError.InvalidLayer;
+        if (distortion_passes != pass_count) return PacketScaffoldError.InvalidLayer;
+        const weight = pcrdBandWeight(encoded.job.band);
+        const stored = try allocator.alloc(f64, pass_count);
+        for (stored, distortion_scratch[0..pass_count]) |*out, value| out.* = value * weight;
+        encoded.pass_distortions = stored;
+    }
+}
+
+/// Global cross-tile PCRD (ISO 15444-1 J.14): one slope threshold over every
+/// code-block of every tile, with layer byte targets referenced to the whole
+/// image's compressed payload. Runs after all tiles are encoded, then
+/// rebuilds each tile's packet stream from the updated truncations. A
+/// single-tile grid reduces exactly to the former tile-local allocation.
+pub fn applyGridPcrdTargets(
+    allocator: std.mem.Allocator,
+    tiles: []TileRpclEncodeArtifacts,
     options: PacketScaffoldOptions,
 ) !void {
-    const layer_count: usize = @intCast(scaffold.layers);
-    if (options.rate_count == 0 or layer_count <= 1) return;
-    if (options.rate_count > scaffold.layers or layer_count > rate_alloc.max_layers) return PacketScaffoldError.InvalidLayer;
+    if (options.rate_count == 0 or tiles.len == 0) return;
+    const layer_count: usize = @intCast(tiles[0].scaffold.layers);
+    if (layer_count <= 1) return;
+    if (options.rate_count > layer_count or layer_count > rate_alloc.max_layers) return PacketScaffoldError.InvalidLayer;
 
-    const block_count = catalog.blocks.len;
-    const spans = try allocator.alloc(PcrdSpan, block_count);
-    defer allocator.free(spans);
-
+    var block_count: usize = 0;
     var total_passes: usize = 0;
     var total_bytes: u64 = 0;
-    for (catalog.blocks, 0..) |encoded, block_index| {
-        spans[block_index] = .{ .start = total_passes, .count = encoded.segment.pass_count };
-        total_passes += encoded.segment.pass_count;
-        total_bytes = std.math.add(u64, total_bytes, encoded.segment.byte_length) catch
-            return PacketScaffoldError.InvalidLayer;
+    for (tiles) |tile| {
+        if (@as(usize, @intCast(tile.scaffold.layers)) != layer_count) return PacketScaffoldError.InvalidLayer;
+        for (tile.catalog.blocks) |encoded| {
+            block_count += 1;
+            total_passes += encoded.segment.pass_count;
+            total_bytes = std.math.add(u64, total_bytes, encoded.segment.byte_length) catch
+                return PacketScaffoldError.InvalidLayer;
+        }
     }
+    if (block_count == 0) return;
 
     const pcrd_blocks = try allocator.alloc(rate_alloc.PcrdBlock, block_count);
     defer allocator.free(pcrd_blocks);
     const pass_bytes = try allocator.alloc(u64, total_passes);
     defer allocator.free(pass_bytes);
-    const distortions = try allocator.alloc(f64, total_passes);
-    defer allocator.free(distortions);
 
-    var scratch = ebcot.BlockScratch.init(allocator);
-    defer scratch.deinit();
-    var distortion_scratch: [164]f64 = undefined;
-    for (catalog.blocks, spans, 0..) |encoded, span, block_index| {
-        for (0..span.count) |pass_index| {
-            pass_bytes[span.start + pass_index] = encoded.segment.passes[pass_index].cumulative_bytes;
-        }
-
-        if (span.count > 0) {
-            const plane = componentPlane(rct_tile, encoded.job.component) orelse return PacketScaffoldError.InvalidComponentBlock;
-            var actual_style = style;
-            actual_style.band_kind = encoded.job.band.kind;
-            const distortion_passes = ebcot.passDistortions(
-                &scratch,
-                plane,
-                rct_tile.planes.width,
-                encoded.job.rect,
-                actual_style,
-                distortion_scratch[0..],
-            ) catch return PacketScaffoldError.InvalidLayer;
-            if (distortion_passes != span.count) return PacketScaffoldError.InvalidLayer;
-            const weight = pcrdBandWeight(encoded.job.band);
-            for (0..span.count) |pass_index| {
-                distortions[span.start + pass_index] = distortion_scratch[pass_index] * weight;
+    var slot: usize = 0;
+    var pass_cursor: usize = 0;
+    for (tiles) |tile| {
+        for (tile.catalog.blocks) |encoded| {
+            const count: usize = encoded.segment.pass_count;
+            for (0..count) |pass_index| {
+                pass_bytes[pass_cursor + pass_index] = encoded.segment.passes[pass_index].cumulative_bytes;
             }
+            if (encoded.pass_distortions.len != count) return PacketScaffoldError.InvalidLayer;
+            pcrd_blocks[slot] = .{
+                .pass_bytes = pass_bytes[pass_cursor..][0..count],
+                .pass_distortion = encoded.pass_distortions,
+            };
+            pass_cursor += count;
+            slot += 1;
         }
-
-        pcrd_blocks[block_index] = .{
-            .pass_bytes = pass_bytes[span.start..][0..span.count],
-            .pass_distortion = distortions[span.start..][0..span.count],
-        };
     }
 
     var targets: [rate_alloc.max_layers]u64 = undefined;
@@ -1649,19 +1675,36 @@ fn applyTilePcrdTargets(
     rate_alloc.allocatePcrdPasses(allocator, pcrd_blocks, targets[0..layer_count], out_passes) catch
         return PacketScaffoldError.InvalidLayer;
 
-    for (catalog.blocks, 0..) |*encoded, block_index| {
-        if (encoded.layers.len != layer_count) return PacketScaffoldError.InvalidLayer;
-        var previous = t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 };
-        for (encoded.layers, 0..) |*layer, layer_index| {
-            const is_final = layer_index == layer_count - 1;
-            layer.* = try normalizedLayerTruncation(
-                encoded.segment,
-                out_passes[block_index * layer_count + layer_index],
-                previous,
-                is_final,
-            );
-            previous = layer.*;
+    slot = 0;
+    for (tiles) |*tile| {
+        for (tile.catalog.blocks) |*encoded| {
+            if (encoded.layers.len != layer_count) return PacketScaffoldError.InvalidLayer;
+            var previous = t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 };
+            for (encoded.layers, 0..) |*layer, layer_index| {
+                const is_final = layer_index == layer_count - 1;
+                layer.* = try normalizedLayerTruncation(
+                    encoded.segment,
+                    out_passes[slot * layer_count + layer_index],
+                    previous,
+                    is_final,
+                );
+                previous = layer.*;
+            }
+            if (encoded.pass_distortions.len > 0) {
+                allocator.free(encoded.pass_distortions);
+                encoded.pass_distortions = &.{};
+            }
+            slot += 1;
         }
+
+        // The packet stream was built from the proportional pre-allocation;
+        // rebuild it from the global truncations.
+        var stream = try buildTileRpclPacketStream(allocator, tile.scaffold, tile.catalog, tile.index, tile.bit_depth);
+        errdefer stream.deinit();
+        try reorderTilePacketStreamFromRpcl(allocator, &stream, tile.scaffold.plan, tile.scaffold.layers, options.packet_order);
+        try validateTilePacketStream(allocator, tile.scaffold, tile.catalog, tile.index, stream, tile.bit_depth, options.packet_order);
+        tile.stream.deinit();
+        tile.stream = stream;
     }
 }
 
@@ -1799,6 +1842,26 @@ pub fn buildTileRpclEncodeArtifactsIsoMq(
     options: PacketScaffoldOptions,
     style: ebcot.CodeBlockStyle,
 ) !TileRpclEncodeArtifacts {
+    var artifact = try buildTileRpclEncodeArtifactsIsoMqDeferredRates(allocator, source, tile, requested_levels, options, style);
+    errdefer artifact.deinit();
+    // A standalone tile is its own grid: apply the (then tile-local) rate
+    // targets immediately.
+    try applyGridPcrdTargets(allocator, @as([*]TileRpclEncodeArtifacts, @ptrCast(&artifact))[0..1], options);
+    return artifact;
+}
+
+/// Tile encode with rate-target application deferred to the grid-level
+/// global PCRD pass: layer truncations hold the proportional pre-allocation
+/// and, when rates are requested, every block carries its stored per-pass
+/// distortions for applyGridPcrdTargets.
+fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
+    allocator: std.mem.Allocator,
+    source: image.RgbImage,
+    tile: tile_grid.Tile,
+    requested_levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+) !TileRpclEncodeArtifacts {
     var rct_tile = try forwardRctTile(allocator, source, tile);
     defer rct_tile.deinit();
 
@@ -1812,7 +1875,12 @@ pub fn buildTileRpclEncodeArtifactsIsoMq(
     var catalog = try buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, style);
     var catalog_moved = false;
     errdefer if (!catalog_moved) catalog.deinit();
-    try applyTilePcrdTargets(allocator, scaffold, rct_tile, &catalog, style, options);
+    // Rate targets are applied globally across the whole tile grid after
+    // every tile is encoded (applyGridPcrdTargets); store the per-pass
+    // distortions now, while the tile's RCT planes are alive.
+    if (options.rate_count > 0 and scaffold.layers > 1) {
+        try storeCatalogPassDistortions(allocator, rct_tile, &catalog, style);
+    }
     try validateEncodedBlockCatalogCoversTile(allocator, scaffold, catalog);
 
     var index = try buildRpclPacketIndex(allocator, scaffold);
@@ -1865,7 +1933,7 @@ pub fn buildTileGridRpclEncodeArtifactsIsoMq(
     var iterator = grid.iterator();
     while (try iterator.next()) |tile| {
         if (initialized >= tiles.len) return PacketScaffoldError.InvalidPacket;
-        tiles[initialized] = try buildTileRpclEncodeArtifactsIsoMq(
+        tiles[initialized] = try buildTileRpclEncodeArtifactsIsoMqDeferredRates(
             allocator,
             source,
             tile,
@@ -1876,6 +1944,8 @@ pub fn buildTileGridRpclEncodeArtifactsIsoMq(
         initialized += 1;
     }
     if (initialized != tiles.len) return PacketScaffoldError.InvalidPacket;
+
+    try applyGridPcrdTargets(allocator, tiles, options);
 
     return .{
         .allocator = allocator,
@@ -1960,6 +2030,8 @@ pub fn buildTileGridRpclEncodeArtifactsIsoMqParallel(
     for (initialized) |is_initialized| {
         if (!is_initialized) return PacketScaffoldError.InvalidPacket;
     }
+
+    try applyGridPcrdTargets(allocator, tiles, options);
 
     return .{
         .allocator = allocator,
@@ -3399,7 +3471,7 @@ fn tileGridEncodeWorker(job: *TileGridEncodeJob) void {
             recordTileGridEncodeError(job, err);
             return;
         };
-        const artifacts = buildTileRpclEncodeArtifactsIsoMq(
+        const artifacts = buildTileRpclEncodeArtifactsIsoMqDeferredRates(
             job.allocator,
             job.source,
             tile,
