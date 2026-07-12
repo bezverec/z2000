@@ -15878,21 +15878,87 @@ test "multi-tile irreversible 9/7 roundtrips within lossy tolerance" {
         try std.testing.expectEqual(@as(usize, width), info.width);
     }
 
-    // Rate targets stay fail-closed for irreversible tiles until the 9/7
-    // PCRD weights are wired.
+    // Rate-targeted 9/7 tiles use the 9/7 PCRD weight table (squared
+    // reconstruction step x 9/7 norm) in the global cross-tile allocation.
+    // The final layer always carries the complete stream, so the full
+    // decode still reconstructs within lossy tolerance, and the per-layer
+    // PLT byte sums grow monotonically toward the total payload.
     {
         var options = multi_tile_test_options;
         options.transform = .irreversible_9_7;
         options.mct = .ict;
         options.quantization = .scalar_expounded;
-        options.layers = 2;
-        options.rates[0] = 8.0;
-        options.rates[1] = 1.0;
-        options.rate_count = 2;
-        try std.testing.expectError(
-            codestream.CodestreamError.UnsupportedPayload,
-            codestream.encodeLosslessWithOptions(allocator, rgb, options),
-        );
+        options.progression = .lrcp;
+        options.layers = 3;
+        options.rates[0] = 20.0;
+        options.rates[1] = 10.0;
+        options.rates[2] = 1.0;
+        options.rate_count = 3;
+        options.sop = false;
+        options.tlm = false;
+        options.tile_part_divisions = null;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+
+        // Deterministic across encode threads.
+        var threaded_options = options;
+        threaded_options.threads = 3;
+        const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        var max_diff: i32 = 0;
+        for (samples, decoded.samples) |expected, actual| {
+            const diff = @as(i32, expected) - @as(i32, actual);
+            max_diff = @max(max_diff, @as(i32, @intCast(@abs(diff))));
+        }
+        try std.testing.expect(max_diff <= 8);
+
+        // Per-layer PLT byte totals (LRCP keeps the layer outermost inside a
+        // tile), aggregated across all four tiles: the coarse first layer
+        // targeted at ratio 20 must carry fewer bytes than the lossless
+        // final layer targeted at ratio 1.
+        var layer_bytes = [_]u64{ 0, 0, 0 };
+        {
+            const sot = codestream.markerValue("sot");
+            const sod = codestream.markerValue("sod");
+            const plt_marker = codestream.markerValue("plt");
+            var cursor: usize = 2;
+            while (readU16BeTest(bytes, cursor) != sot) {
+                cursor += 2 + readU16BeTest(bytes, cursor + 2);
+            }
+            var tiles_seen: usize = 0;
+            while (tiles_seen < 4) : (tiles_seen += 1) {
+                const psot = readU32BeTest(bytes, cursor + 6);
+                var lengths: std.ArrayList(u64) = .empty;
+                defer lengths.deinit(allocator);
+                var header_cursor = cursor + 12;
+                while (readU16BeTest(bytes, header_cursor) != sod) {
+                    const segment_length = readU16BeTest(bytes, header_cursor + 2);
+                    if (readU16BeTest(bytes, header_cursor) == plt_marker) {
+                        var value: u64 = 0;
+                        for (bytes[header_cursor + 5 .. header_cursor + 2 + segment_length]) |byte| {
+                            value = (value << 7) | (byte & 0x7f);
+                            if ((byte & 0x80) == 0) {
+                                try lengths.append(allocator, value);
+                                value = 0;
+                            }
+                        }
+                    }
+                    header_cursor += 2 + segment_length;
+                }
+                try std.testing.expectEqual(@as(usize, 0), lengths.items.len % 3);
+                const per_layer = lengths.items.len / 3;
+                for (0..3) |layer| {
+                    for (lengths.items[layer * per_layer ..][0..per_layer]) |len| layer_bytes[layer] += len;
+                }
+                cursor += psot;
+            }
+        }
+        try std.testing.expect(layer_bytes[0] > 0);
+        try std.testing.expect(layer_bytes[2] > layer_bytes[0]);
     }
 
     // Odd tile origins fail closed: tile-local 9/7 lifting parity would
@@ -16605,18 +16671,15 @@ test "multi-tile encode fails closed outside the bounded envelope" {
                 options.emit_temporary_payload_sidecar = true;
             }
         }.mutate },
-        // Irreversible 9/7 multi-tile encode is supported now (aligned tile
-        // origins); its roundtrip lives in "multi-tile irreversible 9/7
-        // roundtrips within lossy tolerance". Rates with 9/7 tiles stay
-        // fail-closed there.
-        .{ .label = "lossy 9/7 with rate targets", .mutate = struct {
+        // Irreversible 9/7 multi-tile encode (ICT + scalar quantization,
+        // including rate targets) is supported now; its roundtrips live in
+        // "multi-tile irreversible 9/7 roundtrips within lossy tolerance".
+        // 9/7 without ICT stays fail-closed (the front end always uses ICT).
+        .{ .label = "lossy 9/7 without ICT", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.transform = .irreversible_9_7;
-                options.mct = .ict;
+                options.mct = .rct;
                 options.quantization = .scalar_expounded;
-                options.layers = 2;
-                options.rate_count = 1;
-                options.rates[0] = 4.0;
             }
         }.mutate },
         .{ .label = "resolution tile-parts with non-RPCL progression", .mutate = struct {

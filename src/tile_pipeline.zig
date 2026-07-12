@@ -48,6 +48,10 @@ pub const PacketScaffoldOptions = struct {
     /// indexed [band_level][@intFromEnum(kind)]; null keeps the reversible
     /// 5/3 rule (bit_depth + gain + 1).
     nominal_bitplanes: ?[33][4]u8 = null,
+    /// Per-band PCRD distortion weights (squared reconstruction step x norm)
+    /// indexed [band_level][@intFromEnum(kind)]; null keeps the reversible
+    /// 5/3 squared-norm weight. Used only when rate targets are requested.
+    band_weights: ?[33][4]f64 = null,
     front_end: ?TileFrontEnd = null,
 };
 
@@ -62,6 +66,7 @@ pub const PacketScaffold = struct {
     bands: []subband.Band,
     blocks: []subband.CodeBlock,
     nominal_bitplanes: ?[33][4]u8 = null,
+    band_weights: ?[33][4]f64 = null,
 
     pub fn deinit(self: *PacketScaffold) void {
         self.allocator.free(self.blocks);
@@ -1529,6 +1534,7 @@ pub fn buildPacketScaffold(
         .bands = bands,
         .blocks = blocks,
         .nominal_bitplanes = options.nominal_bitplanes,
+        .band_weights = options.band_weights,
     };
 }
 
@@ -1612,6 +1618,7 @@ fn storeCatalogPassDistortions(
     rct_tile: RctTile,
     catalog: *EncodedBlockCatalog,
     style: ebcot.CodeBlockStyle,
+    band_weights: ?[33][4]f64,
 ) !void {
     var scratch = ebcot.BlockScratch.init(allocator);
     defer scratch.deinit();
@@ -1631,7 +1638,14 @@ fn storeCatalogPassDistortions(
             distortion_scratch[0..],
         ) catch return PacketScaffoldError.InvalidLayer;
         if (distortion_passes != pass_count) return PacketScaffoldError.InvalidLayer;
-        const weight = pcrdBandWeight(encoded.job.band);
+        // Irreversible tiles carry a per-band weight table (squared
+        // reconstruction step x 9/7 norm), converting quantized-domain
+        // squared error into the reconstruction domain; the reversible
+        // path uses the squared 5/3 norm (unit step).
+        const weight = if (band_weights) |table|
+            table[encoded.job.band.level][@intFromEnum(encoded.job.band.kind)]
+        else
+            pcrdBandWeight(encoded.job.band);
         const stored = try allocator.alloc(f64, pass_count);
         for (stored, distortion_scratch[0..pass_count]) |*out, value| out.* = value * weight;
         encoded.pass_distortions = stored;
@@ -1913,7 +1927,7 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
     // every tile is encoded (applyGridPcrdTargets); store the per-pass
     // distortions now, while the tile's RCT planes are alive.
     if (options.rate_count > 0 and scaffold.layers > 1) {
-        try storeCatalogPassDistortions(allocator, rct_tile, &catalog, style);
+        try storeCatalogPassDistortions(allocator, rct_tile, &catalog, style, scaffold.band_weights);
     }
     try validateEncodedBlockCatalogCoversTile(allocator, scaffold, catalog);
 

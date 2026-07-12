@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 94/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 95/100 full** as of
 2026-07-12. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-12)
 
-Scorecard now **100/100 narrow, 94/100 full**. The bounded multi-tile path has
+Scorecard now **100/100 narrow, 95/100 full**. The bounded multi-tile path has
 all five progression orders, quality layers including the first tile-local
 rate-target slice, and the implemented resilience matrix. CAUSAL+SEGMARK,
 RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
@@ -466,9 +466,12 @@ for more ISO coverage is:
    cross-tile PCRD rate breadth is now landed. Continue with broader
    rate-targeted matrix coverage, non-empty PLT-less multi-part decode,
    broader progression/division combinations, and then tile-level scheduling.
-4. **Lossy breadth.** ICT/9-7 with scalar-expounded and scalar-derived QCD is
-   public on the narrow path. The next work is broader error-bound and foreign
-   decode fixtures, not more parser-only options.
+4. **Lossy breadth.** ICT/9-7 (scalar-expounded and scalar-derived QCD) is
+   public single-tile and aligned multi-tile, including rate-targeted 9/7
+   multi-tile with 9/7-weighted global cross-tile PCRD (2026-07-12). The
+   remaining lossy work is the encoder-side PCRD PSNR gap (measured 0.7-1.8 dB
+   vs OpenJPEG at matched bytes, tracked by `tools/pcrd_psnr_ladder.ps1`) and
+   odd-origin 9/7 lifting, not more parser-only options.
 5. **T1 style policy.** ✅ COMPLETE (2026-07-12): all 64 combinations of the
    six Part 1 style bits have implemented payload models with roundtrip
    tests and three-decoder interop (BYPASS+RESET/ERTERM landed last, with

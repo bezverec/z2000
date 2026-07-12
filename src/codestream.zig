@@ -533,6 +533,34 @@ fn irreversibleNominalBitplaneTable(
     return table;
 }
 
+/// Per-band PCRD distortion weight table for irreversible tiles, indexed
+/// [band_level][kind]: `(reconstruction step delta x 9/7 synthesis norm)^2`
+/// converts quantized-coefficient squared error into weighted reconstruction
+/// squared error (ISO 15444-1 J.14). Identical for every tile because the
+/// step tables and norms depend only on the global bit depth, quantization
+/// style, and level count. Mirrors the single-tile pcrdBandWeight.
+fn irreversibleBandWeightTable(
+    bit_depth: u8,
+    levels: u8,
+    quantization: QuantizationStyle,
+) ![33][4]f64 {
+    var table = [_][4]f64{.{ 0, 0, 0, 0 }} ** 33;
+    if (levels > 32) return CodestreamError.UnsupportedPayload;
+    const kinds = [_]subband.Kind{ .ll, .hl, .lh, .hh };
+    var level: u8 = 1;
+    while (level <= levels) : (level += 1) {
+        for (kinds) |kind| {
+            if (kind == .ll and level != levels) continue;
+            const opj_level: usize = if (kind == .ll) level else @as(usize, level) - 1;
+            const orient: usize = @intFromEnum(kind);
+            const step = try irreversibleBandStepSizeFor(quantization, bit_depth, kind, level, levels);
+            const weighted = irreversibleBandDelta(bit_depth, kind, step) * dwt97Norm(opj_level, orient);
+            table[level][orient] = weighted * weighted;
+        }
+    }
+    return table;
+}
+
 fn quantizeBandRegion(src: []const f32, dst: []i32, stride: usize, rect: subband.Rect, delta: f64) void {
     var row: usize = 0;
     while (row < rect.height) : (row += 1) {
@@ -9355,10 +9383,6 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
             {
                 return CodestreamError.UnsupportedPayload;
             }
-            // The multi-tile PCRD distortion weights are 5/3-normed; keep
-            // rate targets fail-closed for irreversible tiles until the
-            // 9/7 weights are wired.
-            if (options.rate_count != 0) return CodestreamError.UnsupportedPayload;
         },
     }
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
@@ -9644,6 +9668,10 @@ fn encodeLosslessMultiTileMeasured(
         try irreversibleNominalBitplaneTable(rgb.bit_depth, levels, encode_options.guard_bits, encode_options.quantization)
     else
         null;
+    const band_weights: ?[33][4]f64 = if (encode_options.transform == .irreversible_9_7 and encode_options.rate_count != 0)
+        try irreversibleBandWeightTable(rgb.bit_depth, levels, encode_options.quantization)
+    else
+        null;
     var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
         allocator,
         rgb,
@@ -9658,6 +9686,7 @@ fn encodeLosslessMultiTileMeasured(
             .rates = encode_options.rates,
             .rate_count = encode_options.rate_count,
             .nominal_bitplanes = nominal_bitplanes,
+            .band_weights = band_weights,
             .front_end = front_end,
         },
         block_style,
