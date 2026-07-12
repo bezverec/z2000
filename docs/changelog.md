@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Rate-Targeted Multi-Tile Irreversible 9/7
+
+- Lifted the last multi-tile 9/7 gate: `--rates` are now accepted with
+  irreversible tiles. The global cross-tile PCRD allocation gained a per-band
+  distortion weight table `(reconstruction step delta x 9/7 synthesis norm)^2`
+  (built once in codestream.zig, identical for every tile, threaded through
+  `PacketScaffoldOptions.band_weights`) that converts the quantized-domain
+  squared error `passDistortions` measures into weighted reconstruction
+  squared error — the reversible path keeps its squared 5/3 norm. Coverage: a
+  rate-targeted multi-tile 9/7 roundtrip (lossless final layer, cross-thread
+  determinism, first layer smaller than the lossless final layer via the PLT
+  byte sums) plus the existing odd-origin fail-closed guard. Live interop
+  (2048x2048 noise, 512x512 tiles, `--rates 20,10,1`): layer prefixes progress
+  11.6 -> 12.3 -> 53 dB under `opj -l`, and the full stream decodes through
+  kdu_expand, opj_decompress, and grk_decompress within max byte diff 1 of
+  z2000's own decode. Scorecard: full lossy encode/decode 13->14, moving the
+  full codec estimate to 95/100.
+
 ### Multi-Tile Irreversible 9/7
 
 - Opened the multi-tile gate for the lossy path: a tile front-end hook
