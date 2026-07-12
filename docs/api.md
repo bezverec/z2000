@@ -42,7 +42,7 @@ Important `tiff-to-jp2` options:
 - `--mct rct|ict|none`
 - `--transform 5-3|9-7`
 - `--qstyle none|scalar-derived|scalar-expounded`
-- `--tile-parts none|R`
+- `--tile-parts none|R|L|C`
 - `--sop`, `--eph`, `--tlm`
 - `--t1-backend iso-mq|legacy-mq`
 - `--bypass`
@@ -54,31 +54,30 @@ Supported public JP2 profiles are still narrow:
 
 - lossless RGB: `--mct rct --transform 5-3 --qstyle none`
 - irreversible RGB: `--mct ict --transform 9-7` with scalar-expounded or
-- bounded multi-tile irreversible RGB uses origin-aware 9/7 lifting, including
-  odd tile origins, and supports the documented global rate-target path
+  scalar-derived quantization; bounded multi-tile irreversible RGB uses
+  origin-aware 9/7 lifting, including odd tile origins, and global rate targets
 - reversible component-independent RGB: `--mct none --transform 5-3 --qstyle none`
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution
-- a bounded multi-tile lossless envelope: RCT/5-3, one or more
-  quality layers for all five progression orders, deterministic row-major
-  encode, reordered foreign one-part tile decode, and PLT-backed RPCL
-  `--tile-parts R` with one tile-part per resolution; plus the
+- a bounded multi-tile lossless envelope: RCT/5-3, one or more quality layers
+  for all five progression orders, deterministic row-major encode, reordered
+  foreign tile decode, global cross-tile PCRD, and PLT-backed `R`/RPCL,
+  `L`/LRCP, and `C`/CPRL tile-part divisions; plus the
   implemented CAUSAL/SEGMARK/terminated resilience styles, reference-grid
   precinct/code-block/tag-tree partitions, and origin-aware reversible 5/3 lifting
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
 - `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
   segments and packet-header segment length accounting
-- selected code-block style profiles where the payload model is implemented:
-  TERMALL, BYPASS+TERMALL, TERMALL-scoped RESET, vertical-causal, segmentation
-  symbols, and TERMALL-scoped predictable termination
+- all six Part 1 code-block style bits in the documented ISO-MQ envelope,
+  including BYPASS, RESET, TERMALL, vertical-causal, predictable termination,
+  segmentation symbols, and their tested combinations
 
-Unsupported combinations still fail closed. Examples include standalone ERTERM,
-BYPASS combined with RESET or ERTERM, standalone RESET outside the single-tile
-ISO-MQ envelope, tile-part divisions other than none/R, JPX features,
-unsupported component layouts, and profile mixes outside the bounded envelope.
-In multi-tile mode, BYPASS without TERMALL, PLT-less resolution tile-parts,
-and `R` divisions with non-RPCL progression also remain unsupported.
+Unsupported combinations still fail closed. Examples include precinct (`P`)
+tile-part division, division/progression mismatches, JPX features, unsupported
+component layouts, and profile mixes outside the bounded envelope. In
+multi-tile mode, BYPASS without TERMALL and non-empty PLT-less multipart tiles
+also remain unsupported.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
 smoke tests cover the common no-EPH and archival EPH paths, while
 valid2000/jpylyzer-style validators remain diagnostic gates rather than

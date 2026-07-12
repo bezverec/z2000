@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Per-Component Tile-Part Divisions (`--tile-parts C`)
+
+- Added PLT-backed component tile-parts for multi-tile CPRL streams. Each RGB
+  tile is split into three component-contiguous packet ranges with ordered
+  `TPsot`, `TNsot = 3`, per-part PLT, TLM/Psot accounting, and continuous SOP
+  sequence state. Strict metadata now reports the division as `C` rather than
+  assuming every multipart stream is `R`. A 16-tile, two-layer regression is
+  deterministic across thread counts and roundtrips losslessly; the live JP2
+  smoke is pixel-exact through z2000, OpenJPEG, Grok, and Kakadu. `C` with a
+  non-CPRL order and the still-unimplemented `P` mode fail closed. The full
+  score remains 95/100 while POC, PPM/PPT, and `P` remain open T2 work.
+
 ### Origin-Aware Multi-Tile Irreversible 9/7
 
 - Removed the multi-tile 9/7 alignment guard by carrying each tile's

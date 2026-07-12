@@ -16178,6 +16178,93 @@ test "multi-tile layer tile-part divisions emit one part per layer per tile" {
     try std.testing.expectEqualSlices(u16, rgb.samples, single_decoded.samples);
 }
 
+test "multi-tile component tile-part divisions emit one part per component per tile" {
+    // `--tile-parts C` with CPRL: the component is the outermost packet loop,
+    // so every RGB tile has three component-contiguous parts with independent
+    // PLT packet accounting.
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.layers = 2;
+    options.progression = .cprl;
+    options.tile_part_divisions = 'C';
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const plt_marker = codestream.markerValue("plt");
+    var cursor: usize = 2;
+    while (readU16BeTest(bytes, cursor) != sot) {
+        cursor += 2 + readU16BeTest(bytes, cursor + 2);
+    }
+    var parts_seen: usize = 0;
+    var packets_per_component: ?usize = null;
+    while (readU16BeTest(bytes, cursor) == sot) {
+        const psot = readU32BeTest(bytes, cursor + 6);
+        try std.testing.expectEqual(@as(u8, 3), bytes[cursor + 11]);
+        try std.testing.expectEqual(@as(u8, @intCast(parts_seen % 3)), bytes[cursor + 10]);
+
+        var packet_count: usize = 0;
+        var header_cursor = cursor + 12;
+        while (readU16BeTest(bytes, header_cursor) != sod) {
+            const segment_length = readU16BeTest(bytes, header_cursor + 2);
+            if (readU16BeTest(bytes, header_cursor) == plt_marker) {
+                for (bytes[header_cursor + 5 .. header_cursor + 2 + segment_length]) |byte| {
+                    if ((byte & 0x80) == 0) packet_count += 1;
+                }
+            }
+            header_cursor += 2 + segment_length;
+        }
+        try std.testing.expect(packet_count > 0);
+        if (packets_per_component) |expected| {
+            try std.testing.expectEqual(expected, packet_count);
+        } else {
+            packets_per_component = packet_count;
+        }
+
+        parts_seen += 1;
+        cursor += psot;
+        if (cursor + 1 >= bytes.len) break;
+    }
+    try std.testing.expectEqual(@as(usize, 12), parts_seen);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(?u8, 'C'), stats.tile_part_divisions);
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(usize, width), info.width);
+
+    var wrong_progression = options;
+    wrong_progression.progression = .rpcl;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, wrong_progression),
+    );
+}
+
 test "multi-tile rate targets allocate one global budget across tiles" {
     // Four 32x32 tiles with strongly heterogeneous content: tile 0 carries
     // high-amplitude noise, the others a shallow gradient. The global PCRD
@@ -17274,9 +17361,8 @@ test "unsupported JP2 profile marker options fail closed" {
         .{ .label = "RLCP with debug sidecar", .options = .{ .progression = .rlcp, .emit_temporary_payload_sidecar = true } },
         .{ .label = "PCRL with debug sidecar", .options = .{ .progression = .pcrl, .emit_temporary_payload_sidecar = true } },
         .{ .label = "CPRL with debug sidecar", .options = .{ .progression = .cprl, .emit_temporary_payload_sidecar = true } },
-        // L tile-parts are supported now (multi-tile LRCP emits per-layer
-        // parts; the single-tile assembler normalizes them to one part).
-        .{ .label = "C tile-parts", .options = .{ .tile_part_divisions = 'C' } },
+        // L and C tile-parts are supported now on their matching multi-tile
+        // progressions; the single-tile assembler normalizes them to one part.
         .{ .label = "P tile-parts", .options = .{ .tile_part_divisions = 'P' } },
         .{ .label = "ICT", .options = .{ .mct = .ict } },
         .{ .label = "9-7 JP2", .options = .{ .transform = .irreversible_9_7 } },

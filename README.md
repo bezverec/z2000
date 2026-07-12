@@ -141,11 +141,11 @@ Packet, layer, and geometry options:
 | `--resolutions N` | Alternative to `--levels`; resolutions are levels + 1. |
 | `--progression RPCL|LRCP|RLCP|PCRL|CPRL` | JPEG2000 progression order. Supported paths are still profile-bounded and fail closed when unsafe. |
 | `--layers N` | Number of quality layers (untargeted even split). When `--rates` is given, the rate-list length sets the layer count and overrides `--layers`. |
-| `--rates R1,R2,...` | Compression-ratio targets for layered output, referenced to the total compressed payload (unlike OpenJPEG's `-r`, which references the uncompressed size). The final layer always carries the complete stream, so end the list with `1` for an explicit lossless-final ladder. Single-tile uses global PCRD with packet-header charging; bounded multi-tile uses tile-local PCRD in the lossless path. |
+| `--rates R1,R2,...` | Compression-ratio targets for layered output, referenced to the total compressed payload (unlike OpenJPEG's `-r`, which references the uncompressed size). The final layer always carries the complete stream, so end the list with `1` for an explicit lossless-final ladder. Single- and multi-tile paths use global PCRD; single-tile also charges measured packet-header bytes directly. |
 | `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |
 | `--block N` | Square code-block size. |
 | `--tile W,H` | Tile size. Multi-tile support is the bounded reference-grid lossless envelope (explicit, default, or odd-origin partitions). |
-| `--tile-parts none|R|L` | Tile-part division mode: one part per tile, per resolution (RPCL), or per layer (LRCP, multi-tile). `C`/`P` stay fail-closed. |
+| `--tile-parts none|R|L|C` | Tile-part division mode: one part per tile, per resolution (`R` with RPCL), per layer (`L` with LRCP), or per RGB component (`C` with CPRL). Divided layouts are currently multi-tile; `P` stays fail-closed. |
 
 Marker, T1, and diagnostics:
 

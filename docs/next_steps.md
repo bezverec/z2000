@@ -20,6 +20,7 @@ probed on 2026-07-12; findings inline. Ordered by *value per unit risk*.
 | --- | --- | --- | --- | --- |
 | Core syntax 14→15 · Containers 8→10 | **N6: component-generic pipeline** (grayscale/1-component then N-component, palette expansion) | LARGE (multi-PR, like the multi-tile campaign) | HIGH — reworks the `color.RctPlanes` y/cb/cr representation (87 call sites) the 100/100 narrow path rides on | Yes: TIFF grayscale I/O + OpenJPEG/Grok/Kakadu grayscale interop |
 | T2 9→10 · Core syntax +1 | **POC** (progression-order-change marker + multi-chunk packet scheduling) | Medium (1–2 PRs) | Medium (new encode+decode path; narrow path untouched) | Weak: OpenJPEG `-POC` is finicky and did not emit a `POC` marker in a single-tile probe; needs a reliable POC fixture source before claiming interop |
+| T2 9→10 | **`P` tile-part division** (`C`/CPRL landed 2026-07-12) | Small–medium (derive contiguous position groups and preserve packet state across parts) | Low–medium | Yes: the `C` gate established the z2000/OpenJPEG/Grok/Kakadu multipart matrix |
 | T2 9→10 | **PPM/PPT** packed packet headers | Small–medium (decode-side marker parse + header redirection) | Low | **No**: neither Kakadu nor OpenJPEG default output emits `PPM`/`PPT`; only synthetic fixtures available, so no independent-decoder cross-check |
 | Lossy 14→15 | **PCRD PSNR gap** (encoder distortion model); odd-origin 9/7 lifting is now landed | PCRD = research (0.7–1.8 dB vs OpenJPEG at matched bytes, `tools/pcrd_psnr_ladder.ps1`) | PCRD medium/uncertain (no guaranteed linear progress) | Yes: matched-byte ladder; odd-origin 9/7 is bidirectionally reference-relative within max byte diff 1 |
 | Containers 8→10 | mixed per-component precision (`BPCC`) + alpha channels | Medium; couples to N6's per-component depth work | Medium | Yes: reference grayscale/mixed-precision files |
@@ -54,15 +55,18 @@ The malformed-input sweep now includes multi-tile BYPASS+TERMALL as its seventh
 profile, and PLT-less multi-tile streams now strict-decode by deriving
 tile-local packet spans from T2 packet headers. The foreign OpenJPEG/Grok/Kakadu
 PLT-less multi-tile smoke is green for explicit and COD-default precincts,
-including Kakadu's reordered `0,1,3,2` tile-part sequence. A first tile-local PCRD `--rates` slice is now wired for
-the bounded reversible multi-tile path and has a z2000/OpenJPEG/Grok/Kakadu
-LRCP smoke gate. Reference-grid precinct/code-block/tag-tree anchoring and odd-
+including Kakadu's reordered `0,1,3,2` tile-part sequence. Global cross-tile
+PCRD `--rates` is wired for reversible and irreversible multi-tile paths with
+z2000/OpenJPEG/Grok/Kakadu smoke gates. Reference-grid precinct/code-block/
+tag-tree anchoring and odd-
 origin reversible 5/3 lifting are now bidirectionally interop-green for
 PLT-less OpenJPEG, Grok, and Kakadu inputs and z2000 output. The strict T2
 reader also accepts present geometry-empty edge packets while still requiring
 zero contributions and zero payload. PLT-backed RPCL `R` divisions emit and
 decode one part per resolution per tile, with z2000/OpenJPEG/Grok/Kakadu
-pixel-exact interop on the 17x17 odd-origin gate. **Foreign multi-part tile
+pixel-exact interop on the 17x17 odd-origin gate. PLT-backed `L`/LRCP and
+`C`/CPRL divisions are likewise pixel-exact through all four decoders; `P`
+remains the only missing direct tile-part division. **Foreign multi-part tile
 sequences now decode (2026-07-11, full lossless-decode row 14->15, estimate
 88->89):** per-part PLT packet accounting joins each tile's parts in TPsot
 order whether grouped or interleaved across tiles, TNsot 0 "count not
@@ -255,8 +259,9 @@ format, codestream profile, and container semantics are explicit.
 - **ISO clause:** B.3–B.12 (tile grid, per-tile SOT/SOD, tile-part order).
 - **State:** multi-tile v1/v2 is interop-proven for aligned RPCL and multi-layer
   LRCP/RLCP/PCRL/CPRL grids. The envelope is RCT/5-3, untargeted quality layers
-  across all five progression orders, the implemented resilience style matrix,
-  one tile-part per tile plus PLT-backed RPCL resolution divisions. Gates:
+  across all five progression orders, the complete resilience style matrix,
+  global cross-tile PCRD, and one tile-part per tile plus PLT-backed `R`/RPCL,
+  `L`/LRCP, and `C`/CPRL divisions. Gates:
   `validateMultiTileCodingPath` / `validateMultiTileGeometry` in `codestream.zig`.
 - **What to add (staged, each its own PR, single-tile byte-identical at every
   step):**
@@ -265,11 +270,10 @@ format, codestream profile, and container semantics are explicit.
     Grok decode three-layer LRCP/RLCP/PCRL/CPRL smokes losslessly. Remaining:
     Kakadu across the matrix.
   - **v2b — quality layers per tile.** Untargeted quality layers are wired for
-    all five progression orders. First tile-local PCRD/rate-target slice is
-    now wired for the bounded reversible profile with strict local roundtrip,
-    deterministic threaded encode, and a z2000/OpenJPEG/Grok/Kakadu LRCP
-    smoke. Remaining: cross-tile/global byte-target refinement and broader
-    style/progression matrix coverage before counting a score bump.
+    all five progression orders. Global cross-tile PCRD is wired for the
+    reversible and irreversible profiles with strict roundtrip, deterministic
+    threaded encode, and z2000/OpenJPEG/Grok/Kakadu smokes. Remaining:
+    broader style/progression matrix coverage.
   - **v2c — reference-grid partition anchoring.** Packet plans retain
     per-resolution reference bounds and first precinct indexes; code-block
     partitions and tag-tree leaves use global subband origins. Foreign default-

@@ -20,23 +20,16 @@ interop gate.
 
 ## Near-Term ISO Task Ledger
 
-- T1/EBCOT: continue tightening the coding pass model after cleanup run mode,
-  JPEG2000-style directional sign context/prediction, and more precise
-  refinement contexts. BYPASS, terminate-all, TERMALL-scoped reset-context,
-  BYPASS+TERMALL, vertical-causal, TERMALL-scoped predictable termination, and
-  segmentation-symbol behavior now have public payload paths where the required
-  segment model exists. Standalone RESET and ERTERM are public on the tested
-  ISO-MQ envelopes; BYPASS+RESET, BYPASS+ERTERM, and untested combinations
-  remain fail-closed. Keep row-mask, stripe-mask,
-  flag-word, and SIMD-aware T1 optimization going only when byte-for-byte
-  oracle tests continue to pass.
-- T2 packet state: make include tag-tree state, zero-bitplane tag-tree state,
-  `numlenbits`, layer deltas, and packet header state explicit per
-  resolution/precinct/component/layer. The RPCL path now tracks layer bounds,
-  sequence, precinct coordinates, tag-tree lows/known-node state, whole-packet
-  consumption, and rollback on failed reads; next extend the same discipline
-  when adding LRCP, PCRL, and CPRL, each with matching writer, reader, and
-  tests.
+- T1/EBCOT: all six Part 1 code-block style bits are public in the tested
+  ISO-MQ envelope, including combined BYPASS/RESET/TERMALL/CAUSAL/ERTERM/
+  SEGMARK profiles. Keep row-mask, stripe-mask, flag-word, and SIMD-aware T1
+  optimization going only when byte-for-byte oracle and interop tests remain
+  green.
+- T2 packet state: all five progression orders preserve inclusion tag-tree,
+  zero-bitplane tag-tree, `numlenbits`, layer deltas, and packet state through
+  strict decode. PLT-backed tile-part divisions now cover `R`/RPCL, `L`/LRCP,
+  and `C`/CPRL. Next implement `P` on its matching position-major order, then
+  POC and PPM/PPT as separate fail-closed slices.
 - JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
   Start with 8-bit and 16-bit RGB plus sRGB `colr`; the reader now also accepts
@@ -56,13 +49,13 @@ interop gate.
   distortion metadata and byte-targeted layer deltas. The remaining work is
   broadening fixtures and reducing the access-profile size/quality gap against
   Grok/OpenJPEG/Kakadu.
-- Multi-tile: the v1 bounded-grid model is implemented for the reversible
-  RCT/5-3 profile with per-tile DWT, packet state, strict decode, all five
-  progression orders, tile-local rate-targeted layers, and the implemented
-  resilience style matrix. The first rate-targeted LRCP smoke is lossless
-  through z2000 strict decode, OpenJPEG, Grok, and Kakadu. Next add global
-  cross-tile budget validation, broader rate-targeted matrix coverage, and
-  scheduling while keeping unsupported geometry/style combinations fail-closed.
+- Multi-tile: the bounded-grid model is implemented for reversible RCT/5-3 and
+  irreversible ICT/9-7, with per-tile DWT, packet state, strict decode, all
+  five progression orders, global cross-tile PCRD, and the implemented
+  resilience style matrix. `R`, `L`, and `C` divisions are independently
+  lossless through z2000/OpenJPEG/Grok/Kakadu. Next broaden rate-target/style
+  matrices and add tile scheduling while keeping unsupported combinations
+  fail-closed.
   Strict decode anchors tile precincts to the reference grid and accepts
   PLT-less foreign default-precinct multi-tile files. Encode now anchors
   precincts, subband code-blocks, and tag-tree leaves too, and reversible 5/3
@@ -77,34 +70,21 @@ interop gate.
 
 ## Next Implementation Slice
 
-1. Turn the local JP2/ICC fixture coverage into a small interop matrix:
-   ICC-absent RGB TIFF, ICC-present RGB TIFF, malformed ICC tag, and malformed
-   `colr` box against OpenJPEG/Grok/Kakadu where applicable. The ICC-absent
-   fixture already stays valid without inventing a profile.
-2. Harden JP2 reader diagnostics around duplicate or misplaced required boxes,
-   unsupported brands, ICC-vs-sRGB `colr` policy, mixed variable bits-per-component,
-   extra components, and multiple contiguous codestream boxes. Basic
-   length-to-EOF, `XLBox`, sequential `SOT` tile-part auditing, and `TLM/Psot`
-   length matching are now covered for codestream boxes. JP2-boundary `PLT`
-   parsing now also rejects unterminated packet lengths and packet spans that
-   do not match the tile-part `SOD` byte count; packet `SOP`/`EPH` framing is
-   checked against `COD/Scod` before trusting the codestream, and reversible
-   `QCD` exponent bytes plus public 9/7 scalar-expounded/scalar-derived step
-   sizes are checked against `SIZ` bit depth. `COD/Scod` implicit/default
-   precinct geometry is supported in the strict foreign-stream decode path
-   where packet spans can be derived; `COD` layer counts are capped to the
-   current rate-allocation/T2 metadata limit.
-3. Extend strict T2 audit fixtures from the current smoke file to deliberately
-   corrupted PLT/TLM/SOP/EPH/header cases that can be compared against
-   OpenJPEG/Grok/Kakadu behavior without assuming any validator is final.
-4. Continue T1 style coverage after the JP2/T2 diagnostics are sharper: keep
-   the implemented single- and multi-tile combinations green in the
-   OpenJPEG/Grok/Kakadu matrix, then open standalone ERTERM only after it has a
-   writer, strict reader, oracle tests, and interop. Keep BYPASS+RESET,
-   BYPASS+ERTERM, unsupported RESET envelopes, and other untested combinations
-   fail-closed.
-5. Run a comparative benchmark only after the above interop fixtures are green,
-   so performance numbers are attached to output that external decoders accept.
+1. Implement precinct (`P`) tile-part boundaries for a progression whose
+   position groups are contiguous, with per-part PLT/TLM accounting and the
+   same z2000/OpenJPEG/Grok/Kakadu lossless gate used for `C`.
+2. Add POC only after a reliable independently produced fixture is available;
+   keep the current marker fail-closed until writer and strict packet schedule
+   agree across every change interval.
+3. Add PPM/PPT packed packet-header decode as a complete header-source switch,
+   including ordered segment concatenation and malformed-length tests; do not
+   merely accept the marker while continuing to read headers from SOD.
+4. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
+   keeping the existing RGB representation byte-identical until the new path
+   has independent interop.
+5. Continue measured PCRD distortion-model research against the matched-byte
+   PSNR ladder; retain a change only when quality improves without correctness
+   or safety regressions.
 
 ## Post-Part 1 Conversion Roadmap
 
@@ -199,10 +179,9 @@ Tasks:
   lengths, including ordered multi-segment TLM/PLT coverage.
 - Keep RPCL as the first supported progression, with bounded per-precinct state
   and whole-packet reader validation.
-- Add LRCP/PCRL/CPRL only after packet payload ordering is implemented and
-  tested for each.
-- Extend tile-part division beyond none and `R` only after payload order and
-  marker accounting are correct.
+- Keep all five implemented progression orders under packet-state regression.
+- Extend tile-part division from the implemented none/`R`/`L`/`C` set to `P`
+  only after position-group boundaries and marker accounting are proven.
 
 Exit criteria:
 
@@ -217,14 +196,13 @@ large-image memory scaling and tile-level parallelism.
 Tasks:
 
 - Keep the current positive multi-tile encode/decode path green: lossless
-  RCT/5-3, quality layers including tile-local rate targets across the bounded
-  profile, one tile-part per tile or PLT-backed RPCL resolution divisions,
-  deterministic row-major encode plus reordered foreign one-part tile decode,
-  CAUSAL/SEGMARK and the supported
-  TERMALL-scoped resilience combinations, and ISO B.6/B.7-aligned geometry.
+  RCT/5-3 and irreversible ICT/9-7, quality layers with global cross-tile PCRD,
+  one tile-part per tile or PLT-backed `R`/`L`/`C` divisions, deterministic
+  row-major encode plus reordered foreign multipart decode, the complete T1
+  style-bit envelope, and ISO B.6/B.7-aligned geometry.
 - Expand the tile/profile matrix one axis at a time: more fixtures for edge
-  tiles and non-divisible dimensions, then external/global-budget rate-target
-  coverage, PLT-less multi-part decode, and broader progression/tile-part
+  tiles and non-divisible dimensions, then broader rate-target/style coverage,
+  non-empty PLT-less multi-part decode, and remaining progression/tile-part
   combinations after the reference-grid packet/block/DWT path and its interop
   coverage are green.
 - Preserve tile-component independence in DWT, T1, and T2 scheduling while
