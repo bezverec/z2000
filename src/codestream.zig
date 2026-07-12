@@ -422,6 +422,15 @@ fn forwardIrreversibleQuantizedPlanes(
     levels: u8,
     options: LosslessOptions,
 ) !color.RctPlanes {
+    return forwardIrreversibleQuantizedPlanesWithQuantization(allocator, rgb, levels, options.quantization);
+}
+
+fn forwardIrreversibleQuantizedPlanesWithQuantization(
+    allocator: std.mem.Allocator,
+    rgb: image.RgbImage,
+    levels: u8,
+    quantization: QuantizationStyle,
+) !color.RctPlanes {
     var ict = try color.forwardIct(allocator, rgb);
     defer ict.deinit();
 
@@ -445,7 +454,7 @@ fn forwardIrreversibleQuantizedPlanes(
         const delta = irreversibleBandDelta(
             rgb.bit_depth,
             band.kind,
-            try irreversibleBandStepSizeFor(options.quantization, rgb.bit_depth, band.kind, band.level, levels),
+            try irreversibleBandStepSizeFor(quantization, rgb.bit_depth, band.kind, band.level, levels),
         );
         quantizeBandRegion(ict.y, y, ict.width, band.rect, delta);
         quantizeBandRegion(ict.cb, cb, ict.width, band.rect, delta);
@@ -461,6 +470,67 @@ fn forwardIrreversibleQuantizedPlanes(
         .cb = cb,
         .cr = cr,
     };
+}
+
+/// Tile front end for the irreversible multi-tile path: extracts the tile
+/// region, then runs the same ICT + 9/7 + deadzone quantization the
+/// single-tile path uses. Tile-local lifting parity equals the reference
+/// grid's because the multi-tile 9/7 geometry gate requires tile origins to
+/// be multiples of 2^levels.
+const IrreversibleTileFrontEndContext = struct {
+    quantization: QuantizationStyle,
+};
+
+fn buildIrreversibleQuantizedTile(
+    context: *const anyopaque,
+    allocator: std.mem.Allocator,
+    source: image.RgbImage,
+    tile: tile_grid.Tile,
+    levels: u8,
+) anyerror!tile_pipeline.RctTile {
+    const ctx: *const IrreversibleTileFrontEndContext = @ptrCast(@alignCast(context));
+    var rgb_tile = try tile_grid.extractRgbTile(allocator, source, tile.rect);
+    defer rgb_tile.deinit();
+    const planes = try forwardIrreversibleQuantizedPlanesWithQuantization(allocator, rgb_tile, levels, ctx.quantization);
+    return .{ .tile = tile, .planes = planes };
+}
+
+/// Per-band nominal bitplane (Mb) table for irreversible tiles, indexed
+/// [band_level][kind]: Mb derives from the signalled epsilon_b (E-2), which
+/// is identical for every tile because the step tables depend only on the
+/// global bit depth, quantization style, and level count.
+fn irreversibleNominalBitplaneTable(
+    bit_depth: u8,
+    levels: u8,
+    guard_bits: u8,
+    quantization: QuantizationStyle,
+) ![33][4]u8 {
+    var table = [_][4]u8{.{ 0, 0, 0, 0 }} ** 33;
+    if (levels > 32) return CodestreamError.UnsupportedPayload;
+    var level: u8 = 1;
+    while (level <= levels) : (level += 1) {
+        inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
+            table[level][@intFromEnum(kind)] = try bandNominalBitplanesForTransform(
+                bit_depth,
+                kind,
+                level,
+                .irreversible_9_7,
+                guard_bits,
+                quantization,
+                levels,
+            );
+        }
+    }
+    table[levels][@intFromEnum(subband.Kind.ll)] = try bandNominalBitplanesForTransform(
+        bit_depth,
+        .ll,
+        levels,
+        .irreversible_9_7,
+        guard_bits,
+        quantization,
+        levels,
+    );
+    return table;
 }
 
 fn quantizeBandRegion(src: []const f32, dst: []i32, stride: usize, rect: subband.Rect, delta: f64) void {
@@ -9274,8 +9344,23 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     if (options.tile_part_divisions == 'L' and options.progression != .lrcp) {
         return CodestreamError.UnsupportedPayload;
     }
-    if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
-    if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
+    switch (options.transform) {
+        .reversible_5_3 => {
+            if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
+        },
+        .irreversible_9_7 => {
+            if (options.mct != .ict) return CodestreamError.UnsupportedPayload;
+            if (options.quantization != .scalar_expounded and
+                options.quantization != .scalar_derived)
+            {
+                return CodestreamError.UnsupportedPayload;
+            }
+            // The multi-tile PCRD distortion weights are 5/3-normed; keep
+            // rate targets fail-closed for irreversible tiles until the
+            // 9/7 weights are wired.
+            if (options.rate_count != 0) return CodestreamError.UnsupportedPayload;
+        },
+    }
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
     if (options.bypass and !options.terminate_all) return CodestreamError.UnsupportedPayload;
     // Standalone RESET and standalone ERTERM ride the same continuous ISO-MQ
@@ -9319,6 +9404,16 @@ fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: Lossless
     while (iterator.next() catch return CodestreamError.InvalidCodestream) |tile| {
         if (!wavelet_int.canDecompose53Region(tile.rect.x0, tile.rect.y0, tile.rect.x1, tile.rect.y1, levels)) {
             return CodestreamError.UnsupportedPayload;
+        }
+        // The irreversible tile front end runs plain tile-local 9/7 lifting;
+        // its parity equals the reference grid's only when every tile origin
+        // is a multiple of 2^levels. Odd-origin irreversible tiles stay
+        // fail-closed until origin-aware 9/7 lifting exists.
+        if (options.transform == .irreversible_9_7) {
+            const scale = @as(usize, 1) << @intCast(levels);
+            if (tile.rect.x0 % scale != 0 or tile.rect.y0 % scale != 0) {
+                return CodestreamError.UnsupportedPayload;
+            }
         }
     }
 }
@@ -9538,6 +9633,17 @@ fn encodeLosslessMultiTileMeasured(
         .pcrl => .pcrl,
         .cprl => .cprl,
     };
+    var irreversible_context = IrreversibleTileFrontEndContext{
+        .quantization = encode_options.quantization,
+    };
+    const front_end: ?tile_pipeline.TileFrontEnd = if (encode_options.transform == .irreversible_9_7) .{
+        .context = @ptrCast(&irreversible_context),
+        .build = buildIrreversibleQuantizedTile,
+    } else null;
+    const nominal_bitplanes: ?[33][4]u8 = if (encode_options.transform == .irreversible_9_7)
+        try irreversibleNominalBitplaneTable(rgb.bit_depth, levels, encode_options.guard_bits, encode_options.quantization)
+    else
+        null;
     var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
         allocator,
         rgb,
@@ -9551,6 +9657,8 @@ fn encodeLosslessMultiTileMeasured(
             .packet_order = packet_order,
             .rates = encode_options.rates,
             .rate_count = encode_options.rate_count,
+            .nominal_bitplanes = nominal_bitplanes,
+            .front_end = front_end,
         },
         block_style,
         encode_options.threads,

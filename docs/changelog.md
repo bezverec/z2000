@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile Irreversible 9/7
+
+- Opened the multi-tile gate for the lossy path: a tile front-end hook
+  (`TileFrontEnd`) lets codestream's ICT + 9/7 + deadzone-quantization
+  stage replace the RCT + 5/3 stage per tile while the tile pipeline stays
+  transform-agnostic, and per-band nominal bitplanes (Mb) now come from a
+  scaffold-carried table built from the signalled irreversible step
+  exponents (E-2) instead of the reversible bit-depth rule. Tile origins
+  must be multiples of 2^levels (tile-local 9/7 lifting parity equals the
+  reference grid there); odd origins and 9/7 rate targets stay fail-closed.
+  Coverage: scalar-expounded and scalar-derived multi-tile roundtrips
+  within lossy tolerance with cross-thread determinism and JP2 acceptance,
+  plus fail-closed rates/odd-origin cases. Live interop on 2048x2048 noise
+  with 512x512 tiles: kdu_expand, opj_decompress, and grk_decompress all
+  reconstruct z2000's multi-tile 9/7 output within max byte diff 1 of
+  z2000's own decode; conversely, foreign kdu (-rate 1/4), opj (-I -r 6),
+  and grok (-I -r 6) lossy multi-tile files decode through z2000 within
+  max 2 / 53-55 dB of each reference's own output — the foreign lossy
+  multi-tile decode surface needed no new code and is now documented and
+  claimed. Scorecard: full lossy encode/decode 12->13, moving the full
+  codec estimate to 94/100.
+
 ### Per-Layer Tile-Part Divisions (`--tile-parts L`)
 
 - Added the `L` tile-part division for the multi-tile LRCP path: the layer

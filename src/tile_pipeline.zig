@@ -21,6 +21,21 @@ pub const RctTile = struct {
 
 pub const PacketOrder = enum { rpcl, lrcp, rlcp, pcrl, cprl };
 
+/// Replaces the RCT + reversible 5/3 tile stage with an alternate front end
+/// that returns already-transformed, already-quantized coefficient planes
+/// (the irreversible ICT + 9/7 path lives in codestream.zig and hooks in
+/// here so the tile pipeline stays transform-agnostic).
+pub const TileFrontEnd = struct {
+    context: *const anyopaque,
+    build: *const fn (
+        context: *const anyopaque,
+        allocator: std.mem.Allocator,
+        source: image.RgbImage,
+        tile: tile_grid.Tile,
+        levels: u8,
+    ) anyerror!RctTile,
+};
+
 pub const PacketScaffoldOptions = struct {
     layers: u16 = 1,
     block_width: usize = 64,
@@ -29,6 +44,11 @@ pub const PacketScaffoldOptions = struct {
     packet_order: PacketOrder = .rpcl,
     rates: [rate_alloc.max_layers]f64 = [_]f64{0} ** rate_alloc.max_layers,
     rate_count: u8 = 0,
+    /// Per-band nominal bitplane (Mb) overrides for irreversible tiles,
+    /// indexed [band_level][@intFromEnum(kind)]; null keeps the reversible
+    /// 5/3 rule (bit_depth + gain + 1).
+    nominal_bitplanes: ?[33][4]u8 = null,
+    front_end: ?TileFrontEnd = null,
 };
 
 pub const PacketScaffold = struct {
@@ -41,6 +61,7 @@ pub const PacketScaffold = struct {
     plan: packet_plan.Plan,
     bands: []subband.Band,
     blocks: []subband.CodeBlock,
+    nominal_bitplanes: ?[33][4]u8 = null,
 
     pub fn deinit(self: *PacketScaffold) void {
         self.allocator.free(self.blocks);
@@ -946,7 +967,12 @@ pub const RpclPacketBandGroups = struct {
             const catalog_index = component_offset + local_index;
             if (catalog_index >= catalog.blocks.len) return PacketScaffoldError.InvalidPacket;
             const encoded = catalog.blocks[catalog_index];
-            const nominal_bitplanes = try reversible53NominalBitplanes(bit_depth, encoded.job.band.kind);
+            // Irreversible tiles carry their signalled per-band Mb table;
+            // the reversible path derives Mb from the bit depth and gain.
+            const nominal_bitplanes = if (scaffold.nominal_bitplanes) |table|
+                table[encoded.job.band.level][@intFromEnum(encoded.job.band.kind)]
+            else
+                try reversible53NominalBitplanes(bit_depth, encoded.job.band.kind);
             out_block.* = try encoded.asEncodedLayerBlock(scaffold, nominal_bitplanes);
         }
 
@@ -1502,6 +1528,7 @@ pub fn buildPacketScaffold(
         .plan = plan,
         .bands = bands,
         .blocks = blocks,
+        .nominal_bitplanes = options.nominal_bitplanes,
     };
 }
 
@@ -1862,11 +1889,18 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
     options: PacketScaffoldOptions,
     style: ebcot.CodeBlockStyle,
 ) !TileRpclEncodeArtifacts {
-    var rct_tile = try forwardRctTile(allocator, source, tile);
+    var rct_tile = if (options.front_end) |front_end|
+        try front_end.build(front_end.context, allocator, source, tile, requested_levels)
+    else
+        try forwardRctTile(allocator, source, tile);
     defer rct_tile.deinit();
 
     const bit_depth = rct_tile.planes.bit_depth;
-    const levels = try forward53TileInPlace(allocator, &rct_tile, requested_levels);
+    // A front end returns already-transformed planes at the requested depth.
+    const levels = if (options.front_end != null)
+        requested_levels
+    else
+        try forward53TileInPlace(allocator, &rct_tile, requested_levels);
 
     var scaffold = try buildPacketScaffold(allocator, rct_tile, levels, options);
     var scaffold_moved = false;
