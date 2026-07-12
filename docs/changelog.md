@@ -45,7 +45,13 @@ entries are grouped by development milestone rather than semantic version.
   use each resolution's exact packet count rather than equal slices, and
   compare every PLT/TLM span against the reference-grid packet plan. A dense
   fixture using LRCP inside COD-RPCL resolution parts is pixel-exact through
-  z2000, OpenJPEG, Grok, and Kakadu. `P` remains gated. Score: 95/100.
+  z2000, OpenJPEG, Grok, and Kakadu.
+- Added reference-grid position POC across `P` tile-parts. The validator
+  compares every composed packet's projected position against canonical PCRL,
+  derives variable per-tile part boundaries from position runs, and checks
+  each PLT/TLM span. The dense 2x2-tile fixture is pixel-exact through z2000,
+  OpenJPEG, Grok, and Kakadu. Main-header POC now covers all direct division
+  modes; tile-part-header POC markers remain gated. Score: 95/100.
 
 ### PPM Framing Foundation
 

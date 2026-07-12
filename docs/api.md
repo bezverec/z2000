@@ -64,7 +64,9 @@ Supported public JP2 profiles are still narrow:
 - checked main-header POC schedules on single- and multi-tile grids with one
   tile-part per tile, plus `R` parts when each resolution is contiguous, `L`
   parts when every quality layer is contiguous, and `C` parts when each RGB
-  component is contiguous; the writer emits the requested order
+  component is contiguous; `P` parts require the canonical PCRL position
+  sequence while allowing packet reordering inside each position. The writer
+  emits the requested order
   independently for each tile and strict decode normalizes each catalog to RPCL
 - a bounded multi-tile lossless envelope: RCT/5-3, one or more quality layers
   for all five progression orders, deterministic row-major encode, reordered
@@ -170,11 +172,12 @@ Notes:
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
 - Strict decode accepts checked main-header `POC` schedules on single- and
-  multi-tile grids with one part per tile or compatible `R`/`L`/`C` parts,
+  multi-tile grids with one part per tile or compatible `R`/`L`/`C`/`P` parts,
   composes overlapping progression intervals without duplicate packets, and
   normalizes the resulting block catalog back to its internal RPCL grouping.
   `LosslessOptions.poc_records` writes the same bounded schedule independently
-  for every tile; `P` POC tile-part layouts remain fail-closed.
+  for every tile. POC markers located inside tile-part headers remain
+  fail-closed; the public writer emits POC only in the main header.
 - `DecodeTimings` reports the strict decode split for metadata, packet catalog,
   T1 block payload, inverse DWT, and inverse MCT. The packet catalog timing is
   further split into SOD/PLT scan, packet-header assembly, and final block

@@ -1446,7 +1446,7 @@ fn encodeLosslessWithOptionsMeasured(
             if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
         } else if (options.tile_part_divisions != null and
             options.tile_part_divisions != 'R' and options.tile_part_divisions != 'L' and
-            options.tile_part_divisions != 'C')
+            options.tile_part_divisions != 'C' and options.tile_part_divisions != 'P')
         {
             return CodestreamError.UnsupportedPayload;
         }
@@ -2376,7 +2376,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             if (ppm_headers != null) return CodestreamError.UnsupportedPayload;
             if (has_multiple_tile_parts) {
                 switch (parsed_progression) {
-                    .rpcl, .lrcp, .cprl => {},
+                    .rpcl, .lrcp, .pcrl, .cprl => {},
                     else => return CodestreamError.UnsupportedPayload,
                 }
             }
@@ -2402,6 +2402,14 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                             try validatePocComponentTilePartSequence(sequence);
                             try validatePocComponentTilePartSpans(spans.items, @intCast(tile_index), sequence.len);
                         },
+                        .pcrl => try validatePocPositionTileParts(
+                            allocator,
+                            sequence,
+                            spans.items,
+                            @intCast(tile_index),
+                            tile_plan,
+                            layers,
+                        ),
                         else => unreachable,
                     }
                 }
@@ -10381,6 +10389,77 @@ fn validatePocComponentTilePartSpans(
     if (part_index != 3) return CodestreamError.InvalidCodestream;
 }
 
+fn validatePocPositionTilePartSequence(
+    allocator: std.mem.Allocator,
+    sequence: []const packet_plan.Packet,
+    plan: packet_plan.Plan,
+    layers: u16,
+) !void {
+    const canonical = packet_plan.positionOrderedPackets(allocator, plan, 3, layers, .pcrl) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return CodestreamError.InvalidCodestream,
+    };
+    defer allocator.free(canonical);
+    if (sequence.len == 0 or sequence.len != canonical.len) return CodestreamError.UnsupportedPayload;
+    for (sequence, canonical) |actual, expected| {
+        const actual_position = packet_plan.packetPosition(plan, actual) catch
+            return CodestreamError.InvalidCodestream;
+        const expected_position = packet_plan.packetPosition(plan, expected) catch
+            return CodestreamError.InvalidCodestream;
+        if (actual_position.x_ref != expected_position.x_ref or actual_position.y_ref != expected_position.y_ref) {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+}
+
+fn validatePocPositionTileParts(
+    allocator: std.mem.Allocator,
+    sequence: []const packet_plan.Packet,
+    spans: []const StrictMultiTileTilePartSpan,
+    tile_index: u16,
+    plan: packet_plan.Plan,
+    layers: u16,
+) !void {
+    try validatePocPositionTilePartSequence(allocator, sequence, plan, layers);
+    var part_count: usize = 0;
+    var packet_index: usize = 0;
+    while (packet_index < sequence.len) : (part_count += 1) {
+        const position = packet_plan.packetPosition(plan, sequence[packet_index]) catch
+            return CodestreamError.InvalidCodestream;
+        packet_index += 1;
+        while (packet_index < sequence.len) : (packet_index += 1) {
+            const next = packet_plan.packetPosition(plan, sequence[packet_index]) catch
+                return CodestreamError.InvalidCodestream;
+            if (next.x_ref != position.x_ref or next.y_ref != position.y_ref) break;
+        }
+    }
+    if (part_count == 0 or part_count > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
+
+    var part_index: usize = 0;
+    packet_index = 0;
+    for (spans) |span| {
+        if (span.tile_index != tile_index) continue;
+        if (part_index >= part_count or packet_index >= sequence.len) return CodestreamError.InvalidCodestream;
+        const first_packet = packet_index;
+        const position = packet_plan.packetPosition(plan, sequence[packet_index]) catch
+            return CodestreamError.InvalidCodestream;
+        packet_index += 1;
+        while (packet_index < sequence.len) : (packet_index += 1) {
+            const next = packet_plan.packetPosition(plan, sequence[packet_index]) catch
+                return CodestreamError.InvalidCodestream;
+            if (next.x_ref != position.x_ref or next.y_ref != position.y_ref) break;
+        }
+        if (span.tile_part_count != @as(u8, @intCast(part_count)) or
+            span.tile_part_index != @as(u8, @intCast(part_index)) or
+            span.first_packet != first_packet or span.packet_count != packet_index - first_packet)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        part_index += 1;
+    }
+    if (part_index != part_count or packet_index != sequence.len) return CodestreamError.InvalidCodestream;
+}
+
 const MultiTilePacketPart = struct {
     tile_index: u16,
     tile_part_index: u8,
@@ -10875,6 +10954,12 @@ fn encodeLosslessMultiTileMeasured(
                 'R' => try validatePocResolutionTilePartSequence(sequence, tile_artifacts.scaffold.plan),
                 'L' => try validatePocLayerTilePartSequence(sequence, encode_options.layers),
                 'C' => try validatePocComponentTilePartSequence(sequence),
+                'P' => try validatePocPositionTilePartSequence(
+                    allocator,
+                    sequence,
+                    tile_artifacts.scaffold.plan,
+                    encode_options.layers,
+                ),
                 else => {},
             }
             try reorderTilePacketStreamFromRpclSequence(

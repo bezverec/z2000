@@ -458,6 +458,34 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessWithOptions(allocator, rgb, component_part_options),
     );
+
+    const position_records = [_]codestream.PocRecord{.{
+        .resolution_start = 0,
+        .component_start = 0,
+        .layer_end = 2,
+        .resolution_end = 3,
+        .component_end = 3,
+        .progression = .pcrl,
+    }};
+    var position_part_options = bad_options;
+    position_part_options.progression = .pcrl;
+    position_part_options.tile_part_divisions = 'P';
+    position_part_options.poc_records = &position_records;
+    const position_part_encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, position_part_options);
+    defer allocator.free(position_part_encoded);
+    var position_part_decoded = try codestream.decodeLosslessTemporary(allocator, position_part_encoded);
+    defer position_part_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, position_part_decoded.samples);
+    const position_part_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, position_part_encoded);
+    defer allocator.free(position_part_wrapped);
+    _ = try jp2.parseInfo(position_part_wrapped);
+
+    position_part_options.poc_records = &component_records;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, position_part_options),
+    );
+
     component_part_options.poc_records = &component_records;
     component_part_options.tile_part_divisions = 'P';
     try std.testing.expectError(

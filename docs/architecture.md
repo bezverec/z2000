@@ -47,8 +47,9 @@ Current RGB TIFF to JP2 encode:
    tile's real packet stream to match it; strict decode consumes the records
    in tile-local T2 state and reorders each decoded catalog back to RPCL.
    Compatible resolution-, layer-, or component-contiguous schedules may
-   cross `R`, `L`, or `C` tile-parts while preserving that state; `P` remains
-   gated.
+   cross `R`, `L`, or `C` tile-parts while preserving that state. `P` parts
+   validate the exact canonical PCRL reference-grid position sequence and may
+   reorder only within a position. Tile-part-header POC markers remain gated.
    `src/ppm.zig` owns the main-header packed-packet framing layer:
    ordered `Zppm` segment collection, cross-segment `Nppm/Ippm` parsing, and
    bounded marker-payload construction. RPCL codestream paths map one globally
