@@ -16382,13 +16382,13 @@ test "PPT packed packet headers roundtrip through strict single-tile decode" {
     options.tile_height = 4096;
     options.layers = 2;
     options.progression = .rpcl;
-    options.tile_part_divisions = null;
+    options.tile_part_divisions = 'R';
     options.sop = false;
     options.eph = false;
     options.ppt = true;
     const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
     defer allocator.free(bytes);
-    try std.testing.expect(countMarker(bytes, codestream.markerValue("ppt")) >= 1);
+    try std.testing.expect(countMarker(bytes, codestream.markerValue("ppt")) >= 3);
 
     var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
     defer decoded.deinit();
@@ -16440,12 +16440,6 @@ test "PPT packed packet headers roundtrip through strict single-tile decode" {
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_options),
-    );
-    var multipart_options = options;
-    multipart_options.tile_part_divisions = 'R';
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, multipart_options),
     );
 }
 

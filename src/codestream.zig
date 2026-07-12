@@ -1427,7 +1427,8 @@ fn encodeLosslessWithOptionsMeasured(
         tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
     };
     if (options.ppt and
-        (!grid.isSingleTile() or options.tile_part_divisions != null or
+        (!grid.isSingleTile() or options.progression != .rpcl or
+            (options.tile_part_divisions != null and options.tile_part_divisions != 'R') or
             options.sop or options.eph or options.emit_temporary_payload_sidecar))
     {
         return CodestreamError.UnsupportedPayload;
@@ -1533,6 +1534,7 @@ fn encodeLosslessWithOptionsMeasured(
 
     if (encode_options.tlm) try appendTlm(allocator, &out, psots[0..tile_parts]);
     var packet_sequence: u16 = 0;
+    var ppt_marker_index: u16 = 0;
     tile_part_index = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
         const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
@@ -1543,7 +1545,14 @@ fn encodeLosslessWithOptionsMeasured(
         try appendSot(allocator, &out, 0, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
         if (encode_options.ppt) {
             try appendPltFromPackedPacketLengths(allocator, &out, packet_lengths, packet_header_lengths);
-            try appendPptPacketHeaders(allocator, &out, packet_lengths, packet_header_lengths, rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end]);
+            try appendPptPacketHeaders(
+                allocator,
+                &out,
+                packet_lengths,
+                packet_header_lengths,
+                rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
+                &ppt_marker_index,
+            );
         } else {
             try appendPltFromRpclPacketLengths(allocator, &out, encode_options, packet_lengths);
         }
@@ -2766,6 +2775,7 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
+    var expected_ppt_index: u16 = 0;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
@@ -2778,7 +2788,7 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
 
@@ -2885,6 +2895,7 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
 
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
+    var expected_ppt_index: u16 = 0;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
@@ -2897,7 +2908,7 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
             if (tile_part.packet_lengths.items.len > 0) {
@@ -4401,7 +4412,8 @@ fn readStrictMultiTileTilePartPacketCatalog(
     defer packet_lengths.deinit(allocator);
     var packed_headers: std.ArrayList(u8) = .empty;
     defer packed_headers.deinit(allocator);
-    const sod = try readTilePartHeaderMarkers(allocator, bytes, span.sot_start + 12, span.end, &packet_lengths, &packed_headers);
+    var expected_ppt_index: u16 = 0;
+    const sod = try readTilePartHeaderMarkers(allocator, bytes, span.sot_start + 12, span.end, &packet_lengths, &packed_headers, &expected_ppt_index);
     if (sod != span.sod) return CodestreamError.InvalidCodestream;
     if (packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
     if (span.missing_plt) {
@@ -5601,6 +5613,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     var packet_sequence: u16 = 0;
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
+    var expected_ppt_index: u16 = 0;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
@@ -5626,7 +5639,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
 
         const entries = if (main_header.tlm_entries) |tlm_slice| tlm_slice else null;
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries, &expected_ppt_index);
             defer tile_part.deinit(allocator);
             if (tile_part.packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
             if (tile_part.packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
@@ -5906,6 +5919,7 @@ fn readStrictSodPacketCatalog(
     var packet_sequence: u16 = 0;
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
+    var expected_ppt_index: u16 = 0;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
@@ -5936,11 +5950,8 @@ fn readStrictSodPacketCatalog(
 
         const tlm_entries = if (main_header.tlm_entries) |tlm_slice| tlm_slice else null;
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index);
             defer tile_part.deinit(allocator);
-            if (tile_part.packed_headers.items.len != 0 and tile_part.sot.tile_part_count != 1) {
-                return CodestreamError.UnsupportedPayload;
-            }
             cursor = tile_part.sod + 2;
             if (tile_part.packet_lengths.items.len == 0) {
                 if (tile_part.packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
@@ -6058,6 +6069,7 @@ fn readStrictTilePartPacketPlan(
 ) !StrictTilePartPacketPlan {
     var result = StrictTilePartPacketPlan{};
     var expected_tile_part_count: ?u8 = null;
+    var expected_ppt_index: u16 = 0;
     var scan = first_sot;
     while (scan < bytes.len) {
         if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
@@ -6077,7 +6089,7 @@ fn readStrictTilePartPacketPlan(
         if (result.count == result.packet_counts.len) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, scan, result.count, &expected_tile_part_count, tlm_entries);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, scan, result.count, &expected_tile_part_count, tlm_entries, &expected_ppt_index);
             defer tile_part.deinit(allocator);
             if (tile_part.packet_lengths.items.len == 0) {
                 result.missing_plt = true;
@@ -6206,7 +6218,8 @@ fn readStrictMultiTileTilePartSpans(
         defer packet_lengths.deinit(allocator);
         var packed_headers: std.ArrayList(u8) = .empty;
         defer packed_headers.deinit(allocator);
-        const sod = try readTilePartHeaderMarkers(allocator, bytes, scan + 12, tile_part_end, &packet_lengths, &packed_headers);
+        var expected_ppt_index: u16 = 0;
+        const sod = try readTilePartHeaderMarkers(allocator, bytes, scan + 12, tile_part_end, &packet_lengths, &packed_headers, &expected_ppt_index);
         if (packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
 
         const tile = grid.tile(sot.tile_index) catch return CodestreamError.InvalidCodestream;
@@ -6280,6 +6293,7 @@ fn readStrictTilePartHeader(
     tile_part_index: usize,
     expected_tile_part_count: *?u8,
     tlm_entries: ?[]const TlmEntry,
+    expected_ppt_index: *u16,
 ) !StrictTilePartHeader {
     const sot = try readStrictSotInfo(bytes, marker_start);
     try validateStrictSotSequence(sot, tile_part_index, expected_tile_part_count);
@@ -6296,7 +6310,15 @@ fn readStrictTilePartHeader(
     errdefer packet_lengths.deinit(allocator);
     var packed_headers: std.ArrayList(u8) = .empty;
     errdefer packed_headers.deinit(allocator);
-    const sod = try readTilePartHeaderMarkers(allocator, bytes, marker_start + 12, tile_part_end, &packet_lengths, &packed_headers);
+    const sod = try readTilePartHeaderMarkers(
+        allocator,
+        bytes,
+        marker_start + 12,
+        tile_part_end,
+        &packet_lengths,
+        &packed_headers,
+        expected_ppt_index,
+    );
     const packet_payload_bytes = try validateStrictTilePartPacketSpan(
         sod,
         tile_part_end,
@@ -7292,10 +7314,10 @@ fn readTilePartHeaderMarkers(
     end: usize,
     packet_lengths: *std.ArrayList(usize),
     packed_headers: *std.ArrayList(u8),
+    expected_ppt_index: *u16,
 ) !usize {
     var cursor = start;
     var expected_plt_index: u8 = 0;
-    var expected_ppt_index: u8 = 0;
     var saw_ppt = false;
     while (cursor + 1 < end) {
         const marker = readU16Be(bytes, cursor);
@@ -7318,11 +7340,14 @@ fn readTilePartHeaderMarkers(
             expected_plt_index += 1;
         } else if (marker == @intFromEnum(Marker.ppt)) {
             const segment = bytes[cursor + 2 .. cursor + segment_length];
-            if (segment.len < 2 or segment[0] != expected_ppt_index) return CodestreamError.InvalidCodestream;
+            if (expected_ppt_index.* > std.math.maxInt(u8) or
+                segment.len < 2 or segment[0] != @as(u8, @intCast(expected_ppt_index.*)))
+            {
+                return CodestreamError.InvalidCodestream;
+            }
             try packed_headers.appendSlice(allocator, segment[1..]);
             saw_ppt = true;
-            if (expected_ppt_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
-            expected_ppt_index += 1;
+            expected_ppt_index.* += 1;
         } else if (marker == @intFromEnum(Marker.com)) {
             // Tile-part comments are metadata only and do not affect packet spans.
         } else if (isUnsupportedTilePartHeaderMarker(marker)) {
@@ -7553,6 +7578,7 @@ fn appendPptPacketHeaders(
     packet_lengths: []const u32,
     header_lengths: []const u32,
     packet_bytes: []const u8,
+    marker_index: *u16,
 ) !void {
     if (packet_lengths.len != header_lengths.len) return CodestreamError.InvalidCodestream;
     var headers: std.ArrayList(u8) = .empty;
@@ -7567,19 +7593,16 @@ fn appendPptPacketHeaders(
     }
     if (cursor != packet_bytes.len or headers.items.len == 0) return CodestreamError.InvalidCodestream;
 
-    var marker_index: u8 = 0;
     var offset: usize = 0;
     while (offset < headers.items.len) {
+        if (marker_index.* > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
         const count = @min(@as(usize, 65532), headers.items.len - offset);
         try appendMarker(allocator, out, .ppt);
         try appendU16Be(allocator, out, @intCast(count + 3));
-        try out.append(allocator, marker_index);
+        try out.append(allocator, @intCast(marker_index.*));
         try out.appendSlice(allocator, headers.items[offset..][0..count]);
         offset += count;
-        if (offset < headers.items.len) {
-            if (marker_index == std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
-            marker_index += 1;
-        }
+        marker_index.* += 1;
     }
 }
 

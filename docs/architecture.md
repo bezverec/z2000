@@ -43,9 +43,10 @@ Current RGB TIFF to JP2 encode:
    packet read/write state, and RPCL packet assembly helpers.
 10. `src/codestream.zig` writes JPEG2000 markers, progression-ordered packet
     payloads, PLT-backed `R`/`L`/`C`/`P` tile-part layouts, and optional debug
-    private `COM` sidecar metadata. The opt-in single-part PPT path separates
-    packed T2 headers from SOD packet bodies and rebuilds the normal internal
-    header+body packet view during strict decode.
+    private `COM` sidecar metadata. The opt-in single-tile PPT path separates
+    packed T2 headers from SOD packet bodies, preserves `Zppt` and tag-tree
+    state across `R` parts, and rebuilds the normal internal header+body packet
+    view during strict decode.
 11. `src/jp2.zig` wraps the codestream in JP2 boxes, using enumerated sRGB
     `colr` by default or restricted ICC `colr` when the TIFF supplied an ICC
     profile.
@@ -371,7 +372,7 @@ These are intentionally not treated as complete yet:
 - multi-tile combinations outside the bounded envelope, including BYPASS
   without TERMALL, division/progression mismatches, and non-empty PLT-less
   multipart tiles;
-- PPM packed headers and PPT combined with multipart tiles or SOP/EPH;
+- PPM packed headers and PPT combined with multiple tiles or SOP/EPH;
 - broader PLT-less foreign decode coverage beyond the current single-tile and
   explicit/default-precinct multi-tile OpenJPEG/Grok/Kakadu lossless matrices;
 - general-purpose lossy decode/error-bound coverage beyond the current narrow
