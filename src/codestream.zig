@@ -1340,6 +1340,11 @@ fn encodeLosslessWithOptionsMeasured(
     {
         encode_options.tile_part_divisions = null;
     }
+    // Per-layer divisions are wired for the multi-tile path; the single-tile
+    // assembler emits one part for them (mirroring the normalization above).
+    if (encode_options.tile_part_divisions == 'L') {
+        encode_options.tile_part_divisions = null;
+    }
 
     var tile_payload: std.ArrayList(u8) = .empty;
     defer tile_payload.deinit(allocator);
@@ -9260,7 +9265,13 @@ fn validateBlockSize(width: u16, height: u16) !void {
 /// implement.
 fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     try validateMultiTileProgression(options.progression, options.layers);
+    try validateTilePartDivisions(options.tile_part_divisions);
     if (options.tile_part_divisions == 'R' and options.progression != .rpcl) {
+        return CodestreamError.UnsupportedPayload;
+    }
+    // Per-layer divisions need layer-contiguous packet ranges inside each
+    // tile, which only LRCP provides (layer is the outermost loop).
+    if (options.tile_part_divisions == 'L' and options.progression != .lrcp) {
         return CodestreamError.UnsupportedPayload;
     }
     if (options.transform != .reversible_5_3) return CodestreamError.UnsupportedPayload;
@@ -9381,6 +9392,51 @@ fn buildMultiTileResolutionParts(
     return parts;
 }
 
+/// Per-layer tile-part division (`L`): LRCP keeps the layer as the outermost
+/// loop inside every tile, so each of the tile's `layers` equal packet
+/// ranges is one layer's worth of packets and becomes its own tile-part.
+fn buildMultiTileLayerParts(
+    allocator: std.mem.Allocator,
+    artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
+    options: LosslessOptions,
+) ![]MultiTileResolutionPart {
+    const parts_per_tile: usize = options.layers;
+    if (parts_per_tile == 0 or parts_per_tile > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
+    const total_parts = try std.math.mul(usize, artifacts.tiles.len, parts_per_tile);
+    const parts = try allocator.alloc(MultiTileResolutionPart, total_parts);
+    errdefer allocator.free(parts);
+
+    var out_index: usize = 0;
+    for (artifacts.tiles) |tile_artifacts| {
+        if (tile_artifacts.tile.index > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+        const total_packets = tile_artifacts.stream.packet_lengths.len;
+        if (total_packets == 0 or total_packets % parts_per_tile != 0) return CodestreamError.InvalidCodestream;
+        const packet_count = total_packets / parts_per_tile;
+        var first_packet: usize = 0;
+        for (0..parts_per_tile) |layer_index| {
+            const packet_end = first_packet + packet_count;
+            const packet_lengths = tile_artifacts.stream.packet_lengths[first_packet..packet_end];
+            const framed_bytes = try rpclPacketPayloadByteCount(options, packet_lengths);
+            const plt_bytes = try pltBytesForRpclPacketLengths(options, packet_lengths);
+            const psot_usize = try std.math.add(usize, 14, try std.math.add(usize, plt_bytes, framed_bytes));
+            const psot = std.math.cast(u32, psot_usize) orelse return CodestreamError.UnsupportedPayload;
+            parts[out_index] = .{
+                .tile_index = @intCast(tile_artifacts.tile.index),
+                .tile_part_index = @intCast(layer_index),
+                .tile_part_count = @intCast(parts_per_tile),
+                .first_packet = first_packet,
+                .packet_count = packet_count,
+                .psot = psot,
+            };
+            out_index += 1;
+            first_packet = packet_end;
+        }
+        if (first_packet != total_packets) return CodestreamError.InvalidCodestream;
+    }
+    if (out_index != parts.len) return CodestreamError.InvalidCodestream;
+    return parts;
+}
+
 fn appendMultiTileTlm(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -9406,13 +9462,14 @@ fn appendMultiTileResolutionPartSequence(
     out: *std.ArrayList(u8),
     artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
     parts: []const MultiTileResolutionPart,
+    parts_per_tile: usize,
     options: LosslessOptions,
 ) !void {
     var part_index: usize = 0;
     for (artifacts.tiles) |tile_artifacts| {
         var packet_sequence: u16 = 0;
         var local_part: usize = 0;
-        while (local_part < @as(usize, tile_artifacts.levels) + 1) : (local_part += 1) {
+        while (local_part < parts_per_tile) : (local_part += 1) {
             if (part_index >= parts.len) return CodestreamError.InvalidCodestream;
             const part = parts[part_index];
             if (part.tile_index != tile_artifacts.tile.index or part.tile_part_index != local_part) {
@@ -9507,9 +9564,17 @@ fn encodeLosslessMultiTileMeasured(
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
 
     const marker_start = monotonicNs();
-    if (encode_options.tile_part_divisions == 'R') {
-        const parts = try buildMultiTileResolutionParts(allocator, artifacts, levels, encode_options);
+    const division = encode_options.tile_part_divisions;
+    if (division == 'R' or division == 'L') {
+        const parts = if (division == 'R')
+            try buildMultiTileResolutionParts(allocator, artifacts, levels, encode_options)
+        else
+            try buildMultiTileLayerParts(allocator, artifacts, encode_options);
         defer allocator.free(parts);
+        const parts_per_tile: usize = if (division == 'R')
+            @as(usize, levels) + 1
+        else
+            encode_options.layers;
 
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -9518,7 +9583,7 @@ fn encodeLosslessMultiTileMeasured(
         try appendCod(allocator, &out, levels, encode_options);
         try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
         if (encode_options.tlm) try appendMultiTileTlm(allocator, &out, parts);
-        try appendMultiTileResolutionPartSequence(allocator, &out, artifacts, parts, encode_options);
+        try appendMultiTileResolutionPartSequence(allocator, &out, artifacts, parts, parts_per_tile, encode_options);
         try appendMarker(allocator, &out, .eoc);
         if (timings) |t| {
             t.marker_ns = elapsedNs(marker_start);
@@ -9589,8 +9654,8 @@ fn validateRates(options: LosslessOptions) !void {
 fn validateTilePartDivisions(value: ?u8) !void {
     const actual = value orelse return;
     switch (actual) {
-        'R' => {},
-        'L', 'C', 'P' => return CodestreamError.UnsupportedPayload,
+        'R', 'L' => {},
+        'C', 'P' => return CodestreamError.UnsupportedPayload,
         else => return CodestreamError.InvalidCodestream,
     }
 }

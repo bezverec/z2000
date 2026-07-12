@@ -7,12 +7,12 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 92/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 93/100 full** as of
 2026-07-12. First drafted at `ba66799`.
 
 ## Next Working Sequence (2026-07-12)
 
-Scorecard now **100/100 narrow, 92/100 full**. The bounded multi-tile path has
+Scorecard now **100/100 narrow, 93/100 full**. The bounded multi-tile path has
 all five progression orders, quality layers including the first tile-local
 rate-target slice, and the implemented resilience matrix. CAUSAL+SEGMARK,
 RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all

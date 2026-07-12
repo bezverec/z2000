@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Per-Layer Tile-Part Divisions (`--tile-parts L`)
+
+- Added the `L` tile-part division for the multi-tile LRCP path: the layer
+  is the outermost packet loop inside every tile, so each tile emits one
+  tile-part per quality layer (TPsot 0..layers-1, TNsot = layers) with its
+  own PLT, reusing the generalized multi-part sequence writer the `R`
+  divisions introduced. The single-tile assembler normalizes `L` to one
+  part (mirroring the existing multi-layer-LRCP `R` normalization), `L`
+  with non-LRCP progressions fails closed, and unknown divisions are now
+  validated on the multi-tile gate too. The decoded side needs no new code:
+  z2000's own `L` output rides the general foreign multi-part tile walk.
+  Coverage: a 4x3 part-layout regression (SOT walk, per-part PLT packet
+  counts, lossless 1/3-thread decode, deterministic re-encode, JP2
+  acceptance, RPCL+L fail-closed, single-tile normalization) plus a live
+  16-tile x 3-layer 2048x2048 smoke decoding pixel-exactly through z2000
+  strict decode, kdu_expand, opj_decompress, and grk_decompress (with
+  `opj -l 1` consuming the layer prefix). Scorecard: full T2 completeness
+  8->9, moving the full codec estimate to 93/100.
+
 ### Global Cross-Tile PCRD Rate Targets
 
 - Replaced the tile-local `--rates` allocation with a global cross-tile PCRD
