@@ -7,13 +7,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ### PPM Framing Foundation
 
-- Added a standalone owned PPM framing component. It joins ordered `Zppm`
+- Added an owned PPM framing component. It joins ordered `Zppm`
   marker payloads even when marker boundaries split `Nppm` or `Ippm`, iterates
   length-delimited tile-part header groups with checked arithmetic, and builds
   bounded marker payloads from groups. Focused tests cover split length/data,
   empty groups, malformed segment order, truncation, the 256-segment ceiling,
-  and the ISO marker-length bound. Main-header PPM remains fail-closed until
-  these groups are connected to strict T2 packet state; the score stays 95/100.
+  and the ISO marker-length bound.
+- Connected PPM to the bounded single-tile RPCL writer and strict reader for
+  one part or `R` resolution parts with SOP/EPH disabled. Each tile-part gets
+  one `Nppm/Ippm` group, PLT measures only SOD bodies, the JP2 wrapper checks
+  marker ordering/conflicts, and strict decode validates all framing and T2
+  state. A 128x128, two-layer, three-part live output decodes pixel-exactly
+  through z2000, OpenJPEG, Grok, and Kakadu. Multi-tile PPM remains fail-closed;
+  the score stays 95/100.
 
 ### PPT Packed Packet Headers
 
@@ -30,7 +36,8 @@ entries are grouped by development milestone rather than semantic version.
   validation, globally ordered tile-local `Zppt` across parts, and fail-closed
   SOP/EPH or multi-tile non-`R` combinations. Live one-part, three-part, and
   16-tile/48-part outputs decode pixel-exactly through z2000, OpenJPEG, Grok,
-  and Kakadu. Main-header PPM remains open; the score stays 95/100.
+  and Kakadu. Single-tile main-header PPM is covered by the newer slice above;
+  multi-tile PPM remains open and the score stays 95/100.
 
 ### Per-Position Tile-Part Divisions (`--tile-parts P`)
 
@@ -43,7 +50,7 @@ entries are grouped by development milestone rather than semantic version.
   strict `P` metadata, threaded determinism, pixel-exact decode, and
   progression mismatch rejection. A live 16-tile/256-part JP2 decodes
   losslessly through z2000, OpenJPEG, Grok, and Kakadu. The score remains
-  95/100 because POC and main-header PPM are still open T2 syntax.
+  95/100 because POC and multi-tile PPM are still open T2 syntax.
 
 ### Per-Component Tile-Part Divisions (`--tile-parts C`)
 

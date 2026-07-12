@@ -61,6 +61,15 @@ pub const PackedHeaders = struct {
         while (try groups.next()) |_| count += 1;
         return count;
     }
+
+    pub fn groupAt(self: PackedHeaders, wanted: usize) !?[]const u8 {
+        var groups = self.iterator();
+        var index: usize = 0;
+        while (try groups.next()) |group| : (index += 1) {
+            if (index == wanted) return group;
+        }
+        return null;
+    }
 };
 
 pub const GroupIterator = struct {
@@ -139,7 +148,7 @@ fn appendU32Be(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u32
     try out.append(allocator, @intCast(value >> 24));
     try out.append(allocator, @intCast(value >> 16));
     try out.append(allocator, @intCast(value >> 8));
-    try out.append(allocator, @intCast(value));
+    try out.append(allocator, @truncate(value));
 }
 
 fn readU32Be(bytes: []const u8, offset: usize) u32 {

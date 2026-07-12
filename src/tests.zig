@@ -61,6 +61,8 @@ test "PPM framing joins marker boundaries and preserves tile-part groups" {
     var assembled = try collector.finish();
     defer assembled.deinit();
     try std.testing.expectEqual(groups.len, try assembled.validate());
+    try std.testing.expectEqualSlices(u8, groups[2], (try assembled.groupAt(2)).?);
+    try std.testing.expect((try assembled.groupAt(groups.len)) == null);
 
     var iterator = assembled.iterator();
     for (groups) |expected| {
@@ -3192,7 +3194,6 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
             .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
             .{ .label = "POC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("poc") },
-            .{ .label = "PPM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppm") },
             .{ .label = "PPT main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppt") },
             .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
         };
@@ -14198,7 +14199,6 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         .{ .label = "PLM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("plm") },
         .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
         .{ .label = "POC main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("poc") },
-        .{ .label = "PPM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppm") },
         .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
         .{ .label = "PPT tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("ppt") },
         .{ .label = "COC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("coc") },
@@ -16550,6 +16550,91 @@ test "PPT packed packet headers roundtrip through strict single and multi-tile d
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessWithOptions(allocator, rgb, wrong_progression),
+    );
+}
+
+test "PPM packed packet headers roundtrip through strict single-tile decode" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.tile_width = 4096;
+    options.tile_height = 4096;
+    options.layers = 2;
+    options.progression = .rpcl;
+    options.tile_part_divisions = 'R';
+    options.sop = false;
+    options.eph = false;
+    options.ppm = true;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    try std.testing.expect(countMarker(bytes, codestream.markerValue("ppm")) > 0);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expect(audit.packets > 0);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(usize, width), info.width);
+
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    var one_part_options = options;
+    one_part_options.tile_part_divisions = null;
+    const one_part = try codestream.encodeLosslessWithOptions(allocator, rgb, one_part_options);
+    defer allocator.free(one_part);
+    var one_part_decoded = try codestream.decodeLosslessTemporary(allocator, one_part);
+    defer one_part_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, one_part_decoded.samples);
+
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const first_ppm = findMarker(corrupted, codestream.markerValue("ppm")) orelse return error.TestUnexpectedResult;
+    corrupted[first_ppm + 4] = 1;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, corrupted),
+    );
+
+    const bad_group_length = try allocator.dupe(u8, bytes);
+    defer allocator.free(bad_group_length);
+    const length_ppm = findMarker(bad_group_length, codestream.markerValue("ppm")) orelse return error.TestUnexpectedResult;
+    bad_group_length[length_ppm + 5] = 0x7f;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, bad_group_length),
+    );
+
+    var conflicting = options;
+    conflicting.ppt = true;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, conflicting),
+    );
+    var multi_tile = options;
+    multi_tile.tile_width = 32;
+    multi_tile.tile_height = 32;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile),
     );
 }
 

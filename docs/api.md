@@ -43,7 +43,7 @@ Important `tiff-to-jp2` options:
 - `--transform 5-3|9-7`
 - `--qstyle none|scalar-derived|scalar-expounded`
 - `--tile-parts none|R|L|C|P`
-- `--sop`, `--eph`, `--ppt`, `--tlm`
+- `--sop`, `--eph`, `--ppm`, `--ppt`, `--tlm`
 - `--t1-backend iso-mq|legacy-mq`
 - `--bypass`
 - `--threads N`
@@ -76,13 +76,17 @@ Supported public JP2 profiles are still narrow:
   single-tile streams use one part or `R` resolution parts, and multi-tile
   streams require `R` parts; PLT measures SOD packet bodies while PPT carries
   one ordered T2 header stream per tile across its parts
+- main-header packed packet headers via `--ppm` for single-tile RPCL with one
+  part or `R` resolution parts and SOP/EPH disabled; one checked `Nppm/Ippm`
+  group maps to each tile-part and drives the same strict T2 packed-header path
 
 Unsupported combinations still fail closed. Examples include tile-part
 division/progression mismatches, JPX features, unsupported component layouts,
 and profile mixes outside the bounded envelope. In
 multi-tile mode, BYPASS without TERMALL and non-empty PLT-less multipart tiles
-also remain unsupported. PPM and SOP/EPH PPT combinations remain fail-closed;
-multi-tile PPT additionally rejects non-`R` layouts.
+also remain unsupported. Multi-tile PPM and SOP/EPH packed-header combinations
+remain fail-closed; PPM/PPT are mutually exclusive and multi-tile PPT
+additionally rejects non-`R` layouts.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
 smoke tests cover the common no-EPH and archival EPH paths, while
 valid2000/jpylyzer-style validators remain diagnostic gates rather than
