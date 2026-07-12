@@ -72,16 +72,17 @@ Supported public JP2 profiles are still narrow:
 - all six Part 1 code-block style bits in the documented ISO-MQ envelope,
   including BYPASS, RESET, TERMALL, vertical-causal, predictable termination,
   segmentation symbols, and their tested combinations
-- tile-part packed packet headers via `--ppt` for single-tile RPCL, with one
-  part or `R` resolution parts and SOP/EPH disabled; PLT then measures SOD
-  packet bodies while PPT carries one ordered T2 header stream across parts
+- tile-part packed packet headers via `--ppt` for RPCL with SOP/EPH disabled:
+  single-tile streams use one part or `R` resolution parts, and multi-tile
+  streams require `R` parts; PLT measures SOD packet bodies while PPT carries
+  one ordered T2 header stream per tile across its parts
 
 Unsupported combinations still fail closed. Examples include tile-part
 division/progression mismatches, JPX features, unsupported component layouts,
 and profile mixes outside the bounded envelope. In
 multi-tile mode, BYPASS without TERMALL and non-empty PLT-less multipart tiles
-also remain unsupported. PPM and multi-tile/SOP/EPH PPT combinations remain
-fail-closed.
+also remain unsupported. PPM and SOP/EPH PPT combinations remain fail-closed;
+multi-tile PPT additionally rejects non-`R` layouts.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
 smoke tests cover the common no-EPH and archival EPH paths, while
 valid2000/jpylyzer-style validators remain diagnostic gates rather than

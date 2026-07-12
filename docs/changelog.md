@@ -7,18 +7,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ### PPT Packed Packet Headers
 
-- Added a real opt-in `--ppt` encode/decode path for single-tile RPCL JP2
-  streams with one part or `R` resolution parts and SOP/EPH disabled. The
+- Added a real opt-in `--ppt` encode/decode path for RPCL JP2 streams with
+  SOP/EPH disabled. Single-tile streams support one part or `R` resolution
+  parts; multi-tile streams require `R` parts and preserve independent `Zppt`
+  and T2 precinct/tag-tree state for each tile. The
   writer concatenates byte-stuffed T2
   headers into ordered PPT segments, writes PLT lengths for SOD packet bodies,
   and emits bodies without inline headers. Strict decode parses the packed
   header stream with persistent precinct/tag-tree state and reconstructs the
   normal internal header+body packet view. Coverage includes multi-layer
   roundtrip, empty packets with zero-length bodies, malformed `Zppt`, wrapper
-  validation, globally ordered `Zppt` across parts, and fail-closed
-  SOP/multi-tile combinations. Live one- and three-part outputs decode
-  pixel-exactly through z2000, OpenJPEG, Grok, and Kakadu. Multi-tile PPT and
-  main-header PPM remain open; the score stays 95/100.
+  validation, globally ordered tile-local `Zppt` across parts, and fail-closed
+  SOP/EPH or multi-tile non-`R` combinations. Live one-part, three-part, and
+  16-tile/48-part outputs decode pixel-exactly through z2000, OpenJPEG, Grok,
+  and Kakadu. Main-header PPM remains open; the score stays 95/100.
 
 ### Per-Position Tile-Part Divisions (`--tile-parts P`)
 
@@ -31,7 +33,7 @@ entries are grouped by development milestone rather than semantic version.
   strict `P` metadata, threaded determinism, pixel-exact decode, and
   progression mismatch rejection. A live 16-tile/256-part JP2 decodes
   losslessly through z2000, OpenJPEG, Grok, and Kakadu. The score remains
-  95/100 because POC and PPM/PPT are still open T2 syntax.
+  95/100 because POC and main-header PPM are still open T2 syntax.
 
 ### Per-Component Tile-Part Divisions (`--tile-parts C`)
 
@@ -43,7 +45,7 @@ entries are grouped by development milestone rather than semantic version.
   deterministic across thread counts and roundtrips losslessly; the live JP2
   smoke is pixel-exact through z2000, OpenJPEG, Grok, and Kakadu. `C` with a
   non-CPRL order fails closed. The subsequent `P` slice above completes the
-  direct tile-part division set; POC, PPM, and multi-tile PPT remain open T2 work.
+  direct tile-part division set; POC and PPM remain open T2 work.
 
 ### Origin-Aware Multi-Tile Irreversible 9/7
 

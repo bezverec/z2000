@@ -16363,7 +16363,7 @@ test "multi-tile precinct tile-part divisions follow PCRL position groups" {
     );
 }
 
-test "PPT packed packet headers roundtrip through strict single-tile decode" {
+test "PPT packed packet headers roundtrip through strict single and multi-tile decode" {
     const allocator = std.testing.allocator;
     const width = 64;
     const height = 64;
@@ -16437,9 +16437,60 @@ test "PPT packed packet headers roundtrip through strict single-tile decode" {
     var multi_tile_options = options;
     multi_tile_options.tile_width = 32;
     multi_tile_options.tile_height = 32;
+    const multi_tile_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_options);
+    defer allocator.free(multi_tile_bytes);
+    try std.testing.expect(countMarker(multi_tile_bytes, codestream.markerValue("ppt")) >= 12);
+
+    var multi_tile_decoded = try codestream.decodeLosslessTemporary(allocator, multi_tile_bytes);
+    defer multi_tile_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, multi_tile_decoded.samples);
+    const multi_tile_audit = try codestream.auditStrictPacketHeaders(allocator, multi_tile_bytes);
+    try std.testing.expect(multi_tile_audit.packets > 0);
+
+    var threaded_options = multi_tile_options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, multi_tile_bytes, threaded);
+
+    const multi_tile_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, multi_tile_bytes);
+    defer allocator.free(multi_tile_wrapped);
+    const multi_tile_info = try jp2.parseInfo(multi_tile_wrapped);
+    try std.testing.expectEqual(@as(usize, width), multi_tile_info.width);
+
+    const corrupted_tile_state = try allocator.dupe(u8, multi_tile_bytes);
+    defer allocator.free(corrupted_tile_state);
+    var second_tile_sot: usize = 0;
+    for (0..4) |_| {
+        second_tile_sot = findMarkerAfter(
+            corrupted_tile_state,
+            codestream.markerValue("sot"),
+            second_tile_sot,
+        ) orelse return error.TestUnexpectedResult;
+        second_tile_sot += 2;
+    }
+    const second_tile_ppt = findMarkerAfter(
+        corrupted_tile_state,
+        codestream.markerValue("ppt"),
+        second_tile_sot,
+    ) orelse return error.TestUnexpectedResult;
+    corrupted_tile_state[second_tile_ppt + 4] = 1;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, corrupted_tile_state),
+    );
+
+    var no_division = multi_tile_options;
+    no_division.tile_part_divisions = null;
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_options),
+        codestream.encodeLosslessWithOptions(allocator, rgb, no_division),
+    );
+    var wrong_progression = multi_tile_options;
+    wrong_progression.progression = .pcrl;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, wrong_progression),
     );
 }
 
