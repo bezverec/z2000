@@ -90,6 +90,17 @@ tiles that clamp DWT levels (§2.3).
 Single-tile behavior stays **byte-identical** — every increment keeps
 `tile == image` on the exact current code path.
 
+### 3.1 Current POC extension
+
+Main-header POC now composes one checked, duplicate-free schedule per tile.
+The public writer/strict reader supports either one part per tile or `L`
+tile-parts when the resulting packet sequence keeps each quality layer in one
+contiguous range. Inclusion/zero-bitplane tag trees and `numlenbits` remain
+tile-local and persist across the layer-part boundary. The dense regression
+uses 8x8 precincts and 4x4 blocks so LRCP and RPCL are observably different;
+z2000, OpenJPEG, and Kakadu decode it losslessly. `R`, `C`, and `P` POC
+divisions remain fail-closed until equivalent boundary validators land.
+
 ## 4. Staged plan (each stage = one PR, green tests, narrow path untouched)
 
 ### Stage A — Encode integration — ✅ DONE

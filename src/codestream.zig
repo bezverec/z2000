@@ -1438,11 +1438,15 @@ fn encodeLosslessWithOptionsMeasured(
         tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
     };
     if (options.ppm and options.ppt) return CodestreamError.UnsupportedPayload;
-    if (options.poc_records.len != 0 and
-        (options.tile_part_divisions != null or options.ppm or options.ppt or
-            options.emit_temporary_payload_sidecar))
-    {
-        return CodestreamError.UnsupportedPayload;
+    if (options.poc_records.len != 0) {
+        if (options.ppm or options.ppt or options.emit_temporary_payload_sidecar) {
+            return CodestreamError.UnsupportedPayload;
+        }
+        if (grid.isSingleTile()) {
+            if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
+        } else if (options.tile_part_divisions != null and options.tile_part_divisions != 'L') {
+            return CodestreamError.UnsupportedPayload;
+        }
     }
     if (options.ppm or options.ppt) {
         if (options.progression != .rpcl or options.sop or options.eph or options.emit_temporary_payload_sidecar) {
@@ -2366,7 +2370,10 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             has_multiple_tile_parts = has_multiple_tile_parts or span.tile_part_count > 1;
         }
         if (poc_records.items.len != 0) {
-            if (has_multiple_tile_parts or ppm_headers != null) return CodestreamError.UnsupportedPayload;
+            if (ppm_headers != null) return CodestreamError.UnsupportedPayload;
+            if (has_multiple_tile_parts and parsed_progression != .lrcp) {
+                return CodestreamError.UnsupportedPayload;
+            }
             var tile_index: u32 = 0;
             while (tile_index < grid.tileCount()) : (tile_index += 1) {
                 const tile = grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
@@ -2375,6 +2382,10 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                     error.OutOfMemory => return err,
                     else => return CodestreamError.InvalidCodestream,
                 };
+                if (has_multiple_tile_parts) {
+                    try validatePocLayerTilePartSequence(sequence, layers);
+                    try validatePocLayerTilePartSpans(spans.items, @intCast(tile_index), sequence.len, layers);
+                }
                 allocator.free(sequence);
             }
         }
@@ -4742,7 +4753,6 @@ fn readStrictMultiTilePacketCatalogForTile(
     // Single-part tiles were already reordered per part; multi-part tiles
     // join their parts in stream (progression) order first, so non-RPCL
     // sequences reorder here once the whole tile is assembled.
-    if (poc_records != null and part_count > 1) return CodestreamError.UnsupportedPayload;
     if ((progression != .rpcl or poc_records != null) and part_count > 1) {
         try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, layers);
     }
@@ -10227,6 +10237,48 @@ fn validateMultiTileDecodeGeometry(grid: tile_grid.Grid, levels: u8, options: Lo
     }
 }
 
+fn validatePocLayerTilePartSequence(sequence: []const packet_plan.Packet, layers: u16) !void {
+    const layer_count = @as(usize, layers);
+    if (layer_count == 0 or layer_count > std.math.maxInt(u8) or sequence.len == 0 or
+        sequence.len % layer_count != 0)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    const packets_per_layer = sequence.len / layer_count;
+    for (0..layer_count) |layer| {
+        const start = layer * packets_per_layer;
+        for (sequence[start..][0..packets_per_layer]) |packet| {
+            if (packet.layer != @as(u16, @intCast(layer))) return CodestreamError.UnsupportedPayload;
+        }
+    }
+}
+
+fn validatePocLayerTilePartSpans(
+    spans: []const StrictMultiTileTilePartSpan,
+    tile_index: u16,
+    packet_count: usize,
+    layers: u16,
+) !void {
+    const layer_count = @as(usize, layers);
+    if (layer_count == 0 or layer_count > std.math.maxInt(u8) or packet_count % layer_count != 0) {
+        return CodestreamError.InvalidCodestream;
+    }
+    const packets_per_layer = packet_count / layer_count;
+    var part_index: usize = 0;
+    for (spans) |span| {
+        if (span.tile_index != tile_index) continue;
+        if (part_index >= layer_count or span.tile_part_count != @as(u8, @intCast(layers)) or
+            span.tile_part_index != @as(u8, @intCast(part_index)) or
+            span.first_packet != part_index * packets_per_layer or
+            span.packet_count != packets_per_layer)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        part_index += 1;
+    }
+    if (part_index != layer_count) return CodestreamError.InvalidCodestream;
+}
+
 const MultiTilePacketPart = struct {
     tile_index: u16,
     tile_part_index: u8,
@@ -10717,6 +10769,9 @@ fn encodeLosslessMultiTileMeasured(
                 else => return CodestreamError.InvalidCodestream,
             };
             defer allocator.free(sequence);
+            if (encode_options.tile_part_divisions == 'L') {
+                try validatePocLayerTilePartSequence(sequence, encode_options.layers);
+            }
             try reorderTilePacketStreamFromRpclSequence(
                 allocator,
                 &tile_artifacts.stream,
@@ -10746,6 +10801,9 @@ fn encodeLosslessMultiTileMeasured(
         try appendSiz(allocator, &out, rgb, encode_options);
         try appendCod(allocator, &out, levels, encode_options);
         try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+        if (encode_options.poc_records.len != 0) {
+            try appendPoc(allocator, &out, levels, encode_options);
+        }
         if (encode_options.tlm) try appendMultiTileTlm(allocator, &out, parts);
         if (encode_options.ppm) try appendMultiTilePpm(allocator, &out, artifacts, parts);
         try appendMultiTilePacketPartSequence(allocator, &out, artifacts, parts, encode_options);

@@ -74,11 +74,12 @@ interop gate.
 
 ## Next Implementation Slice
 
-1. Extend the landed single- and multi-tile main-header POC writer/reader
-   across divided tile-parts. The current one-part-per-tile writer is lossless
-   through z2000, OpenJPEG, and Kakadu; Grok 20.3.6 misdecodes the same
-   schedule from both z2000 and Kakadu. Keep divided profiles fail-closed until
-   their schedule and T2 state roundtrip through independent decoders.
+1. Extend the landed single-/multi-tile main-header POC writer/reader from
+   compatible `L` layer parts to `R`, `C`, and `P` divided layouts. The
+   one-part and dense `L` profiles are lossless through z2000, OpenJPEG, and
+   Kakadu; Grok 20.3.6 misdecodes the same schedule from both z2000 and Kakadu.
+   Keep each remaining division fail-closed until its schedule boundaries and
+   persistent T2 state roundtrip through independent decoders.
 2. Obtain or generate an independent foreign multi-tile/multi-part PPM fixture
    and isolate Grok 20.3.6's remaining mismatch; z2000/OpenJPEG/Kakadu already
    agree on the PLT-less output. Keep SOP/EPH combinations fail-closed until

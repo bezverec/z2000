@@ -403,10 +403,37 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     defer allocator.free(multi_wrapped);
     _ = try jp2.parseInfo(multi_wrapped);
 
-    bad_options.tile_part_divisions = 'R';
+    var layer_part_options = bad_options;
+    layer_part_options.progression = .lrcp;
+    layer_part_options.tile_part_divisions = 'L';
+    const layer_part_encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, layer_part_options);
+    defer allocator.free(layer_part_encoded);
+    var layer_part_decoded = try codestream.decodeLosslessTemporary(allocator, layer_part_encoded);
+    defer layer_part_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, layer_part_decoded.samples);
+    const layer_part_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, layer_part_encoded);
+    defer allocator.free(layer_part_wrapped);
+    _ = try jp2.parseInfo(layer_part_wrapped);
+
+    layer_part_options.tile_part_divisions = 'R';
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, bad_options),
+        codestream.encodeLosslessWithOptions(allocator, rgb, layer_part_options),
+    );
+
+    const interleaved_records = [_]codestream.PocRecord{.{
+        .resolution_start = 0,
+        .component_start = 0,
+        .layer_end = 2,
+        .resolution_end = 3,
+        .component_end = 3,
+        .progression = .rpcl,
+    }};
+    layer_part_options.tile_part_divisions = 'L';
+    layer_part_options.poc_records = &interleaved_records;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, layer_part_options),
     );
 }
 

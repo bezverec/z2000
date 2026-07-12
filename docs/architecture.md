@@ -46,6 +46,8 @@ Current RGB TIFF to JP2 encode:
    single- and multi-tile writer serializes that schedule and permutes each
    tile's real packet stream to match it; strict decode consumes the records
    in tile-local T2 state and reorders each decoded catalog back to RPCL.
+   Compatible layer-contiguous schedules may cross `L` tile-parts while
+   preserving that state; other POC tile-part divisions remain gated.
    `src/ppm.zig` owns the main-header packed-packet framing layer:
    ordered `Zppm` segment collection, cross-segment `Nppm/Ippm` parsing, and
    bounded marker-payload construction. RPCL codestream paths map one globally
