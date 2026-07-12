@@ -9,7 +9,7 @@ implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
 of 2026-07-12, the narrow RGB lossless JP2 target is estimated at **100/100**;
-the broader JPEG2000 Part 1 codec family is estimated at **92/100**.
+the broader JPEG2000 Part 1 codec family is estimated at **93/100**.
 
 ## Features
 
@@ -144,7 +144,7 @@ Packet, layer, and geometry options:
 | `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |
 | `--block N` | Square code-block size. |
 | `--tile W,H` | Tile size. Multi-tile support is the bounded reference-grid lossless envelope (explicit, default, or odd-origin partitions). |
-| `--tile-parts none|R` | Tile-part division mode. Other divisions stay fail-closed. |
+| `--tile-parts none|R|L` | Tile-part division mode: one part per tile, per resolution (RPCL), or per layer (LRCP, multi-tile). `C`/`P` stay fail-closed. |
 
 Marker, T1, and diagnostics:
 
