@@ -15807,6 +15807,110 @@ test "multi-tile reference-grid precinct and code-block partitions roundtrip" {
     try std.testing.expectEqualSlices(u8, bytes, threaded);
 }
 
+test "multi-tile irreversible 9/7 roundtrips within lossy tolerance" {
+    // The irreversible tile front end (ICT + 9/7 + deadzone quantization)
+    // hooks into the transform-agnostic tile pipeline, with per-band Mb
+    // taken from the signalled irreversible step exponents. Tile origins
+    // are multiples of 2^levels, so tile-local lifting parity matches the
+    // reference grid.
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const i = (y * width + x) * 3;
+            samples[i + 0] = @intCast((x * 4) % 256);
+            samples[i + 1] = @intCast((y * 4) % 256);
+            samples[i + 2] = @intCast((x * 2 + y * 2) % 256);
+        }
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Scenario = struct { label: []const u8, quantization: codestream.QuantizationStyle };
+    const scenarios = [_]Scenario{
+        .{ .label = "scalar-expounded", .quantization = .scalar_expounded },
+        .{ .label = "scalar-derived", .quantization = .scalar_derived },
+    };
+    for (scenarios) |scenario| {
+        errdefer std.debug.print("multi-tile 9/7 scenario failed: {s}\n", .{scenario.label});
+        var options = multi_tile_test_options;
+        options.transform = .irreversible_9_7;
+        options.mct = .ict;
+        options.quantization = scenario.quantization;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+
+        try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        // SPcod transform byte 0x00 = irreversible 9/7.
+        try std.testing.expectEqual(@as(u8, 0x00), bytes[cod + 13]);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        var max_diff: i32 = 0;
+        for (samples, decoded.samples) |expected, actual| {
+            const diff = @as(i32, expected) - @as(i32, actual);
+            max_diff = @max(max_diff, @as(i32, @intCast(@abs(diff))));
+        }
+        try std.testing.expect(max_diff <= 8);
+
+        var threaded_decode = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = 3 });
+        defer threaded_decode.deinit();
+        try std.testing.expectEqualSlices(u16, decoded.samples, threaded_decode.samples);
+
+        var threaded_options = options;
+        threaded_options.threads = 3;
+        const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(@as(usize, width), info.width);
+    }
+
+    // Rate targets stay fail-closed for irreversible tiles until the 9/7
+    // PCRD weights are wired.
+    {
+        var options = multi_tile_test_options;
+        options.transform = .irreversible_9_7;
+        options.mct = .ict;
+        options.quantization = .scalar_expounded;
+        options.layers = 2;
+        options.rates[0] = 8.0;
+        options.rates[1] = 1.0;
+        options.rate_count = 2;
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.encodeLosslessWithOptions(allocator, rgb, options),
+        );
+    }
+
+    // Odd tile origins fail closed: tile-local 9/7 lifting parity would
+    // diverge from the reference grid.
+    {
+        var options = multi_tile_test_options;
+        options.transform = .irreversible_9_7;
+        options.mct = .ict;
+        options.quantization = .scalar_expounded;
+        options.tile_width = 30;
+        options.tile_height = 30;
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.encodeLosslessWithOptions(allocator, rgb, options),
+        );
+    }
+}
+
 test "multi-tile layer tile-part divisions emit one part per layer per tile" {
     // `--tile-parts L` with LRCP: the layer is the outermost packet loop in
     // every tile, so each tile splits into `layers` tile-parts at layer
@@ -16501,11 +16605,18 @@ test "multi-tile encode fails closed outside the bounded envelope" {
                 options.emit_temporary_payload_sidecar = true;
             }
         }.mutate },
-        .{ .label = "lossy 9/7", .mutate = struct {
+        // Irreversible 9/7 multi-tile encode is supported now (aligned tile
+        // origins); its roundtrip lives in "multi-tile irreversible 9/7
+        // roundtrips within lossy tolerance". Rates with 9/7 tiles stay
+        // fail-closed there.
+        .{ .label = "lossy 9/7 with rate targets", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.transform = .irreversible_9_7;
                 options.mct = .ict;
                 options.quantization = .scalar_expounded;
+                options.layers = 2;
+                options.rate_count = 1;
+                options.rates[0] = 4.0;
             }
         }.mutate },
         .{ .label = "resolution tile-parts with non-RPCL progression", .mutate = struct {

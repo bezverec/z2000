@@ -9,7 +9,7 @@ implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
 of 2026-07-12, the narrow RGB lossless JP2 target is estimated at **100/100**;
-the broader JPEG2000 Part 1 codec family is estimated at **93/100**.
+the broader JPEG2000 Part 1 codec family is estimated at **94/100**.
 
 ## Features
 
@@ -19,7 +19,7 @@ the broader JPEG2000 Part 1 codec family is estimated at **93/100**.
 - Lossless RGB path: RCT, reversible 5/3 DWT, RPCL and other bounded
   progression orders, quality layers, PLT/TLM, strict no-sidecar decode.
 - Lossy experimental path: ICT, irreversible 9/7 DWT, scalar-derived or
-  scalar-expounded quantization.
+  scalar-expounded quantization, single-tile and aligned multi-tile.
 - All six JPEG2000 code-block style bits (BYPASS, RESET, terminate-all,
   vertical-causal, predictable termination, segmentation symbols) in every
   combination, with three-decoder interop coverage on the ISO-MQ path.
