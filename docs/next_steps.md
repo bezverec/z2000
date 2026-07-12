@@ -10,6 +10,26 @@ Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 the subsequent JP2/T2/T1/profile work is **100/100 narrow, 95/100 full** as of
 2026-07-12. First drafted at `ba66799`.
 
+## Path From 95 To 100 (2026-07-12 assessment)
+
+The remaining five full-codec points are each a genuine vertical or a research
+effort, not an incremental gate. Tooling reality on the benchmark box was
+probed on 2026-07-12; findings inline. Ordered by *value per unit risk*.
+
+| Row | Gap | Size | Risk | Verifiable here? |
+| --- | --- | --- | --- | --- |
+| Core syntax 14→15 · Containers 8→10 | **N6: component-generic pipeline** (grayscale/1-component then N-component, palette expansion) | LARGE (multi-PR, like the multi-tile campaign) | HIGH — reworks the `color.RctPlanes` y/cb/cr representation (87 call sites) the 100/100 narrow path rides on | Yes: TIFF grayscale I/O + OpenJPEG/Grok/Kakadu grayscale interop |
+| T2 9→10 · Core syntax +1 | **POC** (progression-order-change marker + multi-chunk packet scheduling) | Medium (1–2 PRs) | Medium (new encode+decode path; narrow path untouched) | Weak: OpenJPEG `-POC` is finicky and did not emit a `POC` marker in a single-tile probe; needs a reliable POC fixture source before claiming interop |
+| T2 9→10 | **PPM/PPT** packed packet headers | Small–medium (decode-side marker parse + header redirection) | Low | **No**: neither Kakadu nor OpenJPEG default output emits `PPM`/`PPT`; only synthetic fixtures available, so no independent-decoder cross-check |
+| Lossy 14→15 | **PCRD PSNR gap** (encoder distortion model) + **odd-origin 9/7 lifting** | PCRD = research (0.7–1.8 dB vs OpenJPEG at matched bytes, `tools/pcrd_psnr_ladder.ps1`); odd-origin 9/7 = small–medium 4-lift boundary math | PCRD medium/uncertain (no guaranteed linear progress); odd-origin medium (lifting-parity correctness) | PCRD yes (the ladder tool); odd-origin partial (reference-relative PSNR, not bit-exact) |
+| Containers 8→10 | mixed per-component precision (`BPCC`) + alpha channels | Medium; couples to N6's per-component depth work | Medium | Yes: reference grayscale/mixed-precision files |
+
+Recommended order when resuming the push: **POC** (best contained value if a
+reliable fixture source is found) or **N6** (biggest unlock but budget it as a
+multi-PR campaign that keeps the single-tile RGB path byte-identical at every
+step). The PCRD PSNR gap is the one item with no guaranteed linear progress and
+should be treated as research, measured against `pcrd_psnr_ladder.ps1`.
+
 ## Next Working Sequence (2026-07-12)
 
 Scorecard now **100/100 narrow, 95/100 full**. The bounded multi-tile path has
