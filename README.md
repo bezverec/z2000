@@ -140,7 +140,7 @@ Packet, layer, and geometry options:
 | `--levels N` | Number of DWT decomposition levels. |
 | `--resolutions N` | Alternative to `--levels`; resolutions are levels + 1. |
 | `--progression RPCL|LRCP|RLCP|PCRL|CPRL` | JPEG2000 progression order. Supported paths are still profile-bounded and fail closed when unsafe. |
-| `--poc "RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;..."` | Main-header progression changes. Complete schedules support one part per tile, contiguous-layer `L` parts, or contiguous-component `C` parts; `R`/`P` layouts fail closed. Omitted `--tile-parts` is normalized to `none`. |
+| `--poc "RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;..."` | Main-header progression changes. Complete schedules support one part per tile and compatible resolution (`R`), layer (`L`), or component (`C`) parts; `P` layouts fail closed. Omitted `--tile-parts` is normalized to `none`. |
 | `--layers N` | Number of quality layers (untargeted even split). When `--rates` is given, the rate-list length sets the layer count and overrides `--layers`. |
 | `--rates R1,R2,...` | Compression-ratio targets for layered output, referenced to the total compressed payload (unlike OpenJPEG's `-r`, which references the uncompressed size). The final layer always carries the complete stream, so end the list with `1` for an explicit lossless-final ladder. Single- and multi-tile paths use global PCRD; single-tile also charges measured packet-header bytes directly. |
 | `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |

@@ -1445,7 +1445,8 @@ fn encodeLosslessWithOptionsMeasured(
         if (grid.isSingleTile()) {
             if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
         } else if (options.tile_part_divisions != null and
-            options.tile_part_divisions != 'L' and options.tile_part_divisions != 'C')
+            options.tile_part_divisions != 'R' and options.tile_part_divisions != 'L' and
+            options.tile_part_divisions != 'C')
         {
             return CodestreamError.UnsupportedPayload;
         }
@@ -2375,7 +2376,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             if (ppm_headers != null) return CodestreamError.UnsupportedPayload;
             if (has_multiple_tile_parts) {
                 switch (parsed_progression) {
-                    .lrcp, .cprl => {},
+                    .rpcl, .lrcp, .cprl => {},
                     else => return CodestreamError.UnsupportedPayload,
                 }
             }
@@ -2389,6 +2390,10 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 };
                 if (has_multiple_tile_parts) {
                     switch (parsed_progression) {
+                        .rpcl => {
+                            try validatePocResolutionTilePartSequence(sequence, tile_plan);
+                            try validatePocResolutionTilePartSpans(spans.items, @intCast(tile_index), tile_plan);
+                        },
                         .lrcp => {
                             try validatePocLayerTilePartSequence(sequence, layers);
                             try validatePocLayerTilePartSpans(spans.items, @intCast(tile_index), sequence.len, layers);
@@ -10267,6 +10272,56 @@ fn validatePocLayerTilePartSequence(sequence: []const packet_plan.Packet, layers
     }
 }
 
+fn validatePocResolutionTilePartSequence(
+    sequence: []const packet_plan.Packet,
+    plan: packet_plan.Plan,
+) !void {
+    if (plan.resolution_count == 0 or sequence.len == 0) return CodestreamError.UnsupportedPayload;
+    var packet_index: usize = 0;
+    for (plan.resolutions[0..plan.resolution_count], 0..) |resolution, resolution_index| {
+        const packet_count = std.math.cast(usize, resolution.packets) orelse
+            return CodestreamError.UnsupportedPayload;
+        const end = std.math.add(usize, packet_index, packet_count) catch
+            return CodestreamError.UnsupportedPayload;
+        if (packet_count == 0 or end > sequence.len) return CodestreamError.UnsupportedPayload;
+        for (sequence[packet_index..end]) |packet| {
+            if (packet.resolution != @as(u8, @intCast(resolution_index))) {
+                return CodestreamError.UnsupportedPayload;
+            }
+        }
+        packet_index = end;
+    }
+    if (packet_index != sequence.len) return CodestreamError.UnsupportedPayload;
+}
+
+fn validatePocResolutionTilePartSpans(
+    spans: []const StrictMultiTileTilePartSpan,
+    tile_index: u16,
+    plan: packet_plan.Plan,
+) !void {
+    const part_count = @as(usize, plan.resolution_count);
+    if (part_count == 0 or part_count > std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
+    var part_index: usize = 0;
+    var first_packet: usize = 0;
+    for (spans) |span| {
+        if (span.tile_index != tile_index) continue;
+        if (part_index >= part_count) return CodestreamError.InvalidCodestream;
+        const packet_count = std.math.cast(usize, plan.resolutions[part_index].packets) orelse
+            return CodestreamError.InvalidCodestream;
+        if (span.tile_part_count != @as(u8, @intCast(part_count)) or
+            span.tile_part_index != @as(u8, @intCast(part_index)) or
+            span.first_packet != first_packet or span.packet_count != packet_count)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        first_packet = try std.math.add(usize, first_packet, packet_count);
+        part_index += 1;
+    }
+    if (part_index != part_count or first_packet != plan.packets) {
+        return CodestreamError.InvalidCodestream;
+    }
+}
+
 fn validatePocLayerTilePartSpans(
     spans: []const StrictMultiTileTilePartSpan,
     tile_index: u16,
@@ -10817,6 +10872,7 @@ fn encodeLosslessMultiTileMeasured(
             };
             defer allocator.free(sequence);
             switch (encode_options.tile_part_divisions orelse 0) {
+                'R' => try validatePocResolutionTilePartSequence(sequence, tile_artifacts.scaffold.plan),
                 'L' => try validatePocLayerTilePartSequence(sequence, encode_options.layers),
                 'C' => try validatePocComponentTilePartSequence(sequence),
                 else => {},

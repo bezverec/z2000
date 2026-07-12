@@ -313,10 +313,9 @@ test "strict decode consumes single- and multi-tile main-header POC schedules" {
         &rpcl_poc_payload,
     );
     defer allocator.free(divided_poc);
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessTemporary(allocator, divided_poc),
-    );
+    var divided_decoded = try codestream.decodeLosslessTemporary(allocator, divided_poc);
+    defer divided_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, divided_decoded.samples);
 }
 
 test "POC writer emits scheduled single- and multi-tile packet streams" {
@@ -464,6 +463,51 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessWithOptions(allocator, rgb, component_part_options),
+    );
+
+    const resolution_records = [_]codestream.PocRecord{
+        .{
+            .resolution_start = 0,
+            .component_start = 0,
+            .layer_end = 2,
+            .resolution_end = 1,
+            .component_end = 3,
+            .progression = .lrcp,
+        },
+        .{
+            .resolution_start = 1,
+            .component_start = 0,
+            .layer_end = 2,
+            .resolution_end = 2,
+            .component_end = 3,
+            .progression = .lrcp,
+        },
+        .{
+            .resolution_start = 2,
+            .component_start = 0,
+            .layer_end = 2,
+            .resolution_end = 3,
+            .component_end = 3,
+            .progression = .lrcp,
+        },
+    };
+    var resolution_part_options = bad_options;
+    resolution_part_options.progression = .rpcl;
+    resolution_part_options.tile_part_divisions = 'R';
+    resolution_part_options.poc_records = &resolution_records;
+    const resolution_part_encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, resolution_part_options);
+    defer allocator.free(resolution_part_encoded);
+    var resolution_part_decoded = try codestream.decodeLosslessTemporary(allocator, resolution_part_encoded);
+    defer resolution_part_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, resolution_part_decoded.samples);
+    const resolution_part_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, resolution_part_encoded);
+    defer allocator.free(resolution_part_wrapped);
+    _ = try jp2.parseInfo(resolution_part_wrapped);
+
+    resolution_part_options.poc_records = &records;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, resolution_part_options),
     );
 
     layer_part_options.tile_part_divisions = 'R';

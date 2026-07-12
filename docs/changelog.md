@@ -40,7 +40,12 @@ entries are grouped by development milestone rather than semantic version.
   delimit RGB component ranges, encode/decode validate the composed sequence
   against the three PLT/TLM part spans, and tile-local T2 state persists across
   every boundary. The dense 2x2-tile fixture is pixel-exact through z2000,
-  OpenJPEG, Grok, and Kakadu. `R`/`P` POC divisions remain gated. Score: 95/100.
+  OpenJPEG, Grok, and Kakadu.
+- Added resolution-contiguous POC across `R` tile-parts. Per-tile validators
+  use each resolution's exact packet count rather than equal slices, and
+  compare every PLT/TLM span against the reference-grid packet plan. A dense
+  fixture using LRCP inside COD-RPCL resolution parts is pixel-exact through
+  z2000, OpenJPEG, Grok, and Kakadu. `P` remains gated. Score: 95/100.
 
 ### PPM Framing Foundation
 

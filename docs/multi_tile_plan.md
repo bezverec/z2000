@@ -93,13 +93,14 @@ Single-tile behavior stays **byte-identical** — every increment keeps
 ### 3.1 Current POC extension
 
 Main-header POC now composes one checked, duplicate-free schedule per tile.
-The public writer/strict reader supports one part per tile, `L` parts when each
-quality layer is contiguous, and `C` parts when each RGB component is
-contiguous. Inclusion/zero-bitplane tag trees and `numlenbits` remain
+The public writer/strict reader supports one part per tile, `R` parts when each
+resolution is contiguous, `L` parts when each quality layer is contiguous,
+and `C` parts when each RGB component is contiguous.
+Inclusion/zero-bitplane tag trees and `numlenbits` remain
 tile-local and persist across part boundaries. Dense regressions use 8x8
 precincts and 4x4 blocks; z2000/OpenJPEG/Kakadu decode `L` losslessly and all
-four decoders, including Grok, decode `C` losslessly. `R` and `P` POC
-divisions remain fail-closed until equivalent boundary validators land.
+four decoders, including Grok, decode dense `R` and `C` losslessly. `P` POC
+division remains fail-closed until a position-boundary validator lands.
 
 ## 4. Staged plan (each stage = one PR, green tests, narrow path untouched)
 
