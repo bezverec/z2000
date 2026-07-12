@@ -21,7 +21,7 @@ probed on 2026-07-12; findings inline. Ordered by *value per unit risk*.
 | Core syntax 14→15 · Containers 8→10 | **N6: component-generic pipeline** (grayscale/1-component then N-component, palette expansion) | LARGE (multi-PR, like the multi-tile campaign) | HIGH — reworks the `color.RctPlanes` y/cb/cr representation (87 call sites) the 100/100 narrow path rides on | Yes: TIFF grayscale I/O + OpenJPEG/Grok/Kakadu grayscale interop |
 | T2 9→10 · Core syntax +1 | **POC** (progression-order-change marker + multi-chunk packet scheduling) | Medium (1–2 PRs) | Medium (new encode+decode path; narrow path untouched) | Weak: OpenJPEG `-POC` is finicky and did not emit a `POC` marker in a single-tile probe; needs a reliable POC fixture source before claiming interop |
 | T2 9→10 | **PPM/PPT** packed packet headers | Small–medium (decode-side marker parse + header redirection) | Low | **No**: neither Kakadu nor OpenJPEG default output emits `PPM`/`PPT`; only synthetic fixtures available, so no independent-decoder cross-check |
-| Lossy 14→15 | **PCRD PSNR gap** (encoder distortion model) + **odd-origin 9/7 lifting** | PCRD = research (0.7–1.8 dB vs OpenJPEG at matched bytes, `tools/pcrd_psnr_ladder.ps1`); odd-origin 9/7 = small–medium 4-lift boundary math | PCRD medium/uncertain (no guaranteed linear progress); odd-origin medium (lifting-parity correctness) | PCRD yes (the ladder tool); odd-origin partial (reference-relative PSNR, not bit-exact) |
+| Lossy 14→15 | **PCRD PSNR gap** (encoder distortion model); odd-origin 9/7 lifting is now landed | PCRD = research (0.7–1.8 dB vs OpenJPEG at matched bytes, `tools/pcrd_psnr_ladder.ps1`) | PCRD medium/uncertain (no guaranteed linear progress) | Yes: matched-byte ladder; odd-origin 9/7 is bidirectionally reference-relative within max byte diff 1 |
 | Containers 8→10 | mixed per-component precision (`BPCC`) + alpha channels | Medium; couples to N6's per-component depth work | Medium | Yes: reference grayscale/mixed-precision files |
 
 Recommended order when resuming the push: **POC** (best contained value if a
@@ -487,11 +487,12 @@ for more ISO coverage is:
    rate-targeted matrix coverage, non-empty PLT-less multi-part decode,
    broader progression/division combinations, and then tile-level scheduling.
 4. **Lossy breadth.** ICT/9-7 (scalar-expounded and scalar-derived QCD) is
-   public single-tile and aligned multi-tile, including rate-targeted 9/7
+   public single-tile and reference-grid-aware multi-tile, including
+   odd-origin tiles and rate-targeted 9/7
    multi-tile with 9/7-weighted global cross-tile PCRD (2026-07-12). The
    remaining lossy work is the encoder-side PCRD PSNR gap (measured 0.7-1.8 dB
-   vs OpenJPEG at matched bytes, tracked by `tools/pcrd_psnr_ladder.ps1`) and
-   odd-origin 9/7 lifting, not more parser-only options.
+   vs OpenJPEG at matched bytes, tracked by `tools/pcrd_psnr_ladder.ps1`), not
+   more parser-only options.
 5. **T1 style policy.** ✅ COMPLETE (2026-07-12): all 64 combinations of the
    six Part 1 style bits have implemented payload models with roundtrip
    tests and three-decoder interop (BYPASS+RESET/ERTERM landed last, with

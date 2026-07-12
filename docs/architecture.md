@@ -345,7 +345,9 @@ reordered foreign one-part tile decode,
 plain coding and the implemented
 CAUSAL/SEGMARK/terminated resilience combinations, reference-grid precinct/
 code-block/tag-tree geometry, and origin-aware reversible 5/3 lifting for odd
-tile origins.
+tile origins. The irreversible tile front end likewise carries reference-grid
+origins through all four 9/7 lifting steps and quantizes against the matching
+origin-aware subband catalog.
 
 `src/tile_pipeline.zig` is the tile-local implementation layer. It runs the
 reversible component transform, tile-local 5/3 DWT/inverse-DWT, T1 code-block

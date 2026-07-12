@@ -257,6 +257,9 @@ Tasks:
   against malformed QCD/QCC-style inputs.
 - Keep scalar-derived marker behavior and payload decode covered by strict
   reader, JP2 wrapper, and reference-decoder checks.
+- Keep odd-origin multi-tile 9/7 encode/decode covered bidirectionally against
+  OpenJPEG, Grok, and Kakadu; lifting parity must follow the reference grid at
+  every decomposition level.
 - Add PCRD-style rate-control tests that compare quality layers, output bytes,
   and decoded error bounds against Grok/OpenJPEG on shared corpora.
 

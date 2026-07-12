@@ -431,15 +431,39 @@ fn forwardIrreversibleQuantizedPlanesWithQuantization(
     levels: u8,
     quantization: QuantizationStyle,
 ) !color.RctPlanes {
+    return forwardIrreversibleQuantizedPlanesForRegion(allocator, rgb, levels, quantization, 0, 0);
+}
+
+fn forwardIrreversibleQuantizedPlanesForRegion(
+    allocator: std.mem.Allocator,
+    rgb: image.RgbImage,
+    levels: u8,
+    quantization: QuantizationStyle,
+    x0: u32,
+    y0: u32,
+) !color.RctPlanes {
     var ict = try color.forwardIct(allocator, rgb);
     defer ict.deinit();
 
     inline for (.{ ict.y, ict.cb, ict.cr }) |plane| {
-        const done = try wavelet.forward2D(allocator, plane, ict.width, ict.height, levels, .irreversible_9_7);
+        const done = try wavelet.forward2DOrigin(
+            allocator,
+            plane,
+            ict.width,
+            ict.height,
+            levels,
+            .irreversible_9_7,
+            x0,
+            y0,
+        );
         if (done != levels) return CodestreamError.InvalidCodestream;
     }
 
-    const bands = try subband.makeBands(allocator, ict.width, ict.height, levels);
+    const x1 = std.math.add(u32, x0, std.math.cast(u32, ict.width) orelse return CodestreamError.ImageTooLarge) catch
+        return CodestreamError.ImageTooLarge;
+    const y1 = std.math.add(u32, y0, std.math.cast(u32, ict.height) orelse return CodestreamError.ImageTooLarge) catch
+        return CodestreamError.ImageTooLarge;
+    const bands = try subband.makeBandsForRegion(allocator, x0, y0, x1, y1, levels);
     defer allocator.free(bands);
 
     const pixels = try std.math.mul(usize, ict.width, ict.height);
@@ -474,9 +498,7 @@ fn forwardIrreversibleQuantizedPlanesWithQuantization(
 
 /// Tile front end for the irreversible multi-tile path: extracts the tile
 /// region, then runs the same ICT + 9/7 + deadzone quantization the
-/// single-tile path uses. Tile-local lifting parity equals the reference
-/// grid's because the multi-tile 9/7 geometry gate requires tile origins to
-/// be multiples of 2^levels.
+/// single-tile path uses, retaining the tile's reference-grid lifting parity.
 const IrreversibleTileFrontEndContext = struct {
     quantization: QuantizationStyle,
 };
@@ -491,7 +513,14 @@ fn buildIrreversibleQuantizedTile(
     const ctx: *const IrreversibleTileFrontEndContext = @ptrCast(@alignCast(context));
     var rgb_tile = try tile_grid.extractRgbTile(allocator, source, tile.rect);
     defer rgb_tile.deinit();
-    const planes = try forwardIrreversibleQuantizedPlanesWithQuantization(allocator, rgb_tile, levels, ctx.quantization);
+    const planes = try forwardIrreversibleQuantizedPlanesForRegion(
+        allocator,
+        rgb_tile,
+        levels,
+        ctx.quantization,
+        tile.rect.x0,
+        tile.rect.y0,
+    );
     return .{ .tile = tile, .planes = planes };
 }
 
@@ -4703,7 +4732,21 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
         return CodestreamError.InvalidCodestream;
     }
 
-    const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
+    const plan = temporaryPacketPlan(header);
+    if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
+    const full_resolution = plan.resolutions[plan.resolution_count - 1];
+    const x1 = std.math.add(u32, full_resolution.x0, std.math.cast(u32, header.width) orelse return CodestreamError.InvalidCodestream) catch
+        return CodestreamError.InvalidCodestream;
+    const y1 = std.math.add(u32, full_resolution.y0, std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream) catch
+        return CodestreamError.InvalidCodestream;
+    const bands = try subband.makeBandsForRegion(
+        allocator,
+        full_resolution.x0,
+        full_resolution.y0,
+        x1,
+        y1,
+        header.levels,
+    );
     defer allocator.free(bands);
 
     const y_f = try allocator.alloc(f32, pixels);
@@ -4728,7 +4771,16 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     }
 
     inline for (.{ y_f, cb_f, cr_f }) |plane| {
-        try wavelet.inverse2D(allocator, plane, header.width, header.height, header.levels, .irreversible_9_7);
+        try wavelet.inverse2DOrigin(
+            allocator,
+            plane,
+            header.width,
+            header.height,
+            header.levels,
+            .irreversible_9_7,
+            full_resolution.x0,
+            full_resolution.y0,
+        );
     }
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
@@ -9428,16 +9480,6 @@ fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: Lossless
     while (iterator.next() catch return CodestreamError.InvalidCodestream) |tile| {
         if (!wavelet_int.canDecompose53Region(tile.rect.x0, tile.rect.y0, tile.rect.x1, tile.rect.y1, levels)) {
             return CodestreamError.UnsupportedPayload;
-        }
-        // The irreversible tile front end runs plain tile-local 9/7 lifting;
-        // its parity equals the reference grid's only when every tile origin
-        // is a multiple of 2^levels. Odd-origin irreversible tiles stay
-        // fail-closed until origin-aware 9/7 lifting exists.
-        if (options.transform == .irreversible_9_7) {
-            const scale = @as(usize, 1) << @intCast(levels);
-            if (tile.rect.x0 % scale != 0 or tile.rect.y0 % scale != 0) {
-                return CodestreamError.UnsupportedPayload;
-            }
         }
     }
 }

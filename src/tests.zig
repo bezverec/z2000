@@ -2276,6 +2276,76 @@ test "9/7 wavelet roundtrips odd scaling tails" {
     }
 }
 
+test "9/7 wavelet origin-aware path roundtrips odd reference origins" {
+    const allocator = std.testing.allocator;
+    const Case = struct { x0: u32, y0: u32, width: usize, height: usize };
+    const cases = [_]Case{
+        .{ .x0 = 1, .y0 = 0, .width = 17, .height = 15 },
+        .{ .x0 = 0, .y0 = 1, .width = 16, .height = 17 },
+        .{ .x0 = 1, .y0 = 1, .width = 17, .height = 17 },
+        .{ .x0 = 17, .y0 = 33, .width = 19, .height = 13 },
+    };
+
+    for (cases) |case| {
+        const count = case.width * case.height;
+        const data = try allocator.alloc(f32, count);
+        defer allocator.free(data);
+        const original = try allocator.alloc(f32, count);
+        defer allocator.free(original);
+        for (data, 0..) |*sample, index| {
+            const x = index % case.width;
+            const y = index / case.width;
+            sample.* = @as(f32, @floatFromInt(@as(i32, @intCast((x * 37 + y * 53) % 257)) - 128)) +
+                @as(f32, @floatFromInt(index % 7)) * 0.125;
+        }
+        @memcpy(original, data);
+
+        const levels = try wavelet.forward2DOrigin(
+            allocator,
+            data,
+            case.width,
+            case.height,
+            2,
+            .irreversible_9_7,
+            case.x0,
+            case.y0,
+        );
+        try std.testing.expectEqual(@as(u8, 2), levels);
+        try wavelet.inverse2DOrigin(
+            allocator,
+            data,
+            case.width,
+            case.height,
+            levels,
+            .irreversible_9_7,
+            case.x0,
+            case.y0,
+        );
+        for (data, original) |actual, expected| {
+            try std.testing.expectApproxEqAbs(expected, actual, 0.02);
+        }
+    }
+}
+
+test "float 5/3 origin-aware wavelet keeps odd-origin API symmetric" {
+    const allocator = std.testing.allocator;
+    const width = 17;
+    const height = 13;
+    const data = try allocator.alloc(f32, width * height);
+    defer allocator.free(data);
+    const original = try allocator.alloc(f32, data.len);
+    defer allocator.free(original);
+    for (data, 0..) |*sample, index| {
+        sample.* = @floatFromInt(@as(i32, @intCast((index * 47) % 511)) - 255);
+    }
+    @memcpy(original, data);
+
+    const levels = try wavelet.forward2DOrigin(allocator, data, width, height, 2, .reversible_5_3, 1, 1);
+    try std.testing.expectEqual(@as(u8, 2), levels);
+    try wavelet.inverse2DOrigin(allocator, data, width, height, levels, .reversible_5_3, 1, 1);
+    try std.testing.expectEqualSlices(f32, original, data);
+}
+
 test "codec encodes and decodes a small grayscale image" {
     const allocator = std.testing.allocator;
     const pixels = try allocator.dupe(u8, &[_]u8{
@@ -15810,9 +15880,8 @@ test "multi-tile reference-grid precinct and code-block partitions roundtrip" {
 test "multi-tile irreversible 9/7 roundtrips within lossy tolerance" {
     // The irreversible tile front end (ICT + 9/7 + deadzone quantization)
     // hooks into the transform-agnostic tile pipeline, with per-band Mb
-    // taken from the signalled irreversible step exponents. Tile origins
-    // are multiples of 2^levels, so tile-local lifting parity matches the
-    // reference grid.
+    // taken from the signalled irreversible step exponents. Origin-aware
+    // lifting retains reference-grid parity for aligned and odd-origin tiles.
     const allocator = std.testing.allocator;
     const width = 64;
     const height = 64;
@@ -15961,19 +16030,37 @@ test "multi-tile irreversible 9/7 roundtrips within lossy tolerance" {
         try std.testing.expect(layer_bytes[2] > layer_bytes[0]);
     }
 
-    // Odd tile origins fail closed: tile-local 9/7 lifting parity would
-    // diverge from the reference grid.
+    // The 17x17 grid exercises odd first-level parity and odd parity after
+    // origin reduction at deeper levels.
     {
         var options = multi_tile_test_options;
         options.transform = .irreversible_9_7;
         options.mct = .ict;
         options.quantization = .scalar_expounded;
-        options.tile_width = 30;
-        options.tile_height = 30;
-        try std.testing.expectError(
-            codestream.CodestreamError.UnsupportedPayload,
-            codestream.encodeLosslessWithOptions(allocator, rgb, options),
-        );
+        options.tile_width = 17;
+        options.tile_height = 17;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        var max_diff: i32 = 0;
+        for (samples, decoded.samples) |expected, actual| {
+            const diff = @as(i32, expected) - @as(i32, actual);
+            max_diff = @max(max_diff, @as(i32, @intCast(@abs(diff))));
+        }
+        try std.testing.expect(max_diff <= 8);
+
+        options.threads = 3;
+        const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(@as(u32, width), info.width);
+        try std.testing.expectEqual(@as(u32, height), info.height);
     }
 }
 

@@ -21,6 +21,8 @@ pub const TransformError = error{
 const LevelShape = struct {
     width: usize,
     height: usize,
+    x0: u32 = 0,
+    y0: u32 = 0,
 };
 
 const dwt97_alpha: f32 = -1.586134342059924;
@@ -40,6 +42,19 @@ pub fn forward2D(
     requested_levels: u8,
     wavelet: Wavelet,
 ) !u8 {
+    return forward2DOrigin(allocator, data, width, height, requested_levels, wavelet, 0, 0);
+}
+
+pub fn forward2DOrigin(
+    allocator: std.mem.Allocator,
+    data: []f32,
+    width: usize,
+    height: usize,
+    requested_levels: u8,
+    wavelet: Wavelet,
+    x0: u32,
+    y0: u32,
+) !u8 {
     if (width == 0 or height == 0 or data.len != width * height) {
         return TransformError.InvalidDimensions;
     }
@@ -52,25 +67,32 @@ pub fn forward2D(
 
     var cur_width = width;
     var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
     var done: u8 = 0;
 
     while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        const next_width = lowCountOrigin(cur_width, cur_x0);
+        const next_height = lowCountOrigin(cur_height, cur_y0);
+        if (next_width == 0 or next_height == 0) break;
         // ISO/IEC 15444-1 F.4.8: forward transform filters vertically first,
         // then horizontally, matching independent codecs.
         for (0..cur_width) |col| {
             for (0..cur_height) |row| line[row] = data[row * width + col];
-            forward1D(line[0..cur_height], scratch[0..cur_height], wavelet);
+            forward1DOrigin(line[0..cur_height], scratch[0..cur_height], wavelet, cur_y0);
             for (0..cur_height) |row| data[row * width + col] = line[row];
         }
 
         for (0..cur_height) |row| {
             for (0..cur_width) |col| line[col] = data[row * width + col];
-            forward1D(line[0..cur_width], scratch[0..cur_width], wavelet);
+            forward1DOrigin(line[0..cur_width], scratch[0..cur_width], wavelet, cur_x0);
             for (0..cur_width) |col| data[row * width + col] = line[col];
         }
 
-        cur_width = lowCount(cur_width);
-        cur_height = lowCount(cur_height);
+        cur_width = next_width;
+        cur_height = next_height;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
     }
 
     return done;
@@ -84,6 +106,19 @@ pub fn inverse2D(
     levels: u8,
     wavelet: Wavelet,
 ) !void {
+    return inverse2DOrigin(allocator, data, width, height, levels, wavelet, 0, 0);
+}
+
+pub fn inverse2DOrigin(
+    allocator: std.mem.Allocator,
+    data: []f32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    wavelet: Wavelet,
+    x0: u32,
+    y0: u32,
+) !void {
     if (width == 0 or height == 0 or data.len != width * height) {
         return TransformError.InvalidDimensions;
     }
@@ -93,11 +128,18 @@ pub fn inverse2D(
 
     var cur_width = width;
     var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
     var actual_levels: u8 = 0;
     while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
-        shapes[actual_levels] = .{ .width = cur_width, .height = cur_height };
-        cur_width = lowCount(cur_width);
-        cur_height = lowCount(cur_height);
+        const next_width = lowCountOrigin(cur_width, cur_x0);
+        const next_height = lowCountOrigin(cur_height, cur_y0);
+        if (next_width == 0 or next_height == 0) break;
+        shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+        cur_width = next_width;
+        cur_height = next_height;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
     }
 
     const max_dim = @max(width, height);
@@ -114,13 +156,13 @@ pub fn inverse2D(
         // Mirror of the ISO forward order: horizontal first, then vertical.
         for (0..shape.height) |row| {
             for (0..shape.width) |col| line[col] = data[row * width + col];
-            inverse1D(line[0..shape.width], scratch[0..shape.width], wavelet);
+            inverse1DOrigin(line[0..shape.width], scratch[0..shape.width], wavelet, shape.x0);
             for (0..shape.width) |col| data[row * width + col] = line[col];
         }
 
         for (0..shape.width) |col| {
             for (0..shape.height) |row| line[row] = data[row * width + col];
-            inverse1D(line[0..shape.height], scratch[0..shape.height], wavelet);
+            inverse1DOrigin(line[0..shape.height], scratch[0..shape.height], wavelet, shape.y0);
             for (0..shape.height) |row| data[row * width + col] = line[row];
         }
     }
@@ -130,19 +172,27 @@ fn lowCount(n: usize) usize {
     return (n + 1) / 2;
 }
 
-fn forward1D(data: []f32, scratch: []f32, wavelet: Wavelet) void {
+fn lowCountOrigin(n: usize, origin: u32) usize {
+    return if ((origin & 1) == 0) (n + 1) / 2 else n / 2;
+}
+
+fn ceilDiv2(value: u32) u32 {
+    return (value / 2) + @intFromBool((value & 1) != 0);
+}
+
+fn forward1DOrigin(data: []f32, scratch: []f32, wavelet: Wavelet, origin: u32) void {
     if (data.len < 2) return;
     switch (wavelet) {
-        .reversible_5_3 => forward53(data, scratch),
-        .irreversible_9_7 => forward97(data, scratch),
+        .reversible_5_3 => if ((origin & 1) == 0) forward53(data, scratch) else forward53OddOrigin(data, scratch),
+        .irreversible_9_7 => if ((origin & 1) == 0) forward97(data, scratch) else forward97OddOrigin(data, scratch),
     }
 }
 
-fn inverse1D(data: []f32, scratch: []f32, wavelet: Wavelet) void {
+fn inverse1DOrigin(data: []f32, scratch: []f32, wavelet: Wavelet, origin: u32) void {
     if (data.len < 2) return;
     switch (wavelet) {
-        .reversible_5_3 => inverse53(data, scratch),
-        .irreversible_9_7 => inverse97(data, scratch),
+        .reversible_5_3 => if ((origin & 1) == 0) inverse53(data, scratch) else inverse53OddOrigin(data, scratch),
+        .irreversible_9_7 => if ((origin & 1) == 0) inverse97(data, scratch) else inverse97OddOrigin(data, scratch),
     }
 }
 
@@ -180,6 +230,39 @@ fn inverse53(data: []f32, scratch: []f32) void {
     }
 }
 
+fn forward53OddOrigin(data: []f32, scratch: []f32) void {
+    var i: usize = 0;
+    while (i < data.len) : (i += 2) {
+        const left = if (i > 0) data[i - 1] else data[i + 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] -= @floor((left + right) / 2.0);
+    }
+
+    i = 1;
+    while (i < data.len) : (i += 2) {
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] += @floor((data[i - 1] + right + 2.0) / 4.0);
+    }
+    packOddEven(data, scratch);
+}
+
+fn inverse53OddOrigin(data: []f32, scratch: []f32) void {
+    unpackOddEven(data, scratch);
+
+    var i: usize = 1;
+    while (i < data.len) : (i += 2) {
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] -= @floor((data[i - 1] + right + 2.0) / 4.0);
+    }
+
+    i = 0;
+    while (i < data.len) : (i += 2) {
+        const left = if (i > 0) data[i - 1] else data[i + 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] += @floor((left + right) / 2.0);
+    }
+}
+
 fn forward97(data: []f32, scratch: []f32) void {
     liftOdd(data, dwt97_alpha);
     liftEven(data, dwt97_beta);
@@ -200,6 +283,24 @@ fn inverse97(data: []f32, scratch: []f32) void {
     liftOdd(data, -dwt97_gamma);
     liftEven(data, -dwt97_beta);
     liftOdd(data, -dwt97_alpha);
+}
+
+fn forward97OddOrigin(data: []f32, scratch: []f32) void {
+    liftEven(data, dwt97_alpha);
+    liftOdd(data, dwt97_beta);
+    liftEven(data, dwt97_gamma);
+    liftOdd(data, dwt97_delta);
+    scaleEvenOdd(data, dwt97_k, dwt97_inv_k);
+    packOddEven(data, scratch);
+}
+
+fn inverse97OddOrigin(data: []f32, scratch: []f32) void {
+    unpackOddEven(data, scratch);
+    scaleEvenOdd(data, dwt97_inv_k, dwt97_k);
+    liftOdd(data, -dwt97_delta);
+    liftEven(data, -dwt97_gamma);
+    liftOdd(data, -dwt97_beta);
+    liftEven(data, -dwt97_alpha);
 }
 
 fn scaleEvenOdd(data: []f32, even_scale: f32, odd_scale: f32) void {
@@ -292,5 +393,36 @@ fn unpackEvenOdd(data: []f32, scratch: []f32) void {
         }
     }
 
+    @memcpy(data, scratch[0..data.len]);
+}
+
+fn packOddEven(data: []f32, scratch: []f32) void {
+    var out: usize = 0;
+    var i: usize = 1;
+    while (i < data.len) : (i += 2) {
+        scratch[out] = data[i];
+        out += 1;
+    }
+    i = 0;
+    while (i < data.len) : (i += 2) {
+        scratch[out] = data[i];
+        out += 1;
+    }
+    @memcpy(data, scratch[0..data.len]);
+}
+
+fn unpackOddEven(data: []f32, scratch: []f32) void {
+    const lows = data.len / 2;
+    var low: usize = 0;
+    var high: usize = lows;
+    for (0..data.len) |i| {
+        if ((i & 1) != 0) {
+            scratch[i] = data[low];
+            low += 1;
+        } else {
+            scratch[i] = data[high];
+            high += 1;
+        }
+    }
     @memcpy(data, scratch[0..data.len]);
 }

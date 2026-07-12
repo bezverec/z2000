@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Origin-Aware Multi-Tile Irreversible 9/7
+
+- Removed the multi-tile 9/7 alignment guard by carrying each tile's
+  reference-grid `x0/y0` through all decomposition levels. Odd origins swap
+  the local high/low lifting parity, scaling, and packed layout; inverse 9/7
+  and scalar quantization use the same origin-aware subband catalog. Added
+  direct floating-point roundtrips for four odd-origin geometries and a 17x17
+  public multi-tile ICT/9/7 roundtrip with cross-thread determinism and JP2
+  validation. Bidirectional live interop is within max byte diff 1: OpenJPEG,
+  Grok, and Kakadu decode z2000 output, and z2000 decodes each reference's
+  odd-origin 9/7 output against that reference's own raster. The score remains
+  95/100 because the lossy row's final point still includes the measured PCRD
+  PSNR gap.
+
 ### Rate-Targeted Multi-Tile Irreversible 9/7
 
 - Lifted the last multi-tile 9/7 gate: `--rates` are now accepted with

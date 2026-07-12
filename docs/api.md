@@ -54,7 +54,8 @@ Supported public JP2 profiles are still narrow:
 
 - lossless RGB: `--mct rct --transform 5-3 --qstyle none`
 - irreversible RGB: `--mct ict --transform 9-7` with scalar-expounded or
-  scalar-derived quantization
+- bounded multi-tile irreversible RGB uses origin-aware 9/7 lifting, including
+  odd tile origins, and supports the documented global rate-target path
 - reversible component-independent RGB: `--mct none --transform 5-3 --qstyle none`
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
