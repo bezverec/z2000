@@ -153,7 +153,7 @@ Marker, T1, and diagnostics:
 | --- | --- |
 | `--sop` / `--no-sop` | Enable or disable SOP packet markers. SOP is enabled by default for the narrow archival profile. |
 | `--eph` / `--no-eph` | Enable or disable EPH packet-header markers. |
-| `--ppm` / `--no-ppm` | Move packet headers into main-header PPM markers. Supported for single-tile RPCL with one part or `R` resolution parts and SOP/EPH disabled. PPM and PPT are mutually exclusive; multi-tile PPM fails closed. |
+| `--ppm` / `--no-ppm` | Move packet headers into main-header PPM markers. Supported for RPCL `R` layouts with SOP/EPH disabled, including multi-tile streams. PPM and PPT are mutually exclusive. Multi-part PPM is lossless through z2000, OpenJPEG, and Kakadu; Grok 20.3.6 currently misdecodes the multi-tile/multi-part combination. |
 | `--ppt` / `--no-ppt` | Move packet headers into PPT markers. Supported for RPCL with SOP/EPH disabled: single-tile streams may use one part or `R` resolution parts, while multi-tile streams require `R` parts. Other combinations fail closed. |
 | `--tlm` / `--no-tlm` | Enable or disable TLM tile-part length markers. |
 | `--t1-backend iso-mq|legacy-mq` | Select the T1 entropy backend. `iso-mq` is the normal JPEG2000-style path. |

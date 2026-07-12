@@ -15,11 +15,20 @@ entries are grouped by development milestone rather than semantic version.
   and the ISO marker-length bound.
 - Connected PPM to the bounded single-tile RPCL writer and strict reader for
   one part or `R` resolution parts with SOP/EPH disabled. Each tile-part gets
-  one `Nppm/Ippm` group, PLT measures only SOD bodies, the JP2 wrapper checks
+  one `Nppm/Ippm` group; the initial version used PLT for SOD bodies, and the
+  follow-up below removes that redundancy. The JP2 wrapper checks
   marker ordering/conflicts, and strict decode validates all framing and T2
   state. A 128x128, two-layer, three-part live output decodes pixel-exactly
-  through z2000, OpenJPEG, Grok, and Kakadu. Multi-tile PPM remains fail-closed;
-  the score stays 95/100.
+  through z2000, OpenJPEG, Grok, and Kakadu. This first integration kept
+  multi-tile PPM fail-closed; the following increment opens it. Score: 95/100.
+- Extended PPM across multi-tile RPCL `R` streams. Main-header groups follow
+  codestream tile-part order while inclusion/zero-bitplane tag-trees and
+  `numlenbits` remain independent per tile. PPM output is now PLT-less: strict
+  decode derives each SOD body span from its decoded packed header, avoiding
+  redundant and decoder-sensitive PL accounting. A 16-tile/48-part output is
+  pixel-exact through z2000, OpenJPEG, and Kakadu. Grok 20.3.6 decodes the
+  one-part-per-tile and all single-tile PPM cases losslessly but misdecodes
+  multiple PPM groups per tile; that interop gate remains open. Score: 95/100.
 
 ### PPT Packed Packet Headers
 
@@ -36,8 +45,8 @@ entries are grouped by development milestone rather than semantic version.
   validation, globally ordered tile-local `Zppt` across parts, and fail-closed
   SOP/EPH or multi-tile non-`R` combinations. Live one-part, three-part, and
   16-tile/48-part outputs decode pixel-exactly through z2000, OpenJPEG, Grok,
-  and Kakadu. Single-tile main-header PPM is covered by the newer slice above;
-  multi-tile PPM remains open and the score stays 95/100.
+  and Kakadu. Main-header PPM is covered by the newer slices above, with the
+  multi-part Grok gate still open. The score stays 95/100.
 
 ### Per-Position Tile-Part Divisions (`--tile-parts P`)
 
@@ -50,7 +59,7 @@ entries are grouped by development milestone rather than semantic version.
   strict `P` metadata, threaded determinism, pixel-exact decode, and
   progression mismatch rejection. A live 16-tile/256-part JP2 decodes
   losslessly through z2000, OpenJPEG, Grok, and Kakadu. The score remains
-  95/100 because POC and multi-tile PPM are still open T2 syntax.
+  95/100 because POC and packed-header breadth were still open at that stage.
 
 ### Per-Component Tile-Part Divisions (`--tile-parts C`)
 
@@ -62,7 +71,7 @@ entries are grouped by development milestone rather than semantic version.
   deterministic across thread counts and roundtrips losslessly; the live JP2
   smoke is pixel-exact through z2000, OpenJPEG, Grok, and Kakadu. `C` with a
   non-CPRL order fails closed. The subsequent `P` slice above completes the
-  direct tile-part division set; POC and PPM remain open T2 work.
+  direct tile-part division set; POC and PPM remained open at that stage.
 
 ### Origin-Aware Multi-Tile Irreversible 9/7
 

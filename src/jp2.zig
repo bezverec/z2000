@@ -611,8 +611,7 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
                 if (tile_count == 1) {
                     try validateTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null, ppm_state.saw);
                 } else {
-                    if (ppm_state.saw) return Jp2Error.UnsupportedProfile;
-                    try validateMultiTileTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null, tile_count);
+                    try validateMultiTileTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null, tile_count, ppm_state.saw);
                 }
                 return;
             },
@@ -708,6 +707,7 @@ fn validateMultiTileTilePartSequence(
     cod: CodSegmentInfo,
     tlm_state: ?*const TlmState,
     tile_count: u32,
+    has_ppm: bool,
 ) !void {
     if (tile_count > 256) return Jp2Error.UnsupportedProfile;
     var next_parts = [_]u8{0} ** 256;
@@ -753,7 +753,7 @@ fn validateMultiTileTilePartSequence(
         }
         const tile_part_end = std.math.add(usize, cursor, tile_part_length) catch return Jp2Error.InvalidCodestream;
         if (tile_part_end > payload.len - 2) return Jp2Error.InvalidCodestream;
-        try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, &packet_sequences[state_index], &ppt_states[state_index], false);
+        try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, &packet_sequences[state_index], &ppt_states[state_index], has_ppm);
         cursor = tile_part_end;
         next_parts[state_index] = std.math.add(u8, next_parts[state_index], 1) catch return Jp2Error.InvalidCodestream;
         if (expected_parts[state_index] != 0 and next_parts[state_index] == expected_parts[state_index]) {
@@ -843,7 +843,7 @@ fn validateFirstTilePartHeader(
                     } else {
                         try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
                     }
-                } else if (part_has_ppt or has_ppm) {
+                } else if (part_has_ppt) {
                     return Jp2Error.UnsupportedProfile;
                 }
                 // PLT-less tile-parts (default OpenJPEG/Grok/Kakadu output):

@@ -16553,7 +16553,7 @@ test "PPT packed packet headers roundtrip through strict single and multi-tile d
     );
 }
 
-test "PPM packed packet headers roundtrip through strict single-tile decode" {
+test "PPM packed packet headers roundtrip through strict single and multi-tile decode" {
     const allocator = std.testing.allocator;
     const width = 64;
     const height = 64;
@@ -16632,9 +16632,26 @@ test "PPM packed packet headers roundtrip through strict single-tile decode" {
     var multi_tile = options;
     multi_tile.tile_width = 32;
     multi_tile.tile_height = 32;
+    const multi_tile_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile);
+    defer allocator.free(multi_tile_bytes);
+    var multi_tile_decoded = try codestream.decodeLosslessTemporary(allocator, multi_tile_bytes);
+    defer multi_tile_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, multi_tile_decoded.samples);
+    const multi_tile_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, multi_tile_bytes);
+    defer allocator.free(multi_tile_wrapped);
+    _ = try jp2.parseInfo(multi_tile_wrapped);
+
+    var multi_threaded = multi_tile;
+    multi_threaded.threads = 3;
+    const multi_threaded_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_threaded);
+    defer allocator.free(multi_threaded_bytes);
+    try std.testing.expectEqualSlices(u8, multi_tile_bytes, multi_threaded_bytes);
+
+    var multi_tile_no_division = multi_tile;
+    multi_tile_no_division.tile_part_divisions = null;
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile),
+        codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_no_division),
     );
 }
 

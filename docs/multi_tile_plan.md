@@ -274,5 +274,6 @@ carry the globally signalled decomposition count.
 
 Tile-parts-within-tile (R divisions × tiles), per-tile COD/QCD overrides,
 `--mct none`, unsupported style combinations, lossy 9/7 tiles,
-streaming (bounded-memory) assembly and PPM. Multi-tile RPCL/`R` PPT landed as
-a later increment on 2026-07-12; SOP/EPH PPT combinations remain fail-closed.
+streaming (bounded-memory) assembly. Multi-tile RPCL/`R` PPT and PLT-less PPM
+landed as later increments on 2026-07-12; SOP/EPH packed-header combinations
+remain fail-closed.

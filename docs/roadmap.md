@@ -30,8 +30,9 @@ interop gate.
   strict decode. PLT-backed tile-part divisions now cover all direct modes on
   matching orders: `R`/RPCL, `L`/LRCP, `C`/CPRL, and `P`/PCRL. PPT is public
   on the bounded RPCL no-SOP/no-EPH path: single-tile accepts one or `R` parts,
-  and multi-tile requires `R` parts. PPM is public for the matching single-tile
-  envelope. POC, multi-tile PPM, and SOP/EPH packed headers remain separate
+  and multi-tile requires `R` parts. PPM is public for the matching single- and
+  multi-tile `R` envelope; its remaining gate is Grok
+  multi-part-per-tile interop. POC and SOP/EPH packed headers remain separate
   fail-closed slices.
 - JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
@@ -76,9 +77,9 @@ interop gate.
 1. Add POC only after a reliable independently produced fixture is available;
    keep the current marker fail-closed until writer and strict packet schedule
    agree across every change interval.
-2. Extend the landed single-tile PPM path to codestream-order multi-tile
-   tile-part groups, preserving each tile's independent T2 state while PPM
-   groups remain globally ordered. Keep SOP/EPH combinations fail-closed until
+2. Obtain or generate an independent foreign multi-tile/multi-part PPM fixture
+   and isolate Grok 20.3.6's remaining mismatch; z2000/OpenJPEG/Kakadu already
+   agree on the PLT-less output. Keep SOP/EPH combinations fail-closed until
    their packed-header placement is covered by independent fixtures.
 3. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
    keeping the existing RGB representation byte-identical until the new path
