@@ -43,7 +43,7 @@ Important `tiff-to-jp2` options:
 - `--transform 5-3|9-7`
 - `--qstyle none|scalar-derived|scalar-expounded`
 - `--tile-parts none|R|L|C|P`
-- `--sop`, `--eph`, `--tlm`
+- `--sop`, `--eph`, `--ppt`, `--tlm`
 - `--t1-backend iso-mq|legacy-mq`
 - `--bypass`
 - `--threads N`
@@ -72,12 +72,16 @@ Supported public JP2 profiles are still narrow:
 - all six Part 1 code-block style bits in the documented ISO-MQ envelope,
   including BYPASS, RESET, TERMALL, vertical-causal, predictable termination,
   segmentation symbols, and their tested combinations
+- tile-part packed packet headers via `--ppt` for single-tile, single-part,
+  no-SOP/no-EPH streams; PLT then measures SOD packet bodies while PPT carries
+  the ordered T2 header stream
 
 Unsupported combinations still fail closed. Examples include tile-part
 division/progression mismatches, JPX features, unsupported component layouts,
 and profile mixes outside the bounded envelope. In
 multi-tile mode, BYPASS without TERMALL and non-empty PLT-less multipart tiles
-also remain unsupported.
+also remain unsupported. PPM and multipart/SOP/EPH PPT combinations remain
+fail-closed.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
 smoke tests cover the common no-EPH and archival EPH paths, while
 valid2000/jpylyzer-style validators remain diagnostic gates rather than

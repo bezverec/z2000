@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### PPT Packed Packet Headers
+
+- Added a real opt-in `--ppt` encode/decode path for single-tile, single-part
+  JP2 streams with SOP/EPH disabled. The writer concatenates byte-stuffed T2
+  headers into ordered PPT segments, writes PLT lengths for SOD packet bodies,
+  and emits bodies without inline headers. Strict decode parses the packed
+  header stream with persistent precinct/tag-tree state and reconstructs the
+  normal internal header+body packet view. Coverage includes multi-layer
+  roundtrip, empty packets with zero-length bodies, malformed `Zppt`, wrapper
+  validation, and fail-closed multipart/SOP/multi-tile combinations. A live
+  output decodes pixel-exactly through z2000, OpenJPEG, Grok, and Kakadu.
+  Multipart PPT and main-header PPM remain open; the score stays 95/100.
+
 ### Per-Position Tile-Part Divisions (`--tile-parts P`)
 
 - Added PLT-backed precinct-position tile-parts for multi-tile PCRL streams.
@@ -28,7 +41,7 @@ entries are grouped by development milestone rather than semantic version.
   deterministic across thread counts and roundtrips losslessly; the live JP2
   smoke is pixel-exact through z2000, OpenJPEG, Grok, and Kakadu. `C` with a
   non-CPRL order fails closed. The subsequent `P` slice above completes the
-  direct tile-part division set; POC and PPM/PPT remain open T2 work.
+  direct tile-part division set; POC, PPM, and multipart PPT remain open T2 work.
 
 ### Origin-Aware Multi-Tile Irreversible 9/7
 

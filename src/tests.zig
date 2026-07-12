@@ -3492,7 +3492,9 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             replacement: u16,
         };
         const unsupported_tile_part_marker_cases = [_]UnsupportedTilePartMarkerCase{
-            .{ .label = "PPT tile-part marker", .replacement = codestream.markerValue("ppt") },
+            // Re-labelling PLT bytes as PPT removes the required packet-body
+            // lengths and must remain an unsupported malformed profile.
+            .{ .label = "PPT without PLT", .replacement = codestream.markerValue("ppt") },
             .{ .label = "COC tile-part marker", .replacement = codestream.markerValue("coc") },
             .{ .label = "QCC tile-part marker", .replacement = codestream.markerValue("qcc") },
         };
@@ -16358,6 +16360,92 @@ test "multi-tile precinct tile-part divisions follow PCRL position groups" {
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessWithOptions(allocator, rgb, wrong_progression),
+    );
+}
+
+test "PPT packed packet headers roundtrip through strict single-tile decode" {
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.tile_width = 4096;
+    options.tile_height = 4096;
+    options.layers = 2;
+    options.progression = .rpcl;
+    options.tile_part_divisions = null;
+    options.sop = false;
+    options.eph = false;
+    options.ppt = true;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+    try std.testing.expect(countMarker(bytes, codestream.markerValue("ppt")) >= 1);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expect(audit.packets > 0);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(usize, width), info.width);
+
+    // Empty packets retain packed T2 headers but have zero SOD body bytes;
+    // PLT length zero is valid specifically for this packed-header case.
+    const zero_samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(zero_samples);
+    @memset(zero_samples, 0);
+    const zero_rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = zero_samples,
+    };
+    const zero_bytes = try codestream.encodeLosslessWithOptions(allocator, zero_rgb, options);
+    defer allocator.free(zero_bytes);
+    var zero_decoded = try codestream.decodeLosslessTemporary(allocator, zero_bytes);
+    defer zero_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, zero_samples, zero_decoded.samples);
+
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const first_ppt = findMarker(corrupted, codestream.markerValue("ppt")) orelse return error.TestUnexpectedResult;
+    corrupted[first_ppt + 4] = 1;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, corrupted),
+    );
+
+    var sop_options = options;
+    sop_options.sop = true;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, sop_options),
+    );
+    var multi_tile_options = options;
+    multi_tile_options.tile_width = 32;
+    multi_tile_options.tile_height = 32;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_options),
+    );
+    var multipart_options = options;
+    multipart_options.tile_part_divisions = 'R';
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, multipart_options),
     );
 }
 

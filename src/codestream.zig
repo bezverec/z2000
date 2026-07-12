@@ -254,6 +254,7 @@ pub const LosslessOptions = struct {
     sop: bool = true,
     eph: bool = false,
     tlm: bool = true,
+    ppt: bool = false,
     tile_part_divisions: ?u8 = 'R',
     threads: u8 = 1,
     emit_temporary_payload_sidecar: bool = false,
@@ -982,9 +983,11 @@ const StrictTilePartHeader = struct {
     end: usize,
     packet_payload_bytes: usize,
     packet_lengths: std.ArrayList(usize),
+    packed_headers: std.ArrayList(u8),
 
     fn deinit(self: *StrictTilePartHeader, allocator: std.mem.Allocator) void {
         self.packet_lengths.deinit(allocator);
+        self.packed_headers.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -1423,6 +1426,12 @@ fn encodeLosslessWithOptionsMeasured(
         tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
         tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
     };
+    if (options.ppt and
+        (!grid.isSingleTile() or options.tile_part_divisions != null or
+            options.sop or options.eph or options.emit_temporary_payload_sidecar))
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
     try validatePrecincts(options);
     try validateTilePartDivisions(options.tile_part_divisions);
     try validateCodingPath(options);
@@ -1505,9 +1514,20 @@ fn encodeLosslessWithOptionsMeasured(
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
         const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
         const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
-        tile_part_payload_bytes[tile_part_index] = try rpclPacketPayloadByteCount(encode_options, packet_lengths);
-        const plt_bytes = try pltBytesForRpclPacketLengths(encode_options, packet_lengths);
-        const tile_part_bytes = try std.math.add(usize, plt_bytes, tile_part_payload_bytes[tile_part_index]);
+        const packet_header_lengths = rpcl_stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
+        tile_part_payload_bytes[tile_part_index] = if (encode_options.ppt)
+            try packedPacketBodyByteCount(packet_lengths, packet_header_lengths)
+        else
+            try rpclPacketPayloadByteCount(encode_options, packet_lengths);
+        const plt_bytes = if (encode_options.ppt)
+            try pltBytesForPackedPacketLengths(packet_lengths, packet_header_lengths)
+        else
+            try pltBytesForRpclPacketLengths(encode_options, packet_lengths);
+        const ppt_bytes = if (encode_options.ppt)
+            try pptMarkerByteCount(packet_header_lengths)
+        else
+            0;
+        const tile_part_bytes = try std.math.add(usize, try std.math.add(usize, plt_bytes, ppt_bytes), tile_part_payload_bytes[tile_part_index]);
         psots[tile_part_index] = try std.math.add(u32, 14, @as(u32, @intCast(tile_part_bytes)));
     }
 
@@ -1521,17 +1541,32 @@ fn encodeLosslessWithOptionsMeasured(
         const packet_bytes_start = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start);
         const packet_bytes_end = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start + packet_range.count);
         try appendSot(allocator, &out, 0, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
-        try appendPltFromRpclPacketLengths(allocator, &out, encode_options, packet_lengths);
+        if (encode_options.ppt) {
+            try appendPltFromPackedPacketLengths(allocator, &out, packet_lengths, packet_header_lengths);
+            try appendPptPacketHeaders(allocator, &out, packet_lengths, packet_header_lengths, rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end]);
+        } else {
+            try appendPltFromRpclPacketLengths(allocator, &out, encode_options, packet_lengths);
+        }
         try appendMarker(allocator, &out, .sod);
-        try appendRpclPackets(
-            allocator,
-            &out,
-            encode_options,
-            packet_lengths,
-            packet_header_lengths,
-            rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
-            &packet_sequence,
-        );
+        if (encode_options.ppt) {
+            try appendPackedPacketBodies(
+                allocator,
+                &out,
+                packet_lengths,
+                packet_header_lengths,
+                rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
+            );
+        } else {
+            try appendRpclPackets(
+                allocator,
+                &out,
+                encode_options,
+                packet_lengths,
+                packet_header_lengths,
+                rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
+                &packet_sequence,
+            );
+        }
     }
     try appendMarker(allocator, &out, .eoc);
     if (timings) |t| {
@@ -2323,7 +2358,6 @@ fn isUnsupportedTilePartHeaderMarker(marker: u16) bool {
         @intFromEnum(Marker.qcc),
         @intFromEnum(Marker.rgn),
         @intFromEnum(Marker.poc),
-        @intFromEnum(Marker.ppt),
         => true,
         else => false,
     };
@@ -4365,8 +4399,11 @@ fn readStrictMultiTileTilePartPacketCatalog(
 
     var packet_lengths: std.ArrayList(usize) = .empty;
     defer packet_lengths.deinit(allocator);
-    const sod = try readTilePartHeaderMarkers(allocator, bytes, span.sot_start + 12, span.end, &packet_lengths);
+    var packed_headers: std.ArrayList(u8) = .empty;
+    defer packed_headers.deinit(allocator);
+    const sod = try readTilePartHeaderMarkers(allocator, bytes, span.sot_start + 12, span.end, &packet_lengths, &packed_headers);
     if (sod != span.sod) return CodestreamError.InvalidCodestream;
+    if (packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
     if (span.missing_plt) {
         if (packet_lengths.items.len != 0) return CodestreamError.InvalidCodestream;
     } else if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
@@ -5592,6 +5629,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries);
             defer tile_part.deinit(allocator);
             if (tile_part.packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
+            if (tile_part.packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
             cursor = tile_part.sod + 2;
             try appendStrictSodPackets(
                 allocator,
@@ -5900,8 +5938,12 @@ fn readStrictSodPacketCatalog(
         {
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries);
             defer tile_part.deinit(allocator);
+            if (tile_part.packed_headers.items.len != 0 and tile_part.sot.tile_part_count != 1) {
+                return CodestreamError.UnsupportedPayload;
+            }
             cursor = tile_part.sod + 2;
             if (tile_part.packet_lengths.items.len == 0) {
+                if (tile_part.packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
                 // Foreign-stream Stage B: no PLT, so each packet's span comes
                 // from decoding its header in stream order with persistent
                 // per-precinct states (non-RPCL progressions revisit precincts
@@ -5953,12 +5995,33 @@ fn readStrictSodPacketCatalog(
                 if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
             } else {
                 try packet_bytes.ensureTotalCapacity(allocator, try std.math.add(usize, packet_bytes.items.len, tile_part.packet_payload_bytes));
+                var packed_header_cursor: usize = 0;
+                if (tile_part.packed_headers.items.len != 0) {
+                    if (main_header.packet_markers.sop or main_header.packet_markers.eph) {
+                        return CodestreamError.UnsupportedPayload;
+                    }
+                    if (stateful == null) stateful = try StrictStatefulPrecinctGroups.init(allocator, header, plan);
+                }
                 for (tile_part.packet_lengths.items) |packet_length| {
                     if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
                     const packet = sequence[sequence_index];
                     sequence_index += 1;
                     const byte_offset = packet_bytes.items.len;
-                    const byte_length = try appendStrictSodPacketPayload(
+                    const byte_length = if (tile_part.packed_headers.items.len != 0) blk: {
+                        const groups = try stateful.?.groupsFor(packet);
+                        break :blk try appendStrictPackedPacketPayload(
+                            allocator,
+                            &packet_bytes,
+                            bytes,
+                            &cursor,
+                            tile_part.end,
+                            packet_length,
+                            tile_part.packed_headers.items,
+                            &packed_header_cursor,
+                            packet,
+                            groups,
+                        );
+                    } else try appendStrictSodPacketPayload(
                         allocator,
                         &packet_bytes,
                         bytes,
@@ -5976,6 +6039,7 @@ fn readStrictSodPacketCatalog(
                         .byte_length = byte_length,
                     });
                 }
+                if (packed_header_cursor != tile_part.packed_headers.items.len) return CodestreamError.InvalidCodestream;
                 if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
             }
             cursor = tile_part.end;
@@ -6140,7 +6204,10 @@ fn readStrictMultiTileTilePartSpans(
 
         var packet_lengths: std.ArrayList(usize) = .empty;
         defer packet_lengths.deinit(allocator);
-        const sod = try readTilePartHeaderMarkers(allocator, bytes, scan + 12, tile_part_end, &packet_lengths);
+        var packed_headers: std.ArrayList(u8) = .empty;
+        defer packed_headers.deinit(allocator);
+        const sod = try readTilePartHeaderMarkers(allocator, bytes, scan + 12, tile_part_end, &packet_lengths, &packed_headers);
+        if (packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
 
         const tile = grid.tile(sot.tile_index) catch return CodestreamError.InvalidCodestream;
         const tile_plan = try makePacketPlanForTile(tile, levels, options);
@@ -6174,7 +6241,7 @@ fn readStrictMultiTileTilePartSpans(
             const payload_start = try std.math.add(usize, sod, 2);
             if (payload_start > tile_part_end) return CodestreamError.TruncatedData;
             break :blk tile_part_end - payload_start;
-        } else try validateStrictTilePartPacketSpan(sod, tile_part_end, packet_lengths.items);
+        } else try validateStrictTilePartPacketSpan(sod, tile_part_end, packet_lengths.items, false);
         const packet_count = if (missing_plt)
             expected_packet_count
         else blk: {
@@ -6227,8 +6294,15 @@ fn readStrictTilePartHeader(
 
     var packet_lengths: std.ArrayList(usize) = .empty;
     errdefer packet_lengths.deinit(allocator);
-    const sod = try readTilePartHeaderMarkers(allocator, bytes, marker_start + 12, tile_part_end, &packet_lengths);
-    const packet_payload_bytes = try validateStrictTilePartPacketSpan(sod, tile_part_end, packet_lengths.items);
+    var packed_headers: std.ArrayList(u8) = .empty;
+    errdefer packed_headers.deinit(allocator);
+    const sod = try readTilePartHeaderMarkers(allocator, bytes, marker_start + 12, tile_part_end, &packet_lengths, &packed_headers);
+    const packet_payload_bytes = try validateStrictTilePartPacketSpan(
+        sod,
+        tile_part_end,
+        packet_lengths.items,
+        packed_headers.items.len != 0,
+    );
 
     return .{
         .sot = sot,
@@ -6236,17 +6310,23 @@ fn readStrictTilePartHeader(
         .end = tile_part_end,
         .packet_payload_bytes = packet_payload_bytes,
         .packet_lengths = packet_lengths,
+        .packed_headers = packed_headers,
     };
 }
 
-fn validateStrictTilePartPacketSpan(sod: usize, tile_part_end: usize, packet_lengths: []const usize) !usize {
+fn validateStrictTilePartPacketSpan(
+    sod: usize,
+    tile_part_end: usize,
+    packet_lengths: []const usize,
+    allow_zero_lengths: bool,
+) !usize {
     if (packet_lengths.len == 0) return 0;
     const payload_start = try std.math.add(usize, sod, 2);
     if (payload_start > tile_part_end) return CodestreamError.TruncatedData;
 
     var payload_bytes: usize = 0;
     for (packet_lengths) |packet_length| {
-        if (packet_length == 0) return CodestreamError.InvalidCodestream;
+        if (packet_length == 0 and !allow_zero_lengths) return CodestreamError.InvalidCodestream;
         payload_bytes = try std.math.add(usize, payload_bytes, packet_length);
     }
     if (payload_bytes != tile_part_end - payload_start) return CodestreamError.InvalidCodestream;
@@ -6503,6 +6583,33 @@ fn appendStrictSodPacketPayload(
     }
     cursor.* = packet_end;
     return payload_len_u32;
+}
+
+fn appendStrictPackedPacketPayload(
+    allocator: std.mem.Allocator,
+    packet_bytes: *std.ArrayList(u8),
+    bytes: []const u8,
+    body_cursor: *usize,
+    body_end: usize,
+    body_length: usize,
+    packed_headers: []const u8,
+    header_cursor: *usize,
+    packet: packet_plan.Packet,
+    groups: []StrictPacketAuditBandGroup,
+) !u32 {
+    if (header_cursor.* >= packed_headers.len) return CodestreamError.TruncatedData;
+    const span = try readStrictPacketHeaderSpan(packed_headers[header_cursor.*..], packet, groups);
+    if (span.payload_length != body_length) return CodestreamError.InvalidCodestream;
+    const header_end = try std.math.add(usize, header_cursor.*, span.header_length);
+    if (header_end > packed_headers.len) return CodestreamError.TruncatedData;
+    const packet_end = try std.math.add(usize, body_cursor.*, body_length);
+    if (packet_end > body_end) return CodestreamError.TruncatedData;
+
+    try packet_bytes.appendSlice(allocator, packed_headers[header_cursor.*..header_end]);
+    try packet_bytes.appendSlice(allocator, bytes[body_cursor.*..packet_end]);
+    header_cursor.* = header_end;
+    body_cursor.* = packet_end;
+    return std.math.cast(u32, span.header_length + span.payload_length) orelse return CodestreamError.InvalidCodestream;
 }
 
 fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_component: u8, payload_version: u8, layer_count: u16) !void {
@@ -7184,12 +7291,18 @@ fn readTilePartHeaderMarkers(
     start: usize,
     end: usize,
     packet_lengths: *std.ArrayList(usize),
+    packed_headers: *std.ArrayList(u8),
 ) !usize {
     var cursor = start;
     var expected_plt_index: u8 = 0;
+    var expected_ppt_index: u8 = 0;
+    var saw_ppt = false;
     while (cursor + 1 < end) {
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(Marker.sod)) return cursor;
+        if (marker == @intFromEnum(Marker.sod)) {
+            if (saw_ppt and packed_headers.items.len == 0) return CodestreamError.InvalidCodestream;
+            return cursor;
+        }
         if (marker == @intFromEnum(Marker.sot) or marker == @intFromEnum(Marker.eoc)) {
             return CodestreamError.InvalidCodestream;
         }
@@ -7203,6 +7316,13 @@ fn readTilePartHeaderMarkers(
             try appendPltSegmentLengths(allocator, bytes[cursor + 2 .. cursor + segment_length], expected_plt_index, packet_lengths);
             if (expected_plt_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
             expected_plt_index += 1;
+        } else if (marker == @intFromEnum(Marker.ppt)) {
+            const segment = bytes[cursor + 2 .. cursor + segment_length];
+            if (segment.len < 2 or segment[0] != expected_ppt_index) return CodestreamError.InvalidCodestream;
+            try packed_headers.appendSlice(allocator, segment[1..]);
+            saw_ppt = true;
+            if (expected_ppt_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
+            expected_ppt_index += 1;
         } else if (marker == @intFromEnum(Marker.com)) {
             // Tile-part comments are metadata only and do not affect packet spans.
         } else if (isUnsupportedTilePartHeaderMarker(marker)) {
@@ -7357,6 +7477,129 @@ fn appendPltFromRpclPacketLengths(
     if (segment.items.len > 0) {
         try flushPltSegment(allocator, out, marker_index, segment.items);
     }
+}
+
+fn appendPltFromPackedPacketLengths(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    packet_lengths: []const u32,
+    header_lengths: []const u32,
+) !void {
+    if (packet_lengths.len == 0 or packet_lengths.len != header_lengths.len) {
+        return CodestreamError.InvalidCodestream;
+    }
+    var marker_index: u8 = 0;
+    var segment: std.ArrayList(u8) = .empty;
+    defer segment.deinit(allocator);
+    for (packet_lengths, header_lengths) |packet_length, header_length| {
+        if (header_length > packet_length) return CodestreamError.InvalidCodestream;
+        const body_length = packet_length - header_length;
+        const encoded_len = pltLengthByteCount(body_length);
+        if (segment.items.len + encoded_len > 65532) {
+            try flushPltSegment(allocator, out, marker_index, segment.items);
+            if (marker_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
+            marker_index += 1;
+            segment.clearRetainingCapacity();
+        }
+        try appendPltLength(allocator, &segment, body_length);
+    }
+    if (segment.items.len > 0) try flushPltSegment(allocator, out, marker_index, segment.items);
+}
+
+fn packedPacketBodyByteCount(packet_lengths: []const u32, header_lengths: []const u32) !usize {
+    if (packet_lengths.len != header_lengths.len) return CodestreamError.InvalidCodestream;
+    var total: usize = 0;
+    for (packet_lengths, header_lengths) |packet_length, header_length| {
+        if (header_length > packet_length) return CodestreamError.InvalidCodestream;
+        total = try std.math.add(usize, total, packet_length - header_length);
+    }
+    return total;
+}
+
+fn pltBytesForPackedPacketLengths(packet_lengths: []const u32, header_lengths: []const u32) !usize {
+    if (packet_lengths.len == 0 or packet_lengths.len != header_lengths.len) {
+        return CodestreamError.InvalidCodestream;
+    }
+    var bytes: usize = 5;
+    var segment_payload_bytes: usize = 0;
+    var marker_count: usize = 1;
+    for (packet_lengths, header_lengths) |packet_length, header_length| {
+        if (header_length > packet_length) return CodestreamError.InvalidCodestream;
+        const encoded_len = pltLengthByteCount(packet_length - header_length);
+        if (segment_payload_bytes + encoded_len > 65532) {
+            marker_count += 1;
+            if (marker_count > 256) return CodestreamError.InvalidCodestream;
+            bytes = try std.math.add(usize, bytes, 5);
+            segment_payload_bytes = 0;
+        }
+        segment_payload_bytes += encoded_len;
+        bytes = try std.math.add(usize, bytes, encoded_len);
+    }
+    return bytes;
+}
+
+fn pptMarkerByteCount(header_lengths: []const u32) !usize {
+    var header_bytes: usize = 0;
+    for (header_lengths) |length| header_bytes = try std.math.add(usize, header_bytes, length);
+    if (header_bytes == 0) return CodestreamError.InvalidCodestream;
+    const marker_count = try std.math.divCeil(usize, header_bytes, 65532);
+    if (marker_count > 256) return CodestreamError.UnsupportedPayload;
+    return try std.math.add(usize, header_bytes, try std.math.mul(usize, marker_count, 5));
+}
+
+fn appendPptPacketHeaders(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    packet_lengths: []const u32,
+    header_lengths: []const u32,
+    packet_bytes: []const u8,
+) !void {
+    if (packet_lengths.len != header_lengths.len) return CodestreamError.InvalidCodestream;
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(allocator);
+    var cursor: usize = 0;
+    for (packet_lengths, header_lengths) |packet_length, header_length| {
+        const packet_end = try std.math.add(usize, cursor, packet_length);
+        const header_end = try std.math.add(usize, cursor, header_length);
+        if (header_end > packet_end or packet_end > packet_bytes.len) return CodestreamError.InvalidCodestream;
+        try headers.appendSlice(allocator, packet_bytes[cursor..header_end]);
+        cursor = packet_end;
+    }
+    if (cursor != packet_bytes.len or headers.items.len == 0) return CodestreamError.InvalidCodestream;
+
+    var marker_index: u8 = 0;
+    var offset: usize = 0;
+    while (offset < headers.items.len) {
+        const count = @min(@as(usize, 65532), headers.items.len - offset);
+        try appendMarker(allocator, out, .ppt);
+        try appendU16Be(allocator, out, @intCast(count + 3));
+        try out.append(allocator, marker_index);
+        try out.appendSlice(allocator, headers.items[offset..][0..count]);
+        offset += count;
+        if (offset < headers.items.len) {
+            if (marker_index == std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
+            marker_index += 1;
+        }
+    }
+}
+
+fn appendPackedPacketBodies(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    packet_lengths: []const u32,
+    header_lengths: []const u32,
+    packet_bytes: []const u8,
+) !void {
+    if (packet_lengths.len != header_lengths.len) return CodestreamError.InvalidCodestream;
+    var cursor: usize = 0;
+    for (packet_lengths, header_lengths) |packet_length, header_length| {
+        const packet_end = try std.math.add(usize, cursor, packet_length);
+        const body_start = try std.math.add(usize, cursor, header_length);
+        if (body_start > packet_end or packet_end > packet_bytes.len) return CodestreamError.InvalidCodestream;
+        try out.appendSlice(allocator, packet_bytes[body_start..packet_end]);
+        cursor = packet_end;
+    }
+    if (cursor != packet_bytes.len) return CodestreamError.InvalidCodestream;
 }
 
 fn flushPltSegment(allocator: std.mem.Allocator, out: *std.ArrayList(u8), marker_index: u8, lengths: []const u8) !void {

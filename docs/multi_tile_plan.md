@@ -274,5 +274,5 @@ carry the globally signalled decomposition count.
 
 Tile-parts-within-tile (R divisions × tiles), per-tile COD/QCD overrides,
 `--mct none`, unsupported style combinations, lossy 9/7 tiles,
-streaming (bounded-memory) assembly, PPM/PPT. Each is a separate, later
+streaming (bounded-memory) assembly, PPM, and multipart PPT. Each is a separate, later
 increment on top of the v1 skeleton.

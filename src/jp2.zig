@@ -98,6 +98,12 @@ const PltState = struct {
     saw: bool = false,
 };
 
+const PptState = struct {
+    expected_segment_index: u8 = 0,
+    header_bytes: usize = 0,
+    saw: bool = false,
+};
+
 pub fn wrapRgbCodestream(
     allocator: std.mem.Allocator,
     input: image.RgbImage,
@@ -801,6 +807,7 @@ fn validateFirstTilePartHeader(
 ) !void {
     var cursor = start;
     var plt_state = PltState{};
+    var ppt_state = PptState{};
     while (cursor < end) {
         const marker = try readU16Be(payload, cursor);
         if ((marker >> 8) != 0xff) return Jp2Error.InvalidCodestream;
@@ -812,7 +819,13 @@ fn validateFirstTilePartHeader(
                     if (plt_state.packet_bytes != end - payload_start) {
                         return Jp2Error.InvalidCodestream;
                     }
-                    try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
+                    if (ppt_state.saw) {
+                        if (cod.sop or cod.eph or ppt_state.header_bytes == 0) return Jp2Error.UnsupportedProfile;
+                    } else {
+                        try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
+                    }
+                } else if (ppt_state.saw) {
+                    return Jp2Error.UnsupportedProfile;
                 }
                 // PLT-less tile-parts (default OpenJPEG/Grok/Kakadu output):
                 // packet spans are recoverable only by decoding the headers in
@@ -820,7 +833,7 @@ fn validateFirstTilePartHeader(
                 // Stage B); the wrapper skips per-packet frame validation.
                 return;
             },
-            marker_plt, marker_com => {},
+            marker_plt, marker_ppt, marker_com => {},
             marker_sot, marker_eoc => return Jp2Error.InvalidCodestream,
             else => return Jp2Error.UnsupportedProfile,
         }
@@ -830,7 +843,7 @@ fn validateFirstTilePartHeader(
         try validateMarkerSegmentLength(marker, marker_length);
         const next = std.math.add(usize, length_offset, marker_length) catch return Jp2Error.InvalidCodestream;
         if (next > end) return Jp2Error.InvalidCodestream;
-        try validateTilePartHeaderMarkerSegment(payload, marker, length_offset, marker_length, &plt_state);
+        try validateTilePartHeaderMarkerSegment(payload, marker, length_offset, marker_length, &plt_state, &ppt_state);
         cursor = next;
     }
     return Jp2Error.InvalidCodestream;
@@ -844,6 +857,7 @@ fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
         marker_qcc => 4, // Lqcc(2) Cqcc(1) Sqcc(1)
         marker_tlm => 9,
         marker_plt => 4,
+        marker_ppt => 4,
         marker_com => 4,
         else => 2,
     };
@@ -1138,11 +1152,22 @@ fn validateTilePartHeaderMarkerSegment(
     length_offset: usize,
     marker_length: u16,
     plt_state: *PltState,
+    ppt_state: *PptState,
 ) !void {
     switch (marker) {
         marker_plt => try validatePltSegment(payload, length_offset, marker_length, plt_state),
+        marker_ppt => try validatePptSegment(payload, length_offset, marker_length, ppt_state),
         else => {},
     }
+}
+
+fn validatePptSegment(payload: []const u8, length_offset: usize, marker_length: u16, state: *PptState) !void {
+    if (payload[length_offset + 2] != state.expected_segment_index) return Jp2Error.InvalidCodestream;
+    state.expected_segment_index = std.math.add(u8, state.expected_segment_index, 1) catch return Jp2Error.InvalidCodestream;
+    const data_bytes = @as(usize, marker_length) - 3;
+    if (data_bytes == 0) return Jp2Error.InvalidCodestream;
+    state.header_bytes = std.math.add(usize, state.header_bytes, data_bytes) catch return Jp2Error.InvalidCodestream;
+    state.saw = true;
 }
 
 fn validatePltSegment(payload: []const u8, length_offset: usize, marker_length: u16, state: *PltState) !void {

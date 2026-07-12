@@ -28,8 +28,9 @@ interop gate.
 - T2 packet state: all five progression orders preserve inclusion tag-tree,
   zero-bitplane tag-tree, `numlenbits`, layer deltas, and packet state through
   strict decode. PLT-backed tile-part divisions now cover all direct modes on
-  matching orders: `R`/RPCL, `L`/LRCP, `C`/CPRL, and `P`/PCRL. POC and
-  PPM/PPT remain separate fail-closed slices.
+  matching orders: `R`/RPCL, `L`/LRCP, `C`/CPRL, and `P`/PCRL. Single-part
+  PPT is public on its bounded no-SOP/no-EPH path. POC, PPM, and multipart PPT
+  remain separate fail-closed slices.
 - JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
   Start with 8-bit and 16-bit RGB plus sRGB `colr`; the reader now also accepts
@@ -73,9 +74,10 @@ interop gate.
 1. Add POC only after a reliable independently produced fixture is available;
    keep the current marker fail-closed until writer and strict packet schedule
    agree across every change interval.
-2. Add PPM/PPT packed packet-header decode as a complete header-source switch,
-   including ordered segment concatenation and malformed-length tests; do not
-   merely accept the marker while continuing to read headers from SOD.
+2. Extend the landed single-part PPT header-source switch to shared multipart
+   `Zppt`/header state, then add PPM main-header distribution across tile-parts.
+   Keep SOP/EPH combinations fail-closed until their packed-header placement is
+   covered by independent fixtures.
 3. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
    keeping the existing RGB representation byte-identical until the new path
    has independent interop.

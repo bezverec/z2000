@@ -153,6 +153,7 @@ Marker, T1, and diagnostics:
 | --- | --- |
 | `--sop` / `--no-sop` | Enable or disable SOP packet markers. SOP is enabled by default for the narrow archival profile. |
 | `--eph` / `--no-eph` | Enable or disable EPH packet-header markers. |
+| `--ppt` / `--no-ppt` | Move packet headers into PPT markers. Currently supported for single-tile, single-part output with SOP/EPH disabled; other combinations fail closed. |
 | `--tlm` / `--no-tlm` | Enable or disable TLM tile-part length markers. |
 | `--t1-backend iso-mq|legacy-mq` | Select the T1 entropy backend. `iso-mq` is the normal JPEG2000-style path. |
 | `--bypass` / `--no-bypass` | Enable or disable BYPASS coding style where the payload model is implemented. |
