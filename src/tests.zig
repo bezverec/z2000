@@ -15313,7 +15313,6 @@ test "position-ordered packet sequences cover all RPCL slots in reference-grid o
     const precincts = [_]packet_plan.Precinct{.{ .width = 8, .height = 8 }};
     const plan = try packet_plan.rpclSingleTile(17, 9, 2, 3, 2, &precincts);
     const total = std.math.cast(usize, plan.packets).?;
-    const levels: u8 = plan.resolution_count - 1;
 
     for ([_]packet_plan.PositionOrder{ .pcrl, .cprl }) |order| {
         const sequence = try packet_plan.positionOrderedPackets(allocator, plan, 3, 2, order);
@@ -15329,11 +15328,8 @@ test "position-ordered packet sequences cover all RPCL slots in reference-grid o
 
             // The position key (y_ref, x_ref packed) never decreases within
             // one component run for CPRL, or globally for PCRL.
-            const resolution = plan.resolutions[packet.resolution];
-            const shift: u6 = @intCast(levels - packet.resolution);
-            const x_ref = (@as(u64, packet.precinct_x) * resolution.precinct_width) << shift;
-            const y_ref = (@as(u64, packet.precinct_y) * resolution.precinct_height) << shift;
-            const key = (y_ref << 32) | x_ref;
+            const position = try packet_plan.packetPosition(plan, packet);
+            const key = (position.y_ref << 32) | position.x_ref;
             switch (order) {
                 .pcrl => try std.testing.expect(key >= previous_key),
                 .cprl => {
@@ -16242,6 +16238,106 @@ test "multi-tile component tile-part divisions emit one part per component per t
 
     const stats = try codestream.analyzeLosslessTemporary(bytes);
     try std.testing.expectEqual(@as(?u8, 'C'), stats.tile_part_divisions);
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var threaded_options = options;
+    threaded_options.threads = 3;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, threaded_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, bytes, threaded);
+
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, bytes);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(usize, width), info.width);
+
+    var wrong_progression = options;
+    wrong_progression.progression = .rpcl;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessWithOptions(allocator, rgb, wrong_progression),
+    );
+}
+
+test "multi-tile precinct tile-part divisions follow PCRL position groups" {
+    // `--tile-parts P` with PCRL: every distinct precinct position on the
+    // reference grid becomes one tile-part. Packet counts may differ between
+    // positions because not every resolution has a precinct at every point.
+    const allocator = std.testing.allocator;
+    const width = 64;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.layers = 2;
+    options.progression = .pcrl;
+    options.tile_part_divisions = 'P';
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    const sot = codestream.markerValue("sot");
+    const sod = codestream.markerValue("sod");
+    const plt_marker = codestream.markerValue("plt");
+    var cursor: usize = 2;
+    while (readU16BeTest(bytes, cursor) != sot) {
+        cursor += 2 + readU16BeTest(bytes, cursor + 2);
+    }
+    var tile_index: u16 = 0;
+    var local_part: u8 = 0;
+    var parts_per_tile: ?u8 = null;
+    var parts_seen: usize = 0;
+    while (readU16BeTest(bytes, cursor) == sot) {
+        const actual_tile = readU16BeTest(bytes, cursor + 4);
+        if (actual_tile != tile_index) {
+            try std.testing.expectEqual(tile_index + 1, actual_tile);
+            try std.testing.expectEqual(parts_per_tile.?, local_part);
+            tile_index = actual_tile;
+            local_part = 0;
+            parts_per_tile = null;
+        }
+        const tile_part_count = bytes[cursor + 11];
+        try std.testing.expect(tile_part_count > 1);
+        if (parts_per_tile) |expected| {
+            try std.testing.expectEqual(expected, tile_part_count);
+        } else {
+            parts_per_tile = tile_part_count;
+        }
+        try std.testing.expectEqual(local_part, bytes[cursor + 10]);
+
+        var packet_count: usize = 0;
+        var header_cursor = cursor + 12;
+        while (readU16BeTest(bytes, header_cursor) != sod) {
+            const segment_length = readU16BeTest(bytes, header_cursor + 2);
+            if (readU16BeTest(bytes, header_cursor) == plt_marker) {
+                for (bytes[header_cursor + 5 .. header_cursor + 2 + segment_length]) |byte| {
+                    if ((byte & 0x80) == 0) packet_count += 1;
+                }
+            }
+            header_cursor += 2 + segment_length;
+        }
+        try std.testing.expect(packet_count > 0);
+
+        local_part += 1;
+        parts_seen += 1;
+        cursor += readU32BeTest(bytes, cursor + 6);
+        if (cursor + 1 >= bytes.len) break;
+    }
+    try std.testing.expectEqual(@as(u16, 3), tile_index);
+    try std.testing.expectEqual(parts_per_tile.?, local_part);
+    try std.testing.expect(parts_seen > 4);
+
+    const stats = try codestream.analyzeLosslessTemporary(bytes);
+    try std.testing.expectEqual(@as(?u8, 'P'), stats.tile_part_divisions);
     var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
@@ -17361,9 +17457,8 @@ test "unsupported JP2 profile marker options fail closed" {
         .{ .label = "RLCP with debug sidecar", .options = .{ .progression = .rlcp, .emit_temporary_payload_sidecar = true } },
         .{ .label = "PCRL with debug sidecar", .options = .{ .progression = .pcrl, .emit_temporary_payload_sidecar = true } },
         .{ .label = "CPRL with debug sidecar", .options = .{ .progression = .cprl, .emit_temporary_payload_sidecar = true } },
-        // L and C tile-parts are supported now on their matching multi-tile
+        // L, C, and P tile-parts are supported on their matching multi-tile
         // progressions; the single-tile assembler normalizes them to one part.
-        .{ .label = "P tile-parts", .options = .{ .tile_part_divisions = 'P' } },
         .{ .label = "ICT", .options = .{ .mct = .ict } },
         .{ .label = "9-7 JP2", .options = .{ .transform = .irreversible_9_7 } },
         .{ .label = "scalar-derived quantization", .options = .{ .quantization = .scalar_derived } },

@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Per-Position Tile-Part Divisions (`--tile-parts P`)
+
+- Added PLT-backed precinct-position tile-parts for multi-tile PCRL streams.
+  Packet runs are grouped by their upper-left precinct coordinate on the image
+  reference grid, reusing `packet_plan.packetPosition`; edge tiles may carry
+  different `TNsot` counts. The shared multipart writer now derives each
+  tile's part count from its plan instead of assuming one global count. A
+  multi-layer regression covers PLT/TLM/Psot accounting, continuous SOP state,
+  strict `P` metadata, threaded determinism, pixel-exact decode, and
+  progression mismatch rejection. A live 16-tile/256-part JP2 decodes
+  losslessly through z2000, OpenJPEG, Grok, and Kakadu. The score remains
+  95/100 because POC and PPM/PPT are still open T2 syntax.
+
 ### Per-Component Tile-Part Divisions (`--tile-parts C`)
 
 - Added PLT-backed component tile-parts for multi-tile CPRL streams. Each RGB
@@ -14,8 +27,8 @@ entries are grouped by development milestone rather than semantic version.
   assuming every multipart stream is `R`. A 16-tile, two-layer regression is
   deterministic across thread counts and roundtrips losslessly; the live JP2
   smoke is pixel-exact through z2000, OpenJPEG, Grok, and Kakadu. `C` with a
-  non-CPRL order and the still-unimplemented `P` mode fail closed. The full
-  score remains 95/100 while POC, PPM/PPT, and `P` remain open T2 work.
+  non-CPRL order fails closed. The subsequent `P` slice above completes the
+  direct tile-part division set; POC and PPM/PPT remain open T2 work.
 
 ### Origin-Aware Multi-Tile Irreversible 9/7
 

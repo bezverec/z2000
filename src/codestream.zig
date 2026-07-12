@@ -2253,11 +2253,10 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .tile_part_divisions = if (has_multiple_tile_parts) switch (parsed_progression) {
                 .rpcl => 'R',
                 .lrcp => 'L',
+                .pcrl => 'P',
                 .cprl => 'C',
-                // No public division mode is inferred for foreign RLCP/PCRL
-                // multipart layouts unless their exact boundary semantics are
-                // known from an implemented writer.
-                .rlcp, .pcrl => null,
+                // RLCP has no matching public direct tile-part division.
+                .rlcp => null,
             } else null,
             .tile_part_plan_count = 0,
             .tile_part_plan = [_]u8{0} ** 33,
@@ -9418,7 +9417,7 @@ fn validateBlockSize(width: u16, height: u16) !void {
 /// Multi-tile constraints (docs/multi_tile_plan.md §3): the tile pipeline
 /// currently covers reversible 5/3 + RCT and irreversible 9/7 + ICT, quality
 /// layers across all five Part 1 packet orders, the supported resilience style
-/// combinations, and PLT-backed R/L/C tile-part divisions on matching packet
+/// combinations, and PLT-backed R/L/C/P tile-part divisions on matching packet
 /// orders. Everything outside that fails closed so COD/SIZ never advertise
 /// behavior the tile encoder does not implement.
 fn validateMultiTileCodingPath(options: LosslessOptions) !void {
@@ -9435,6 +9434,11 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
     // Per-component divisions need component-contiguous packet ranges; CPRL
     // is the Part 1 order with component as the outermost loop.
     if (options.tile_part_divisions == 'C' and options.progression != .cprl) {
+        return CodestreamError.UnsupportedPayload;
+    }
+    // Precinct-position divisions need position-contiguous packet ranges;
+    // PCRL is the Part 1 order with reference-grid position outermost.
+    if (options.tile_part_divisions == 'P' and options.progression != .pcrl) {
         return CodestreamError.UnsupportedPayload;
     }
     switch (options.transform) {
@@ -9655,6 +9659,76 @@ fn buildMultiTileComponentParts(
     return parts;
 }
 
+/// Per-position tile-part division (`P`): PCRL packets are grouped by their
+/// upper-left precinct position on the image reference grid. Different edge
+/// tiles may have different group counts, so TNsot is derived per tile.
+fn buildMultiTilePositionParts(
+    allocator: std.mem.Allocator,
+    artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
+    options: LosslessOptions,
+) ![]MultiTilePacketPart {
+    var parts: std.ArrayList(MultiTilePacketPart) = .empty;
+    errdefer parts.deinit(allocator);
+
+    for (artifacts.tiles) |tile_artifacts| {
+        if (tile_artifacts.tile.index > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+        const packets = packet_plan.positionOrderedPackets(
+            allocator,
+            tile_artifacts.scaffold.plan,
+            3,
+            options.layers,
+            .pcrl,
+        ) catch return CodestreamError.InvalidCodestream;
+        defer allocator.free(packets);
+        if (packets.len == 0 or packets.len != tile_artifacts.stream.packet_lengths.len) {
+            return CodestreamError.InvalidCodestream;
+        }
+
+        var part_count: usize = 0;
+        var packet_index: usize = 0;
+        while (packet_index < packets.len) : (part_count += 1) {
+            const position = packet_plan.packetPosition(tile_artifacts.scaffold.plan, packets[packet_index]) catch
+                return CodestreamError.InvalidCodestream;
+            packet_index += 1;
+            while (packet_index < packets.len) : (packet_index += 1) {
+                const next = packet_plan.packetPosition(tile_artifacts.scaffold.plan, packets[packet_index]) catch
+                    return CodestreamError.InvalidCodestream;
+                if (next.x_ref != position.x_ref or next.y_ref != position.y_ref) break;
+            }
+        }
+        if (part_count == 0 or part_count > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
+
+        packet_index = 0;
+        var local_part: usize = 0;
+        while (packet_index < packets.len) : (local_part += 1) {
+            const first_packet = packet_index;
+            const position = packet_plan.packetPosition(tile_artifacts.scaffold.plan, packets[packet_index]) catch
+                return CodestreamError.InvalidCodestream;
+            packet_index += 1;
+            while (packet_index < packets.len) : (packet_index += 1) {
+                const next = packet_plan.packetPosition(tile_artifacts.scaffold.plan, packets[packet_index]) catch
+                    return CodestreamError.InvalidCodestream;
+                if (next.x_ref != position.x_ref or next.y_ref != position.y_ref) break;
+            }
+            const packet_lengths = tile_artifacts.stream.packet_lengths[first_packet..packet_index];
+            const framed_bytes = try rpclPacketPayloadByteCount(options, packet_lengths);
+            const plt_bytes = try pltBytesForRpclPacketLengths(options, packet_lengths);
+            const psot_usize = try std.math.add(usize, 14, try std.math.add(usize, plt_bytes, framed_bytes));
+            const psot = std.math.cast(u32, psot_usize) orelse return CodestreamError.UnsupportedPayload;
+            try parts.append(allocator, .{
+                .tile_index = @intCast(tile_artifacts.tile.index),
+                .tile_part_index = @intCast(local_part),
+                .tile_part_count = @intCast(part_count),
+                .first_packet = first_packet,
+                .packet_count = packet_index - first_packet,
+                .psot = psot,
+            });
+        }
+        if (local_part != part_count) return CodestreamError.InvalidCodestream;
+    }
+    return parts.toOwnedSlice(allocator);
+}
+
 fn appendMultiTileTlm(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -9680,11 +9754,13 @@ fn appendMultiTilePacketPartSequence(
     out: *std.ArrayList(u8),
     artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
     parts: []const MultiTilePacketPart,
-    parts_per_tile: usize,
     options: LosslessOptions,
 ) !void {
     var part_index: usize = 0;
     for (artifacts.tiles) |tile_artifacts| {
+        if (part_index >= parts.len) return CodestreamError.InvalidCodestream;
+        const parts_per_tile = @as(usize, parts[part_index].tile_part_count);
+        if (parts_per_tile == 0) return CodestreamError.InvalidCodestream;
         var packet_sequence: u16 = 0;
         var local_part: usize = 0;
         while (local_part < parts_per_tile) : (local_part += 1) {
@@ -9801,20 +9877,15 @@ fn encodeLosslessMultiTileMeasured(
 
     const marker_start = monotonicNs();
     const division = encode_options.tile_part_divisions;
-    if (division == 'R' or division == 'L' or division == 'C') {
+    if (division == 'R' or division == 'L' or division == 'C' or division == 'P') {
         const parts = switch (division.?) {
             'R' => try buildMultiTileResolutionParts(allocator, artifacts, levels, encode_options),
             'L' => try buildMultiTileLayerParts(allocator, artifacts, encode_options),
             'C' => try buildMultiTileComponentParts(allocator, artifacts, encode_options),
+            'P' => try buildMultiTilePositionParts(allocator, artifacts, encode_options),
             else => unreachable,
         };
         defer allocator.free(parts);
-        const parts_per_tile: usize = switch (division.?) {
-            'R' => @as(usize, levels) + 1,
-            'L' => encode_options.layers,
-            'C' => 3,
-            else => unreachable,
-        };
 
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -9823,7 +9894,7 @@ fn encodeLosslessMultiTileMeasured(
         try appendCod(allocator, &out, levels, encode_options);
         try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
         if (encode_options.tlm) try appendMultiTileTlm(allocator, &out, parts);
-        try appendMultiTilePacketPartSequence(allocator, &out, artifacts, parts, parts_per_tile, encode_options);
+        try appendMultiTilePacketPartSequence(allocator, &out, artifacts, parts, encode_options);
         try appendMarker(allocator, &out, .eoc);
         if (timings) |t| {
             t.marker_ns = elapsedNs(marker_start);
@@ -9894,8 +9965,7 @@ fn validateRates(options: LosslessOptions) !void {
 fn validateTilePartDivisions(value: ?u8) !void {
     const actual = value orelse return;
     switch (actual) {
-        'R', 'L', 'C' => {},
-        'P' => return CodestreamError.UnsupportedPayload,
+        'R', 'L', 'C', 'P' => {},
         else => return CodestreamError.InvalidCodestream,
     }
 }

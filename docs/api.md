@@ -42,7 +42,7 @@ Important `tiff-to-jp2` options:
 - `--mct rct|ict|none`
 - `--transform 5-3|9-7`
 - `--qstyle none|scalar-derived|scalar-expounded`
-- `--tile-parts none|R|L|C`
+- `--tile-parts none|R|L|C|P`
 - `--sop`, `--eph`, `--tlm`
 - `--t1-backend iso-mq|legacy-mq`
 - `--bypass`
@@ -63,7 +63,7 @@ Supported public JP2 profiles are still narrow:
 - a bounded multi-tile lossless envelope: RCT/5-3, one or more quality layers
   for all five progression orders, deterministic row-major encode, reordered
   foreign tile decode, global cross-tile PCRD, and PLT-backed `R`/RPCL,
-  `L`/LRCP, and `C`/CPRL tile-part divisions; plus the
+  `L`/LRCP, `C`/CPRL, and `P`/PCRL tile-part divisions; plus the
   implemented CAUSAL/SEGMARK/terminated resilience styles, reference-grid
   precinct/code-block/tag-tree partitions, and origin-aware reversible 5/3 lifting
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
@@ -73,9 +73,9 @@ Supported public JP2 profiles are still narrow:
   including BYPASS, RESET, TERMALL, vertical-causal, predictable termination,
   segmentation symbols, and their tested combinations
 
-Unsupported combinations still fail closed. Examples include precinct (`P`)
-tile-part division, division/progression mismatches, JPX features, unsupported
-component layouts, and profile mixes outside the bounded envelope. In
+Unsupported combinations still fail closed. Examples include tile-part
+division/progression mismatches, JPX features, unsupported component layouts,
+and profile mixes outside the bounded envelope. In
 multi-tile mode, BYPASS without TERMALL and non-empty PLT-less multipart tiles
 also remain unsupported.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok

@@ -51,6 +51,27 @@ pub const Packet = struct {
     layer: u16,
 };
 
+pub const Position = struct {
+    x_ref: u64,
+    y_ref: u64,
+};
+
+/// Upper-left precinct position on the image reference grid used by the PCRL
+/// and CPRL ordering rules. Keeping this projection here prevents tile-part
+/// writers from duplicating the resolution scaling math.
+pub fn packetPosition(plan: Plan, packet: Packet) !Position {
+    if (plan.resolution_count == 0 or packet.resolution >= plan.resolution_count) {
+        return PacketPlanError.InvalidDimensions;
+    }
+    const levels: u8 = plan.resolution_count - 1;
+    const resolution = plan.resolutions[packet.resolution];
+    const shift: u6 = @intCast(levels - packet.resolution);
+    return .{
+        .x_ref = (@as(u64, packet.precinct_x) * resolution.precinct_width) << shift,
+        .y_ref = (@as(u64, packet.precinct_y) * resolution.precinct_height) << shift,
+    };
+}
+
 fn validatePlan(plan: Plan, components: u16, layers: u16) !void {
     if (components == 0 or layers == 0) return PacketPlanError.InvalidDimensions;
     if (plan.resolution_count == 0 or plan.resolution_count > plan.resolutions.len) {
@@ -280,8 +301,6 @@ pub fn positionOrderedPackets(
     order: PositionOrder,
 ) ![]Packet {
     const total = std.math.cast(usize, plan.packets) orelse return PacketPlanError.InvalidDimensions;
-    const levels: u8 = plan.resolution_count - 1;
-
     const keyed = try allocator.alloc(PositionKeyedPacket, total);
     defer allocator.free(keyed);
 
@@ -289,12 +308,11 @@ pub fn positionOrderedPackets(
     var count: usize = 0;
     while (iterator.next()) |packet| {
         if (count >= total) return PacketPlanError.InvalidDimensions;
-        const resolution = plan.resolutions[packet.resolution];
-        const shift: u6 = @intCast(levels - packet.resolution);
+        const position = try packetPosition(plan, packet);
         keyed[count] = .{
             .packet = packet,
-            .x_ref = (@as(u64, packet.precinct_x) * resolution.precinct_width) << shift,
-            .y_ref = (@as(u64, packet.precinct_y) * resolution.precinct_height) << shift,
+            .x_ref = position.x_ref,
+            .y_ref = position.y_ref,
         };
         count += 1;
     }

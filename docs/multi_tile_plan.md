@@ -136,7 +136,7 @@ multi-tile; full suite green in Debug + ReleaseFast).
 `readStrictCodestreamMetadata` accepts multi-tile SIZ (the `isSingleTile`
 rejection is gone; the parsed grid is kept) and, for multi-tile grids, runs
 `readStrictMultiTileTilePartSpans`: one tile-part per tile or PLT-backed
-`R`/RPCL, `L`/LRCP, and `C`/CPRL parts, per-tile `TPsot` sequencing, `Psot`
+`R`/RPCL, `L`/LRCP, `C`/CPRL, and `P`/PCRL parts, per-tile `TPsot` sequencing, `Psot`
 chaining ending exactly
 at EOC, optional PLT for one-part streams and required PLT for multi-part,
 per-tile packet counts validated against each tile's own packet plan when PLT

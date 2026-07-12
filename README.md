@@ -145,7 +145,7 @@ Packet, layer, and geometry options:
 | `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |
 | `--block N` | Square code-block size. |
 | `--tile W,H` | Tile size. Multi-tile support is the bounded reference-grid lossless envelope (explicit, default, or odd-origin partitions). |
-| `--tile-parts none|R|L|C` | Tile-part division mode: one part per tile, per resolution (`R` with RPCL), per layer (`L` with LRCP), or per RGB component (`C` with CPRL). Divided layouts are currently multi-tile; `P` stays fail-closed. |
+| `--tile-parts none|R|L|C|P` | Tile-part division mode: one part per tile, per resolution (`R` with RPCL), layer (`L` with LRCP), RGB component (`C` with CPRL), or reference-grid precinct position (`P` with PCRL). Divided layouts are currently multi-tile. |
 
 Marker, T1, and diagnostics:
 

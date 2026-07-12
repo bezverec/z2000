@@ -27,9 +27,9 @@ interop gate.
   green.
 - T2 packet state: all five progression orders preserve inclusion tag-tree,
   zero-bitplane tag-tree, `numlenbits`, layer deltas, and packet state through
-  strict decode. PLT-backed tile-part divisions now cover `R`/RPCL, `L`/LRCP,
-  and `C`/CPRL. Next implement `P` on its matching position-major order, then
-  POC and PPM/PPT as separate fail-closed slices.
+  strict decode. PLT-backed tile-part divisions now cover all direct modes on
+  matching orders: `R`/RPCL, `L`/LRCP, `C`/CPRL, and `P`/PCRL. POC and
+  PPM/PPT remain separate fail-closed slices.
 - JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
   Start with 8-bit and 16-bit RGB plus sRGB `colr`; the reader now also accepts
@@ -70,19 +70,16 @@ interop gate.
 
 ## Next Implementation Slice
 
-1. Implement precinct (`P`) tile-part boundaries for a progression whose
-   position groups are contiguous, with per-part PLT/TLM accounting and the
-   same z2000/OpenJPEG/Grok/Kakadu lossless gate used for `C`.
-2. Add POC only after a reliable independently produced fixture is available;
+1. Add POC only after a reliable independently produced fixture is available;
    keep the current marker fail-closed until writer and strict packet schedule
    agree across every change interval.
-3. Add PPM/PPT packed packet-header decode as a complete header-source switch,
+2. Add PPM/PPT packed packet-header decode as a complete header-source switch,
    including ordered segment concatenation and malformed-length tests; do not
    merely accept the marker while continuing to read headers from SOD.
-4. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
+3. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
    keeping the existing RGB representation byte-identical until the new path
    has independent interop.
-5. Continue measured PCRD distortion-model research against the matched-byte
+4. Continue measured PCRD distortion-model research against the matched-byte
    PSNR ladder; retain a change only when quality improves without correctness
    or safety regressions.
 
@@ -180,8 +177,8 @@ Tasks:
 - Keep RPCL as the first supported progression, with bounded per-precinct state
   and whole-packet reader validation.
 - Keep all five implemented progression orders under packet-state regression.
-- Extend tile-part division from the implemented none/`R`/`L`/`C` set to `P`
-  only after position-group boundaries and marker accounting are proven.
+- Keep all direct tile-part divisions (none/`R`/`L`/`C`/`P`) under marker,
+  packet-state, and independent-decoder regression.
 
 Exit criteria:
 
@@ -197,7 +194,7 @@ Tasks:
 
 - Keep the current positive multi-tile encode/decode path green: lossless
   RCT/5-3 and irreversible ICT/9-7, quality layers with global cross-tile PCRD,
-  one tile-part per tile or PLT-backed `R`/`L`/`C` divisions, deterministic
+  one tile-part per tile or PLT-backed `R`/`L`/`C`/`P` divisions, deterministic
   row-major encode plus reordered foreign multipart decode, the complete T1
   style-bit envelope, and ISO B.6/B.7-aligned geometry.
 - Expand the tile/profile matrix one axis at a time: more fixtures for edge

@@ -42,7 +42,7 @@ Current RGB TIFF to JP2 encode:
 9. `src/t2.zig` owns packet-header primitives, tag-trees, layer deltas,
    packet read/write state, and RPCL packet assembly helpers.
 10. `src/codestream.zig` writes JPEG2000 markers, progression-ordered packet
-    payloads, PLT-backed `R`/`L`/`C` tile-part layouts, and optional debug
+    payloads, PLT-backed `R`/`L`/`C`/`P` tile-part layouts, and optional debug
     private `COM` sidecar metadata.
 11. `src/jp2.zig` wraps the codestream in JP2 boxes, using enumerated sRGB
     `colr` by default or restricted ICC `colr` when the TIFF supplied an ICC
@@ -341,7 +341,8 @@ copy-back helpers so per-tile encode/decode work can move rectangular image
 regions without ad hoc row math. Multi-tile support is intentionally bounded:
 lossless RCT/5-3, quality layers across all five progression orders, global
 cross-tile PCRD rate targets, one tile-part per tile or PLT-backed resolution
-(`R`/RPCL), layer (`L`/LRCP), and component (`C`/CPRL) divisions,
+(`R`/RPCL), layer (`L`/LRCP), component (`C`/CPRL), and reference-grid
+position (`P`/PCRL) divisions,
 deterministic row-major encode, reordered foreign multipart tile decode,
 plain coding and the implemented
 CAUSAL/SEGMARK/terminated resilience combinations, reference-grid precinct/
@@ -366,8 +367,8 @@ These are intentionally not treated as complete yet:
 - arbitrary component layouts, subsampling, palettes, alpha channels, and
   variable bits-per-component;
 - multi-tile combinations outside the bounded envelope, including BYPASS
-  without TERMALL, precinct (`P`) tile-part division, division/progression
-  mismatches, and non-empty PLT-less multipart tiles;
+  without TERMALL, division/progression mismatches, and non-empty PLT-less
+  multipart tiles;
 - broader PLT-less foreign decode coverage beyond the current single-tile and
   explicit/default-precinct multi-tile OpenJPEG/Grok/Kakadu lossless matrices;
 - general-purpose lossy decode/error-bound coverage beyond the current narrow
