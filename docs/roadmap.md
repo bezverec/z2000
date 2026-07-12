@@ -75,9 +75,12 @@ interop gate.
 1. Add POC only after a reliable independently produced fixture is available;
    keep the current marker fail-closed until writer and strict packet schedule
    agree across every change interval.
-2. Add PPM main-header packet distribution using the now-proven tile-local
-   packed-header state. Keep SOP/EPH combinations fail-closed until their
-   packed-header placement is covered by independent fixtures.
+2. Connect the landed standalone PPM `Zppm`/`Nppm`/`Ippm` framing component to
+   main-header parsing, distribute one group per codestream tile-part, and feed
+   those groups into the now-proven tile-local packed-header state. Keep PPM
+   publicly fail-closed until strict decode and independent interop pass. Keep
+   SOP/EPH combinations fail-closed until their packed-header placement is
+   covered by independent fixtures.
 3. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
    keeping the existing RGB representation byte-identical until the new path
    has independent interop.

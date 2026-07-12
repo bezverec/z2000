@@ -11,6 +11,7 @@ const jp2 = @import("jp2.zig");
 const mq = @import("mq.zig");
 const mq_iso = @import("mq_iso.zig");
 const packet_plan = @import("packet_plan.zig");
+const ppm = @import("ppm.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const simd = @import("simd.zig");
 const subband = @import("subband.zig");
@@ -42,6 +43,64 @@ const minimal_jp2_codestream = [_]u8{
     0x01,
     0xff, 0xd9, // EOC
 };
+
+test "PPM framing joins marker boundaries and preserves tile-part groups" {
+    const allocator = std.testing.allocator;
+    const groups = [_][]const u8{
+        &.{ 0x80, 0x11, 0xff, 0x7f },
+        &.{},
+        &.{ 0x22, 0x33, 0x44, 0x55, 0x66 },
+    };
+    var payloads = try ppm.buildMarkerPayloads(allocator, &groups, 4);
+    defer payloads.deinit();
+    try std.testing.expect(payloads.items.len > groups.len);
+
+    var collector = ppm.SegmentCollector.init(allocator);
+    defer collector.deinit();
+    for (payloads.items) |payload| try collector.append(payload);
+    var assembled = try collector.finish();
+    defer assembled.deinit();
+    try std.testing.expectEqual(groups.len, try assembled.validate());
+
+    var iterator = assembled.iterator();
+    for (groups) |expected| {
+        const actual = (try iterator.next()) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
+    try std.testing.expect((try iterator.next()) == null);
+}
+
+test "PPM framing rejects malformed segment and group state" {
+    const allocator = std.testing.allocator;
+
+    const one_group = [_][]const u8{&.{0}};
+    try std.testing.expectError(
+        ppm.PpmError.InvalidSegment,
+        ppm.buildMarkerPayloads(allocator, &one_group, 65534),
+    );
+
+    var collector = ppm.SegmentCollector.init(allocator);
+    defer collector.deinit();
+    try std.testing.expectError(ppm.PpmError.InvalidSegment, collector.append(&.{0}));
+    try collector.append(&.{ 0, 0, 0 });
+    try std.testing.expectError(ppm.PpmError.InvalidSegment, collector.append(&.{ 2, 0 }));
+    var assembled = try collector.finish();
+    defer assembled.deinit();
+    try std.testing.expectError(ppm.PpmError.TruncatedGroup, assembled.validate());
+
+    const truncated_data = [_]u8{ 0, 0, 0, 3, 0xaa, 0xbb };
+    var truncated = ppm.PackedHeaders{
+        .allocator = allocator,
+        .bytes = try allocator.dupe(u8, &truncated_data),
+    };
+    defer truncated.deinit();
+    try std.testing.expectError(ppm.PpmError.TruncatedGroup, truncated.validate());
+
+    var too_many = ppm.SegmentCollector.init(allocator);
+    defer too_many.deinit();
+    for (0..256) |index| try too_many.append(&.{ @intCast(index), 0 });
+    try std.testing.expectError(ppm.PpmError.TooManySegments, too_many.append(&.{ 0, 0 }));
+}
 
 test "5/3 wavelet roundtrips integer-like samples" {
     const allocator = std.testing.allocator;

@@ -5,6 +5,16 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### PPM Framing Foundation
+
+- Added a standalone owned PPM framing component. It joins ordered `Zppm`
+  marker payloads even when marker boundaries split `Nppm` or `Ippm`, iterates
+  length-delimited tile-part header groups with checked arithmetic, and builds
+  bounded marker payloads from groups. Focused tests cover split length/data,
+  empty groups, malformed segment order, truncation, the 256-segment ceiling,
+  and the ISO marker-length bound. Main-header PPM remains fail-closed until
+  these groups are connected to strict T2 packet state; the score stays 95/100.
+
 ### PPT Packed Packet Headers
 
 - Added a real opt-in `--ppt` encode/decode path for RPCL JP2 streams with

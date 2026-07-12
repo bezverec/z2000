@@ -41,6 +41,10 @@ Current RGB TIFF to JP2 encode:
    implemented progression orders.
 9. `src/t2.zig` owns packet-header primitives, tag-trees, layer deltas,
    packet read/write state, and RPCL packet assembly helpers.
+   `src/ppm.zig` owns the standalone main-header packed-packet framing layer:
+   ordered `Zppm` segment collection, cross-segment `Nppm/Ippm` parsing, and
+   bounded marker-payload construction. Codestream integration remains
+   fail-closed until PPM groups drive strict packet decode.
 10. `src/codestream.zig` writes JPEG2000 markers, progression-ordered packet
     payloads, PLT-backed `R`/`L`/`C`/`P` tile-part layouts, and optional debug
     private `COM` sidecar metadata. The opt-in RPCL PPT path separates packed
