@@ -239,6 +239,10 @@ fn inverseRctRange(samples: []u16, planes: RctPlanes, begin: usize, end: usize, 
 // ---------------------------------------------------------------------------
 
 const max_rct_workers = 32;
+// Inverse color is a short memory-heavy tail after T1. Four workers beat eight
+// on the maintained 8C/16T host; smaller images stay serial to avoid spawn cost.
+const max_inverse_color_workers = 4;
+const min_inverse_color_pixels_per_worker = 64 * 1024;
 
 const RctForwardJob = struct {
     samples: []const u16,
@@ -258,8 +262,8 @@ fn rctForwardWorker(job: *RctForwardJob) void {
 /// (last band → pixels). Writes band [begin,end) pairs into `out` and returns
 /// the count. A single scalar-only band is produced when there are no full
 /// vector groups.
-fn rctBands(pixels: usize, thread_count: usize, out: *[max_rct_workers][2]usize) usize {
-    const groups = pixels / rct_lanes;
+fn colorBands(pixels: usize, lanes: usize, thread_count: usize, out: *[max_rct_workers][2]usize) usize {
+    const groups = pixels / lanes;
     if (groups == 0) {
         out[0] = .{ 0, pixels };
         return 1;
@@ -271,12 +275,94 @@ fn rctBands(pixels: usize, thread_count: usize, out: *[max_rct_workers][2]usize)
     var b: usize = 0;
     while (b < bands) : (b += 1) {
         const g = base + (if (b < extra) @as(usize, 1) else 0);
-        const begin = group_start * rct_lanes;
+        const begin = group_start * lanes;
         const is_last = b == bands - 1;
-        out[b] = .{ begin, if (is_last) pixels else (group_start + g) * rct_lanes };
+        out[b] = .{ begin, if (is_last) pixels else (group_start + g) * lanes };
         group_start += g;
     }
     return bands;
+}
+
+fn inverseColorThreadCount(pixels: usize, requested_threads: usize) usize {
+    const workers_for_size = if (pixels == 0)
+        1
+    else
+        1 + (pixels - 1) / min_inverse_color_pixels_per_worker;
+    return @max(1, @min(@min(requested_threads, max_inverse_color_workers), workers_for_size));
+}
+
+fn runColorJobs(
+    comptime Job: type,
+    jobs: []Job,
+    comptime worker: fn (*Job) void,
+) void {
+    if (jobs.len == 1) {
+        worker(&jobs[0]);
+        return;
+    }
+
+    var threads: [max_inverse_color_workers - 1]std.Thread = undefined;
+    var spawned: usize = 0;
+    while (spawned < jobs.len - 1) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, worker, .{&jobs[spawned]}) catch break;
+    }
+    var remaining = spawned;
+    while (remaining < jobs.len) : (remaining += 1) worker(&jobs[remaining]);
+    for (threads[0..spawned]) |thread| thread.join();
+}
+
+const RctInverseJob = struct {
+    samples: []u16,
+    planes: RctPlanes,
+    begin: usize,
+    end: usize,
+    max_sample: i32,
+    level_shift: i32,
+    result: ColorError!void = {},
+};
+
+fn rctInverseWorker(job: *RctInverseJob) void {
+    job.result = inverseRctRange(job.samples, job.planes, job.begin, job.end, job.max_sample, job.level_shift);
+}
+
+pub fn inverseRctThreaded(
+    allocator: std.mem.Allocator,
+    planes: RctPlanes,
+    requested_threads: usize,
+) !image.RgbImage {
+    const pixels = try std.math.mul(usize, planes.width, planes.height);
+    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
+        return ColorError.InvalidImage;
+    }
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    const max_sample = try maxSample(planes.bit_depth);
+    const level_shift = try dcLevelShift(planes.bit_depth);
+    const samples = try allocator.alloc(u16, sample_count);
+    errdefer allocator.free(samples);
+
+    var ranges: [max_rct_workers][2]usize = undefined;
+    const band_count = colorBands(pixels, rct_lanes, inverseColorThreadCount(pixels, requested_threads), &ranges);
+    var jobs: [max_inverse_color_workers]RctInverseJob = undefined;
+    for (0..band_count) |band| {
+        jobs[band] = .{
+            .samples = samples,
+            .planes = planes,
+            .begin = ranges[band][0],
+            .end = ranges[band][1],
+            .max_sample = max_sample,
+            .level_shift = level_shift,
+        };
+    }
+    runColorJobs(RctInverseJob, jobs[0..band_count], rctInverseWorker);
+    for (jobs[0..band_count]) |job| try job.result;
+
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = planes.bit_depth,
+        .samples = samples,
+    };
 }
 
 pub fn forwardRctThreaded(allocator: std.mem.Allocator, rgb: image.RgbImage, thread_count: usize) !RctPlanes {
@@ -294,7 +380,7 @@ pub fn forwardRctThreaded(allocator: std.mem.Allocator, rgb: image.RgbImage, thr
 
     const level_shift = try dcLevelShift(rgb.bit_depth);
     var ranges: [max_rct_workers][2]usize = undefined;
-    const band_count = rctBands(pixels, thread_count, &ranges);
+    const band_count = colorBands(pixels, rct_lanes, thread_count, &ranges);
 
     if (band_count <= 1) {
         forwardRctRange(rgb.samples, y, cb, cr, 0, pixels, level_shift);
@@ -441,14 +527,18 @@ fn forwardIctVector(samples: []const u16, y: []f32, cb: []f32, cr: []f32, pixels
 }
 
 fn inverseIctVector(samples: []u16, planes: IctPlanes, pixels: usize, shift: f32, max_sample: i32) void {
+    inverseIctRange(samples, planes, 0, pixels, shift, max_sample);
+}
+
+fn inverseIctRange(samples: []u16, planes: IctPlanes, begin: usize, end: usize, shift: f32, max_sample: i32) void {
     const shift_vec: IctVector = @splat(shift);
     const cr_to_r: IctVector = @splat(1.402);
     const cb_to_g: IctVector = @splat(0.34413);
     const cr_to_g: IctVector = @splat(0.71414);
     const cb_to_b: IctVector = @splat(1.772);
 
-    var i: usize = 0;
-    while (i + ict_lanes <= pixels) : (i += ict_lanes) {
+    var i: usize = begin;
+    while (i + ict_lanes <= end) : (i += ict_lanes) {
         const y_vec: IctVector = planes.y[i..][0..ict_lanes].*;
         const cb_vec: IctVector = planes.cb[i..][0..ict_lanes].*;
         const cr_vec: IctVector = planes.cr[i..][0..ict_lanes].*;
@@ -458,7 +548,7 @@ fn inverseIctVector(samples: []u16, planes: IctPlanes, pixels: usize, shift: f32
         storeIctRgbVector(samples, i, r, g, b, max_sample);
     }
 
-    while (i < pixels) : (i += 1) {
+    while (i < end) : (i += 1) {
         const y = planes.y[i];
         const cb = planes.cb[i];
         const cr = planes.cr[i];
@@ -469,6 +559,58 @@ fn inverseIctVector(samples: []u16, planes: IctPlanes, pixels: usize, shift: f32
         samples[i * 3 + 1] = clampToSample(g + shift, max_sample);
         samples[i * 3 + 2] = clampToSample(b + shift, max_sample);
     }
+}
+
+const IctInverseJob = struct {
+    samples: []u16,
+    planes: IctPlanes,
+    begin: usize,
+    end: usize,
+    shift: f32,
+    max_sample: i32,
+};
+
+fn ictInverseWorker(job: *IctInverseJob) void {
+    inverseIctRange(job.samples, job.planes, job.begin, job.end, job.shift, job.max_sample);
+}
+
+pub fn inverseIctThreaded(
+    allocator: std.mem.Allocator,
+    planes: IctPlanes,
+    requested_threads: usize,
+) !image.RgbImage {
+    const pixels = try std.math.mul(usize, planes.width, planes.height);
+    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
+        return ColorError.InvalidImage;
+    }
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    const max_sample = try maxSample(planes.bit_depth);
+    const shift: f32 = @floatFromInt(try dcLevelShift(planes.bit_depth));
+    const samples = try allocator.alloc(u16, sample_count);
+    errdefer allocator.free(samples);
+
+    var ranges: [max_rct_workers][2]usize = undefined;
+    const band_count = colorBands(pixels, ict_lanes, inverseColorThreadCount(pixels, requested_threads), &ranges);
+    var jobs: [max_inverse_color_workers]IctInverseJob = undefined;
+    for (0..band_count) |band| {
+        jobs[band] = .{
+            .samples = samples,
+            .planes = planes,
+            .begin = ranges[band][0],
+            .end = ranges[band][1],
+            .shift = shift,
+            .max_sample = max_sample,
+        };
+    }
+    runColorJobs(IctInverseJob, jobs[0..band_count], ictInverseWorker);
+
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = planes.bit_depth,
+        .samples = samples,
+    };
 }
 
 const IctRgbVector = struct {

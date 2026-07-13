@@ -191,8 +191,10 @@ silently break elsewhere).
 - Do not attempt to vectorize MQ symbol decode/encode — the (a, c) register
   dependency makes it impossible; this is documented and measured territory.
 - Do not re-attempt the reverted items from `optimization_plan.md` (Known
-  swap, all-significant skip, RCT/MCT-only parallelization, DWT spawn-gating,
-  generic MQ branch hints) under a SIMD label.
+  swap, all-significant skip, DWT spawn-gating, generic MQ branch hints) under
+  a SIMD label. Inverse-color parallelization was reconsidered only for the
+  larger 4Mpx ICT profile with a bounded scheduler and passed the Ryzen gate;
+  do not raise its four-worker cap without a new A/B.
 - Do not introduce intrinsics or per-ISA source branches; if portable
   `@Vector` cannot express a candidate, the candidate is out of scope.
 - Do not keep any change whose only evidence is a microbenchmark; the gate is
@@ -202,6 +204,7 @@ silently break elsewhere).
 
 | date | candidate | host | metric before | metric after | verdict |
 | --- | --- | --- | ---: | ---: | --- |
+| 2026-07-13 | SIMD-aligned four-worker inverse RCT/ICT bands | Ryzen 5700X | lossy dec t16 148.2 +/- 5.1 ms; inverse ICT 14.2 ms | 136.5 +/- 4.1 ms (-7.9%); inverse ICT 3.6 ms | **kept** — 30-run gate, exact TIFF hashes; lossless/t1 neutral |
 | 2026-07-13 | S1 9/7 split lifting + 16-column vertical bands | M4 | lossy enc t1/t10 559.2/231.5 ms, dec t1/t10 526.9/219.4 ms | 494.2/166.5 ms, 457.2/156.1 ms (−11.6/−28.1/−13.2/−28.9 %) | **kept** — bit-identical streams, lossless profile unchanged |
 | 2026-07-13 | S2 vector quantize/dequantize band regions | M4 | lossy enc t1 494.3 ms, dec t1/t10 465.0/153.0 ms | 483.9 ms (−2.1 %), 459.0/151.5 ms (−1.3/−1.0 %) | **reverted** — consistent but below the 3 % gate; do not re-attempt without a new angle (e.g. fused dequantize-into-inverse-DWT pass) |
 | 2026-07-13 | Per-plane component jobs for the 9/7 pipeline (DWT + quantize per component on the existing runComponentJobs infra; thread-level follow-up to S1, same gate) | M4 | lossy enc t10 167.2 ms, dec t10 156.2 ms | 128.6 ms (−23.1 %), 118.9 ms (−23.9 %) | **kept** — byte-identical streams, t1 and lossless unchanged |

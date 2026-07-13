@@ -268,7 +268,8 @@ Tasks:
   single-tile 9/7 forward pool clears the encode gate; its inverse promotion
   was slower, so future decode work should test catalog/T1 overlap, TIFF output
   parallelism, or a fused dequantize-to-lifting design instead of retrying the
-  same split traversal.
+  same split traversal. A separate four-worker inverse RCT/ICT tail clears the
+  lossy t16 decode gate and remains serial for small images and t1.
 - Treat the strict packet catalog as a measured serial Amdahl term. Recent scan,
   header, and finalize reductions keep it near 9-10 ms on the current smoke
   file; further T2 work should be justified by larger-image or multi-tile

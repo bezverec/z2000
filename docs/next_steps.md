@@ -36,8 +36,12 @@ neutral. These performance changes do not alter the ISO score.
 The next parallel slice kept a persistent eight-worker 9/7 forward-DWT pool:
 lossy t16 encode improved by 5.2% with a byte-identical stream. The symmetric
 inverse integration was rejected after a 4.9% decode regression, so the next
-decode candidates are catalog/T1 overlap, TIFF output parallelism, or the
-separate fused dequantize-to-lifting experiment. ISO coverage remains 100/100.
+decode slice instead parallelized the following inverse color transform. A
+four-worker SIMD-aligned RCT/ICT scheduler improved lossy t16 decode by 7.9%
+(148.2 -> 136.5 ms, 30 runs) while lossless and t1 remained neutral and pixel
+hashes stayed exact. The next candidates are catalog/T1 overlap, TIFF output
+parallelism, allocation profiling, or the separate fused
+dequantize-to-lifting experiment. ISO coverage remains 100/100.
 
 ## Next Working Sequence (2026-07-12)
 

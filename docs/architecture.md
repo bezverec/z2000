@@ -47,7 +47,9 @@ Current TIFF to JP2 encode:
    uncompressed chunky RGB, 8 or 16 bits per channel, strip storage, and an
    optional embedded ICC profile from tag 34675.
 2. `src/color.zig` converts RGB samples through RCT, ICT, or no-MCT depending
-   on the accepted profile.
+   on the accepted profile. Strict RGB decode splits large inverse RCT/ICT
+   transforms into SIMD-aligned bands for at most four workers; smaller images
+   stay serial, and each band owns a disjoint interleaved RGB output range.
 3. `src/wavelet_int.zig` and `src/wavelet.zig` apply the reversible integer
    5/3 or irreversible 9/7 transform. Single-tile multi-threaded 9/7 encode
    uses a bounded persistent band pool across row/column phases, then runs

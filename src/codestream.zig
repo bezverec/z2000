@@ -3881,7 +3881,7 @@ fn decodeStrictRpclImageFromPackets(
     var strict_image = if (header.mct == .none)
         try color.inverseNoTransform(allocator, strict_planes)
     else
-        try color.inverseRct(allocator, strict_planes);
+        try color.inverseRctThreaded(allocator, strict_planes, options.threads);
     errdefer strict_image.deinit();
 
     return .{
@@ -4943,7 +4943,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
             allocator,
             header,
             strict_planes,
-            componentThreadCountFor(options.threads),
+            options.threads,
             timings,
         );
     }
@@ -4971,7 +4971,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     return if (header.mct == .none)
         color.inverseNoTransform(allocator, strict_planes)
     else
-        color.inverseRct(allocator, strict_planes);
+        color.inverseRctThreaded(allocator, strict_planes, options.threads);
 }
 
 /// Builds a per-tile packet catalog from one Stage B tile-part span: the
@@ -5579,7 +5579,7 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
         .{ .quantized = quantized.cb, .plane = cb_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
         .{ .quantized = quantized.cr, .plane = cr_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
     };
-    try runComponentJobs(IrreversibleInversePlaneJob, &jobs, thread_count, irreversibleInversePlaneWorker);
+    try runComponentJobs(IrreversibleInversePlaneJob, &jobs, componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     const ict = color.IctPlanes{
@@ -5595,7 +5595,7 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     defer {
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
-    return color.inverseIct(allocator, ict);
+    return color.inverseIctThreaded(allocator, ict, thread_count);
 }
 
 const StrictBlockDecodeJob = struct {

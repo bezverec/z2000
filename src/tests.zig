@@ -6386,6 +6386,76 @@ test "threaded forward RCT matches the serial transform byte-for-byte" {
     }
 }
 
+test "threaded inverse RCT and ICT match serial output byte-for-byte" {
+    const allocator = std.testing.allocator;
+    const dims = [_][2]usize{ .{ 1, 7 }, .{ 65, 63 }, .{ 257, 257 }, .{ 513, 257 } };
+    const bit_depths = [_]u8{ 8, 16 };
+    const thread_counts = [_]usize{ 1, 2, 4, 8, 16 };
+
+    for (dims) |dim| {
+        const width = dim[0];
+        const height = dim[1];
+        const pixels = width * height;
+        for (bit_depths) |bit_depth| {
+            const samples = try allocator.alloc(u16, pixels * 3);
+            defer allocator.free(samples);
+            const mask: u16 = if (bit_depth == 8) 0xff else 0xffff;
+            var seed: u32 = @intCast(width * 6151 + height * 389 + bit_depth);
+            for (samples) |*sample| {
+                seed = seed *% 1664525 +% 1013904223;
+                sample.* = @as(u16, @truncate(seed >> 8)) & mask;
+            }
+            const rgb = image.RgbImage{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = bit_depth,
+                .samples = samples,
+            };
+
+            var rct = try color.forwardRct(allocator, rgb);
+            defer rct.deinit();
+            var serial_rct = try color.inverseRct(allocator, rct);
+            defer serial_rct.deinit();
+            for (thread_counts) |threads| {
+                var threaded = try color.inverseRctThreaded(allocator, rct, threads);
+                defer threaded.deinit();
+                try std.testing.expectEqualSlices(u16, serial_rct.samples, threaded.samples);
+            }
+
+            var ict = try color.forwardIct(allocator, rgb);
+            defer ict.deinit();
+            var serial_ict = try color.inverseIct(allocator, ict);
+            defer serial_ict.deinit();
+            for (thread_counts) |threads| {
+                var threaded = try color.inverseIctThreaded(allocator, ict, threads);
+                defer threaded.deinit();
+                try std.testing.expectEqualSlices(u16, serial_ict.samples, threaded.samples);
+            }
+        }
+    }
+}
+
+test "threaded inverse RCT propagates worker range errors" {
+    const allocator = std.testing.allocator;
+    const width = 513;
+    const height = 257;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    var planes = try color.forwardRct(allocator, rgb);
+    defer planes.deinit();
+    planes.y[0] = 1000;
+    try std.testing.expectError(color.ColorError.SampleOutOfRange, color.inverseRctThreaded(allocator, planes, 8));
+}
+
 test "RCT transform roundtrips a small RGB image" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{

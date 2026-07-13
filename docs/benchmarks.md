@@ -26,6 +26,35 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-07-13: Ryzen 7 5700X, parallel inverse RCT/ICT
+
+| Field | Value |
+| --- | --- |
+| z2000 source | baseline `a58f1cf`, candidate = threaded inverse-color change |
+| Build | Zig 0.16.0, `ReleaseFast`, native x86-64/AVX2 |
+| Host | AMD Ryzen 7 5700X, 8 cores / 16 threads, Windows 11 |
+| Harness | Hyperfine 1.20.0, 2 warmups + 30 measured runs, interleaved |
+| Input | `bench-rgb-2048.tif`, 12,583,052 B |
+
+The candidate uses SIMD-aligned bands and at most four workers for inverse RCT
+and ICT. The lossy stream is ICT, irreversible 9/7, scalar-expounded QCD and
+two layers at `--rates 8,1`; the lossless stream is RCT/reversible 5/3. Both
+use the existing 8192 tile, RPCL, six-resolution, SOP/EPH/TLM profile.
+
+| Metric | Baseline | Candidate | Delta |
+| --- | ---: | ---: | ---: |
+| **Lossy decode t16** | **148.2 +/- 5.1 ms** | **136.5 +/- 4.1 ms** | **-7.9%, kept** |
+| Lossless decode t16 | 143.9 +/- 5.5 ms | 139.2 +/- 4.0 ms | -3.3%, overlapping |
+| Lossy decode t1 | 744.7 +/- 33.0 ms | 731.6 +/- 10.0 ms | neutral; serial path |
+| Lossless decode t1 | 754.1 +/- 8.5 ms | 752.4 +/- 4.3 ms | neutral; serial path |
+
+The inverse ICT timing row fell from 14.238 to 3.630 ms in representative
+runs. The initial eight-worker candidate measured 151.4 +/- 4.4 to
+143.1 +/- 4.4 ms (-5.5%, 30 runs); capping the memory-heavy tail at four
+workers produced the stronger final result. Candidate and baseline decoded
+TIFF SHA-256 hashes matched for both streams. The streams themselves were
+unchanged: lossless 6,636,048 bytes and lossy 4,798,568 bytes.
+
 ## 2026-07-13: Ryzen 7 5700X, persistent 9/7 forward-DWT pool
 
 | Field | Value |

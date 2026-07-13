@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Parallel Inverse Color Transform
+
+- Added SIMD-aligned band scheduling for inverse RCT and ICT in strict RGB
+  decode. Large images use at most four workers; small images remain serial,
+  spawn failures fall back safely, and RCT range errors propagate after joins.
+- Preserved the fused three-component dequantize plus inverse 9/7 DWT path and
+  handed the full requested thread count only to the following inverse ICT.
+  Serial/parallel tests cover odd dimensions, SIMD tails, 8/16-bit data,
+  overprovisioned thread counts, and worker-side range failures.
+- On the Ryzen 5700X, the 30-run lossy t16 gate improved from
+  148.2 +/- 5.1 to 136.5 +/- 4.1 ms (-7.9%); lossless and both t1 metrics had
+  no credible regression. ReleaseFast lossless/lossy TIFF hashes match the
+  baseline exactly.
+
 ### Persistent Parallel 9/7 Forward DWT
 
 - Added a multi-plane 9/7 row/column band scheduler with private worker

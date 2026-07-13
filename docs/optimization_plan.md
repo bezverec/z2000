@@ -146,6 +146,29 @@ intra-plane inverse DWT as an immediate decode lever; the next low-risk
 parallel work is catalog/T1 overlap or TIFF output, while the fused
 dequantize-to-lifting idea remains a separate algorithmic experiment.
 
+## Checkpoint #8 (2026-07-13) — Parallel Inverse Color Transform
+
+Strict RGB decode now partitions inverse RCT and ICT into SIMD-aligned bands
+and runs at most four workers. Images below 64K pixels per worker remain on the
+serial path, worker creation failure falls back to synchronous execution, and
+RCT range errors are collected after every spawned worker joins. The existing
+component-level fused dequantize plus inverse-DWT path remains unchanged.
+
+On the Ryzen 7 5700X 2048x2048 lossy profile, a 30-run interleaved A/B moved
+t16 decode from 148.2 +/- 5.1 to 136.5 +/- 4.1 ms (-7.9%, non-overlapping
+intervals). The measured inverse ICT phase fell from 14.2 to 3.6 ms. Lossless
+t16 measured 143.9 +/- 5.5 to 139.2 +/- 4.0 ms (-3.3%, overlapping, treated
+as neutral), and t1 remained neutral because it uses the serial path. Both
+decoded TIFF hashes remained byte-identical to baseline. Four workers beat the
+initial eight-worker variant, which improved lossy t16 by only 5.5% in its
+30-run confirmation.
+
+This closes inverse color as a low-risk large-image decode lever on the Ryzen
+gate. The next decode candidates remain catalog/T1 overlap, parallel TIFF
+output, allocation profiling, and the separate fused dequantize-to-lifting
+experiment; do not increase the color-worker cap without a new host/profile
+A/B.
+
 ## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
 
 Machine: AMD Ryzen 7 5700X (8C/16T), Windows 11, x86_64. Kakadu **8.4.1**
