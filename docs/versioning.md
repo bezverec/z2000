@@ -29,6 +29,21 @@ A release-mode build (`-Drelease=true`) reports:
 0.1.0+build.BUILD.gCOMMIT
 ```
 
+A release candidate adds an explicit prerelease label:
+
+```sh
+zig build -Drelease=true -Dprerelease=rc.1 -Doptimize=ReleaseFast
+```
+
+and reports:
+
+```text
+0.1.0-rc.1+build.BUILD.gCOMMIT
+```
+
+`-Dprerelease` is accepted only with `-Drelease=true`. The complete generated
+string must remain valid SemVer.
+
 Where:
 
 - `BUILD` is `git rev-list --count HEAD`, the number of commits reachable from
@@ -77,6 +92,8 @@ should prefer a full clone so the default commit count remains meaningful.
 - Increment `MINOR` for meaningful new codec profiles, formats, CLI/API
   capability, or intentional pre-1.0 compatibility changes.
 - Keep release tags in the form `vMAJOR.MINOR.PATCH`, beginning with `v0.1.0`.
+- Keep prerelease tags in the form `vMAJOR.MINOR.PATCH-rc.N`, beginning with
+  `v0.1.0-rc.1`.
 - Do not reset or hand-edit `BUILD`; it is derived from repository history.
 
 The `VERSION` file names the next release line during development. After a
@@ -85,11 +102,21 @@ release, advance it to the next planned pre-1.0 line in a normal commit.
 ## Release Procedure
 
 1. Work from a clean, full-history checkout of `main`.
-2. Set `VERSION` to the intended release and commit that change.
+2. Set `VERSION` to the intended base release and commit that change.
 3. Run the full test and interoperability gates.
-4. Build with `zig build -Drelease=true -Doptimize=ReleaseFast -Dtarget=native`.
-5. Confirm `zig-out/bin/z2000 --version` has no `.dirty` suffix.
-6. Create and push the matching annotated tag, for example `v0.1.0`.
+4. For a release candidate, first run the `Release` GitHub Actions workflow
+   with `publish=false`. This is an explicit manual action; ordinary commits
+   and tag pushes never publish a release.
+5. Confirm every archive passes its native tests and reports the intended
+   version without a `.dirty` suffix.
+6. Create and push the matching annotated tag, for example `v0.1.0-rc.1`.
+7. Run the same workflow with `publish=true`, the tag as both `tag` and the
+   effective build ref, and review the resulting GitHub pre-release.
+
+The workflow builds Windows x86-64, Linux x86-64 musl, and macOS arm64
+archives, then emits `SHA256SUMS`. Release publication requires an existing
+tag that resolves to the exact tested checkout. Release candidates are marked
+as GitHub pre-releases; final tags omit that marker.
 
 ## Gate For 1.0.0
 

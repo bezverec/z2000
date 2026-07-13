@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Release Candidate Infrastructure
+
+- Added explicit SemVer prerelease labels for release builds, producing
+  versions such as `0.1.0-rc.1+build.404.gabcdef12` while preserving the
+  existing development and final-release forms.
+- Added a manual-only GitHub release workflow with separate dry-run and publish
+  modes. Commits and tag pushes cannot create releases. Publication requires
+  an existing tag that matches the tested revision exactly.
+- Added native Windows x86-64, Linux x86-64 musl, and macOS arm64 release
+  packages, SHA-256 checksums, pinned Zig 0.16.0 downloads, and release notes
+  that distinguish the engineering scorecard from formal certification.
+
 ### Parallel Inverse Color Transform
 
 - Added SIMD-aligned band scheduling for inverse RCT and ICT in strict RGB

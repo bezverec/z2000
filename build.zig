@@ -8,6 +8,11 @@ pub fn build(b: *std.Build) void {
         "release",
         "Format the application version as a release rather than a development build",
     ) orelse false;
+    const prerelease = b.option(
+        []const u8,
+        "prerelease",
+        "Optional SemVer prerelease label for release builds, for example rc.1",
+    ) orelse "";
     const build_number = b.option(
         u64,
         "build-number",
@@ -32,10 +37,16 @@ pub fn build(b: *std.Build) void {
     if (!validGitRevision(git_sha)) {
         std.debug.panic("invalid -Dgit-sha value '{s}': expected 7-40 hexadecimal characters or 'unknown'", .{git_sha});
     }
+    if (prerelease.len > 0 and !release_build) {
+        std.debug.panic("-Dprerelease requires -Drelease=true", .{});
+    }
     const base_version = readBaseVersion(b);
     const dirty_suffix = if (git_dirty) ".dirty" else "";
     const application_version = if (release_build)
-        b.fmt("{s}+build.{d}.g{s}{s}", .{ base_version, build_number, git_sha, dirty_suffix })
+        if (prerelease.len > 0)
+            b.fmt("{s}-{s}+build.{d}.g{s}{s}", .{ base_version, prerelease, build_number, git_sha, dirty_suffix })
+        else
+            b.fmt("{s}+build.{d}.g{s}{s}", .{ base_version, build_number, git_sha, dirty_suffix })
     else
         b.fmt("{s}-dev.{d}+g{s}{s}", .{ base_version, build_number, git_sha, dirty_suffix });
     _ = std.SemanticVersion.parse(application_version) catch {
@@ -46,6 +57,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "packed_t1_context_flags", packed_t1_context_flags);
     options.addOption([]const u8, "version_base", base_version);
     options.addOption([]const u8, "version", application_version);
+    options.addOption([]const u8, "prerelease", prerelease);
     options.addOption(u64, "build_number", build_number);
     options.addOption([]const u8, "git_sha", git_sha);
     options.addOption(bool, "git_dirty", git_dirty);

@@ -71,8 +71,9 @@ zig build run -- --version
 
 z2000 starts conservatively on the `0.1.x` line. Development builds use the
 SemVer form `0.1.0-dev.BUILD+gCOMMIT`; release builds use
-`0.1.0+build.BUILD.gCOMMIT`. `BUILD` is the reachable Git commit count and
-`COMMIT` is the eight-character revision. See
+`0.1.0+build.BUILD.gCOMMIT`, and release candidates use
+`0.1.0-rc.N+build.BUILD.gCOMMIT`. `BUILD` is the reachable Git commit count
+and `COMMIT` is the eight-character revision. See
 [Versioning](docs/versioning.md) for release and source-archive rules.
 
 ## Command Examples

@@ -2,6 +2,7 @@ const build_options = @import("build_options.zig");
 
 /// Manually selected pre-1.0 application/API version from the VERSION file.
 pub const base = build_options.version_base;
+pub const prerelease = build_options.prerelease;
 
 /// Complete SemVer string including the Git-derived build provenance.
 pub const string = build_options.version;

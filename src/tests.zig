@@ -31,11 +31,18 @@ test "application version carries deterministic build provenance" {
     try std.testing.expect(base.build == null);
 
     const expected = if (version.is_release)
-        try std.fmt.allocPrint(
-            std.testing.allocator,
-            "{s}+build.{d}.g{s}{s}",
-            .{ version.base, version.build_number, version.git_sha, if (version.dirty) ".dirty" else "" },
-        )
+        if (version.prerelease.len > 0)
+            try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{s}-{s}+build.{d}.g{s}{s}",
+                .{ version.base, version.prerelease, version.build_number, version.git_sha, if (version.dirty) ".dirty" else "" },
+            )
+        else
+            try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{s}+build.{d}.g{s}{s}",
+                .{ version.base, version.build_number, version.git_sha, if (version.dirty) ".dirty" else "" },
+            )
     else
         try std.fmt.allocPrint(
             std.testing.allocator,
@@ -44,6 +51,7 @@ test "application version carries deterministic build provenance" {
         );
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, version.string);
+    if (!version.is_release) try std.testing.expectEqual(@as(usize, 0), version.prerelease.len);
 }
 
 const minimal_jp2_codestream = [_]u8{
