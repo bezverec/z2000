@@ -5,6 +5,37 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Parallel 9/7 Component Pipeline
+
+- The irreversible encode pipeline (per-component 9/7 DWT + deadzone
+  quantization) and its decode mirror (dequantization + inverse 9/7 DWT) now
+  run the three components as parallel jobs on the existing component-job
+  infrastructure, exactly like the 5/3 path. Per-plane arithmetic is
+  untouched, so streams and decodes stay byte-identical; single-thread runs
+  keep the serial order. Multi-tile keeps this stage serial inside its
+  already-parallel tile workers.
+- Measured on M4 (hyperfine, warmup 2, 8 runs): lossy encode t10 -23.1%,
+  lossy decode t10 -23.9% on top of the S1 kernels; t1 and the lossless
+  archival profile are unchanged. Cumulative with S1, the lossy t10 profile
+  is ~44-46% faster than the pre-campaign baseline.
+
+### Vectorized 9/7 Wavelet (SIMD Plan S1)
+
+- The irreversible 9/7 DWT now lifts on the line split into contiguous
+  even/odd halves (16-lane blocks) instead of gathering interleaved samples
+  into 2-lane vectors, and the vertical pass processes 16-column bands with
+  wide row-vector lifts instead of per-column strided gathers. Horizontal
+  line copies are gone. Results are bit-identical to the previous
+  implementation (proven by a scalar-reference matrix test across 16x16
+  dimensions, 4 origins, 3 levels, plus byte-identical 2048x2048 lossy and
+  lossless streams).
+- Measured on M4 (hyperfine, warmup 2, 8 runs, keep rule >=3% with
+  non-overlapping +/-sigma): lossy encode t1 -11.6%, t10 -28.1%; lossy
+  decode t1 -13.2%, t10 -28.9%. The lossless archival profile is unchanged.
+- The follow-up S2 candidate (vectorized quantize/dequantize band loops)
+  measured -1.0% to -2.1% and was reverted per the keep rule; numbers are
+  recorded in the `docs/simd_plan.md` progress log.
+
 ### Reproducible Comparative Benchmark Ledger
 
 - Added `docs/benchmarks.md` as an append-only record of comparative runs,

@@ -32,7 +32,6 @@ const dwt97_delta: f32 = 0.443506852043971;
 // ISO/IEC 15444-1 F.4.8.2 / OpenJPEG: lowpass scales by 1/K, highpass by K.
 const dwt97_k: f32 = 1.230174104914001;
 const dwt97_inv_k: f32 = 1.0 / dwt97_k;
-const F32PairVector = @Vector(simd.f32_pair_lanes, f32);
 
 pub fn forward2D(
     allocator: std.mem.Allocator,
@@ -64,6 +63,12 @@ pub fn forward2DOrigin(
     defer allocator.free(line);
     var scratch = try allocator.alloc(f32, max_dim);
     defer allocator.free(scratch);
+    const vertical_scratch_len = if (wavelet == .irreversible_9_7)
+        ((height + 1) / 2) * f32_block_lanes
+    else
+        0;
+    const vertical_scratch = try allocator.alloc(f32, vertical_scratch_len);
+    defer allocator.free(vertical_scratch);
 
     var cur_width = width;
     var cur_height = height;
@@ -77,16 +82,22 @@ pub fn forward2DOrigin(
         if (next_width == 0 or next_height == 0) break;
         // ISO/IEC 15444-1 F.4.8: forward transform filters vertically first,
         // then horizontally, matching independent codecs.
-        for (0..cur_width) |col| {
+        var col: usize = 0;
+        if (wavelet == .irreversible_9_7 and cur_height >= 2) {
+            // Whole cache-line column bands take the wide-vector kernel; the
+            // remainder falls back to the per-column line path below.
+            while (col + f32_block_lanes <= cur_width) : (col += f32_block_lanes) {
+                forward97VerticalBand(data, width, col, cur_height, (cur_y0 & 1) == 1, vertical_scratch);
+            }
+        }
+        while (col < cur_width) : (col += 1) {
             for (0..cur_height) |row| line[row] = data[row * width + col];
             forward1DOrigin(line[0..cur_height], scratch[0..cur_height], wavelet, cur_y0);
             for (0..cur_height) |row| data[row * width + col] = line[row];
         }
 
         for (0..cur_height) |row| {
-            for (0..cur_width) |col| line[col] = data[row * width + col];
-            forward1DOrigin(line[0..cur_width], scratch[0..cur_width], wavelet, cur_x0);
-            for (0..cur_width) |col| data[row * width + col] = line[col];
+            forward1DOrigin(data[row * width ..][0..cur_width], scratch[0..cur_width], wavelet, cur_x0);
         }
 
         cur_width = next_width;
@@ -147,6 +158,12 @@ pub fn inverse2DOrigin(
     defer allocator.free(line);
     var scratch = try allocator.alloc(f32, max_dim);
     defer allocator.free(scratch);
+    const vertical_scratch_len = if (wavelet == .irreversible_9_7)
+        ((height + 1) / 2) * f32_block_lanes
+    else
+        0;
+    const vertical_scratch = try allocator.alloc(f32, vertical_scratch_len);
+    defer allocator.free(vertical_scratch);
 
     var level = actual_levels;
     while (level > 0) {
@@ -155,12 +172,16 @@ pub fn inverse2DOrigin(
 
         // Mirror of the ISO forward order: horizontal first, then vertical.
         for (0..shape.height) |row| {
-            for (0..shape.width) |col| line[col] = data[row * width + col];
-            inverse1DOrigin(line[0..shape.width], scratch[0..shape.width], wavelet, shape.x0);
-            for (0..shape.width) |col| data[row * width + col] = line[col];
+            inverse1DOrigin(data[row * width ..][0..shape.width], scratch[0..shape.width], wavelet, shape.x0);
         }
 
-        for (0..shape.width) |col| {
+        var col: usize = 0;
+        if (wavelet == .irreversible_9_7 and shape.height >= 2) {
+            while (col + f32_block_lanes <= shape.width) : (col += f32_block_lanes) {
+                inverse97VerticalBand(data, width, col, shape.height, (shape.y0 & 1) == 1, vertical_scratch);
+            }
+        }
+        while (col < shape.width) : (col += 1) {
             for (0..shape.height) |row| line[row] = data[row * width + col];
             inverse1DOrigin(line[0..shape.height], scratch[0..shape.height], wavelet, shape.y0);
             for (0..shape.height) |row| data[row * width + col] = line[row];
@@ -263,100 +284,301 @@ fn inverse53OddOrigin(data: []f32, scratch: []f32) void {
     }
 }
 
+// The 9/7 lifting kernels work on the line split into its even-position and
+// odd-position halves so every step is a contiguous wide-vector pass instead
+// of a per-sample gather over the interleaved layout. The per-element
+// arithmetic (operand values and operation order) is identical to the
+// interleaved formulation, so results stay bit-identical.
+//
+// Boundary rules mirror ISO 15444-1 F.4.8 symmetric extension and depend only
+// on array-index parity, so the same two kernels serve both line origins: an
+// odd origin merely swaps the lift order, the K scales, and the pack order.
+
 fn forward97(data: []f32, scratch: []f32) void {
-    liftOdd(data, dwt97_alpha);
-    liftEven(data, dwt97_beta);
-    liftOdd(data, dwt97_gamma);
-    liftEven(data, dwt97_delta);
-
-    scaleEvenOdd(data, dwt97_inv_k, dwt97_k);
-
-    packEvenOdd(data, scratch);
+    const even_count = (data.len + 1) / 2;
+    const even = scratch[0..even_count];
+    const odd = scratch[even_count..data.len];
+    deinterleaveSplit(data, even, odd);
+    liftSplitOdd(even, odd, dwt97_alpha);
+    liftSplitEven(even, odd, dwt97_beta);
+    liftSplitOdd(even, odd, dwt97_gamma);
+    liftSplitEven(even, odd, dwt97_delta);
+    scaleSplit(even, dwt97_inv_k);
+    scaleSplit(odd, dwt97_k);
+    @memcpy(data[0..even_count], even);
+    @memcpy(data[even_count..], odd);
 }
 
 fn inverse97(data: []f32, scratch: []f32) void {
-    unpackEvenOdd(data, scratch);
-
-    scaleEvenOdd(data, dwt97_k, dwt97_inv_k);
-
-    liftEven(data, -dwt97_delta);
-    liftOdd(data, -dwt97_gamma);
-    liftEven(data, -dwt97_beta);
-    liftOdd(data, -dwt97_alpha);
+    const even_count = (data.len + 1) / 2;
+    const even = scratch[0..even_count];
+    const odd = scratch[even_count..data.len];
+    @memcpy(even, data[0..even_count]);
+    @memcpy(odd, data[even_count..]);
+    scaleSplit(even, dwt97_k);
+    scaleSplit(odd, dwt97_inv_k);
+    liftSplitEven(even, odd, -dwt97_delta);
+    liftSplitOdd(even, odd, -dwt97_gamma);
+    liftSplitEven(even, odd, -dwt97_beta);
+    liftSplitOdd(even, odd, -dwt97_alpha);
+    interleaveSplit(data, even, odd);
 }
 
 fn forward97OddOrigin(data: []f32, scratch: []f32) void {
-    liftEven(data, dwt97_alpha);
-    liftOdd(data, dwt97_beta);
-    liftEven(data, dwt97_gamma);
-    liftOdd(data, dwt97_delta);
-    scaleEvenOdd(data, dwt97_k, dwt97_inv_k);
-    packOddEven(data, scratch);
+    const even_count = (data.len + 1) / 2;
+    const odd_count = data.len / 2;
+    const even = scratch[0..even_count];
+    const odd = scratch[even_count..data.len];
+    deinterleaveSplit(data, even, odd);
+    liftSplitEven(even, odd, dwt97_alpha);
+    liftSplitOdd(even, odd, dwt97_beta);
+    liftSplitEven(even, odd, dwt97_gamma);
+    liftSplitOdd(even, odd, dwt97_delta);
+    scaleSplit(even, dwt97_k);
+    scaleSplit(odd, dwt97_inv_k);
+    @memcpy(data[0..odd_count], odd);
+    @memcpy(data[odd_count..], even);
 }
 
 fn inverse97OddOrigin(data: []f32, scratch: []f32) void {
-    unpackOddEven(data, scratch);
-    scaleEvenOdd(data, dwt97_inv_k, dwt97_k);
-    liftOdd(data, -dwt97_delta);
-    liftEven(data, -dwt97_gamma);
-    liftOdd(data, -dwt97_beta);
-    liftEven(data, -dwt97_alpha);
+    const even_count = (data.len + 1) / 2;
+    const odd_count = data.len / 2;
+    const even = scratch[0..even_count];
+    const odd = scratch[even_count..data.len];
+    @memcpy(odd, data[0..odd_count]);
+    @memcpy(even, data[odd_count..]);
+    scaleSplit(even, dwt97_inv_k);
+    scaleSplit(odd, dwt97_k);
+    liftSplitOdd(even, odd, -dwt97_delta);
+    liftSplitEven(even, odd, -dwt97_gamma);
+    liftSplitOdd(even, odd, -dwt97_beta);
+    liftSplitEven(even, odd, -dwt97_alpha);
+    interleaveSplit(data, even, odd);
 }
 
-fn scaleEvenOdd(data: []f32, even_scale: f32, odd_scale: f32) void {
-    // Adjacent even/odd samples map cleanly to 3DNow-style f32x2 scaling.
-    const scales: F32PairVector = .{ even_scale, odd_scale };
-    var i: usize = 0;
-    while (i + simd.f32_pair_lanes <= data.len) : (i += simd.f32_pair_lanes) {
-        const pair: F32PairVector = data[i..][0..simd.f32_pair_lanes].*;
-        data[i..][0..simd.f32_pair_lanes].* = @as([simd.f32_pair_lanes]f32, pair * scales);
-    }
-    if (i < data.len) {
-        data[i] *= even_scale;
-    }
-}
+const F32Block = @Vector(simd.f32_block_lanes, f32);
+const f32_block_lanes = simd.f32_block_lanes;
 
-fn liftOdd(data: []f32, coefficient: f32) void {
-    const coeff: F32PairVector = @splat(coefficient);
-    var i: usize = 1;
-    while (i + 2 < data.len) : (i += 4) {
-        const target: F32PairVector = .{ data[i], data[i + 2] };
-        const left: F32PairVector = .{ data[i - 1], data[i + 1] };
-        const right: F32PairVector = .{
-            data[i + 1],
-            data[if (i + 3 < data.len) i + 3 else i + 1],
-        };
-        const updated = target + coeff * (left + right);
-        data[i] = updated[0];
-        data[i + 2] = updated[1];
+/// odd[j] += c * (even[j] + even[j+1]), mirroring the final right neighbor
+/// when the line ends on an odd position (even.len == odd.len).
+fn liftSplitOdd(even: []f32, odd: []f32, coefficient: f32) void {
+    const coeff: F32Block = @splat(coefficient);
+    var j: usize = 0;
+    while (j + f32_block_lanes <= odd.len and j + 1 + f32_block_lanes <= even.len) : (j += f32_block_lanes) {
+        const target: F32Block = odd[j..][0..f32_block_lanes].*;
+        const left: F32Block = even[j..][0..f32_block_lanes].*;
+        const right: F32Block = even[j + 1 ..][0..f32_block_lanes].*;
+        odd[j..][0..f32_block_lanes].* = @as([f32_block_lanes]f32, target + coeff * (left + right));
     }
-    while (i < data.len) : (i += 2) {
-        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] += coefficient * (data[i - 1] + right);
+    while (j < odd.len) : (j += 1) {
+        const right = if (j + 1 < even.len) even[j + 1] else even[j];
+        odd[j] += coefficient * (even[j] + right);
     }
 }
 
-fn liftEven(data: []f32, coefficient: f32) void {
-    const coeff: F32PairVector = @splat(coefficient);
-    var i: usize = 0;
-    while (i + 2 < data.len) : (i += 4) {
-        const target: F32PairVector = .{ data[i], data[i + 2] };
-        const left: F32PairVector = .{
-            if (i > 0) data[i - 1] else data[1],
-            data[i + 1],
-        };
-        const right: F32PairVector = .{
-            data[i + 1],
-            data[if (i + 3 < data.len) i + 3 else i + 1],
-        };
-        const updated = target + coeff * (left + right);
-        data[i] = updated[0];
-        data[i + 2] = updated[1];
+/// even[j] += c * (odd[j-1] + odd[j]), mirroring odd[0] on the left edge and
+/// the final left neighbor when the line ends on an even position.
+fn liftSplitEven(even: []f32, odd: []f32, coefficient: f32) void {
+    const coeff: F32Block = @splat(coefficient);
+    even[0] += coefficient * (odd[0] + odd[0]);
+    var j: usize = 1;
+    while (j + f32_block_lanes <= odd.len) : (j += f32_block_lanes) {
+        const target: F32Block = even[j..][0..f32_block_lanes].*;
+        const left: F32Block = odd[j - 1 ..][0..f32_block_lanes].*;
+        const right: F32Block = odd[j..][0..f32_block_lanes].*;
+        even[j..][0..f32_block_lanes].* = @as([f32_block_lanes]f32, target + coeff * (left + right));
     }
-    while (i < data.len) : (i += 2) {
-        const left = if (i > 0) data[i - 1] else data[1];
-        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] += coefficient * (left + right);
+    while (j < even.len) : (j += 1) {
+        const right = if (j < odd.len) odd[j] else odd[j - 1];
+        even[j] += coefficient * (odd[j - 1] + right);
+    }
+}
+
+fn scaleSplit(half: []f32, scale: f32) void {
+    const scales: F32Block = @splat(scale);
+    var j: usize = 0;
+    while (j + f32_block_lanes <= half.len) : (j += f32_block_lanes) {
+        const block: F32Block = half[j..][0..f32_block_lanes].*;
+        half[j..][0..f32_block_lanes].* = @as([f32_block_lanes]f32, block * scales);
+    }
+    while (j < half.len) : (j += 1) {
+        half[j] *= scale;
+    }
+}
+
+fn deinterleaveSplit(data: []const f32, even: []f32, odd: []f32) void {
+    for (odd, 0..) |*value, j| {
+        even[j] = data[2 * j];
+        value.* = data[2 * j + 1];
+    }
+    if (even.len > odd.len) even[odd.len] = data[2 * odd.len];
+}
+
+fn interleaveSplit(data: []f32, even: []const f32, odd: []const f32) void {
+    for (odd, 0..) |value, j| {
+        data[2 * j] = even[j];
+        data[2 * j + 1] = value;
+    }
+    if (even.len > odd.len) data[2 * odd.len] = even[odd.len];
+}
+
+// Vertical 9/7 over a band of f32_block_lanes columns at once: each lifting
+// step is one wide vector op per row instead of a per-column strided gather,
+// and one row access spans exactly one cache line. The row-parity boundary
+// rules are the same as the split kernels above, so the per-column arithmetic
+// is bit-identical to running the 1D transform on each column.
+
+inline fn loadRow(data: []const f32, index: usize) F32Block {
+    return data[index..][0..f32_block_lanes].*;
+}
+
+inline fn storeRow(data: []f32, index: usize, block: F32Block) void {
+    data[index..][0..f32_block_lanes].* = @as([f32_block_lanes]f32, block);
+}
+
+fn forward97VerticalBand(
+    data: []f32,
+    stride: usize,
+    col: usize,
+    height: usize,
+    origin_odd: bool,
+    pack_scratch: []f32,
+) void {
+    if (!origin_odd) {
+        liftVerticalOdd(data, stride, col, height, dwt97_alpha);
+        liftVerticalEven(data, stride, col, height, dwt97_beta);
+        liftVerticalOdd(data, stride, col, height, dwt97_gamma);
+        liftVerticalEven(data, stride, col, height, dwt97_delta);
+        scaleVertical(data, stride, col, height, dwt97_inv_k, dwt97_k);
+        packVertical(data, stride, col, height, false, pack_scratch);
+    } else {
+        liftVerticalEven(data, stride, col, height, dwt97_alpha);
+        liftVerticalOdd(data, stride, col, height, dwt97_beta);
+        liftVerticalEven(data, stride, col, height, dwt97_gamma);
+        liftVerticalOdd(data, stride, col, height, dwt97_delta);
+        scaleVertical(data, stride, col, height, dwt97_k, dwt97_inv_k);
+        packVertical(data, stride, col, height, true, pack_scratch);
+    }
+}
+
+fn inverse97VerticalBand(
+    data: []f32,
+    stride: usize,
+    col: usize,
+    height: usize,
+    origin_odd: bool,
+    pack_scratch: []f32,
+) void {
+    if (!origin_odd) {
+        unpackVertical(data, stride, col, height, false, pack_scratch);
+        scaleVertical(data, stride, col, height, dwt97_k, dwt97_inv_k);
+        liftVerticalEven(data, stride, col, height, -dwt97_delta);
+        liftVerticalOdd(data, stride, col, height, -dwt97_gamma);
+        liftVerticalEven(data, stride, col, height, -dwt97_beta);
+        liftVerticalOdd(data, stride, col, height, -dwt97_alpha);
+    } else {
+        unpackVertical(data, stride, col, height, true, pack_scratch);
+        scaleVertical(data, stride, col, height, dwt97_inv_k, dwt97_k);
+        liftVerticalOdd(data, stride, col, height, -dwt97_delta);
+        liftVerticalEven(data, stride, col, height, -dwt97_gamma);
+        liftVerticalOdd(data, stride, col, height, -dwt97_beta);
+        liftVerticalEven(data, stride, col, height, -dwt97_alpha);
+    }
+}
+
+fn liftVerticalOdd(data: []f32, stride: usize, col: usize, height: usize, coefficient: f32) void {
+    const coeff: F32Block = @splat(coefficient);
+    var row: usize = 1;
+    while (row < height) : (row += 2) {
+        const right_row = if (row + 1 < height) row + 1 else row - 1;
+        const target = loadRow(data, row * stride + col);
+        const left = loadRow(data, (row - 1) * stride + col);
+        const right = loadRow(data, right_row * stride + col);
+        storeRow(data, row * stride + col, target + coeff * (left + right));
+    }
+}
+
+fn liftVerticalEven(data: []f32, stride: usize, col: usize, height: usize, coefficient: f32) void {
+    const coeff: F32Block = @splat(coefficient);
+    var row: usize = 0;
+    while (row < height) : (row += 2) {
+        const left_row = if (row > 0) row - 1 else 1;
+        const right_row = if (row + 1 < height) row + 1 else row - 1;
+        const target = loadRow(data, row * stride + col);
+        const left = loadRow(data, left_row * stride + col);
+        const right = loadRow(data, right_row * stride + col);
+        storeRow(data, row * stride + col, target + coeff * (left + right));
+    }
+}
+
+fn scaleVertical(data: []f32, stride: usize, col: usize, height: usize, even_scale: f32, odd_scale: f32) void {
+    const evens: F32Block = @splat(even_scale);
+    const odds: F32Block = @splat(odd_scale);
+    var row: usize = 0;
+    while (row < height) : (row += 1) {
+        const scales = if ((row & 1) == 0) evens else odds;
+        storeRow(data, row * stride + col, loadRow(data, row * stride + col) * scales);
+    }
+}
+
+/// Reorder the band's rows into low|high halves: even rows first for an even
+/// origin, odd rows first for an odd origin. The soon-to-be high half is
+/// staged in pack_scratch so the in-place compaction cannot clobber it.
+fn packVertical(data: []f32, stride: usize, col: usize, height: usize, origin_odd: bool, pack_scratch: []f32) void {
+    const first_parity: usize = if (origin_odd) 1 else 0;
+    const second_parity: usize = 1 - first_parity;
+    const first_count = if (origin_odd) height / 2 else (height + 1) / 2;
+
+    var staged: usize = 0;
+    var row: usize = second_parity;
+    while (row < height) : (row += 2) {
+        @memcpy(pack_scratch[staged * f32_block_lanes ..][0..f32_block_lanes], data[row * stride + col ..][0..f32_block_lanes]);
+        staged += 1;
+    }
+    var out: usize = 0;
+    row = first_parity;
+    while (row < height) : (row += 2) {
+        if (out != row) {
+            @memcpy(data[out * stride + col ..][0..f32_block_lanes], data[row * stride + col ..][0..f32_block_lanes]);
+        }
+        out += 1;
+    }
+    for (0..staged) |j| {
+        @memcpy(
+            data[(first_count + j) * stride + col ..][0..f32_block_lanes],
+            pack_scratch[j * f32_block_lanes ..][0..f32_block_lanes],
+        );
+    }
+}
+
+/// Inverse of packVertical: spread the low|high halves back to interleaved
+/// row parities. The high half is staged first because expanding the low half
+/// in place overwrites the band's tail rows.
+fn unpackVertical(data: []f32, stride: usize, col: usize, height: usize, origin_odd: bool, pack_scratch: []f32) void {
+    const first_parity: usize = if (origin_odd) 1 else 0;
+    const second_parity: usize = 1 - first_parity;
+    const first_count = if (origin_odd) height / 2 else (height + 1) / 2;
+    const second_count = height - first_count;
+
+    for (0..second_count) |j| {
+        @memcpy(
+            pack_scratch[j * f32_block_lanes ..][0..f32_block_lanes],
+            data[(first_count + j) * stride + col ..][0..f32_block_lanes],
+        );
+    }
+    var j = first_count;
+    while (j > 0) {
+        j -= 1;
+        const dest = 2 * j + first_parity;
+        if (dest != j) {
+            @memcpy(data[dest * stride + col ..][0..f32_block_lanes], data[j * stride + col ..][0..f32_block_lanes]);
+        }
+    }
+    for (0..second_count) |k| {
+        @memcpy(
+            data[(2 * k + second_parity) * stride + col ..][0..f32_block_lanes],
+            pack_scratch[k * f32_block_lanes ..][0..f32_block_lanes],
+        );
     }
 }
 
