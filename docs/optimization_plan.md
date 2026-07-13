@@ -169,6 +169,29 @@ output, allocation profiling, and the separate fused dequantize-to-lifting
 experiment; do not increase the color-worker cap without a new host/profile
 A/B.
 
+## Checkpoint #9 (2026-07-13) — Cross-Component T1 Pool Rejected
+
+A decode candidate replaced the three sequential per-component T1 worker
+pools with one 16-worker queue over all RGB code-blocks. The first form sorted
+all blocks globally by payload weight; a second form kept Y, Cb, and Cr groups
+contiguous and sorted only within each component. Both were pixel-exact and
+reduced profiled worker jobs from 48 to 16, but neither passed the keep rule.
+
+The globally mixed form regressed the 30-run lossless t16 gate from
+143.1 +/- 5.1 to 150.3 +/- 7.8 ms (+5.0%). The component-grouped form looked
+promising on lossy decode, but the final shell-less gates remained
+statistically inconclusive: lossless 137.4 +/- 3.5 to 139.3 +/- 7.2 ms
+(+1.4%), lossy 147.4 +/- 9.4 to 135.3 +/- 6.3 ms (-8.2%), and the reverse
+60-run lossy confirmation 151.1 +/- 15.4 to 140.0 +/- 9.9 ms (-7.3%). The
+mean gains did not overcome the overlapping intervals, so the candidate was
+reverted.
+
+The experiment shows that thread creation is visible (aggregate system CPU
+fell substantially), but a flat cross-component queue trades it for cache and
+scheduler variance. Do not retry that layout. A future persistent-pool design
+must preserve strict component phases with an error-safe barrier, or overlap
+packet catalog production directly with block-ready T1 work.
+
 ## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
 
 Machine: AMD Ryzen 7 5700X (8C/16T), Windows 11, x86_64. Kakadu **8.4.1**

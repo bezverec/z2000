@@ -274,6 +274,10 @@ Tasks:
   header, and finalize reductions keep it near 9-10 ms on the current smoke
   file; further T2 work should be justified by larger-image or multi-tile
   profiles unless it also improves ISO correctness.
+- Do not flatten RGB T1 blocks into one cross-component decode queue: the
+  measured candidate reduced worker creation but increased variance and failed
+  the lossless gate. Any persistent pool must retain component phases or begin
+  from block-ready catalog/T1 pipelining.
 - Avoid more block-order scheduling experiments until worker-balance counters
   show a real tail; the tested LPT-by-payload ordering was slower than the
   atomic next-block scheduler.
