@@ -73,6 +73,17 @@ result for one-word code-blocks measured encode 808.1 +/- 10.9 to
 per-symbol MQ significance work; cleanup coefficient reloads and duplicate
 one-word stripe scans are now spent unless combined with a broader redesign.
 
+A follow-up O3/parallel probe tested four larger variants, all byte-exact and
+all reverted. CLZ-batched encoder renormalization was neutral at t1 and, in a
+30-run t16 confirmation, measured 136.2 +/- 4.6 vs 136.6 +/- 3.2 ms. Removing
+the write-only ISO-MQ context state byte measured encode -1.2% and decode
++0.3%. Explicit four-row significance stripe unrolling measured 794.4 +/- 3.9
+vs 795.4 +/- 5.9 ms. Finally, assigning each spatial code-block's RGB triplet
+with one atomic queue claim initially suggested -2.5%, but a simplified queue
+and 30-run repeat measured 139.1 +/- 4.7 vs 138.9 +/- 4.9 ms. These results
+reinforce that compiler-visible loop/store cleanup and queue atomics are spent;
+the next O3 attempt needs a genuinely different context/column data layout.
+
 ## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
 
 Machine: AMD Ryzen 7 5700X (8C/16T), Windows 11, x86_64. Kakadu **8.4.1**
@@ -458,3 +469,7 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | 2026-07-08 | O5 block-level decode for 2-3 threads (t2/t3 imbalance) (Mac M4) | — | — | t2 -19.5%, t3 +7% | unchanged | kept; monotone scaling, t1/t10 unchanged, removes nested-parallel special case |
 | 2026-07-13 | O2 cleanup sign coefficient reuse | -1.1% | — | — | — | reverted; byte-exact, below gate |
 | 2026-07-13 | O3 one-word stripe range reuse | -1.3% | — | -1.9% | — | reverted; byte-exact, below gate |
+| 2026-07-13 | O3 CLZ-batched MQ encode renormalization | +0.4% | neutral | — | — | reverted; byte-exact, t16 30-run confirmation neutral |
+| 2026-07-13 | O3 remove write-only ISO-MQ context state | -1.2% | — | +0.3% | — | reverted; below gate |
+| 2026-07-13 | O3 explicit four-row significance unroll | +0.1% | — | — | — | reverted; compiler already optimizes the short loop |
+| 2026-07-13 | O5 spatial RGB block queue | — | neutral | — | — | reverted; initial -2.5% did not reproduce in simplified 30-run queue |

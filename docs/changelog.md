@@ -20,6 +20,12 @@ entries are grouped by development milestone rather than semantic version.
   1.1%, while avoiding a duplicate full-width row-mask scan improved encode
   by 1.3% and decode by 1.9%. The next candidate should reduce per-symbol MQ
   significance work rather than add more stripe-level gating.
+- A second measured series also stayed below the keep rule and was reverted:
+  CLZ-batched MQ encode renormalization was neutral, removing a write-only
+  context state byte improved encode by 1.2%, explicit four-row significance
+  unrolling was neutral, and a one-claim-per-RGB-block worker queue was neutral
+  in its 30-run confirmation. The optimization plan records the full numbers
+  and now reserves further O3 work for a different context/column data layout.
 
 ### ISO MQ Decode Branch Layout
 
