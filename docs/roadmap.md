@@ -74,9 +74,10 @@ interop gate.
 
 ## Next Implementation Slice
 
-1. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
-   keeping the existing RGB representation byte-identical until the new path
-   has independent interop.
+1. Continue the component-generic campaign from the landed grayscale TIFF,
+   JP2 metadata, and externally pixel-exact encode path: teach the strict SIZ,
+   packet catalog, T1 reconstruction, and public decode result to handle one
+   component while keeping the existing RGB representation byte-identical.
 2. Continue measured PCRD distortion-model research against the matched-byte
    PSNR ladder; retain a change only when quality improves without correctness
    or safety regressions.

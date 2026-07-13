@@ -370,6 +370,164 @@ pub fn encodeLosslessWithOptionsProfiled(
     return encodeLosslessWithOptionsMeasured(allocator, rgb, options, timings);
 }
 
+/// Encodes the narrow ISO/IEC 15444-1 grayscale profile currently supported
+/// by z2000: one unsigned component, one tile, reversible 5/3, ISO MQ, RPCL,
+/// in-band packet headers, PLT, and optional TLM/SOP/EPH markers.
+pub fn encodeLosslessGrayWithOptions(
+    allocator: std.mem.Allocator,
+    gray: image.GrayImage,
+    options: LosslessOptions,
+) ![]u8 {
+    if (gray.width == 0 or gray.height == 0 or
+        gray.width > std.math.maxInt(u32) or gray.height > std.math.maxInt(u32))
+    {
+        return CodestreamError.ImageTooLarge;
+    }
+    if (gray.bit_depth != 8 and gray.bit_depth != 16) return CodestreamError.UnsupportedPayload;
+    const pixels = std.math.mul(usize, gray.width, gray.height) catch return CodestreamError.ImageTooLarge;
+    if (gray.samples.len != pixels) return CodestreamError.InvalidCodestream;
+    if (gray.white_is_zero) return CodestreamError.UnsupportedPayload;
+    if (options.levels > 32) return CodestreamError.TooManyLevels;
+    if (options.layers == 0 or options.layers > max_quality_layers or
+        options.rate_count > options.layers or options.threads == 0)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    try validateBlockSize(options.block_width, options.block_height);
+    try validatePrecincts(options);
+    try validateRates(options);
+    try validateTilePartDivisions(options.tile_part_divisions);
+    try validateCodingPath(options);
+
+    if (options.transform != .reversible_5_3 or options.quantization != .none or
+        options.mct != .none or options.progression != .rpcl or
+        options.poc_records.len != 0 or options.poc_in_tile_header or
+        options.ppm or options.ppt or options.emit_temporary_payload_sidecar or
+        options.t1_backend != .iso_mq)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (options.tile_part_divisions != null and options.tile_part_divisions != 'R') {
+        return CodestreamError.UnsupportedPayload;
+    }
+
+    const grid = tile_grid.Grid.fromImageSize(
+        gray.width,
+        gray.height,
+        options.tile_width,
+        options.tile_height,
+    ) catch |err| switch (err) {
+        tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
+        tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
+    };
+    if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
+
+    const levels = actualDwtLevels(gray.width, gray.height, options.levels);
+    const encode_options = normalizedEncodePrecinctOptions(options, levels);
+    try validatePrecinctBlockSpans(encode_options);
+
+    var scaffold_precincts: [33]packet_plan.Precinct = undefined;
+    for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {
+        scaffold_precincts[index] = .{ .width = precinct.width, .height = precinct.height };
+    }
+    const block_style = ebcot.CodeBlockStyle{
+        .bypass = encode_options.bypass,
+        .reset_context = encode_options.reset_context,
+        .terminate_all = encode_options.terminate_all,
+        .vertical_causal = encode_options.vertical_causal,
+        .predictable_termination = encode_options.predictable_termination,
+        .segmentation_symbols = encode_options.segmentation_symbols,
+    };
+    var artifacts = try tile_pipeline.buildGrayRpclEncodeArtifactsIsoMq(
+        allocator,
+        gray,
+        levels,
+        .{
+            .layers = encode_options.layers,
+            .block_width = encode_options.block_width,
+            .block_height = encode_options.block_height,
+            .precincts = scaffold_precincts[0..encode_options.precinct_count],
+            .rates = encode_options.rates,
+            .rate_count = encode_options.rate_count,
+        },
+        block_style,
+    );
+    defer artifacts.deinit();
+    if (artifacts.levels != levels or artifacts.scaffold.components != 1 or
+        artifacts.catalog.components != 1)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    const packets = try makePacketPlanForComponents(gray.width, gray.height, levels, 1, encode_options);
+    if (artifacts.stream.packet_lengths.len != packets.packets or
+        artifacts.stream.packet_header_lengths.len != packets.packets)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    const tile_parts = tilePartCountForOptions(levels, encode_options);
+    var psots: [33]u32 = undefined;
+    var tile_part_index: usize = 0;
+    while (tile_part_index < tile_parts) : (tile_part_index += 1) {
+        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
+        const packet_lengths = artifacts.stream.packet_lengths[packet_range.start..][0..packet_range.count];
+        const packet_bytes = try rpclPacketPayloadByteCount(encode_options, packet_lengths);
+        const plt_bytes = try pltBytesForRpclPacketLengths(encode_options, packet_lengths);
+        const tile_part_bytes = try std.math.add(usize, packet_bytes, plt_bytes);
+        psots[tile_part_index] = std.math.cast(u32, try std.math.add(usize, 14, tile_part_bytes)) orelse
+            return CodestreamError.ImageTooLarge;
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendMarker(allocator, &out, .soc);
+    try appendSizForComponents(allocator, &out, .{
+        .width = @intCast(gray.width),
+        .height = @intCast(gray.height),
+        .bit_depth = gray.bit_depth,
+        .components = 1,
+        .tile_width = encode_options.tile_width,
+        .tile_height = encode_options.tile_height,
+    });
+    try appendCod(allocator, &out, levels, encode_options);
+    try appendQcd(allocator, &out, levels, gray.bit_depth, encode_options);
+    if (encode_options.tlm) try appendTlm(allocator, &out, psots[0..tile_parts]);
+
+    var packet_sequence: u16 = 0;
+    tile_part_index = 0;
+    while (tile_part_index < tile_parts) : (tile_part_index += 1) {
+        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
+        const packet_lengths = artifacts.stream.packet_lengths[packet_range.start..][0..packet_range.count];
+        const packet_header_lengths = artifacts.stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
+        const packet_bytes_start = try rpclPacketByteOffset(artifacts.stream.packet_lengths, packet_range.start);
+        const packet_bytes_end = try rpclPacketByteOffset(
+            artifacts.stream.packet_lengths,
+            packet_range.start + packet_range.count,
+        );
+        try appendSot(
+            allocator,
+            &out,
+            0,
+            psots[tile_part_index],
+            @intCast(tile_part_index),
+            @intCast(tile_parts),
+        );
+        try appendPltFromRpclPacketLengths(allocator, &out, encode_options, packet_lengths);
+        try appendMarker(allocator, &out, .sod);
+        try appendRpclPackets(
+            allocator,
+            &out,
+            encode_options,
+            packet_lengths,
+            packet_header_lengths,
+            artifacts.stream.bytes[packet_bytes_start..packet_bytes_end],
+            &packet_sequence,
+        );
+    }
+    try appendMarker(allocator, &out, .eoc);
+    return out.toOwnedSlice(allocator);
+}
+
 const ComponentSlices = struct {
     y: []i32,
     cb: []i32,
@@ -7716,22 +7874,52 @@ fn appendSiz(
     rgb: image.RgbImage,
     options: LosslessOptions,
 ) !void {
-    const components: u16 = 3;
-    const lsiz = 38 + 3 * components;
+    return appendSizForComponents(allocator, out, .{
+        .width = @intCast(rgb.width),
+        .height = @intCast(rgb.height),
+        .bit_depth = rgb.bit_depth,
+        .components = 3,
+        .tile_width = options.tile_width,
+        .tile_height = options.tile_height,
+    });
+}
+
+const SizProfile = struct {
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    components: u16,
+    tile_width: u32,
+    tile_height: u32,
+};
+
+fn appendSizForComponents(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    profile: SizProfile,
+) !void {
+    if (profile.width == 0 or profile.height == 0 or profile.components == 0) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (profile.bit_depth == 0 or profile.bit_depth > 38) return CodestreamError.UnsupportedPayload;
+    const component_bytes = try std.math.mul(u32, 3, profile.components);
+    const lsiz_u32 = try std.math.add(u32, 38, component_bytes);
+    if (lsiz_u32 > std.math.maxInt(u16)) return CodestreamError.ImageTooLarge;
+
     try appendMarker(allocator, out, .siz);
-    try appendU16Be(allocator, out, lsiz);
+    try appendU16Be(allocator, out, @intCast(lsiz_u32));
     try appendU16Be(allocator, out, 0);
-    try appendU32Be(allocator, out, @as(u32, @intCast(rgb.width)));
-    try appendU32Be(allocator, out, @as(u32, @intCast(rgb.height)));
+    try appendU32Be(allocator, out, profile.width);
+    try appendU32Be(allocator, out, profile.height);
     try appendU32Be(allocator, out, 0);
     try appendU32Be(allocator, out, 0);
-    try appendU32Be(allocator, out, options.tile_width);
-    try appendU32Be(allocator, out, options.tile_height);
+    try appendU32Be(allocator, out, profile.tile_width);
+    try appendU32Be(allocator, out, profile.tile_height);
     try appendU32Be(allocator, out, 0);
     try appendU32Be(allocator, out, 0);
-    try appendU16Be(allocator, out, components);
-    for (0..components) |_| {
-        try out.append(allocator, rgb.bit_depth - 1);
+    try appendU16Be(allocator, out, profile.components);
+    for (0..profile.components) |_| {
+        try out.append(allocator, profile.bit_depth - 1);
         try out.append(allocator, 1);
         try out.append(allocator, 1);
     }
@@ -9762,6 +9950,16 @@ fn appendPacketPlan(
 }
 
 fn makePacketPlan(width: usize, height: usize, levels: u8, options: LosslessOptions) !packet_plan.Plan {
+    return makePacketPlanForComponents(width, height, levels, 3, options);
+}
+
+fn makePacketPlanForComponents(
+    width: usize,
+    height: usize,
+    levels: u8,
+    components: u16,
+    options: LosslessOptions,
+) !packet_plan.Plan {
     var precincts: [33]packet_plan.Precinct = undefined;
     var index: usize = 0;
     while (index < options.precinct_count) : (index += 1) {
@@ -9775,13 +9973,22 @@ fn makePacketPlan(width: usize, height: usize, levels: u8, options: LosslessOpti
         width,
         height,
         levels,
-        3,
+        components,
         options.layers,
         precincts[0..options.precinct_count],
     );
 }
 
 fn makePacketPlanForTile(tile: tile_grid.Tile, levels: u8, options: LosslessOptions) !packet_plan.Plan {
+    return makePacketPlanForTileComponents(tile, levels, 3, options);
+}
+
+fn makePacketPlanForTileComponents(
+    tile: tile_grid.Tile,
+    levels: u8,
+    components: u16,
+    options: LosslessOptions,
+) !packet_plan.Plan {
     var precincts: [33]packet_plan.Precinct = undefined;
     var index: usize = 0;
     while (index < options.precinct_count) : (index += 1) {
@@ -9796,7 +10003,7 @@ fn makePacketPlanForTile(tile: tile_grid.Tile, levels: u8, options: LosslessOpti
         tile.rect.x1,
         tile.rect.y1,
         levels,
-        3,
+        components,
         options.layers,
         precincts[0..options.precinct_count],
     );

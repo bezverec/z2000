@@ -43,6 +43,8 @@ const BoxType = enum(u32) {
 
 const signature_payload = [_]u8{ 0x0d, 0x0a, 0x87, 0x0a };
 const brand_jp2 = fourcc("jp2 ");
+const enum_cs_srgb: u32 = 16;
+const enum_cs_grayscale: u32 = 17;
 const marker_soc = 0xff4f;
 const marker_cap = 0xff50;
 const marker_siz = 0xff51;
@@ -123,11 +125,64 @@ pub fn wrapRgbCodestream(
     const pixels = try std.math.mul(usize, input.width, input.height);
     const expected_samples = try std.math.mul(usize, pixels, 3);
     if (input.samples.len != expected_samples) return Jp2Error.InvalidBox;
-    try validateCodestreamPayload(codestream, .{
-        .width = @as(u32, @intCast(input.width)),
-        .height = @as(u32, @intCast(input.height)),
+
+    return wrapCodestream(allocator, .{
+        .width = @intCast(input.width),
+        .height = @intCast(input.height),
         .components = 3,
         .bits_per_component = input.bit_depth,
+        .enumerated_color_space = enum_cs_srgb,
+        .icc_profile = input.icc_profile,
+    }, codestream);
+}
+
+/// Wraps an unsigned, non-subsampled one-component codestream in the JP2
+/// baseline grayscale colour space. TIFF WhiteIsZero samples must be inverted
+/// before codestream encoding; accepting them here would silently change their
+/// colour meaning because JP2 enumerated grayscale uses zero as black.
+pub fn wrapGrayCodestream(
+    allocator: std.mem.Allocator,
+    input: image.GrayImage,
+    codestream: []const u8,
+) ![]u8 {
+    if (input.width == 0 or input.height == 0) return Jp2Error.InvalidBox;
+    if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
+        return Jp2Error.ImageTooLarge;
+    }
+    if (input.bit_depth != 8 and input.bit_depth != 16) return Jp2Error.UnsupportedProfile;
+    const expected_samples = try std.math.mul(usize, input.width, input.height);
+    if (input.samples.len != expected_samples) return Jp2Error.InvalidBox;
+    if (input.white_is_zero) return Jp2Error.UnsupportedProfile;
+
+    return wrapCodestream(allocator, .{
+        .width = @intCast(input.width),
+        .height = @intCast(input.height),
+        .components = 1,
+        .bits_per_component = input.bit_depth,
+        .enumerated_color_space = enum_cs_grayscale,
+        .icc_profile = input.icc_profile,
+    }, codestream);
+}
+
+const WrapProfile = struct {
+    width: u32,
+    height: u32,
+    components: u16,
+    bits_per_component: u8,
+    enumerated_color_space: u32,
+    icc_profile: ?[]const u8,
+};
+
+fn wrapCodestream(
+    allocator: std.mem.Allocator,
+    profile: WrapProfile,
+    codestream: []const u8,
+) ![]u8 {
+    try validateCodestreamPayload(codestream, .{
+        .width = profile.width,
+        .height = profile.height,
+        .components = profile.components,
+        .bits_per_component = profile.bits_per_component,
     });
     if (codestream.len > std.math.maxInt(u32) - 8) return Jp2Error.CodestreamTooLarge;
 
@@ -148,10 +203,10 @@ pub fn wrapRgbCodestream(
 
     var ihdr: std.ArrayList(u8) = .empty;
     defer ihdr.deinit(allocator);
-    try appendU32Be(allocator, &ihdr, @as(u32, @intCast(input.height)));
-    try appendU32Be(allocator, &ihdr, @as(u32, @intCast(input.width)));
-    try appendU16Be(allocator, &ihdr, 3);
-    try ihdr.append(allocator, input.bit_depth - 1);
+    try appendU32Be(allocator, &ihdr, profile.height);
+    try appendU32Be(allocator, &ihdr, profile.width);
+    try appendU16Be(allocator, &ihdr, profile.components);
+    try ihdr.append(allocator, profile.bits_per_component - 1);
     try ihdr.append(allocator, 7);
     try ihdr.append(allocator, 0);
     try ihdr.append(allocator, 0);
@@ -159,18 +214,18 @@ pub fn wrapRgbCodestream(
 
     var colr: std.ArrayList(u8) = .empty;
     defer colr.deinit(allocator);
-    if (input.icc_profile) |profile| {
-        if (profile.len == 0) return Jp2Error.UnsupportedProfile;
-        if (profile.len > std.math.maxInt(u32) - 11) return Jp2Error.CodestreamTooLarge;
+    if (profile.icc_profile) |icc_profile| {
+        if (icc_profile.len == 0) return Jp2Error.UnsupportedProfile;
+        if (icc_profile.len > std.math.maxInt(u32) - 11) return Jp2Error.CodestreamTooLarge;
         try colr.append(allocator, 2);
         try colr.append(allocator, 0);
         try colr.append(allocator, 0);
-        try colr.appendSlice(allocator, profile);
+        try colr.appendSlice(allocator, icc_profile);
     } else {
         try colr.append(allocator, 1);
         try colr.append(allocator, 0);
         try colr.append(allocator, 0);
-        try appendU32Be(allocator, &colr, 16);
+        try appendU32Be(allocator, &colr, profile.enumerated_color_space);
     }
     try appendBox(allocator, &jp2h, .color, colr.items);
     try appendBox(allocator, &out, .jp2_header, jp2h.items);
@@ -298,7 +353,10 @@ fn extractIccProfileFromJp2Header(allocator: std.mem.Allocator, bytes: []const u
         if (box.payload.len < 3) return Jp2Error.InvalidBox;
         switch (box.payload[0]) {
             1 => {
-                if (box.payload.len == 7 and (try readU32Be(box.payload, 3)) == 16) return null;
+                if (box.payload.len == 7) {
+                    const enum_cs = try readU32Be(box.payload, 3);
+                    if (enum_cs == enum_cs_srgb or enum_cs == enum_cs_grayscale) return null;
+                }
             },
             2 => {
                 if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
@@ -338,7 +396,9 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 if (compression_type != 7 or colorspace_unknown > 1 or intellectual_property != 0) {
                     return Jp2Error.UnsupportedProfile;
                 }
-                if (info.components != 3) return Jp2Error.UnsupportedColorSpace;
+                if (info.components != 1 and info.components != 3) {
+                    return Jp2Error.UnsupportedColorSpace;
+                }
                 if (bpc == 0xff) {
                     requires_bpcc = true;
                     info.bits_per_component = 0;
@@ -371,9 +431,6 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 if (bits_per_component == 0) return Jp2Error.InvalidBox;
                 info.bits_per_component = bits_per_component;
                 saw_bpcc = true;
-                if (info.components != 3) {
-                    return Jp2Error.UnsupportedColorSpace;
-                }
             },
             @intFromEnum(BoxType.color) => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
@@ -394,7 +451,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                         1 => {
                             if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
                             const enum_cs = try readU32Be(box.payload, 3);
-                            if (enum_cs == 16) {
+                            if (enum_cs == enumeratedColorSpace(info.components)) {
                                 info.has_icc_profile = false;
                                 info.icc_profile_bytes = 0;
                                 chose_colr = true;
@@ -445,16 +502,18 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
 }
 
 /// ISO 15444-1 I.5.3.6: the channel definition box is accepted when it
-/// describes exactly the identity colour mapping the RGB profile already
-/// implies — every codestream channel k is colour component k (Typ 0)
-/// associated with colour k+1 (R=1, G=2, B=3), in any entry order. Alpha or
-/// auxiliary channel definitions imply component semantics the codec does
-/// not implement and fail closed.
+/// describes exactly the identity colour mapping the one- or three-component
+/// profile already implies: every codestream channel k is colour component k
+/// (Typ 0) associated with colour k+1, in any entry order. Alpha or auxiliary
+/// channel definitions imply semantics the codec does not implement and fail
+/// closed.
 fn validateIdentityChannelDefinition(payload: []const u8, components: u16) !void {
     if (payload.len < 2) return Jp2Error.InvalidBox;
     const entry_count = try readU16Be(payload, 0);
     if (payload.len != 2 + @as(usize, entry_count) * 6) return Jp2Error.InvalidBox;
-    if (entry_count != components or components != 3) return Jp2Error.UnsupportedProfile;
+    if (entry_count != components or (components != 1 and components != 3)) {
+        return Jp2Error.UnsupportedProfile;
+    }
     var seen = [_]bool{false} ** 3;
     var index: usize = 0;
     while (index < entry_count) : (index += 1) {
@@ -462,12 +521,20 @@ fn validateIdentityChannelDefinition(payload: []const u8, components: u16) !void
         const channel = try readU16Be(payload, offset);
         const channel_type = try readU16Be(payload, offset + 2);
         const association = try readU16Be(payload, offset + 4);
-        if (channel >= 3) return Jp2Error.UnsupportedProfile;
+        if (channel >= components) return Jp2Error.UnsupportedProfile;
         if (seen[channel]) return Jp2Error.InvalidBox;
         seen[channel] = true;
         if (channel_type != 0) return Jp2Error.UnsupportedProfile;
         if (association != channel + 1) return Jp2Error.UnsupportedProfile;
     }
+}
+
+fn enumeratedColorSpace(components: u16) u32 {
+    return switch (components) {
+        1 => enum_cs_grayscale,
+        3 => enum_cs_srgb,
+        else => 0,
+    };
 }
 
 /// ISO 15444-1 I.5.3.7: the resolution superbox holds at most one capture
@@ -608,7 +675,7 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
         switch (marker) {
             marker_sot => {
                 if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
-                try validateUniformComponentOverrides(&override_state, cod_payload, qcd_payload);
+                try validateUniformComponentOverrides(&override_state, cod_payload, qcd_payload, components);
                 if (tile_count == 1) {
                     try validateTilePartSequence(payload, cursor, cod_info.?, components, if (tlm_state.saw) &tlm_state else null, ppm_state.saw);
                 } else {
@@ -656,7 +723,7 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
         if (next > payload.len - 2) return Jp2Error.InvalidCodestream;
         switch (marker) {
             marker_cod => {
-                cod_info = try validateCodSegment(payload, length_offset, marker_length);
+                cod_info = try validateCodSegment(payload, length_offset, marker_length, components);
                 cod_payload = payload[length_offset + 2 .. length_offset + marker_length];
             },
             marker_qcd => {
@@ -664,8 +731,8 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
                 qcd_payload = payload[length_offset + 2 .. length_offset + marker_length];
                 saw_qcd = true;
             },
-            marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, &override_state),
-            marker_qcc => try validateUniformQccSegment(payload, length_offset, marker_length, cod_info.?, &override_state),
+            marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, components, &override_state),
+            marker_qcc => try validateUniformQccSegment(payload, length_offset, marker_length, cod_info.?, components, &override_state),
             else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state, &ppm_state, cod_info, components),
         }
         cursor = next;
@@ -986,7 +1053,7 @@ fn validatePocSegment(
     }
 }
 
-fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: u16) !CodSegmentInfo {
+fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: u16, components: u16) !CodSegmentInfo {
     const scod = payload[length_offset + 2];
     if ((scod & ~@as(u8, 0x07)) != 0) return Jp2Error.InvalidCodestream;
     // All five Part 1 progression orders (LRCP..CPRL, values 0-4) are wired
@@ -998,6 +1065,7 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     if (layers > rate_alloc.max_layers) return Jp2Error.UnsupportedProfile;
     const mct = payload[length_offset + 6];
     if (mct != 0 and mct != 1) return Jp2Error.UnsupportedProfile;
+    if (components != 3 and mct != 0) return Jp2Error.UnsupportedProfile;
     const levels = payload[length_offset + 7];
     if (levels > 32) return Jp2Error.InvalidCodestream;
     const block_width = try codeBlockSizeFromCodExponent(payload[length_offset + 8]);
@@ -1045,9 +1113,11 @@ fn validateCodeBlockStyleByte(code_block_style: u8) !void {
 
 /// Cross-marker state for COC/QCC handling: z2000 accepts them either as
 /// byte-replications of the main COD/QCD or as a *uniform override* where
-/// every RGB component carries identical data (Kakadu signals uniform
+/// every component carries identical data (Kakadu signals uniform
 /// per-component Cmodes/Qguard requests this way). Genuinely per-component
-/// divergence fails closed in validateUniformComponentOverrides.
+/// divergence fails closed in validateUniformComponentOverrides. The fixed
+/// storage is sufficient because the current JP2 boundary accepts one or
+/// three components only.
 const ComponentOverrideState = struct {
     coc_seen: [3]bool = .{ false, false, false },
     coc_first: []const u8 = &.{},
@@ -1055,10 +1125,10 @@ const ComponentOverrideState = struct {
     qcc_first: []const u8 = &.{},
 };
 
-fn validateUniformCocSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod_payload: []const u8, state: *ComponentOverrideState) !void {
+fn validateUniformCocSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod_payload: []const u8, components: u16, state: *ComponentOverrideState) !void {
     if (cod_payload.len < 6) return Jp2Error.InvalidCodestream;
     const component = payload[length_offset + 2];
-    if (component >= 3) return Jp2Error.UnsupportedProfile;
+    if (component >= components) return Jp2Error.UnsupportedProfile;
     const scoc = payload[length_offset + 3];
     if ((scoc & ~@as(u8, 0x01)) != 0) return Jp2Error.InvalidCodestream;
     if ((scoc & 0x01) != (cod_payload[0] & 0x01)) return Jp2Error.UnsupportedProfile;
@@ -1074,7 +1144,7 @@ fn validateUniformCocSegment(payload: []const u8, length_offset: usize, marker_l
     }
 }
 
-fn validateUniformComponentOverrides(state: *ComponentOverrideState, cod_payload: []const u8, qcd_payload: []const u8) !void {
+fn validateUniformComponentOverrides(state: *ComponentOverrideState, cod_payload: []const u8, qcd_payload: []const u8, components: u16) !void {
     if (state.coc_first.len != 0) {
         const spcoc = state.coc_first[1..];
         const cod_coding = cod_payload[5..];
@@ -1082,8 +1152,8 @@ fn validateUniformComponentOverrides(state: *ComponentOverrideState, cod_payload
             // A uniform override requires every component and may differ from
             // the COD only in the code-block style byte; the style itself must
             // be implemented. Redundant byte-replication is fine on its own.
-            if (!state.coc_seen[0] or !state.coc_seen[1] or !state.coc_seen[2]) {
-                return Jp2Error.UnsupportedProfile;
+            for (state.coc_seen[0..components]) |seen| {
+                if (!seen) return Jp2Error.UnsupportedProfile;
             }
             if (spcoc.len != cod_coding.len or spcoc.len < 5) return Jp2Error.UnsupportedProfile;
             for (spcoc, cod_coding, 0..) |coc_byte, cod_byte, index| {
@@ -1099,8 +1169,8 @@ fn validateUniformComponentOverrides(state: *ComponentOverrideState, cod_payload
         // boundary only enforces the uniformity (strict decode consumes the
         // signalled values). Redundant byte-replication is fine on its own.
         if (!std.mem.eql(u8, state.qcc_first, qcd_payload)) {
-            if (!state.qcc_seen[0] or !state.qcc_seen[1] or !state.qcc_seen[2]) {
-                return Jp2Error.UnsupportedProfile;
+            for (state.qcc_seen[0..components]) |seen| {
+                if (!seen) return Jp2Error.UnsupportedProfile;
             }
         }
     }
@@ -1121,9 +1191,9 @@ fn validateCocCodingPayload(segment: []const u8, scoc: u8) !void {
     try validateCodPrecinctBytes(segment, 5, @intCast(precinct_bytes));
 }
 
-fn validateUniformQccSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, state: *ComponentOverrideState) !void {
+fn validateUniformQccSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, components: u16, state: *ComponentOverrideState) !void {
     const component = payload[length_offset + 2];
-    if (component >= 3) return Jp2Error.UnsupportedProfile;
+    if (component >= components) return Jp2Error.UnsupportedProfile;
     const qcc_quantization = payload[length_offset + 3 .. length_offset + marker_length];
     try validateQcdPayloadBytes(qcc_quantization, cod);
     if (state.qcc_seen[component]) return Jp2Error.InvalidCodestream;

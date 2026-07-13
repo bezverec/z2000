@@ -440,13 +440,22 @@ format, codestream profile, and container semantics are explicit.
 ### N6. Arbitrary component layouts (grayscale / >3 components) — L · High
 
 - **Impact:** full "Core syntax" +1, "Lossless encode/decode" +1 each. (+3)
-- **State:** the pipeline is hard-wired to 3 RGB components with MCT; SIZ
-  validation requires `components == 3`. Single-component (grayscale) and
-  N-component (no MCT) are a common real gap.
-- **What to add:** a component-count-generic path (no MCT for ≠3 or when
-  `--mct none`), SIZ/COD/QCD for arbitrary component counts, TIFF grayscale
-  I/O. Large vertical feature (like multi-tile was); scope as its own multi-PR
-  effort with single-tile RGB byte-identical at every step.
+- **State:** owned `GrayImage`, shared RGB/grayscale TIFF parsing and writing,
+  BlackIsZero/WhiteIsZero polarity, ICC preservation, and tagged CLI inspection
+  are in place. The JP2 boundary now wraps and audits unsigned 8/16-bit
+  one-component SIZ/COD/QCD metadata with enumerated grayscale `colr` (17),
+  optional restricted ICC, identity grayscale `cdef`, component-bounded
+  COC/QCC, and mandatory no-MCT. Packet scaffolds/catalogs/order are checked for
+  one or three components, and the public single-tile grayscale encoder emits
+  reversible 5/3 ISO-MQ RPCL packets with PLT, optional TLM/SOP/EPH, and `R`
+  tile-parts. The CLI normalizes WhiteIsZero and OpenJPEG/Grok decode 8/16-bit
+  output pixel-exactly. The full score stays at 97/100 because z2000 strict
+  wire decode still rejects `Csiz=1`.
+- **What to add:** generalize strict SIZ/T2 block-catalog reconstruction and
+  decode output from fixed Y/Cb/Cr/RGB to one component, then add self-decode,
+  Kakadu/validator fixtures, and malformed one-component packet coverage.
+  General N-component, multi-tile grayscale, mixed-depth, and palette support
+  remain later stages.
 
 ## Current Working Sequence (2026-07-07 docs sync)
 

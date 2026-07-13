@@ -126,13 +126,26 @@ fn tiffInfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
         return error.InvalidCommand;
     }
 
-    var rgb = try tiff.readRgb(io, allocator, args[0]);
-    defer rgb.deinit();
+    var decoded = try tiff.read(io, allocator, args[0]);
+    defer decoded.deinit();
 
-    std.debug.print(
-        "TIFF RGB: {s}: {}x{}, {} bits/channel, {} samples\n",
-        .{ args[0], rgb.width, rgb.height, rgb.bit_depth, rgb.samples.len },
-    );
+    switch (decoded) {
+        .rgb => |rgb| std.debug.print(
+            "TIFF RGB: {s}: {}x{}, {} bits/channel, {} samples\n",
+            .{ args[0], rgb.width, rgb.height, rgb.bit_depth, rgb.samples.len },
+        ),
+        .grayscale => |gray| std.debug.print(
+            "TIFF grayscale ({s}): {s}: {}x{}, {} bits, {} samples\n",
+            .{
+                if (gray.white_is_zero) "WhiteIsZero" else "BlackIsZero",
+                args[0],
+                gray.width,
+                gray.height,
+                gray.bit_depth,
+                gray.samples.len,
+            },
+        ),
+    }
 }
 
 fn dngInfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -196,6 +209,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
     var options = codestream.LosslessOptions{};
     var poc_storage: [64]codestream.PocRecord = undefined;
     var tile_parts_explicit = false;
+    var mct_explicit = false;
     var show_timings = false;
     var index: usize = 2;
     while (index < args.len) {
@@ -238,6 +252,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.mct = try parseMct(args[index]);
+            mct_explicit = true;
         } else if (std.mem.eql(u8, args[index], "--transform")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -347,23 +362,69 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
 
     var command_timings = TiffToJp2Timings{};
     const read_start = monotonicNs();
-    var rgb = try tiff.readRgb(io, allocator, args[0]);
-    defer rgb.deinit();
+    var decoded = try tiff.read(io, allocator, args[0]);
+    defer decoded.deinit();
     command_timings.tiff_read_ns = elapsedNs(read_start);
 
     var encode_timings = codestream.EncodeTimings{};
-    const encode_start = monotonicNs();
-    const j2k = if (show_timings)
-        try codestream.encodeLosslessWithOptionsProfiled(allocator, rgb, options, &encode_timings)
-    else
-        try codestream.encodeLosslessWithOptions(allocator, rgb, options);
-    defer allocator.free(j2k);
-    command_timings.codestream_ns = elapsedNs(encode_start);
+    var width: usize = 0;
+    var height: usize = 0;
+    var bit_depth: u8 = 0;
+    var components: u16 = 0;
+    var wrapped: []u8 = undefined;
+    switch (decoded) {
+        .rgb => |rgb| {
+            width = rgb.width;
+            height = rgb.height;
+            bit_depth = rgb.bit_depth;
+            components = 3;
 
-    const wrap_start = monotonicNs();
-    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, j2k);
+            const encode_start = monotonicNs();
+            const j2k = if (show_timings)
+                try codestream.encodeLosslessWithOptionsProfiled(allocator, rgb, options, &encode_timings)
+            else
+                try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+            defer allocator.free(j2k);
+            command_timings.codestream_ns = elapsedNs(encode_start);
+
+            const wrap_start = monotonicNs();
+            wrapped = try jp2.wrapRgbCodestream(allocator, rgb, j2k);
+            command_timings.jp2_wrap_ns = elapsedNs(wrap_start);
+        },
+        .grayscale => |gray| {
+            if (!mct_explicit) options.mct = .none;
+            width = gray.width;
+            height = gray.height;
+            bit_depth = gray.bit_depth;
+            components = 1;
+
+            var normalized = gray;
+            var normalized_samples: ?[]u16 = null;
+            defer if (normalized_samples) |samples| allocator.free(samples);
+            if (gray.white_is_zero) {
+                const samples = try allocator.alloc(u16, gray.samples.len);
+                normalized_samples = samples;
+                const max_sample: u16 = if (gray.bit_depth == 8) 255 else std.math.maxInt(u16);
+                for (gray.samples, samples) |sample, *out_sample| {
+                    if (sample > max_sample) return error.InvalidValue;
+                    out_sample.* = max_sample - sample;
+                }
+                normalized.samples = samples;
+                normalized.white_is_zero = false;
+            }
+
+            const encode_start = monotonicNs();
+            const j2k = try codestream.encodeLosslessGrayWithOptions(allocator, normalized, options);
+            defer allocator.free(j2k);
+            command_timings.codestream_ns = elapsedNs(encode_start);
+            encode_timings.total_ns = command_timings.codestream_ns;
+
+            const wrap_start = monotonicNs();
+            wrapped = try jp2.wrapGrayCodestream(allocator, normalized, j2k);
+            command_timings.jp2_wrap_ns = elapsedNs(wrap_start);
+        },
+    }
     defer allocator.free(wrapped);
-    command_timings.jp2_wrap_ns = elapsedNs(wrap_start);
 
     const write_start = monotonicNs();
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = wrapped });
@@ -374,13 +435,15 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         command_timings.write_ns;
 
     std.debug.print(
-        "wrote JP2 marker skeleton {s} -> {s} ({}x{}, {} bits/channel, levels {}, tile {}x{}, block {}x{}, progression {s}, POC records {} ({s}), layers {}, MCT {s}, transform {s}, QCD {s}/guard {}, tile-parts {s}, TLM {}, PPM {}, PPT {}, T1 {s}, threads {}, debug sidecar {})\n",
+        "wrote JP2 {s} -> {s} ({}x{}, {} component{s}, {} bits/component, levels {}, tile {}x{}, block {}x{}, progression {s}, POC records {} ({s}), layers {}, MCT {s}, transform {s}, QCD {s}/guard {}, tile-parts {s}, TLM {}, PPM {}, PPT {}, T1 {s}, threads {}, debug sidecar {})\n",
         .{
             args[0],
             args[1],
-            rgb.width,
-            rgb.height,
-            rgb.bit_depth,
+            width,
+            height,
+            components,
+            if (components == 1) "" else "s",
+            bit_depth,
             options.levels,
             options.tile_width,
             options.tile_height,
@@ -404,7 +467,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         },
     );
     if (show_timings) {
-        printTiffToJp2Timings(command_timings, encode_timings);
+        printTiffToJp2Timings(command_timings, encode_timings, components);
     }
 }
 
@@ -757,16 +820,18 @@ const DecodeTempJp2Timings = struct {
     tiff_write_ns: u64 = 0,
 };
 
-fn printTiffToJp2Timings(command: TiffToJp2Timings, encode: codestream.EncodeTimings) void {
+fn printTiffToJp2Timings(command: TiffToJp2Timings, encode: codestream.EncodeTimings, components: u16) void {
     const total = command.total_ns;
     std.debug.print("timings:\n", .{});
     printTiming("total", total, total);
     printTiming("TIFF read", command.tiff_read_ns, total);
     printTiming("codestream", command.codestream_ns, total);
-    printTiming("  RCT", encode.color_transform_ns, total);
-    printTiming("  DWT 5/3", encode.wavelet_ns, total);
-    printTiming("  block payload", encode.payload_ns, total);
-    printTiming("  markers/write SOD", encode.marker_ns, total);
+    if (components == 3) {
+        printTiming("  MCT", encode.color_transform_ns, total);
+        printTiming("  DWT", encode.wavelet_ns, total);
+        printTiming("  block payload", encode.payload_ns, total);
+        printTiming("  markers/write SOD", encode.marker_ns, total);
+    }
     printTiming("JP2 wrap", command.jp2_wrap_ns, total);
     printTiming("disk write", command.write_ns, total);
 }

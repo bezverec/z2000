@@ -37,6 +37,7 @@ pub const TileFrontEnd = struct {
 };
 
 pub const PacketScaffoldOptions = struct {
+    components: u16 = 3,
     layers: u16 = 1,
     block_width: usize = 64,
     block_height: usize = 64,
@@ -59,6 +60,7 @@ pub const PacketScaffold = struct {
     allocator: std.mem.Allocator,
     tile: tile_grid.Tile,
     levels: u8,
+    components: u16,
     layers: u16,
     block_width: usize,
     block_height: usize,
@@ -75,7 +77,7 @@ pub const PacketScaffold = struct {
     }
 
     pub fn componentBlockCount(self: PacketScaffold) !usize {
-        return std.math.mul(usize, self.blocks.len, component_count);
+        return std.math.mul(usize, self.blocks.len, self.components);
     }
 
     pub fn componentBlock(self: PacketScaffold, index: usize) !ComponentBlock {
@@ -87,7 +89,7 @@ pub const PacketScaffold = struct {
     }
 
     pub fn componentBlockAt(self: PacketScaffold, component: u8, block_index: usize) !ComponentBlock {
-        if (component >= component_count or block_index >= self.blocks.len) return PacketScaffoldError.InvalidComponentBlock;
+        if (component >= self.components or block_index >= self.blocks.len) return PacketScaffoldError.InvalidComponentBlock;
         const block = self.blocks[block_index];
         if (block.band_index >= self.bands.len) return PacketScaffoldError.InvalidComponentBlock;
         const band = self.bands[block.band_index];
@@ -206,6 +208,7 @@ pub const EncodedComponentBlock = struct {
 pub const EncodedBlockCatalog = struct {
     allocator: std.mem.Allocator,
     tile: tile_grid.Tile,
+    components: u16,
     component_block_count: usize,
     blocks: []EncodedComponentBlock,
 
@@ -216,7 +219,7 @@ pub const EncodedBlockCatalog = struct {
     }
 
     pub fn componentBlocks(self: EncodedBlockCatalog, component: u8) ![]EncodedComponentBlock {
-        if (component >= component_count) return PacketScaffoldError.InvalidComponentBlock;
+        if (component >= self.components) return PacketScaffoldError.InvalidComponentBlock;
         const start = @as(usize, component) * self.component_block_count;
         return self.blocks[start..][0..self.component_block_count];
     }
@@ -325,7 +328,7 @@ const TilePacketReaderStateSlots = struct {
     fn slotIndex(self: *const TilePacketReaderStateSlots, packet: packet_plan.Packet) !usize {
         const sequence = packet_plan.rpclSequenceForPacket(
             self.scaffold.plan,
-            component_count,
+            self.scaffold.components,
             self.scaffold.layers,
             packet,
         ) catch return PacketScaffoldError.InvalidPacket;
@@ -342,7 +345,7 @@ const TilePacketReaderStateSlots = struct {
             if (packet.layer != 0) return PacketScaffoldError.InvalidPacket;
             const rpcl_sequence = packet_plan.rpclSequenceForPacket(
                 self.scaffold.plan,
-                component_count,
+                self.scaffold.components,
                 self.scaffold.layers,
                 packet,
             ) catch return PacketScaffoldError.InvalidPacket;
@@ -958,7 +961,7 @@ pub const RpclPacketBandGroups = struct {
         group_index: usize,
         bit_depth: u8,
     ) ![]t2.EncodedLayerBlock {
-        if (self.packet.component >= component_count) return PacketScaffoldError.InvalidPacket;
+        if (self.packet.component >= scaffold.components) return PacketScaffoldError.InvalidPacket;
         if (catalog.component_block_count != scaffold.blocks.len) return PacketScaffoldError.InvalidComponentBlock;
         const group = if (group_index < self.groups.len) self.groups[group_index] else return PacketScaffoldError.InvalidPacket;
         const local_indexes = try self.groupLocalBlockIndexes(group_index);
@@ -1019,7 +1022,7 @@ pub const RpclPacketIndex = struct {
         packet_sequence: u64,
     ) ![]usize {
         const packet_entry = try self.entry(packet_sequence);
-        if (packet_entry.packet.component >= component_count) return PacketScaffoldError.InvalidPacket;
+        if (packet_entry.packet.component >= catalog.components) return PacketScaffoldError.InvalidPacket;
         const local_indexes = try self.blockIndexes(packet_sequence);
         const indexes = try allocator.alloc(usize, local_indexes.len);
         errdefer allocator.free(indexes);
@@ -1122,7 +1125,6 @@ pub const ComponentBlockIterator = struct {
     }
 };
 
-const component_count: usize = 3;
 const max_rpcl_packet_band_groups: usize = 3;
 const tile_part_tlm_entry_bytes: usize = 6;
 const tile_part_tlm_stlm_u16_u32: u8 = 0x60;
@@ -1495,6 +1497,7 @@ pub fn buildPacketScaffold(
     options: PacketScaffoldOptions,
 ) !PacketScaffold {
     if (options.layers == 0 or options.precincts.len == 0) return packet_plan.PacketPlanError.InvalidDimensions;
+    if (options.components != 1 and options.components != 3) return packet_plan.PacketPlanError.InvalidDimensions;
     const width = rct_tile.planes.width;
     const height = rct_tile.planes.height;
     if (width != rct_tile.tile.rect.width() or height != rct_tile.tile.rect.height()) {
@@ -1507,7 +1510,7 @@ pub fn buildPacketScaffold(
         rct_tile.tile.rect.x1,
         rct_tile.tile.rect.y1,
         levels,
-        component_count,
+        options.components,
         options.layers,
         options.precincts,
     );
@@ -1527,6 +1530,7 @@ pub fn buildPacketScaffold(
         .allocator = allocator,
         .tile = rct_tile.tile,
         .levels = levels,
+        .components = options.components,
         .layers = options.layers,
         .block_width = options.block_width,
         .block_height = options.block_height,
@@ -1603,6 +1607,7 @@ pub fn buildEncodedBlockCatalogIsoMq(
     return .{
         .allocator = allocator,
         .tile = scaffold.tile,
+        .components = scaffold.components,
         .component_block_count = block_count,
         .blocks = blocks,
     };
@@ -1742,7 +1747,14 @@ pub fn applyGridPcrdTargets(
         // rebuild it from the global truncations.
         var stream = try buildTileRpclPacketStream(allocator, tile.scaffold, tile.catalog, tile.index, tile.bit_depth);
         errdefer stream.deinit();
-        try reorderTilePacketStreamFromRpcl(allocator, &stream, tile.scaffold.plan, tile.scaffold.layers, options.packet_order);
+        try reorderTilePacketStreamFromRpcl(
+            allocator,
+            &stream,
+            tile.scaffold.plan,
+            tile.scaffold.components,
+            tile.scaffold.layers,
+            options.packet_order,
+        );
         try validateTilePacketStream(allocator, tile.scaffold, tile.catalog, tile.index, stream, tile.bit_depth, options.packet_order);
         tile.stream.deinit();
         tile.stream = stream;
@@ -1755,11 +1767,12 @@ pub fn validateEncodedBlockCatalogCoversTile(
     catalog: EncodedBlockCatalog,
 ) !void {
     if (catalog.tile.index != scaffold.tile.index) return PacketScaffoldError.InvalidComponentBlock;
+    if (catalog.components != scaffold.components) return PacketScaffoldError.InvalidComponentBlock;
     if (catalog.component_block_count != scaffold.blocks.len) return PacketScaffoldError.InvalidComponentBlock;
     if (catalog.blocks.len != try scaffold.componentBlockCount()) return PacketScaffoldError.InvalidComponentBlock;
 
     const pixels = try std.math.mul(usize, scaffold.tile.rect.width(), scaffold.tile.rect.height());
-    for (0..component_count) |component| {
+    for (0..scaffold.components) |component| {
         const covered = try allocator.alloc(bool, pixels);
         defer allocator.free(covered);
         @memset(covered, false);
@@ -1801,10 +1814,11 @@ pub fn decodeEncodedBlockCatalogIsoMqToRctTile(
     const y = try allocator.alloc(i32, pixels);
     var y_moved = false;
     errdefer if (!y_moved) allocator.free(y);
-    const cb = try allocator.alloc(i32, pixels);
+    const auxiliary_pixels: usize = if (scaffold.components == 3) pixels else 0;
+    const cb = try allocator.alloc(i32, auxiliary_pixels);
     var cb_moved = false;
     errdefer if (!cb_moved) allocator.free(cb);
-    const cr = try allocator.alloc(i32, pixels);
+    const cr = try allocator.alloc(i32, auxiliary_pixels);
     var cr_moved = false;
     errdefer if (!cr_moved) allocator.free(cr);
     @memset(y, 0);
@@ -1861,6 +1875,53 @@ pub fn reconstructTileRpclEncodeArtifactsIsoMqInto(
     try inverseRctTileInto(allocator, destination, rct_tile);
 }
 
+/// Local byte-exact oracle for the one-component artifact path. Wire-level
+/// strict grayscale decode is layered separately in codestream.zig.
+pub fn reconstructGrayRpclEncodeArtifactsIsoMq(
+    allocator: std.mem.Allocator,
+    artifacts: TileRpclEncodeArtifacts,
+    style: ebcot.CodeBlockStyle,
+) !image.GrayImage {
+    if (artifacts.scaffold.components != 1 or artifacts.catalog.components != 1) {
+        return PacketScaffoldError.InvalidPlane;
+    }
+    var tile = try decodeEncodedBlockCatalogIsoMqToRctTile(
+        allocator,
+        artifacts.scaffold,
+        artifacts.catalog,
+        artifacts.bit_depth,
+        style,
+    );
+    defer tile.deinit();
+
+    var workspace = try wavelet_int.Workspace.init(allocator, @max(tile.planes.width, tile.planes.height));
+    defer workspace.deinit();
+    try wavelet_int.inverse53WithWorkspace(
+        &workspace,
+        tile.planes.y,
+        tile.planes.width,
+        tile.planes.height,
+        artifacts.levels,
+    );
+
+    const samples = try allocator.alloc(u16, tile.planes.y.len);
+    errdefer allocator.free(samples);
+    const max_sample: i32 = if (artifacts.bit_depth == 8) 255 else std.math.maxInt(u16);
+    const level_shift = @as(i32, 1) << @as(u5, @intCast(artifacts.bit_depth - 1));
+    for (tile.planes.y, samples) |coefficient, *sample| {
+        const value = coefficient + level_shift;
+        if (value < 0 or value > max_sample) return PacketScaffoldError.InvalidPlane;
+        sample.* = @intCast(value);
+    }
+    return .{
+        .allocator = allocator,
+        .width = tile.planes.width,
+        .height = tile.planes.height,
+        .bit_depth = artifacts.bit_depth,
+        .samples = samples,
+    };
+}
+
 pub fn reconstructTileGridRpclEncodeArtifactsIsoMqInto(
     allocator: std.mem.Allocator,
     destination: image.RgbImage,
@@ -1909,12 +1970,29 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
         try forwardRctTile(allocator, source, tile);
     defer rct_tile.deinit();
 
-    const bit_depth = rct_tile.planes.bit_depth;
     // A front end returns already-transformed planes at the requested depth.
     const levels = if (options.front_end != null)
         requested_levels
     else
         try forward53TileInPlace(allocator, &rct_tile, requested_levels);
+
+    return buildTileRpclEncodeArtifactsFromTransformedTile(
+        allocator,
+        rct_tile,
+        levels,
+        options,
+        style,
+    );
+}
+
+fn buildTileRpclEncodeArtifactsFromTransformedTile(
+    allocator: std.mem.Allocator,
+    rct_tile: RctTile,
+    levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+) !TileRpclEncodeArtifacts {
+    const bit_depth = rct_tile.planes.bit_depth;
 
     var scaffold = try buildPacketScaffold(allocator, rct_tile, levels, options);
     var scaffold_moved = false;
@@ -1939,7 +2017,14 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
     var stream_moved = false;
     errdefer if (!stream_moved) stream.deinit();
 
-    try reorderTilePacketStreamFromRpcl(allocator, &stream, scaffold.plan, scaffold.layers, options.packet_order);
+    try reorderTilePacketStreamFromRpcl(
+        allocator,
+        &stream,
+        scaffold.plan,
+        scaffold.components,
+        scaffold.layers,
+        options.packet_order,
+    );
     try validateTilePacketStream(allocator, scaffold, catalog, index, stream, bit_depth, options.packet_order);
 
     scaffold_moved = true;
@@ -1948,7 +2033,7 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
     stream_moved = true;
     return .{
         .allocator = allocator,
-        .tile = tile,
+        .tile = rct_tile.tile,
         .bit_depth = bit_depth,
         .levels = levels,
         .scaffold = scaffold,
@@ -1956,6 +2041,92 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
         .index = index,
         .stream = stream,
     };
+}
+
+/// Builds the one-component reversible artifact set used by the grayscale
+/// codestream path. The existing RctTile carrier is retained temporarily, but
+/// inactive component planes are zero-length allocations and never enter T1.
+pub fn buildGrayRpclEncodeArtifactsIsoMq(
+    allocator: std.mem.Allocator,
+    source: image.GrayImage,
+    requested_levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+) !TileRpclEncodeArtifacts {
+    if (source.width == 0 or source.height == 0 or source.white_is_zero) {
+        return PacketScaffoldError.InvalidPlane;
+    }
+    if (source.bit_depth != 8 and source.bit_depth != 16) return PacketScaffoldError.InvalidPlane;
+    if (options.front_end != null) return PacketScaffoldError.InvalidPlane;
+    const pixels = try std.math.mul(usize, source.width, source.height);
+    if (source.samples.len != pixels) return PacketScaffoldError.InvalidPlane;
+
+    const width_u32 = std.math.cast(u32, source.width) orelse return PacketScaffoldError.InvalidPlane;
+    const height_u32 = std.math.cast(u32, source.height) orelse return PacketScaffoldError.InvalidPlane;
+    const grid = tile_grid.Grid.fromImageSize(source.width, source.height, width_u32, height_u32) catch
+        return PacketScaffoldError.InvalidPlane;
+    const tile = grid.tile(0) catch return PacketScaffoldError.InvalidPlane;
+
+    const y = try allocator.alloc(i32, pixels);
+    var y_moved = false;
+    errdefer if (!y_moved) allocator.free(y);
+    const cb = try allocator.alloc(i32, 0);
+    var cb_moved = false;
+    errdefer if (!cb_moved) allocator.free(cb);
+    const cr = try allocator.alloc(i32, 0);
+    var cr_moved = false;
+    errdefer if (!cr_moved) allocator.free(cr);
+
+    const max_sample: u16 = if (source.bit_depth == 8) 255 else std.math.maxInt(u16);
+    const level_shift = @as(i32, 1) << @as(u5, @intCast(source.bit_depth - 1));
+    for (source.samples, y) |sample, *coefficient| {
+        if (sample > max_sample) return PacketScaffoldError.InvalidPlane;
+        coefficient.* = @as(i32, sample) - level_shift;
+    }
+
+    var transformed = RctTile{
+        .tile = tile,
+        .planes = .{
+            .allocator = allocator,
+            .width = source.width,
+            .height = source.height,
+            .bit_depth = source.bit_depth,
+            .y = y,
+            .cb = cb,
+            .cr = cr,
+        },
+    };
+    y_moved = true;
+    cb_moved = true;
+    cr_moved = true;
+    defer transformed.deinit();
+
+    var workspace = try wavelet_int.Workspace.init(allocator, @max(source.width, source.height));
+    defer workspace.deinit();
+    const levels = try wavelet_int.forward53WithWorkspace(
+        &workspace,
+        transformed.planes.y,
+        source.width,
+        source.height,
+        requested_levels,
+    );
+
+    var gray_options = options;
+    gray_options.components = 1;
+    var artifact = try buildTileRpclEncodeArtifactsFromTransformedTile(
+        allocator,
+        transformed,
+        levels,
+        gray_options,
+        style,
+    );
+    errdefer artifact.deinit();
+    try applyGridPcrdTargets(
+        allocator,
+        @as([*]TileRpclEncodeArtifacts, @ptrCast(&artifact))[0..1],
+        gray_options,
+    );
+    return artifact;
 }
 
 pub fn buildTileGridRpclEncodeArtifactsIsoMq(
@@ -2825,7 +2996,7 @@ pub fn buildRpclPacketIndex(
     errdefer block_indexes.deinit(allocator);
 
     var initialized: usize = 0;
-    var iterator = try packet_plan.RpclIterator.init(scaffold.plan, component_count, scaffold.layers);
+    var iterator = try packet_plan.RpclIterator.init(scaffold.plan, scaffold.components, scaffold.layers);
     while (iterator.next()) |packet| {
         if (initialized >= entries.len or packet.sequence != initialized) return PacketScaffoldError.InvalidPacket;
         const selected = try t2.collectRpclCodeBlockIndexes(
@@ -2894,7 +3065,7 @@ pub fn validateTilePacketStream(
     var active_count: usize = 0;
     defer deinitTilePacketReaderGroups(active_storage[0..active_count], allocator);
 
-    const sequence = try buildPacketOrderSequence(allocator, packet_order, scaffold.plan, scaffold.layers);
+    const sequence = try buildPacketOrderSequence(allocator, packet_order, scaffold.plan, scaffold.components, scaffold.layers);
     defer allocator.free(sequence);
     if (sequence.len != packet_count) return PacketScaffoldError.InvalidPacket;
 
@@ -2912,7 +3083,7 @@ pub fn validateTilePacketStream(
 
     var packet_offset: usize = 0;
     for (sequence, 0..) |packet, packet_index| {
-        const rpcl_sequence = packet_plan.rpclSequenceForPacket(scaffold.plan, component_count, scaffold.layers, packet) catch
+        const rpcl_sequence = packet_plan.rpclSequenceForPacket(scaffold.plan, scaffold.components, scaffold.layers, packet) catch
             return PacketScaffoldError.InvalidPacket;
         const rpcl_slot = std.math.cast(usize, rpcl_sequence) orelse return PacketScaffoldError.InvalidPacket;
         if (rpcl_slot >= index.entries.len) return PacketScaffoldError.InvalidPacket;
@@ -2991,14 +3162,15 @@ fn buildPacketOrderSequence(
     allocator: std.mem.Allocator,
     packet_order: PacketOrder,
     plan: packet_plan.Plan,
+    components: u16,
     layers: u16,
 ) ![]packet_plan.Packet {
     switch (packet_order) {
-        .pcrl => return packet_plan.positionOrderedPackets(allocator, plan, component_count, layers, .pcrl) catch |err| switch (err) {
+        .pcrl => return packet_plan.positionOrderedPackets(allocator, plan, components, layers, .pcrl) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => PacketScaffoldError.InvalidPacket,
         },
-        .cprl => return packet_plan.positionOrderedPackets(allocator, plan, component_count, layers, .cprl) catch |err| switch (err) {
+        .cprl => return packet_plan.positionOrderedPackets(allocator, plan, components, layers, .cprl) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => PacketScaffoldError.InvalidPacket,
         },
@@ -3012,7 +3184,7 @@ fn buildPacketOrderSequence(
     var count: usize = 0;
     switch (packet_order) {
         .rpcl => {
-            var iterator = try packet_plan.RpclIterator.init(plan, component_count, layers);
+            var iterator = try packet_plan.RpclIterator.init(plan, components, layers);
             while (iterator.next()) |packet| {
                 if (count >= sequence.len) return PacketScaffoldError.InvalidPacket;
                 sequence[count] = packet;
@@ -3020,7 +3192,7 @@ fn buildPacketOrderSequence(
             }
         },
         .lrcp => {
-            var iterator = try packet_plan.LrcpIterator.init(plan, component_count, layers);
+            var iterator = try packet_plan.LrcpIterator.init(plan, components, layers);
             while (iterator.next()) |packet| {
                 if (count >= sequence.len) return PacketScaffoldError.InvalidPacket;
                 sequence[count] = packet;
@@ -3028,7 +3200,7 @@ fn buildPacketOrderSequence(
             }
         },
         .rlcp => {
-            var iterator = try packet_plan.RlcpIterator.init(plan, component_count, layers);
+            var iterator = try packet_plan.RlcpIterator.init(plan, components, layers);
             while (iterator.next()) |packet| {
                 if (count >= sequence.len) return PacketScaffoldError.InvalidPacket;
                 sequence[count] = packet;
@@ -3045,6 +3217,7 @@ fn reorderTilePacketStreamFromRpcl(
     allocator: std.mem.Allocator,
     stream: *TileRpclPacketStream,
     plan: packet_plan.Plan,
+    components: u16,
     layers: u16,
     packet_order: PacketOrder,
 ) !void {
@@ -3071,12 +3244,12 @@ fn reorderTilePacketStreamFromRpcl(
     const bytes = try allocator.alloc(u8, stream.bytes.len);
     errdefer allocator.free(bytes);
 
-    const sequence = try buildPacketOrderSequence(allocator, packet_order, plan, layers);
+    const sequence = try buildPacketOrderSequence(allocator, packet_order, plan, components, layers);
     defer allocator.free(sequence);
 
     var out_offset: usize = 0;
     for (sequence, 0..) |packet, out_index| {
-        const source_sequence = packet_plan.rpclSequenceForPacket(plan, component_count, layers, packet) catch
+        const source_sequence = packet_plan.rpclSequenceForPacket(plan, components, layers, packet) catch
             return PacketScaffoldError.InvalidPacket;
         const source = std.math.cast(usize, source_sequence) orelse return PacketScaffoldError.InvalidPacket;
         if (source >= packet_count) return PacketScaffoldError.InvalidPacket;
@@ -3122,7 +3295,7 @@ pub fn buildTileRpclPacketStream(
     var active_count: usize = 0;
     defer deinitTilePacketWriterGroups(active_storage[0..active_count], allocator);
 
-    var iterator = try packet_plan.RpclIterator.init(scaffold.plan, component_count, scaffold.layers);
+    var iterator = try packet_plan.RpclIterator.init(scaffold.plan, scaffold.components, scaffold.layers);
     var emitted_packets: usize = 0;
     while (iterator.next()) |packet| {
         if (packet.layer == 0) {
