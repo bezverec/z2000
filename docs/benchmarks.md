@@ -26,6 +26,82 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-07-13: Ryzen 7 5700X, S3 close-out — 9/7 lifting block width 32
+
+### Provenance And Profiles
+
+| Field | Value |
+| --- | --- |
+| z2000 source | baseline `66807d7` (`0.1.0-dev.394+g66807d77`), candidate = baseline + `f32_block_lanes` 16 -> 32 |
+| Build | Zig 0.16.0, `ReleaseFast`, native x86-64/AVX2 |
+| Host | AMD Ryzen 7 5700X, 8 cores / 16 threads, Windows 11 |
+| Harness | Hyperfine 1.20.0, 2 warmups + 8 measured runs (20-run confirmation for the borderline decode t1) |
+| References | Grok 20.3.6, OpenJPEG 2.5.4, Kakadu 8.4.1 |
+| Input | `bench-rgb-2048.tif`, 12,583,052 B, SHA-256 `d8e3038c...` |
+
+Profiles identical to the record below (archival 5/3 lossless; ICT 9/7
+scalar-expounded `--rates 8,1` lossy). The candidate run interleaved four
+binaries in one hyperfine invocation: baseline (16 f32 block lanes),
+8 lanes, 32 lanes, and `ict_lanes` forced to 4.
+
+### Baseline At `66807d7` (Four Codecs)
+
+Lossless:
+
+| Codec | Encode t1 | Encode t16 | Decode t1 | Decode t16 |
+| --- | ---: | ---: | ---: | ---: |
+| z2000 | 802.0 +/- 7.0 ms | 137.0 +/- 10.5 ms | 743.8 +/- 8.0 ms | 147.1 +/- 10.6 ms |
+| Grok | 714.7 +/- 45.2 ms | 163.2 +/- 11.5 ms | 540.0 +/- 5.5 ms | 98.1 +/- 8.9 ms |
+| OpenJPEG | 688.0 +/- 10.2 ms | 124.1 +/- 2.9 ms | 573.4 +/- 1.9 ms | 138.4 +/- 10.0 ms |
+| Kakadu | 425.2 +/- 7.4 ms | 65.5 +/- 1.6 ms | 491.6 +/- 15.0 ms | 70.2 +/- 3.8 ms |
+
+Lossy 9/7:
+
+| Codec | Encode t1 | Encode t16 | Decode t1 | Decode t16 |
+| --- | ---: | ---: | ---: | ---: |
+| z2000 | 829.5 +/- 3.6 ms | 159.5 +/- 1.6 ms | 745.3 +/- 3.5 ms | 147.1 +/- 2.3 ms |
+| Grok | 773.1 +/- 4.7 ms | 177.4 +/- 5.7 ms | 659.1 +/- 55.8 ms | 119.2 +/- 10.0 ms |
+| OpenJPEG | 632.3 +/- 2.2 ms | 127.1 +/- 1.7 ms | 533.1 +/- 4.0 ms | 137.0 +/- 6.0 ms |
+| Kakadu | 449.3 +/- 3.9 ms | 62.0 +/- 0.5 ms | 508.5 +/- 4.6 ms | 70.8 +/- 8.1 ms |
+
+Lossless sizes: z2000 6,636,048 B, Grok 6,635,206 B, OpenJPEG 6,636,085 B,
+Kakadu 6,624,994 B. Lossy sizes: z2000 4,798,568 B, Grok 5,326,180 B,
+OpenJPEG 4,805,522 B, Kakadu 4,826,199 B. z2000 t1 == t16 codestreams in
+both profiles. Relative to the previous record, the `88b061b` T1 pass
+profiling counters did not move lossless encode (802.0 vs 798.0, overlapping
+sigma) and the MQ branch-layout candidate's lossy decode win held
+(745.3/147.1 vs 758.8/152.6).
+
+### Candidate: `f32_block_lanes` 16 -> 32 — KEPT
+
+Interleaved z2000-only A/B on the lossy profile (all four variants produced
+bit-identical lossy JP2s, SHA-256 `7597eb20...`, and the lossless stream was
+unchanged):
+
+| Variant | Lossy encode t1 | Lossy decode t1 |
+| --- | ---: | ---: |
+| 16 lanes (baseline) | 836.3 +/- 15.4 ms | 754.3 +/- 10.9 ms |
+| 8 lanes | 879.1 +/- 13.5 ms | 806.8 +/- 7.8 ms |
+| **32 lanes** | **786.5 +/- 3.6 ms (-6.0%)** | **730.9 +/- 9.4 ms (-3.1%)** |
+| `ict_lanes` 4 | 817.0 +/- 2.4 ms (-2.3%) | 750.7 +/- 6.6 ms (-0.5%) |
+
+No-regression checks for 32 lanes: lossless encode t1 797.4 -> 793.0 ms
+(unchanged within sigma), lossy encode t16 158.0 -> 150.3 ms (-4.9%), lossy
+decode t16 146.7 -> 139.2 ms (-5.1%). The borderline decode t1 delta was
+confirmed on 20 runs: 758.8 +/- 8.5 -> 726.2 +/- 9.2 ms (-4.3%,
+non-overlapping sigma). 8 lanes regressed both metrics and the narrower
+`ict_lanes` stayed below the 3% gate; both were reverted.
+
+### Generated-Code Spot Check (S3 close-out)
+
+`zig build-obj -OReleaseFast -mcpu=native -femit-asm` on a probe root that
+forces the 9/7 `forward2D` path: the lifting emits 72x `vmulps ymm` and 72x
+`vaddps ymm` (the 32-lane block lowers to four 256-bit AVX2 registers per
+lift step), with 77 scalar `mulss`/`addss` confined to boundary/tail
+elements. No `vfmadd*` appears — intentionally: FMA contraction would change
+f32 rounding and break the bit-identical-stream invariant the SIMD keep rule
+mandates.
+
 ## 2026-07-13: Ryzen 7 5700X, 5/3 lossless focus
 
 This follow-up uses the same host, tools, corpus, and archival profile as the

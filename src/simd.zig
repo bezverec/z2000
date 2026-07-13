@@ -16,11 +16,15 @@ pub const has_neon: bool = switch (builtin.target.cpu.arch) {
 pub const neon_i32_lanes: comptime_int = 4;
 pub const f32_pair_lanes: comptime_int = 2;
 
-/// Block width (in f32 lanes) for the 9/7 lifting kernels: one 64-byte cache
-/// line per row access. LLVM splits the block into however many native
-/// registers the target has (4x NEON q-regs, 2x AVX2 ymm, 1x AVX-512 zmm),
-/// so one constant serves every ISA.
-pub const f32_block_lanes: comptime_int = 16;
+/// Block width (in f32 lanes) for the 9/7 lifting kernels: two 64-byte cache
+/// lines per row access. LLVM splits the block into however many native
+/// registers the target has (8x NEON q-regs, 4x AVX2 ymm, 2x AVX-512 zmm),
+/// so one constant serves every ISA. The S3 lane audit on the Ryzen 5700X
+/// measured 32 lanes ahead of both 16 (the prior value) and 8 on the lossy
+/// profile: encode t1 -6.0%, decode t1 -4.3% (20-run), encode/decode t16
+/// -4.9%/-5.1%, lossless unchanged, streams bit-identical. Re-run the A/B on
+/// the M4 before assuming the same win on NEON.
+pub const f32_block_lanes: comptime_int = 32;
 
 pub const family: []const u8 = switch (builtin.target.cpu.arch) {
     .x86, .x86_64 => x86Family(),
