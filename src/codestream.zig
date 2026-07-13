@@ -282,6 +282,7 @@ pub const EncodeTimings = struct {
     wavelet_ns: u64 = 0,
     payload_ns: u64 = 0,
     marker_ns: u64 = 0,
+    t1_pass_stats: ebcot.EncodePassStats = .{},
 };
 
 fn normalizedEncodePrecinctOptions(options: LosslessOptions, levels: u8) LosslessOptions {
@@ -1486,6 +1487,7 @@ fn componentCatalogWorker(job: *ComponentCatalogJob) void {
         job.nominal_bitplanes,
         job.options,
         job.include_bitplane_payload,
+        null,
     ) catch |err| {
         job.result = err;
         return;
@@ -1743,7 +1745,7 @@ fn encodeLosslessWithOptionsMeasured(
     var rpcl_stream: RpclPacketStream = .{};
     defer rpcl_stream.deinit();
     const payload_start = monotonicNs();
-    try appendTemporaryPayload(allocator, &tile_payload, planes, levels, encode_options, &rpcl_stream);
+    try appendTemporaryPayload(allocator, &tile_payload, planes, levels, encode_options, &rpcl_stream, timings);
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
     const packets = try makePacketPlan(rgb.width, rgb.height, levels, encode_options);
     if (encode_options.poc_records.len != 0) {
@@ -8827,6 +8829,7 @@ fn appendTemporaryPayload(
     levels: u8,
     options: LosslessOptions,
     rpcl_stream: ?*RpclPacketStream,
+    timings: ?*EncodeTimings,
 ) !void {
     if (options.emit_temporary_payload_sidecar) {
         try out.appendSlice(allocator, temporary_magic_v8);
@@ -8847,7 +8850,19 @@ fn appendTemporaryPayload(
     const blocks = try subband.makeCodeBlocks(allocator, bands, options.block_width, options.block_height);
     defer allocator.free(blocks);
 
-    var catalogs = try buildComponentRpclShadowCatalogs(allocator, planes, bands, blocks, options, options.emit_temporary_payload_sidecar);
+    const pass_stats = if (options.threads == 1)
+        if (timings) |value| &value.t1_pass_stats else null
+    else
+        null;
+    var catalogs = try buildComponentRpclShadowCatalogs(
+        allocator,
+        planes,
+        bands,
+        blocks,
+        options,
+        options.emit_temporary_payload_sidecar,
+        pass_stats,
+    );
     defer {
         for (&catalogs) |*catalog| catalog.deinit();
     }
@@ -9339,6 +9354,7 @@ fn buildComponentRpclShadowCatalogs(
     blocks: []const subband.CodeBlock,
     options: LosslessOptions,
     include_bitplane_payload: bool,
+    pass_stats: ?*ebcot.EncodePassStats,
 ) ![3]ComponentRpclShadowCatalog {
     const block_worker_count = payloadBlockThreadCount(options, blocks.len);
     if (block_worker_count > 1 or componentThreadCount(options) < 2) {
@@ -9358,11 +9374,11 @@ fn buildComponentRpclShadowCatalogs(
         errdefer {
             for (catalogs[0..initialized]) |*catalog| catalog.deinit();
         }
-        catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.y, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload);
+        catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.y, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
         initialized += 1;
-        catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.cb, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload);
+        catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.cb, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
         initialized += 1;
-        catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.cr, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload);
+        catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.cr, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
         return catalogs;
     }
 
@@ -9473,6 +9489,7 @@ fn buildComponentRpclShadowCatalog(
     nominal_bitplanes: u8,
     options: LosslessOptions,
     include_bitplane_payload: bool,
+    pass_stats: ?*ebcot.EncodePassStats,
 ) !ComponentRpclShadowCatalog {
     const catalog_blocks = try allocator.alloc(RpclShadowBlock, blocks.len);
     errdefer allocator.free(catalog_blocks);
@@ -9506,6 +9523,7 @@ fn buildComponentRpclShadowCatalog(
     defer bitplane_scratch.deinit();
     var ebcot_scratch = ebcot.DirectBlockScratch.init(allocator);
     defer ebcot_scratch.deinit();
+    ebcot_scratch.encode_pass_stats = pass_stats;
     for (blocks, 0..) |block, index| {
         if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         const block_nominal_bitplanes = try bandNominalBitplanesForTransform(

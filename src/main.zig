@@ -893,6 +893,7 @@ fn printTiffToJp2Timings(command: TiffToJp2Timings, encode: codestream.EncodeTim
         printTiming("  MCT", encode.color_transform_ns, total);
         printTiming("  DWT", encode.wavelet_ns, total);
         printTiming("  block payload", encode.payload_ns, total);
+        printEncodeT1PassProfile(encode);
         printTiming("  markers/write SOD", encode.marker_ns, total);
     }
     printTiming("JP2 wrap", command.jp2_wrap_ns, total);
@@ -948,9 +949,20 @@ fn printDecodeBlockWorkerProfile(decode: codestream.DecodeTimings) void {
     );
 }
 
+fn printEncodeT1PassProfile(encode: codestream.EncodeTimings) void {
+    const stats = encode.t1_pass_stats;
+    if (!hasT1PassProfile(stats)) return;
+    std.debug.print("  T1 encode pass profile (single-thread CPU time):\n", .{});
+    printPassTiming("MQ significance", stats.mq_ns[0], stats.mq_passes[0], stats.mq_symbols[0]);
+    printPassTiming("MQ refinement", stats.mq_ns[1], stats.mq_passes[1], stats.mq_symbols[1]);
+    printPassTiming("MQ cleanup/RLC", stats.mq_ns[2], stats.mq_passes[2], stats.mq_symbols[2]);
+    printPassTiming("RAW significance", stats.raw_ns[0], stats.raw_passes[0], stats.raw_symbols[0]);
+    printPassTiming("RAW refinement", stats.raw_ns[1], stats.raw_passes[1], stats.raw_symbols[1]);
+}
+
 fn printDecodeT1PassProfile(decode: codestream.DecodeTimings) void {
     const stats = decode.t1_pass_stats;
-    if (!hasDecodeT1PassProfile(stats)) return;
+    if (!hasT1PassProfile(stats)) return;
     std.debug.print("  T1 pass profile (CPU-sum across workers):\n", .{});
     printPassTiming("MQ significance", stats.mq_ns[0], stats.mq_passes[0], stats.mq_symbols[0]);
     printMqBranchStats("  branches", stats, 0);
@@ -962,7 +974,7 @@ fn printDecodeT1PassProfile(decode: codestream.DecodeTimings) void {
     printPassTiming("RAW refinement", stats.raw_ns[1], stats.raw_passes[1], stats.raw_symbols[1]);
 }
 
-fn hasDecodeT1PassProfile(stats: anytype) bool {
+fn hasT1PassProfile(stats: anytype) bool {
     inline for (0..3) |index| {
         if (stats.mq_passes[index] != 0 or stats.raw_passes[index] != 0) return true;
     }

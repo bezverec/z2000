@@ -19,6 +19,28 @@ pub const PassKind = enum(u8) {
     cleanup = 2,
 };
 
+pub const EncodePassStats = struct {
+    mq_passes: [3]u64 = .{0} ** 3,
+    mq_symbols: [3]u64 = .{0} ** 3,
+    mq_ns: [3]u64 = .{0} ** 3,
+    raw_passes: [3]u64 = .{0} ** 3,
+    raw_symbols: [3]u64 = .{0} ** 3,
+    raw_ns: [3]u64 = .{0} ** 3,
+
+    fn add(self: *EncodePassStats, kind: PassKind, raw: bool, symbols: usize, ns: u64) void {
+        const index = passKindIndex(kind);
+        if (raw) {
+            self.raw_passes[index] += 1;
+            self.raw_symbols[index] += symbols;
+            self.raw_ns[index] += ns;
+        } else {
+            self.mq_passes[index] += 1;
+            self.mq_symbols[index] += symbols;
+            self.mq_ns[index] += ns;
+        }
+    }
+};
+
 pub const DecodePassStats = struct {
     mq_passes: [3]u64 = .{0} ** 3,
     mq_symbols: [3]u64 = .{0} ** 3,
@@ -1637,6 +1659,7 @@ pub const DirectBlockScratch = struct {
     iso_encoder: ?mq_iso.Encoder = null,
     raw_writer: ?RawBitWriter = null,
     current_pass_distortion: ?*f64 = null,
+    encode_pass_stats: ?*EncodePassStats = null,
 
     pub fn init(allocator: std.mem.Allocator) DirectBlockScratch {
         return .{ .allocator = allocator };
@@ -5120,6 +5143,15 @@ fn profileRawPass(stats: ?*DecodePassStats, kind: PassKind, symbols: usize, star
     if (stats) |s| s.addRaw(kind, symbols, profileElapsedNs(start_ns));
 }
 
+fn encodeProfileStart(stats: ?*EncodePassStats) u64 {
+    if (stats == null) return 0;
+    return profileNs();
+}
+
+fn profileEncodePass(stats: ?*EncodePassStats, kind: PassKind, raw: bool, symbols: usize, start_ns: u64) void {
+    if (stats) |value| value.add(kind, raw, symbols, profileElapsedNs(start_ns));
+}
+
 fn profileStart(stats: ?*DecodePassStats) u64 {
     if (stats == null) return 0;
     return profileNs();
@@ -5734,6 +5766,7 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
             if (comptime track_distortion) {
                 scratch.current_pass_distortion = &pass_distortions[pass_index];
             }
+            const profile_start = encodeProfileStart(scratch.encode_pass_stats);
 
             const symbol_count: usize = switch (kind) {
                 .significance => if (is_raw)
@@ -5746,6 +5779,7 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
                     try emitDirectIsoRefinementPass(track_distortion, scratch, iso, plane, stride, rect, bitplane, style),
                 .cleanup => try emitDirectIsoCleanupPass(track_distortion, scratch, iso, plane, stride, rect, bitplane, style),
             };
+            profileEncodePass(scratch.encode_pass_stats, kind, is_raw, symbol_count, profile_start);
 
             segment_pass_count += 1;
             pass_index += 1;

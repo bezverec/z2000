@@ -170,6 +170,11 @@ Primary public functions:
 
 Notes:
 
+- `EncodeTimings.t1_pass_stats` accounts for MQ/RAW significance,
+  refinement, and cleanup passes during measured single-thread encode. The
+  CLI prints pass, symbol, and CPU-time totals under `--timings`; parallel
+  encode leaves this diagnostic profile empty to avoid shared counters in
+  worker hot paths.
 - `encodeLosslessWithOptions` writes JPEG2000 markers with strict packet
   payloads in `SOD`. Despite the historical name, it now covers the reversible
   RCT/5-3 path, reversible `mct none`, the irreversible ICT/9-7 scalar

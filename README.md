@@ -187,7 +187,7 @@ Marker, T1, and diagnostics:
 | `--predictable-termination` / `--no-predictable-termination` | Toggle predictable (ER-TERM) termination, standalone or TERMALL-scoped. |
 | `--segmentation-symbols` / `--no-segmentation-symbols` | Toggle segmentation symbols where supported. |
 | `--threads N` | Worker count. `0` means use all logical threads. |
-| `--timings` | Print encode/decode timing breakdowns. |
+| `--timings` | Print encode/decode timing breakdowns, including a per-pass T1 encode profile for single-thread runs. |
 | `--debug-temp-sidecar` | Emit the private BP8 sidecar for diagnostics; normal encode omits it. |
 
 Inspection and decode commands:

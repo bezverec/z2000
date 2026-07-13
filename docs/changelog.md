@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Encode T1 Pass Profiling
+
+- Extended single-thread encode `--timings` with separate MQ significance,
+  refinement, cleanup/RLC, RAW significance, and RAW refinement pass totals,
+  including pass and symbol counts. A focused EBCOT test checks that the
+  profile accounts for every emitted pass and symbol.
+- On the Ryzen 7 5700X 2048x2048 lossless corpus, MQ significance is the
+  largest encode pass group at 244.5 ms, followed by cleanup/RLC at 202.7 ms
+  and MQ refinement at 166.6 ms. Cleanup remains the most expensive MQ group
+  per symbol.
+- Reverted two byte-exact candidates below the 3% keep rule: reusing an
+  already-loaded cleanup coefficient for sign coding improved t1 encode by
+  1.1%, while avoiding a duplicate full-width row-mask scan improved encode
+  by 1.3% and decode by 1.9%. The next candidate should reduce per-symbol MQ
+  significance work rather than add more stripe-level gating.
+
 ### ISO MQ Decode Branch Layout
 
 - Reordered the ISO MQ decoder around the arithmetic-code `c_high >= Qe`

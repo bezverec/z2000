@@ -10753,6 +10753,49 @@ test "EBCOT direct MQ pass distortions match symbol oracle" {
     }
 }
 
+test "EBCOT direct encode pass profile counts passes and symbols" {
+    const allocator = std.testing.allocator;
+    const width = 7;
+    const height = 6;
+    const plane = [_]i32{
+        0,  -7, 0,   5,  3,   0,  -17,
+        1,  0,  -2,  0,  0,   23, 0,
+        0,  0,  0,   0,  -1,  0,  9,
+        9,  -12, 0,  4,  0,   -6, 0,
+        0,  6,  0,   -8, 2,   0,  31,
+        -3, 0,  14,  0,  -25, 7,  0,
+    };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+
+    var stats: ebcot.EncodePassStats = .{};
+    var scratch = ebcot.DirectBlockScratch.init(allocator);
+    defer scratch.deinit();
+    scratch.encode_pass_stats = &stats;
+    var segment = try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
+        &scratch,
+        plane[0..],
+        width,
+        rect,
+        .{ .bypass = true },
+    );
+    defer segment.deinit(allocator);
+
+    var pass_count: u64 = 0;
+    var symbol_count: u64 = 0;
+    for (0..3) |index| {
+        pass_count += stats.mq_passes[index] + stats.raw_passes[index];
+        symbol_count += stats.mq_symbols[index] + stats.raw_symbols[index];
+    }
+    var expected_symbols: u64 = 0;
+    for (segment.passes) |pass| expected_symbols += pass.symbol_count;
+
+    try std.testing.expectEqual(@as(u64, segment.pass_count), pass_count);
+    try std.testing.expectEqual(expected_symbols, symbol_count);
+    try std.testing.expect(stats.mq_passes[@intFromEnum(ebcot.PassKind.cleanup)] > 0);
+    try std.testing.expect(stats.raw_passes[@intFromEnum(ebcot.PassKind.significance)] > 0);
+    try std.testing.expect(stats.raw_passes[@intFromEnum(ebcot.PassKind.refinement)] > 0);
+}
+
 test "EBCOT ISO MQ symbol segment preserves pass metadata" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{

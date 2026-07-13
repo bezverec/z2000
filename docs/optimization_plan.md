@@ -54,6 +54,25 @@ and both were reverted. The S3 lane audit also confirmed that AVX2's native
 and 2.7% decode t1. The next 5/3 encode candidate must target EBCOT pass work,
 not generic MQ layout, DWT width, or RCT.
 
+## Checkpoint #5 (2026-07-13) — Encode Pass Profile
+
+Single-thread encode `--timings` now measures the real direct-EBCOT pass
+groups rather than reporting only aggregate block-payload time. On the Ryzen
+7 5700X 2048x2048 lossless corpus, block payload was 727.0 ms: MQ
+significance 244.5 ms / 19.80 M symbols, cleanup/RLC 202.7 ms / 14.96 M,
+MQ refinement 166.6 ms / 21.09 M, RAW refinement 53.8 ms / 19.29 M, and RAW
+significance 31.2 ms / 1.55 M. This makes MQ significance the largest total
+encode target and cleanup the highest-cost MQ target per symbol.
+
+Two narrow byte-exact candidates were measured and reverted. Passing the
+already-loaded cleanup coefficient sign into the sign helper measured
+807.2 +/- 5.2 to 798.1 +/- 8.2 ms (-1.1%). Reusing the whole-stripe mask
+result for one-word code-blocks measured encode 808.1 +/- 10.9 to
+798.0 +/- 4.2 ms (-1.3%) and decode 750.5 +/- 6.8 to 736.3 +/- 4.1 ms
+(-1.9%). Both remained below the 3% keep rule. The useful next step is O3
+per-symbol MQ significance work; cleanup coefficient reloads and duplicate
+one-word stripe scans are now spent unless combined with a broader redesign.
+
 ## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
 
 Machine: AMD Ryzen 7 5700X (8C/16T), Windows 11, x86_64. Kakadu **8.4.1**
@@ -295,9 +314,10 @@ MQ column-pipeline reformulation (O3), not more parallelism.
 
 Encode block payload is 477 ms vs decode's 451 ms for the same MQ work;
 the ~27 ms delta plus the sig/ref/cleanup encode overhead hides in bitplane
-extraction and pass buffering. Profile first (`--timings` breaks down the
-encode passes the same way); candidates: SIMD magnitude/bitplane extraction
-(partially exists), skipping all-zero bitplanes earlier.
+extraction and pass buffering. The encode pass profile is now available under
+single-thread `--timings`; its current lossless numbers are recorded in
+Checkpoint #5. Remaining candidates are SIMD magnitude/bitplane extraction
+(partially exists) and skipping all-zero bitplanes earlier.
 
 ### Parked (previously tried, needs a new angle before retry)
 
@@ -436,3 +456,5 @@ Windows/Ryzen vs Kakadu (Baseline #2; t16 columns):
 | 2026-07-08 | O5 parallel forward RCT (encode only) (Mac M4) | unchanged | **-3.5%** | — | — | kept; reproducible across 2 A/Bs, variance ±4.5→±1.7, sigma marginally overlaps (base noise); t1 unchanged, byte-exact |
 | 2026-07-08 | O5 parallel inverse RCT (decode) (Mac M4) | — | — | — | +1.2% | reverted; 3.4 ms phase too small, spawn+error-check cancels the gain |
 | 2026-07-08 | O5 block-level decode for 2-3 threads (t2/t3 imbalance) (Mac M4) | — | — | t2 -19.5%, t3 +7% | unchanged | kept; monotone scaling, t1/t10 unchanged, removes nested-parallel special case |
+| 2026-07-13 | O2 cleanup sign coefficient reuse | -1.1% | — | — | — | reverted; byte-exact, below gate |
+| 2026-07-13 | O3 one-word stripe range reuse | -1.3% | — | -1.9% | — | reverted; byte-exact, below gate |
