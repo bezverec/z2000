@@ -6678,6 +6678,66 @@ test "parallel 5/3 DWT matches the serial workspace transform byte-for-byte" {
     }
 }
 
+test "parallel 9/7 DWT matches the serial origin transform bit-for-bit" {
+    const allocator = std.testing.allocator;
+    // Cover vector-band widths (f32_block_lanes = 32), per-column line tails,
+    // odd dims, one-dimensional transforms, tile-origin lifting parities, and
+    // worker counts from the inline fallback to more workers than vector groups.
+    const dims = [_][2]usize{
+        .{ 1, 1 }, .{ 1, 33 }, .{ 33, 1 }, .{ 64, 64 }, .{ 65, 63 },
+        .{ 129, 128 }, .{ 100, 40 }, .{ 17, 200 }, .{ 512, 512 },
+    };
+    const origins = [_][2]u32{ .{ 0, 0 }, .{ 1, 1 }, .{ 3, 2 } };
+    const thread_counts = [_]usize{ 1, 2, 4, 8, 16 };
+
+    for (dims) |dim| {
+        const width = dim[0];
+        const height = dim[1];
+        const pixels = width * height;
+
+        var serial: [3][]f32 = undefined;
+        var parallel: [3][]f32 = undefined;
+        for (0..3) |c| {
+            serial[c] = try allocator.alloc(f32, pixels);
+            parallel[c] = try allocator.alloc(f32, pixels);
+        }
+        defer for (0..3) |c| {
+            allocator.free(serial[c]);
+            allocator.free(parallel[c]);
+        };
+
+        for (origins) |origin| {
+            for (thread_counts) |threads| {
+                var seed: u32 = @intCast(width * 2749 + height * 40961 + threads * 7 + origin[0] * 131 + origin[1] * 17);
+                for (0..3) |c| {
+                    for (serial[c], 0..) |*sample, index| {
+                        seed = seed *% 1664525 +% 1013904223;
+                        sample.* = @floatFromInt(@as(i32, @intCast((seed >> 13) & 0x3ff)) - 512 +
+                            @as(i32, @intCast(index % 23)) - 11);
+                    }
+                    @memcpy(parallel[c], serial[c]);
+                }
+
+                // Serial reference: one origin-aware transform per component.
+                var serial_levels: u8 = 0;
+                for (0..3) |c| {
+                    serial_levels = try wavelet.forward2DOrigin(allocator, serial[c], width, height, 6, .irreversible_9_7, origin[0], origin[1]);
+                }
+
+                const parallel_levels = try wavelet.forward97Parallel(allocator, parallel, width, height, 6, origin[0], origin[1], threads);
+                try std.testing.expectEqual(serial_levels, parallel_levels);
+                for (0..3) |c| try std.testing.expectEqualSlices(f32, serial[c], parallel[c]);
+
+                for (0..3) |c| {
+                    try wavelet.inverse2DOrigin(allocator, serial[c], width, height, serial_levels, .irreversible_9_7, origin[0], origin[1]);
+                }
+                try wavelet.inverse97Parallel(allocator, parallel, width, height, parallel_levels, origin[0], origin[1], threads);
+                for (0..3) |c| try std.testing.expectEqualSlices(f32, serial[c], parallel[c]);
+            }
+        }
+    }
+}
+
 test "odd and edge dimensions roundtrip losslessly through archival encode/decode" {
     const allocator = std.testing.allocator;
     // Odd, thin, and minimal geometries stress the 5/3 DWT edge lifting
@@ -11881,6 +11941,52 @@ test "irreversible 9/7 ICT codestream roundtrips within lossy tolerance" {
     try std.testing.expect(max_diff <= 8);
     const mse = @as(f64, @floatFromInt(sum_sq)) / @as(f64, @floatFromInt(samples.len));
     try std.testing.expect(mse < 4.0);
+}
+
+test "single-tile irreversible 9/7 pipeline is deterministic across thread counts" {
+    const allocator = std.testing.allocator;
+    const width = 129;
+    const height = 128;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = row * width + col;
+            samples[i * 3 + 0] = @intCast((col * 3 + row * 5) % 256);
+            samples[i * 3 + 1] = @intCast((col * 11 + row * 7) % 256);
+            samples[i * 3 + 2] = @intCast((col * 13 + row * 17) % 256);
+        }
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    var options = codestream.LosslessOptions{
+        .levels = 4,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+        .block_width = 32,
+        .block_height = 32,
+    };
+
+    options.threads = 1;
+    const serial = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(serial);
+    options.threads = 8;
+    const parallel = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(parallel);
+    try std.testing.expectEqualSlices(u8, serial, parallel);
+
+    var serial_decode = try codestream.decodeLosslessTemporaryWithOptions(allocator, serial, .{ .threads = 1 });
+    defer serial_decode.deinit();
+    var parallel_decode = try codestream.decodeLosslessTemporaryWithOptions(allocator, serial, .{ .threads = 8 });
+    defer parallel_decode.deinit();
+    try std.testing.expectEqualSlices(u16, serial_decode.samples, parallel_decode.samples);
 }
 
 test "scalar-derived quantization signals one QCD step and roundtrips within lossy tolerance" {

@@ -648,3 +648,370 @@ fn unpackOddEven(data: []f32, scratch: []f32) void {
     }
     @memcpy(data, scratch[0..data.len]);
 }
+
+// ---------------------------------------------------------------------------
+// Parallel multi-component 9/7 DWT.
+//
+// Same design as wavelet_int's 5/3 driver: the per-level cascade is
+// sequential, but within a level the column transforms are mutually
+// independent and so are the row transforms. The per-plane job structure in
+// the lossy pipeline caps DWT parallelism at three component threads; this
+// driver distributes the three planes' column bands and row bands across
+// `thread_count` workers with private scratch. The per-column and per-row
+// arithmetic is exactly the serial `forward2DOrigin` / `inverse2DOrigin`
+// kernels, so output stays bit-identical (covered by a unit test).
+// ---------------------------------------------------------------------------
+
+// Wide 9/7 bands are memory-heavy and short-lived. More than eight workers
+// adds phase-spawn and SMT contention on the maintained x86 benchmark host;
+// T1 still receives the full caller thread count.
+const max_dwt_workers = 8;
+
+const Dwt97Phase = enum { forward_columns, forward_rows, inverse_columns, inverse_rows };
+
+const Dwt97BandJob = struct {
+    planes: [3][]f32,
+    stride: usize,
+    cur_width: usize,
+    cur_height: usize,
+    x0: u32,
+    y0: u32,
+    line: []f32,
+    scratch: []f32,
+    pack_scratch: []f32,
+    begin: usize,
+    end: usize,
+    phase: Dwt97Phase,
+
+    fn run(job: *const Dwt97BandJob) void {
+        switch (job.phase) {
+            .forward_columns => for (job.planes) |plane| {
+                var col = job.begin;
+                if (job.cur_height >= 2) {
+                    while (col + f32_block_lanes <= job.end) : (col += f32_block_lanes) {
+                        forward97VerticalBand(plane, job.stride, col, job.cur_height, (job.y0 & 1) == 1, job.pack_scratch);
+                    }
+                }
+                if (job.end == job.cur_width) {
+                    while (col < job.cur_width) : (col += 1) {
+                        for (0..job.cur_height) |row| job.line[row] = plane[row * job.stride + col];
+                        forward1DOrigin(job.line[0..job.cur_height], job.scratch[0..job.cur_height], .irreversible_9_7, job.y0);
+                        for (0..job.cur_height) |row| plane[row * job.stride + col] = job.line[row];
+                    }
+                }
+            },
+            .inverse_columns => for (job.planes) |plane| {
+                var col = job.begin;
+                if (job.cur_height >= 2) {
+                    while (col + f32_block_lanes <= job.end) : (col += f32_block_lanes) {
+                        inverse97VerticalBand(plane, job.stride, col, job.cur_height, (job.y0 & 1) == 1, job.pack_scratch);
+                    }
+                }
+                if (job.end == job.cur_width) {
+                    while (col < job.cur_width) : (col += 1) {
+                        for (0..job.cur_height) |row| job.line[row] = plane[row * job.stride + col];
+                        inverse1DOrigin(job.line[0..job.cur_height], job.scratch[0..job.cur_height], .irreversible_9_7, job.y0);
+                        for (0..job.cur_height) |row| plane[row * job.stride + col] = job.line[row];
+                    }
+                }
+            },
+            .forward_rows => for (job.planes) |plane| {
+                var row = job.begin;
+                while (row < job.end) : (row += 1) {
+                    forward1DOrigin(plane[row * job.stride ..][0..job.cur_width], job.scratch[0..job.cur_width], .irreversible_9_7, job.x0);
+                }
+            },
+            .inverse_rows => for (job.planes) |plane| {
+                var row = job.begin;
+                while (row < job.end) : (row += 1) {
+                    inverse1DOrigin(plane[row * job.stride ..][0..job.cur_width], job.scratch[0..job.cur_width], .irreversible_9_7, job.x0);
+                }
+            },
+        }
+    }
+};
+
+const Dwt97PoolWorker = struct {
+    pool: *Dwt97Pool,
+    index: usize,
+};
+
+const Dwt97Pool = struct {
+    jobs: [max_dwt_workers]Dwt97BandJob = undefined,
+    worker_args: [max_dwt_workers - 1]Dwt97PoolWorker = undefined,
+    threads: [max_dwt_workers - 1]std.Thread = undefined,
+    worker_count: usize = 1,
+    spawned: usize = 0,
+    active_jobs: usize = 0,
+    generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    completed: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn start(pool: *Dwt97Pool, requested_workers: usize) void {
+        pool.worker_count = @max(1, @min(requested_workers, max_dwt_workers));
+        if (pool.worker_count == 1) return;
+
+        while (pool.spawned < pool.worker_count - 1) : (pool.spawned += 1) {
+            pool.worker_args[pool.spawned] = .{ .pool = pool, .index = pool.spawned };
+            pool.threads[pool.spawned] = std.Thread.spawn(.{}, dwt97PoolWorker, .{&pool.worker_args[pool.spawned]}) catch {
+                // A partial pool cannot safely change its barrier width. Stop
+                // the threads already created and use the caller thread.
+                pool.stopping.store(true, .release);
+                _ = pool.generation.fetchAdd(1, .release);
+                for (pool.threads[0..pool.spawned]) |thread| thread.join();
+                pool.worker_count = 1;
+                pool.spawned = 0;
+                return;
+            };
+        }
+    }
+
+    fn dispatch(pool: *Dwt97Pool, active_jobs: usize) void {
+        if (pool.worker_count == 1) {
+            pool.jobs[0].run();
+            return;
+        }
+
+        pool.active_jobs = active_jobs;
+        pool.completed.store(0, .monotonic);
+        _ = pool.generation.fetchAdd(1, .release);
+
+        const caller_index = pool.worker_count - 1;
+        if (caller_index < active_jobs) pool.jobs[caller_index].run();
+        while (pool.completed.load(.acquire) != pool.spawned) std.atomic.spinLoopHint();
+    }
+
+    fn stop(pool: *Dwt97Pool) void {
+        if (pool.spawned == 0) return;
+        pool.stopping.store(true, .release);
+        _ = pool.generation.fetchAdd(1, .release);
+        for (pool.threads[0..pool.spawned]) |thread| thread.join();
+        pool.spawned = 0;
+    }
+};
+
+fn dwt97PoolWorker(worker: *Dwt97PoolWorker) void {
+    const pool = worker.pool;
+    var observed_generation: u32 = 0;
+    while (true) {
+        var generation = pool.generation.load(.acquire);
+        while (generation == observed_generation) {
+            std.atomic.spinLoopHint();
+            generation = pool.generation.load(.acquire);
+        }
+        observed_generation = generation;
+        if (pool.stopping.load(.acquire)) return;
+        if (worker.index < pool.active_jobs) pool.jobs[worker.index].run();
+        _ = pool.completed.fetchAdd(1, .acq_rel);
+    }
+}
+
+/// Runs one 9/7 DWT phase across `worker_count` bands. Column phases split
+/// the column index at `f32_block_lanes` boundaries (the final band absorbs
+/// the per-column line tail); row phases split the row index evenly. Bands
+/// touch disjoint output regions, so no synchronization beyond the join is
+/// needed. Each worker's scratch is sliced pack|line|1D from one allocation.
+fn runDwt97Phase(
+    pool: *Dwt97Pool,
+    planes: [3][]f32,
+    stride: usize,
+    cur_width: usize,
+    cur_height: usize,
+    x0: u32,
+    y0: u32,
+    scratches: []const []f32,
+    pack_len: usize,
+    max_dim: usize,
+    phase: Dwt97Phase,
+) void {
+    const is_columns = phase == .forward_columns or phase == .inverse_columns;
+    const span = if (is_columns) cur_width else cur_height;
+    if (span == 0) return;
+
+    const jobs = &pool.jobs;
+    const worker_count = pool.worker_count;
+    var job_count: usize = 0;
+
+    const makeJob = struct {
+        fn make(
+            planes_: [3][]f32,
+            stride_: usize,
+            cur_width_: usize,
+            cur_height_: usize,
+            x0_: u32,
+            y0_: u32,
+            scratch_all: []f32,
+            pack_len_: usize,
+            max_dim_: usize,
+            begin: usize,
+            end: usize,
+            phase_: Dwt97Phase,
+        ) Dwt97BandJob {
+            return .{
+                .planes = planes_,
+                .stride = stride_,
+                .cur_width = cur_width_,
+                .cur_height = cur_height_,
+                .x0 = x0_,
+                .y0 = y0_,
+                .pack_scratch = scratch_all[0..pack_len_],
+                .line = scratch_all[pack_len_..][0..max_dim_],
+                .scratch = scratch_all[pack_len_ + max_dim_ ..][0..max_dim_],
+                .begin = begin,
+                .end = end,
+                .phase = phase_,
+            };
+        }
+    }.make;
+
+    if (is_columns) {
+        // Distribute full vector groups; the last populated band runs to
+        // `cur_width` so it emits the per-column line tail.
+        const vec_groups = cur_width / f32_block_lanes;
+        if (vec_groups == 0) {
+            jobs[0] = makeJob(planes, stride, cur_width, cur_height, x0, y0, scratches[0], pack_len, max_dim, 0, cur_width, phase);
+            job_count = 1;
+        } else {
+            const bands = @min(worker_count, vec_groups);
+            const base = vec_groups / bands;
+            const extra = vec_groups % bands;
+            var group_start: usize = 0;
+            var b: usize = 0;
+            while (b < bands) : (b += 1) {
+                const groups = base + (if (b < extra) @as(usize, 1) else 0);
+                const col_begin = group_start * f32_block_lanes;
+                const is_last = b == bands - 1;
+                const col_end = if (is_last) cur_width else (group_start + groups) * f32_block_lanes;
+                jobs[b] = makeJob(planes, stride, cur_width, cur_height, x0, y0, scratches[b], pack_len, max_dim, col_begin, col_end, phase);
+                group_start += groups;
+                job_count += 1;
+            }
+        }
+    } else {
+        const bands = @min(worker_count, cur_height);
+        const base = cur_height / bands;
+        const extra = cur_height % bands;
+        var row_start: usize = 0;
+        var b: usize = 0;
+        while (b < bands) : (b += 1) {
+            const rows = base + (if (b < extra) @as(usize, 1) else 0);
+            jobs[b] = makeJob(planes, stride, cur_width, cur_height, x0, y0, scratches[b], pack_len, max_dim, row_start, row_start + rows, phase);
+            row_start += rows;
+            job_count += 1;
+        }
+    }
+
+    pool.dispatch(job_count);
+}
+
+fn dwt97WorkerCount(thread_count: usize) usize {
+    return @max(1, @min(thread_count, max_dwt_workers));
+}
+
+fn allocDwt97Scratches(allocator: std.mem.Allocator, workers: usize, scratch_len: usize) ![][]f32 {
+    const scratches = try allocator.alloc([]f32, workers);
+    errdefer allocator.free(scratches);
+    var allocated: usize = 0;
+    errdefer for (scratches[0..allocated]) |s| allocator.free(s);
+    while (allocated < workers) : (allocated += 1) scratches[allocated] = try allocator.alloc(f32, scratch_len);
+    return scratches;
+}
+
+fn freeDwt97Scratches(allocator: std.mem.Allocator, scratches: [][]f32) void {
+    for (scratches) |s| allocator.free(s);
+    allocator.free(scratches);
+}
+
+pub fn forward97Parallel(
+    allocator: std.mem.Allocator,
+    planes: [3][]f32,
+    width: usize,
+    height: usize,
+    requested_levels: u8,
+    x0: u32,
+    y0: u32,
+    thread_count: usize,
+) !u8 {
+    for (planes) |plane| {
+        if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
+    }
+    const workers = dwt97WorkerCount(thread_count);
+    const max_dim = @max(width, height);
+    const pack_len = ((height + 1) / 2) * f32_block_lanes;
+    const scratch_len = pack_len + 2 * max_dim;
+    const scratches = try allocDwt97Scratches(allocator, workers, scratch_len);
+    defer freeDwt97Scratches(allocator, scratches);
+    var pool: Dwt97Pool = .{};
+    pool.start(workers);
+    defer pool.stop();
+
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    var done: u8 = 0;
+    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        const next_width = lowCountOrigin(cur_width, cur_x0);
+        const next_height = lowCountOrigin(cur_height, cur_y0);
+        if (next_width == 0 or next_height == 0) break;
+        // ISO/IEC 15444-1 F.4.8 forward order: vertical first, then horizontal.
+        runDwt97Phase(&pool, planes, width, cur_width, cur_height, cur_x0, cur_y0, scratches, pack_len, max_dim, .forward_columns);
+        runDwt97Phase(&pool, planes, width, cur_width, cur_height, cur_x0, cur_y0, scratches, pack_len, max_dim, .forward_rows);
+        cur_width = next_width;
+        cur_height = next_height;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+    }
+    return done;
+}
+
+pub fn inverse97Parallel(
+    allocator: std.mem.Allocator,
+    planes: [3][]f32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    x0: u32,
+    y0: u32,
+    thread_count: usize,
+) !void {
+    for (planes) |plane| {
+        if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
+    }
+    var shapes: [32]LevelShape = undefined;
+    if (levels > shapes.len) return TransformError.TooManyLevels;
+    const workers = dwt97WorkerCount(thread_count);
+    const max_dim = @max(width, height);
+    const pack_len = ((height + 1) / 2) * f32_block_lanes;
+    const scratch_len = pack_len + 2 * max_dim;
+    const scratches = try allocDwt97Scratches(allocator, workers, scratch_len);
+    defer freeDwt97Scratches(allocator, scratches);
+    var pool: Dwt97Pool = .{};
+    pool.start(workers);
+    defer pool.stop();
+
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    var actual_levels: u8 = 0;
+    while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
+        const next_width = lowCountOrigin(cur_width, cur_x0);
+        const next_height = lowCountOrigin(cur_height, cur_y0);
+        if (next_width == 0 or next_height == 0) break;
+        shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+        cur_width = next_width;
+        cur_height = next_height;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+    }
+
+    var level = actual_levels;
+    while (level > 0) {
+        level -= 1;
+        const shape = shapes[level];
+        // Mirror of the ISO forward order: horizontal first, then vertical.
+        runDwt97Phase(&pool, planes, width, shape.width, shape.height, shape.x0, shape.y0, scratches, pack_len, max_dim, .inverse_rows);
+        runDwt97Phase(&pool, planes, width, shape.width, shape.height, shape.x0, shape.y0, scratches, pack_len, max_dim, .inverse_columns);
+    }
+}

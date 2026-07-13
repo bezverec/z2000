@@ -599,7 +599,7 @@ fn forwardIrreversibleQuantizedPlanes(
         options.quantization,
         0,
         0,
-        componentThreadCount(options),
+        options.threads,
         timings,
     );
 }
@@ -633,6 +633,23 @@ fn irreversibleForwardPlane(job: *IrreversibleForwardPlaneJob) anyerror!void {
         job.y0,
     );
     if (done != job.levels) return CodestreamError.InvalidCodestream;
+    for (job.bands, job.deltas) |band, delta| {
+        quantizeBandRegion(job.plane, job.quantized, job.width, band.rect, delta);
+    }
+}
+
+/// Quantize-only plane job for the intra-plane parallel DWT path, where the
+/// 9/7 transform already ran jointly across all planes.
+const IrreversibleQuantizePlaneJob = struct {
+    plane: []const f32,
+    quantized: []i32,
+    width: usize,
+    bands: []const subband.Band,
+    deltas: []const f64,
+    result: anyerror!void = {},
+};
+
+fn irreversibleQuantizePlaneWorker(job: *IrreversibleQuantizePlaneJob) void {
     for (job.bands, job.deltas) |band, delta| {
         quantizeBandRegion(job.plane, job.quantized, job.width, band.rect, delta);
     }
@@ -693,17 +710,42 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
     const cr = try allocator.alloc(i32, pixels);
     errdefer allocator.free(cr);
 
-    // Each component's 9/7 DWT and deadzone quantization is independent, so
-    // the three planes run as component jobs (same pattern as the 5/3 path).
-    // The per-plane arithmetic is untouched: streams stay byte-identical to
-    // the serial order.
     const wavelet_start = monotonicNs();
-    var jobs = [3]IrreversibleForwardPlaneJob{
-        .{ .plane = ict.y, .quantized = y, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
-        .{ .plane = ict.cb, .quantized = cb, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
-        .{ .plane = ict.cr, .quantized = cr, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
-    };
-    try runComponentJobs(IrreversibleForwardPlaneJob, &jobs, thread_count, irreversibleForwardPlaneWorker);
+    if (thread_count > 1) {
+        // Intra-plane parallel DWT: one joint 9/7 transform over the three
+        // planes with row/column bands spread across all `thread_count`
+        // workers, then 3-way quantize jobs. The per-plane job path below
+        // caps the DWT at three threads and starves wider machines. The
+        // per-column/per-row arithmetic is unchanged, so streams stay
+        // bit-identical.
+        const done = try wavelet.forward97Parallel(
+            std.heap.smp_allocator,
+            .{ ict.y, ict.cb, ict.cr },
+            ict.width,
+            ict.height,
+            levels,
+            x0,
+            y0,
+            thread_count,
+        );
+        if (done != levels) return CodestreamError.InvalidCodestream;
+        var jobs = [3]IrreversibleQuantizePlaneJob{
+            .{ .plane = ict.y, .quantized = y, .width = ict.width, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.cb, .quantized = cb, .width = ict.width, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.cr, .quantized = cr, .width = ict.width, .bands = bands, .deltas = deltas },
+        };
+        try runComponentJobs(IrreversibleQuantizePlaneJob, &jobs, componentThreadCountFor(thread_count), irreversibleQuantizePlaneWorker);
+    } else {
+        // Serial/tile-worker path: each component's 9/7 DWT and deadzone
+        // quantization is independent, so the three planes run as fused
+        // component jobs (same pattern as the 5/3 path).
+        var jobs = [3]IrreversibleForwardPlaneJob{
+            .{ .plane = ict.y, .quantized = y, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.cb, .quantized = cb, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.cr, .quantized = cr, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+        };
+        try runComponentJobs(IrreversibleForwardPlaneJob, &jobs, thread_count, irreversibleForwardPlaneWorker);
+    }
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     return .{
@@ -5529,9 +5571,9 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     }
 
     const wavelet_start = monotonicNs();
-    // Mirror of the forward path: dequantization and the inverse 9/7 DWT are
-    // independent per component, so the three planes run as component jobs
-    // with unchanged per-plane arithmetic.
+    // Dequantization and the inverse 9/7 DWT are independent per component,
+    // so three fused plane jobs avoid extra full-plane traffic. A wider
+    // intra-plane inverse was bit-exact but regressed the maintained t16 gate.
     var jobs = [3]IrreversibleInversePlaneJob{
         .{ .quantized = quantized.y, .plane = y_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
         .{ .quantized = quantized.cb, .plane = cb_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
