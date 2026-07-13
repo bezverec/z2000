@@ -7,6 +7,10 @@ entries are grouped by development milestone rather than semantic version.
 
 ### Release Candidate Infrastructure
 
+- Added a portable static `riscv64-linux-musl` release archive and a full
+  QEMU-backed RISC-V test gate. The release binary does not require RVV.
+- Made the Linux x86-64 release target explicitly use musl rather than the
+  hosted runner's native libc while retaining native Linux tests.
 - Added explicit SemVer prerelease labels for release builds, producing
   versions such as `0.1.0-rc.1+build.404.gabcdef12` while preserving the
   existing development and final-release forms.

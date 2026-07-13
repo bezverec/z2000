@@ -97,21 +97,35 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux-x86_64
+            target: x86_64-linux-musl
+            emulated: false
             zig_url: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
             zig_sha: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
             zig_dir: zig-x86_64-linux-0.16.0
             executable: z2000
           - os: windows-latest
             platform: windows-x86_64
+            target: native
+            emulated: false
             zig_url: https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip
             zig_sha: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
             zig_dir: zig-x86_64-windows-0.16.0
             executable: z2000.exe
           - os: macos-15
             platform: macos-aarch64
+            target: native
+            emulated: false
             zig_url: https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
             zig_sha: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
             zig_dir: zig-aarch64-macos-0.16.0
+            executable: z2000
+          - os: ubuntu-latest
+            platform: linux-riscv64
+            target: riscv64-linux-musl
+            emulated: true
+            zig_url: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+            zig_sha: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            zig_dir: zig-x86_64-linux-0.16.0
             executable: z2000
     runs-on: ${{ matrix.os }}
     steps:
@@ -163,8 +177,24 @@ jobs:
           Expand-Archive zig.zip -DestinationPath .
           (Resolve-Path $env:ZIG_DIR).Path | Out-File -FilePath $env:GITHUB_PATH -Append
 
+      - name: Install RISC-V user-mode emulator
+        if: matrix.emulated
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-user
+
       - name: Run native tests
+        if: ${{ !matrix.emulated }}
         run: zig build test -Dtarget=native
+
+      - name: Run RISC-V tests under QEMU
+        if: matrix.emulated
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: zig build test "-Dtarget=$TARGET" -fqemu
 
       - name: Build release binary (Unix)
         if: runner.os != 'Windows'
@@ -172,13 +202,14 @@ jobs:
           PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
           BUILD_NUMBER: ${{ needs.metadata.outputs.build_number }}
           GIT_SHA: ${{ needs.metadata.outputs.git_sha }}
+          TARGET: ${{ matrix.target }}
         shell: bash
         run: |
           set -euo pipefail
           args=(
             -Drelease=true
             -Doptimize=ReleaseFast
-            -Dtarget=native
+            "-Dtarget=$TARGET"
             "-Dbuild-number=$BUILD_NUMBER"
             "-Dgit-sha=$GIT_SHA"
             -Dgit-dirty=false
@@ -207,13 +238,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify embedded version (Unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !matrix.emulated
         env:
           EXPECTED_VERSION: ${{ needs.metadata.outputs.expected_version }}
         shell: bash
         run: |
           set -euo pipefail
           actual="$(./zig-out/bin/z2000 --version 2>&1)"
+          test "$actual" = "$EXPECTED_VERSION"
+
+      - name: Verify embedded version (RISC-V)
+        if: matrix.emulated
+        env:
+          EXPECTED_VERSION: ${{ needs.metadata.outputs.expected_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(qemu-riscv64 ./zig-out/bin/z2000 --version 2>&1)"
           test "$actual" = "$EXPECTED_VERSION"
 
       - name: Verify embedded version (Windows)
