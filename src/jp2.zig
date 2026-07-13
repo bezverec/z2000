@@ -866,9 +866,9 @@ fn validateFirstTilePartHeader(
                         return Jp2Error.InvalidCodestream;
                     }
                     if (has_ppm) {
-                        if (part_has_ppt or cod.sop or cod.eph) return Jp2Error.UnsupportedProfile;
+                        if (part_has_ppt) return Jp2Error.UnsupportedProfile;
                     } else if (part_has_ppt) {
-                        if (cod.sop or cod.eph or ppt_state.header_bytes == 0) return Jp2Error.UnsupportedProfile;
+                        if (ppt_state.header_bytes == 0) return Jp2Error.UnsupportedProfile;
                     } else {
                         try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
                     }

@@ -83,12 +83,12 @@ Supported public JP2 profiles are still narrow:
 - all six Part 1 code-block style bits in the documented ISO-MQ envelope,
   including BYPASS, RESET, TERMALL, vertical-causal, predictable termination,
   segmentation symbols, and their tested combinations
-- tile-part packed packet headers via `--ppt` for RPCL with SOP/EPH disabled:
+- tile-part packed packet headers via `--ppt` for RPCL with optional SOP/EPH:
   single-tile streams use one part or `R` resolution parts, and multi-tile
-  streams require `R` parts; PLT measures SOD packet bodies while PPT carries
-  one ordered T2 header stream per tile across its parts
+  streams require `R` parts; PLT measures SOD-resident SOP plus packet bodies,
+  while PPT carries T2 headers plus EPH in one ordered stream per tile
 - main-header packed packet headers via `--ppm` for RPCL with `R` resolution
-  parts and SOP/EPH disabled, including multi-tile streams; one checked
+  parts and optional SOP/EPH, including multi-tile streams; one checked
   `Nppm/Ippm` group maps to each codestream-order tile-part and drives a
   tile-local strict T2 packed-header state. PPM output omits redundant PLT and
   derives SOD body spans from decoded packet headers
@@ -97,9 +97,8 @@ Unsupported combinations still fail closed. Examples include tile-part
 division/progression mismatches, JPX features, unsupported component layouts,
 and profile mixes outside the bounded envelope. In
 multi-tile mode, BYPASS without TERMALL and non-empty PLT-less multipart tiles
-without PPM-backed RPCL/`R` derivation also remain unsupported. SOP/EPH
-packed-header combinations remain fail-closed;
-PPM/PPT are mutually exclusive and multi-tile PPT
+without PPM-backed RPCL/`R` derivation also remain unsupported. PPM/PPT are
+mutually exclusive and multi-tile PPT
 additionally rejects non-`R` layouts.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
 smoke tests cover the common no-EPH and archival EPH paths, while

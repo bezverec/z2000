@@ -290,5 +290,5 @@ carry the globally signalled decomposition count.
 Tile-parts-within-tile (R divisions × tiles), per-tile COD/QCD overrides,
 `--mct none`, unsupported style combinations, lossy 9/7 tiles,
 streaming (bounded-memory) assembly. Multi-tile RPCL/`R` PPT and PLT-less PPM
-landed as later increments on 2026-07-12; SOP/EPH packed-header combinations
-remain fail-closed.
+landed as later increments on 2026-07-12; all SOP/EPH packed-header
+combinations followed on 2026-07-13.

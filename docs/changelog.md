@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Packed Packet Boundary Markers
+
+- Extended both `--ppt` and `--ppm` through every SOP/EPH combination on the
+  bounded RPCL profile. ISO placement is explicit: SOP remains in SOD before
+  each packet body and counts toward PLT, `Psot`, and TLM; EPH follows the T2
+  header in the packed PPM/PPT stream. The shared strict reader validates
+  marker presence, `Nsop`, EPH placement, and packed/body lengths before
+  rebuilding its internal unframed header+body packet bytes. JP2 structural
+  validation now admits the same bounded profiles.
+- Added single- and multi-tile roundtrips for SOP-only, EPH-only, and combined
+  framing, including PLT-less PPM, zero-body PPT packets, threaded determinism,
+  malformed `Nsop`/EPH rejection, and wrapper acceptance. ReleaseFast macOS
+  smokes over the 1024x1024 RGB fixture decode pixel-exactly through z2000,
+  OpenJPEG 2.5.4, and Grok 20.3.6. The formerly open 16-tile/48-part two-layer
+  PPM Grok gate also passes in the current tree. T2 completeness is now 10/10;
+  the full Part 1 estimate moves from 96/100 to 97/100.
+
 ### POC Scheduling Foundation
 
 - Added a standalone POC parser and packet scheduler. It handles Part 1's

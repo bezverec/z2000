@@ -57,6 +57,9 @@ Current RGB TIFF to JP2 encode:
    ordered group to each tile-part and feed it into tile-local strict T2 state.
    PPM streams derive body spans directly from those headers and need no PLT;
    PPT continues to use tile-part-local packed headers plus PLT body lengths.
+   With packed headers, SOP stays in SOD and is included in PLT, while EPH is
+   carried beside the T2 header in PPM/PPT; strict decode validates and strips
+   both markers before rebuilding its internal header+body packet view.
 10. `src/codestream.zig` writes JPEG2000 markers, progression-ordered packet
     payloads, PLT-backed `R`/`L`/`C`/`P` tile-part layouts, and optional debug
     private `COM` sidecar metadata. The opt-in RPCL PPT path separates packed
@@ -389,7 +392,6 @@ These are intentionally not treated as complete yet:
 - multi-tile combinations outside the bounded envelope, including BYPASS
   without TERMALL, division/progression mismatches, and non-empty PLT-less
   multipart tiles;
-- SOP/EPH combined with PPM/PPT packed headers;
 - broader PLT-less foreign decode coverage beyond the current single-tile and
   explicit/default-precinct multi-tile OpenJPEG/Grok/Kakadu lossless matrices;
 - general-purpose lossy decode/error-bound coverage beyond the current narrow

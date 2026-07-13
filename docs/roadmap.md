@@ -28,12 +28,12 @@ interop gate.
 - T2 packet state: all five progression orders preserve inclusion tag-tree,
   zero-bitplane tag-tree, `numlenbits`, layer deltas, and packet state through
   strict decode. PLT-backed tile-part divisions now cover all direct modes on
-  matching orders: `R`/RPCL, `L`/LRCP, `C`/CPRL, and `P`/PCRL. PPT is public
-  on the bounded RPCL no-SOP/no-EPH path: single-tile accepts one or `R` parts,
-  and multi-tile requires `R` parts. PPM is public for the matching single- and
-  multi-tile `R` envelope; its remaining gate is Grok
-  multi-part-per-tile interop. POC and SOP/EPH packed headers remain separate
-  fail-closed slices.
+  matching orders: `R`/RPCL, `L`/LRCP, `C`/CPRL, and `P`/PCRL. PPT and PPM are
+  public on the bounded RPCL path with every SOP/EPH combination: single-tile
+  accepts one or `R` parts, and multi-tile requires `R` parts. Packed EPH stays
+  with the T2 header, packed SOP stays in SOD and contributes to PLT/`Psot`.
+  The 16-tile/48-part two-layer PPM gate now decodes pixel-exactly through
+  z2000, OpenJPEG, and Grok.
 - JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
   Start with 8-bit and 16-bit RGB plus sRGB `colr`; the reader now also accepts
@@ -74,21 +74,15 @@ interop gate.
 
 ## Next Implementation Slice
 
-1. Extend packed-header breadth to independently verified SOP/EPH combinations.
-   Main- and first-tile-part-header POC now share the checked scheduler;
-   `TPsot=0` placement, inherited-record ordering, `Psot`/TLM accounting, and
-   later-part rejection are covered locally, while OpenJPEG/Grok decode the
-   16-tile/48-part `R` output losslessly and jpylyzer reports valid JP2.
-2. Obtain or generate an independent foreign multi-tile/multi-part PPM fixture
-   and isolate Grok 20.3.6's remaining mismatch; z2000/OpenJPEG/Kakadu already
-   agree on the PLT-less output. Keep SOP/EPH combinations fail-closed until
-   their packed-header placement is covered by independent fixtures.
-3. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
+1. Begin the component-generic campaign with one-component grayscale TIFF/JP2,
    keeping the existing RGB representation byte-identical until the new path
    has independent interop.
-4. Continue measured PCRD distortion-model research against the matched-byte
+2. Continue measured PCRD distortion-model research against the matched-byte
    PSNR ladder; retain a change only when quality improves without correctness
    or safety regressions.
+3. Add a small checked-in packed-header fixture matrix from an independent
+   producer when PPM/PPT encode controls are available locally; current live
+   z2000 output is already pixel-exact through OpenJPEG and Grok.
 
 ## Post-Part 1 Conversion Roadmap
 

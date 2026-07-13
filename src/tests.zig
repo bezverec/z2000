@@ -17105,15 +17105,29 @@ test "PPT packed packet headers roundtrip through strict single and multi-tile d
         codestream.decodeLosslessTemporary(allocator, corrupted),
     );
 
-    var sop_options = options;
-    sop_options.sop = true;
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, sop_options),
-    );
+    const marker_modes = [_]struct { sop: bool, eph: bool }{
+        .{ .sop = true, .eph = false },
+        .{ .sop = false, .eph = true },
+        .{ .sop = true, .eph = true },
+    };
+    for (marker_modes) |mode| {
+        var marked_options = options;
+        marked_options.sop = mode.sop;
+        marked_options.eph = mode.eph;
+        const marked = try codestream.encodeLosslessWithOptions(allocator, rgb, marked_options);
+        defer allocator.free(marked);
+        var marked_decoded = try codestream.decodeLosslessTemporary(allocator, marked);
+        defer marked_decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, marked_decoded.samples);
+        const marked_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, marked);
+        defer allocator.free(marked_wrapped);
+        _ = try jp2.parseInfo(marked_wrapped);
+    }
     var multi_tile_options = options;
     multi_tile_options.tile_width = 32;
     multi_tile_options.tile_height = 32;
+    multi_tile_options.sop = true;
+    multi_tile_options.eph = true;
     const multi_tile_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_options);
     defer allocator.free(multi_tile_bytes);
     try std.testing.expect(countMarker(multi_tile_bytes, codestream.markerValue("ppt")) >= 12);
@@ -17134,6 +17148,24 @@ test "PPT packed packet headers roundtrip through strict single and multi-tile d
     defer allocator.free(multi_tile_wrapped);
     const multi_tile_info = try jp2.parseInfo(multi_tile_wrapped);
     try std.testing.expectEqual(@as(usize, width), multi_tile_info.width);
+
+    const bad_sop = try allocator.dupe(u8, multi_tile_bytes);
+    defer allocator.free(bad_sop);
+    const first_sod = findMarker(bad_sop, codestream.markerValue("sod")) orelse return error.TestUnexpectedResult;
+    bad_sop[first_sod + 7] = 1;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, bad_sop),
+    );
+
+    const bad_eph = try allocator.dupe(u8, multi_tile_bytes);
+    defer allocator.free(bad_eph);
+    const first_eph = findMarker(bad_eph, codestream.markerValue("eph")) orelse return error.TestUnexpectedResult;
+    bad_eph[first_eph + 1] = 0x93;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, bad_eph),
+    );
 
     const corrupted_tile_state = try allocator.dupe(u8, multi_tile_bytes);
     defer allocator.free(corrupted_tile_state);
@@ -17217,11 +17249,32 @@ test "PPM packed packet headers roundtrip through strict single and multi-tile d
 
     var one_part_options = options;
     one_part_options.tile_part_divisions = null;
+    one_part_options.sop = true;
+    one_part_options.eph = true;
     const one_part = try codestream.encodeLosslessWithOptions(allocator, rgb, one_part_options);
     defer allocator.free(one_part);
     var one_part_decoded = try codestream.decodeLosslessTemporary(allocator, one_part);
     defer one_part_decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, one_part_decoded.samples);
+
+    const marker_modes = [_]struct { sop: bool, eph: bool }{
+        .{ .sop = true, .eph = false },
+        .{ .sop = false, .eph = true },
+        .{ .sop = true, .eph = true },
+    };
+    for (marker_modes) |mode| {
+        var marked_options = options;
+        marked_options.sop = mode.sop;
+        marked_options.eph = mode.eph;
+        const marked = try codestream.encodeLosslessWithOptions(allocator, rgb, marked_options);
+        defer allocator.free(marked);
+        var marked_decoded = try codestream.decodeLosslessTemporary(allocator, marked);
+        defer marked_decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, marked_decoded.samples);
+        const marked_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, marked);
+        defer allocator.free(marked_wrapped);
+        _ = try jp2.parseInfo(marked_wrapped);
+    }
 
     const corrupted = try allocator.dupe(u8, bytes);
     defer allocator.free(corrupted);
@@ -17250,6 +17303,8 @@ test "PPM packed packet headers roundtrip through strict single and multi-tile d
     var multi_tile = options;
     multi_tile.tile_width = 32;
     multi_tile.tile_height = 32;
+    multi_tile.sop = true;
+    multi_tile.eph = true;
     const multi_tile_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile);
     defer allocator.free(multi_tile_bytes);
     var multi_tile_decoded = try codestream.decodeLosslessTemporary(allocator, multi_tile_bytes);
