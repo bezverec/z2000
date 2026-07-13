@@ -1636,6 +1636,7 @@ pub const DirectBlockScratch = struct {
     encoder: ?mq.Encoder = null,
     iso_encoder: ?mq_iso.Encoder = null,
     raw_writer: ?RawBitWriter = null,
+    current_pass_distortion: ?*f64 = null,
 
     pub fn init(allocator: std.mem.Allocator) DirectBlockScratch {
         return .{ .allocator = allocator };
@@ -1659,6 +1660,7 @@ pub const DirectBlockScratch = struct {
         self.pass_payloads.clearRetainingCapacity();
         self.bytes.clearRetainingCapacity();
         self.segments.clearRetainingCapacity();
+        self.current_pass_distortion = null;
     }
 
     fn isoMqEncoder(self: *DirectBlockScratch) !*mq_iso.Encoder {
@@ -5631,6 +5633,48 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
     rect: subband.Rect,
     style: CodeBlockStyle,
 ) !CodeBlockSegment {
+    return encodeCodeBlockSegmentDirectIsoScratchInternal(
+        false,
+        scratch,
+        plane,
+        stride,
+        rect,
+        style,
+        &.{},
+    );
+}
+
+/// Rate-allocation variant of the direct ISO-MQ encoder. Distortion is
+/// accumulated while the real coding passes are emitted, avoiding a second
+/// symbol-coder traversal of the block solely for PCRD metadata.
+pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyleAndDistortions(
+    scratch: *DirectBlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+    pass_distortions: []f64,
+) !CodeBlockSegment {
+    return encodeCodeBlockSegmentDirectIsoScratchInternal(
+        true,
+        scratch,
+        plane,
+        stride,
+        rect,
+        style,
+        pass_distortions,
+    );
+}
+
+fn encodeCodeBlockSegmentDirectIsoScratchInternal(
+    comptime track_distortion: bool,
+    scratch: *DirectBlockScratch,
+    plane: []const i32,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+    pass_distortions: []f64,
+) !CodeBlockSegment {
     try validateImplementedStyleAllowBypass(style);
     if (style.terminate_all) return EbcotError.InvalidBlock;
     scratch.reset();
@@ -5641,6 +5685,11 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
         return ownedSegmentFromDirectIsoScratch(scratch, 0, 0, style.bypass);
     }
     const bitplanes = stats.bitplanes;
+    const total_passes = expectedCodingPasses(bitplanes);
+    if (comptime track_distortion) {
+        if (pass_distortions.len < total_passes) return EbcotError.InvalidBlock;
+        @memset(pass_distortions[0..total_passes], 0);
+    }
 
     const area = try blockArea(rect);
     try scratch.ensureBlockState(rect.width, rect.height, area);
@@ -5660,8 +5709,6 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
     var segment_pass_count: u16 = 0;
     var segment_is_raw = false;
     var pass_index: u16 = 0;
-    const total_passes = expectedCodingPasses(bitplanes);
-
     var bitplane_index = bitplanes;
     while (bitplane_index > 0) {
         bitplane_index -= 1;
@@ -5684,17 +5731,20 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
             // contexts restart at every coding-pass boundary while the
             // codeword stream stays continuous.
             if (style.reset_context and pass_index != 0) try iso.resetJpeg2000Contexts();
+            if (comptime track_distortion) {
+                scratch.current_pass_distortion = &pass_distortions[pass_index];
+            }
 
             const symbol_count: usize = switch (kind) {
                 .significance => if (is_raw)
-                    try emitDirectIsoSignificancePass(scratch, raw, plane, stride, rect, bitplane, style, true)
+                    try emitDirectIsoSignificancePass(track_distortion, scratch, raw, plane, stride, rect, bitplane, style, true)
                 else
-                    try emitDirectIsoSignificancePass(scratch, iso, plane, stride, rect, bitplane, style, false),
+                    try emitDirectIsoSignificancePass(track_distortion, scratch, iso, plane, stride, rect, bitplane, style, false),
                 .refinement => if (is_raw)
-                    try emitDirectIsoRefinementPass(scratch, raw, plane, stride, rect, bitplane, style)
+                    try emitDirectIsoRefinementPass(track_distortion, scratch, raw, plane, stride, rect, bitplane, style)
                 else
-                    try emitDirectIsoRefinementPass(scratch, iso, plane, stride, rect, bitplane, style),
-                .cleanup => try emitDirectIsoCleanupPass(scratch, iso, plane, stride, rect, bitplane, style),
+                    try emitDirectIsoRefinementPass(track_distortion, scratch, iso, plane, stride, rect, bitplane, style),
+                .cleanup => try emitDirectIsoCleanupPass(track_distortion, scratch, iso, plane, stride, rect, bitplane, style),
             };
 
             segment_pass_count += 1;
@@ -5745,8 +5795,35 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyle(
         }
     }
     if (pass_index != total_passes or segment_pass_count != 0) return EbcotError.InvalidBlock;
+    scratch.current_pass_distortion = null;
 
     return ownedSegmentFromDirectIsoScratch(scratch, bitplanes, stats.non_zero_count, style.bypass);
+}
+
+inline fn recordSignificanceDistortion(
+    comptime track_distortion: bool,
+    scratch: *DirectBlockScratch,
+    coeff: i32,
+    bitplane: u8,
+) void {
+    if (comptime track_distortion) {
+        const magnitude_value: u64 = @abs(coeff);
+        const before = @as(f64, @floatFromInt(magnitude_value)) * @as(f64, @floatFromInt(magnitude_value));
+        scratch.current_pass_distortion.?.* += before - midpointSquaredError(magnitude_value, bitplane);
+    }
+}
+
+inline fn recordRefinementDistortion(
+    comptime track_distortion: bool,
+    scratch: *DirectBlockScratch,
+    coeff: i32,
+    bitplane: u8,
+) void {
+    if (comptime track_distortion) {
+        const magnitude_value: u64 = @abs(coeff);
+        scratch.current_pass_distortion.?.* += midpointSquaredError(magnitude_value, bitplane + 1) -
+            midpointSquaredError(magnitude_value, bitplane);
+    }
 }
 
 fn estimatedIsoMqByteCapacity(area: usize, bitplanes: u8) usize {
@@ -5906,6 +5983,7 @@ fn significantRowsHaveRange(
 }
 
 fn emitDirectIsoSignificancePass(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: anytype,
     plane: []const i32,
@@ -5917,7 +5995,7 @@ fn emitDirectIsoSignificancePass(
 ) !usize {
     if (comptime !maintain_packed_t1_context_flags) {
         if (!style.vertical_causal) {
-            return emitDirectIsoSignificancePassPlain(scratch, encoder, plane, stride, rect, bitplane, style.band_kind, raw);
+            return emitDirectIsoSignificancePassPlain(track_distortion, scratch, encoder, plane, stride, rect, bitplane, style.band_kind, raw);
         }
     }
 
@@ -5952,6 +6030,7 @@ fn emitDirectIsoSignificancePass(
                         try encoder.writeBit(bit);
                         symbol_count += 1;
                         if (bit) {
+                            recordSignificanceDistortion(track_distortion, scratch, coeff, bitplane);
                             const negative = coeff < 0;
                             try encoder.writeBit(negative);
                             symbol_count += 1;
@@ -5969,6 +6048,7 @@ fn emitDirectIsoSignificancePass(
                         try encoder.write(mqContextIndex(zero_context), bit);
                         symbol_count += 1;
                         if (bit) {
+                            recordSignificanceDistortion(track_distortion, scratch, coeff, bitplane);
                             const negative = coeff < 0;
                             const sign = directT1SignCoding(scratch, x, y, sample_flags, style);
                             try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
@@ -5986,6 +6066,7 @@ fn emitDirectIsoSignificancePass(
 }
 
 fn emitDirectIsoSignificancePassPlain(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: anytype,
     plane: []const i32,
@@ -6029,6 +6110,7 @@ fn emitDirectIsoSignificancePassPlain(
                     }
                     symbol_count += 1;
                     if (bit) {
+                        recordSignificanceDistortion(track_distortion, scratch, coeff, bitplane);
                         const negative = coeff < 0;
                         if (raw) {
                             try encoder.writeBit(negative);
@@ -6048,6 +6130,7 @@ fn emitDirectIsoSignificancePassPlain(
 }
 
 fn emitDirectIsoRefinementPass(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: anytype,
     plane: []const i32,
@@ -6058,7 +6141,7 @@ fn emitDirectIsoRefinementPass(
 ) !usize {
     if (comptime !maintain_packed_t1_context_flags) {
         if (!style.vertical_causal) {
-            return emitDirectIsoRefinementPassPlain(scratch, encoder, plane, stride, rect, bitplane);
+            return emitDirectIsoRefinementPassPlain(track_distortion, scratch, encoder, plane, stride, rect, bitplane);
         }
     }
 
@@ -6085,13 +6168,15 @@ fn emitDirectIsoRefinementPass(
                     const p = nbfIndex(nbs, x, y);
                     const decision = directT1RefinementDecision(scratch, x, y, flags[p], style);
                     if (!decision.candidate) continue;
-                    const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
+                    const coeff = plane[(rect.y + y) * stride + rect.x + x];
+                    const bit = isMagnitudeBitSet(coeff, bitplane);
                     if (raw) {
                         try encoder.writeBit(bit);
                     } else {
                         try encoder.write(mqContextIndex(decision.context), bit);
                     }
                     symbol_count += 1;
+                    recordRefinementDistortion(track_distortion, scratch, coeff, bitplane);
                     flags[p] |= nbf_refine;
                     directMarkPackedT1Refined(scratch, x, y);
                 }
@@ -6102,6 +6187,7 @@ fn emitDirectIsoRefinementPass(
 }
 
 fn emitDirectIsoRefinementPassPlain(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: anytype,
     plane: []const i32,
@@ -6131,7 +6217,8 @@ fn emitDirectIsoRefinementPassPlain(
                     const p = nbfIndex(nbs, x, y);
                     const sample_flags = flags[p];
                     if ((sample_flags & nbf_sig_self) == 0 or (sample_flags & nbf_visit) != 0) continue;
-                    const bit = isMagnitudeBitSet(plane[(rect.y + y) * stride + rect.x + x], bitplane);
+                    const coeff = plane[(rect.y + y) * stride + rect.x + x];
+                    const bit = isMagnitudeBitSet(coeff, bitplane);
                     if (raw) {
                         try encoder.writeBit(bit);
                     } else {
@@ -6139,6 +6226,7 @@ fn emitDirectIsoRefinementPassPlain(
                         try encoder.write(mqContextIndex(context), bit);
                     }
                     symbol_count += 1;
+                    recordRefinementDistortion(track_distortion, scratch, coeff, bitplane);
                     flags[p] |= nbf_refine;
                 }
             }
@@ -6148,6 +6236,7 @@ fn emitDirectIsoRefinementPassPlain(
 }
 
 fn emitDirectIsoCleanupPass(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: *mq_iso.Encoder,
     plane: []const i32,
@@ -6158,7 +6247,7 @@ fn emitDirectIsoCleanupPass(
 ) !usize {
     if (comptime !maintain_packed_t1_context_flags) {
         if (!style.vertical_causal) {
-            return emitDirectIsoCleanupPassPlain(scratch, encoder, plane, stride, rect, bitplane, style.band_kind, style.segmentation_symbols);
+            return emitDirectIsoCleanupPassPlain(track_distortion, scratch, encoder, plane, stride, rect, bitplane, style.band_kind, style.segmentation_symbols);
         }
     }
 
@@ -6183,7 +6272,9 @@ fn emitDirectIsoCleanupPass(
                     const y = stripe_y + runlen;
                     const sample_flags = flags[nbfIndex(nbs, x, y)];
                     const sign = directT1SignCoding(scratch, x, y, sample_flags, style);
-                    const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
+                    const coeff = plane[(rect.y + y) * stride + rect.x + x];
+                    recordSignificanceDistortion(track_distortion, scratch, coeff, bitplane);
+                    const negative = coeff < 0;
                     try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
                     symbol_count += 1;
                     nbfMarkSignificant(flags, nbs, x, y, negative);
@@ -6191,9 +6282,9 @@ fn emitDirectIsoCleanupPass(
                     setSignificantRow(scratch, x, y);
                 }
 
-                symbol_count += try nbfEmitCleanupSampleRange(scratch, encoder, plane, stride, rect, x, stripe_y, runlen + 1, 4, bitplane, style);
+                symbol_count += try nbfEmitCleanupSampleRange(track_distortion, scratch, encoder, plane, stride, rect, x, stripe_y, runlen + 1, 4, bitplane, style);
             } else {
-                symbol_count += try nbfEmitCleanupSampleRange(scratch, encoder, plane, stride, rect, x, stripe_y, 0, stripe_height, bitplane, style);
+                symbol_count += try nbfEmitCleanupSampleRange(track_distortion, scratch, encoder, plane, stride, rect, x, stripe_y, 0, stripe_height, bitplane, style);
             }
         }
     }
@@ -6206,6 +6297,7 @@ fn emitDirectIsoCleanupPass(
 }
 
 fn emitDirectIsoCleanupPassPlain(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: *mq_iso.Encoder,
     plane: []const i32,
@@ -6236,13 +6328,15 @@ fn emitDirectIsoCleanupPassPlain(
                 {
                     const y = stripe_y + runlen;
                     const sample_flags = flags[nbfIndex(nbs, x, y)];
+                    const coeff = plane[(rect.y + y) * stride + rect.x + x];
+                    recordSignificanceDistortion(track_distortion, scratch, coeff, bitplane);
                     try emitDirectCleanupSignPlain(scratch, encoder, plane, stride, rect, flags, nbs, x, y, sample_flags);
                     symbol_count += 1;
                 }
 
-                symbol_count += try emitDirectCleanupSampleRangePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y, runlen + 1, 4, bitplane, band_index);
+                symbol_count += try emitDirectCleanupSampleRangePlainKnown(track_distortion, scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y, runlen + 1, 4, bitplane, band_index);
             } else {
-                symbol_count += try emitDirectCleanupSampleRangePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y, 0, stripe_height, bitplane, band_index);
+                symbol_count += try emitDirectCleanupSampleRangePlainKnown(track_distortion, scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y, 0, stripe_height, bitplane, band_index);
             }
         }
     }
@@ -6272,6 +6366,7 @@ inline fn nbfCanUseRunStripePlain(flags: []const u16, nbs: usize, x: usize, stri
 }
 
 fn nbfEmitCleanupSample(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: *mq_iso.Encoder,
     plane: []const i32,
@@ -6294,6 +6389,7 @@ fn nbfEmitCleanupSample(
     try encoder.write(mqContextIndex(decision.zero_context), bit);
     var symbol_count: usize = 1;
     if (bit) {
+        recordSignificanceDistortion(track_distortion, scratch, coeff, bitplane);
         const negative = coeff < 0;
         const sign = directT1SignCoding(scratch, x, y, sample_flags, style);
         try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
@@ -6306,6 +6402,7 @@ fn nbfEmitCleanupSample(
 }
 
 inline fn nbfEmitCleanupSampleRange(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: *mq_iso.Encoder,
     plane: []const i32,
@@ -6321,7 +6418,7 @@ inline fn nbfEmitCleanupSampleRange(
     var symbol_count: usize = 0;
     var dy = first_dy;
     while (dy < end_dy) : (dy += 1) {
-        symbol_count += try nbfEmitCleanupSample(scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
+        symbol_count += try nbfEmitCleanupSample(track_distortion, scratch, encoder, plane, stride, rect, x, stripe_y + dy, bitplane, style);
     }
     return symbol_count;
 }
@@ -6343,6 +6440,7 @@ fn nbfEmitCleanupSamplePlain(
 }
 
 inline fn nbfEmitCleanupSamplePlainKnown(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: *mq_iso.Encoder,
     plane: []const i32,
@@ -6363,6 +6461,7 @@ inline fn nbfEmitCleanupSamplePlainKnown(
     try encoder.write(mqContextIndex(zero_context), bit);
     var symbol_count: usize = 1;
     if (bit) {
+        recordSignificanceDistortion(track_distortion, scratch, coeff, bitplane);
         try emitDirectCleanupSignPlain(scratch, encoder, plane, stride, rect, flags, nbs, x, y, sample_flags);
         symbol_count += 1;
     }
@@ -6370,6 +6469,7 @@ inline fn nbfEmitCleanupSamplePlainKnown(
 }
 
 inline fn emitDirectCleanupSampleRangePlainKnown(
+    comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
     encoder: *mq_iso.Encoder,
     plane: []const i32,
@@ -6387,7 +6487,7 @@ inline fn emitDirectCleanupSampleRangePlainKnown(
     var symbol_count: usize = 0;
     var dy = first_dy;
     while (dy < end_dy) : (dy += 1) {
-        symbol_count += try nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y + dy, bitplane, band_index);
+        symbol_count += try nbfEmitCleanupSamplePlainKnown(track_distortion, scratch, encoder, plane, stride, rect, flags, nbs, x, stripe_y + dy, bitplane, band_index);
     }
     return symbol_count;
 }

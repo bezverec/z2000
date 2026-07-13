@@ -19,6 +19,69 @@ and common-stream decode. The `.bench/` artifacts are local evidence and are not
 committed. The summary tables below use wall-clock mean +/- sample standard
 deviation; median is included because interactive systems can produce outliers.
 
+On Windows, the equivalent harness can include the irreversible profile:
+
+```powershell
+.\tools\bench_compare.ps1 -InputPath .\zig-out\bench-rgb-2048.tif `
+  -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
+```
+
+## 2026-07-13: Ryzen 7 5700X, direct PCRD distortion candidate
+
+### Provenance And Profiles
+
+| Field | Value |
+| --- | --- |
+| z2000 source | candidate based on `4b479a91` (`0.1.0-dev.390+g4b479a91.dirty`) |
+| Build | Zig 0.16.0, `ReleaseFast`, native x86-64/AVX2 |
+| Host | AMD Ryzen 7 5700X, 8 cores / 16 threads, Windows 11 |
+| Harness | Hyperfine 1.20.0, 2 warmups + 8 measured runs |
+| References | Grok 20.3.6, OpenJPEG 2.5.4, Kakadu 8.4.1 |
+| Input | `bench-rgb-2048.tif`, 12,583,052 B, SHA-256 `d8e3038ca752fab381d167783b797ebd64250a3f51c852437771180f3234e139` |
+
+Both profiles use one 8192x8192 tile, RPCL, six resolutions, 64x64 blocks,
+resolution tile-parts, PLT/TLM, SOP/EPH, and the documented 256/128 precinct
+ladder. Lossless uses RCT, reversible 5/3, BYPASS, and one layer. Lossy uses
+ICT, irreversible 9/7, scalar-expounded quantization, and two rate-targeted
+layers (`8,1` for z2000/Grok/OpenJPEG; Kakadu's closest size-matched
+`-rate -,3`). Each decoder reads its own encoder's 16-thread output.
+
+### Lossless Results
+
+| Codec | Encode t1 | Encode t16 | Decode t1 | Decode t16 |
+| --- | ---: | ---: | ---: | ---: |
+| z2000 | 788.6 +/- 5.1 ms | 136.6 +/- 6.4 ms | 753.8 +/- 3.8 ms | 136.5 +/- 4.0 ms |
+| Grok | 691.0 +/- 4.3 ms | 148.8 +/- 2.7 ms | 532.6 +/- 2.7 ms | 90.6 +/- 3.5 ms |
+| OpenJPEG | 671.1 +/- 1.0 ms | 124.2 +/- 3.1 ms | 571.2 +/- 1.4 ms | 133.7 +/- 6.6 ms |
+| Kakadu | 416.4 +/- 1.2 ms | 63.6 +/- 2.0 ms | 479.4 +/- 0.8 ms | 70.2 +/- 3.1 ms |
+
+Lossless output sizes were z2000 6,636,048 B, Grok 6,635,206 B, OpenJPEG
+6,636,085 B, and Kakadu 6,624,994 B. This performance-only candidate did not
+change the z2000 lossless stream or timing materially.
+
+### Lossy Results
+
+| Codec | Encode t1 | Encode t16 | Decode t1 | Decode t16 |
+| --- | ---: | ---: | ---: | ---: |
+| z2000 | 808.9 +/- 3.2 ms | 159.4 +/- 4.2 ms | 758.8 +/- 6.0 ms | 152.6 +/- 4.1 ms |
+| Grok | 762.2 +/- 1.4 ms | 170.0 +/- 10.3 ms | 610.3 +/- 1.0 ms | 110.1 +/- 2.1 ms |
+| OpenJPEG | 628.5 +/- 2.1 ms | 128.6 +/- 3.2 ms | 525.1 +/- 1.3 ms | 125.5 +/- 3.3 ms |
+| Kakadu | 444.5 +/- 0.5 ms | 62.4 +/- 2.8 ms | 500.2 +/- 2.4 ms | 66.8 +/- 2.1 ms |
+
+The direct-MQ PCRD distortion capture reduced z2000 lossy encode from
+2,256 to 809 ms at t1 (-64.1%) and from 367 to 159 ms at t16 (-56.6%). It
+removed a second symbol-coder traversal without changing pass distortions,
+packet decisions, or output bytes. z2000 remains 1.06x behind Grok at t1 but
+is 1.07x faster at t16; Kakadu remains 1.82x/2.56x faster at t1/t16.
+
+Lossy output sizes were z2000 4,798,568 B, Grok 5,326,180 B, OpenJPEG
+4,805,522 B, and Kakadu 4,826,199 B. z2000 t1 and t16 files were SHA-256
+identical, and the candidate z2000 stream was byte-identical to the pre-change
+baseline. z2000, Grok, OpenJPEG, and Kakadu all decoded that stream in the
+interop smoke. The optional Python pixel comparator was unavailable in this
+run; unchanged stream hashes plus the full codec tests provide the regression
+gate, but this record does not claim a new lossy pixel-quality result.
+
 ## 2026-07-13: Apple M4, commit 506ebdc4
 
 ### Provenance

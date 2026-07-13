@@ -238,6 +238,16 @@ Detailed notes live in `docs/`:
 - [Versioning](docs/versioning.md)
 - [Changelog](docs/changelog.md)
 
+Run the maintained four-codec benchmark on Windows with an optional lossy
+ICT/9/7 rate-target profile:
+
+```powershell
+.\tools\bench_compare.ps1 -InputPath .\zig-out\bench-rgb-2048.tif `
+  -Runs 8 -Warmup 2 -Threads all -IncludeLossy
+```
+
+The POSIX harness accepts the same extension through `INCLUDE_LOSSY=1`.
+
 ## Project Direction
 
 Near term: hold the narrow RGB lossless JP2 target at 100/100 (strict T2/T1

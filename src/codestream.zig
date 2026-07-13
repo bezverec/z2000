@@ -1036,12 +1036,14 @@ const ComponentBlockPayloadJob = struct {
 const RpclShadowBlock = struct {
     bitplane: ?bitplane.EncodedBlockPasses,
     segment: ebcot.CodeBlockSegment,
+    pass_distortions: []f64 = &.{},
     layers: [max_quality_layers]t2.LayerTruncation,
     encoded: t2.EncodedLayerBlock,
 
     fn deinit(self: *RpclShadowBlock, allocator: std.mem.Allocator) void {
         if (self.bitplane) |*passes| passes.deinit(allocator);
         self.segment.deinit(allocator);
+        if (self.pass_distortions.len > 0) allocator.free(self.pass_distortions);
         self.* = undefined;
     }
 };
@@ -9053,10 +9055,9 @@ fn buildRpclBlockIndex(
 
 /// Rate-distortion data for global PCRD (ISO 15444-1 J.14): per-block
 /// cumulative pass bytes plus band-weighted per-pass distortion reductions,
-/// extracted once from the symbol-based reference coder and reused for every
-/// target refinement. The distortion extraction parallelizes over blocks
-/// (each slot writes a disjoint span, so the result is independent of the
-/// worker count).
+/// reused for every target refinement. Normal direct-MQ encode captures the
+/// reductions during its real coding pass; style/backend fallbacks retain the
+/// parallel symbol-coder extraction.
 const PcrdData = struct {
     allocator: std.mem.Allocator,
     blocks: []rate_alloc.PcrdBlock,
@@ -9130,8 +9131,8 @@ fn pcrdDistortionWorker(job: *PcrdDistortionJob) void {
 }
 
 /// Extracts the PCRD rate-distortion tables from the finished block
-/// catalogs: pass byte boundaries serially (cheap), per-pass distortion in
-/// parallel over blocks (the expensive symbol-coder re-run).
+/// catalogs. Direct-MQ blocks already carry per-pass distortion; any style or
+/// backend fallback missing that metadata uses the parallel symbol oracle.
 fn buildPcrdData(
     allocator: std.mem.Allocator,
     catalogs: *const [3]ComponentRpclShadowCatalog,
@@ -9178,19 +9179,29 @@ fn buildPcrdData(
     errdefer allocator.free(pass_bytes);
     const distortions = try allocator.alloc(f64, total_passes);
     errdefer allocator.free(distortions);
+    var direct_distortions_complete = true;
     for (0..3) |component| {
         for (blocks, 0..) |_, block_index| {
             const slot = component * blocks.len + block_index;
-            const segment = catalogs[component].blocks[block_index].segment;
+            const shadow = catalogs[component].blocks[block_index];
+            const segment = shadow.segment;
             const span = spans[slot];
             for (0..span.count) |pass_index| {
                 pass_bytes[span.start + pass_index] = segment.passes[pass_index].cumulative_bytes;
+            }
+            if (shadow.pass_distortions.len != span.count) {
+                direct_distortions_complete = false;
+            } else {
+                const weight = band_weights[blocks[block_index].band_index];
+                for (shadow.pass_distortions, 0..) |value, pass_index| {
+                    distortions[span.start + pass_index] = value * weight;
+                }
             }
         }
     }
 
     const worker_count = payloadBlockThreadCount(options, total_blocks);
-    if (worker_count <= 1) {
+    if (!direct_distortions_complete and worker_count <= 1) {
         var job = PcrdDistortionJob{
             .catalogs = catalogs,
             .component_planes = component_planes,
@@ -9207,7 +9218,7 @@ fn buildPcrdData(
         };
         pcrdDistortionWorker(&job);
         try job.result;
-    } else {
+    } else if (!direct_distortions_complete) {
         const jobs = try allocator.alloc(PcrdDistortionJob, worker_count);
         defer allocator.free(jobs);
         const chunk = (total_blocks + worker_count - 1) / worker_count;
@@ -9624,6 +9635,11 @@ fn buildRpclShadowBlock(
         .predictable_termination = options.predictable_termination,
         .segmentation_symbols = options.segmentation_symbols,
     }, band_kind);
+    var direct_distortions: [164]f64 = undefined;
+    const capture_direct_distortions = options.rate_count > 0 and
+        options.layers > 1 and
+        options.t1_backend == .iso_mq and
+        !block_style.terminate_all;
     var segment = switch (options.t1_backend) {
         .legacy_mq => try ebcot.encodeCodeBlockSegmentContinuous(allocator, plane, stride, rect),
         // terminate_all flushes an independently terminated ISO MQ segment per
@@ -9634,10 +9650,25 @@ fn buildRpclShadowBlock(
         // as the symbol-based encoder pair.
         .iso_mq => if (block_style.terminate_all)
             try ebcot.encodeCodeBlockSegmentIsoMqTerminatedWithStyle(allocator, plane, stride, rect, block_style)
+        else if (capture_direct_distortions)
+            try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyleAndDistortions(
+                ebcot_scratch,
+                plane,
+                stride,
+                rect,
+                block_style,
+                direct_distortions[0..],
+            )
         else
             try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(ebcot_scratch, plane, stride, rect, block_style),
     };
     errdefer segment.deinit(allocator);
+
+    var pass_distortions: []f64 = &.{};
+    if (capture_direct_distortions) {
+        pass_distortions = try allocator.dupe(f64, direct_distortions[0..segment.pass_count]);
+    }
+    errdefer if (pass_distortions.len > 0) allocator.free(pass_distortions);
 
     var bitplane_passes: ?bitplane.EncodedBlockPasses = null;
     errdefer if (bitplane_passes) |*passes| passes.deinit(allocator);
@@ -9654,6 +9685,7 @@ fn buildRpclShadowBlock(
     return .{
         .bitplane = bitplane_passes,
         .segment = segment,
+        .pass_distortions = pass_distortions,
         .layers = layers,
         .encoded = .{
             .location = .{ .leaf_x = 0, .leaf_y = 0 },

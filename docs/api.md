@@ -429,6 +429,13 @@ remove the subband gain before applying the 9/7 synthesis norm. The
 profile-matched `tools/pcrd_psnr_ladder.ps1` diagnostic and in-tree exact PLT
 prefix regression guard future allocator changes.
 
+Rate-targeted T1 uses
+`encodeCodeBlockSegmentDirectIsoScratchWithStyleAndDistortions` to return the
+normal ISO-MQ segment while filling one exact distortion delta per coding pass.
+The public no-rate encoder remains compile-time specialized without distortion
+bookkeeping. The symbol-based `passDistortions` helper remains the test oracle
+and fallback for terminated or legacy paths.
+
 ## `src/subband.zig`
 
 Primary public types:

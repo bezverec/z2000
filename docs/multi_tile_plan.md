@@ -253,8 +253,8 @@ multi-tile BYPASS+TERMALL malformed-input sweep.
 ### Stage F — Tile-local rate targets — ✅ LOCAL SLICE LANDED
 
 The bounded multi-tile reversible path now accepts `--rates`. Each tile builds
-its encoded block catalog once, extracts per-pass distortion metadata from the
-same EBCOT symbol model used by the single-tile PCRD path, applies a tile-local
+its encoded block catalog once and captures per-pass distortion metadata during
+the real direct-MQ pass emission (with the symbol model retained as fallback), applies a tile-local
 slope allocation, rewrites T2 layer truncations, then assembles the packet
 stream normally. A focused regression verifies that rate-targeted output differs
 from even layer splitting, strict-decodes byte-exactly, carries non-final PLT

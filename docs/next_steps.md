@@ -25,6 +25,13 @@ certification or a claim of arbitrary JP2/JPX support. Mixed precision, alpha,
 general N-component layouts, and broader palette mappings remain explicit
 breadth work. PCRD quality research also continues independently.
 
+Performance checkpoint (2026-07-13): rate-targeted direct-MQ encode now
+captures exact per-pass distortion during the real T1 traversal. Removing the
+duplicate symbol-coder pass cut the maintained Ryzen lossy encode gate by
+64.1% t1 and 56.6% t16 with byte-identical output. Remaining performance work
+is concentrated in decode T1, lane-width validation, and parallel efficiency;
+this changes no ISO score.
+
 ## Next Working Sequence (2026-07-12)
 
 Scorecard now **100/100 narrow, 100/100 full**. Packed PPM/PPT headers support

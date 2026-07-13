@@ -38,10 +38,10 @@ From the 2026-07-08 campaign checkpoint (M4, t10, archival 5/3 profile):
 
 **Conclusion:** on the archival 5/3 lossless profile, the classic SIMD targets
 are already vectorized (`src/simd.zig` picks lanes per ISA; the 5/3 lifting,
-RCT, and parts of bitplane/TIFF use `@Vector`). The remaining *large* scalar
-loops live on the **irreversible 9/7 lossy path**, which the comparative
-benchmark currently does not measure at all. That is where this plan aims
-first, plus a lane-width audit of the code that is already vectorized.
+RCT, and parts of bitplane/TIFF use `@Vector`). The irreversible 9/7 lifting
+and per-component parallel slices have now landed, and the comparative harness
+measures them explicitly. The remaining SIMD task is the lane-width/codegen
+audit; the larger runtime target is still serial T1 work around MQ.
 
 ## ISA policy
 
@@ -72,7 +72,7 @@ first, plus a lane-width audit of the code that is already vectorized.
 
 ## Candidates, ranked by expected value per risk
 
-### S0. Prerequisite: add a lossy 9/7 scenario to the benchmark harness — S
+### S0. Prerequisite: add a lossy 9/7 scenario to the benchmark harness — DONE
 
 `tools/bench_compare.sh` only measures the lossless archival profile, so S1/S2/
 S4 would currently be invisible to the gate. Add a second profile pair (encode:
@@ -80,7 +80,10 @@ S4 would currently be invisible to the gate. Add a second profile pair (encode:
 that stream; opj/grk `-I -r` equivalents) exporting to
 `BENCH_RESULTS_DIR/{encode,decode}-lossy.json`. Extend `docs/benchmarks.md`
 with the lossy table on the next ledger entry. Without S0, none of the lossy
-candidates can be honestly kept.
+candidates can be honestly kept. This is now available in both maintained
+harnesses through `INCLUDE_LOSSY=1` (POSIX) or `-IncludeLossy` (PowerShell),
+including t1/tN encode, own-stream decode, sizes, JSON, and z2000 cross-thread
+stream determinism.
 
 ### S1. 9/7 float lifting re-layout — M, the main event
 
@@ -133,14 +136,15 @@ Audit pass on the Ryzen box (and M4 where applicable):
 Output: numbers in the progress log; code changes only where the A/B clears
 the gate.
 
-### S4. PCRD distortion accumulation — S, encode-only
+### S4. PCRD distortion accumulation — DONE, fused instead of vectorized
 
-The per-pass distortion estimation walks coefficients in f64. The sums are
-reductions, so a vectorized version reassociates — **not** bit-exactness-safe
-by construction. Only attempt if S0's encode-with-rates scenario shows the
-phase is >= 5% of encode wall time; gate additionally on byte-identical
-output streams (PCRD decisions may not flip). If streams differ, revert
-regardless of speed.
+Profiling the S0 profile showed a larger structural issue than the f64
+reduction: after direct-MQ T1 encode, PCRD ran the complete symbol coder a
+second time solely to recover per-pass distortion. The kept solution records
+the exact midpoint-error delta during the real significance/refinement/cleanup
+passes. This preserves arithmetic order and exact oracle values, so no SIMD
+reassociation is needed. TERMALL and legacy/style fallback paths retain the
+symbol oracle until they gain the same direct metadata.
 
 ### S5. T1 SWAR/packed-column research — L, research-grade (unchanged from O3)
 
@@ -162,13 +166,14 @@ silently break elsewhere).
 
 ## Execution order
 
-1. **S0** (harness) → unlocks measurement.
-2. **S1** (9/7 lifting) — the biggest expected win.
-3. **S2** (quant/dequant) — same measurement scenario, cheap to try.
-4. **S3** (lane audit) — Ryzen session; pairs naturally with the next Kakadu
+1. **S0** (harness) — completed.
+2. **S1** (9/7 lifting) — completed and kept.
+3. **S2** (quant/dequant) — measured and reverted below threshold.
+4. **S4** (direct PCRD metadata) — completed and kept.
+5. **S3** (lane audit) — Ryzen session; pairs naturally with the next Kakadu
    benchmark visit.
-5. **S6** (RISC-V gate) — any idle slot.
-6. **S4** only if S0's numbers justify it; **S5** only as a deliberate
+6. **S6** (RISC-V gate) — any idle slot.
+7. **S5** only as a deliberate
    campaign decision.
 
 ## Do-not-do list
@@ -190,9 +195,10 @@ silently break elsewhere).
 | 2026-07-13 | S1 9/7 split lifting + 16-column vertical bands | M4 | lossy enc t1/t10 559.2/231.5 ms, dec t1/t10 526.9/219.4 ms | 494.2/166.5 ms, 457.2/156.1 ms (−11.6/−28.1/−13.2/−28.9 %) | **kept** — bit-identical streams, lossless profile unchanged |
 | 2026-07-13 | S2 vector quantize/dequantize band regions | M4 | lossy enc t1 494.3 ms, dec t1/t10 465.0/153.0 ms | 483.9 ms (−2.1 %), 459.0/151.5 ms (−1.3/−1.0 %) | **reverted** — consistent but below the 3 % gate; do not re-attempt without a new angle (e.g. fused dequantize-into-inverse-DWT pass) |
 | 2026-07-13 | Per-plane component jobs for the 9/7 pipeline (DWT + quantize per component on the existing runComponentJobs infra; thread-level follow-up to S1, same gate) | M4 | lossy enc t10 167.2 ms, dec t10 156.2 ms | 128.6 ms (−23.1 %), 118.9 ms (−23.9 %) | **kept** — byte-identical streams, t1 and lossless unchanged |
+| 2026-07-13 | S0 lossy profile in POSIX and PowerShell comparative harnesses | Ryzen 5700X | no maintained four-codec 9/7 gate | t1/t16 encode/decode, sizes, JSON, determinism | **kept** — shared gate now covers Grok/OpenJPEG/Kakadu |
+| 2026-07-13 | S4 direct-MQ per-pass distortion capture | Ryzen 5700X | lossy enc t1/t16 2256/367 ms | 809/159 ms (-64.1/-56.6%) | **kept** — exact symbol-oracle distortion, byte-identical stream; lossless unchanged |
 
-S0 note (2026-07-13): the S1/S2 gates ran as direct hyperfine A/B pairs
-(baseline binary vs candidate binary, warmup 2, 8 runs, 2048x2048 RGB, 9/7
-ICT scalar-expounded, levels 5, t1 and t10) rather than through
-`tools/bench_compare.sh`, which was being reworked on a parallel branch at
-the time. Folding the lossy scenario into the shared harness remains open.
+S0 note (2026-07-13): the earlier S1/S2 gates ran as direct hyperfine A/B
+pairs while the shared harness was being reworked. The maintained POSIX and
+Windows harnesses now carry that profile; the first full four-codec record is
+in `docs/benchmarks.md`.

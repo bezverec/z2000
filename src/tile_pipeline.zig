@@ -1547,8 +1547,18 @@ pub fn encodeComponentBlockIsoMq(
     view: ComponentBlockView,
     style: ebcot.CodeBlockStyle,
 ) !EncodedComponentBlock {
+    return encodeComponentBlockIsoMqInternal(allocator, view, style, false);
+}
+
+fn encodeComponentBlockIsoMqInternal(
+    allocator: std.mem.Allocator,
+    view: ComponentBlockView,
+    style: ebcot.CodeBlockStyle,
+    capture_distortions: bool,
+) !EncodedComponentBlock {
     var actual_style = style;
     actual_style.band_kind = view.job.band.kind;
+    var distortion_scratch: [164]f64 = undefined;
     const segment = if (actual_style.terminate_all)
         try ebcot.encodeCodeBlockSegmentIsoMqTerminatedWithStyle(
             allocator,
@@ -1560,18 +1570,37 @@ pub fn encodeComponentBlockIsoMq(
     else blk: {
         var scratch = ebcot.DirectBlockScratch.init(allocator);
         defer scratch.deinit();
-        break :blk try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
-            &scratch,
-            view.plane,
-            view.stride,
-            view.rect,
-            actual_style,
-        );
+        break :blk if (capture_distortions)
+            try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyleAndDistortions(
+                &scratch,
+                view.plane,
+                view.stride,
+                view.rect,
+                actual_style,
+                distortion_scratch[0..],
+            )
+        else
+            try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
+                &scratch,
+                view.plane,
+                view.stride,
+                view.rect,
+                actual_style,
+            );
     };
+    errdefer {
+        var owned_segment = segment;
+        owned_segment.deinit(allocator);
+    }
+    var pass_distortions: []f64 = &.{};
+    if (capture_distortions and !actual_style.terminate_all) {
+        pass_distortions = try allocator.dupe(f64, distortion_scratch[0..segment.pass_count]);
+    }
     return .{
         .job = view.job,
         .segment = segment,
         .bypass = actual_style.bypass,
+        .pass_distortions = pass_distortions,
     };
 }
 
@@ -1580,6 +1609,16 @@ pub fn buildEncodedBlockCatalogIsoMq(
     scaffold: PacketScaffold,
     rct_tile: RctTile,
     style: ebcot.CodeBlockStyle,
+) !EncodedBlockCatalog {
+    return buildEncodedBlockCatalogIsoMqInternal(allocator, scaffold, rct_tile, style, false);
+}
+
+fn buildEncodedBlockCatalogIsoMqInternal(
+    allocator: std.mem.Allocator,
+    scaffold: PacketScaffold,
+    rct_tile: RctTile,
+    style: ebcot.CodeBlockStyle,
+    capture_distortions: bool,
 ) !EncodedBlockCatalog {
     const block_count = scaffold.blocks.len;
     const total_blocks = try scaffold.componentBlockCount();
@@ -1594,7 +1633,7 @@ pub fn buildEncodedBlockCatalogIsoMq(
     var iterator = scaffold.componentBlockIterator();
     while (try iterator.next()) |job| {
         const view = try job.view(rct_tile);
-        var encoded = try encodeComponentBlockIsoMq(allocator, view, style);
+        var encoded = try encodeComponentBlockIsoMqInternal(allocator, view, style, capture_distortions);
         var moved = false;
         errdefer if (!moved) encoded.deinit(allocator);
         encoded.layers = try computeLayerTruncations(allocator, encoded.segment, scaffold.layers);
@@ -1631,18 +1670,6 @@ fn storeCatalogPassDistortions(
     for (catalog.blocks) |*encoded| {
         const pass_count: usize = encoded.segment.pass_count;
         if (pass_count == 0) continue;
-        const plane = componentPlane(rct_tile, encoded.job.component) orelse return PacketScaffoldError.InvalidComponentBlock;
-        var actual_style = style;
-        actual_style.band_kind = encoded.job.band.kind;
-        const distortion_passes = ebcot.passDistortions(
-            &scratch,
-            plane,
-            rct_tile.planes.width,
-            encoded.job.rect,
-            actual_style,
-            distortion_scratch[0..],
-        ) catch return PacketScaffoldError.InvalidLayer;
-        if (distortion_passes != pass_count) return PacketScaffoldError.InvalidLayer;
         // Irreversible tiles carry a per-band weight table (squared
         // reconstruction step x 9/7 norm), converting quantized-domain
         // squared error into the reconstruction domain; the reversible
@@ -1651,9 +1678,25 @@ fn storeCatalogPassDistortions(
             table[encoded.job.band.level][@intFromEnum(encoded.job.band.kind)]
         else
             pcrdBandWeight(encoded.job.band);
-        const stored = try allocator.alloc(f64, pass_count);
-        for (stored, distortion_scratch[0..pass_count]) |*out, value| out.* = value * weight;
-        encoded.pass_distortions = stored;
+        if (encoded.pass_distortions.len == pass_count) {
+            for (encoded.pass_distortions) |*value| value.* *= weight;
+        } else {
+            const plane = componentPlane(rct_tile, encoded.job.component) orelse return PacketScaffoldError.InvalidComponentBlock;
+            var actual_style = style;
+            actual_style.band_kind = encoded.job.band.kind;
+            const distortion_passes = ebcot.passDistortions(
+                &scratch,
+                plane,
+                rct_tile.planes.width,
+                encoded.job.rect,
+                actual_style,
+                distortion_scratch[0..],
+            ) catch return PacketScaffoldError.InvalidLayer;
+            if (distortion_passes != pass_count) return PacketScaffoldError.InvalidLayer;
+            const stored = try allocator.alloc(f64, pass_count);
+            for (stored, distortion_scratch[0..pass_count]) |*out, value| out.* = value * weight;
+            encoded.pass_distortions = stored;
+        }
     }
 }
 
@@ -1998,7 +2041,14 @@ fn buildTileRpclEncodeArtifactsFromTransformedTile(
     var scaffold_moved = false;
     errdefer if (!scaffold_moved) scaffold.deinit();
 
-    var catalog = try buildEncodedBlockCatalogIsoMq(allocator, scaffold, rct_tile, style);
+    const capture_distortions = options.rate_count > 0 and scaffold.layers > 1 and !style.terminate_all;
+    var catalog = try buildEncodedBlockCatalogIsoMqInternal(
+        allocator,
+        scaffold,
+        rct_tile,
+        style,
+        capture_distortions,
+    );
     var catalog_moved = false;
     errdefer if (!catalog_moved) catalog.deinit();
     // Rate targets are applied globally across the whole tile grid after

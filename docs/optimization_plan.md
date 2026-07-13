@@ -9,6 +9,23 @@ The campaign goal, in order: (1) beat Grok at equal thread counts on the
 archival profile, (2) beat Kakadu once it is installed on the benchmark
 machine.
 
+## Checkpoint #3 (2026-07-13) — Direct PCRD Metadata
+
+The maintained Windows and POSIX harnesses now include an optional 9/7 ICT,
+scalar-expounded, two-layer rate-target profile. On the Ryzen 7 5700X,
+profiling showed that rate allocation encoded every block twice: direct MQ
+produced the payload, then the symbol reference coder repeated all coding
+passes solely to collect distortion deltas. Distortion accounting now happens
+inside the real direct-MQ significance, refinement, and cleanup passes and is
+checked exactly against the symbol oracle.
+
+On the 2048x2048 corpus (warmup 2, 8 runs), lossy encode improved from
+2256 to 809 ms t1 (-64.1%) and 367 to 159 ms t16 (-56.6%). The JP2 remained
+byte-identical, lossless metrics were unchanged, and all four decoders accepted
+the output. z2000 is now only 1.06x behind Grok t1 and 1.07x ahead of Grok t16
+for this lossy profile; Kakadu remains 1.82x/2.56x faster. The next high-value
+work is decode T1 and the S3 AVX2 lane audit, not another PCRD traversal.
+
 ## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
 
 Machine: AMD Ryzen 7 5700X (8C/16T), Windows 11, x86_64. Kakadu **8.4.1**

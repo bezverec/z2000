@@ -57,6 +57,10 @@ Current TIFF to JP2 encode:
 7. `src/rate_alloc.zig` maps quality layers or target rates to cumulative
    code-block truncation points; the rate-targeted path uses global PCRD over
    per-pass distortion metadata and then charges measured T2 header overhead.
+   The direct ISO-MQ encoder records each pass's exact midpoint-error reduction
+   while emitting that pass, so ordinary rate-targeted blocks do not need a
+   second symbol-coder traversal. TERMALL and legacy/style paths retain the
+   symbol model as a correctness-first fallback.
    Irreversible slopes remove the subband gain before applying the 9/7
    synthesis norm, matching the actual inverse-basis energy.
 8. `src/packet_plan.zig` describes packet order and precinct geometry for the

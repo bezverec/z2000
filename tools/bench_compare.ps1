@@ -10,6 +10,7 @@ param(
     [string]$KduCompress = "kdu_compress.exe",
     [string]$KduExpand = "kdu_expand.exe",
     [string]$Python = $env:Z2000_BENCH_PYTHON,
+    [switch]$IncludeLossy,
     [switch]$SkipBuild,
     [switch]$SkipCrossDecode
 )
@@ -119,21 +120,29 @@ Write-Host "threads: $threadsResolved"
 Write-Host "runs:    $Runs (warmup $Warmup)"
 Write-Host ""
 
-$cmdZ1 = "$z tiff-to-jp2 $inputTool $outTool/z2000-t1.jp2 --tile 8192,8192 --progression RPCL --resolutions 6 --precincts `"$precincts`" --block 64 --layers 1 --tlm --threads 1"
-$cmdZN = "$z tiff-to-jp2 $inputTool $outTool/z2000-t$threadsResolved.jp2 --tile 8192,8192 --progression RPCL --resolutions 6 --precincts `"$precincts`" --block 64 --layers 1 --tlm --threads $threadsResolved"
-$cmdGrk = "$(Quote-Arg $grokCompress) -i $inputTool -o $outTool/grok.jp2 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -Y 1 -L"
-$cmdOpj = "$(Quote-Arg $opjCompress) -i $inputTool -o $outTool/openjpeg.jp2 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -mct 1 -TLM -PLT"
-$cmdKdu = "$(Quote-Arg $kduCompressTool) -i $inputTool -o $outTool/kakadu.jp2 Creversible=yes Cycc=yes Clevels=5 Corder=RPCL Cprecincts='$kduPrecincts' Cblk='{64,64}' Stiles='{8192,8192}' Cuse_sop=no Cuse_eph=no -quiet"
+$cmdZ1 = "$z tiff-to-jp2 $inputTool $outTool/z2000-t1.jp2 --tile 8192,8192 --progression RPCL --resolutions 6 --precincts `"$precincts`" --block 64 --layers 1 --tile-parts R --sop --eph --tlm --bypass --threads 1"
+$cmdZN = "$z tiff-to-jp2 $inputTool $outTool/z2000-t$threadsResolved.jp2 --tile 8192,8192 --progression RPCL --resolutions 6 --precincts `"$precincts`" --block 64 --layers 1 --tile-parts R --sop --eph --tlm --bypass --threads $threadsResolved"
+$cmdGrk1 = "$(Quote-Arg $grokCompress) -i $inputTool -o $outTool/grok-t1.jp2 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -Y 1 -X -M 1 -S -E -u R -H 1 -G -2"
+$cmdGrkN = "$(Quote-Arg $grokCompress) -i $inputTool -o $outTool/grok-t$threadsResolved.jp2 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -Y 1 -X -M 1 -S -E -u R -H $threadsResolved -G -2"
+$cmdOpj1 = "$(Quote-Arg $opjCompress) -i $inputTool -o $outTool/openjpeg-t1.jp2 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -mct 1 -TLM -PLT -M 1 -SOP -EPH -TP R -threads 1"
+$cmdOpjN = "$(Quote-Arg $opjCompress) -i $inputTool -o $outTool/openjpeg-t$threadsResolved.jp2 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -mct 1 -TLM -PLT -M 1 -SOP -EPH -TP R -threads $threadsResolved"
+$cmdKdu1 = "$(Quote-Arg $kduCompressTool) -i $inputTool -o $outTool/kakadu-t1.jp2 Creversible=yes Cycc=yes Clevels=5 Corder=RPCL Cprecincts='$kduPrecincts' Cblk='{64,64}' Stiles='{8192,8192}' Cuse_sop=yes Cuse_eph=yes Cmodes=BYPASS ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -num_threads 0 -quiet"
+$cmdKduN = "$(Quote-Arg $kduCompressTool) -i $inputTool -o $outTool/kakadu-t$threadsResolved.jp2 Creversible=yes Cycc=yes Clevels=5 Corder=RPCL Cprecincts='$kduPrecincts' Cblk='{64,64}' Stiles='{8192,8192}' Cuse_sop=yes Cuse_eph=yes Cmodes=BYPASS ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -num_threads $threadsResolved -quiet"
 
 $encodeArgs = @(
     "--shell=none", "--warmup", "$Warmup", "--runs", "$Runs", "--export-json", "$outTool/encode.json",
     "--command-name", "z2000 t1 encode", $cmdZ1,
     "--command-name", "z2000 t$threadsResolved encode", $cmdZN,
-    "--command-name", "Grok encode", $cmdGrk,
-    "--command-name", "OpenJPEG encode", $cmdOpj
+    "--command-name", "Grok t1 encode", $cmdGrk1,
+    "--command-name", "Grok t$threadsResolved encode", $cmdGrkN,
+    "--command-name", "OpenJPEG t1 encode", $cmdOpj1,
+    "--command-name", "OpenJPEG t$threadsResolved encode", $cmdOpjN
 )
 if ($haveKakadu) {
-    $encodeArgs += @("--command-name", "Kakadu encode", $cmdKdu)
+    $encodeArgs += @(
+        "--command-name", "Kakadu t1 encode", $cmdKdu1,
+        "--command-name", "Kakadu t$threadsResolved encode", $cmdKduN
+    )
 }
 
 Write-Host "== ENCODE =="
@@ -141,19 +150,27 @@ Write-Host "== ENCODE =="
 
 $cmdDz1 = "$z decode-temp-jp2 $outTool/z2000-t$threadsResolved.jp2 $outTool/dec-z2000-t1.tif --threads 1"
 $cmdDzN = "$z decode-temp-jp2 $outTool/z2000-t$threadsResolved.jp2 $outTool/dec-z2000-t$threadsResolved.tif --threads $threadsResolved"
-$cmdDgrk = "$(Quote-Arg $grokDecompress) -i $outTool/grok.jp2 -o $outTool/dec-grok.tif"
-$cmdDopj = "$(Quote-Arg $opjDecompress) -i $outTool/openjpeg.jp2 -o $outTool/dec-openjpeg.tif -quiet"
-$cmdDkdu = "$(Quote-Arg $kduExpandTool) -i $outTool/kakadu.jp2 -o $outTool/dec-kakadu.tif -quiet"
+$cmdDgrk1 = "$(Quote-Arg $grokDecompress) -i $outTool/grok-t$threadsResolved.jp2 -o $outTool/dec-grok-t1.tif -H 1 -G -2"
+$cmdDgrkN = "$(Quote-Arg $grokDecompress) -i $outTool/grok-t$threadsResolved.jp2 -o $outTool/dec-grok-t$threadsResolved.tif -H $threadsResolved -G -2"
+$cmdDopj1 = "$(Quote-Arg $opjDecompress) -i $outTool/openjpeg-t$threadsResolved.jp2 -o $outTool/dec-openjpeg-t1.tif -quiet -threads 1"
+$cmdDopjN = "$(Quote-Arg $opjDecompress) -i $outTool/openjpeg-t$threadsResolved.jp2 -o $outTool/dec-openjpeg-t$threadsResolved.tif -quiet -threads $threadsResolved"
+$cmdDkdu1 = "$(Quote-Arg $kduExpandTool) -i $outTool/kakadu-t$threadsResolved.jp2 -o $outTool/dec-kakadu-t1.tif -num_threads 0 -quiet"
+$cmdDkduN = "$(Quote-Arg $kduExpandTool) -i $outTool/kakadu-t$threadsResolved.jp2 -o $outTool/dec-kakadu-t$threadsResolved.tif -num_threads $threadsResolved -quiet"
 
 $decodeArgs = @(
     "--shell=none", "--warmup", "$Warmup", "--runs", "$Runs", "--export-json", "$outTool/decode.json",
     "--command-name", "z2000 t1 decode", $cmdDz1,
     "--command-name", "z2000 t$threadsResolved decode", $cmdDzN,
-    "--command-name", "Grok decode", $cmdDgrk,
-    "--command-name", "OpenJPEG decode", $cmdDopj
+    "--command-name", "Grok t1 decode", $cmdDgrk1,
+    "--command-name", "Grok t$threadsResolved decode", $cmdDgrkN,
+    "--command-name", "OpenJPEG t1 decode", $cmdDopj1,
+    "--command-name", "OpenJPEG t$threadsResolved decode", $cmdDopjN
 )
 if ($haveKakadu) {
-    $decodeArgs += @("--command-name", "Kakadu decode", $cmdDkdu)
+    $decodeArgs += @(
+        "--command-name", "Kakadu t1 decode", $cmdDkdu1,
+        "--command-name", "Kakadu t$threadsResolved decode", $cmdDkduN
+    )
 }
 
 Write-Host ""
@@ -163,7 +180,7 @@ Write-Host "== DECODE OWN FILES =="
 Write-Host ""
 Write-Host "== SIZES =="
 Get-ChildItem -LiteralPath $outDirNative -Filter "*.jp2" |
-    Where-Object { $_.Name -in @("z2000-t1.jp2", "z2000-t$threadsResolved.jp2", "grok.jp2", "openjpeg.jp2", "kakadu.jp2") } |
+    Where-Object { $_.Name -in @("z2000-t1.jp2", "z2000-t$threadsResolved.jp2", "grok-t$threadsResolved.jp2", "openjpeg-t$threadsResolved.jp2", "kakadu-t$threadsResolved.jp2") } |
     Sort-Object Name |
     Select-Object Name, Length |
     Format-Table -AutoSize
@@ -172,13 +189,75 @@ $pythonExe = Find-Python
 if (Test-PixelComparePython $pythonExe) {
     Write-Host "== LOSSLESS VERIFICATION =="
     Run-PixelCompare $pythonExe $InputPath (Join-Path $outDirNative "dec-z2000-t$threadsResolved.tif") "z2000 self-decode"
-    Run-PixelCompare $pythonExe $InputPath (Join-Path $outDirNative "dec-grok.tif") "Grok self-decode"
-    Run-PixelCompare $pythonExe $InputPath (Join-Path $outDirNative "dec-openjpeg.tif") "OpenJPEG self-decode"
+    Run-PixelCompare $pythonExe $InputPath (Join-Path $outDirNative "dec-grok-t$threadsResolved.tif") "Grok self-decode"
+    Run-PixelCompare $pythonExe $InputPath (Join-Path $outDirNative "dec-openjpeg-t$threadsResolved.tif") "OpenJPEG self-decode"
     if ($haveKakadu) {
-        Run-PixelCompare $pythonExe $InputPath (Join-Path $outDirNative "dec-kakadu.tif") "Kakadu self-decode"
+        Run-PixelCompare $pythonExe $InputPath (Join-Path $outDirNative "dec-kakadu-t$threadsResolved.tif") "Kakadu self-decode"
     }
 } else {
     Write-Host "pixel check skipped: set Z2000_BENCH_PYTHON to a Python with numpy and Pillow"
+}
+
+if ($IncludeLossy) {
+    Write-Host ""
+    Write-Host "== LOSSY 9/7 ENCODE (ICT, scalar quantization, 2 layers, complete final layer) =="
+    $lossyCommon = "--tile 8192,8192 --progression RPCL --resolutions 6 --precincts `"$precincts`" --block 64 --rates 8,1 --tile-parts R --sop --eph --tlm --transform 9-7 --mct ict --qstyle scalar-expounded"
+    $lossyZ1 = "$z tiff-to-jp2 $inputTool $outTool/lossy-z2000-t1.jp2 $lossyCommon --threads 1"
+    $lossyZN = "$z tiff-to-jp2 $inputTool $outTool/lossy-z2000-t$threadsResolved.jp2 $lossyCommon --threads $threadsResolved"
+    $lossyGrk1 = "$(Quote-Arg $grokCompress) -i $inputTool -o $outTool/lossy-grok-t1.jp2 -I -r 8,1 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -Y 1 -X -S -E -u R -H 1 -G -2"
+    $lossyGrkN = "$(Quote-Arg $grokCompress) -i $inputTool -o $outTool/lossy-grok-t$threadsResolved.jp2 -I -r 8,1 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -Y 1 -X -S -E -u R -H $threadsResolved -G -2"
+    $lossyOpj1 = "$(Quote-Arg $opjCompress) -i $inputTool -o $outTool/lossy-openjpeg-t1.jp2 -I -r 8,1 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -mct 1 -TLM -PLT -SOP -EPH -TP R -threads 1"
+    $lossyOpjN = "$(Quote-Arg $opjCompress) -i $inputTool -o $outTool/lossy-openjpeg-t$threadsResolved.jp2 -I -r 8,1 -t 8192,8192 -p RPCL -n 6 -c `"$precincts`" -b 64,64 -mct 1 -TLM -PLT -SOP -EPH -TP R -threads $threadsResolved"
+    $lossyKdu1 = "$(Quote-Arg $kduCompressTool) -i $inputTool -o $outTool/lossy-kakadu-t1.jp2 Creversible=no Cycc=yes Clevels=5 Clayers=2 Corder=RPCL Cprecincts='$kduPrecincts' Cblk='{64,64}' Stiles='{8192,8192}' Cuse_sop=yes Cuse_eph=yes ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -rate -,3 -num_threads 0 -quiet"
+    $lossyKduN = "$(Quote-Arg $kduCompressTool) -i $inputTool -o $outTool/lossy-kakadu-t$threadsResolved.jp2 Creversible=no Cycc=yes Clevels=5 Clayers=2 Corder=RPCL Cprecincts='$kduPrecincts' Cblk='{64,64}' Stiles='{8192,8192}' Cuse_sop=yes Cuse_eph=yes ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -rate -,3 -num_threads $threadsResolved -quiet"
+    $lossyEncodeArgs = @(
+        "--shell=none", "--warmup", "$Warmup", "--runs", "$Runs", "--export-json", "$outTool/encode-lossy.json",
+        "--command-name", "z2000 t1 lossy encode", $lossyZ1,
+        "--command-name", "z2000 t$threadsResolved lossy encode", $lossyZN,
+        "--command-name", "Grok t1 lossy encode", $lossyGrk1,
+        "--command-name", "Grok t$threadsResolved lossy encode", $lossyGrkN,
+        "--command-name", "OpenJPEG t1 lossy encode", $lossyOpj1,
+        "--command-name", "OpenJPEG t$threadsResolved lossy encode", $lossyOpjN
+    )
+    if ($haveKakadu) {
+        $lossyEncodeArgs += @(
+            "--command-name", "Kakadu t1 lossy encode", $lossyKdu1,
+            "--command-name", "Kakadu t$threadsResolved lossy encode", $lossyKduN
+        )
+    }
+    & hyperfine @lossyEncodeArgs
+
+    Write-Host ""
+    Write-Host "== LOSSY 9/7 DECODE OWN FILES =="
+    $lossyDecodeArgs = @(
+        "--shell=none", "--warmup", "$Warmup", "--runs", "$Runs", "--export-json", "$outTool/decode-lossy.json",
+        "--command-name", "z2000 t1 lossy decode", "$z decode-temp-jp2 $outTool/lossy-z2000-t$threadsResolved.jp2 $outTool/lossy-dec-z2000-t1.tif --threads 1",
+        "--command-name", "z2000 t$threadsResolved lossy decode", "$z decode-temp-jp2 $outTool/lossy-z2000-t$threadsResolved.jp2 $outTool/lossy-dec-z2000-t$threadsResolved.tif --threads $threadsResolved",
+        "--command-name", "Grok t1 lossy decode", "$(Quote-Arg $grokDecompress) -i $outTool/lossy-grok-t$threadsResolved.jp2 -o $outTool/lossy-dec-grok-t1.tif -H 1 -G -2",
+        "--command-name", "Grok t$threadsResolved lossy decode", "$(Quote-Arg $grokDecompress) -i $outTool/lossy-grok-t$threadsResolved.jp2 -o $outTool/lossy-dec-grok-t$threadsResolved.tif -H $threadsResolved -G -2",
+        "--command-name", "OpenJPEG t1 lossy decode", "$(Quote-Arg $opjDecompress) -i $outTool/lossy-openjpeg-t$threadsResolved.jp2 -o $outTool/lossy-dec-openjpeg-t1.tif -quiet -threads 1",
+        "--command-name", "OpenJPEG t$threadsResolved lossy decode", "$(Quote-Arg $opjDecompress) -i $outTool/lossy-openjpeg-t$threadsResolved.jp2 -o $outTool/lossy-dec-openjpeg-t$threadsResolved.tif -quiet -threads $threadsResolved"
+    )
+    if ($haveKakadu) {
+        $lossyDecodeArgs += @(
+            "--command-name", "Kakadu t1 lossy decode", "$(Quote-Arg $kduExpandTool) -i $outTool/lossy-kakadu-t$threadsResolved.jp2 -o $outTool/lossy-dec-kakadu-t1.tif -num_threads 0 -quiet",
+            "--command-name", "Kakadu t$threadsResolved lossy decode", "$(Quote-Arg $kduExpandTool) -i $outTool/lossy-kakadu-t$threadsResolved.jp2 -o $outTool/lossy-dec-kakadu-t$threadsResolved.tif -num_threads $threadsResolved -quiet"
+        )
+    }
+    & hyperfine @lossyDecodeArgs
+
+    Write-Host ""
+    Write-Host "== LOSSY SIZES =="
+    Get-ChildItem -LiteralPath $outDirNative -Filter "lossy-*.jp2" |
+        Where-Object { $_.Name -match "-t$threadsResolved\.jp2$" } |
+        Sort-Object Name |
+        Select-Object Name, Length |
+        Format-Table -AutoSize
+
+    $lossyT1Hash = (Get-FileHash -Algorithm SHA256 (Join-Path $outDirNative "lossy-z2000-t1.jp2")).Hash
+    $lossyTNHash = (Get-FileHash -Algorithm SHA256 (Join-Path $outDirNative "lossy-z2000-t$threadsResolved.jp2")).Hash
+    if ($lossyT1Hash -ne $lossyTNHash) { throw "lossy z2000 output is not cross-thread deterministic" }
+    Write-Host "z2000 lossy t1 == t$threadsResolved codestream: OK"
 }
 
 if (-not $SkipCrossDecode) {

@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Direct PCRD Distortion Capture And Lossy Benchmark Gate
+
+- The direct ISO-MQ T1 encoder can now collect exact per-pass coefficient
+  distortion while emitting the real significance, refinement, and cleanup
+  passes. Rate-targeted single- and multi-tile encode reuse that metadata
+  instead of rerunning the symbol reference coder for every block; TERMALL and
+  legacy/style paths retain the conservative fallback.
+- Added an exact oracle regression across default, BYPASS, vertical-causal,
+  segmentation-symbol, and non-LL band styles. Pass distortions, pass metadata,
+  and output bytes must all match the previous path.
+- Extended both comparative harnesses with an optional two-layer ICT/9/7
+  profile and aligned the Windows lossless marker, tile-part, BYPASS, and thread
+  flags across z2000, Grok, OpenJPEG, and Kakadu.
+- On Ryzen 7 5700X (warmup 2, 8 runs), z2000 lossy encode fell from
+  2256/367 ms to 809/159 ms at t1/t16 (-64.1/-56.6%), with byte-identical
+  output. Lossless performance was unchanged. Full tables are recorded in
+  `docs/benchmarks.md`.
+
 ### Parallel 9/7 Component Pipeline
 
 - The irreversible encode pipeline (per-component 9/7 DWT + deadzone

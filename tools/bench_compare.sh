@@ -10,6 +10,7 @@ set -eu
 INPUT=${1:-bench-rgb-2048.tif}
 RUNS=${RUNS:-8}
 ZIG_BUILD_FLAGS=${ZIG_BUILD_FLAGS:-}
+INCLUDE_LOSSY=${INCLUDE_LOSSY:-0}
 PRECINCTS='[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]'
 # Kakadu Cprecincts uses its own brace syntax; the trailing entry repeats.
 KDU_PRECINCTS='{256,256},{256,256},{128,128}'
@@ -163,4 +164,50 @@ elif command -v tiffcmp >/dev/null 2>&1; then
   fi
 else
   echo "pixel check skipped: install Pillow or libtiff's tiffcmp"
+fi
+
+if [ "$INCLUDE_LOSSY" = 1 ]; then
+  echo
+  echo "== LOSSY 9/7 ENCODE (ICT, scalar quantization, 2 layers, complete final layer) =="
+  set -- --warmup 2 --runs "$RUNS" \
+    --command-name "z2000 t1"        "$Z tiff-to-jp2 $INPUT bench-lossy-z2000-t1.jp2 --tile 4096,4096 --progression RPCL --resolutions 6 --precincts \"$PRECINCTS\" --block 64 --rates 8,1 --tile-parts R --sop --eph --tlm --transform 9-7 --mct ict --qstyle scalar-expounded --threads 1" \
+    --command-name "z2000 t$THREADS" "$Z tiff-to-jp2 $INPUT bench-lossy-z2000-tN.jp2 --tile 4096,4096 --progression RPCL --resolutions 6 --precincts \"$PRECINCTS\" --block 64 --rates 8,1 --tile-parts R --sop --eph --tlm --transform 9-7 --mct ict --qstyle scalar-expounded --threads $THREADS"
+  [ "$HAS_GRK" = 1 ] && set -- "$@" \
+    --command-name "grok t1"         "grk_compress -i $INPUT -o bench-lossy-grok-t1.jp2 -I -r 8,1 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -X -S -E -u R -H 1 -G -2" \
+    --command-name "grok t$THREADS"  "grk_compress -i $INPUT -o bench-lossy-grok-tN.jp2 -I -r 8,1 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -X -S -E -u R -H $THREADS -G -2"
+  [ "$HAS_OPJ" = 1 ] && set -- "$@" \
+    --command-name "openjpeg t1"        "opj_compress -i $INPUT -o bench-lossy-openjpeg-t1.jp2 -I -r 8,1 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -TLM -SOP -EPH -TP R -threads 1" \
+    --command-name "openjpeg t$THREADS" "opj_compress -i $INPUT -o bench-lossy-openjpeg-tN.jp2 -I -r 8,1 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -TLM -SOP -EPH -TP R -threads $THREADS"
+  [ "$HAS_KDU" = 1 ] && set -- "$@" \
+    --command-name "kdu t1"          "\"$KDU_COMPRESS\" -i $INPUT -o bench-lossy-kakadu-t1.jp2 Creversible=no Clevels=5 Clayers=2 Cblk={64,64} Cprecincts=$KDU_PRECINCTS Corder=RPCL Cuse_sop=yes Cuse_eph=yes ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -rate -,3 -num_threads 0 -quiet" \
+    --command-name "kdu t$THREADS"   "\"$KDU_COMPRESS\" -i $INPUT -o bench-lossy-kakadu-tN.jp2 Creversible=no Clevels=5 Clayers=2 Cblk={64,64} Cprecincts=$KDU_PRECINCTS Corder=RPCL Cuse_sop=yes Cuse_eph=yes ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -rate -,3 -num_threads $THREADS -quiet"
+  [ -n "$BENCH_RESULTS_DIR" ] && set -- "$@" --export-json "$BENCH_RESULTS_DIR/encode-lossy.json"
+  hyperfine "$@"
+
+  echo
+  echo "== LOSSY 9/7 DECODE own files =="
+  set -- --warmup 2 --runs "$RUNS" \
+    --command-name "z2000 t1"        "$Z decode-temp-jp2 bench-lossy-z2000-tN.jp2 bench-lossy-z2000-decoded-t1.tif --threads 1" \
+    --command-name "z2000 t$THREADS" "$Z decode-temp-jp2 bench-lossy-z2000-tN.jp2 bench-lossy-z2000-decoded-tN.tif --threads $THREADS"
+  [ "$HAS_GRK" = 1 ] && set -- "$@" \
+    --command-name "grok t1"         "grk_decompress -i bench-lossy-grok-tN.jp2 -o bench-lossy-grok-decoded-t1.tif -H 1 -G -2" \
+    --command-name "grok t$THREADS"  "grk_decompress -i bench-lossy-grok-tN.jp2 -o bench-lossy-grok-decoded-tN.tif -H $THREADS -G -2"
+  [ "$HAS_OPJ" = 1 ] && set -- "$@" \
+    --command-name "openjpeg t1"        "opj_decompress -i bench-lossy-openjpeg-tN.jp2 -o bench-lossy-openjpeg-decoded-t1.tif -quiet -threads 1" \
+    --command-name "openjpeg t$THREADS" "opj_decompress -i bench-lossy-openjpeg-tN.jp2 -o bench-lossy-openjpeg-decoded-tN.tif -quiet -threads $THREADS"
+  [ "$HAS_KDU" = 1 ] && set -- "$@" \
+    --command-name "kdu t1"          "\"$KDU_EXPAND\" -i bench-lossy-kakadu-tN.jp2 -o bench-lossy-kakadu-decoded-t1.tif -num_threads 0 -quiet" \
+    --command-name "kdu t$THREADS"   "\"$KDU_EXPAND\" -i bench-lossy-kakadu-tN.jp2 -o bench-lossy-kakadu-decoded-tN.tif -num_threads $THREADS -quiet"
+  [ -n "$BENCH_RESULTS_DIR" ] && set -- "$@" --export-json "$BENCH_RESULTS_DIR/decode-lossy.json"
+  hyperfine "$@"
+
+  echo
+  echo "== LOSSY SIZES AND DETERMINISM =="
+  size_files="bench-lossy-z2000-tN.jp2"
+  [ "$HAS_GRK" = 1 ] && size_files="$size_files bench-lossy-grok-tN.jp2"
+  [ "$HAS_OPJ" = 1 ] && size_files="$size_files bench-lossy-openjpeg-tN.jp2"
+  [ "$HAS_KDU" = 1 ] && size_files="$size_files bench-lossy-kakadu-tN.jp2"
+  ls -l $size_files | awk '{printf "%-14s %10d B\n", $NF, $5}'
+  cmp bench-lossy-z2000-t1.jp2 bench-lossy-z2000-tN.jp2
+  echo "z2000 lossy t1 == t$THREADS codestream: OK"
 fi

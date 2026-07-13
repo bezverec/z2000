@@ -79,9 +79,11 @@ interop gate.
    independent fixtures, then continue the component-generic campaign toward
    multi-tile grayscale, mixed precision/BPCC, alpha, richer palette mappings,
    and general component layouts while keeping RGB byte behavior stable.
-2. Continue measured PCRD distortion-model research as an optimization track;
-   retain a change only when the profile-matched ladder improves without
-   correctness or safety regressions.
+2. Keep the landed direct-MQ PCRD distortion capture pinned against its symbol
+   oracle and byte-identical rate-target streams. Continue the measured
+   optimization campaign with decode T1 and the AVX2/NEON lane audit; retain a
+   change only when the profile-matched gate improves without correctness or
+   safety regressions.
 3. Add a small checked-in packed-header fixture matrix from an independent
    producer when PPM/PPT encode controls are available locally; current live
    z2000 output is already pixel-exact through OpenJPEG and Grok.

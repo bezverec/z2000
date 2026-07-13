@@ -10687,6 +10687,72 @@ test "EBCOT direct MQ segment matches symbol oracle" {
     try expectMarkerStuffingIsValid(direct.bytes);
 }
 
+test "EBCOT direct MQ pass distortions match symbol oracle" {
+    const allocator = std.testing.allocator;
+    const width = 7;
+    const height = 6;
+    const plane = [_]i32{
+        0,  -7, 0,   5,  3,   0,  -17,
+        1,  0,  -2,  0,  0,   23, 0,
+        0,  0,  0,   0,  -1,  0,  9,
+        9,  -12, 0,  4,  0,   -6, 0,
+        0,  6,  0,   -8, 2,   0,  31,
+        -3, 0,  14,  0,  -25, 7,  0,
+    };
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    const styles = [_]ebcot.CodeBlockStyle{
+        .{},
+        .{ .band_kind = .hl, .bypass = true },
+        .{ .band_kind = .lh, .vertical_causal = true, .segmentation_symbols = true },
+    };
+
+    for (styles) |style| {
+        var symbol_scratch = ebcot.BlockScratch.init(allocator);
+        defer symbol_scratch.deinit();
+        var measured_scratch = ebcot.DirectBlockScratch.init(allocator);
+        defer measured_scratch.deinit();
+        var direct_scratch = ebcot.DirectBlockScratch.init(allocator);
+        defer direct_scratch.deinit();
+
+        var expected_distortions: [256]f64 = undefined;
+        const expected_pass_count = try ebcot.passDistortions(
+            &symbol_scratch,
+            plane[0..],
+            width,
+            rect,
+            style,
+            expected_distortions[0..],
+        );
+        var actual_distortions: [256]f64 = undefined;
+        var measured = try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyleAndDistortions(
+            &measured_scratch,
+            plane[0..],
+            width,
+            rect,
+            style,
+            actual_distortions[0..],
+        );
+        defer measured.deinit(allocator);
+        try std.testing.expectEqual(expected_pass_count, measured.pass_count);
+        try std.testing.expectEqualSlices(
+            f64,
+            expected_distortions[0..expected_pass_count],
+            actual_distortions[0..expected_pass_count],
+        );
+
+        var direct = try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
+            &direct_scratch,
+            plane[0..],
+            width,
+            rect,
+            style,
+        );
+        defer direct.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, direct.bytes, measured.bytes);
+        try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, direct.passes, measured.passes);
+    }
+}
+
 test "EBCOT ISO MQ symbol segment preserves pass metadata" {
     const allocator = std.testing.allocator;
     const plane = [_]i32{
