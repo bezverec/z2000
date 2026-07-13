@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Reproducible Comparative Benchmark Ledger
+
+- Added `docs/benchmarks.md` as an append-only record of comparative runs,
+  including commit and application version, date, machine and OS, power state,
+  tool versions, input checksum, exact codec profile, thread count, statistics,
+  output sizes, and correctness validation.
+- Made `tools/bench_compare.sh` compare explicit one-thread and equal-N-thread
+  configurations for z2000, Grok, and OpenJPEG. Grok is pinned to CPU execution;
+  optional `BENCH_RESULTS_DIR` exports Hyperfine JSON for all benchmark groups.
+- Recorded the 2026-07-13 Apple M4 baseline against Grok 20.3.6 and OpenJPEG
+  2.5.4, including native-output and common-z2000-stream decode measurements.
+
 ### Conservative Application Versioning
 
 - Established `0.1.0` as the first pre-1.0 application/API line in the
