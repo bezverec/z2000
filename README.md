@@ -14,38 +14,27 @@ project-readiness estimate, not a formal ISO conformance certification.
 
 ## Features
 
-- TIFF 6.0 RGB or grayscale input for uncompressed chunky 8-bit and 16-bit
-  strips. BlackIsZero grayscale encodes directly; WhiteIsZero is explicitly
-  normalized before one-component JP2 encoding.
-- JP2 output with strict codestream packet payloads and optional ICC
-  preservation. The container boundary can also wrap and inspect unsigned
-  one-component codestreams using enumerated grayscale `colr` (17). The narrow
-  single-tile reversible grayscale path carries real ISO-MQ T1/T2 payloads in
-  both encode and strict wire decode. A bounded JP2 Part 1 palette profile can
-  wrap one 8/16-bit index component with three unsigned 8/16-bit sRGB `pclr`
-  columns and strict `cmap`, then expand it safely to RGB during decode.
-- Lossless RGB path: RCT, reversible 5/3 DWT, RPCL and other bounded
-  progression orders, quality layers, PLT/TLM, strict no-sidecar decode.
-- Lossy experimental path: ICT, irreversible 9/7 DWT, scalar-derived or
-  scalar-expounded quantization, single-tile and reference-grid-aware
-  multi-tile including odd tile origins.
-- All six JPEG2000 code-block style bits (BYPASS, RESET, terminate-all,
-  vertical-causal, predictable termination, segmentation symbols) in every
-  combination, with three-decoder interop coverage on the ISO-MQ path.
-- Reference-grid-aware multi-tile lossless encode/decode with origin-aware
-  reversible 5/3 lifting, OpenJPEG/Grok/Kakadu smoke coverage for supported
-  profiles, foreign PLT-less streams using explicit, default, or odd-origin
-  precinct/tile partitions, and foreign multi-part tile sequences (grouped or
-  interleaved PLT-backed parts, TNsot 0, empty padding parts).
+- TIFF 6.0 RGB and grayscale input: uncompressed chunky 8-bit or 16-bit
+  strips, including optional ICC profile preservation.
+- Lossless JP2 encoding with RCT, reversible 5/3 DWT, quality layers, all five
+  progression orders, PLT/TLM, and strict no-sidecar decode.
+- Lossy JP2 encoding with ICT, irreversible 9/7 DWT, scalar-derived or
+  scalar-expounded quantization, and rate allocation.
+- Reference-grid-aware single- and multi-tile encode/decode, including odd
+  tile origins and global cross-tile rate targets.
+- ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
+  PPM, and PPT packet headers on their documented profiles.
+- Bounded grayscale and palette JP2 profiles, strict malformed-input handling,
+  and OpenJPEG/Grok/Kakadu interoperability tests.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, general component layouts,
-full multi-tile rate allocation, non-empty PLT-less multi-part tiles,
-broad color management,
-JPEG/PNG/BMP/RAW/OpenEXR input, and full metadata handling beyond the staged ICC
-path.
+non-empty PLT-less multi-part tiles, broad color management,
+JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
+path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
+supported envelope.
 
 ## Build From Source
 
@@ -128,16 +117,7 @@ zig build run -- encode input.pgm output.z2000 --wavelet 5-3 --levels 3 --quant 
 zig build run -- decode output.z2000 reconstructed.pgm
 ```
 
-Useful debug option:
-
-```sh
---debug-temp-sidecar
-```
-
-This emits the private BP8 `COM` sidecar used as a diagnostic/oracle payload.
-Normal encode omits it.
-
-## Supported CLI Options
+## CLI Reference
 
 Main conversion command:
 
@@ -145,60 +125,79 @@ Main conversion command:
 z2000 tiff-to-jp2 input.tif output.jp2 [options]
 ```
 
-Profile and transform options:
+For normal lossless conversion, the defaults are usually sufficient. The most
+useful options are grouped below. Unsupported combinations fail closed rather
+than silently changing the codestream profile.
 
-| Option | Meaning |
-| --- | --- |
-| `--mct rct|ict|none` | Multi-component transform: reversible RGB color transform, irreversible color transform, or no color transform. |
-| `--transform 5-3|9-7` | Wavelet transform: reversible 5/3 for lossless, irreversible 9/7 for lossy experiments. |
-| `--qstyle none|scalar-derived|scalar-expounded` | Quantization marker style. Use `none` with 5/3 lossless; scalar styles belong to the 9/7 path. |
-| `--guard-bits N` | QCD guard bits. Defaults are chosen for the current profile; unusual values remain bounded by strict validation. |
+### Profile And Quality
 
-Packet, layer, and geometry options:
+- **--mct MODE**: Color transform: **rct** for reversible RGB, **ict** for
+  irreversible RGB, or **none** for component-independent coding.
+- **--transform MODE**: Wavelet transform: reversible **5-3** or irreversible
+  **9-7**.
+- **--qstyle STYLE**: Quantization: **none**, **scalar-derived**, or
+  **scalar-expounded**. Use none with 5-3 and a scalar style with 9-7.
+- **--guard-bits N**: Number of QCD guard bits.
+- **--layers N**: Number of untargeted quality layers.
+- **--rates LIST**: Comma-separated compression-ratio targets, for example
+  **16,8,1**. The list sets the layer count; a final 1 requests a complete
+  final layer.
 
-| Option | Meaning |
-| --- | --- |
-| `--levels N` | Number of DWT decomposition levels. |
-| `--resolutions N` | Alternative to `--levels`; resolutions are levels + 1. |
-| `--progression RPCL|LRCP|RLCP|PCRL|CPRL` | JPEG2000 progression order. Supported paths are still profile-bounded and fail closed when unsafe. |
-| `--poc "RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;..."` | Checked progression changes. Complete schedules support one part per tile and compatible `R`, `L`, `C`, or reference-grid position `P` parts. Omitted `--tile-parts` is normalized to `none`. |
-| `--poc-location main|tile` | Emit POC in the main header (default) or in `TPsot=0` of every tile. Tile-header POC is included in `Psot`/TLM accounting and remains incompatible with PPM/PPT. |
-| `--layers N` | Number of quality layers (untargeted even split). When `--rates` is given, the rate-list length sets the layer count and overrides `--layers`. |
-| `--rates R1,R2,...` | Compression-ratio targets for layered output, referenced to the total compressed payload (unlike OpenJPEG's `-r`, which references the uncompressed size). The final layer always carries the complete stream, so end the list with `1` for an explicit lossless-final ladder. Single- and multi-tile paths use global PCRD; single-tile also charges measured packet-header bytes directly. |
-| `--precincts "[W,H],[W,H]"` | Per-resolution precinct sizes. Values must satisfy the current ISO B.6/B.7 geometry guards. |
-| `--block N` | Square code-block size. |
-| `--tile W,H` | Tile size. Multi-tile support is the bounded reference-grid lossless envelope (explicit, default, or odd-origin partitions). |
-| `--tile-parts none|R|L|C|P` | Tile-part division mode: one part per tile, per resolution (`R` with RPCL), layer (`L` with LRCP), RGB component (`C` with CPRL), or reference-grid precinct position (`P` with PCRL). Divided layouts are currently multi-tile. |
+### Resolution, Tiles, And Packet Order
 
-Marker, T1, and diagnostics:
+- **--levels N**: Number of wavelet decomposition levels.
+- **--resolutions N**: Alternative spelling where resolutions equal levels
+  plus one.
+- **--block N**: Square code-block size.
+- **--precincts LIST**: Per-resolution precinct sizes, for example
+  **"[256,256],[128,128]"**.
+- **--tile W,H**: Tile dimensions. A tile smaller than the image enables the
+  bounded multi-tile path.
+- **--progression ORDER**: Packet order: **RPCL**, **LRCP**, **RLCP**,
+  **PCRL**, or **CPRL**.
+- **--tile-parts MODE**: Tile-part division: **none**, **R**, **L**, **C**,
+  or **P**. The mode must match a compatible packet order.
+- **--poc RECORDS**: Advanced progression changes using ISO fields in the
+  form **RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER**. Separate records with a
+  semicolon.
+- **--poc-location PLACE**: Write POC in the **main** header or first **tile**
+  header. Tile-header POC cannot be combined with PPM or PPT.
 
-| Option | Meaning |
-| --- | --- |
-| `--sop` / `--no-sop` | Enable or disable SOP packet markers. SOP is enabled by default for the narrow archival profile. |
-| `--eph` / `--no-eph` | Enable or disable EPH packet-header markers. |
-| `--ppm` / `--no-ppm` | Move packet headers into main-header PPM markers. Supported for RPCL with optional SOP/EPH: single-tile streams use one part or `R` resolution parts, while multi-tile streams require `R` parts. PPM is PLT-less and PPM/PPT are mutually exclusive. |
-| `--ppt` / `--no-ppt` | Move packet headers into PPT markers. Supported for RPCL with optional SOP/EPH: single-tile streams use one part or `R` resolution parts, while multi-tile streams require `R` parts. PLT counts the SOD-resident SOP plus packet body; PPT carries the T2 header plus EPH. |
-| `--tlm` / `--no-tlm` | Enable or disable TLM tile-part length markers. |
-| `--t1-backend iso-mq|legacy-mq` | Select the T1 entropy backend. `iso-mq` is the normal JPEG2000-style path. |
-| `--bypass` / `--no-bypass` | Enable or disable BYPASS coding style where the payload model is implemented. |
-| `--reset-context` / `--no-reset-context` | Toggle RESET context style in supported envelopes. |
-| `--terminate-all` / `--no-terminate-all` | Toggle TERMALL pass termination. |
-| `--vertical-causal` / `--no-vertical-causal` | Toggle vertical-causal context behavior. |
-| `--predictable-termination` / `--no-predictable-termination` | Toggle predictable (ER-TERM) termination, standalone or TERMALL-scoped. |
-| `--segmentation-symbols` / `--no-segmentation-symbols` | Toggle segmentation symbols where supported. |
-| `--threads N` | Worker count. `0` means use all logical threads. |
-| `--timings` | Print encode/decode timing breakdowns, including a per-pass T1 encode profile for single-thread runs. |
-| `--debug-temp-sidecar` | Emit the private BP8 sidecar for diagnostics; normal encode omits it. |
+### Markers And T1 Resilience
 
-Inspection and decode commands:
+Boolean marker and style options also accept a **--no-...** form.
 
-| Command | Meaning |
-| --- | --- |
-| `tiff-info input.tif` | Print TIFF metadata accepted by the current parser. |
-| `dng-info input.dng` | Print DNG/TIFF-style metadata for inspection. |
-| `jp2-info output.jp2` | Print JP2 container and codestream summary. |
-| `jp2-stats output.jp2` | Audit packet headers, strict packet catalog, and payload statistics. |
-| `decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--timings]` | Strict-decode a JP2 into TIFF. The historical command name remains for compatibility. |
+- **--sop**, **--eph**, **--tlm**: Emit SOP, EPH, or TLM markers.
+- **--ppm**, **--ppt**: Move packet headers into PPM or PPT markers. These
+  options are mutually exclusive and profile-bounded.
+- **--t1-backend BACKEND**: Use the normal **iso-mq** backend or the internal
+  **legacy-mq** compatibility backend.
+- **--bypass**: Enable selective arithmetic-coding bypass.
+- **--reset-context**: Reset MQ contexts at coding-pass boundaries.
+- **--terminate-all**: Terminate every coding pass.
+- **--vertical-causal**: Enable vertical-causal context formation.
+- **--predictable-termination**: Enable ER-TERM predictable termination.
+- **--segmentation-symbols**: Append cleanup-pass segmentation symbols.
+
+### Runtime And Diagnostics
+
+- **--threads N**: Worker count. Zero uses all logical CPU threads.
+- **--timings**: Print encode/decode phase timings and available T1 profiles.
+- **--debug-temp-sidecar**: Emit the private BP8 COM sidecar for diagnostics.
+  Normal files omit it.
+
+Other commands:
+
+- **tiff-info INPUT**: Inspect supported TIFF metadata.
+- **dng-info INPUT**: Inspect TIFF-style DNG metadata.
+- **jp2-info INPUT**: Show the JP2 container and codestream summary.
+- **jp2-stats INPUT**: Audit packet headers, block catalogs, and payload sizes.
+- **decode-temp-jp2 INPUT OUTPUT**: Strict-decode JP2 into TIFF. The command
+  keeps its historical name for compatibility and accepts --threads,
+  --t1-backend, and --timings.
+
+The full profile matrix and internal API surface are documented in
+[API notes](docs/api.md).
 
 ## Supported Input Boundary
 
@@ -251,9 +250,9 @@ The POSIX harness accepts the same extension through `INCLUDE_LOSSY=1`.
 
 ## Project Direction
 
-Near term: hold the narrow RGB lossless JP2 target at 100/100 (strict T2/T1
-behavior and interop gates must stay green) while broadening the full Part 1
-coverage tracked in the scorecard.
+Near term: keep both engineering scorecards at 100/100 while hardening release
+gates, strict decode, interoperability, and performance inside the documented
+profile envelope.
 
 Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.
