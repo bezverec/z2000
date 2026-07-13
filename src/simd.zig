@@ -16,6 +16,12 @@ pub const has_neon: bool = switch (builtin.target.cpu.arch) {
 pub const neon_i32_lanes: comptime_int = 4;
 pub const f32_pair_lanes: comptime_int = 2;
 
+/// Block width (in f32 lanes) for the 9/7 lifting kernels: one 64-byte cache
+/// line per row access. LLVM splits the block into however many native
+/// registers the target has (4x NEON q-regs, 2x AVX2 ymm, 1x AVX-512 zmm),
+/// so one constant serves every ISA.
+pub const f32_block_lanes: comptime_int = 16;
+
 pub const family: []const u8 = switch (builtin.target.cpu.arch) {
     .x86, .x86_64 => x86Family(),
     .aarch64, .aarch64_be => "NEON-128",
