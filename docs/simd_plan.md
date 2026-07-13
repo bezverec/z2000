@@ -177,11 +177,14 @@ silently break elsewhere).
    intentionally no FMA. Remaining follow-up: re-run the `f32_block_lanes`
    A/B on the M4 (NEON has 4-wide registers, so 32-lane blocks mean 8 q-regs
    per step — the Ryzen win does not automatically transfer).
-6. **S6** (RISC-V gate) — compile half green on the Ryzen box (2026-07-13,
-   including the AVX-512 `x86_64_v4` compile gate with the 32-lane blocks);
-   the qemu run half needs the M4 or a Linux host with qemu-user.
+6. **S6** (RISC-V gate) — **completed (2026-07-13)**: cross-compile green
+   (riscv64+v exe and AVX-512 `x86_64_v4` builds) and the full 360-test
+   suite passed on `riscv64/alpine` under Docker's qemu binfmt emulation.
+   Functional gate only; no performance claims.
 7. **S5** only as a deliberate
-   campaign decision.
+   campaign decision — see `optimization_plan.md` Checkpoint #6 for the
+   full remaining-levers assessment (parallel decode efficiency and the
+   fused dequantize-into-inverse-DWT angle rank ahead of S5).
 
 ## Do-not-do list
 
@@ -209,7 +212,8 @@ silently break elsewhere).
 | 2026-07-13 | S3 `f32_block_lanes` 16 -> 8 | Ryzen 5700X | same baseline | enc t1 879.1 (+5.1%), dec t1 806.8 (+7.0%) | **rejected** — regression both ways |
 | 2026-07-13 | S3 `ict_lanes` 8 -> 4 | Ryzen 5700X | same baseline | enc t1 817.0 (-2.3%), dec t1 750.7 (-0.5%) | **reverted** — encode gain consistent but below the 3% gate; ICT share too small |
 | 2026-07-13 | S3 generated-code spot check (9/7 `forward2D` probe root, `-mcpu=native -femit-asm`) | Ryzen 5700X | open question: does `@Vector` lower to AVX2? | 72x `vmulps ymm` + 72x `vaddps ymm` (32-lane block = 4 ymm per lift step), scalar `mulss/addss` only in boundary tails; zero `vfmadd*` (correct: FMA would break stream bit-exactness) | **closed** — vectorization confirmed, no silent scalar fallback |
-| 2026-07-13 | S6 cross-compile half: `riscv64-linux-musl -Dcpu=baseline_rv64+v` exe build and `x86_64_v4` (AVX-512, 16 i32 lanes / 32-lane f32 blocks = 2 zmm) build | Ryzen 5700X | untested with the 32-lane blocks | both ReleaseFast builds succeed | **compile half green** — the run half (test suite under qemu-riscv64) stays pending: no qemu on the Windows box and the Docker daemon was not running; execute on the M4 or any Linux host with qemu-user |
+| 2026-07-13 | S6 cross-compile half: `riscv64-linux-musl -Dcpu=baseline_rv64+v` exe build and `x86_64_v4` (AVX-512, 16 i32 lanes / 32-lane f32 blocks = 2 zmm) build | Ryzen 5700X | untested with the 32-lane blocks | both ReleaseFast builds succeed | **compile half green** |
+| 2026-07-13 | S6 run half: full test suite (`zig test --test-no-exec` -> `riscv64/alpine` container, Docker Desktop qemu binfmt) | Ryzen 5700X (qemu-riscv64 user emulation) | RVV correctness of the portable `@Vector` code unproven | **All 360 tests passed** on `baseline_rv64+v` at ReleaseFast | **S6 closed** — functional gate green, zero performance claims per the ISA policy |
 
 S0 note (2026-07-13): the earlier S1/S2 gates ran as direct hyperfine A/B
 pairs while the shared harness was being reworked. The maintained POSIX and

@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### S6 RISC-V Functional Gate, Feature Plan, And Remaining-Levers Assessment
+
+- Closed the SIMD plan's S6 RISC-V gate: the full 360-test suite passed on
+  `riscv64/alpine` under Docker Desktop's qemu binfmt emulation
+  (`riscv64-linux-musl -Dcpu=baseline_rv64+v`, ReleaseFast, built via
+  `zig test --test-no-exec`), proving the portable `@Vector` code —
+  including the new 32-lane 9/7 lifting blocks — is functionally correct
+  with RVV enabled. Functional gate only; no performance claims per the
+  ISA policy. With S0-S4, S6 done and S3 closed, the SIMD plan's routine
+  execution is complete; only the S5 research campaign remains as a
+  deliberate decision.
+- Added `docs/feature_plan.md`: the staged post-Part 1 breadth plan —
+  F1 component-generic core (the enabling N-plane refactor), F2 alpha,
+  F3 mixed precision/subsampling, F4 colourspace breadth (sYCC/CMYK,
+  signalling-first), F5 format front ends (BMP -> PNG -> JPEG -> linear
+  DNG -> OpenEXR), F6 EXIF/IPTC/XMP preservation — with dependencies,
+  sizes, verification requirements, and explicit non-goals.
+- Added `optimization_plan.md` Checkpoint #6: the honest remaining-levers
+  assessment after the micro-optimization space measured out — parallel
+  decode efficiency (t16 gap 2.1x vs Kakadu against 1.5x at t1) and the
+  fused dequantize-into-inverse-DWT angle rank ahead of the S5 T1 SWAR
+  research; the corrected pass profile shows lossy encode's largest pass
+  is MQ refinement.
+
 ### Lossy Encode Timing Split And S6 Compile Gates
 
 - Fixed the `--timings` phase attribution on the irreversible encode path:

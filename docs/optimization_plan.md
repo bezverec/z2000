@@ -84,6 +84,41 @@ and 30-run repeat measured 139.1 +/- 4.7 vs 138.9 +/- 4.9 ms. These results
 reinforce that compiler-visible loop/store cleanup and queue atomics are spent;
 the next O3 attempt needs a genuinely different context/column data layout.
 
+## Checkpoint #6 (2026-07-13) — Remaining Levers Assessment
+
+With S3 closed (32-lane 9/7 blocks kept) and the micro-optimization space
+measured as spent by a dozen reverted byte-exact probes, the honest remaining
+levers, ordered by expected value:
+
+1. **Parallel decode efficiency** — z2000 decode scales t1->t16 only 5.1x
+   (743.8 -> 147.1 ms) against Kakadu's 7.0x (491.6 -> 70.2 ms), so the t16
+   decode gap (2.1x) is much worse than the t1 gap (1.5x). The serial
+   sections are the packet catalog (~1.3%), the 3-way-only component
+   parallelism of inverse DWT (~10.4% at t1) and inverse MCT, and TIFF
+   write. Levers: intra-plane parallel inverse DWT (row/column band
+   splitting inside one component), overlapping catalog with T1 block
+   decode, and parallel TIFF interleave. This is thread-level work, not in
+   the do-not-do list, and measurable with the existing harness.
+2. **Fused dequantize-into-inverse-DWT** on the lossy decode path — the S2
+   revert note's "new angle": skip the separate dequantized-plane write
+   before lifting. Touches ~10-12% of lossy decode; needs bit-exactness
+   care (same f64->f32 order).
+3. **S5 T1 SWAR/packed-column research** — the only lever on the 85-88%
+   T1 share, research-grade, prior wholesale attempt measured slower. Needs
+   a dedicated campaign decision; the corrected pass profile says lossy
+   encode's biggest pass is now MQ refinement (273.7 ms / 27.0 M symbols),
+   lossless's is MQ significance — any new context-layout design should be
+   evaluated against both.
+4. **M4 follow-ups** — re-A/B the 32-lane 9/7 blocks on NEON (8 q-regs per
+   lift step may not win there) and the M4 parallel-efficiency picture.
+5. **Allocation profiling** — never measured as a dimension; a heap-traffic
+   profile of decode t16 could expose contention invisible to hyperfine
+   means.
+
+Realistic ceiling note: without S5-class T1 work, the decode t1 gap to
+Kakadu (1.5x) will not close — the MQ coder's serial (a, c) dependency is
+the wall, and items 1-2 mostly attack the multi-thread and lossy-path gaps.
+
 ## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
 
 Machine: AMD Ryzen 7 5700X (8C/16T), Windows 11, x86_64. Kakadu **8.4.1**
