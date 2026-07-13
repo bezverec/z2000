@@ -3,6 +3,7 @@
 zig-out/
 
 # Generated smoke/benchmark inputs and outputs.
+.bench/
 bench-*
 roundtrip-*
 sample-rgb.*

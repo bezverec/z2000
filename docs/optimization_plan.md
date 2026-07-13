@@ -3,6 +3,8 @@
 Companion to the "Performance" section of `docs/roadmap.md` and the
 "Performance Notes" in `README.md`. This file defines the measured baseline,
 the benchmark methodology every change must pass, and the prioritized backlog.
+The SIMD-specific campaign (remaining scalar loops, lane-width audit, ISA
+policy) lives in `docs/simd_plan.md` and inherits this file's keep rule.
 The campaign goal, in order: (1) beat Grok at equal thread counts on the
 archival profile, (2) beat Kakadu once it is installed on the benchmark
 machine.
