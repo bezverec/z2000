@@ -127,6 +127,7 @@ pub const TemporaryStats = struct {
     width: usize,
     height: usize,
     bit_depth: u8,
+    component_count: u16 = 3,
     levels: u8,
     layers: u16,
     code_block_style: ebcot.CodeBlockStyle = .{},
@@ -1100,11 +1101,12 @@ pub const StrictPacketBlock = struct {
 
 pub const StrictPacketBlockCatalog = struct {
     allocator: std.mem.Allocator = undefined,
+    component_count: u16 = 3,
     components: [3][]StrictPacketBlock = [_][]StrictPacketBlock{&.{}} ** 3,
     payloads: [3][]u8 = [_][]u8{&.{}} ** 3,
 
     pub fn deinit(self: *StrictPacketBlockCatalog) void {
-        for (0..3) |component| {
+        for (0..self.component_count) |component| {
             if (self.components[component].len > 0) self.allocator.free(self.components[component]);
             if (self.payloads[component].len > 0) self.allocator.free(self.payloads[component]);
         }
@@ -1335,10 +1337,16 @@ const StrictComponentAssemblySet = struct {
     assemblies: [3]StrictComponentAssembly = undefined,
     initialized: usize = 0,
 
-    fn init(allocator: std.mem.Allocator, block_count: usize, use_component_payloads: bool) !StrictComponentAssemblySet {
+    fn init(
+        allocator: std.mem.Allocator,
+        component_count: u16,
+        block_count: usize,
+        use_component_payloads: bool,
+    ) !StrictComponentAssemblySet {
+        if (component_count != 1 and component_count != 3) return CodestreamError.UnsupportedPayload;
         var set = StrictComponentAssemblySet{};
         errdefer set.deinit();
-        inline for (0..3) |component| {
+        for (0..component_count) |component| {
             set.assemblies[component] = try StrictComponentAssembly.init(allocator, block_count, use_component_payloads);
             set.initialized += 1;
         }
@@ -1358,17 +1366,23 @@ const StrictRpclImage = struct {
 
 const RpclBlockIndex = struct {
     allocator: std.mem.Allocator,
+    component_count: u16,
     resolution_offsets: [33]usize,
     resolution_count: u8,
     cells: []RpclBlockIndexCell,
 
-    fn init(allocator: std.mem.Allocator, plan: packet_plan.Plan) !RpclBlockIndex {
+    fn init(allocator: std.mem.Allocator, plan: packet_plan.Plan, component_count: u16) !RpclBlockIndex {
+        if (component_count != 1 and component_count != 3) return CodestreamError.UnsupportedPayload;
         var resolution_offsets: [33]usize = [_]usize{0} ** 33;
         var cell_count: usize = 0;
         var resolution_index: usize = 0;
         while (resolution_index < plan.resolution_count) : (resolution_index += 1) {
             resolution_offsets[resolution_index] = cell_count;
-            const resolution_cells = try std.math.mul(usize, @as(usize, @intCast(plan.resolutions[resolution_index].precincts)), 3);
+            const resolution_cells = try std.math.mul(
+                usize,
+                @as(usize, @intCast(plan.resolutions[resolution_index].precincts)),
+                component_count,
+            );
             cell_count = try std.math.add(usize, cell_count, resolution_cells);
         }
 
@@ -1376,6 +1390,7 @@ const RpclBlockIndex = struct {
         for (cells) |*entry| entry.* = .{};
         return .{
             .allocator = allocator,
+            .component_count = component_count,
             .resolution_offsets = resolution_offsets,
             .resolution_count = plan.resolution_count,
             .cells = cells,
@@ -1389,16 +1404,16 @@ const RpclBlockIndex = struct {
     }
 
     fn cell(self: *RpclBlockIndex, resolution: u8, precinct_index: u64, component: u16) !*RpclBlockIndexCell {
-        if (resolution >= self.resolution_count or component >= 3) return CodestreamError.InvalidCodestream;
-        const offset = try std.math.add(usize, self.resolution_offsets[resolution], try std.math.mul(usize, @as(usize, @intCast(precinct_index)), 3));
+        if (resolution >= self.resolution_count or component >= self.component_count) return CodestreamError.InvalidCodestream;
+        const offset = try std.math.add(usize, self.resolution_offsets[resolution], try std.math.mul(usize, @as(usize, @intCast(precinct_index)), self.component_count));
         const index = try std.math.add(usize, offset, @as(usize, @intCast(component)));
         if (index >= self.cells.len) return CodestreamError.InvalidCodestream;
         return &self.cells[index];
     }
 
     fn indexesFor(self: *const RpclBlockIndex, resolution: u8, precinct_index: u64, component: u16) ![]const usize {
-        if (resolution >= self.resolution_count or component >= 3) return CodestreamError.InvalidCodestream;
-        const offset = try std.math.add(usize, self.resolution_offsets[resolution], try std.math.mul(usize, @as(usize, @intCast(precinct_index)), 3));
+        if (resolution >= self.resolution_count or component >= self.component_count) return CodestreamError.InvalidCodestream;
+        const offset = try std.math.add(usize, self.resolution_offsets[resolution], try std.math.mul(usize, @as(usize, @intCast(precinct_index)), self.component_count));
         const index = try std.math.add(usize, offset, @as(usize, @intCast(component)));
         if (index >= self.cells.len) return CodestreamError.InvalidCodestream;
         return self.cells[index].indexes.items;
@@ -1872,6 +1887,102 @@ pub fn decodeLosslessTemporaryWithOptionsProfiled(
     return decodeLosslessTemporaryWithOptionsMeasured(allocator, bytes, options, timings);
 }
 
+pub fn decodeLosslessGray(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) !image.GrayImage {
+    return decodeLosslessGrayWithOptions(allocator, bytes, .{});
+}
+
+pub fn decodeLosslessGrayWithOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+) !image.GrayImage {
+    return decodeLosslessGrayWithOptionsMeasured(allocator, bytes, options, null);
+}
+
+pub fn decodeLosslessGrayWithOptionsProfiled(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    timings: *DecodeTimings,
+) !image.GrayImage {
+    timings.* = .{};
+    return decodeLosslessGrayWithOptionsMeasured(allocator, bytes, options, timings);
+}
+
+fn decodeLosslessGrayWithOptionsMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !image.GrayImage {
+    const total_start = monotonicNs();
+    defer {
+        if (timings) |t| t.total_ns = elapsedNs(total_start);
+    }
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
+
+    const metadata_start = monotonicNs();
+    const header = try readStrictCodestreamMetadata(allocator, bytes);
+    if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+    if (header.component_count != 1 or header.mct != .none or
+        header.transform != .reversible_5_3 or header.quantization != .none)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (header.tile_width != 0 or header.tile_height != 0) return CodestreamError.UnsupportedPayload;
+
+    const catalog_start = monotonicNs();
+    var catalog = try readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, timings);
+    defer catalog.deinit();
+    if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
+    if (catalog.component_count != 1) return CodestreamError.InvalidCodestream;
+
+    const payload_start = monotonicNs();
+    const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+        allocator,
+        header.width,
+        header.height,
+        catalog,
+        0,
+        options,
+        timings,
+    );
+    defer allocator.free(coefficients);
+    if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
+
+    const wavelet_start = monotonicNs();
+    var workspace = try wavelet_int.Workspace.init(allocator, @max(header.width, header.height));
+    defer workspace.deinit();
+    try wavelet_int.inverse53WithWorkspace(
+        &workspace,
+        coefficients,
+        header.width,
+        header.height,
+        header.levels,
+    );
+    if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
+
+    const samples = try allocator.alloc(u16, coefficients.len);
+    errdefer allocator.free(samples);
+    const max_sample: i32 = if (header.bit_depth == 8) 255 else std.math.maxInt(u16);
+    const level_shift = @as(i32, 1) << @as(u5, @intCast(header.bit_depth - 1));
+    for (coefficients, samples) |coefficient, *sample| {
+        const value = coefficient + level_shift;
+        if (value < 0 or value > max_sample) return CodestreamError.InvalidCodestream;
+        sample.* = @intCast(value);
+    }
+    return .{
+        .allocator = allocator,
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .samples = samples,
+    };
+}
+
 fn decodeLosslessTemporaryWithOptionsMeasured(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -1899,6 +2010,7 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     const metadata_start = monotonicNs();
     const header = try readStrictCodestreamMetadata(allocator, bytes);
     if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+    if (header.component_count != 3) return CodestreamError.UnsupportedPayload;
 
     // Multi-tile headers carry the real SIZ tile dimensions (single-tile
     // metadata leaves them zero); route them through the per-tile decode.
@@ -2071,6 +2183,7 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
         .width = header.width,
         .height = header.height,
         .bit_depth = header.bit_depth,
+        .component_count = header.component_count,
         .levels = header.levels,
         .layers = header.layers,
         .block_width = header.block_width,
@@ -2117,6 +2230,7 @@ fn analyzeStrictMultiTilePacketStats(
         .width = header.width,
         .height = header.height,
         .bit_depth = header.bit_depth,
+        .component_count = header.component_count,
         .levels = header.levels,
         .layers = header.layers,
         .block_width = header.block_width,
@@ -2204,7 +2318,10 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
     if (timings) |t| t.packet_catalog_header_ns += elapsedNs(header_start);
 
     const finalize_start = monotonicNs();
-    var build = try strictPacketBlockCatalogFromAssembliesChecked(allocator, &assemblies.assemblies);
+    var build = try strictPacketBlockCatalogFromAssembliesChecked(
+        allocator,
+        assemblies.assemblies[0..assemblies.initialized],
+    );
     errdefer build.catalog.deinit();
     if (build.stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
     if (timings) |t| t.packet_catalog_finalize_ns += elapsedNs(finalize_start);
@@ -2219,6 +2336,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var width: usize = 0;
     var height: usize = 0;
     var bit_depth: u8 = 0;
+    var component_count: u16 = 0;
     var levels: u8 = 0;
     var layers: u16 = 0;
     var block_width: u16 = 0;
@@ -2287,9 +2405,9 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             const xtosiz = readU32Be(segment, 26);
             const ytosiz = readU32Be(segment, 30);
             if (xsiz <= xosiz or ysiz <= yosiz) return CodestreamError.InvalidCodestream;
-            const components = readU16Be(segment, 34);
-            if (components != 3) return CodestreamError.UnsupportedPayload;
-            if (segment.len != 36 + @as(usize, components) * 3) return CodestreamError.InvalidCodestream;
+            component_count = readU16Be(segment, 34);
+            if (component_count != 1 and component_count != 3) return CodestreamError.UnsupportedPayload;
+            if (segment.len != 36 + @as(usize, component_count) * 3) return CodestreamError.InvalidCodestream;
             width = xsiz - xosiz;
             height = ysiz - yosiz;
             if (xtsiz == 0 or ytsiz == 0) return CodestreamError.InvalidCodestream;
@@ -2310,7 +2428,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             bit_depth = (segment[36] & 0x7f) + 1;
             if (bit_depth != 8 and bit_depth != 16) return CodestreamError.UnsupportedPayload;
             var component_index: usize = 0;
-            while (component_index < components) : (component_index += 1) {
+            while (component_index < component_count) : (component_index += 1) {
                 const component_offset = 36 + component_index * 3;
                 const ssiz = segment[component_offset];
                 if ((ssiz & 0x80) != 0) return CodestreamError.UnsupportedPayload;
@@ -2408,7 +2526,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             // Ccoc(1) Scoc(1) SPcoc(NL,xcb,ycb,cblk,transform,precincts).
             if (!saw_cod) return CodestreamError.InvalidCodestream;
             if (segment.len < 3) return CodestreamError.InvalidCodestream;
-            if (segment[0] >= 3) return CodestreamError.UnsupportedPayload;
+            if (segment[0] >= component_count) return CodestreamError.UnsupportedPayload;
             if ((segment[1] & ~@as(u8, 0x01)) != 0) return CodestreamError.InvalidCodestream;
             if ((segment[1] & 0x01) != (cod_scod & 0x01)) return CodestreamError.UnsupportedPayload;
             try validateStrictCocCodingPayload(segment[2..], segment[1]);
@@ -2430,7 +2548,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             // (the signalled-Mb decode path consumes whichever values win).
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
             if (segment.len < 1) return CodestreamError.InvalidCodestream;
-            if (segment[0] >= 3) return CodestreamError.UnsupportedPayload;
+            if (segment[0] >= component_count) return CodestreamError.UnsupportedPayload;
             const qcc_component = segment[0];
             const qcc_info = try validateStrictQcdSegment(segment[1..], bit_depth, levels, parsed_transform);
             if (qcc_component_seen[qcc_component]) return CodestreamError.InvalidCodestream;
@@ -2454,7 +2572,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             };
         } else if (marker == @intFromEnum(Marker.poc)) {
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
-            poc.appendSegment(allocator, &poc_records, segment, 3, levels + 1, layers) catch |err| switch (err) {
+            poc.appendSegment(allocator, &poc_records, segment, component_count, levels + 1, layers) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
@@ -2470,6 +2588,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     if (!saw_siz or !saw_cod or !saw_qcd or width == 0 or height == 0 or layers == 0) {
         return CodestreamError.InvalidCodestream;
     }
+    if (component_count == 1 and parsed_mct != .none) return CodestreamError.UnsupportedPayload;
     if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
 
     if (coc_payload_first.len != 0) {
@@ -2480,8 +2599,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         // (Kakadu's uniform per-component Cmodes signalling).
         const spcoc = coc_payload_first[1..];
         if (!std.mem.eql(u8, spcoc, cod_coding)) {
-            if (!coc_component_seen[0] or !coc_component_seen[1] or !coc_component_seen[2]) {
-                return CodestreamError.UnsupportedPayload;
+            for (coc_component_seen[0..component_count]) |seen| {
+                if (!seen) return CodestreamError.UnsupportedPayload;
             }
             if (spcoc.len != cod_coding.len or spcoc.len < 5) return CodestreamError.UnsupportedPayload;
             for (spcoc, cod_coding, 0..) |coc_byte, cod_byte, index| {
@@ -2498,8 +2617,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         // consumes arbitrary legal values (Kakadu's per-component Qguard
         // signalling leaves the QCD at its default).
         if (!std.mem.eql(u8, qcc_payload_first, qcd_payload)) {
-            if (!qcc_component_seen[0] or !qcc_component_seen[1] or !qcc_component_seen[2]) {
-                return CodestreamError.UnsupportedPayload;
+            for (qcc_component_seen[0..component_count]) |seen| {
+                if (!seen) return CodestreamError.UnsupportedPayload;
             }
             qcd_band_count = qcc_override_info.bands;
             parsed_quantization = qcc_override_info.quantization;
@@ -2534,6 +2653,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         null;
     defer if (ppm_headers) |*headers| headers.deinit();
     if (!grid.isSingleTile()) {
+        if (component_count != 3) return CodestreamError.UnsupportedPayload;
         // Multi-tile: validate one-part tiles or PLT-backed RPCL resolution
         // divisions, per-tile packet plans, TLM cross-check, and the same
         // geometry envelope the encoder enforces. The per-tile
@@ -2582,6 +2702,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                     allocator,
                     parsed_progression,
                     tile_plan,
+                    component_count,
                     layers,
                     if (poc_records.items.len == 0) null else poc_records.items,
                     tile_poc_records[tile_index].items,
@@ -2620,6 +2741,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .width = width,
             .height = height,
             .bit_depth = bit_depth,
+            .component_count = component_count,
             .levels = levels,
             .layers = layers,
             .progression = parsed_progression,
@@ -2651,7 +2773,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .packet_count = total_packets,
         };
     }
-    const plan = try makePacketPlan(width, height, levels, options);
+    const plan = try makePacketPlanForComponents(width, height, levels, component_count, options);
     const tile_part_packets = try readStrictTilePartPacketPlan(
         allocator,
         bytes,
@@ -2659,7 +2781,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         if (saw_tlm) tlm_entries.items else null,
         if (ppm_headers) |headers| headers else null,
         .{
-            .component_count = 3,
+            .component_count = component_count,
             .resolution_count = levels + 1,
             .layer_count = layers,
         },
@@ -2671,6 +2793,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .width = width,
         .height = height,
         .bit_depth = bit_depth,
+        .component_count = component_count,
         .levels = levels,
         .layers = layers,
         .progression = parsed_progression,
@@ -3281,7 +3404,7 @@ fn validateStrictRpclPacketsMatchTemporary(
         return .{};
     }
 
-    var actual = try readStrictSodRpclPacketStream(allocator, bytes);
+    var actual = try readStrictSodRpclPacketStream(allocator, bytes, 3);
     defer actual.deinit();
     const sod = PacketStreamInfo{
         .packets = @intCast(actual.packet_lengths.len),
@@ -3339,7 +3462,7 @@ fn decodeStrictRpclImageWithTemporaryMetadata(
     defer expected.deinit();
     if (expected.packet_lengths.len == 0) return null;
 
-    var actual = try readStrictSodRpclPacketStream(allocator, bytes);
+    var actual = try readStrictSodRpclPacketStream(allocator, bytes, 3);
     defer actual.deinit();
     if (!std.mem.eql(u32, expected.packet_lengths, actual.packet_lengths)) {
         return CodestreamError.InvalidCodestream;
@@ -3559,7 +3682,7 @@ fn decodeStrictRpclImageFromPackets(
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
     try validateTemporaryCatalogsMatchCodeBlocks(catalogs, blocks);
-    var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
+    var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.component_count, header.levels, bands, blocks);
     defer rpcl_index.deinit();
 
     if (actual.packet_lengths.len != header.packet_count) return CodestreamError.InvalidCodestream;
@@ -3785,7 +3908,7 @@ fn auditStrictPacketCatalogHeaders(
     var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, &audit);
     defer assemblies.deinit();
 
-    const assembly_stats = try strictAssemblyStats(assemblies.assemblies);
+    const assembly_stats = try strictAssemblyStats(assemblies.assemblies[0..assemblies.initialized]);
     if (assembly_stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
     audit.assembled_blocks = assembly_stats.blocks;
     audit.assembled_bytes = assembly_stats.bytes;
@@ -3806,12 +3929,17 @@ fn assembleStrictPacketCatalogHeaders(
     const blocks = try makeCodeBlocksForPacketPlan(allocator, bands, header.block_width, header.block_height, plan);
     defer allocator.free(blocks);
 
-    var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
+    var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.component_count, header.levels, bands, blocks);
     defer rpcl_index.deinit();
 
-    var assemblies = try StrictComponentAssemblySet.init(allocator, blocks.len, header.layers == 1);
+    var assemblies = try StrictComponentAssemblySet.init(
+        allocator,
+        header.component_count,
+        blocks.len,
+        header.layers == 1,
+    );
     errdefer assemblies.deinit();
-    inline for (0..3) |component| {
+    for (0..header.component_count) |component| {
         try initializeStrictAssemblyGeometry(&assemblies.assemblies[component], bands, blocks, header);
     }
 
@@ -4044,7 +4172,7 @@ const StrictPacketBlockCatalogBuild = struct {
     stats: StrictAssemblyStats,
 };
 
-fn strictAssemblyStats(assemblies: [3]StrictComponentAssembly) !StrictAssemblyStats {
+fn strictAssemblyStats(assemblies: []const StrictComponentAssembly) !StrictAssemblyStats {
     var stats = StrictAssemblyStats{};
     for (assemblies) |assembly| {
         for (assembly.blocks) |block| {
@@ -4081,7 +4209,7 @@ fn codeBlockStyleForBand(style: ebcot.CodeBlockStyle, band_kind: subband.Kind) e
 
 fn strictPacketBlockCatalogFromAssemblies(
     allocator: std.mem.Allocator,
-    assemblies: *[3]StrictComponentAssembly,
+    assemblies: []StrictComponentAssembly,
 ) !StrictPacketBlockCatalog {
     const build = try strictPacketBlockCatalogFromAssembliesChecked(allocator, assemblies);
     return build.catalog;
@@ -4089,13 +4217,17 @@ fn strictPacketBlockCatalogFromAssemblies(
 
 fn strictPacketBlockCatalogFromAssembliesChecked(
     allocator: std.mem.Allocator,
-    assemblies: *[3]StrictComponentAssembly,
+    assemblies: []StrictComponentAssembly,
 ) !StrictPacketBlockCatalogBuild {
-    var catalog = StrictPacketBlockCatalog{ .allocator = allocator };
+    if (assemblies.len != 1 and assemblies.len != 3) return CodestreamError.UnsupportedPayload;
+    var catalog = StrictPacketBlockCatalog{
+        .allocator = allocator,
+        .component_count = @intCast(assemblies.len),
+    };
     errdefer catalog.deinit();
     var stats = StrictAssemblyStats{};
 
-    inline for (0..3) |component| {
+    for (0..assemblies.len) |component| {
         const assembly = &assemblies[component];
         var payload_total: usize = 0;
         for (assembly.blocks) |block| {
@@ -4785,7 +4917,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
             else => return CodestreamError.InvalidCodestream,
         }
     else
-        try buildStreamPacketSequence(allocator, progression, tile_plan, layers);
+        try buildStreamPacketSequence(allocator, progression, tile_plan, 3, layers);
     defer allocator.free(full_sequence);
     const sequence_end = try std.math.add(usize, span.first_packet, packet_capacity);
     if (sequence_end > full_sequence.len) return CodestreamError.InvalidCodestream;
@@ -4905,7 +5037,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
     const owned_entries = try entries.toOwnedSlice(allocator);
     errdefer allocator.free(owned_entries);
     if ((progression != .rpcl or poc_records != null) and span.tile_part_count == 1) {
-        try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, layers);
+        try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, 3, layers);
     }
     const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
     return .{
@@ -4980,7 +5112,7 @@ fn readStrictMultiTilePacketCatalogForTile(
     // join their parts in stream (progression) order first, so non-RPCL
     // sequences reorder here once the whole tile is assembled.
     if ((progression != .rpcl or poc_records != null) and part_count > 1) {
-        try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, layers);
+        try reorderStrictEntriesToRpcl(allocator, owned_entries, tile_plan, tile_header.component_count, layers);
     }
     const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
     return .{
@@ -5068,7 +5200,7 @@ fn readStrictMultiTileContext(
         .progression = header.progression,
     };
 
-    var main_header = try readStrictMainHeaderIndex(allocator, bytes);
+    var main_header = try readStrictMainHeaderIndex(allocator, bytes, header.component_count);
     errdefer main_header.deinit();
 
     const tile_count = std.math.cast(usize, grid.tileCount()) orelse return CodestreamError.UnsupportedPayload;
@@ -5160,7 +5292,10 @@ fn decodeStrictMultiTileImageMeasured(
         var audit = StrictPacketHeaderAudit{};
         var assemblies = try assembleStrictPacketCatalogHeaders(allocator, tile_header, catalog, &audit);
         defer assemblies.deinit();
-        const build = try strictPacketBlockCatalogFromAssembliesChecked(allocator, &assemblies.assemblies);
+        const build = try strictPacketBlockCatalogFromAssembliesChecked(
+            allocator,
+            assemblies.assemblies[0..assemblies.initialized],
+        );
         var block_catalog = build.catalog;
         defer block_catalog.deinit();
         if (build.stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
@@ -5530,7 +5665,7 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) ![]i32 {
-    if (component >= 3) return CodestreamError.InvalidCodestream;
+    if (component >= catalog.component_count) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
     const plane = try allocator.alloc(i32, pixels);
     errdefer allocator.free(plane);
@@ -5559,7 +5694,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     t1_stats: ?*ebcot.DecodePassStats,
     timings: ?*DecodeTimings,
 ) !void {
-    if (component >= 3) return CodestreamError.InvalidCodestream;
+    if (component >= catalog.component_count) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
     if (plane.len != pixels) return CodestreamError.InvalidCodestream;
 
@@ -6063,7 +6198,11 @@ fn validateDecodedRpclPacketBlocks(
     }
 }
 
-fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8) !RpclPacketStream {
+fn readStrictSodRpclPacketStream(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    component_count: u16,
+) !RpclPacketStream {
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
@@ -6073,7 +6212,7 @@ fn readStrictSodRpclPacketStream(allocator: std.mem.Allocator, bytes: []const u8
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
 
-    var main_header = try readStrictMainHeaderIndex(allocator, bytes);
+    var main_header = try readStrictMainHeaderIndex(allocator, bytes, component_count);
     defer main_header.deinit();
     var cursor = main_header.first_sot;
     var packet_sequence: u16 = 0;
@@ -6166,6 +6305,7 @@ fn buildStreamPacketSequence(
     allocator: std.mem.Allocator,
     progression: ProgressionOrder,
     plan: packet_plan.Plan,
+    component_count: u16,
     layers: u16,
 ) ![]packet_plan.Packet {
     switch (progression) {
@@ -6173,7 +6313,7 @@ fn buildStreamPacketSequence(
             const total = std.math.cast(usize, plan.packets) orelse return CodestreamError.InvalidCodestream;
             const packets = try allocator.alloc(packet_plan.Packet, total);
             errdefer allocator.free(packets);
-            var iterator = try StreamPacketIterator.init(progression, plan, 3, layers);
+            var iterator = try StreamPacketIterator.init(progression, plan, component_count, layers);
             var count: usize = 0;
             while (iterator.next()) |packet| {
                 if (count >= total) return CodestreamError.InvalidCodestream;
@@ -6183,11 +6323,11 @@ fn buildStreamPacketSequence(
             if (count != total) return CodestreamError.InvalidCodestream;
             return packets;
         },
-        .pcrl => return packet_plan.positionOrderedPackets(allocator, plan, 3, layers, .pcrl) catch |err| switch (err) {
+        .pcrl => return packet_plan.positionOrderedPackets(allocator, plan, component_count, layers, .pcrl) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => CodestreamError.InvalidCodestream,
         },
-        .cprl => return packet_plan.positionOrderedPackets(allocator, plan, 3, layers, .cprl) catch |err| switch (err) {
+        .cprl => return packet_plan.positionOrderedPackets(allocator, plan, component_count, layers, .cprl) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => CodestreamError.InvalidCodestream,
         },
@@ -6203,6 +6343,7 @@ fn reorderStrictEntriesToRpcl(
     allocator: std.mem.Allocator,
     entries: []StrictPacketEntry,
     plan: packet_plan.Plan,
+    component_count: u16,
     layers: u16,
 ) !void {
     const scratch = try allocator.alloc(StrictPacketEntry, entries.len);
@@ -6211,7 +6352,7 @@ fn reorderStrictEntriesToRpcl(
     defer allocator.free(seen);
     @memset(seen, false);
     for (entries) |entry| {
-        const sequence = packet_plan.rpclSequenceForPacket(plan, 3, layers, entry.packet) catch
+        const sequence = packet_plan.rpclSequenceForPacket(plan, component_count, layers, entry.packet) catch
             return CodestreamError.InvalidCodestream;
         const slot = std.math.cast(usize, sequence) orelse return CodestreamError.InvalidCodestream;
         if (slot >= entries.len or seen[slot]) return CodestreamError.InvalidCodestream;
@@ -6248,7 +6389,7 @@ const StrictStatefulPrecinctGroups = struct {
         errdefer allocator.free(bands);
         const blocks = try makeCodeBlocksForPacketPlan(allocator, bands, header.block_width, header.block_height, plan);
         errdefer allocator.free(blocks);
-        var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.levels, bands, blocks);
+        var rpcl_index = try buildRpclBlockIndex(allocator, plan, header.component_count, header.levels, bands, blocks);
         errdefer rpcl_index.deinit();
 
         const slots = try allocator.alloc(?Slot, rpcl_index.cells.len);
@@ -6277,12 +6418,18 @@ const StrictStatefulPrecinctGroups = struct {
     }
 
     fn slotIndex(self: *const StrictStatefulPrecinctGroups, packet: packet_plan.Packet) !usize {
-        if (packet.resolution >= self.rpcl_index.resolution_count or packet.component >= 3) {
+        if (packet.resolution >= self.rpcl_index.resolution_count or
+            packet.component >= self.rpcl_index.component_count)
+        {
             return CodestreamError.InvalidCodestream;
         }
         const base = self.rpcl_index.resolution_offsets[packet.resolution];
         const precinct = std.math.cast(usize, packet.precinct_index) orelse return CodestreamError.InvalidCodestream;
-        const offset = try std.math.add(usize, try std.math.mul(usize, precinct, 3), packet.component);
+        const offset = try std.math.add(
+            usize,
+            try std.math.mul(usize, precinct, self.rpcl_index.component_count),
+            packet.component,
+        );
         const index = try std.math.add(usize, base, offset);
         if (index >= self.slots.len) return CodestreamError.InvalidCodestream;
         return index;
@@ -6363,19 +6510,20 @@ fn buildStrictPacketSequence(
     allocator: std.mem.Allocator,
     progression: ProgressionOrder,
     plan: packet_plan.Plan,
+    component_count: u16,
     layers: u16,
     main_records: ?[]const poc.Record,
     tile_records: []const poc.Record,
 ) ![]packet_plan.Packet {
     if (main_records == null and tile_records.len == 0) {
-        return buildStreamPacketSequence(allocator, progression, plan, layers);
+        return buildStreamPacketSequence(allocator, progression, plan, component_count, layers);
     }
 
     var records: std.ArrayList(poc.Record) = .empty;
     defer records.deinit(allocator);
     if (main_records) |main| try records.appendSlice(allocator, main);
     try records.appendSlice(allocator, tile_records);
-    return poc.buildSequence(allocator, plan, 3, layers, records.items) catch |err| switch (err) {
+    return poc.buildSequence(allocator, plan, component_count, layers, records.items) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return CodestreamError.InvalidCodestream,
     };
@@ -6425,10 +6573,10 @@ fn readStrictSodPacketCatalog(
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
 
-    var main_header = try readStrictMainHeaderIndex(allocator, bytes);
+    var main_header = try readStrictMainHeaderIndex(allocator, bytes, header.component_count);
     defer main_header.deinit();
     const poc_limits = TilePartPocLimits{
-        .component_count = 3,
+        .component_count = header.component_count,
         .resolution_count = header.levels + 1,
         .layer_count = layers,
     };
@@ -6443,6 +6591,7 @@ fn readStrictSodPacketCatalog(
         allocator,
         progression,
         plan,
+        header.component_count,
         layers,
         main_header.poc_records,
         tile_poc_records.items,
@@ -6473,7 +6622,7 @@ fn readStrictSodPacketCatalog(
             const owned_entries = try entries.toOwnedSlice(allocator);
             errdefer allocator.free(owned_entries);
             if (progression != .rpcl or main_header.poc_records != null or tile_poc_records.items.len != 0) {
-                try reorderStrictEntriesToRpcl(allocator, owned_entries, plan, layers);
+                try reorderStrictEntriesToRpcl(allocator, owned_entries, plan, header.component_count, layers);
             }
             const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
             return .{
@@ -7080,7 +7229,12 @@ fn validateStrictSotSequence(
     }
 }
 
-fn readStrictMainHeaderIndex(allocator: std.mem.Allocator, bytes: []const u8) !StrictMainHeaderIndex {
+fn readStrictMainHeaderIndex(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    component_count: u16,
+) !StrictMainHeaderIndex {
+    if (component_count != 1 and component_count != 3) return CodestreamError.UnsupportedPayload;
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
@@ -7153,7 +7307,7 @@ fn readStrictMainHeaderIndex(allocator: std.mem.Allocator, bytes: []const u8) !S
         } else if (marker == @intFromEnum(Marker.poc)) {
             const levels = cod_levels orelse return CodestreamError.InvalidCodestream;
             const layers = cod_layers orelse return CodestreamError.InvalidCodestream;
-            poc.appendSegment(allocator, &poc_records, segment, 3, levels + 1, layers) catch |err| switch (err) {
+            poc.appendSegment(allocator, &poc_records, segment, component_count, levels + 1, layers) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
@@ -7499,6 +7653,7 @@ const TemporaryHeader = struct {
     width: usize,
     height: usize,
     bit_depth: u8,
+    component_count: u16 = 3,
     levels: u8,
     layers: u16,
     progression: ProgressionOrder = .rpcl,
@@ -8702,7 +8857,7 @@ fn appendRpclShadowStream(
     rpcl_stream: ?*RpclPacketStream,
 ) !void {
     const plan = try makePacketPlan(planes.width, planes.height, levels, options);
-    var rpcl_index = try buildRpclBlockIndex(allocator, plan, levels, bands, blocks);
+    var rpcl_index = try buildRpclBlockIndex(allocator, plan, 3, levels, bands, blocks);
     defer rpcl_index.deinit();
 
     var packet_bytes: std.ArrayList(u8) = .empty;
@@ -8792,11 +8947,12 @@ fn appendRpclShadowStream(
 fn buildRpclBlockIndex(
     allocator: std.mem.Allocator,
     plan: packet_plan.Plan,
+    component_count: u16,
     levels: u8,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
 ) !RpclBlockIndex {
-    var index = try RpclBlockIndex.init(allocator, plan);
+    var index = try RpclBlockIndex.init(allocator, plan, component_count);
     errdefer index.deinit();
 
     var resolution_index: u8 = 0;
@@ -8817,7 +8973,7 @@ fn buildRpclBlockIndex(
             defer allocator.free(selected);
 
             var component: u16 = 0;
-            while (component < 3) : (component += 1) {
+            while (component < component_count) : (component += 1) {
                 const cell = try index.cell(resolution_index, precinct_index, component);
                 try cell.indexes.appendSlice(allocator, selected);
             }
@@ -10076,7 +10232,7 @@ fn reorderPacketStreamFromRpcl(
     options: LosslessOptions,
 ) !void {
     const plan = try makePacketPlan(width, height, levels, options);
-    const sequence = try buildStreamPacketSequence(allocator, options.progression, plan, options.layers);
+    const sequence = try buildStreamPacketSequence(allocator, options.progression, plan, 3, options.layers);
     defer allocator.free(sequence);
     try reorderPacketStreamFromRpclSequence(allocator, stream, plan, options.layers, sequence);
 }

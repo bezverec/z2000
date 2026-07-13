@@ -5,7 +5,7 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
-### Grayscale JP2 Encode
+### Grayscale JP2 Encode And Strict Decode
 
 - Added a real one-component coefficient, ISO-MQ T1, T2 packet, and codestream
   path for unsigned 8/16-bit grayscale. The bounded profile is single-tile,
@@ -18,8 +18,15 @@ entries are grouped by development milestone rather than semantic version.
 - `tiff-to-jp2` now dispatches grayscale TIFF input, normalizes WhiteIsZero,
   preserves optional ICC metadata, and chooses no MCT unless the user supplied
   an explicit profile. OpenJPEG 2.5.4 and Grok 20.3.6 decode generated 8/16-bit
-  files pixel-exactly. z2000 strict wire decode remains RGB-only, so the full
-  Part 1 estimate stays conservatively at 97/100.
+  files pixel-exactly.
+- Generalized strict SIZ metadata, RPCL indexes, packet sequences, active
+  assemblies, block catalogs, and PLT-less reader state to one or three active
+  components. `decodeLosslessGray*` reconstructs single-tile reversible
+  grayscale through the block-level T1 scheduler and inverse 5/3;
+  `decode-temp-jp2` dispatches grayscale JP2 back to TIFF with ICC preservation.
+  z2000 decodes 8/16-bit output from OpenJPEG 2.5.4 and Grok 20.3.6
+  pixel-exactly, completing bidirectional live interop and moving the full Part
+  1 estimate from 97/100 to 98/100.
 
 ### Grayscale JP2 Metadata Foundation
 

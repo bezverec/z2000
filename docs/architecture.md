@@ -17,7 +17,10 @@ component-bounded `cdef`/COC/QCC validation. The single-tile reversible path
 now enters the shared ISO-MQ T1/T2 pipeline through a one-component packet
 scaffold and emits RPCL packets with PLT plus optional resolution tile-parts
 and TLM. Its local artifact oracle reconstructs 8/16-bit samples byte-exactly;
-the strict wire decoder is the remaining component-generic boundary.
+the strict SIZ/T2 block catalog now carries an active component count and
+reconstructs one-component wire payloads through the same block-level T1
+scheduler, inverse 5/3, and checked DC level shift. Fixed-capacity arrays retain
+the RGB hot-path layout while only one assembly is initialized for grayscale.
 
 The project is intentionally fail-closed. Profile options that would require
 payload behavior not implemented yet are rejected with `UnsupportedPayload`.

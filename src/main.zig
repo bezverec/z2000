@@ -577,27 +577,46 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     command_timings.jp2_read_ns = elapsedNs(read_start);
 
     const extract_start = monotonicNs();
+    const info = try jp2.parseInfo(bytes);
     const j2k = try jp2.extractCodestream(bytes);
     command_timings.codestream_extract_ns = elapsedNs(extract_start);
 
     var decode_timings = codestream.DecodeTimings{};
     const decode_start = monotonicNs();
-    var rgb = if (show_timings)
-        try codestream.decodeLosslessTemporaryWithOptionsProfiled(allocator, j2k, options, &decode_timings)
-    else
-        try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options);
-    defer rgb.deinit();
+    var decoded: tiff.DecodedImage = switch (info.components) {
+        1 => .{ .grayscale = if (show_timings)
+            try codestream.decodeLosslessGrayWithOptionsProfiled(allocator, j2k, options, &decode_timings)
+        else
+            try codestream.decodeLosslessGrayWithOptions(allocator, j2k, options) },
+        3 => .{ .rgb = if (show_timings)
+            try codestream.decodeLosslessTemporaryWithOptionsProfiled(allocator, j2k, options, &decode_timings)
+        else
+            try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options) },
+        else => return error.UnsupportedComponentCount,
+    };
+    defer decoded.deinit();
     command_timings.codestream_decode_ns = elapsedNs(decode_start);
 
     const icc_start = monotonicNs();
     if (try jp2.extractIccProfile(allocator, bytes)) |profile| {
-        if (rgb.icc_profile) |existing| allocator.free(existing);
-        rgb.icc_profile = profile;
+        switch (decoded) {
+            .rgb => |*rgb| {
+                if (rgb.icc_profile) |existing| allocator.free(existing);
+                rgb.icc_profile = profile;
+            },
+            .grayscale => |*gray| {
+                if (gray.icc_profile) |existing| allocator.free(existing);
+                gray.icc_profile = profile;
+            },
+        }
     }
     command_timings.icc_extract_ns = elapsedNs(icc_start);
 
     const write_start = monotonicNs();
-    try tiff.writeRgb(io, allocator, rgb, args[1]);
+    switch (decoded) {
+        .rgb => |rgb| try tiff.writeRgb(io, allocator, rgb, args[1]),
+        .grayscale => |gray| try tiff.writeGray(io, allocator, gray, args[1]),
+    }
     command_timings.tiff_write_ns = elapsedNs(write_start);
     command_timings.total_ns = command_timings.jp2_read_ns +
         command_timings.codestream_extract_ns +
@@ -606,8 +625,17 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         command_timings.tiff_write_ns;
 
     std.debug.print(
-        "decoded temporary JP2 payload {s} -> {s} ({}x{}, {} bits/channel, threads {})\n",
-        .{ args[0], args[1], rgb.width, rgb.height, rgb.bit_depth, options.threads },
+        "decoded JP2 {s} -> {s} ({}x{}, {} component{s}, {} bits/component, threads {})\n",
+        .{
+            args[0],
+            args[1],
+            info.width,
+            info.height,
+            info.components,
+            if (info.components == 1) "" else "s",
+            info.bits_per_component,
+            options.threads,
+        },
     );
     if (show_timings) {
         printDecodeTempJp2Timings(command_timings, decode_timings);
@@ -616,11 +644,13 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
 
 fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void {
     std.debug.print(
-        "JP2 temporary payload stats: {s}: {}x{}, {} bits/channel, levels {}, layers {}, block {}x{}, tile-parts {s}",
+        "JP2 payload stats: {s}: {}x{}, {} component{s}, {} bits/component, levels {}, layers {}, block {}x{}, tile-parts {s}",
         .{
             path,
             stats.width,
             stats.height,
+            stats.component_count,
+            if (stats.component_count == 1) "" else "s",
             stats.bit_depth,
             stats.levels,
             stats.layers,
@@ -694,9 +724,13 @@ fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void 
 
     const total = totalComponentStats(stats);
     printComponentStats("total", total);
-    printComponentStats("Y", stats.components[0]);
-    printComponentStats("Cb", stats.components[1]);
-    printComponentStats("Cr", stats.components[2]);
+    if (stats.component_count == 1) {
+        printComponentStats("Gray", stats.components[0]);
+    } else {
+        printComponentStats("Y", stats.components[0]);
+        printComponentStats("Cb", stats.components[1]);
+        printComponentStats("Cr", stats.components[2]);
+    }
 }
 
 fn tilePartDivisionLabel(value: ?u8) []const u8 {

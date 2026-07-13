@@ -36,7 +36,8 @@ roundtrips uncompressed 8/16-bit BlackIsZero or WhiteIsZero strips. The public
 `tiff-to-jp2` dispatches RGB or grayscale input. The grayscale branch
 normalizes WhiteIsZero, selects no MCT by default, and emits the bounded
 single-tile reversible 5/3/RPCL/ISO-MQ profile. Explicit incompatible options
-fail closed; z2000 strict decode is still RGB-only.
+fail closed. `decode-temp-jp2` dispatches one- or three-component JP2 output to
+the grayscale or RGB strict decoder and TIFF writer.
 
 Important `tiff-to-jp2` options:
 
@@ -221,6 +222,9 @@ Primary public types:
 Primary public functions:
 
 - `encodeLosslessGrayWithOptions(allocator, input, options)`
+- `decodeLosslessGray(allocator, codestream)`
+- `decodeLosslessGrayWithOptions(allocator, codestream, options)`
+- `decodeLosslessGrayWithOptionsProfiled(allocator, codestream, options, timings)`
 - `wrapRgbCodestream(allocator, input, codestream)`
 - `wrapGrayCodestream(allocator, input, codestream)`
 - `parseInfo(bytes)`

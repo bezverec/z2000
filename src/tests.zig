@@ -3880,7 +3880,6 @@ test "JP2 grayscale wrapper validates one-component metadata and polarity" {
         jp2.Jp2Error.UnsupportedProfile,
         jp2.wrapGrayCodestream(allocator, gray, mct_codestream),
     );
-
 }
 
 test "codestream encodes one-component grayscale ISO MQ profile" {
@@ -3930,6 +3929,50 @@ test "codestream encodes one-component grayscale ISO MQ profile" {
     try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
     try std.testing.expectEqualSlices(u8, encoded, try jp2.extractCodestream(wrapped));
 
+    var catalog = try codestream.readStrictPacketBlockCatalog(allocator, encoded);
+    defer catalog.deinit();
+    try std.testing.expectEqual(@as(u16, 1), catalog.component_count);
+    try std.testing.expect(catalog.components[0].len > 0);
+    try std.testing.expectEqual(@as(usize, 0), catalog.components[1].len);
+
+    var decoded = try codestream.decodeLosslessGrayWithOptions(
+        allocator,
+        encoded,
+        .{ .threads = 2 },
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, gray.samples, decoded.samples);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, encoded),
+    );
+
+    const samples16 = try allocator.alloc(u16, width * height);
+    defer allocator.free(samples16);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            samples16[y * width + x] = @intCast((x * 977 + y * 6151 + x * y * 37 + 19) & 0xffff);
+        }
+    }
+    const gray16 = image.GrayImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 16,
+        .samples = samples16,
+    };
+    const encoded16 = try codestream.encodeLosslessGrayWithOptions(allocator, gray16, .{
+        .levels = 3,
+        .mct = .none,
+        .block_width = 4,
+        .block_height = 4,
+    });
+    defer allocator.free(encoded16);
+    var decoded16 = try codestream.decodeLosslessGray(allocator, encoded16);
+    defer decoded16.deinit();
+    try std.testing.expectEqual(@as(u8, 16), decoded16.bit_depth);
+    try std.testing.expectEqualSlices(u16, gray16.samples, decoded16.samples);
+
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessGrayWithOptions(allocator, gray, .{ .levels = 3 }),
@@ -3938,6 +3981,67 @@ test "codestream encodes one-component grayscale ISO MQ profile" {
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessGrayWithOptions(allocator, gray, options),
+    );
+}
+
+test "grayscale strict decoder rejects malformed component and packet metadata" {
+    const allocator = std.testing.allocator;
+    const width = 17;
+    const height = 13;
+    const samples = try allocator.alloc(u16, width * height);
+    defer allocator.free(samples);
+    for (samples, 0..) |*sample, index| sample.* = @intCast((index * 43 + 17) & 0xff);
+
+    const gray = image.GrayImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const encoded = try codestream.encodeLosslessGrayWithOptions(allocator, gray, .{
+        .levels = 3,
+        .mct = .none,
+        .block_width = 4,
+        .block_height = 4,
+    });
+    defer allocator.free(encoded);
+
+    const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    const cod = findMarker(encoded, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const plt = findMarker(encoded, codestream.markerValue("plt")) orelse return error.MissingMarker;
+
+    const with_mct = try allocator.dupe(u8, encoded);
+    defer allocator.free(with_mct);
+    with_mct[cod + 8] = 1;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessGray(allocator, with_mct),
+    );
+
+    const with_two_components = try allocator.dupe(u8, encoded);
+    defer allocator.free(with_two_components);
+    writeU16BeTest(with_two_components, siz + 38, 2);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessGray(allocator, with_two_components),
+    );
+
+    const bad_plt = try allocator.dupe(u8, encoded);
+    defer allocator.free(bad_plt);
+    const plt_segment_length = readU16BeTest(bad_plt, plt + 2);
+    try std.testing.expect(plt_segment_length > 3);
+    const final_plt_byte = plt + 2 + plt_segment_length - 1;
+    bad_plt[final_plt_byte] ^= 1;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessGray(allocator, bad_plt),
+    );
+
+    try std.testing.expectEqual(@as(u16, codestream.markerValue("eoc")), readU16BeTest(encoded, encoded.len - 2));
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessGray(allocator, encoded[0 .. encoded.len - 2]),
     );
 }
 
@@ -14848,11 +14952,11 @@ test "strict SIZ marker reader rejects unsupported component layout" {
                 writeU16BeTest(corrupted, siz + 38, 4);
             }
         }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "grayscale component count before T1 support", .mutate = struct {
+        .{ .label = "grayscale component count with RGB-sized SIZ payload", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
                 writeU16BeTest(corrupted, siz + 38, 1);
             }
-        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "signed component", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
                 corrupted[siz + 40] = 0x87;

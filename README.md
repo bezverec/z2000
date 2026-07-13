@@ -9,7 +9,7 @@ implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
 of 2026-07-13, the narrow RGB lossless JP2 target is estimated at **100/100**;
-the broader JPEG2000 Part 1 codec family is estimated at **97/100**.
+the broader JPEG2000 Part 1 codec family is estimated at **98/100**.
 
 ## Features
 
@@ -19,8 +19,8 @@ the broader JPEG2000 Part 1 codec family is estimated at **97/100**.
 - JP2 output with strict codestream packet payloads and optional ICC
   preservation. The container boundary can also wrap and inspect unsigned
   one-component codestreams using enumerated grayscale `colr` (17). The narrow
-  single-tile reversible grayscale encode path carries real ISO-MQ T1/T2
-  payloads; component-generic strict wire decode remains staged.
+  single-tile reversible grayscale path carries real ISO-MQ T1/T2 payloads in
+  both encode and strict wire decode.
 - Lossless RGB path: RCT, reversible 5/3 DWT, RPCL and other bounded
   progression orders, quality layers, PLT/TLM, strict no-sidecar decode.
 - Lossy experimental path: ICT, irreversible 9/7 DWT, scalar-derived or
@@ -199,9 +199,9 @@ The production `tiff-to-jp2` path is deliberately narrow:
 The one-component CLI path is currently single-tile RPCL with reversible 5/3,
 ISO MQ, in-band packet headers, PLT, optional TLM/SOP/EPH, and either one tile
 part or `R` resolution tile-parts. OpenJPEG 2.5.4 and Grok 20.3.6 decode the
-8-bit and 16-bit output pixel-exactly. z2000's own strict JP2 decoder remains
-RGB-only until its packet catalog and reconstruction output become
-component-generic.
+8-bit and 16-bit output pixel-exactly; z2000 strict-decodes both references'
+grayscale output pixel-exactly too. Multi-tile grayscale and general or mixed
+component layouts remain fail-closed.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
 floating-point samples, extra alpha/sample channels, mixed bit depth, signed

@@ -7,20 +7,19 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 97/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 98/100 full** as of
 2026-07-13. First drafted at `ba66799`.
 
-## Path From 97 To 100 (2026-07-13 assessment)
+## Path From 98 To 100 (2026-07-13 assessment)
 
-The remaining three full-codec points are each a genuine vertical or a research
+The remaining two full-codec points are each a genuine vertical or a research
 effort, not an incremental gate. Tooling reality on the benchmark box was
 probed on 2026-07-12; findings inline. Ordered by *value per unit risk*.
 
 | Row | Gap | Size | Risk | Verifiable here? |
 | --- | --- | --- | --- | --- |
-| Containers 8→10 | **N6: component-generic pipeline** (grayscale/1-component then N-component, palette expansion) | LARGE (multi-PR, like the multi-tile campaign) | HIGH — reworks the `color.RctPlanes` y/cb/cr representation (87 call sites) the 100/100 narrow path rides on | Yes: TIFF grayscale I/O + OpenJPEG/Grok/Kakadu grayscale interop |
+| Containers 9→10 | **N6 remainder:** general/mixed component layouts, alpha, and palette expansion | LARGE (multi-PR, like the multi-tile campaign) | HIGH — broadens component metadata and output representation beyond the landed one-/three-component envelope | Yes: reference mixed-precision, alpha, and palette files |
 | Lossy 14→15 | **PCRD PSNR gap** (encoder distortion model); odd-origin 9/7 lifting is now landed | PCRD = research (0.7–1.8 dB vs OpenJPEG at matched bytes, `tools/pcrd_psnr_ladder.ps1`) | PCRD medium/uncertain (no guaranteed linear progress) | Yes: matched-byte ladder; odd-origin 9/7 is bidirectionally reference-relative within max byte diff 1 |
-| Containers 8→10 | mixed per-component precision (`BPCC`) + alpha channels | Medium; couples to N6's per-component depth work | Medium | Yes: reference grayscale/mixed-precision files |
 
 Recommended order when resuming the push: **N6** (biggest unlock but budget it as a
 multi-PR campaign that keeps the single-tile RGB path byte-identical at every
@@ -29,7 +28,7 @@ should be treated as research, measured against `pcrd_psnr_ladder.ps1`.
 
 ## Next Working Sequence (2026-07-12)
 
-Scorecard now **100/100 narrow, 97/100 full**. Packed PPM/PPT headers support
+Scorecard now **100/100 narrow, 98/100 full**. Packed PPM/PPT headers support
 all SOP/EPH combinations with ISO marker placement and checked length
 accounting; the 16-tile/48-part two-layer PPM smoke is pixel-exact through
 z2000, OpenJPEG, and Grok. The bounded multi-tile path has
@@ -449,13 +448,13 @@ format, codestream profile, and container semantics are explicit.
   one or three components, and the public single-tile grayscale encoder emits
   reversible 5/3 ISO-MQ RPCL packets with PLT, optional TLM/SOP/EPH, and `R`
   tile-parts. The CLI normalizes WhiteIsZero and OpenJPEG/Grok decode 8/16-bit
-  output pixel-exactly. The full score stays at 97/100 because z2000 strict
-  wire decode still rejects `Csiz=1`.
-- **What to add:** generalize strict SIZ/T2 block-catalog reconstruction and
-  decode output from fixed Y/Cb/Cr/RGB to one component, then add self-decode,
-  Kakadu/validator fixtures, and malformed one-component packet coverage.
-  General N-component, multi-tile grayscale, mixed-depth, and palette support
-  remain later stages.
+  output pixel-exactly. Strict SIZ/T2 catalogs carry one active assembly and
+  `decodeLosslessGray*` reconstructs 8/16-bit output through T1 and inverse 5/3;
+  z2000 also decodes OpenJPEG/Grok grayscale output pixel-exactly. This closes
+  the grayscale vertical and moves the full score to 98/100.
+- **What to add:** malformed one-component packet fixtures and a checked-in
+  independent corpus, then general N-component and multi-tile grayscale,
+  mixed-depth/BPCC, alpha, and palette support.
 
 ## Current Working Sequence (2026-07-07 docs sync)
 
