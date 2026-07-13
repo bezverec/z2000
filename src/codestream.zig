@@ -590,16 +590,49 @@ fn forwardIrreversibleQuantizedPlanes(
     levels: u8,
     options: LosslessOptions,
 ) !color.RctPlanes {
-    return forwardIrreversibleQuantizedPlanesWithQuantization(allocator, rgb, levels, options.quantization);
+    return forwardIrreversibleQuantizedPlanesForRegion(
+        allocator,
+        rgb,
+        levels,
+        options.quantization,
+        0,
+        0,
+        componentThreadCount(options),
+    );
 }
 
-fn forwardIrreversibleQuantizedPlanesWithQuantization(
-    allocator: std.mem.Allocator,
-    rgb: image.RgbImage,
+const IrreversibleForwardPlaneJob = struct {
+    plane: []f32,
+    quantized: []i32,
+    width: usize,
+    height: usize,
     levels: u8,
-    quantization: QuantizationStyle,
-) !color.RctPlanes {
-    return forwardIrreversibleQuantizedPlanesForRegion(allocator, rgb, levels, quantization, 0, 0);
+    x0: u32,
+    y0: u32,
+    bands: []const subband.Band,
+    deltas: []const f64,
+    result: anyerror!void = {},
+};
+
+fn irreversibleForwardPlaneWorker(job: *IrreversibleForwardPlaneJob) void {
+    job.result = irreversibleForwardPlane(job);
+}
+
+fn irreversibleForwardPlane(job: *IrreversibleForwardPlaneJob) anyerror!void {
+    const done = try wavelet.forward2DOrigin(
+        std.heap.smp_allocator,
+        job.plane,
+        job.width,
+        job.height,
+        job.levels,
+        .irreversible_9_7,
+        job.x0,
+        job.y0,
+    );
+    if (done != job.levels) return CodestreamError.InvalidCodestream;
+    for (job.bands, job.deltas) |band, delta| {
+        quantizeBandRegion(job.plane, job.quantized, job.width, band.rect, delta);
+    }
 }
 
 fn forwardIrreversibleQuantizedPlanesForRegion(
@@ -609,23 +642,10 @@ fn forwardIrreversibleQuantizedPlanesForRegion(
     quantization: QuantizationStyle,
     x0: u32,
     y0: u32,
+    thread_count: u8,
 ) !color.RctPlanes {
     var ict = try color.forwardIct(allocator, rgb);
     defer ict.deinit();
-
-    inline for (.{ ict.y, ict.cb, ict.cr }) |plane| {
-        const done = try wavelet.forward2DOrigin(
-            allocator,
-            plane,
-            ict.width,
-            ict.height,
-            levels,
-            .irreversible_9_7,
-            x0,
-            y0,
-        );
-        if (done != levels) return CodestreamError.InvalidCodestream;
-    }
 
     const x1 = std.math.add(u32, x0, std.math.cast(u32, ict.width) orelse return CodestreamError.ImageTooLarge) catch
         return CodestreamError.ImageTooLarge;
@@ -633,6 +653,15 @@ fn forwardIrreversibleQuantizedPlanesForRegion(
         return CodestreamError.ImageTooLarge;
     const bands = try subband.makeBandsForRegion(allocator, x0, y0, x1, y1, levels);
     defer allocator.free(bands);
+    const deltas = try allocator.alloc(f64, bands.len);
+    defer allocator.free(deltas);
+    for (bands, deltas) |band, *delta| {
+        delta.* = irreversibleBandDelta(
+            rgb.bit_depth,
+            band.kind,
+            try irreversibleBandStepSizeFor(quantization, rgb.bit_depth, band.kind, band.level, levels),
+        );
+    }
 
     const pixels = try std.math.mul(usize, ict.width, ict.height);
     const y = try allocator.alloc(i32, pixels);
@@ -642,16 +671,16 @@ fn forwardIrreversibleQuantizedPlanesForRegion(
     const cr = try allocator.alloc(i32, pixels);
     errdefer allocator.free(cr);
 
-    for (bands) |band| {
-        const delta = irreversibleBandDelta(
-            rgb.bit_depth,
-            band.kind,
-            try irreversibleBandStepSizeFor(quantization, rgb.bit_depth, band.kind, band.level, levels),
-        );
-        quantizeBandRegion(ict.y, y, ict.width, band.rect, delta);
-        quantizeBandRegion(ict.cb, cb, ict.width, band.rect, delta);
-        quantizeBandRegion(ict.cr, cr, ict.width, band.rect, delta);
-    }
+    // Each component's 9/7 DWT and deadzone quantization is independent, so
+    // the three planes run as component jobs (same pattern as the 5/3 path).
+    // The per-plane arithmetic is untouched: streams stay byte-identical to
+    // the serial order.
+    var jobs = [3]IrreversibleForwardPlaneJob{
+        .{ .plane = ict.y, .quantized = y, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+        .{ .plane = ict.cb, .quantized = cb, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+        .{ .plane = ict.cr, .quantized = cr, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+    };
+    try runComponentJobs(IrreversibleForwardPlaneJob, &jobs, thread_count, irreversibleForwardPlaneWorker);
 
     return .{
         .allocator = allocator,
@@ -681,6 +710,8 @@ fn buildIrreversibleQuantizedTile(
     const ctx: *const IrreversibleTileFrontEndContext = @ptrCast(@alignCast(context));
     var rgb_tile = try tile_grid.extractRgbTile(allocator, source, tile.rect);
     defer rgb_tile.deinit();
+    // Tiles already run on parallel tile workers; keep the per-plane stage
+    // serial here to avoid oversubscription.
     const planes = try forwardIrreversibleQuantizedPlanesForRegion(
         allocator,
         rgb_tile,
@@ -688,6 +719,7 @@ fn buildIrreversibleQuantizedTile(
         ctx.quantization,
         tile.rect.x0,
         tile.rect.y0,
+        1,
     );
     return .{ .tile = tile, .planes = planes };
 }
@@ -4834,7 +4866,13 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
 
     if (header.transform == .irreversible_9_7) {
-        return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, strict_planes, timings);
+        return decodeIrreversibleImageFromQuantizedPlanesMeasured(
+            allocator,
+            header,
+            strict_planes,
+            componentThreadCountFor(options.threads),
+            timings,
+        );
     }
 
     const wavelet_start = monotonicNs();
@@ -5375,13 +5413,47 @@ fn decodeIrreversibleImageFromQuantizedPlanes(
     header: TemporaryHeader,
     quantized: color.RctPlanes,
 ) !image.RgbImage {
-    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, null);
+    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, 1, null);
+}
+
+const IrreversibleInversePlaneJob = struct {
+    quantized: []const i32,
+    plane: []f32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    x0: u32,
+    y0: u32,
+    bands: []const subband.Band,
+    deltas: []const f64,
+    result: anyerror!void = {},
+};
+
+fn irreversibleInversePlaneWorker(job: *IrreversibleInversePlaneJob) void {
+    job.result = irreversibleInversePlane(job);
+}
+
+fn irreversibleInversePlane(job: *IrreversibleInversePlaneJob) anyerror!void {
+    for (job.bands, job.deltas) |band, delta| {
+        dequantizeBandRegion(job.quantized, job.plane, job.width, band.rect, delta);
+    }
+    try wavelet.inverse2DOrigin(
+        std.heap.smp_allocator,
+        job.plane,
+        job.width,
+        job.height,
+        job.levels,
+        .irreversible_9_7,
+        job.x0,
+        job.y0,
+    );
 }
 
 fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     quantized: color.RctPlanes,
+    thread_count: u8,
     timings: ?*DecodeTimings,
 ) !image.RgbImage {
     const pixels = try std.math.mul(usize, header.width, header.height);
@@ -5413,32 +5485,28 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     const cr_f = try allocator.alloc(f32, pixels);
     defer allocator.free(cr_f);
 
-    const wavelet_start = monotonicNs();
-    for (bands) |band| {
+    const deltas = try allocator.alloc(f64, bands.len);
+    defer allocator.free(deltas);
+    for (bands, deltas) |band, *delta| {
         const step = signalledHeaderBandStep(header, band.kind, band.level) orelse
             try irreversibleBandStepSizeFor(header.quantization, header.bit_depth, band.kind, band.level, header.levels);
-        const delta = irreversibleBandDelta(
+        delta.* = irreversibleBandDelta(
             header.bit_depth,
             band.kind,
             step,
         );
-        dequantizeBandRegion(quantized.y, y_f, header.width, band.rect, delta);
-        dequantizeBandRegion(quantized.cb, cb_f, header.width, band.rect, delta);
-        dequantizeBandRegion(quantized.cr, cr_f, header.width, band.rect, delta);
     }
 
-    inline for (.{ y_f, cb_f, cr_f }) |plane| {
-        try wavelet.inverse2DOrigin(
-            allocator,
-            plane,
-            header.width,
-            header.height,
-            header.levels,
-            .irreversible_9_7,
-            full_resolution.x0,
-            full_resolution.y0,
-        );
-    }
+    const wavelet_start = monotonicNs();
+    // Mirror of the forward path: dequantization and the inverse 9/7 DWT are
+    // independent per component, so the three planes run as component jobs
+    // with unchanged per-plane arithmetic.
+    var jobs = [3]IrreversibleInversePlaneJob{
+        .{ .quantized = quantized.y, .plane = y_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
+        .{ .quantized = quantized.cb, .plane = cb_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
+        .{ .quantized = quantized.cr, .plane = cr_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
+    };
+    try runComponentJobs(IrreversibleInversePlaneJob, &jobs, thread_count, irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     const ict = color.IctPlanes{

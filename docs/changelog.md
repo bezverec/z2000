@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Parallel 9/7 Component Pipeline
+
+- The irreversible encode pipeline (per-component 9/7 DWT + deadzone
+  quantization) and its decode mirror (dequantization + inverse 9/7 DWT) now
+  run the three components as parallel jobs on the existing component-job
+  infrastructure, exactly like the 5/3 path. Per-plane arithmetic is
+  untouched, so streams and decodes stay byte-identical; single-thread runs
+  keep the serial order. Multi-tile keeps this stage serial inside its
+  already-parallel tile workers.
+- Measured on M4 (hyperfine, warmup 2, 8 runs): lossy encode t10 -23.1%,
+  lossy decode t10 -23.9% on top of the S1 kernels; t1 and the lossless
+  archival profile are unchanged. Cumulative with S1, the lossy t10 profile
+  is ~44-46% faster than the pre-campaign baseline.
+
 ### Vectorized 9/7 Wavelet (SIMD Plan S1)
 
 - The irreversible 9/7 DWT now lifts on the line split into contiguous
