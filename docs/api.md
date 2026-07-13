@@ -36,6 +36,7 @@ Important `tiff-to-jp2` options:
 - `--tile W,H`
 - `--progression RPCL|LRCP|RLCP|PCRL|CPRL`
 - `--poc "RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;..."`
+- `--poc-location main|tile`
 - `--precincts "[256,256],[128,128]"`
 - `--block N`
 - `--layers N`
@@ -61,13 +62,15 @@ Supported public JP2 profiles are still narrow:
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution
-- checked main-header POC schedules on single- and multi-tile grids with one
+- checked main- or first-tile-part-header POC schedules on single- and multi-tile grids with one
   tile-part per tile, plus `R` parts when each resolution is contiguous, `L`
   parts when every quality layer is contiguous, and `C` parts when each RGB
   component is contiguous; `P` parts require the canonical PCRL position
   sequence while allowing packet reordering inside each position. The writer
-  emits the requested order
-  independently for each tile and strict decode normalizes each catalog to RPCL
+  emits the requested order independently for each tile and strict decode
+  appends tile-local records after inherited main-header records before
+  normalizing each catalog to RPCL. `--poc-location tile` emits the marker in
+  `TPsot=0`, updates `Psot` and TLM, and is not combined with PPM/PPT
 - a bounded multi-tile lossless envelope: RCT/5-3, one or more quality layers
   for all five progression orders, deterministic row-major encode, reordered
   foreign tile decode, global cross-tile PCRD, and PLT-backed `R`/RPCL,
@@ -171,13 +174,14 @@ Notes:
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
-- Strict decode accepts checked main-header `POC` schedules on single- and
+- Strict decode accepts checked main-header and first-tile-part-header `POC` schedules on single- and
   multi-tile grids with one part per tile or compatible `R`/`L`/`C`/`P` parts,
   composes overlapping progression intervals without duplicate packets, and
   normalizes the resulting block catalog back to its internal RPCL grouping.
   `LosslessOptions.poc_records` writes the same bounded schedule independently
-  for every tile. POC markers located inside tile-part headers remain
-  fail-closed; the public writer emits POC only in the main header.
+  for every tile. `LosslessOptions.poc_in_tile_header` selects `TPsot=0`
+  instead of the default main-header placement; later tile-part POC markers
+  fail closed.
 - `DecodeTimings` reports the strict decode split for metadata, packet catalog,
   T1 block payload, inverse DWT, and inverse MCT. The packet catalog timing is
   further split into SOD/PLT scan, packet-header assembly, and final block

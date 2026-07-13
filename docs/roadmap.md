@@ -74,12 +74,11 @@ interop gate.
 
 ## Next Implementation Slice
 
-1. Extend the landed bounded main-header POC writer/reader to POC markers in
-   tile-part headers. Main-header schedules now cover one part and compatible
-   `R`/`L`/`C`/`P` divisions; dense `R`/`C`/`P` profiles are lossless through
-   all four decoders. Grok 20.3.6 still misdecodes the tested LRCP-to-RPCL `L`
-   schedule from both z2000 and Kakadu. Keep tile-part-local POC fail-closed
-   until marker precedence and per-tile state changes roundtrip independently.
+1. Extend packed-header breadth to independently verified SOP/EPH combinations.
+   Main- and first-tile-part-header POC now share the checked scheduler;
+   `TPsot=0` placement, inherited-record ordering, `Psot`/TLM accounting, and
+   later-part rejection are covered locally, while OpenJPEG/Grok decode the
+   16-tile/48-part `R` output losslessly and jpylyzer reports valid JP2.
 2. Obtain or generate an independent foreign multi-tile/multi-part PPM fixture
    and isolate Grok 20.3.6's remaining mismatch; z2000/OpenJPEG/Kakadu already
    agree on the PLT-less output. Keep SOP/EPH combinations fail-closed until

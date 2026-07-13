@@ -92,7 +92,7 @@ Single-tile behavior stays **byte-identical** — every increment keeps
 
 ### 3.1 Current POC extension
 
-Main-header POC now composes one checked, duplicate-free schedule per tile.
+Main-header or first-tile-part-header POC composes one checked, duplicate-free schedule per tile.
 The public writer/strict reader supports one part per tile, `R` parts when each
 resolution is contiguous, `L` parts when each quality layer is contiguous,
 `C` parts when each RGB component is contiguous, and `P` parts when the
@@ -101,7 +101,9 @@ Inclusion/zero-bitplane tag trees and `numlenbits` remain
 tile-local and persist across part boundaries. Dense regressions use 8x8
 precincts and 4x4 blocks; z2000/OpenJPEG/Kakadu decode `L` losslessly and all
 four decoders, including Grok, decode dense `R`, `C`, and `P` losslessly.
-POC marker segments inside tile-part headers remain fail-closed.
+Tile-header records append after inherited main-header records. The writer can
+place the same schedule in `TPsot=0` of every tile with matching `Psot`/TLM;
+strict decode accepts per-tile schedules there and rejects POC in later parts.
 
 ## 4. Staged plan (each stage = one PR, green tests, narrow path untouched)
 
