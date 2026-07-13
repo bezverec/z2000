@@ -5,6 +5,45 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Grayscale JP2 Encode
+
+- Added a real one-component coefficient, ISO-MQ T1, T2 packet, and codestream
+  path for unsigned 8/16-bit grayscale. The bounded profile is single-tile,
+  reversible 5/3, no-MCT, RPCL, in-band packet headers, PLT, optional
+  TLM/SOP/EPH, and either one tile-part or resolution-ordered `R` tile-parts.
+- Generalized packet scaffolds, encoded catalogs, packet ordering, and
+  validation from fixed RGB components to checked one- or three-component
+  operation while preserving the existing RGB defaults. A local artifact
+  oracle roundtrips both bit depths exactly through MQ and inverse 5/3.
+- `tiff-to-jp2` now dispatches grayscale TIFF input, normalizes WhiteIsZero,
+  preserves optional ICC metadata, and chooses no MCT unless the user supplied
+  an explicit profile. OpenJPEG 2.5.4 and Grok 20.3.6 decode generated 8/16-bit
+  files pixel-exactly. z2000 strict wire decode remains RGB-only, so the full
+  Part 1 estimate stays conservatively at 97/100.
+
+### Grayscale JP2 Metadata Foundation
+
+- Added the second component-generic foundation slice. `wrapGrayCodestream`
+  writes checked one-component `ihdr` metadata with enumerated grayscale
+  `colr` (17) or restricted ICC, while `parseInfo` accepts matching unsigned
+  8/16-bit grayscale codestream metadata. Identity grayscale `cdef` is accepted;
+  mismatched color spaces, MCT, component indexes, and WhiteIsZero direct wraps
+  fail closed. SIZ writing and packet planning now have component-count-generic
+  internal cores without changing the RGB call path or ISO score (97/100).
+  Live metadata smokes accept grayscale JP2 output from OpenJPEG and Grok.
+
+### Grayscale TIFF Foundation
+
+- Added owned `GrayImage` storage and a tagged `DecodedImage` TIFF surface.
+  One shared checked parser now handles uncompressed chunky RGB plus 8/16-bit
+  BlackIsZero and WhiteIsZero grayscale strips while preserving optional ICC
+  bytes; strict RGB/gray adapters reject the opposite photometric profile.
+- Added a grayscale TIFF writer with checked raster sizing, SIMD-covered 8-bit
+  narrowing, 16-bit little-endian output, polarity preservation, and optional
+  ICC storage. `tiff-info` reports either RGB or grayscale metadata. Focused
+  roundtrip and malformed-tag tests established the input boundary later used
+  by the one-component encode path. ISO score remained 97/100 at this stage.
+
 ### Packed Packet Boundary Markers
 
 - Extended both `--ppt` and `--ppm` through every SOP/EPH combination on the

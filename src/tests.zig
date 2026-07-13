@@ -45,6 +45,38 @@ const minimal_jp2_codestream = [_]u8{
     0xff, 0xd9, // EOC
 };
 
+const minimal_gray_jp2_codestream = [_]u8{
+    0xff, 0x4f, // SOC
+    0xff, 0x51, // SIZ
+    0x00, 0x29, // Lsiz
+    0x00, 0x00, // Rsiz
+    0x00, 0x00, 0x00, 0x02, // Xsiz
+    0x00, 0x00, 0x00, 0x01, // Ysiz
+    0x00, 0x00, 0x00, 0x00, // XOsiz
+    0x00, 0x00, 0x00, 0x00, // YOsiz
+    0x00, 0x00, 0x00, 0x02, // XTsiz
+    0x00, 0x00, 0x00, 0x01, // YTsiz
+    0x00, 0x00, 0x00, 0x00, // XTOsiz
+    0x00, 0x00, 0x00, 0x00, // YTOsiz
+    0x00, 0x01, // Csiz
+    0x07, 0x01, 0x01, // 8-bit unsigned, no subsampling
+    0xff, 0x52, // COD
+    0x00, 0x0c, // Lcod
+    0x00, // Scod
+    0x02, // RPCL
+    0x00, 0x01, // one layer
+    0x00, // no MCT
+    0x00, // zero decomposition levels
+    0x04, 0x04, // 64x64 code-block
+    0x00, // code-block style
+    0x01, // reversible 5/3
+    0xff, 0x5c, // QCD
+    0x00, 0x04, // Lqcd
+    0x40, // two guard bits, no quantization
+    0x40, // LL exponent for 8-bit input
+    0xff, 0xd9, // EOC
+};
+
 test "PPM framing joins marker boundaries and preserves tile-part groups" {
     const allocator = std.testing.allocator;
     const groups = [_][]const u8{
@@ -3348,6 +3380,117 @@ test "TIFF writer roundtrips optimized 8-bit and 16-bit raster paths" {
     try std.testing.expectEqualSlices(u16, samples16, decoded16.samples);
 }
 
+test "TIFF grayscale writer roundtrips BlackIsZero and WhiteIsZero rasters" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [2][96]u8 = undefined;
+    const path8 = try std.fmt.bufPrint(&path_buffer[0], ".zig-cache/tmp/{s}/gray8.tif", .{tmp.sub_path});
+    const path16 = try std.fmt.bufPrint(&path_buffer[1], ".zig-cache/tmp/{s}/gray16.tif", .{tmp.sub_path});
+
+    const samples8 = try allocator.dupe(u16, &.{ 0, 17, 63, 127, 191, 255 });
+    defer allocator.free(samples8);
+    const gray8 = image.GrayImage{
+        .allocator = allocator,
+        .width = 3,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = samples8,
+    };
+    try tiff.writeGray(io, allocator, gray8, path8);
+
+    var decoded8 = try tiff.readGray(io, allocator, path8);
+    defer decoded8.deinit();
+    try std.testing.expect(!decoded8.white_is_zero);
+    try std.testing.expectEqualSlices(u16, samples8, decoded8.samples);
+
+    var generic8 = try tiff.read(io, allocator, path8);
+    defer generic8.deinit();
+    switch (generic8) {
+        .grayscale => |gray| try std.testing.expectEqualSlices(u16, samples8, gray.samples),
+        .rgb => return error.TestUnexpectedResult,
+    }
+
+    const samples16 = try allocator.dupe(u16, &.{ 0x0000, 0x0102, 0x7fff, 0xabcd, 0xff00, 0xffff });
+    defer allocator.free(samples16);
+    const icc = try allocator.dupe(u8, "synthetic grayscale ICC");
+    defer allocator.free(icc);
+    const gray16 = image.GrayImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 3,
+        .bit_depth = 16,
+        .samples = samples16,
+        .white_is_zero = true,
+        .icc_profile = icc,
+    };
+    try tiff.writeGray(io, allocator, gray16, path16);
+
+    var decoded16 = try tiff.readGray(io, allocator, path16);
+    defer decoded16.deinit();
+    try std.testing.expect(decoded16.white_is_zero);
+    try std.testing.expectEqualSlices(u16, samples16, decoded16.samples);
+    try std.testing.expectEqualSlices(u8, icc, decoded16.icc_profile.?);
+}
+
+test "TIFF grayscale adapters and writer fail closed" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/gray-invalid.tif", .{tmp.sub_path});
+    const samples = try allocator.dupe(u16, &.{ 0, 1, 2, 3, 256, 5, 6, 7 });
+    defer allocator.free(samples);
+    const invalid = image.GrayImage{
+        .allocator = allocator,
+        .width = 8,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.writeGray(io, allocator, invalid, path));
+
+    const valid_samples = try allocator.dupe(u16, &.{ 0, 64, 128, 255 });
+    defer allocator.free(valid_samples);
+    const valid = image.GrayImage{
+        .allocator = allocator,
+        .width = 4,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = valid_samples,
+    };
+    try tiff.writeGray(io, allocator, valid, path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096));
+    defer allocator.free(bytes);
+
+    try std.testing.expectError(tiff.TiffError.UnsupportedPhotometric, tiff.parseRgb(allocator, bytes));
+
+    const malformed_cases = [_]struct {
+        tag: u16,
+        value: u16,
+        expected: anyerror,
+    }{
+        .{ .tag = 259, .value = 5, .expected = tiff.TiffError.UnsupportedCompression },
+        .{ .tag = 258, .value = 4, .expected = tiff.TiffError.UnsupportedBitsPerSample },
+        .{ .tag = 277, .value = 2, .expected = tiff.TiffError.InvalidTagValue },
+        .{ .tag = 284, .value = 2, .expected = tiff.TiffError.UnsupportedPlanarConfiguration },
+    };
+    for (malformed_cases) |case| {
+        const mutated = try allocator.dupe(u8, bytes);
+        defer allocator.free(mutated);
+        try writeTiffIfdInlineU16ForTest(mutated, case.tag, case.value);
+        try std.testing.expectError(case.expected, tiff.parseGray(allocator, mutated));
+    }
+
+    const rgb_bytes = try makeRgbTwoStripTiffForTest(allocator, 6, 6, 168, true);
+    defer allocator.free(rgb_bytes);
+    try std.testing.expectError(tiff.TiffError.UnsupportedPhotometric, tiff.parseGray(allocator, rgb_bytes));
+}
+
 test "TIFF writer rejects out-of-range 8-bit samples before narrowing" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -3627,6 +3770,175 @@ test "JP2 wrapper records RGB image header" {
     try std.testing.expectEqual(@as(u16, 3), info.components);
     try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
     try std.testing.expectEqual(@as(usize, minimal_jp2_codestream.len), info.codestream_bytes);
+}
+
+test "JP2 grayscale wrapper validates one-component metadata and polarity" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 0, 255 });
+    defer allocator.free(samples);
+
+    var gray = image.GrayImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const wrapped = try jp2.wrapGrayCodestream(allocator, gray, minimal_gray_jp2_codestream[0..]);
+    defer allocator.free(wrapped);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u32, 2), info.width);
+    try std.testing.expectEqual(@as(u32, 1), info.height);
+    try std.testing.expectEqual(@as(u16, 1), info.components);
+    try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
+    try std.testing.expect(!info.has_icc_profile);
+    try std.testing.expectEqualSlices(u8, minimal_gray_jp2_codestream[0..], try jp2.extractCodestream(wrapped));
+
+    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
+    const ihdr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "ihdr");
+    const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
+    try std.testing.expectEqual(@as(u16, 1), readU16BeTest(wrapped, ihdr_payload.start + 8));
+    try std.testing.expectEqual(@as(u32, 17), readU32BeTest(wrapped, colr_payload.start + 3));
+
+    const rgb_colr = try allocator.dupe(u8, wrapped);
+    defer allocator.free(rgb_colr);
+    writeU32BeTest(rgb_colr, colr_payload.start + 3, 16);
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(rgb_colr));
+
+    const identity_cdef = [_]u8{
+        0x00, 0x01, // one entry
+        0x00, 0x00, // channel 0
+        0x00, 0x00, // colour channel
+        0x00, 0x01, // grayscale association 1
+    };
+    const with_cdef = try insertJp2BoxInsideJp2HeaderForTest(
+        allocator,
+        wrapped,
+        jp2h_payload,
+        colr_payload.end,
+        "cdef",
+        &identity_cdef,
+    );
+    defer allocator.free(with_cdef);
+    _ = try jp2.parseInfo(with_cdef);
+
+    var invalid_cdef = identity_cdef;
+    invalid_cdef[7] = 2;
+    const with_invalid_cdef = try insertJp2BoxInsideJp2HeaderForTest(
+        allocator,
+        wrapped,
+        jp2h_payload,
+        colr_payload.end,
+        "cdef",
+        &invalid_cdef,
+    );
+    defer allocator.free(with_invalid_cdef);
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(with_invalid_cdef));
+
+    const icc = try allocator.dupe(u8, "synthetic grayscale ICC");
+    defer allocator.free(icc);
+    gray.icc_profile = icc;
+    const with_icc = try jp2.wrapGrayCodestream(allocator, gray, minimal_gray_jp2_codestream[0..]);
+    defer allocator.free(with_icc);
+    const icc_info = try jp2.parseInfo(with_icc);
+    try std.testing.expect(icc_info.has_icc_profile);
+    try std.testing.expectEqual(icc.len, icc_info.icc_profile_bytes);
+    const extracted_icc = (try jp2.extractIccProfile(allocator, with_icc)).?;
+    defer allocator.free(extracted_icc);
+    try std.testing.expectEqualSlices(u8, icc, extracted_icc);
+    gray.icc_profile = null;
+
+    const gray16_codestream = try allocator.dupe(u8, minimal_gray_jp2_codestream[0..]);
+    defer allocator.free(gray16_codestream);
+    gray16_codestream[42] = 15;
+    const qcd = findMarker(gray16_codestream, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    gray16_codestream[qcd + 5] = 0x80;
+    gray.bit_depth = 16;
+    const wrapped16 = try jp2.wrapGrayCodestream(allocator, gray, gray16_codestream);
+    defer allocator.free(wrapped16);
+    try std.testing.expectEqual(@as(u8, 16), (try jp2.parseInfo(wrapped16)).bits_per_component);
+    gray.bit_depth = 8;
+
+    gray.white_is_zero = true;
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedProfile,
+        jp2.wrapGrayCodestream(allocator, gray, minimal_gray_jp2_codestream[0..]),
+    );
+    gray.white_is_zero = false;
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidCodestream,
+        jp2.wrapGrayCodestream(allocator, gray, minimal_jp2_codestream[0..]),
+    );
+
+    const mct_codestream = try allocator.dupe(u8, minimal_gray_jp2_codestream[0..]);
+    defer allocator.free(mct_codestream);
+    const cod = findMarker(mct_codestream, codestream.markerValue("cod")) orelse return error.MissingCod;
+    mct_codestream[cod + 8] = 1;
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedProfile,
+        jp2.wrapGrayCodestream(allocator, gray, mct_codestream),
+    );
+
+}
+
+test "codestream encodes one-component grayscale ISO MQ profile" {
+    const allocator = std.testing.allocator;
+    const width = 17;
+    const height = 13;
+    const samples = try allocator.alloc(u16, width * height);
+    defer allocator.free(samples);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            samples[y * width + x] = @intCast((x * 29 + y * 47 + x * y * 3 + 11) & 0xff);
+        }
+    }
+    var gray = image.GrayImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const options = codestream.LosslessOptions{
+        .levels = 3,
+        .layers = 2,
+        .mct = .none,
+        .block_width = 4,
+        .block_height = 4,
+    };
+    const encoded = try codestream.encodeLosslessGrayWithOptions(allocator, gray, options);
+    defer allocator.free(encoded);
+
+    const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    const cod = findMarker(encoded, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u16, 1), readU16BeTest(encoded, siz + 38));
+    try std.testing.expectEqual(@as(u8, 0), encoded[cod + 8]);
+    try std.testing.expectEqual(@as(u8, 3), encoded[cod + 9]);
+    try std.testing.expectEqual(@as(u8, 1), encoded[cod + 13]);
+    try std.testing.expect(codestream.hasMarker(encoded, codestream.markerValue("tlm")));
+    try std.testing.expect(codestream.hasMarker(encoded, codestream.markerValue("plt")));
+    try std.testing.expectEqual(@as(usize, 4), countMarker(encoded, codestream.markerValue("sot")));
+
+    const wrapped = try jp2.wrapGrayCodestream(allocator, gray, encoded);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u32, width), info.width);
+    try std.testing.expectEqual(@as(u32, height), info.height);
+    try std.testing.expectEqual(@as(u16, 1), info.components);
+    try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
+    try std.testing.expectEqualSlices(u8, encoded, try jp2.extractCodestream(wrapped));
+
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessGrayWithOptions(allocator, gray, .{ .levels = 3 }),
+    );
+    gray.white_is_zero = true;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessGrayWithOptions(allocator, gray, options),
+    );
 }
 
 test "JP2 wrapper validates z2000 codestream SIZ metadata" {
@@ -14536,6 +14848,11 @@ test "strict SIZ marker reader rejects unsupported component layout" {
                 writeU16BeTest(corrupted, siz + 38, 4);
             }
         }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "grayscale component count before T1 support", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                writeU16BeTest(corrupted, siz + 38, 1);
+            }
+        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "signed component", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
                 corrupted[siz + 40] = 0x87;
@@ -14813,7 +15130,12 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         .{ .label = "PLM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("plm") },
         .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
         .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
-        .{ .label = "PPT tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("ppt") },
+        .{
+            .label = "malformed PPT tile-part marker",
+            .source = codestream.markerValue("plt"),
+            .replacement = codestream.markerValue("ppt"),
+            .expected = codestream.CodestreamError.InvalidCodestream,
+        },
         .{ .label = "COC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("coc") },
         .{ .label = "QCC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("qcc") },
         .{ .label = "RGN tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("rgn") },
@@ -19515,6 +19837,73 @@ test "tile pipeline builds owned RPCL encode artifacts for edge tile" {
     try std.testing.expect(artifacts.catalog.totalBytes() > 0);
 }
 
+test "tile pipeline round-trips one-component grayscale encode artifacts" {
+    const allocator = std.testing.allocator;
+    const width = 17;
+    const height = 13;
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 8, .height = 8 },
+        .{ .width = 8, .height = 8 },
+        .{ .width = 8, .height = 8 },
+        .{ .width = 8, .height = 8 },
+    };
+
+    for ([_]u8{ 8, 16 }) |bit_depth| {
+        const samples = try allocator.alloc(u16, width * height);
+        defer allocator.free(samples);
+        const mask: u32 = if (bit_depth == 8) 0xff else 0xffff;
+        for (0..height) |y| {
+            for (0..width) |x| {
+                samples[y * width + x] = @intCast((x * 977 + y * 6151 + x * y * 37 + 19) & mask);
+            }
+        }
+        const source = image.GrayImage{
+            .allocator = allocator,
+            .width = width,
+            .height = height,
+            .bit_depth = bit_depth,
+            .samples = samples,
+        };
+
+        var artifacts = try tile_pipeline.buildGrayRpclEncodeArtifactsIsoMq(
+            allocator,
+            source,
+            3,
+            .{
+                .layers = 2,
+                .block_width = 4,
+                .block_height = 4,
+                .precincts = &precincts,
+            },
+            .{},
+        );
+        defer artifacts.deinit();
+
+        try std.testing.expectEqual(@as(u16, 1), artifacts.scaffold.components);
+        try std.testing.expectEqual(@as(u16, 1), artifacts.catalog.components);
+        try std.testing.expectEqual(
+            artifacts.scaffold.blocks.len,
+            try artifacts.scaffold.componentBlockCount(),
+        );
+        try std.testing.expectEqual(
+            @as(usize, @intCast(artifacts.scaffold.plan.packets)),
+            artifacts.packetCount(),
+        );
+        try std.testing.expect(artifacts.catalog.totalBytes() > 0);
+
+        var decoded = try tile_pipeline.reconstructGrayRpclEncodeArtifactsIsoMq(
+            allocator,
+            artifacts,
+            .{},
+        );
+        defer decoded.deinit();
+        try std.testing.expectEqual(bit_depth, decoded.bit_depth);
+        try std.testing.expectEqual(width, decoded.width);
+        try std.testing.expectEqual(height, decoded.height);
+        try std.testing.expectEqualSlices(u16, source.samples, decoded.samples);
+    }
+}
+
 test "tile pipeline builds owned RPCL encode artifacts for tile grid" {
     const allocator = std.testing.allocator;
     const width = 10;
@@ -20485,6 +20874,7 @@ test "tile pipeline validates encoded block catalog coverage per tile" {
     const corrupt_catalog = tile_pipeline.EncodedBlockCatalog{
         .allocator = allocator,
         .tile = first_tile.catalog.tile,
+        .components = first_tile.catalog.components,
         .component_block_count = first_tile.catalog.component_block_count,
         .blocks = copied_blocks,
     };

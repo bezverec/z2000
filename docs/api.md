@@ -30,6 +30,14 @@ zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N]
 ```
 
+The TIFF module exposes `read`/`parse` for tagged RGB-or-grayscale dispatch,
+plus strict `readRgb`/`parseRgb` and `readGray`/`parseGray` adapters. `writeGray`
+roundtrips uncompressed 8/16-bit BlackIsZero or WhiteIsZero strips. The public
+`tiff-to-jp2` dispatches RGB or grayscale input. The grayscale branch
+normalizes WhiteIsZero, selects no MCT by default, and emits the bounded
+single-tile reversible 5/3/RPCL/ISO-MQ profile. Explicit incompatible options
+fail closed; z2000 strict decode is still RGB-only.
+
 Important `tiff-to-jp2` options:
 
 - `--levels N` or `--resolutions N`
@@ -59,6 +67,9 @@ Supported public JP2 profiles are still narrow:
   scalar-derived quantization; bounded multi-tile irreversible RGB uses
   origin-aware 9/7 lifting, including odd tile origins, and global rate targets
 - reversible component-independent RGB: `--mct none --transform 5-3 --qstyle none`
+- reversible grayscale: one component, single tile, `--mct none --transform
+  5-3 --qstyle none --progression RPCL`, in-band headers, PLT, and optional
+  `R` resolution tile-parts/TLM/SOP/EPH
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution
@@ -209,26 +220,31 @@ Primary public types:
 
 Primary public functions:
 
+- `encodeLosslessGrayWithOptions(allocator, input, options)`
 - `wrapRgbCodestream(allocator, input, codestream)`
+- `wrapGrayCodestream(allocator, input, codestream)`
 - `parseInfo(bytes)`
 - `extractCodestream(bytes)`
 - `extractIccProfile(allocator, bytes)`
 
 The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
-sRGB enumerated `colr`, and one contiguous `jp2c` codestream. The reader accepts
-8-bit and 16-bit RGB metadata and rejects JPX-only or non-sRGB color/profile
-features until they are intentionally implemented. The writer applies the same
-basic guard rails for RGB input: non-empty dimensions, 8/16 bit depth, and a
-sample buffer matching `width * height * 3`.
+enumerated sRGB (16) or grayscale (17) `colr`, and one contiguous `jp2c`
+codestream. The reader accepts uniform unsigned 8-bit and 16-bit one- or
+three-component metadata and rejects JPX-only or other color/profile features
+until they are intentionally implemented. The writers require non-empty
+dimensions, 8/16 bit depth, matching sample counts, codestream/JP2 shape
+agreement, and no MCT for one component. `wrapGrayCodestream` accepts only
+BlackIsZero-normalized samples; WhiteIsZero must be explicitly inverted before
+codestream encoding.
 
 ICC support is staged as metadata preservation before color conversion. TIFF
-tag 34675 is stored as owned RGB image metadata, `wrapRgbCodestream` writes a
-JP2 restricted ICC `colr` box when present, `parseInfo` reports ICC presence and
-profile byte count, and `extractIccProfile` returns an owned copy of the profile
-payload. eciRGBv2, Adobe RGB, and other RGB ICC profiles are treated as opaque
-payloads and preserved without transforming samples. Profile conversion remains
-a later optional LittleCMS-backed path.
+tag 34675 is stored as owned RGB or grayscale image metadata; both wrappers
+write a JP2 restricted ICC `colr` box when present, `parseInfo` reports ICC
+presence and profile byte count, and `extractIccProfile` returns an owned copy
+of the profile payload. Profiles are treated as opaque payloads and preserved
+without transforming samples. Profile conversion remains a later optional
+LittleCMS-backed path.
 
 ## `src/t2.zig`
 

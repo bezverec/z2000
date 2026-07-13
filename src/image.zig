@@ -27,6 +27,22 @@ pub const RgbImage = struct {
     }
 };
 
+pub const GrayImage = struct {
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    samples: []u16,
+    white_is_zero: bool = false,
+    icc_profile: ?[]u8 = null,
+
+    pub fn deinit(self: *GrayImage) void {
+        if (self.icc_profile) |profile| self.allocator.free(profile);
+        self.allocator.free(self.samples);
+        self.* = undefined;
+    }
+};
+
 pub const ImageError = error{
     InvalidPgm,
     UnsupportedMaxValue,

@@ -36,6 +36,31 @@ const IfdEntry = struct {
     value_or_offset: u32,
 };
 
+pub const DecodedImage = union(enum) {
+    rgb: image.RgbImage,
+    grayscale: image.GrayImage,
+
+    pub fn deinit(self: *DecodedImage) void {
+        switch (self.*) {
+            .rgb => |*rgb| rgb.deinit(),
+            .grayscale => |*gray| gray.deinit(),
+        }
+        self.* = undefined;
+    }
+};
+
+pub fn read(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !DecodedImage {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        allocator,
+        .limited(max_file_size),
+    );
+    defer allocator.free(bytes);
+
+    return parse(allocator, bytes);
+}
+
 pub fn readRgb(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !image.RgbImage {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
         io,
@@ -46,6 +71,18 @@ pub fn readRgb(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !imag
     defer allocator.free(bytes);
 
     return parseRgb(allocator, bytes);
+}
+
+pub fn readGray(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !image.GrayImage {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        allocator,
+        .limited(max_file_size),
+    );
+    defer allocator.free(bytes);
+
+    return parseGray(allocator, bytes);
 }
 
 pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, path: []const u8) !void {
@@ -111,6 +148,64 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.items });
 }
 
+pub fn writeGray(io: std.Io, allocator: std.mem.Allocator, gray: image.GrayImage, path: []const u8) !void {
+    if (gray.width == 0 or gray.height == 0 or (gray.bit_depth != 8 and gray.bit_depth != 16)) {
+        return TiffError.InvalidTagValue;
+    }
+    const pixels = try std.math.mul(usize, gray.width, gray.height);
+    if (gray.samples.len != pixels) return TiffError.InvalidTagValue;
+
+    const bytes_per_sample: usize = if (gray.bit_depth == 8) 1 else 2;
+    const raster_bytes = try std.math.mul(usize, pixels, bytes_per_sample);
+    if (gray.width > std.math.maxInt(u32) or
+        gray.height > std.math.maxInt(u32) or
+        raster_bytes > std.math.maxInt(u32))
+    {
+        return TiffError.ImageTooLarge;
+    }
+
+    const icc_profile = gray.icc_profile;
+    if (icc_profile) |profile| {
+        if (profile.len == 0 or profile.len > max_icc_profile_bytes) return TiffError.InvalidTagValue;
+        if (profile.len > std.math.maxInt(u32)) return TiffError.ImageTooLarge;
+    }
+
+    const entry_count: u16 = if (icc_profile != null) 11 else 10;
+    const raster_offset: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
+    const icc_offset: u32 = try std.math.add(u32, raster_offset, @as(u32, @intCast(raster_bytes)));
+    const total_bytes = try std.math.add(usize, @as(usize, icc_offset), if (icc_profile) |profile| profile.len else 0);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, total_bytes);
+
+    try out.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &out, 42);
+    try appendU32Le(allocator, &out, 8);
+    try appendU16Le(allocator, &out, entry_count);
+    try appendIfdEntryLe(allocator, &out, 256, 4, 1, @as(u32, @intCast(gray.width)));
+    try appendIfdEntryLe(allocator, &out, 257, 4, 1, @as(u32, @intCast(gray.height)));
+    try appendIfdEntryLe(allocator, &out, 258, 3, 1, gray.bit_depth);
+    try appendIfdEntryLe(allocator, &out, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &out, 262, 3, 1, if (gray.white_is_zero) 0 else 1);
+    try appendIfdEntryLe(allocator, &out, 273, 4, 1, raster_offset);
+    try appendIfdEntryLe(allocator, &out, 277, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &out, 278, 4, 1, @as(u32, @intCast(gray.height)));
+    try appendIfdEntryLe(allocator, &out, 279, 4, 1, @as(u32, @intCast(raster_bytes)));
+    try appendIfdEntryLe(allocator, &out, 284, 3, 1, 1);
+    if (icc_profile) |profile| {
+        try appendIfdEntryLe(allocator, &out, 34675, 7, @as(u32, @intCast(profile.len)), icc_offset);
+    }
+    try appendU32Le(allocator, &out, 0);
+
+    appendRasterLe(&out, gray.samples, gray.bit_depth) catch |err| switch (err) {
+        error.InvalidTagValue => return TiffError.InvalidTagValue,
+    };
+    if (icc_profile) |profile| try out.appendSlice(allocator, profile);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.items });
+}
+
 fn appendRasterLe(out: *std.ArrayList(u8), samples: []const u16, bit_depth: u8) error{InvalidTagValue}!void {
     const start = out.items.len;
     errdefer out.items.len = start;
@@ -150,7 +245,79 @@ fn appendRasterLe(out: *std.ArrayList(u8), samples: []const u16, bit_depth: u8) 
     }
 }
 
+const ParsedChunkyImage = struct {
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    photometric: u16,
+    samples: []u16,
+    icc_profile: ?[]u8,
+
+    fn deinit(self: *ParsedChunkyImage, allocator: std.mem.Allocator) void {
+        if (self.icc_profile) |profile| allocator.free(profile);
+        allocator.free(self.samples);
+        self.* = undefined;
+    }
+};
+
+pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !DecodedImage {
+    const parsed = try parseChunky(allocator, bytes);
+    return switch (parsed.photometric) {
+        2 => .{ .rgb = .{
+            .allocator = allocator,
+            .width = parsed.width,
+            .height = parsed.height,
+            .bit_depth = parsed.bit_depth,
+            .samples = parsed.samples,
+            .icc_profile = parsed.icc_profile,
+        } },
+        0, 1 => .{ .grayscale = .{
+            .allocator = allocator,
+            .width = parsed.width,
+            .height = parsed.height,
+            .bit_depth = parsed.bit_depth,
+            .samples = parsed.samples,
+            .white_is_zero = parsed.photometric == 0,
+            .icc_profile = parsed.icc_profile,
+        } },
+        else => unreachable,
+    };
+}
+
 pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage {
+    var parsed = try parseChunky(allocator, bytes);
+    if (parsed.photometric != 2) {
+        parsed.deinit(allocator);
+        return TiffError.UnsupportedPhotometric;
+    }
+    return .{
+        .allocator = allocator,
+        .width = parsed.width,
+        .height = parsed.height,
+        .bit_depth = parsed.bit_depth,
+        .samples = parsed.samples,
+        .icc_profile = parsed.icc_profile,
+    };
+}
+
+pub fn parseGray(allocator: std.mem.Allocator, bytes: []const u8) !image.GrayImage {
+    var parsed = try parseChunky(allocator, bytes);
+    if (parsed.photometric != 0 and parsed.photometric != 1) {
+        parsed.deinit(allocator);
+        return TiffError.UnsupportedPhotometric;
+    }
+    return .{
+        .allocator = allocator,
+        .width = parsed.width,
+        .height = parsed.height,
+        .bit_depth = parsed.bit_depth,
+        .samples = parsed.samples,
+        .white_is_zero = parsed.photometric == 0,
+        .icc_profile = parsed.icc_profile,
+    };
+}
+
+fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyImage {
     if (bytes.len < 8) return TiffError.InvalidHeader;
 
     const endian: Endian = if (std.mem.eql(u8, bytes[0..2], "II"))
@@ -176,8 +343,7 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
     var height: ?u32 = null;
     var compression: u16 = 1;
     var photometric: ?u16 = null;
-    var bits: [3]u16 = .{ 0, 0, 0 };
-    var bits_count: usize = 0;
+    var bits_ref: ?ValueRef = null;
     var strip_offsets_ref: ?ValueRef = null;
     var strip_counts_ref: ?ValueRef = null;
     var samples_per_pixel: u16 = 1;
@@ -190,14 +356,7 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
         switch (entry.tag) {
             256 => width = try readSingleU32(bytes, endian, entry),
             257 => height = try readSingleU32(bytes, endian, entry),
-            258 => {
-                bits_count = @as(usize, @intCast(entry.count));
-                if (bits_count != 3) return TiffError.UnsupportedBitsPerSample;
-                const ref = try valueRef(bytes, entry);
-                for (0..3) |channel| {
-                    bits[channel] = try readU16Value(bytes, endian, ref, channel);
-                }
-            },
+            258 => bits_ref = try valueRef(bytes, entry),
             259 => compression = try readSingleU16(bytes, endian, entry),
             262 => photometric = try readSingleU16(bytes, endian, entry),
             273 => strip_offsets_ref = try valueRef(bytes, entry),
@@ -219,21 +378,31 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
 
     if (w == 0 or h == 0) return TiffError.InvalidTagValue;
     if (compression != 1) return TiffError.UnsupportedCompression;
-    if (photo != 2) return TiffError.UnsupportedPhotometric;
-    if (samples_per_pixel != 3) return TiffError.InvalidTagValue;
+    const component_count: usize = switch (photo) {
+        0, 1 => 1,
+        2 => 3,
+        else => return TiffError.UnsupportedPhotometric,
+    };
+    if (@as(usize, samples_per_pixel) != component_count) return TiffError.InvalidTagValue;
     if (planar_config != 1) return TiffError.UnsupportedPlanarConfiguration;
     if (sample_format != 1) return TiffError.UnsupportedSampleFormat;
-    if (bits_count != 3 or bits[0] != bits[1] or bits[1] != bits[2]) {
-        return TiffError.UnsupportedBitsPerSample;
+    const bit_values = bits_ref orelse return TiffError.UnsupportedBitsPerSample;
+    if (bit_values.count != component_count) return TiffError.UnsupportedBitsPerSample;
+    const bit_depth = try readU16Value(bytes, endian, bit_values, 0);
+    var component: usize = 1;
+    while (component < component_count) : (component += 1) {
+        if (try readU16Value(bytes, endian, bit_values, component) != bit_depth) {
+            return TiffError.UnsupportedBitsPerSample;
+        }
     }
-    if (bits[0] != 8 and bits[0] != 16) return TiffError.UnsupportedBitsPerSample;
+    if (bit_depth != 8 and bit_depth != 16) return TiffError.UnsupportedBitsPerSample;
 
     const width_usize = @as(usize, w);
     const height_usize = @as(usize, h);
     const pixels = try std.math.mul(usize, width_usize, height_usize);
     if (pixels > max_pixels) return TiffError.ImageTooLarge;
-    const sample_count = try std.math.mul(usize, pixels, 3);
-    const bytes_per_sample: usize = if (bits[0] == 8) 1 else 2;
+    const sample_count = try std.math.mul(usize, pixels, component_count);
+    const bytes_per_sample: usize = if (bit_depth == 8) 1 else 2;
     const expected_raster_bytes = try std.math.mul(usize, sample_count, bytes_per_sample);
 
     if (offsets_ref.count != counts_ref.count or offsets_ref.count == 0) {
@@ -260,7 +429,7 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
         const strip_bytes = bytes[strip_offset .. strip_offset + strip_count];
         if (strip_bytes.len % bytes_per_sample != 0) return TiffError.InvalidTagValue;
 
-        if (bits[0] == 8) {
+        if (bit_depth == 8) {
             sample_index = widenU8Samples(samples, sample_index, strip_bytes);
         } else {
             sample_index = try readU16Samples(samples, sample_index, strip_bytes, endian);
@@ -273,10 +442,10 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
     errdefer if (icc_profile) |profile| allocator.free(profile);
 
     return .{
-        .allocator = allocator,
         .width = width_usize,
         .height = height_usize,
-        .bit_depth = @as(u8, @intCast(bits[0])),
+        .bit_depth = @as(u8, @intCast(bit_depth)),
+        .photometric = photo,
         .samples = samples,
         .icc_profile = icc_profile,
     };

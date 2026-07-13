@@ -4,9 +4,20 @@ z2000 is an educational JPEG2000-style codec core written from scratch in Zig.
 The current codebase has two codec surfaces:
 
 - a small custom grayscale `.z2000` path used for early wavelet experiments;
-- a JP2 path for RGB TIFF input, with strict packet payloads in `jp2c`,
+- a JP2 path for RGB and bounded grayscale TIFF input, with strict packet payloads in `jp2c`,
   selected Part 1 profiles, strict no-sidecar decode, and an optional private
   debug sidecar.
+
+The format boundary now has a separate one-component foundation:
+`image.GrayImage` and `tiff.DecodedImage` support owned 8/16-bit grayscale
+samples, BlackIsZero/WhiteIsZero polarity, strips, and optional ICC bytes.
+`jp2.wrapGrayCodestream` adds the checked JP2 handoff with one-component
+`ihdr`, enumerated grayscale `colr`, optional restricted ICC, no MCT, and
+component-bounded `cdef`/COC/QCC validation. The single-tile reversible path
+now enters the shared ISO-MQ T1/T2 pipeline through a one-component packet
+scaffold and emits RPCL packets with PLT plus optional resolution tile-parts
+and TLM. Its local artifact oracle reconstructs 8/16-bit samples byte-exactly;
+the strict wire decoder is the remaining component-generic boundary.
 
 The project is intentionally fail-closed. Profile options that would require
 payload behavior not implemented yet are rejected with `UnsupportedPayload`.
@@ -21,7 +32,7 @@ contracts rather than ad hoc changes inside T1/T2.
 
 ## High-Level Pipeline
 
-Current RGB TIFF to JP2 encode:
+Current TIFF to JP2 encode:
 
 1. `src/tiff.zig` reads a narrow subset of TIFF 6.0:
    uncompressed chunky RGB, 8 or 16 bits per channel, strip storage, and an
@@ -67,9 +78,10 @@ Current RGB TIFF to JP2 encode:
     state across `R` parts, and rebuilds the normal internal header+body packet
     view during strict decode. Multi-tile PPT owns one independent packed-header
     state per tile.
-11. `src/jp2.zig` wraps the codestream in JP2 boxes, using enumerated sRGB
-    `colr` by default or restricted ICC `colr` when the TIFF supplied an ICC
-    profile.
+11. `src/jp2.zig` wraps the codestream in JP2 boxes, using enumerated sRGB or
+    grayscale `colr` by default, or restricted ICC `colr` when the source
+    supplied an ICC profile. The public conversion pipeline dispatches to the
+    RGB or grayscale wrapper after TIFF photometric normalization.
 
 JP2 decode for z2000-produced files now uses the strict RPCL packet block
 catalog for the current RPCL/RCT/5-3 path. Debug sidecar decode remains as an

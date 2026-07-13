@@ -13,9 +13,14 @@ the broader JPEG2000 Part 1 codec family is estimated at **97/100**.
 
 ## Features
 
-- TIFF 6.0 RGB input for uncompressed chunky 8-bit and 16-bit strips.
+- TIFF 6.0 RGB or grayscale input for uncompressed chunky 8-bit and 16-bit
+  strips. BlackIsZero grayscale encodes directly; WhiteIsZero is explicitly
+  normalized before one-component JP2 encoding.
 - JP2 output with strict codestream packet payloads and optional ICC
-  preservation.
+  preservation. The container boundary can also wrap and inspect unsigned
+  one-component codestreams using enumerated grayscale `colr` (17). The narrow
+  single-tile reversible grayscale encode path carries real ISO-MQ T1/T2
+  payloads; component-generic strict wire decode remains staged.
 - Lossless RGB path: RCT, reversible 5/3 DWT, RPCL and other bounded
   progression orders, quality layers, PLT/TLM, strict no-sidecar decode.
 - Lossy experimental path: ICT, irreversible 9/7 DWT, scalar-derived or
@@ -181,14 +186,22 @@ Inspection and decode commands:
 
 ## Supported Input Boundary
 
-The production TIFF path is deliberately narrow:
+The production `tiff-to-jp2` path is deliberately narrow:
 
 - one TIFF image / first IFD;
-- RGB photometric interpretation;
+- RGB, BlackIsZero grayscale, or WhiteIsZero grayscale photometric
+  interpretation;
 - chunky/interleaved samples;
 - 8 or 16 unsigned bits per channel;
 - uncompressed strip storage;
 - optional ICC tag 34675 copied into JP2 restricted ICC `colr`.
+
+The one-component CLI path is currently single-tile RPCL with reversible 5/3,
+ISO MQ, in-band packet headers, PLT, optional TLM/SOP/EPH, and either one tile
+part or `R` resolution tile-parts. OpenJPEG 2.5.4 and Grok 20.3.6 decode the
+8-bit and 16-bit output pixel-exactly. z2000's own strict JP2 decoder remains
+RGB-only until its packet catalog and reconstruction output become
+component-generic.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
 floating-point samples, extra alpha/sample channels, mixed bit depth, signed
