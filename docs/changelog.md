@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Lossy Encode Timing Split And S6 Compile Gates
+
+- Fixed the `--timings` phase attribution on the irreversible encode path:
+  the whole ICT + 9/7 DWT + quantization front end used to account to the
+  MCT row with an empty DWT row (the profile that drives optimization
+  decisions reported "MCT 108.7 ms, DWT 0.000 ms"). The measured front end
+  now splits ICT into the colour row and the fused per-plane DWT +
+  quantization jobs into the wavelet row (post-fix on the 32-lane build:
+  MCT 7.2 ms, DWT 62.5 ms). Output streams are bit-identical; the reversible
+  path's accounting is unchanged.
+- S6 compile half recorded: the `riscv64-linux-musl -Dcpu=baseline_rv64+v`
+  exe build and the AVX-512 `x86_64_v4` build (16 i32 lanes, 32-lane f32
+  blocks lowering to 2 zmm per lift step) both succeed at ReleaseFast. The
+  qemu run half stays pending — no qemu-riscv64 on the Windows box and the
+  Docker daemon was not running; execute on the M4 or a Linux host.
+
 ### S3 Lane Audit Close-Out (9/7 Lifting Block Width 32)
 
 - Closed the SIMD plan's S3 lane audit on the Ryzen 5700X. The 9/7 lifting

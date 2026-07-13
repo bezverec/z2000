@@ -590,8 +590,9 @@ fn forwardIrreversibleQuantizedPlanes(
     rgb: image.RgbImage,
     levels: u8,
     options: LosslessOptions,
+    timings: ?*EncodeTimings,
 ) !color.RctPlanes {
-    return forwardIrreversibleQuantizedPlanesForRegion(
+    return forwardIrreversibleQuantizedPlanesForRegionMeasured(
         allocator,
         rgb,
         levels,
@@ -599,6 +600,7 @@ fn forwardIrreversibleQuantizedPlanes(
         0,
         0,
         componentThreadCount(options),
+        timings,
     );
 }
 
@@ -645,8 +647,27 @@ fn forwardIrreversibleQuantizedPlanesForRegion(
     y0: u32,
     thread_count: u8,
 ) !color.RctPlanes {
+    return forwardIrreversibleQuantizedPlanesForRegionMeasured(allocator, rgb, levels, quantization, x0, y0, thread_count, null);
+}
+
+/// Measured variant of the irreversible front end: the ICT stage accounts to
+/// `color_transform_ns` and the fused per-plane 9/7 DWT + deadzone
+/// quantization jobs account to `wavelet_ns`, so `--timings` no longer
+/// reports the whole front end as MCT with an empty DWT row.
+fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
+    allocator: std.mem.Allocator,
+    rgb: image.RgbImage,
+    levels: u8,
+    quantization: QuantizationStyle,
+    x0: u32,
+    y0: u32,
+    thread_count: u8,
+    timings: ?*EncodeTimings,
+) !color.RctPlanes {
+    const color_start = monotonicNs();
     var ict = try color.forwardIct(allocator, rgb);
     defer ict.deinit();
+    if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
 
     const x1 = std.math.add(u32, x0, std.math.cast(u32, ict.width) orelse return CodestreamError.ImageTooLarge) catch
         return CodestreamError.ImageTooLarge;
@@ -676,12 +697,14 @@ fn forwardIrreversibleQuantizedPlanesForRegion(
     // the three planes run as component jobs (same pattern as the 5/3 path).
     // The per-plane arithmetic is untouched: streams stay byte-identical to
     // the serial order.
+    const wavelet_start = monotonicNs();
     var jobs = [3]IrreversibleForwardPlaneJob{
         .{ .plane = ict.y, .quantized = y, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
         .{ .plane = ict.cb, .quantized = cb, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
         .{ .plane = ict.cr, .quantized = cr, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
     };
     try runComponentJobs(IrreversibleForwardPlaneJob, &jobs, thread_count, irreversibleForwardPlaneWorker);
+    if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     return .{
         .allocator = allocator,
@@ -1710,17 +1733,21 @@ fn encodeLosslessWithOptionsMeasured(
             try color.forwardNoTransform(allocator, rgb)
         else
             try color.forwardRctThreaded(allocator, rgb, options.threads),
-        .irreversible_9_7 => try forwardIrreversibleQuantizedPlanes(allocator, rgb, levels, options),
+        // The irreversible front end accounts its own ICT (color) and fused
+        // 9/7 DWT + quantization (wavelet) phases.
+        .irreversible_9_7 => try forwardIrreversibleQuantizedPlanes(allocator, rgb, levels, options, timings),
     };
     defer planes.deinit();
-    if (timings) |t| t.color_transform_ns = elapsedNs(color_start);
-
-    const wavelet_start = monotonicNs();
     if (options.transform == .reversible_5_3) {
+        if (timings) |t| t.color_transform_ns = elapsedNs(color_start);
+    }
+
+    if (options.transform == .reversible_5_3) {
+        const wavelet_start = monotonicNs();
         const dwt_levels = try forwardComponents53(allocator, &planes, options);
         if (dwt_levels != levels) return CodestreamError.InvalidCodestream;
+        if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
     }
-    if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
 
     var encode_options = normalizedEncodePrecinctOptions(options, levels);
     try validatePrecinctBlockSpans(encode_options);
