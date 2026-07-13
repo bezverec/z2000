@@ -233,6 +233,7 @@ Detailed notes live in `docs/`:
 - [Roadmap](docs/roadmap.md)
 - [Next steps](docs/next_steps.md)
 - [Optimization plan](docs/optimization_plan.md)
+- [Post-Part 1 feature plan](docs/feature_plan.md)
 - [Comparative benchmarks](docs/benchmarks.md)
 - [Multi-tile plan](docs/multi_tile_plan.md)
 - [Versioning](docs/versioning.md)

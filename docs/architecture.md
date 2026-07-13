@@ -48,8 +48,12 @@ Current TIFF to JP2 encode:
    optional embedded ICC profile from tag 34675.
 2. `src/color.zig` converts RGB samples through RCT, ICT, or no-MCT depending
    on the accepted profile.
-3. `src/wavelet_int.zig` and `src/wavelet_float.zig` apply the reversible
-   integer 5/3 or irreversible 9/7 transform.
+3. `src/wavelet_int.zig` and `src/wavelet.zig` apply the reversible integer
+   5/3 or irreversible 9/7 transform. Single-tile multi-threaded 9/7 encode
+   uses a bounded persistent band pool across row/column phases, then runs
+   component quantization jobs. Decode retains fused per-component
+   dequantization plus inverse lifting because the wider inverse scheduler was
+   bit-exact but slower on the maintained gate.
 4. `src/subband.zig` builds subband and code-block grids.
 5. `src/bitplane.zig` can still write the old debug sidecar block payload.
 6. `src/ebcot.zig` builds EBCOT-style coding passes and MQ-backed code-block

@@ -33,6 +33,11 @@ is concentrated in decode T1, lane-width validation, and parallel efficiency.
 The first follow-up MQ decode branch-layout slice improved lossless t1 by 3.1%
 and lossy t1 by 3.9% with identical decoded files; t16 remained effectively
 neutral. These performance changes do not alter the ISO score.
+The next parallel slice kept a persistent eight-worker 9/7 forward-DWT pool:
+lossy t16 encode improved by 5.2% with a byte-identical stream. The symmetric
+inverse integration was rejected after a 4.9% decode regression, so the next
+decode candidates are catalog/T1 overlap, TIFF output parallelism, or the
+separate fused dequantize-to-lifting experiment. ISO coverage remains 100/100.
 
 ## Next Working Sequence (2026-07-12)
 

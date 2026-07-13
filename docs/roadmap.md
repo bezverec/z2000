@@ -264,9 +264,11 @@ Tasks:
 - Keep packed T1 experiments narrow and byte-exact; the full guarded packed
   context-word path is currently slower, so prefer smaller RLC/ZC/SC subpaths
   before replacing the u16 flag layer.
-- Add horizontal 5/3 DWT SIMD and cache blocking after T1/MQ profiling, then
-  extend DWT scheduling inside components rather than relying only on the
-  three-component split.
+- Keep the completed 5/3 and 9/7 SIMD/band scheduling byte-exact. The wider
+  single-tile 9/7 forward pool clears the encode gate; its inverse promotion
+  was slower, so future decode work should test catalog/T1 overlap, TIFF output
+  parallelism, or a fused dequantize-to-lifting design instead of retrying the
+  same split traversal.
 - Treat the strict packet catalog as a measured serial Amdahl term. Recent scan,
   header, and finalize reductions keep it near 9-10 ms on the current smoke
   file; further T2 work should be justified by larger-image or multi-tile

@@ -95,10 +95,11 @@ levers, ordered by expected value:
    decode gap (2.1x) is much worse than the t1 gap (1.5x). The serial
    sections are the packet catalog (~1.3%), the 3-way-only component
    parallelism of inverse DWT (~10.4% at t1) and inverse MCT, and TIFF
-   write. Levers: intra-plane parallel inverse DWT (row/column band
-   splitting inside one component), overlapping catalog with T1 block
-   decode, and parallel TIFF interleave. This is thread-level work, not in
-   the do-not-do list, and measurable with the existing harness.
+   write. The first intra-plane inverse-DWT attempt was bit-exact but slower
+   and was not integrated (Checkpoint #7). Remaining levers are overlapping
+   catalog work with T1 block decode and parallel TIFF interleave. This is
+   thread-level work, not in the do-not-do list, and measurable with the
+   existing harness.
 2. **Fused dequantize-into-inverse-DWT** on the lossy decode path — the S2
    revert note's "new angle": skip the separate dequantized-plane write
    before lifting. Touches ~10-12% of lossy decode; needs bit-exactness
@@ -118,6 +119,32 @@ levers, ordered by expected value:
 Realistic ceiling note: without S5-class T1 work, the decode t1 gap to
 Kakadu (1.5x) will not close — the MQ coder's serial (a, c) dependency is
 the wall, and items 1-2 mostly attack the multi-thread and lossy-path gaps.
+
+## Checkpoint #7 (2026-07-13) — Parallel 9/7 Forward DWT
+
+The single-tile irreversible front end now distributes each 9/7 row/column
+phase across a bounded eight-worker pool instead of stopping at three
+component jobs. Workers are created once per transform and synchronize at
+phase boundaries; each owns private scratch, and level order remains serial.
+Quantization follows as three component jobs. A serial-vs-parallel oracle
+covers odd, one-dimensional, origin-shifted, and SIMD-tail geometries across
+1..16 requested threads, and the complete codestream stays byte-identical.
+
+On the Ryzen 7 5700X lossy profile, the final interleaved A/B measured t16
+encode 161.1 +/- 4.5 -> 152.8 +/- 4.1 ms (-5.2%, 16 runs). t1 encode was
+neutral at 819.6 +/- 17.4 -> 802.9 +/- 12.6 ms. Decode had no integrated
+algorithm change and no credible regression (t1 +0.6%; the t16 candidate
+binary measured faster, but that code-layout/noise result is not claimed).
+All four t1/t16 streams were identical: 4,798,568 bytes, SHA-256
+`7597eb209f70f3dc36717c08b4e0029f4c65895758f549a029a1f0612fd9c9ee`.
+
+The symmetric inverse kernel remains standalone and oracle-tested. Separating
+dequantization from inverse lifting and promoting it to the wider pool
+regressed t16 decode 146.7 +/- 6.0 -> 153.9 +/- 5.1 ms (+4.9%, 12 runs), so
+the hot decode path keeps its fused three-component jobs. This closes
+intra-plane inverse DWT as an immediate decode lever; the next low-risk
+parallel work is catalog/T1 overlap or TIFF output, while the fused
+dequantize-to-lifting idea remains a separate algorithmic experiment.
 
 ## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
 

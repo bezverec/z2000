@@ -214,6 +214,7 @@ silently break elsewhere).
 | 2026-07-13 | S3 generated-code spot check (9/7 `forward2D` probe root, `-mcpu=native -femit-asm`) | Ryzen 5700X | open question: does `@Vector` lower to AVX2? | 72x `vmulps ymm` + 72x `vaddps ymm` (32-lane block = 4 ymm per lift step), scalar `mulss/addss` only in boundary tails; zero `vfmadd*` (correct: FMA would break stream bit-exactness) | **closed** — vectorization confirmed, no silent scalar fallback |
 | 2026-07-13 | S6 cross-compile half: `riscv64-linux-musl -Dcpu=baseline_rv64+v` exe build and `x86_64_v4` (AVX-512, 16 i32 lanes / 32-lane f32 blocks = 2 zmm) build | Ryzen 5700X | untested with the 32-lane blocks | both ReleaseFast builds succeed | **compile half green** |
 | 2026-07-13 | S6 run half: full test suite (`zig test --test-no-exec` -> `riscv64/alpine` container, Docker Desktop qemu binfmt) | Ryzen 5700X (qemu-riscv64 user emulation) | RVV correctness of the portable `@Vector` code unproven | **All 360 tests passed** on `baseline_rv64+v` at ReleaseFast | **S6 closed** — functional gate green, zero performance claims per the ISA policy |
+| 2026-07-13 | Post-S6 persistent 9/7 band pool, forward hot path | Ryzen 5700X | lossy enc t16 161.1 +/- 4.5 ms | 152.8 +/- 4.1 ms (-5.2%) | **kept** — 8-worker cap, one spawn set per transform, byte-identical stream, current `riscv64+v` ReleaseFast compile green; inverse integration rejected at +4.9% decode |
 
 S0 note (2026-07-13): the earlier S1/S2 gates ran as direct hyperfine A/B
 pairs while the shared harness was being reworked. The maintained POSIX and

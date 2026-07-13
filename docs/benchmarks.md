@@ -26,6 +26,36 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-07-13: Ryzen 7 5700X, persistent 9/7 forward-DWT pool
+
+| Field | Value |
+| --- | --- |
+| z2000 source | baseline `52d2645` (merged PR #141), candidate `f94b1d1` |
+| Build | Zig 0.16.0, `ReleaseFast`, native x86-64/AVX2 |
+| Host | AMD Ryzen 7 5700X, 8 cores / 16 threads, Windows 11 |
+| Harness | Hyperfine 1.20.0, 2 warmups; 12 t1 and 16 t16 measured runs, interleaved |
+| Input | `bench-rgb-2048.tif`, 12,583,052 B |
+
+Profile: single 8192x8192 tile, RPCL, six resolutions, 256/128 precinct
+ladder, 64x64 blocks, two layers at `--rates 8,1`, `R` tile-parts, SOP/EPH,
+TLM, ICT, irreversible 9/7, and scalar-expounded QCD.
+
+| Metric | Baseline | Candidate | Delta |
+| --- | ---: | ---: | ---: |
+| Encode t1 | 819.6 +/- 17.4 ms | 802.9 +/- 12.6 ms | -2.0%, overlapping |
+| **Encode t16** | **161.1 +/- 4.5 ms** | **152.8 +/- 4.1 ms** | **-5.2%, kept** |
+| Decode t1 | 722.6 +/- 3.0 ms | 726.8 +/- 6.4 ms | +0.6%, neutral |
+| Decode t16 | 148.3 +/- 5.2 ms | 141.5 +/- 3.1 ms | -4.6%, not attributed; decode algorithm unchanged |
+
+The candidate creates at most eight DWT workers once per transform and reuses
+them across row/column phases and decomposition levels. Baseline/candidate and
+t1/t16 produced the same 4,798,568-byte JP2, SHA-256
+`7597eb209f70f3dc36717c08b4e0029f4c65895758f549a029a1f0612fd9c9ee`;
+decoded TIFF hashes also matched. A measured inverse-DWT promotion was not
+kept: even with the persistent pool it changed t16 decode from
+146.7 +/- 6.0 to 153.9 +/- 5.1 ms (+4.9%, 12 runs), primarily because it
+split the existing fused dequantize+inverse traversal.
+
 ## 2026-07-13: Ryzen 7 5700X, S3 close-out — 9/7 lifting block width 32
 
 ### Provenance And Profiles

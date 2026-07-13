@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Persistent Parallel 9/7 Forward DWT
+
+- Added a multi-plane 9/7 row/column band scheduler with private worker
+  scratch and one persistent eight-worker pool per transform. The sequential
+  level cascade and per-sample floating-point operation order are unchanged.
+- Promoted the scheduler only into single-tile irreversible encode; multi-tile
+  keeps tile-level scheduling, and decode keeps fused dequantize+inverse-DWT
+  component jobs. A symmetric inverse kernel is standalone and oracle-tested,
+  but its hot-path integration was rejected after regressing t16 decode by
+  4.9%.
+- The Ryzen 5700X interleaved gate improved lossy t16 encode from
+  161.1 +/- 4.5 to 152.8 +/- 4.1 ms (-5.2%, 16 runs). t1 encode and both
+  decode metrics had no credible regression. Streams remained byte-identical
+  across baseline/candidate and t1/t16 (4,798,568 bytes, SHA-256
+  `7597eb209f70f3dc36717c08b4e0029f4c65895758f549a029a1f0612fd9c9ee`).
+- Added exact serial/parallel 9/7 oracle coverage for minimal, one-dimensional,
+  odd, origin-shifted, SIMD-tail, and overprovisioned-worker geometries, plus
+  end-to-end irreversible encode/decode thread determinism.
+
 ### S6 RISC-V Functional Gate, Feature Plan, And Remaining-Levers Assessment
 
 - Closed the SIMD plan's S6 RISC-V gate: the full 360-test suite passed on
@@ -41,9 +60,9 @@ entries are grouped by development milestone rather than semantic version.
   path's accounting is unchanged.
 - S6 compile half recorded: the `riscv64-linux-musl -Dcpu=baseline_rv64+v`
   exe build and the AVX-512 `x86_64_v4` build (16 i32 lanes, 32-lane f32
-  blocks lowering to 2 zmm per lift step) both succeed at ReleaseFast. The
-  qemu run half stays pending — no qemu-riscv64 on the Windows box and the
-  Docker daemon was not running; execute on the M4 or a Linux host.
+  blocks lowering to 2 zmm per lift step) both succeed at ReleaseFast. This
+  was the compile-only checkpoint; the qemu run half was completed later and
+  is recorded in the S6 close-out above.
 
 ### S3 Lane Audit Close-Out (9/7 Lifting Block Width 32)
 
