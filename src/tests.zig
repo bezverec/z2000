@@ -318,6 +318,112 @@ test "strict decode consumes single- and multi-tile main-header POC schedules" {
     try std.testing.expectEqualSlices(u16, rgb.samples, divided_decoded.samples);
 }
 
+test "strict decode consumes tile-part-header POC schedules" {
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 24;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const records = [_]codestream.PocRecord{
+        .{ .resolution_start = 0, .component_start = 0, .layer_end = 2, .resolution_end = 1, .component_end = 3, .progression = .lrcp },
+        .{ .resolution_start = 1, .component_start = 0, .layer_end = 2, .resolution_end = 2, .component_end = 3, .progression = .lrcp },
+        .{ .resolution_start = 2, .component_start = 0, .layer_end = 2, .resolution_end = 3, .component_end = 3, .progression = .lrcp },
+    };
+    const common = codestream.LosslessOptions{
+        .levels = 2,
+        .layers = 2,
+        .progression = .rpcl,
+        .poc_records = &records,
+        .tile_part_divisions = null,
+        .tlm = false,
+        .block_width = 4,
+        .block_height = 4,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precinct_count = 3,
+    };
+
+    const main_poc = try codestream.encodeLosslessWithOptions(allocator, rgb, common);
+    defer allocator.free(main_poc);
+    const tile_poc = try moveMainPocToFirstTilePartsForTest(allocator, main_poc);
+    defer allocator.free(tile_poc);
+    var decoded = try codestream.decodeLosslessTemporary(allocator, tile_poc);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    const audit = try codestream.auditStrictPacketHeaders(allocator, tile_poc);
+    try std.testing.expect(audit.packets > 0);
+
+    var multi_options = common;
+    multi_options.tile_width = 16;
+    multi_options.tile_height = 12;
+    multi_options.tile_part_divisions = 'R';
+    const multi_main_poc = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_options);
+    defer allocator.free(multi_main_poc);
+    const multi_tile_poc = try moveMainPocToFirstTilePartsForTest(allocator, multi_main_poc);
+    defer allocator.free(multi_tile_poc);
+    var multi_decoded = try codestream.decodeLosslessTemporary(allocator, multi_tile_poc);
+    defer multi_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, multi_decoded.samples);
+    const multi_audit = try codestream.auditStrictPacketHeaders(allocator, multi_tile_poc);
+    try std.testing.expect(multi_audit.packets > audit.packets);
+
+    const misplaced = try allocator.dupe(u8, multi_tile_poc);
+    defer allocator.free(misplaced);
+    const first_sot = findMarker(misplaced, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const second_sot = findMarkerAfter(misplaced, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
+    const second_plt = findMarkerAfter(misplaced, codestream.markerValue("plt"), second_sot + 12) orelse return error.MissingPlt;
+    if (second_plt >= second_sot + @as(usize, readU32BeTest(misplaced, second_sot + 6))) return error.MissingPlt;
+    writeU16BeTest(misplaced, second_plt, codestream.markerValue("poc"));
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.auditStrictPacketHeaders(allocator, misplaced),
+    );
+
+    var direct_options = common;
+    direct_options.poc_in_tile_header = true;
+    direct_options.tlm = true;
+    const direct = try codestream.encodeLosslessWithOptions(allocator, rgb, direct_options);
+    defer allocator.free(direct);
+    const direct_sot = findMarker(direct, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const direct_poc = findMarker(direct, codestream.markerValue("poc")) orelse return error.MissingPoc;
+    const direct_sod = findMarkerAfter(direct, codestream.markerValue("sod"), direct_sot + 12) orelse return error.MissingSod;
+    try std.testing.expect(direct_sot < direct_poc and direct_poc < direct_sod);
+    try std.testing.expectEqual(try codestream.firstSotPsot(direct), try codestream.firstTlmPtlm(direct));
+    var direct_decoded = try codestream.decodeLosslessTemporary(allocator, direct);
+    defer direct_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, direct_decoded.samples);
+    const direct_jp2 = try jp2.wrapRgbCodestream(allocator, rgb, direct);
+    defer allocator.free(direct_jp2);
+    _ = try jp2.parseInfo(direct_jp2);
+
+    direct_options.tile_width = 16;
+    direct_options.tile_height = 12;
+    direct_options.tile_part_divisions = 'R';
+    const direct_multi = try codestream.encodeLosslessWithOptions(allocator, rgb, direct_options);
+    defer allocator.free(direct_multi);
+    try std.testing.expectEqual(@as(usize, 4), countMarker(direct_multi, codestream.markerValue("poc")));
+    var direct_multi_decoded = try codestream.decodeLosslessTemporary(allocator, direct_multi);
+    defer direct_multi_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, direct_multi_decoded.samples);
+    const direct_multi_jp2 = try jp2.wrapRgbCodestream(allocator, rgb, direct_multi);
+    defer allocator.free(direct_multi_jp2);
+    _ = try jp2.parseInfo(direct_multi_jp2);
+
+    var missing_records = common;
+    missing_records.poc_records = &.{};
+    missing_records.poc_in_tile_header = true;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.encodeLosslessWithOptions(allocator, rgb, missing_records),
+    );
+}
+
 test "POC writer emits scheduled single- and multi-tile packet streams" {
     const allocator = std.testing.allocator;
     const width = 32;
@@ -331,6 +437,20 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
         .bit_depth = 8,
         .samples = samples,
     };
+    const expectTileHeaderRoundtrip = struct {
+        fn run(allocator_: std.mem.Allocator, rgb_: image.RgbImage, options_: codestream.LosslessOptions) !void {
+            var tile_options = options_;
+            tile_options.poc_in_tile_header = true;
+            const bytes = try codestream.encodeLosslessWithOptions(allocator_, rgb_, tile_options);
+            defer allocator_.free(bytes);
+            const sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+            const poc_marker = findMarker(bytes, codestream.markerValue("poc")) orelse return error.MissingPoc;
+            try std.testing.expect(poc_marker > sot);
+            var decoded_ = try codestream.decodeLosslessTemporary(allocator_, bytes);
+            defer decoded_.deinit();
+            try std.testing.expectEqualSlices(u16, rgb_.samples, decoded_.samples);
+        }
+    }.run;
     const records = [_]codestream.PocRecord{
         .{
             .resolution_start = 0,
@@ -413,6 +533,7 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     const layer_part_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, layer_part_encoded);
     defer allocator.free(layer_part_wrapped);
     _ = try jp2.parseInfo(layer_part_wrapped);
+    try expectTileHeaderRoundtrip(allocator, rgb, layer_part_options);
 
     const component_records = [_]codestream.PocRecord{
         .{
@@ -452,6 +573,7 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     const component_part_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, component_part_encoded);
     defer allocator.free(component_part_wrapped);
     _ = try jp2.parseInfo(component_part_wrapped);
+    try expectTileHeaderRoundtrip(allocator, rgb, component_part_options);
 
     component_part_options.poc_records = &records;
     try std.testing.expectError(
@@ -479,6 +601,7 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     const position_part_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, position_part_encoded);
     defer allocator.free(position_part_wrapped);
     _ = try jp2.parseInfo(position_part_wrapped);
+    try expectTileHeaderRoundtrip(allocator, rgb, position_part_options);
 
     position_part_options.poc_records = &component_records;
     try std.testing.expectError(
@@ -11579,6 +11702,41 @@ fn spliceMarkerSegmentForTest(
     return out.toOwnedSlice(allocator);
 }
 
+fn moveMainPocToFirstTilePartsForTest(
+    allocator: std.mem.Allocator,
+    stream: []const u8,
+) ![]u8 {
+    const poc_start = findMarker(stream, codestream.markerValue("poc")) orelse return error.MissingPoc;
+    const poc_end = try markerSegmentEndForTest(stream, poc_start);
+    const first_sot = findMarker(stream, codestream.markerValue("sot")) orelse return error.MissingSot;
+    if (poc_end > first_sot) return error.InvalidPocPosition;
+    if (findMarker(stream[0..first_sot], codestream.markerValue("tlm")) != null) return error.UnsupportedTlm;
+    const poc_segment = stream[poc_start..poc_end];
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, stream[0..poc_start]);
+    try out.appendSlice(allocator, stream[poc_end..first_sot]);
+
+    var cursor = first_sot;
+    while (cursor + 12 <= stream.len and readU16BeTest(stream, cursor) == codestream.markerValue("sot")) {
+        const psot = readU32BeTest(stream, cursor + 6);
+        const part_end = cursor + @as(usize, psot);
+        if (part_end > stream.len) return error.InvalidStream;
+        const output_sot = out.items.len;
+        try out.appendSlice(allocator, stream[cursor .. cursor + 12]);
+        if (stream[cursor + 10] == 0) {
+            const updated_psot = std.math.add(u32, psot, @intCast(poc_segment.len)) catch return error.InvalidStream;
+            writeU32BeTest(out.items, output_sot + 6, updated_psot);
+            try out.appendSlice(allocator, poc_segment);
+        }
+        try out.appendSlice(allocator, stream[cursor + 12 .. part_end]);
+        cursor = part_end;
+    }
+    try out.appendSlice(allocator, stream[cursor..]);
+    return out.toOwnedSlice(allocator);
+}
+
 fn duplicateMarkerSegmentForTest(allocator: std.mem.Allocator, stream: []const u8, marker: u16) ![]u8 {
     const start = findMarker(stream, marker) orelse return error.MissingMarker;
     const end = try markerSegmentEndForTest(stream, start);
@@ -14648,6 +14806,7 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         label: []const u8,
         source: u16,
         replacement: u16,
+        expected: anyerror = codestream.CodestreamError.UnsupportedPayload,
     };
     const cases = [_]UnsupportedMarkerCase{
         .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
@@ -14658,7 +14817,12 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         .{ .label = "COC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("coc") },
         .{ .label = "QCC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("qcc") },
         .{ .label = "RGN tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("rgn") },
-        .{ .label = "POC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("poc") },
+        .{
+            .label = "malformed POC tile-part marker",
+            .source = codestream.markerValue("plt"),
+            .replacement = codestream.markerValue("poc"),
+            .expected = codestream.CodestreamError.InvalidCodestream,
+        },
     };
 
     for (cases) |scenario| {
@@ -14668,7 +14832,7 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         const marker = findMarker(corrupted, scenario.source) orelse return error.MissingMarker;
         writeU16BeTest(corrupted, marker, scenario.replacement);
         try std.testing.expectError(
-            codestream.CodestreamError.UnsupportedPayload,
+            scenario.expected,
             codestream.auditStrictPacketHeaders(allocator, corrupted),
         );
     }

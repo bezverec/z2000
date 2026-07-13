@@ -51,7 +51,17 @@ entries are grouped by development milestone rather than semantic version.
   derives variable per-tile part boundaries from position runs, and checks
   each PLT/TLM span. The dense 2x2-tile fixture is pixel-exact through z2000,
   OpenJPEG, Grok, and Kakadu. Main-header POC now covers all direct division
-  modes; tile-part-header POC markers remain gated. Score: 95/100.
+  modes. Score at this stage: 95/100.
+- Added bounded tile-part-header POC. Strict decode parses records only from
+  `TPsot=0`, appends them after inherited main-header records independently per
+  tile, and rejects malformed or later-part markers. `--poc-location tile`
+  writes the checked schedule into every tile's first part and includes its
+  bytes in both `Psot` and TLM; one-part and compatible `R`/`L`/`C`/`P`
+  layouts share the existing packet scheduler. A 16-tile/48-part `R` JP2 is
+  pixel-exact through z2000, OpenJPEG 2.5.4, and Grok 20.3.6, while jpylyzer
+  2.2.1 reports valid JP2. POC remains intentionally incompatible with
+  PPM/PPT until packed-header combinations have their own independent gates.
+  Full Part 1 estimate: 96/100.
 
 ### PPM Framing Foundation
 

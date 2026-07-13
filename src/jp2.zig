@@ -610,9 +610,9 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
                 if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
                 try validateUniformComponentOverrides(&override_state, cod_payload, qcd_payload);
                 if (tile_count == 1) {
-                    try validateTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null, ppm_state.saw);
+                    try validateTilePartSequence(payload, cursor, cod_info.?, components, if (tlm_state.saw) &tlm_state else null, ppm_state.saw);
                 } else {
-                    try validateMultiTileTilePartSequence(payload, cursor, cod_info.?, if (tlm_state.saw) &tlm_state else null, tile_count, ppm_state.saw);
+                    try validateMultiTileTilePartSequence(payload, cursor, cod_info.?, components, if (tlm_state.saw) &tlm_state else null, tile_count, ppm_state.saw);
                 }
                 return;
             },
@@ -676,6 +676,7 @@ fn validateTilePartSequence(
     payload: []const u8,
     first_sot_offset: usize,
     cod: CodSegmentInfo,
+    components: u16,
     tlm_state: ?*const TlmState,
     has_ppm: bool,
 ) !void {
@@ -691,7 +692,7 @@ fn validateTilePartSequence(
             if (state.tile_indices[expected_tile_part_index] != 0) return Jp2Error.InvalidCodestream;
             break :blk state.lengths[expected_tile_part_index];
         } else null;
-        cursor = try validateSotSegment(payload, cursor, expected_tile_part_index, expected_psot, cod, &packet_sequence, &tile_part_count, &ppt_state, has_ppm);
+        cursor = try validateSotSegment(payload, cursor, expected_tile_part_index, expected_psot, cod, components, &packet_sequence, &tile_part_count, &ppt_state, has_ppm);
         expected_tile_part_index = std.math.add(u8, expected_tile_part_index, 1) catch return Jp2Error.InvalidCodestream;
     }
     if (cursor != payload.len - 2) return Jp2Error.InvalidCodestream;
@@ -709,6 +710,7 @@ fn validateMultiTileTilePartSequence(
     payload: []const u8,
     first_sot_offset: usize,
     cod: CodSegmentInfo,
+    components: u16,
     tlm_state: ?*const TlmState,
     tile_count: u32,
     has_ppm: bool,
@@ -757,7 +759,17 @@ fn validateMultiTileTilePartSequence(
         }
         const tile_part_end = std.math.add(usize, cursor, tile_part_length) catch return Jp2Error.InvalidCodestream;
         if (tile_part_end > payload.len - 2) return Jp2Error.InvalidCodestream;
-        try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, &packet_sequences[state_index], &ppt_states[state_index], has_ppm);
+        try validateFirstTilePartHeader(
+            payload,
+            segment_end,
+            tile_part_end,
+            cod,
+            components,
+            sot_tile_part_index == 0,
+            &packet_sequences[state_index],
+            &ppt_states[state_index],
+            has_ppm,
+        );
         cursor = tile_part_end;
         next_parts[state_index] = std.math.add(u8, next_parts[state_index], 1) catch return Jp2Error.InvalidCodestream;
         if (expected_parts[state_index] != 0 and next_parts[state_index] == expected_parts[state_index]) {
@@ -785,6 +797,7 @@ fn validateSotSegment(
     expected_tile_part_index: u8,
     expected_tile_part_length: ?u32,
     cod: CodSegmentInfo,
+    components: u16,
     packet_sequence: *u16,
     tile_part_count: *?u8,
     ppt_state: *PptState,
@@ -813,7 +826,17 @@ fn validateSotSegment(
     }
     const tile_part_end = std.math.add(usize, marker_offset, tile_part_length) catch return Jp2Error.InvalidCodestream;
     if (tile_part_end > payload.len - 2) return Jp2Error.InvalidCodestream;
-    try validateFirstTilePartHeader(payload, segment_end, tile_part_end, cod, packet_sequence, ppt_state, has_ppm);
+    try validateFirstTilePartHeader(
+        payload,
+        segment_end,
+        tile_part_end,
+        cod,
+        components,
+        tile_part_index == 0,
+        packet_sequence,
+        ppt_state,
+        has_ppm,
+    );
     return tile_part_end;
 }
 
@@ -822,6 +845,8 @@ fn validateFirstTilePartHeader(
     start: usize,
     end: usize,
     cod: CodSegmentInfo,
+    components: u16,
+    allow_poc: bool,
     packet_sequence: *u16,
     ppt_state: *PptState,
     has_ppm: bool,
@@ -857,6 +882,7 @@ fn validateFirstTilePartHeader(
                 return;
             },
             marker_plt, marker_com => {},
+            marker_poc => if (!allow_poc) return Jp2Error.InvalidCodestream,
             marker_ppt => part_has_ppt = true,
             marker_sot, marker_eoc => return Jp2Error.InvalidCodestream,
             else => return Jp2Error.UnsupportedProfile,
@@ -868,6 +894,9 @@ fn validateFirstTilePartHeader(
         const next = std.math.add(usize, length_offset, marker_length) catch return Jp2Error.InvalidCodestream;
         if (next > end) return Jp2Error.InvalidCodestream;
         try validateTilePartHeaderMarkerSegment(payload, marker, length_offset, marker_length, &plt_state, ppt_state);
+        if (marker == marker_poc) {
+            try validatePocSegment(payload, length_offset, marker_length, cod, components);
+        }
         cursor = next;
     }
     return Jp2Error.InvalidCodestream;

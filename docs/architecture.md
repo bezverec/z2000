@@ -49,7 +49,8 @@ Current RGB TIFF to JP2 encode:
    Compatible resolution-, layer-, or component-contiguous schedules may
    cross `R`, `L`, or `C` tile-parts while preserving that state. `P` parts
    validate the exact canonical PCRL reference-grid position sequence and may
-   reorder only within a position. Tile-part-header POC markers remain gated.
+   reorder only within a position. POC may be inherited from the main header or
+   appended per tile from its first tile-part header; later-part POC fails closed.
    `src/ppm.zig` owns the main-header packed-packet framing layer:
    ordered `Zppm` segment collection, cross-segment `Nppm/Ippm` parsing, and
    bounded marker-payload construction. RPCL codestream paths map one globally

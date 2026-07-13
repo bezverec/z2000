@@ -7,32 +7,32 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 95/100 full** as of
-2026-07-12. First drafted at `ba66799`.
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 96/100 full** as of
+2026-07-13. First drafted at `ba66799`.
 
-## Path From 95 To 100 (2026-07-12 assessment)
+## Path From 96 To 100 (2026-07-13 assessment)
 
-The remaining five full-codec points are each a genuine vertical or a research
+The remaining four full-codec points are each a genuine vertical or a research
 effort, not an incremental gate. Tooling reality on the benchmark box was
 probed on 2026-07-12; findings inline. Ordered by *value per unit risk*.
 
 | Row | Gap | Size | Risk | Verifiable here? |
 | --- | --- | --- | --- | --- |
-| Core syntax 14→15 · Containers 8→10 | **N6: component-generic pipeline** (grayscale/1-component then N-component, palette expansion) | LARGE (multi-PR, like the multi-tile campaign) | HIGH — reworks the `color.RctPlanes` y/cb/cr representation (87 call sites) the 100/100 narrow path rides on | Yes: TIFF grayscale I/O + OpenJPEG/Grok/Kakadu grayscale interop |
-| T2 9→10 · Core syntax +1 | **Tile-part-header POC + packed-header breadth** (bounded main-header POC now covers one part and compatible `R`/`L`/`C`/`P`) | Medium (marker precedence and per-tile schedule changes) | Medium (state replacement inside tile-part sequence; narrow path untouched) | Partial: dense 2x2 `R`/`C`/`P` are pixel-exact through all four decoders; z2000/OpenJPEG/Kakadu also decode dense `L`, while Grok 20.3.6 misdecodes the tested LRCP-to-RPCL schedule from both z2000 and Kakadu |
+| Containers 8→10 | **N6: component-generic pipeline** (grayscale/1-component then N-component, palette expansion) | LARGE (multi-PR, like the multi-tile campaign) | HIGH — reworks the `color.RctPlanes` y/cb/cr representation (87 call sites) the 100/100 narrow path rides on | Yes: TIFF grayscale I/O + OpenJPEG/Grok/Kakadu grayscale interop |
+| T2 9→10 | **Packed-header breadth** (SOP/EPH combinations plus the remaining multi-part PPM interoperability gate) | Medium | Medium (packet-boundary marker placement and independent-fixture coverage) | Partial: PPT/PPM are public without SOP/EPH; z2000/OpenJPEG/Kakadu decode multi-part PPM, while Grok 20.3.6 misdecodes multiple PPM groups per tile |
 | T2 9→10 | **Close multi-part PPM interop** (global group order, PLT-less body derivation, and per-tile T2 state landed 2026-07-12) | Small investigation or upstream decoder issue | Low code risk | Partial: z2000/OpenJPEG/Kakadu decode the 16-tile/48-part output losslessly; Grok 20.3.6 passes single-tile and one-part-per-tile PPM but misdecodes multiple groups per tile; no independent foreign PPM producer fixture yet |
 | Lossy 14→15 | **PCRD PSNR gap** (encoder distortion model); odd-origin 9/7 lifting is now landed | PCRD = research (0.7–1.8 dB vs OpenJPEG at matched bytes, `tools/pcrd_psnr_ladder.ps1`) | PCRD medium/uncertain (no guaranteed linear progress) | Yes: matched-byte ladder; odd-origin 9/7 is bidirectionally reference-relative within max byte diff 1 |
 | Containers 8→10 | mixed per-component precision (`BPCC`) + alpha channels | Medium; couples to N6's per-component depth work | Medium | Yes: reference grayscale/mixed-precision files |
 
-Recommended order when resuming the push: **tile-part-header POC / packed
-SOP+EPH breadth** or **N6** (biggest unlock but budget it as a
+Recommended order when resuming the push: **packed SOP+EPH breadth** or **N6**
+(biggest unlock but budget it as a
 multi-PR campaign that keeps the single-tile RGB path byte-identical at every
 step). The PCRD PSNR gap is the one item with no guaranteed linear progress and
 should be treated as research, measured against `pcrd_psnr_ladder.ps1`.
 
 ## Next Working Sequence (2026-07-12)
 
-Scorecard now **100/100 narrow, 95/100 full**. The bounded multi-tile path has
+Scorecard now **100/100 narrow, 96/100 full**. The bounded multi-tile path has
 all five progression orders, quality layers including the first tile-local
 rate-target slice, and the implemented resilience matrix. CAUSAL+SEGMARK,
 RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL all
