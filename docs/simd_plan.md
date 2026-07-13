@@ -170,8 +170,13 @@ silently break elsewhere).
 2. **S1** (9/7 lifting) — completed and kept.
 3. **S2** (quant/dequant) — measured and reverted below threshold.
 4. **S4** (direct PCRD metadata) — completed and kept.
-5. **S3** (lane audit) — Ryzen session; pairs naturally with the next Kakadu
-   benchmark visit.
+5. **S3** (lane audit) — **completed on the Ryzen box (2026-07-13)**: i32
+   8-lane policy confirmed, `f32_block_lanes` raised 16 -> 32 (kept, gated),
+   `ict_lanes` narrowing rejected below gate, and the generated-code spot
+   check confirmed 256-bit AVX2 lowering with no silent scalar fallback and
+   intentionally no FMA. Remaining follow-up: re-run the `f32_block_lanes`
+   A/B on the M4 (NEON has 4-wide registers, so 32-lane blocks mean 8 q-regs
+   per step — the Ryzen win does not automatically transfer).
 6. **S6** (RISC-V gate) — any idle slot.
 7. **S5** only as a deliberate
    campaign decision.
@@ -198,6 +203,10 @@ silently break elsewhere).
 | 2026-07-13 | S0 lossy profile in POSIX and PowerShell comparative harnesses | Ryzen 5700X | no maintained four-codec 9/7 gate | t1/t16 encode/decode, sizes, JSON, determinism | **kept** — shared gate now covers Grok/OpenJPEG/Kakadu |
 | 2026-07-13 | S4 direct-MQ per-pass distortion capture | Ryzen 5700X | lossy enc t1/t16 2256/367 ms | 809/159 ms (-64.1/-56.6%) | **kept** — exact symbol-oracle distortion, byte-identical stream; lossless unchanged |
 | 2026-07-13 | S3 AVX2 i32 lane-width A/B on 5/3 | Ryzen 5700X | forced 4 lanes: enc t1/t16 858.8/138.7 ms, dec t1 757.7 ms | native 8 lanes: 791.3/133.9 ms, 737.0 ms (-7.9/-3.5/-2.7%) | **kept existing 8-lane policy** — byte-identical JP2/TIFF; generated-code spot check remains open |
+| 2026-07-13 | S3 `f32_block_lanes` 16 -> 32 (9/7 lifting block width) | Ryzen 5700X | lossy enc t1 836.3 +/- 15.4 ms, dec t1 754.3 +/- 10.9 ms, enc/dec t16 158.0/146.7 ms | 786.5 +/- 3.6 (-6.0%), 730.9 +/- 9.4 (-3.1%; 20-run confirm 758.8 -> 726.2, -4.3%), 150.3/139.2 (-4.9/-5.1%) | **kept** — bit-identical lossy stream, lossless unchanged; re-A/B on M4 before assuming the NEON win |
+| 2026-07-13 | S3 `f32_block_lanes` 16 -> 8 | Ryzen 5700X | same baseline | enc t1 879.1 (+5.1%), dec t1 806.8 (+7.0%) | **rejected** — regression both ways |
+| 2026-07-13 | S3 `ict_lanes` 8 -> 4 | Ryzen 5700X | same baseline | enc t1 817.0 (-2.3%), dec t1 750.7 (-0.5%) | **reverted** — encode gain consistent but below the 3% gate; ICT share too small |
+| 2026-07-13 | S3 generated-code spot check (9/7 `forward2D` probe root, `-mcpu=native -femit-asm`) | Ryzen 5700X | open question: does `@Vector` lower to AVX2? | 72x `vmulps ymm` + 72x `vaddps ymm` (32-lane block = 4 ymm per lift step), scalar `mulss/addss` only in boundary tails; zero `vfmadd*` (correct: FMA would break stream bit-exactness) | **closed** — vectorization confirmed, no silent scalar fallback |
 
 S0 note (2026-07-13): the earlier S1/S2 gates ran as direct hyperfine A/B
 pairs while the shared harness was being reworked. The maintained POSIX and

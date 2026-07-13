@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### S3 Lane Audit Close-Out (9/7 Lifting Block Width 32)
+
+- Closed the SIMD plan's S3 lane audit on the Ryzen 5700X. The 9/7 lifting
+  block width (`simd.f32_block_lanes`) moves 16 -> 32 after an interleaved
+  four-variant hyperfine A/B on the lossy profile: encode t1 -6.0%
+  (836.3 -> 786.5 ms), decode t1 -4.3% on the 20-run confirmation
+  (758.8 -> 726.2 ms), encode/decode t16 -4.9%/-5.1%, lossless unchanged,
+  and all variants produced bit-identical streams. The 8-lane variant
+  regressed both directions and narrowing `ict_lanes` to 4 stayed below the
+  3% gate; both were reverted per the keep rule. A generated-code spot check
+  (`-mcpu=native -femit-asm` probe root) confirmed the lifting lowers to
+  256-bit AVX2 (`vmulps`/`vaddps` on ymm, scalar ops only in boundary
+  tails) with no FMA contraction — intentional, since FMA would change f32
+  rounding and break stream bit-exactness. A fresh four-codec ledger record
+  at `66807d7` (lossless + lossy, t1/t16) is in `docs/benchmarks.md`;
+  follow-up: re-run the block-width A/B on the M4 before assuming the NEON
+  win.
+
 ### Encode T1 Pass Profiling
 
 - Extended single-thread encode `--timings` with separate MQ significance,
