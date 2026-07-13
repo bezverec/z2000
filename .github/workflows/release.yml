@@ -194,7 +194,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
-        run: zig build test "-Dtarget=$TARGET" -fqemu
+        run: zig build test "-Dtarget=$TARGET" -Doptimize=ReleaseFast -fqemu
 
       - name: Build release binary (Unix)
         if: runner.os != 'Windows'
