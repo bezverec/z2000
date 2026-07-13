@@ -187,4 +187,11 @@ silently break elsewhere).
 
 | date | candidate | host | metric before | metric after | verdict |
 | --- | --- | --- | ---: | ---: | --- |
-| — | (none yet) | | | | |
+| 2026-07-13 | S1 9/7 split lifting + 16-column vertical bands | M4 | lossy enc t1/t10 559.2/231.5 ms, dec t1/t10 526.9/219.4 ms | 494.2/166.5 ms, 457.2/156.1 ms (−11.6/−28.1/−13.2/−28.9 %) | **kept** — bit-identical streams, lossless profile unchanged |
+| 2026-07-13 | S2 vector quantize/dequantize band regions | M4 | lossy enc t1 494.3 ms, dec t1/t10 465.0/153.0 ms | 483.9 ms (−2.1 %), 459.0/151.5 ms (−1.3/−1.0 %) | **reverted** — consistent but below the 3 % gate; do not re-attempt without a new angle (e.g. fused dequantize-into-inverse-DWT pass) |
+
+S0 note (2026-07-13): the S1/S2 gates ran as direct hyperfine A/B pairs
+(baseline binary vs candidate binary, warmup 2, 8 runs, 2048x2048 RGB, 9/7
+ICT scalar-expounded, levels 5, t1 and t10) rather than through
+`tools/bench_compare.sh`, which was being reworked on a parallel branch at
+the time. Folding the lossy scenario into the shared harness remains open.

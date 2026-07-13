@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Vectorized 9/7 Wavelet (SIMD Plan S1)
+
+- The irreversible 9/7 DWT now lifts on the line split into contiguous
+  even/odd halves (16-lane blocks) instead of gathering interleaved samples
+  into 2-lane vectors, and the vertical pass processes 16-column bands with
+  wide row-vector lifts instead of per-column strided gathers. Horizontal
+  line copies are gone. Results are bit-identical to the previous
+  implementation (proven by a scalar-reference matrix test across 16x16
+  dimensions, 4 origins, 3 levels, plus byte-identical 2048x2048 lossy and
+  lossless streams).
+- Measured on M4 (hyperfine, warmup 2, 8 runs, keep rule >=3% with
+  non-overlapping +/-sigma): lossy encode t1 -11.6%, t10 -28.1%; lossy
+  decode t1 -13.2%, t10 -28.9%. The lossless archival profile is unchanged.
+- The follow-up S2 candidate (vectorized quantize/dequantize band loops)
+  measured -1.0% to -2.1% and was reverted per the keep rule; numbers are
+  recorded in the `docs/simd_plan.md` progress log.
+
 ### Grayscale JP2 Encode And Strict Decode
 
 - Added a real one-component coefficient, ISO-MQ T1, T2 packet, and codestream

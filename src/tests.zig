@@ -22872,3 +22872,228 @@ fn readU64BeTest(bytes: []const u8, offset: usize) u64 {
         (@as(u64, bytes[offset + 6]) << 8) |
         bytes[offset + 7];
 }
+
+// Scalar reference of the pre-split interleaved 9/7 lifting (the shipped
+// implementation before the split/vertical-band kernels). The SIMD rewrite
+// must match it bit for bit; any divergence is a regression, not tuning.
+const ref97_alpha: f32 = -1.586134342059924;
+const ref97_beta: f32 = -0.052980118572961;
+const ref97_gamma: f32 = 0.882911075530934;
+const ref97_delta: f32 = 0.443506852043971;
+const ref97_k: f32 = 1.230174104914001;
+const ref97_inv_k: f32 = 1.0 / ref97_k;
+
+fn ref97LiftOdd(data: []f32, coefficient: f32) void {
+    var i: usize = 1;
+    while (i < data.len) : (i += 2) {
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] += coefficient * (data[i - 1] + right);
+    }
+}
+
+fn ref97LiftEven(data: []f32, coefficient: f32) void {
+    var i: usize = 0;
+    while (i < data.len) : (i += 2) {
+        const left = if (i > 0) data[i - 1] else data[1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] += coefficient * (left + right);
+    }
+}
+
+fn ref97Scale(data: []f32, even_scale: f32, odd_scale: f32) void {
+    var i: usize = 0;
+    while (i < data.len) : (i += 1) {
+        data[i] *= if ((i & 1) == 0) even_scale else odd_scale;
+    }
+}
+
+fn ref97Pack(data: []f32, scratch: []f32, evens_first: bool) void {
+    var out: usize = 0;
+    var i: usize = if (evens_first) 0 else 1;
+    while (i < data.len) : (i += 2) {
+        scratch[out] = data[i];
+        out += 1;
+    }
+    i = if (evens_first) 1 else 0;
+    while (i < data.len) : (i += 2) {
+        scratch[out] = data[i];
+        out += 1;
+    }
+    @memcpy(data, scratch[0..data.len]);
+}
+
+fn ref97Unpack(data: []f32, scratch: []f32, evens_first: bool) void {
+    const firsts = if (evens_first) (data.len + 1) / 2 else data.len / 2;
+    var low: usize = 0;
+    var high: usize = firsts;
+    for (0..data.len) |i| {
+        const is_first = if (evens_first) (i & 1) == 0 else (i & 1) != 0;
+        if (is_first) {
+            scratch[i] = data[low];
+            low += 1;
+        } else {
+            scratch[i] = data[high];
+            high += 1;
+        }
+    }
+    @memcpy(data, scratch[0..data.len]);
+}
+
+fn ref97Forward1D(data: []f32, scratch: []f32, origin: u32) void {
+    if (data.len < 2) return;
+    if ((origin & 1) == 0) {
+        ref97LiftOdd(data, ref97_alpha);
+        ref97LiftEven(data, ref97_beta);
+        ref97LiftOdd(data, ref97_gamma);
+        ref97LiftEven(data, ref97_delta);
+        ref97Scale(data, ref97_inv_k, ref97_k);
+        ref97Pack(data, scratch, true);
+    } else {
+        ref97LiftEven(data, ref97_alpha);
+        ref97LiftOdd(data, ref97_beta);
+        ref97LiftEven(data, ref97_gamma);
+        ref97LiftOdd(data, ref97_delta);
+        ref97Scale(data, ref97_k, ref97_inv_k);
+        ref97Pack(data, scratch, false);
+    }
+}
+
+fn ref97Inverse1D(data: []f32, scratch: []f32, origin: u32) void {
+    if (data.len < 2) return;
+    if ((origin & 1) == 0) {
+        ref97Unpack(data, scratch, true);
+        ref97Scale(data, ref97_k, ref97_inv_k);
+        ref97LiftEven(data, -ref97_delta);
+        ref97LiftOdd(data, -ref97_gamma);
+        ref97LiftEven(data, -ref97_beta);
+        ref97LiftOdd(data, -ref97_alpha);
+    } else {
+        ref97Unpack(data, scratch, false);
+        ref97Scale(data, ref97_inv_k, ref97_k);
+        ref97LiftOdd(data, -ref97_delta);
+        ref97LiftEven(data, -ref97_gamma);
+        ref97LiftOdd(data, -ref97_beta);
+        ref97LiftEven(data, -ref97_alpha);
+    }
+}
+
+fn ref97LowCount(n: usize, origin: u32) usize {
+    return if ((origin & 1) == 0) (n + 1) / 2 else n / 2;
+}
+
+fn ref97CeilDiv2(value: u32) u32 {
+    return (value / 2) + @intFromBool((value & 1) != 0);
+}
+
+fn ref97Forward2D(allocator: std.mem.Allocator, data: []f32, width: usize, height: usize, levels: u8, x0: u32, y0: u32) !u8 {
+    const max_dim = @max(width, height);
+    const line = try allocator.alloc(f32, max_dim);
+    defer allocator.free(line);
+    const scratch = try allocator.alloc(f32, max_dim);
+    defer allocator.free(scratch);
+
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    var done: u8 = 0;
+    while (done < levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        const next_width = ref97LowCount(cur_width, cur_x0);
+        const next_height = ref97LowCount(cur_height, cur_y0);
+        if (next_width == 0 or next_height == 0) break;
+        for (0..cur_width) |col| {
+            for (0..cur_height) |row| line[row] = data[row * width + col];
+            ref97Forward1D(line[0..cur_height], scratch[0..cur_height], cur_y0);
+            for (0..cur_height) |row| data[row * width + col] = line[row];
+        }
+        for (0..cur_height) |row| {
+            for (0..cur_width) |col| line[col] = data[row * width + col];
+            ref97Forward1D(line[0..cur_width], scratch[0..cur_width], cur_x0);
+            for (0..cur_width) |col| data[row * width + col] = line[col];
+        }
+        cur_width = next_width;
+        cur_height = next_height;
+        cur_x0 = ref97CeilDiv2(cur_x0);
+        cur_y0 = ref97CeilDiv2(cur_y0);
+    }
+    return done;
+}
+
+fn ref97Inverse2D(allocator: std.mem.Allocator, data: []f32, width: usize, height: usize, levels: u8, x0: u32, y0: u32) !void {
+    var shapes: [32]struct { width: usize, height: usize, x0: u32, y0: u32 } = undefined;
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    var actual: u8 = 0;
+    while (actual < levels and (cur_width > 1 or cur_height > 1)) : (actual += 1) {
+        const next_width = ref97LowCount(cur_width, cur_x0);
+        const next_height = ref97LowCount(cur_height, cur_y0);
+        if (next_width == 0 or next_height == 0) break;
+        shapes[actual] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+        cur_width = next_width;
+        cur_height = next_height;
+        cur_x0 = ref97CeilDiv2(cur_x0);
+        cur_y0 = ref97CeilDiv2(cur_y0);
+    }
+
+    const max_dim = @max(width, height);
+    const line = try allocator.alloc(f32, max_dim);
+    defer allocator.free(line);
+    const scratch = try allocator.alloc(f32, max_dim);
+    defer allocator.free(scratch);
+
+    var level = actual;
+    while (level > 0) {
+        level -= 1;
+        const shape = shapes[level];
+        for (0..shape.height) |row| {
+            for (0..shape.width) |col| line[col] = data[row * width + col];
+            ref97Inverse1D(line[0..shape.width], scratch[0..shape.width], shape.x0);
+            for (0..shape.width) |col| data[row * width + col] = line[col];
+        }
+        for (0..shape.width) |col| {
+            for (0..shape.height) |row| line[row] = data[row * width + col];
+            ref97Inverse1D(line[0..shape.height], scratch[0..shape.height], shape.y0);
+            for (0..shape.height) |row| data[row * width + col] = line[row];
+        }
+    }
+}
+
+test "9/7 split and vertical-band kernels match the interleaved reference bit for bit" {
+    const allocator = std.testing.allocator;
+    const dims = [_]usize{ 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 20, 31, 32, 33, 47, 48 };
+    const origins = [_][2]u32{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 1, 1 } };
+
+    var seed: u32 = 0x97531;
+    for (dims) |height| {
+        for (dims) |width| {
+            for (origins) |origin| {
+                const pixels = width * height;
+                const source = try allocator.alloc(f32, pixels);
+                defer allocator.free(source);
+                for (source) |*value| {
+                    seed = seed *% 1664525 +% 1013904223;
+                    // Mixed-sign values with fractional parts so every lift
+                    // step produces inexact f32 arithmetic.
+                    value.* = (@as(f32, @floatFromInt(@as(i32, @bitCast(seed)) >> 16))) / 8.0;
+                }
+
+                const actual = try allocator.dupe(f32, source);
+                defer allocator.free(actual);
+                const expected = try allocator.dupe(f32, source);
+                defer allocator.free(expected);
+
+                const levels: u8 = 3;
+                const done = try wavelet.forward2DOrigin(allocator, actual, width, height, levels, .irreversible_9_7, origin[0], origin[1]);
+                const ref_done = try ref97Forward2D(allocator, expected, width, height, levels, origin[0], origin[1]);
+                try std.testing.expectEqual(ref_done, done);
+                try std.testing.expectEqualSlices(f32, expected, actual);
+
+                try wavelet.inverse2DOrigin(allocator, actual, width, height, done, .irreversible_9_7, origin[0], origin[1]);
+                try ref97Inverse2D(allocator, expected, width, height, ref_done, origin[0], origin[1]);
+                try std.testing.expectEqualSlices(f32, expected, actual);
+            }
+        }
+    }
+}
