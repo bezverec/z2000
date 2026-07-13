@@ -29,8 +29,10 @@ Performance checkpoint (2026-07-13): rate-targeted direct-MQ encode now
 captures exact per-pass distortion during the real T1 traversal. Removing the
 duplicate symbol-coder pass cut the maintained Ryzen lossy encode gate by
 64.1% t1 and 56.6% t16 with byte-identical output. Remaining performance work
-is concentrated in decode T1, lane-width validation, and parallel efficiency;
-this changes no ISO score.
+is concentrated in decode T1, lane-width validation, and parallel efficiency.
+The first follow-up MQ decode branch-layout slice improved lossless t1 by 3.1%
+and lossy t1 by 3.9% with identical decoded files; t16 remained effectively
+neutral. These performance changes do not alter the ISO score.
 
 ## Next Working Sequence (2026-07-12)
 

@@ -26,6 +26,34 @@ the output. z2000 is now only 1.06x behind Grok t1 and 1.07x ahead of Grok t16
 for this lossy profile; Kakadu remains 1.82x/2.56x faster. The next high-value
 work is decode T1 and the S3 AVX2 lane audit, not another PCRD traversal.
 
+## Checkpoint #4 (2026-07-13) — MQ Decode Branch Layout
+
+The ISO MQ decoder now branches first on the arithmetic `c_high >= Qe`
+partition, then handles fast MPS and renormalizing MPS together on that side.
+This removes the old compound fast-path test followed by a repeated LPS
+comparison. The profiled and unchecked readers retain identical control flow
+and branch accounting.
+
+On the Ryzen 7 5700X lossless 2048 corpus, a 20-run A/B improved t1 decode
+from 761.9 +/- 4.1 to 738.6 +/- 6.9 ms (-3.1%); the lossy stream improved
+from 770.7 +/- 1.7 to 740.3 +/- 5.4 ms (-3.9%). Two opposite-order t16 runs
+were scheduler-noisy but pooled to roughly -1%, with no credible regression.
+Lossless and lossy decoded TIFF hashes were identical. The measured T1 block
+payload fell from 729 to 695 ms; significance/refinement/cleanup all improved.
+
+A preceding attempt to replace field-wise MQ context transitions with copies
+from immutable full-context tables measured only 763.8 to 758.2 ms (-0.7%)
+with overlapping intervals. It was reverted under the keep rule.
+
+The matching 5/3 encode campaign did not justify an MQ encoder change. A
+structural MPS/LPS split measured 791.6 to 797.2 ms t1 (+0.7%) and 133.2 to
+131.2 ms t16 (-1.5%); forcing `Encoder.write` inline measured 789.3 to
+793.6 ms t1 (+0.5%) and a statistically neutral t16. Both were byte-identical
+and both were reverted. The S3 lane audit also confirmed that AVX2's native
+8 i32 lanes beat a forced 4-lane build by 7.9% encode t1, 3.5% encode t16,
+and 2.7% decode t1. The next 5/3 encode candidate must target EBCOT pass work,
+not generic MQ layout, DWT width, or RCT.
+
 ## Baseline #2 (2026-07-07) — Windows/Ryzen, vs Kakadu (M4 opened)
 
 Machine: AMD Ryzen 7 5700X (8C/16T), Windows 11, x86_64. Kakadu **8.4.1**

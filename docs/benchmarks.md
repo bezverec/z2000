@@ -26,6 +26,27 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-07-13: Ryzen 7 5700X, 5/3 lossless focus
+
+This follow-up uses the same host, tools, corpus, and archival profile as the
+record below, after the MQ decoder branch-layout candidate based on `c64385f`.
+Hyperfine used two warmups and eight measured runs. Output sizes stayed z2000
+6,636,048 B, Grok 6,635,206 B, OpenJPEG 6,636,085 B, and Kakadu 6,624,994 B;
+z2000 t1 and t16 codestreams were byte-identical.
+
+| Codec | Encode t1 | Encode t16 | Decode t1 | Decode t16 |
+| --- | ---: | ---: | ---: | ---: |
+| z2000 | 798.0 +/- 7.5 ms | 134.8 +/- 3.1 ms | 740.6 +/- 6.4 ms | 137.8 +/- 2.4 ms |
+| Grok | 701.4 +/- 8.7 ms | 152.0 +/- 3.2 ms | 535.4 +/- 3.3 ms | 91.0 +/- 3.0 ms |
+| OpenJPEG | 673.6 +/- 2.1 ms | 126.1 +/- 2.4 ms | 573.3 +/- 8.5 ms | 127.9 +/- 7.5 ms |
+| Kakadu | 417.9 +/- 3.0 ms | 65.1 +/- 2.3 ms | 481.4 +/- 1.8 ms | 71.3 +/- 3.3 ms |
+
+z2000 now beats Grok's 5/3 encode at t16 by 11.3%, while remaining 13.8%
+behind at t1. Decode remains the larger gap: 1.38x/1.51x behind Grok and
+1.54x/1.93x behind Kakadu at t1/t16. A matching `--timings` encode reported
+88.2% T1 block payload, 8.9% 5/3 DWT, and under 1% RCT; future 5/3 encode work
+therefore stays focused on T1 rather than transform or container overhead.
+
 ## 2026-07-13: Ryzen 7 5700X, direct PCRD distortion candidate
 
 ### Provenance And Profiles

@@ -197,6 +197,7 @@ silently break elsewhere).
 | 2026-07-13 | Per-plane component jobs for the 9/7 pipeline (DWT + quantize per component on the existing runComponentJobs infra; thread-level follow-up to S1, same gate) | M4 | lossy enc t10 167.2 ms, dec t10 156.2 ms | 128.6 ms (−23.1 %), 118.9 ms (−23.9 %) | **kept** — byte-identical streams, t1 and lossless unchanged |
 | 2026-07-13 | S0 lossy profile in POSIX and PowerShell comparative harnesses | Ryzen 5700X | no maintained four-codec 9/7 gate | t1/t16 encode/decode, sizes, JSON, determinism | **kept** — shared gate now covers Grok/OpenJPEG/Kakadu |
 | 2026-07-13 | S4 direct-MQ per-pass distortion capture | Ryzen 5700X | lossy enc t1/t16 2256/367 ms | 809/159 ms (-64.1/-56.6%) | **kept** — exact symbol-oracle distortion, byte-identical stream; lossless unchanged |
+| 2026-07-13 | S3 AVX2 i32 lane-width A/B on 5/3 | Ryzen 5700X | forced 4 lanes: enc t1/t16 858.8/138.7 ms, dec t1 757.7 ms | native 8 lanes: 791.3/133.9 ms, 737.0 ms (-7.9/-3.5/-2.7%) | **kept existing 8-lane policy** — byte-identical JP2/TIFF; generated-code spot check remains open |
 
 S0 note (2026-07-13): the earlier S1/S2 gates ran as direct hyperfine A/B
 pairs while the shared harness was being reworked. The maintained POSIX and

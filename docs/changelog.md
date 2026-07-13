@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### ISO MQ Decode Branch Layout
+
+- Reordered the ISO MQ decoder around the arithmetic-code `c_high >= Qe`
+  partition, sharing the MPS-side code before splitting fast and renormalizing
+  transitions. The profiled reader mirrors the unchecked hot path exactly.
+- Ryzen 7 5700X A/B measurements improved lossless t1 decode by 3.1% and
+  lossy t1 decode by 3.9%; pooled t16 measurements were approximately 1%
+  faster but scheduler-noisy. Decoded lossless and lossy TIFFs remained
+  byte-identical.
+- Reverted an immutable full-context transition-table candidate after it
+  improved decode by only 0.7%, below the optimization keep rule.
+- Added a focused four-codec 5/3 lossless benchmark record. z2000 now beats
+  Grok encode at t16 but remains behind at t1 and on decode; profiling assigns
+  88.2% of lossless encode to T1 and only 8.9% to 5/3 DWT.
+- Kept the existing AVX2 8-lane i32 policy after it beat a forced 4-lane build
+  by 7.9% encode t1, 3.5% encode t16, and 2.7% decode t1. Two MQ encoder
+  layout/inlining candidates were byte-exact but reverted below the keep rule.
+
 ### Direct PCRD Distortion Capture And Lossy Benchmark Gate
 
 - The direct ISO-MQ T1 encoder can now collect exact per-pass coefficient

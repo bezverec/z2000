@@ -392,27 +392,22 @@ pub const Decoder = struct {
 
         const next_a = self.a - qe;
         const c_high = self.c >> 16;
-        if (c_high >= qe and (next_a & 0x8000) != 0) {
-            self.a = next_a;
-            self.c -= @as(u32, qe) << 16;
-            return context.mps;
-        }
-
         self.a = next_a;
-        if (c_high < qe) {
-            const bit = self.exchangeLps(context, qe);
+        if (c_high >= qe) {
+            self.c -= @as(u32, qe) << 16;
+            if ((next_a & 0x8000) != 0) return context.mps;
+            const bit = self.exchangeMps(context, qe);
             self.renormalize();
             return bit;
         }
 
-        self.c -= @as(u32, qe) << 16;
-        const bit = self.exchangeMps(context, qe);
+        const bit = self.exchangeLps(context, qe);
         self.renormalize();
         return bit;
     }
 
-    // Keep this branch layout in sync with readUnchecked. The final MPS path
-    // after the fast check is necessarily a renormalizing MPS transition.
+    // Keep this branch layout in sync with readUnchecked. Once the MPS side
+    // misses its high-A fast return, that transition necessarily renormalizes.
     pub inline fn readProfiled(self: *Decoder, context_index: usize, stats: *DecodeBranchStats) bool {
         std.debug.assert(context_index < self.contexts.len);
         const context = &self.contexts.ptr[context_index];
@@ -420,24 +415,21 @@ pub const Decoder = struct {
 
         const next_a = self.a - qe;
         const c_high = self.c >> 16;
-        if (c_high >= qe and (next_a & 0x8000) != 0) {
-            stats.fast_mps += 1;
-            self.a = next_a;
-            self.c -= @as(u32, qe) << 16;
-            return context.mps;
-        }
-
         self.a = next_a;
-        if (c_high < qe) {
-            stats.lps += 1;
-            const bit = self.exchangeLps(context, qe);
+        if (c_high >= qe) {
+            self.c -= @as(u32, qe) << 16;
+            if ((next_a & 0x8000) != 0) {
+                stats.fast_mps += 1;
+                return context.mps;
+            }
+            stats.renorm_mps += 1;
+            const bit = self.exchangeMps(context, qe);
             self.renormalizeProfiled(stats);
             return bit;
         }
 
-        self.c -= @as(u32, qe) << 16;
-        stats.renorm_mps += 1;
-        const bit = self.exchangeMps(context, qe);
+        stats.lps += 1;
+        const bit = self.exchangeLps(context, qe);
         self.renormalizeProfiled(stats);
         return bit;
     }
