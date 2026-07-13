@@ -20,8 +20,31 @@ const t2 = @import("t2.zig");
 const tile_grid = @import("tile_grid.zig");
 const tile_pipeline = @import("tile_pipeline.zig");
 const tiff = @import("tiff.zig");
+const version = @import("version.zig");
 const wavelet = @import("wavelet.zig");
 const wavelet_int = @import("wavelet_int.zig");
+
+test "application version carries deterministic build provenance" {
+    _ = try std.SemanticVersion.parse(version.string);
+    const base = try std.SemanticVersion.parse(version.base);
+    try std.testing.expect(base.pre == null);
+    try std.testing.expect(base.build == null);
+
+    const expected = if (version.is_release)
+        try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{s}+build.{d}.g{s}{s}",
+            .{ version.base, version.build_number, version.git_sha, if (version.dirty) ".dirty" else "" },
+        )
+    else
+        try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{s}-dev.{d}+g{s}{s}",
+            .{ version.base, version.build_number, version.git_sha, if (version.dirty) ".dirty" else "" },
+        );
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, version.string);
+}
 
 const minimal_jp2_codestream = [_]u8{
     0xff, 0x4f, // SOC

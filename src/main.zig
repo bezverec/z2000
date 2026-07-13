@@ -6,6 +6,7 @@ const dng = @import("formats/dng.zig");
 const image = @import("image.zig");
 const jp2 = @import("jp2.zig");
 const tiff = @import("tiff.zig");
+const app_version = @import("version.zig");
 const wavelet = @import("wavelet.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -21,6 +22,15 @@ pub fn main(init: std.process.Init) !void {
         try args_list.append(allocator, arg);
     }
     const args = args_list.items;
+
+    if (args.len == 2 and
+        (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-V")))
+    {
+        var buffer: [256]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buffer, "z2000 {s}\n", .{app_version.string});
+        try std.Io.File.stdout().writeStreamingAll(io, line);
+        return;
+    }
 
     if (args.len < 2) {
         usage();
@@ -1239,6 +1249,7 @@ fn t1BackendLabel(backend: codestream.T1Backend) []const u8 {
 fn usage() void {
     std.debug.print(
         \\Usage:
+        \\  z2000 --version
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>

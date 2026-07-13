@@ -73,6 +73,19 @@ The executable is written to:
 zig-out/bin/z2000
 ```
 
+Inspect the application version and exact source provenance:
+
+```sh
+zig build run -- --version
+# z2000 0.1.0-dev.382+ge93a31e0
+```
+
+z2000 starts conservatively on the `0.1.x` line. Development builds use the
+SemVer form `0.1.0-dev.BUILD+gCOMMIT`; release builds use
+`0.1.0+build.BUILD.gCOMMIT`. `BUILD` is the reachable Git commit count and
+`COMMIT` is the eight-character revision. See
+[Versioning](docs/versioning.md) for release and source-archive rules.
+
 ## Command Examples
 
 Inspect TIFF or DNG metadata:
@@ -221,6 +234,7 @@ Detailed notes live in `docs/`:
 - [Next steps](docs/next_steps.md)
 - [Optimization plan](docs/optimization_plan.md)
 - [Multi-tile plan](docs/multi_tile_plan.md)
+- [Versioning](docs/versioning.md)
 - [Changelog](docs/changelog.md)
 
 ## Project Direction

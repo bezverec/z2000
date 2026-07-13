@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Conservative Application Versioning
+
+- Established `0.1.0` as the first pre-1.0 application/API line in the
+  root `VERSION` file; this is intentionally separate from internal `.z2000`
+  payload versions and JPEG2000 syntax/profile signaling.
+- Build provenance is generated as valid SemVer. Development binaries report
+  `0.1.0-dev.BUILD+gCOMMIT[.dirty]`; release-mode binaries report
+  `0.1.0+build.BUILD.gCOMMIT[.dirty]`. The build number is the reachable Git
+  commit count and the revision is an eight-character SHA.
+- Added `z2000 --version`/`-V`, typed runtime version constants, source-archive
+  fallback `0.1.0-dev.0+gunknown`, and deterministic `-Dbuild-number`,
+  `-Dgit-sha`, and `-Dgit-dirty` overrides for CI/package builds.
+- Documented the pre-1.0 increment policy, release tags, full-history
+  requirement, dirty-worktree meaning, and the gate for eventually declaring
+  1.0.0.
+
 ### Bounded JP2 Palette Vertical And 100/100 Scorecard
 
 - Added `jp2.Palette`, `wrapPaletteCodestream`, and `extractPalette` for a

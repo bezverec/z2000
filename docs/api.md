@@ -22,6 +22,7 @@ zig build run -- decode output.z2000 reconstructed.pgm
 TIFF and temporary JP2 scaffold:
 
 ```sh
+zig build run -- --version
 zig build run -- tiff-info input.tif
 zig build run -- dng-info input.dng
 zig build run -- tiff-to-jp2 input.tif output.jp2 [options]
@@ -29,6 +30,10 @@ zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N]
 ```
+
+`--version` (or `-V`) prints the generated SemVer application version including
+its Git-derived build number and revision. It does not describe the internal
+legacy `.z2000` payload version or JPEG2000 marker/profile syntax.
 
 The TIFF module exposes `read`/`parse` for tagged RGB-or-grayscale dispatch,
 plus strict `readRgb`/`parseRgb` and `readGray`/`parseGray` adapters. `writeGray`
