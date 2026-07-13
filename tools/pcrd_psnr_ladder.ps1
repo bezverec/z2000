@@ -23,8 +23,13 @@ param(
 #   layer 2: z2000 1333 B -> 19.32 dB | opj -r 147 (1317 B) -> 20.00 dB | delta 0.69 dB
 #   layer 3: z2000 2693 B -> 21.86 dB | opj -r  73 (2707 B) -> 23.08 dB | delta 1.21 dB
 #   layer 4: z2000 5383 B -> 24.91 dB | opj -r  37 (5329 B) -> 26.69 dB | delta 1.78 dB
-# i.e. the current global PCRD allocation trails OpenJPEG by ~0.7-1.8 dB at
-# matched payload sizes on this corpus. Track improvements against these.
+# The 2026-07-13 gain-normalized allocator and profile-matched OpenJPEG
+# precincts produce:
+#   layer 1: z2000  657 B -> 15.43 dB | opj -> 17.03 dB | delta 1.60 dB
+#   layer 2: z2000 1329 B -> 19.70 dB | opj -> 20.00 dB | delta 0.31 dB
+#   layer 3: z2000 2639 B -> 22.23 dB | opj -> 22.87 dB | delta 0.65 dB
+#   layer 4: z2000 5355 B -> 26.35 dB | opj -> 26.50 dB | delta 0.15 dB
+# Keep the historical values above as the before-change baseline.
 
 $ErrorActionPreference = 'Stop'
 
@@ -168,7 +173,8 @@ for ($l = 1; $l -le 4; $l++) {
     $r = [math]::Max(1, [math]::Round(196608.0 / $cums[$l - 1]))
     $ojp2 = Join-Path $OutDir "opj-l$l.jp2"
     $otif = Join-Path $OutDir "opj-l$l.tif"
-    & $OpjCompress -i $srcTif -o $ojp2 -I -r $r *> $null
+    & $OpjCompress -i $srcTif -o $ojp2 -I -r $r -n 6 -p LRCP -b 64,64 `
+        -c "[256,256],[256,256],[128,128],[128,128],[128,128],[128,128]" *> $null
     if ($LASTEXITCODE -ne 0) { throw "opj_compress -r $r failed" }
     & $OpjDecompress -i $ojp2 -o $otif *> $null
     if ($LASTEXITCODE -ne 0) { throw "opj_decompress failed" }
@@ -182,3 +188,4 @@ for ($l = 1; $l -le 4; $l++) {
 Write-Host ""
 Write-Host ("worst allocator deficit vs OpenJPEG at matched bytes: {0:F2} dB" -f $worst)
 Write-Host "(2026-07-11 baseline: 1.78 / 0.69 / 1.21 / 1.78 dB per layer; improvements should shrink these)"
+Write-Host "(2026-07-13 gain-normalized/profile-matched: 1.60 / 0.31 / 0.65 / 0.15 dB)"

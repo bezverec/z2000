@@ -8,6 +8,7 @@ pub const Jp2Error = error{
     InvalidCodestream,
     InvalidBox,
     MissingRequiredBox,
+    PaletteIndexOutOfRange,
     UnsupportedColorSpace,
     UnsupportedProfile,
 };
@@ -16,10 +17,58 @@ pub const Info = struct {
     width: u32,
     height: u32,
     components: u16,
+    output_components: u16,
     bits_per_component: u8,
+    has_palette: bool = false,
+    palette_entries: u16 = 0,
+    palette_bits_per_component: u8 = 0,
     has_icc_profile: bool = false,
     icc_profile_bytes: usize = 0,
     codestream_bytes: usize,
+};
+
+/// The bounded JP2 Part 1 palette profile currently accepted by z2000:
+/// three unsigned, uniform 8- or 16-bit columns mapped to sRGB.
+pub const Palette = struct {
+    allocator: std.mem.Allocator,
+    entries: u16,
+    bit_depth: u8,
+    samples: []u16,
+
+    pub fn deinit(self: *Palette) void {
+        self.allocator.free(self.samples);
+        self.* = undefined;
+    }
+
+    pub fn expand(self: Palette, allocator: std.mem.Allocator, indexed: image.GrayImage) !image.RgbImage {
+        if (self.entries == 0 or (self.bit_depth != 8 and self.bit_depth != 16)) {
+            return Jp2Error.UnsupportedProfile;
+        }
+        const expected_palette_samples = std.math.mul(usize, @as(usize, self.entries), 3) catch
+            return Jp2Error.ImageTooLarge;
+        if (self.samples.len != expected_palette_samples) return Jp2Error.InvalidBox;
+        const pixel_count = std.math.mul(usize, indexed.width, indexed.height) catch
+            return Jp2Error.ImageTooLarge;
+        if (indexed.samples.len != pixel_count) return Jp2Error.InvalidBox;
+        const output_samples = std.math.mul(usize, pixel_count, 3) catch
+            return Jp2Error.ImageTooLarge;
+        const samples = try allocator.alloc(u16, output_samples);
+        errdefer allocator.free(samples);
+
+        for (indexed.samples, 0..) |palette_index, pixel_index| {
+            if (palette_index >= self.entries) return Jp2Error.PaletteIndexOutOfRange;
+            const source = @as(usize, palette_index) * 3;
+            const destination = pixel_index * 3;
+            @memcpy(samples[destination..][0..3], self.samples[source..][0..3]);
+        }
+        return .{
+            .allocator = allocator,
+            .width = indexed.width,
+            .height = indexed.height,
+            .bit_depth = self.bit_depth,
+            .samples = samples,
+        };
+    }
 };
 
 const BoxType = enum(u32) {
@@ -164,6 +213,51 @@ pub fn wrapGrayCodestream(
     }, codestream);
 }
 
+pub fn wrapPaletteCodestream(
+    allocator: std.mem.Allocator,
+    indexed: image.GrayImage,
+    palette: Palette,
+    codestream: []const u8,
+) ![]u8 {
+    if (indexed.width == 0 or indexed.height == 0) return Jp2Error.InvalidBox;
+    if (indexed.width > std.math.maxInt(u32) or indexed.height > std.math.maxInt(u32)) {
+        return Jp2Error.ImageTooLarge;
+    }
+    if (indexed.bit_depth != 8 and indexed.bit_depth != 16) return Jp2Error.UnsupportedProfile;
+    const expected_indices = std.math.mul(usize, indexed.width, indexed.height) catch
+        return Jp2Error.ImageTooLarge;
+    if (indexed.samples.len != expected_indices) return Jp2Error.InvalidBox;
+    if (indexed.white_is_zero or indexed.icc_profile != null) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    if (palette.entries == 0 or (palette.bit_depth != 8 and palette.bit_depth != 16)) {
+        return Jp2Error.UnsupportedProfile;
+    }
+    const expected_palette_samples = std.math.mul(usize, @as(usize, palette.entries), 3) catch
+        return Jp2Error.ImageTooLarge;
+    if (palette.samples.len != expected_palette_samples) return Jp2Error.InvalidBox;
+    const palette_max: u16 = if (palette.bit_depth == 16)
+        std.math.maxInt(u16)
+    else
+        std.math.maxInt(u8);
+    for (palette.samples) |sample| {
+        if (sample > palette_max) return Jp2Error.InvalidBox;
+    }
+    for (indexed.samples) |palette_index| {
+        if (palette_index >= palette.entries) return Jp2Error.PaletteIndexOutOfRange;
+    }
+
+    return wrapCodestream(allocator, .{
+        .width = @intCast(indexed.width),
+        .height = @intCast(indexed.height),
+        .components = 1,
+        .bits_per_component = indexed.bit_depth,
+        .enumerated_color_space = enum_cs_srgb,
+        .icc_profile = null,
+        .palette = palette,
+    }, codestream);
+}
+
 const WrapProfile = struct {
     width: u32,
     height: u32,
@@ -171,6 +265,7 @@ const WrapProfile = struct {
     bits_per_component: u8,
     enumerated_color_space: u32,
     icc_profile: ?[]const u8,
+    palette: ?Palette = null,
 };
 
 fn wrapCodestream(
@@ -228,6 +323,29 @@ fn wrapCodestream(
         try appendU32Be(allocator, &colr, profile.enumerated_color_space);
     }
     try appendBox(allocator, &jp2h, .color, colr.items);
+    if (profile.palette) |palette| {
+        var pclr: std.ArrayList(u8) = .empty;
+        defer pclr.deinit(allocator);
+        try appendU16Be(allocator, &pclr, palette.entries);
+        try pclr.append(allocator, 3);
+        const descriptor = palette.bit_depth - 1;
+        try pclr.appendNTimes(allocator, descriptor, 3);
+        for (palette.samples) |sample| {
+            if (palette.bit_depth == 8) {
+                try pclr.append(allocator, @intCast(sample));
+            } else {
+                try appendU16Be(allocator, &pclr, sample);
+            }
+        }
+        try appendBox(allocator, &jp2h, .palette, pclr.items);
+
+        const component_mapping = [_]u8{
+            0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x01, 0x01,
+            0x00, 0x00, 0x01, 0x02,
+        };
+        try appendBox(allocator, &jp2h, .component_mapping, &component_mapping);
+    }
     try appendBox(allocator, &out, .jp2_header, jp2h.items);
 
     try appendBox(allocator, &out, .contiguous_codestream, codestream);
@@ -245,7 +363,11 @@ pub fn parseInfo(bytes: []const u8) !Info {
         .width = 0,
         .height = 0,
         .components = 0,
+        .output_components = 0,
         .bits_per_component = 0,
+        .has_palette = false,
+        .palette_entries = 0,
+        .palette_bits_per_component = 0,
         .has_icc_profile = false,
         .icc_profile_bytes = 0,
         .codestream_bytes = 0,
@@ -331,7 +453,57 @@ pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, true);
         if (box.kind == @intFromEnum(BoxType.jp2_header)) {
-            return extractIccProfileFromJp2Header(allocator, box.payload);
+            return extractIccProfileFromJp2Header(
+                allocator,
+                box.payload,
+                enumeratedColorSpace(info.output_components),
+            );
+        }
+    }
+    return Jp2Error.MissingRequiredBox;
+}
+
+pub fn extractPalette(allocator: std.mem.Allocator, bytes: []const u8) !?Palette {
+    const info = try parseInfo(bytes);
+    if (!info.has_palette) return null;
+
+    var cursor: usize = 0;
+    while (cursor < bytes.len) {
+        const box = try nextBox(bytes, &cursor, true);
+        if (box.kind != @intFromEnum(BoxType.jp2_header)) continue;
+
+        var child_cursor: usize = 0;
+        while (child_cursor < box.payload.len) {
+            const child = try nextBox(box.payload, &child_cursor, false);
+            if (child.kind != @intFromEnum(BoxType.palette)) continue;
+            const header = try parsePaletteHeader(child.payload);
+            const sample_count = std.math.mul(usize, header.entries, 3) catch
+                return Jp2Error.ImageTooLarge;
+            const samples = try allocator.alloc(u16, sample_count);
+            errdefer allocator.free(samples);
+
+            var payload_offset: usize = 6;
+            for (samples) |*sample| {
+                sample.* = switch (header.bit_depth) {
+                    8 => value: {
+                        const value = child.payload[payload_offset];
+                        payload_offset += 1;
+                        break :value value;
+                    },
+                    16 => value: {
+                        const value = try readU16Be(child.payload, payload_offset);
+                        payload_offset += 2;
+                        break :value value;
+                    },
+                    else => unreachable,
+                };
+            }
+            return .{
+                .allocator = allocator,
+                .entries = header.entries,
+                .bit_depth = header.bit_depth,
+                .samples = samples,
+            };
         }
     }
     return Jp2Error.MissingRequiredBox;
@@ -342,7 +514,11 @@ const Box = struct {
     payload: []const u8,
 };
 
-fn extractIccProfileFromJp2Header(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
+fn extractIccProfileFromJp2Header(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    expected_enumerated_color_space: u32,
+) !?[]u8 {
     // Mirrors parseJp2Header's colr choice: the first *supported*
     // specification wins (method 1 sRGB carries no profile; method 2 carries
     // the restricted ICC bytes); unsupported colr boxes are skipped.
@@ -355,7 +531,7 @@ fn extractIccProfileFromJp2Header(allocator: std.mem.Allocator, bytes: []const u
             1 => {
                 if (box.payload.len == 7) {
                     const enum_cs = try readU32Be(box.payload, 3);
-                    if (enum_cs == enum_cs_srgb or enum_cs == enum_cs_grayscale) return null;
+                    if (enum_cs == expected_enumerated_color_space) return null;
                 }
             },
             2 => {
@@ -373,8 +549,14 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var saw_ihdr = false;
     var saw_bpcc = false;
     var saw_colr = false;
-    var chose_colr = false;
+    var saw_palette = false;
+    var saw_component_mapping = false;
+    var saw_channel_definition = false;
     var requires_bpcc = false;
+    var srgb_colr_index: ?usize = null;
+    var grayscale_colr_index: ?usize = null;
+    var icc_colr_index: ?usize = null;
+    var icc_profile_bytes: usize = 0;
     var box_index: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, false);
@@ -399,6 +581,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 if (info.components != 1 and info.components != 3) {
                     return Jp2Error.UnsupportedColorSpace;
                 }
+                info.output_components = info.components;
                 if (bpc == 0xff) {
                     requires_bpcc = true;
                     info.bits_per_component = 0;
@@ -446,39 +629,59 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 // extractIccProfileFromJp2Header.
                 const approximation = box.payload[2];
                 if (approximation > 4) return Jp2Error.InvalidBox;
-                if (!chose_colr) {
-                    switch (method) {
-                        1 => {
-                            if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
-                            const enum_cs = try readU32Be(box.payload, 3);
-                            if (enum_cs == enumeratedColorSpace(info.components)) {
-                                info.has_icc_profile = false;
-                                info.icc_profile_bytes = 0;
-                                chose_colr = true;
-                            }
-                            // Other enumerated colourspaces are skipped; a
-                            // later colr box may still be supported.
-                        },
-                        2 => {
-                            if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
-                            info.has_icc_profile = true;
-                            info.icc_profile_bytes = box.payload.len - 3;
-                            chose_colr = true;
-                        },
-                        else => {},
-                    }
+                switch (method) {
+                    1 => {
+                        if (box.payload.len != 7) return Jp2Error.UnsupportedProfile;
+                        switch (try readU32Be(box.payload, 3)) {
+                            enum_cs_srgb => if (srgb_colr_index == null) {
+                                srgb_colr_index = box_index;
+                            },
+                            enum_cs_grayscale => if (grayscale_colr_index == null) {
+                                grayscale_colr_index = box_index;
+                            },
+                            else => {},
+                        }
+                    },
+                    2 => {
+                        if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
+                        if (icc_colr_index == null) {
+                            icc_colr_index = box_index;
+                            icc_profile_bytes = box.payload.len - 3;
+                        }
+                    },
+                    else => {},
                 }
             },
             @intFromEnum(BoxType.channel_definition) => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
                 if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
-                try validateIdentityChannelDefinition(box.payload, info.components);
+                if (saw_channel_definition) return Jp2Error.InvalidBox;
+                if (saw_palette and !saw_component_mapping) return Jp2Error.MissingRequiredBox;
+                try validateIdentityChannelDefinition(
+                    box.payload,
+                    if (saw_palette) 3 else info.components,
+                );
+                saw_channel_definition = true;
             },
-            @intFromEnum(BoxType.palette),
-            @intFromEnum(BoxType.component_mapping),
-            => {
-                if (!saw_ihdr) return Jp2Error.InvalidBox;
-                return Jp2Error.UnsupportedProfile;
+            @intFromEnum(BoxType.palette) => {
+                if (!saw_ihdr or !saw_colr or saw_palette or saw_component_mapping or saw_channel_definition) {
+                    return Jp2Error.InvalidBox;
+                }
+                if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
+                if (info.components != 1) return Jp2Error.UnsupportedProfile;
+                const palette = try parsePaletteHeader(box.payload);
+                info.has_palette = true;
+                info.palette_entries = palette.entries;
+                info.palette_bits_per_component = palette.bit_depth;
+                info.output_components = 3;
+                saw_palette = true;
+            },
+            @intFromEnum(BoxType.component_mapping) => {
+                if (!saw_palette or saw_component_mapping or saw_channel_definition) {
+                    return Jp2Error.InvalidBox;
+                }
+                try validatePaletteComponentMapping(box.payload);
+                saw_component_mapping = true;
             },
             @intFromEnum(BoxType.resolution) => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
@@ -496,9 +699,82 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
         box_index += 1;
     }
     if (!saw_ihdr or !saw_colr) return Jp2Error.MissingRequiredBox;
-    // colr boxes were present but none carried a supported specification.
-    if (!chose_colr) return Jp2Error.UnsupportedColorSpace;
     if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
+    if (saw_palette != saw_component_mapping) return Jp2Error.MissingRequiredBox;
+
+    const expected_colr_index = switch (info.output_components) {
+        1 => grayscale_colr_index,
+        3 => srgb_colr_index,
+        else => null,
+    };
+    if (info.has_palette) {
+        // The current expansion API produces RGB samples, so a restricted ICC
+        // palette profile is deferred until the palette owns colour metadata.
+        if (expected_colr_index == null or
+            (icc_colr_index != null and icc_colr_index.? < expected_colr_index.?))
+        {
+            return Jp2Error.UnsupportedColorSpace;
+        }
+        info.has_icc_profile = false;
+        info.icc_profile_bytes = 0;
+    } else if (expected_colr_index) |enumerated_index| {
+        if (icc_colr_index == null or enumerated_index < icc_colr_index.?) {
+            info.has_icc_profile = false;
+            info.icc_profile_bytes = 0;
+        } else {
+            info.has_icc_profile = true;
+            info.icc_profile_bytes = icc_profile_bytes;
+        }
+    } else if (icc_colr_index != null) {
+        info.has_icc_profile = true;
+        info.icc_profile_bytes = icc_profile_bytes;
+    } else {
+        return Jp2Error.UnsupportedColorSpace;
+    }
+}
+
+const PaletteHeader = struct {
+    entries: u16,
+    bit_depth: u8,
+};
+
+fn parsePaletteHeader(payload: []const u8) !PaletteHeader {
+    if (payload.len < 6) return Jp2Error.InvalidBox;
+    const entries = try readU16Be(payload, 0);
+    const columns = payload[2];
+    if (entries == 0 or columns != 3) return Jp2Error.UnsupportedProfile;
+
+    var bit_depth: u8 = 0;
+    for (payload[3..6]) |descriptor| {
+        if ((descriptor & 0x80) != 0) return Jp2Error.UnsupportedProfile;
+        const column_bits = (descriptor & 0x7f) + 1;
+        if (column_bits != 8 and column_bits != 16) return Jp2Error.UnsupportedProfile;
+        if (bit_depth == 0) {
+            bit_depth = column_bits;
+        } else if (column_bits != bit_depth) {
+            return Jp2Error.UnsupportedProfile;
+        }
+    }
+
+    const sample_count = std.math.mul(usize, entries, 3) catch return Jp2Error.InvalidBox;
+    const bytes_per_sample: usize = bit_depth / 8;
+    const sample_bytes = std.math.mul(usize, sample_count, bytes_per_sample) catch
+        return Jp2Error.InvalidBox;
+    const expected_length = std.math.add(usize, 6, sample_bytes) catch
+        return Jp2Error.InvalidBox;
+    if (payload.len != expected_length) return Jp2Error.InvalidBox;
+    return .{ .entries = entries, .bit_depth = bit_depth };
+}
+
+fn validatePaletteComponentMapping(payload: []const u8) !void {
+    if (payload.len != 12) return Jp2Error.InvalidBox;
+    for (0..3) |column| {
+        const offset = column * 4;
+        if (try readU16Be(payload, offset) != 0) return Jp2Error.UnsupportedProfile;
+        if (payload[offset + 2] != 1 or payload[offset + 3] != column) {
+            return Jp2Error.UnsupportedProfile;
+        }
+    }
 }
 
 /// ISO 15444-1 I.5.3.6: the channel definition box is accepted when it

@@ -21,6 +21,12 @@ the strict SIZ/T2 block catalog now carries an active component count and
 reconstructs one-component wire payloads through the same block-level T1
 scheduler, inverse 5/3, and checked DC level shift. Fixed-capacity arrays retain
 the RGB hot-path layout while only one assembly is initialized for grayscale.
+The JP2 boundary also owns a deliberately bounded palette vertical:
+`wrapPaletteCodestream` emits one index component plus unsigned uniform RGB
+`pclr` and identity `cmap`; `extractPalette` parses an owned table and
+`Palette.expand` performs checked index-to-RGB expansion. T1/T2 remains the
+same one-component grayscale pipeline, so palette metadata does not leak into
+the codestream core.
 
 The project is intentionally fail-closed. Profile options that would require
 payload behavior not implemented yet are rejected with `UnsupportedPayload`.
@@ -28,7 +34,7 @@ payload behavior not implemented yet are rejected with `UnsupportedPayload`.
 The codec-core roadmap is separate from the future conversion-tool roadmap. The
 current architecture optimizes for a correct JPEG2000 Part 1 core first; later
 input formats such as JPEG, PNG, BMP, RAW/DNG, and OpenEXR, broader color spaces
-such as monochrome, palette, YCC/eYCC, CIELab, and CMYK, richer metadata
+such as YCC/eYCC, CIELab, and CMYK, richer metadata
 families such as EXIF/IPTC/XMP, and component depths above 16 bits should enter
 through explicit front-end modules and strict metadata/color-management
 contracts rather than ad hoc changes inside T1/T2.
@@ -51,6 +57,8 @@ Current TIFF to JP2 encode:
 7. `src/rate_alloc.zig` maps quality layers or target rates to cumulative
    code-block truncation points; the rate-targeted path uses global PCRD over
    per-pass distortion metadata and then charges measured T2 header overhead.
+   Irreversible slopes remove the subband gain before applying the 9/7
+   synthesis norm, matching the actual inverse-basis energy.
 8. `src/packet_plan.zig` describes packet order and precinct geometry for the
    implemented progression orders.
 9. `src/t2.zig` owns packet-header primitives, tag-trees, layer deltas,
@@ -402,8 +410,8 @@ multi-tile codestreams.
 These are intentionally not treated as complete yet:
 
 - arbitrary JP2/JPX box families and JPX-only features;
-- arbitrary component layouts, subsampling, palettes, alpha channels, and
-  variable bits-per-component;
+- arbitrary component layouts, subsampling, palette layouts beyond the bounded
+  unsigned RGB mapping, alpha channels, and variable bits-per-component;
 - multi-tile combinations outside the bounded envelope, including BYPASS
   without TERMALL, division/progression mismatches, and non-empty PLT-less
   multipart tiles;

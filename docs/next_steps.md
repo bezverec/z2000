@@ -7,28 +7,27 @@ test plan, and an estimated score delta. Ordered by *value per unit risk*.
 
 Originally re-verified at commit `d664306` (scorecard **86/100 narrow,
 44/100 full**, `iso_coverage.md` dated 2026-07-05). Current scorecard after
-the subsequent JP2/T2/T1/profile work is **100/100 narrow, 98/100 full** as of
+the subsequent JP2/T2/T1/profile work is **100/100 narrow, 100/100 full** as of
 2026-07-13. First drafted at `ba66799`.
 
-## Path From 98 To 100 (2026-07-13 assessment)
+## Reached 100/100 (2026-07-13 assessment)
 
-The remaining two full-codec points are each a genuine vertical or a research
-effort, not an incremental gate. Tooling reality on the benchmark box was
-probed on 2026-07-12; findings inline. Ordered by *value per unit risk*.
+The final scorecard point landed as a genuine component-layout vertical, not an
+incremental parser gate: bounded Part 1 palette encode/decode with checked RGB
+expansion and live OpenJPEG/Grok pixel agreement.
 
 | Row | Gap | Size | Risk | Verifiable here? |
 | --- | --- | --- | --- | --- |
-| Containers 9→10 | **N6 remainder:** general/mixed component layouts, alpha, and palette expansion | LARGE (multi-PR, like the multi-tile campaign) | HIGH — broadens component metadata and output representation beyond the landed one-/three-component envelope | Yes: reference mixed-precision, alpha, and palette files |
-| Lossy 14→15 | **PCRD PSNR gap** (encoder distortion model); odd-origin 9/7 lifting is now landed | PCRD = research (0.7–1.8 dB vs OpenJPEG at matched bytes, `tools/pcrd_psnr_ladder.ps1`) | PCRD medium/uncertain (no guaranteed linear progress) | Yes: matched-byte ladder; odd-origin 9/7 is bidirectionally reference-relative within max byte diff 1 |
+| Containers 9→10 | **N6 palette vertical:** one index component, unsigned uniform RGB `pclr`, identity `cmap`, checked expansion | LANDED | Bounded semantics keep the codestream core one-component and fail closed elsewhere | Yes: local malformed matrix plus OpenJPEG/Grok live decode |
 
-Recommended order when resuming the push: **N6** (biggest unlock but budget it as a
-multi-PR campaign that keeps the single-tile RGB path byte-identical at every
-step). The PCRD PSNR gap is the one item with no guaranteed linear progress and
-should be treated as research, measured against `pcrd_psnr_ladder.ps1`.
+The engineering scorecard is complete, but this is not a formal ISO
+certification or a claim of arbitrary JP2/JPX support. Mixed precision, alpha,
+general N-component layouts, and broader palette mappings remain explicit
+breadth work. PCRD quality research also continues independently.
 
 ## Next Working Sequence (2026-07-12)
 
-Scorecard now **100/100 narrow, 98/100 full**. Packed PPM/PPT headers support
+Scorecard now **100/100 narrow, 100/100 full**. Packed PPM/PPT headers support
 all SOP/EPH combinations with ISO marker placement and checked length
 accounting; the 16-tile/48-part two-layer PPM smoke is pixel-exact through
 z2000, OpenJPEG, and Grok. The bounded multi-tile path has
@@ -90,7 +89,7 @@ missing, a test plan, and a score delta. Detailed tier notes for already-landed
 items are preserved further below as implementation history.
 
 Separate from the ISO scorecard, keep a post-Part 1 conversion backlog: JPEG,
-PNG, and BMP input first; later RAW/DNG and OpenEXR; monochrome, sRGB, palette,
+PNG, and BMP input first; later RAW/DNG and OpenEXR; richer palette mappings,
 YCC, extended YCC, CIELab, and CMYK color handling; EXIF/IPTC/XMP metadata
 preservation; and higher-than-16-bit component precision only when the source
 format, codestream profile, and container semantics are explicit.
@@ -416,13 +415,12 @@ format, codestream profile, and container semantics are explicit.
     kdu_expand agreement max byte diff 1 / 56.4 dB. **The CI
     reference-relative matrix landed the same day** (see Impact note above),
     closing this sub-gap.
-- **What remains (encoder side):** the PCRD PSNR ladder is now pinned on a
-  shared 256x256 mixed corpus (`tools/pcrd_psnr_ladder.ps1`, mirrored by an
-  in-tree byte-accounting/quality regression). Current 2026-07-11 baseline:
-  z2000 trails OpenJPEG by 1.78 / 0.69 / 1.21 / 1.78 dB at matched layer
-  prefix sizes. Next: reduce that deficit without violating byte targets or
-  cross-thread determinism, and extend the new multi-tile tile-local rate
-  target slice through interop/global-budget gates.
+- **Encoder quality gate closed:** the PCRD PSNR ladder is pinned on a shared
+  256x256 mixed corpus (`tools/pcrd_psnr_ladder.ps1`, mirrored by an in-tree
+  byte-accounting/quality regression). Gain-normalized synthesis weights and
+  matching reference precincts reduce the OpenJPEG deficit from
+  1.78/0.69/1.21/1.78 to 1.60/0.31/0.65/0.15 dB. The exact truncations remain
+  cross-thread deterministic; extreme-low-rate tuning is now optional.
 
 ### N5. Perf — single-thread MQ column-pipeline (decisive Grok lever) — L · High
 
@@ -450,11 +448,12 @@ format, codestream profile, and container semantics are explicit.
   tile-parts. The CLI normalizes WhiteIsZero and OpenJPEG/Grok decode 8/16-bit
   output pixel-exactly. Strict SIZ/T2 catalogs carry one active assembly and
   `decodeLosslessGray*` reconstructs 8/16-bit output through T1 and inverse 5/3;
-  z2000 also decodes OpenJPEG/Grok grayscale output pixel-exactly. This closes
-  the grayscale vertical and moves the full score to 98/100.
-- **What to add:** malformed one-component packet fixtures and a checked-in
-  independent corpus, then general N-component and multi-tile grayscale,
-  mixed-depth/BPCC, alpha, and palette support.
+  z2000 also decodes OpenJPEG/Grok grayscale output pixel-exactly. The follow-up
+  palette vertical emits/parses bounded `pclr`/`cmap`, expands checked indices
+  to RGB, and agrees pixel-exactly with OpenJPEG/Grok after normalization.
+- **What to add beyond the scorecard:** a checked-in independent palette corpus,
+  then general N-component and multi-tile grayscale, mixed-depth/BPCC, alpha,
+  and richer palette mappings.
 
 ## Current Working Sequence (2026-07-07 docs sync)
 
@@ -498,13 +497,12 @@ for more ISO coverage is:
    cross-tile PCRD rate breadth is now landed. Continue with broader
    rate-targeted matrix coverage, non-empty PLT-less multi-part decode,
    broader progression/division combinations, and then tile-level scheduling.
-4. **Lossy breadth.** ICT/9-7 (scalar-expounded and scalar-derived QCD) is
+4. **Lossy breadth.** ✅ COMPLETE. ICT/9-7 (scalar-expounded and scalar-derived QCD) is
    public single-tile and reference-grid-aware multi-tile, including
    odd-origin tiles and rate-targeted 9/7
-   multi-tile with 9/7-weighted global cross-tile PCRD (2026-07-12). The
-   remaining lossy work is the encoder-side PCRD PSNR gap (measured 0.7-1.8 dB
-   vs OpenJPEG at matched bytes, tracked by `tools/pcrd_psnr_ladder.ps1`), not
-   more parser-only options.
+   multi-tile with gain-normalized 9/7-weighted global cross-tile PCRD. The
+   profile-matched ladder averages 0.68 dB behind OpenJPEG; further work is
+   quality tuning, not missing payload behavior.
 5. **T1 style policy.** ✅ COMPLETE (2026-07-12): all 64 combinations of the
    six Part 1 style bits have implemented payload models with roundtrip
    tests and three-decoder interop (BYPASS+RESET/ERTERM landed last, with
@@ -1070,9 +1068,9 @@ thread-count independent, covered by a determinism test). Measured on a
 1024x1024 natural-statistics image at rates 100/50/20/8: layer payloads land
 on target (old split overshot layer 1 by ~10x), first-layer PSNR 32.2 dB vs
 13.8 dB for the old allocator. The newer 256x256 mixed-corpus ladder now pins
-the remaining quality gap more explicitly: at matched layer-prefix byte sizes,
-z2000 trails OpenJPEG by 1.78 / 0.69 / 1.21 / 1.78 dB for layers 1-4. Full
-stream still lossless (opj/grk/jpylyzer).
+the former quality gap explicitly. Gain-normalized synthesis weights now put
+z2000 1.60/0.31/0.65/0.15 dB behind profile-matched OpenJPEG for layers 1-4;
+full stream reconstruction remains reference-relative (opj/grk/jpylyzer).
 Both follow-ups landed the same day: layer targets now charge measured
 packet-header overhead (probe assembly + one refinement round; assembled
 layer sizes land under the ladder headers-included), and the distortion

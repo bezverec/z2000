@@ -488,12 +488,15 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
 
     const info = try jp2.parseInfo(bytes);
     std.debug.print(
-        "JP2: {s}: {}x{}, {} components, {} bits/component, {} codestream bytes, ICC {s}",
+        "JP2: {s}: {}x{}, {} codestream component{s}, {} output component{s}, {} bits/component, {} codestream bytes, ICC {s}",
         .{
             args[0],
             info.width,
             info.height,
             info.components,
+            if (info.components == 1) "" else "s",
+            info.output_components,
+            if (info.output_components == 1) "" else "s",
             info.bits_per_component,
             info.codestream_bytes,
             if (info.has_icc_profile) "yes" else "no",
@@ -501,6 +504,12 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
     );
     if (info.has_icc_profile) {
         std.debug.print(" ({} bytes)", .{info.icc_profile_bytes});
+    }
+    if (info.has_palette) {
+        std.debug.print(
+            ", palette {}x3 at {} bits",
+            .{ info.palette_entries, info.palette_bits_per_component },
+        );
     }
     std.debug.print("\n", .{});
 }
@@ -583,7 +592,17 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
 
     var decode_timings = codestream.DecodeTimings{};
     const decode_start = monotonicNs();
-    var decoded: tiff.DecodedImage = switch (info.components) {
+    var decoded: tiff.DecodedImage = if (info.has_palette) palette: {
+        var indexed = if (show_timings)
+            try codestream.decodeLosslessGrayWithOptionsProfiled(allocator, j2k, options, &decode_timings)
+        else
+            try codestream.decodeLosslessGrayWithOptions(allocator, j2k, options);
+        defer indexed.deinit();
+        var table = (try jp2.extractPalette(allocator, bytes)) orelse
+            return jp2.Jp2Error.MissingRequiredBox;
+        defer table.deinit();
+        break :palette .{ .rgb = try table.expand(allocator, indexed) };
+    } else switch (info.components) {
         1 => .{ .grayscale = if (show_timings)
             try codestream.decodeLosslessGrayWithOptionsProfiled(allocator, j2k, options, &decode_timings)
         else
@@ -625,15 +644,15 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         command_timings.tiff_write_ns;
 
     std.debug.print(
-        "decoded JP2 {s} -> {s} ({}x{}, {} component{s}, {} bits/component, threads {})\n",
+        "decoded JP2 {s} -> {s} ({}x{}, {} output component{s}, {} bits/component, threads {})\n",
         .{
             args[0],
             args[1],
             info.width,
             info.height,
-            info.components,
-            if (info.components == 1) "" else "s",
-            info.bits_per_component,
+            info.output_components,
+            if (info.output_components == 1) "" else "s",
+            if (info.has_palette) info.palette_bits_per_component else info.bits_per_component,
             options.threads,
         },
     );

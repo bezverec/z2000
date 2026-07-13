@@ -3823,6 +3823,12 @@ test "JP2 grayscale wrapper validates one-component metadata and polarity" {
     );
     defer allocator.free(with_cdef);
     _ = try jp2.parseInfo(with_cdef);
+    const alpha_cdef = try allocator.dupe(u8, with_cdef);
+    defer allocator.free(alpha_cdef);
+    const alpha_header = try findJp2BoxPayload(alpha_cdef, "jp2h");
+    const alpha_box = try findJp2ChildBoxPayload(alpha_cdef, alpha_header, "cdef");
+    alpha_cdef[alpha_box.start + 5] = 1;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(alpha_cdef));
 
     var invalid_cdef = identity_cdef;
     invalid_cdef[7] = 2;
@@ -3880,6 +3886,238 @@ test "JP2 grayscale wrapper validates one-component metadata and polarity" {
         jp2.Jp2Error.UnsupportedProfile,
         jp2.wrapGrayCodestream(allocator, gray, mct_codestream),
     );
+}
+
+test "JP2 palette expands one indexed component into bounded sRGB" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 2;
+    const indices = try allocator.alloc(u16, width * height);
+    defer allocator.free(indices);
+    for (indices, 0..) |*sample, index| sample.* = @intCast(index % 4);
+
+    const indexed_source = image.GrayImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = indices,
+    };
+    const codestream_bytes = try codestream.encodeLosslessGrayWithOptions(allocator, indexed_source, .{
+        .levels = 1,
+        .mct = .none,
+        .block_width = 4,
+        .block_height = 4,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(codestream_bytes);
+    const grayscale_jp2 = try jp2.wrapGrayCodestream(allocator, indexed_source, codestream_bytes);
+    defer allocator.free(grayscale_jp2);
+
+    const palette_payload = [_]u8{
+        0x00, 0x04, // four entries
+        0x03, // three columns
+        0x07, 0x07, 0x07, // unsigned 8-bit R, G, B
+        0x00, 0x00, 0x00,
+        0xff, 0x10, 0x20,
+        0x30, 0xe0, 0x40,
+        0x50, 0x60, 0xd0,
+    };
+    const mapping_payload = [_]u8{
+        0x00, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x01, 0x01,
+        0x00, 0x00, 0x01, 0x02,
+    };
+
+    const srgb_jp2 = try allocator.dupe(u8, grayscale_jp2);
+    defer allocator.free(srgb_jp2);
+    const original_header = try findJp2BoxPayload(srgb_jp2, "jp2h");
+    const original_colr = try findJp2ChildBoxPayload(srgb_jp2, original_header, "colr");
+    writeU32BeTest(srgb_jp2, original_colr.start + 3, 16);
+
+    const missing_mapping = try insertJp2BoxInsideJp2HeaderForTest(
+        allocator,
+        srgb_jp2,
+        original_header,
+        original_colr.end,
+        "pclr",
+        &palette_payload,
+    );
+    defer allocator.free(missing_mapping);
+    try std.testing.expectError(jp2.Jp2Error.MissingRequiredBox, jp2.parseInfo(missing_mapping));
+
+    const palette_header = try findJp2BoxPayload(missing_mapping, "jp2h");
+    const palette_box = try findJp2ChildBoxPayload(missing_mapping, palette_header, "pclr");
+    const palette_jp2 = try insertJp2BoxInsideJp2HeaderForTest(
+        allocator,
+        missing_mapping,
+        palette_header,
+        palette_box.end,
+        "cmap",
+        &mapping_payload,
+    );
+    defer allocator.free(palette_jp2);
+
+    const emitted_palette_samples = try allocator.dupe(u16, &.{
+        0x00, 0x00, 0x00,
+        0xff, 0x10, 0x20,
+        0x30, 0xe0, 0x40,
+        0x50, 0x60, 0xd0,
+    });
+    defer allocator.free(emitted_palette_samples);
+    const emitted = try jp2.wrapPaletteCodestream(allocator, indexed_source, .{
+        .allocator = allocator,
+        .entries = 4,
+        .bit_depth = 8,
+        .samples = emitted_palette_samples,
+    }, codestream_bytes);
+    defer allocator.free(emitted);
+    const emitted_info = try jp2.parseInfo(emitted);
+    try std.testing.expect(emitted_info.has_palette);
+    var emitted_table = (try jp2.extractPalette(allocator, emitted)).?;
+    defer emitted_table.deinit();
+    try std.testing.expectEqualSlices(u16, emitted_palette_samples, emitted_table.samples);
+
+    const info = try jp2.parseInfo(palette_jp2);
+    try std.testing.expectEqual(@as(u16, 1), info.components);
+    try std.testing.expectEqual(@as(u16, 3), info.output_components);
+    try std.testing.expect(info.has_palette);
+    try std.testing.expectEqual(@as(u16, 4), info.palette_entries);
+    try std.testing.expectEqual(@as(u8, 8), info.palette_bits_per_component);
+    try std.testing.expect(!info.has_icc_profile);
+    try std.testing.expect((try jp2.extractIccProfile(allocator, palette_jp2)) == null);
+
+    var table = (try jp2.extractPalette(allocator, palette_jp2)).?;
+    defer table.deinit();
+    try std.testing.expectEqualSlices(u16, &.{
+        0x00, 0x00, 0x00,
+        0xff, 0x10, 0x20,
+        0x30, 0xe0, 0x40,
+        0x50, 0x60, 0xd0,
+    }, table.samples);
+
+    var decoded_indices = try codestream.decodeLosslessGray(
+        allocator,
+        try jp2.extractCodestream(palette_jp2),
+    );
+    defer decoded_indices.deinit();
+    try std.testing.expectEqualSlices(u16, indices, decoded_indices.samples);
+    var expanded = try table.expand(allocator, decoded_indices);
+    defer expanded.deinit();
+    try std.testing.expectEqual(@as(u8, 8), expanded.bit_depth);
+    for (indices, 0..) |palette_index, pixel_index| {
+        const source = @as(usize, palette_index) * 3;
+        try std.testing.expectEqualSlices(
+            u16,
+            table.samples[source..][0..3],
+            expanded.samples[pixel_index * 3 ..][0..3],
+        );
+    }
+
+    const identity_cdef = [_]u8{
+        0x00, 0x03,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x00, 0x01,
+        0x00, 0x01,
+        0x00, 0x00,
+        0x00, 0x02,
+        0x00, 0x02,
+        0x00, 0x00,
+        0x00, 0x03,
+    };
+    const mapped_header = try findJp2BoxPayload(palette_jp2, "jp2h");
+    const mapped_cmap = try findJp2ChildBoxPayload(palette_jp2, mapped_header, "cmap");
+    const with_cdef = try insertJp2BoxInsideJp2HeaderForTest(
+        allocator,
+        palette_jp2,
+        mapped_header,
+        mapped_cmap.end,
+        "cdef",
+        &identity_cdef,
+    );
+    defer allocator.free(with_cdef);
+    _ = try jp2.parseInfo(with_cdef);
+
+    const palette16_payload = [_]u8{
+        0x00, 0x04, 0x03,
+        0x0f, 0x0f, 0x0f,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0xff, 0xff, 0x10,
+        0x10, 0x20, 0x20,
+        0x30, 0x30, 0xe0,
+        0xe0, 0x40, 0x40,
+        0x50, 0x50, 0x60,
+        0x60, 0xd0, 0xd0,
+    };
+    const final_header = try findJp2BoxPayload(palette_jp2, "jp2h");
+    const final_palette = try findJp2ChildBoxPayload(palette_jp2, final_header, "pclr");
+    const palette16_jp2 = try replaceJp2ChildBoxForTest(
+        allocator,
+        palette_jp2,
+        final_header,
+        final_palette,
+        "pclr",
+        &palette16_payload,
+    );
+    defer allocator.free(palette16_jp2);
+    const info16 = try jp2.parseInfo(palette16_jp2);
+    try std.testing.expectEqual(@as(u8, 16), info16.palette_bits_per_component);
+    var table16 = (try jp2.extractPalette(allocator, palette16_jp2)).?;
+    defer table16.deinit();
+    try std.testing.expectEqual(@as(u16, 0xffff), table16.samples[3]);
+    try std.testing.expectEqual(@as(u16, 0xe0e0), table16.samples[7]);
+
+    const signed_palette = try allocator.dupe(u8, palette_jp2);
+    defer allocator.free(signed_palette);
+    signed_palette[final_palette.start + 3] |= 0x80;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(signed_palette));
+
+    const mixed_palette = try allocator.dupe(u8, palette_jp2);
+    defer allocator.free(mixed_palette);
+    mixed_palette[final_palette.start + 4] = 0x0f;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(mixed_palette));
+
+    const final_mapping = try findJp2ChildBoxPayload(palette_jp2, final_header, "cmap");
+    const bad_mapping = try allocator.dupe(u8, palette_jp2);
+    defer allocator.free(bad_mapping);
+    bad_mapping[final_mapping.start + 7] = 0;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(bad_mapping));
+
+    const truncated_palette = try replaceJp2ChildBoxForTest(
+        allocator,
+        palette_jp2,
+        final_header,
+        final_palette,
+        "pclr",
+        palette_jp2[final_palette.start .. final_palette.end - 1],
+    );
+    defer allocator.free(truncated_palette);
+    try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(truncated_palette));
+
+    const invalid_index_samples = try allocator.dupe(u16, &.{4});
+    defer allocator.free(invalid_index_samples);
+    const invalid_index = image.GrayImage{
+        .allocator = allocator,
+        .width = 1,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = invalid_index_samples,
+    };
+    try std.testing.expectError(
+        jp2.Jp2Error.PaletteIndexOutOfRange,
+        table.expand(allocator, invalid_index),
+    );
+    const short_table_samples = try allocator.dupe(u16, &.{ 0, 0 });
+    defer allocator.free(short_table_samples);
+    const short_table = jp2.Palette{
+        .allocator = allocator,
+        .entries = 1,
+        .bit_depth = 8,
+        .samples = short_table_samples,
+    };
+    try std.testing.expectError(jp2.Jp2Error.InvalidBox, short_table.expand(allocator, invalid_index));
 }
 
 test "codestream encodes one-component grayscale ISO MQ profile" {
@@ -12834,7 +13072,9 @@ test "rate-targeted layer byte accounting stays pinned on the PCRD corpus" {
     // global PCRD allocator plus packet-header charging must land each
     // cumulative layer size on its byte target. The reference-relative
     // quality of these truncation points is measured out-of-process by the
-    // ladder tool (2026-07-11: 0.7-1.8 dB behind OpenJPEG at matched bytes).
+    // ladder tool. Gain-normalized 9/7 synthesis weights pin the first four
+    // prefixes below; matching OpenJPEG precincts measure deficits of
+    // 1.60/0.31/0.65/0.15 dB (2026-07-13).
     const allocator = std.testing.allocator;
     const width = 256;
     const height = 256;
@@ -12921,6 +13161,7 @@ test "rate-targeted layer byte accounting stays pinned on the PCRD corpus" {
     // (total payload / ratio). The allocator charges measured packet-header
     // bytes against the targets, so actual sizes sit at or slightly under
     // them; 15% covers pass-boundary snapping on this corpus.
+    const expected_prefix_bytes = [_]u64{ 657, 1329, 2639, 5355 };
     var cumulative: u64 = 0;
     for (0..rates.len - 1) |layer| {
         var layer_sum: u64 = 0;
@@ -12932,6 +13173,7 @@ test "rate-targeted layer byte accounting stays pinned on the PCRD corpus" {
             "layer {} cumulative {} target {d:.0} (total {})\n",
             .{ layer + 1, cumulative, target, total_packet_bytes },
         );
+        try std.testing.expectEqual(expected_prefix_bytes[layer], cumulative);
         try std.testing.expect(@abs(actual - target) <= target * 0.15);
     }
 

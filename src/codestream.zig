@@ -751,7 +751,7 @@ fn irreversibleBandWeightTable(
             const opj_level: usize = if (kind == .ll) level else @as(usize, level) - 1;
             const orient: usize = @intFromEnum(kind);
             const step = try irreversibleBandStepSizeFor(quantization, bit_depth, kind, level, levels);
-            const weighted = irreversibleBandDelta(bit_depth, kind, step) * dwt97Norm(opj_level, orient);
+            const weighted = irreversiblePcrdDelta(bit_depth, kind, step) * dwt97Norm(opj_level, orient);
             table[level][orient] = weighted * weighted;
         }
     }
@@ -11962,7 +11962,7 @@ fn pcrdBandWeight(band: subband.Band, options: LosslessOptions, bit_depth: u8, l
         },
         .irreversible_9_7 => {
             const step = try irreversibleBandStepSizeFor(options.quantization, bit_depth, band.kind, band.level, levels);
-            const weighted = irreversibleBandDelta(bit_depth, band.kind, step) * dwt97Norm(opj_level, orient);
+            const weighted = irreversiblePcrdDelta(bit_depth, band.kind, step) * dwt97Norm(opj_level, orient);
             return weighted * weighted;
         },
     }
@@ -12035,6 +12035,15 @@ fn irreversibleBandDelta(bit_depth: u8, kind: subband.Kind, step: BandStepSize) 
     const exponent_diff = rb - @as(i32, step.exponent);
     const base = std.math.pow(f64, 2.0, @floatFromInt(exponent_diff));
     return base * (1.0 + @as(f64, @floatFromInt(step.mantissa)) / 2048.0);
+}
+
+/// OpenJPEG-compatible Tier-1 distortion step. The irreversible coder's
+/// coefficient normalization already carries the subband gain, so PCRD
+/// removes it before applying the 9/7 synthesis norm (opj_t1_getwmsedec).
+fn irreversiblePcrdDelta(bit_depth: u8, kind: subband.Kind, step: BandStepSize) f64 {
+    const gain_scale: u8 = @as(u8, 1) << @intCast(subbandGain(kind));
+    return irreversibleBandDelta(bit_depth, kind, step) /
+        @as(f64, @floatFromInt(gain_scale));
 }
 
 /// Mb for a band under either coding path: guard + epsilon_b - 1.

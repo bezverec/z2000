@@ -37,7 +37,8 @@ roundtrips uncompressed 8/16-bit BlackIsZero or WhiteIsZero strips. The public
 normalizes WhiteIsZero, selects no MCT by default, and emits the bounded
 single-tile reversible 5/3/RPCL/ISO-MQ profile. Explicit incompatible options
 fail closed. `decode-temp-jp2` dispatches one- or three-component JP2 output to
-the grayscale or RGB strict decoder and TIFF writer.
+the grayscale or RGB strict decoder and TIFF writer; a supported one-component
+`pclr`/`cmap` stream is expanded to RGB first.
 
 Important `tiff-to-jp2` options:
 
@@ -218,6 +219,7 @@ Primary public types:
 
 - `Jp2Error`
 - `Info`
+- `Palette`
 
 Primary public functions:
 
@@ -227,20 +229,25 @@ Primary public functions:
 - `decodeLosslessGrayWithOptionsProfiled(allocator, codestream, options, timings)`
 - `wrapRgbCodestream(allocator, input, codestream)`
 - `wrapGrayCodestream(allocator, input, codestream)`
+- `wrapPaletteCodestream(allocator, indexed, palette, codestream)`
 - `parseInfo(bytes)`
 - `extractCodestream(bytes)`
 - `extractIccProfile(allocator, bytes)`
+- `extractPalette(allocator, bytes)`
 
 The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
 enumerated sRGB (16) or grayscale (17) `colr`, and one contiguous `jp2c`
 codestream. The reader accepts uniform unsigned 8-bit and 16-bit one- or
-three-component metadata and rejects JPX-only or other color/profile features
-until they are intentionally implemented. The writers require non-empty
+three-component metadata plus a bounded palette layout: one index component,
+three uniform unsigned 8/16-bit `pclr` columns, and explicit `cmap` records to
+sRGB output channels. Signed/mixed palettes, alpha, arbitrary mappings, and
+JPX-only features fail closed. The writers require non-empty
 dimensions, 8/16 bit depth, matching sample counts, codestream/JP2 shape
 agreement, and no MCT for one component. `wrapGrayCodestream` accepts only
 BlackIsZero-normalized samples; WhiteIsZero must be explicitly inverted before
-codestream encoding.
+codestream encoding. `Palette.expand` validates every index before copying an
+interleaved RGB triplet, and reports `PaletteIndexOutOfRange` on malformed data.
 
 ICC support is staged as metadata preservation before color conversion. TIFF
 tag 34675 is stored as owned RGB or grayscale image metadata; both wrappers
@@ -411,13 +418,11 @@ keep even and compression-ratio allocation available for tests, while the
 current rate-driven path uses PCRD-style slope allocation over per-block
 distortion metadata. The single-tile codestream layer charges measured packet
 header overhead against non-final layer budgets, then T2 converts the chosen
-cumulative points into per-layer deltas. The bounded multi-tile path has a
-tile-local PCRD slice for the bounded reversible profile; the first LRCP smoke
-is lossless through z2000 strict decode, OpenJPEG, Grok, and Kakadu. Cross-tile
-global budgeting and broader rate-targeted matrix coverage are still follow-up
-work.
-`tools/pcrd_psnr_ladder.ps1` is the current matched-byte quality diagnostic
-for future allocator improvements.
+cumulative points into per-layer deltas. Single- and multi-tile paths use one
+global slope threshold across their active code-blocks; irreversible weights
+remove the subband gain before applying the 9/7 synthesis norm. The
+profile-matched `tools/pcrd_psnr_ladder.ps1` diagnostic and in-tree exact PLT
+prefix regression guard future allocator changes.
 
 ## `src/subband.zig`
 

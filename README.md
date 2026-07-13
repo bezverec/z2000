@@ -8,8 +8,9 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-13, the narrow RGB lossless JP2 target is estimated at **100/100**;
-the broader JPEG2000 Part 1 codec family is estimated at **98/100**.
+of 2026-07-13, both the narrow RGB lossless JP2 target and the broader
+JPEG2000 Part 1 engineering scorecard are estimated at **100/100**. This is a
+project-readiness estimate, not a formal ISO conformance certification.
 
 ## Features
 
@@ -20,7 +21,9 @@ the broader JPEG2000 Part 1 codec family is estimated at **98/100**.
   preservation. The container boundary can also wrap and inspect unsigned
   one-component codestreams using enumerated grayscale `colr` (17). The narrow
   single-tile reversible grayscale path carries real ISO-MQ T1/T2 payloads in
-  both encode and strict wire decode.
+  both encode and strict wire decode. A bounded JP2 Part 1 palette profile can
+  wrap one 8/16-bit index component with three unsigned 8/16-bit sRGB `pclr`
+  columns and strict `cmap`, then expand it safely to RGB during decode.
 - Lossless RGB path: RCT, reversible 5/3 DWT, RPCL and other bounded
   progression orders, quality layers, PLT/TLM, strict no-sidecar decode.
 - Lossy experimental path: ICT, irreversible 9/7 DWT, scalar-derived or
@@ -230,7 +233,7 @@ Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.
 
 Later conversion-tool target: add JPEG/PNG/BMP input first, then RAW/DNG and
-OpenEXR workflows; broaden color spaces to monochrome, sRGB, palette, YCC,
+OpenEXR workflows; broaden color spaces beyond the bounded sRGB palette path to YCC,
 extended YCC, CIELab, and CMYK; preserve EXIF/IPTC/XMP; and evaluate component
 depths above 16 bits where the source format and JPEG2000 profile support them
 cleanly.

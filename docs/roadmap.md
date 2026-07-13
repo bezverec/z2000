@@ -34,10 +34,11 @@ interop gate.
   with the T2 header, packed SOP stays in SOD and contributes to PLT/`Psot`.
   The 16-tile/48-part two-layer PPM gate now decodes pixel-exactly through
   z2000, OpenJPEG, and Grok.
-- JP2/JPX compatibility: add a stricter basic `.jp2` reader/writer for
+- JP2/JPX compatibility: the strict basic `.jp2` reader/writer covers
   signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
   Start with 8-bit and 16-bit RGB plus sRGB `colr`; the reader now also accepts
-  final length-to-EOF codestream boxes and 64-bit `XLBox` lengths. Keep
+  final length-to-EOF codestream boxes, 64-bit `XLBox` lengths, and a bounded
+  one-index-component sRGB `pclr`/`cmap` encode/decode profile. Keep
   JPX-only features rejected until JPX boxes are intentionally implemented.
 - ICC profile preservation: TIFF tag 34675 now roundtrips as a JP2 restricted
   ICC `colr` box and back to TIFF as opaque metadata for common RGB profiles
@@ -50,9 +51,9 @@ interop gate.
   style combinations, broader profile mixes, and JPX-only behavior fail-closed
   until they have payload behavior and interop coverage.
 - Rate allocation: `--rates` uses PCRD-style global slope allocation with
-  distortion metadata and byte-targeted layer deltas. The remaining work is
-  broadening fixtures and reducing the access-profile size/quality gap against
-  Grok/OpenJPEG/Kakadu.
+  distortion metadata, byte-targeted layer deltas, and gain-normalized 9/7
+  synthesis weights. Profile-matched OpenJPEG deficits average 0.68 dB; further
+  extreme-low-rate tuning is optimization work rather than missing coverage.
 - Multi-tile: the bounded-grid model is implemented for reversible RCT/5-3 and
   irreversible ICT/9-7, with per-tile DWT, packet state, strict decode, all
   five progression orders, global cross-tile PCRD, and the implemented
@@ -74,13 +75,13 @@ interop gate.
 
 ## Next Implementation Slice
 
-1. Harden the landed bidirectional grayscale path with malformed one-component
-   packet fixtures, then continue the component-generic campaign toward
-   multi-tile grayscale, mixed precision/BPCC, alpha, palette expansion, and
-   general component layouts while keeping RGB byte behavior stable.
-2. Continue measured PCRD distortion-model research against the matched-byte
-   PSNR ladder; retain a change only when quality improves without correctness
-   or safety regressions.
+1. Harden the landed grayscale and bounded palette paths with checked-in
+   independent fixtures, then continue the component-generic campaign toward
+   multi-tile grayscale, mixed precision/BPCC, alpha, richer palette mappings,
+   and general component layouts while keeping RGB byte behavior stable.
+2. Continue measured PCRD distortion-model research as an optimization track;
+   retain a change only when the profile-matched ladder improves without
+   correctness or safety regressions.
 3. Add a small checked-in packed-header fixture matrix from an independent
    producer when PPM/PPT encode controls are available locally; current live
    z2000 output is already pixel-exact through OpenJPEG and Grok.
@@ -95,8 +96,8 @@ correctness work.
 - Input formats: add JPEG, PNG, and BMP import before heavier camera/HDR
   formats. Later, build RAW/DNG workflows around explicit demosaic/color
   decisions and add OpenEXR for HDR/float-heavy production imagery.
-- Color spaces: broaden from the current RGB/sRGB and opaque ICC preservation
-  into monochrome, sRGB, palette color, YCC, extended YCC, CIELab, and CMYK.
+- Color spaces: broaden from the current RGB/sRGB, bounded sRGB palette, and
+  opaque ICC preservation into YCC, extended YCC, CIELab, and CMYK.
   ICC-based conversion should be an optional color-management layer rather than
   hidden pixel mutation.
 - Metadata: preserve and validate EXIF, IPTC, and XMP alongside ICC. Keep a

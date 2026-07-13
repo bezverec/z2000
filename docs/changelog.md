@@ -5,6 +5,43 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded JP2 Palette Vertical And 100/100 Scorecard
+
+- Added `jp2.Palette`, `wrapPaletteCodestream`, and `extractPalette` for a
+  deliberately bounded Part 1 layout: one unsigned 8/16-bit index component,
+  three uniform unsigned 8/16-bit RGB `pclr` columns, explicit identity `cmap`,
+  sRGB `colr`, and optional identity RGB `cdef`.
+- `Palette.expand` uses checked dimensions, allocation sizes, palette indices,
+  and interleaved RGB output. Missing mappings, malformed lengths, duplicate or
+  nonidentity columns, signed/mixed palettes, ICC-first palette colour, alpha,
+  and indices outside the table fail closed.
+- `decode-temp-jp2` now decodes the one-component codestream through the shared
+  grayscale ISO-MQ path and expands supported palette output to RGB TIFF;
+  `jp2-info` reports codestream and output component counts separately.
+- The local 8/16-bit fixture matrix covers emit, parse, extract, strict decode,
+  expansion, `cdef`, truncation, bad `cmap`, and out-of-range indices. A live
+  macOS fixture decoded through OpenJPEG 2.5.4 and Grok 20.3.6 to RGBA pixels
+  identical to z2000 (`tiffcmp` exit 0 for both).
+- This closes the final containers/metadata point and moves the engineering
+  scorecard from **99/100 to 100/100**. The score remains an implementation
+  estimate, not formal ISO certification; alpha, mixed component precision,
+  general N-component layouts, broader colour spaces, and JPX remain explicit
+  future breadth.
+
+### Gain-Normalized Irreversible PCRD
+
+- Corrected irreversible PCRD weighting to remove the ISO subband gain before
+  applying the 9/7 synthesis norm, matching OpenJPEG's Tier-1 distortion
+  model and the measured z2000 inverse basis norms (`HL / 2`, `HH / 4`).
+- On the profile-matched 256x256 ladder, z2000 layer PSNR improves by
+  0.26/0.38/0.36/1.44 dB. The OpenJPEG deficit is now
+  1.60/0.31/0.65/0.15 dB (0.68 dB average versus 1.31 dB before); exact PLT
+  prefixes and thread determinism are pinned in-tree. The benchmark now gives
+  OpenJPEG matching levels, order, code-blocks, and precincts.
+- Lossy encode/decode moves from 14/15 to 15/15 and the full Part 1 estimate
+  moves from 98/100 to 99/100. Extreme-low-rate tuning remains useful but is no
+  longer treated as a missing codec capability.
+
 ### Grayscale JP2 Encode And Strict Decode
 
 - Added a real one-component coefficient, ISO-MQ T1, T2 packet, and codestream
