@@ -8,9 +8,11 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-13, both the narrow RGB lossless JP2 target and the broader
-JPEG2000 Part 1 engineering scorecard are estimated at **100/100**. This is a
-project-readiness estimate, not a formal ISO conformance certification.
+of 2026-07-14, both the narrow RGB lossless JP2 target and the broader
+JPEG2000 Part 1 engineering scorecard are estimated at **100/100**, and the
+first release candidate (`v0.1.0-rc.1`) is published on the GitHub releases
+page. This is a project-readiness estimate, not a formal ISO conformance
+certification.
 
 ## Features
 
@@ -24,13 +26,15 @@ project-readiness estimate, not a formal ISO conformance certification.
   tile origins and global cross-tile rate targets.
 - ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
   PPM, and PPT packet headers on their documented profiles.
-- Bounded grayscale and palette JP2 profiles, strict malformed-input handling,
-  and OpenJPEG/Grok/Kakadu interoperability tests.
+- Bounded grayscale and palette JP2 profiles, plus bounded 1..4-component
+  no-MCT planar layouts at the codestream API level, with strict
+  malformed-input handling and OpenJPEG/Grok/Kakadu interoperability tests.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
-Not yet complete: arbitrary JP2/JPX profiles, general component layouts,
+Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
+bounded 1..4 no-MCT envelope (alpha semantics, subsampling, mixed depth),
 non-empty PLT-less multi-part tiles, broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
@@ -226,8 +230,12 @@ The one-component CLI path is currently single-tile RPCL with reversible 5/3,
 ISO MQ, in-band packet headers, PLT, optional TLM/SOP/EPH, and either one tile
 part or `R` resolution tile-parts. OpenJPEG 2.5.4 and Grok 20.3.6 decode the
 8-bit and 16-bit output pixel-exactly; z2000 strict-decodes both references'
-grayscale output pixel-exactly too. Multi-tile grayscale and general or mixed
-component layouts remain fail-closed.
+grayscale output pixel-exactly too. The same planar engine also serves
+bounded 2- and 4-component no-MCT layouts through the library API
+(`encodeLosslessPlanarWithOptions`/`decodeLosslessPlanar`, OpenJPEG/Grok
+pixel-exact); TIFF front ends for those layouts (alpha channels) are the next
+feature-plan stage. Multi-tile grayscale and mixed component depths remain
+fail-closed.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
 floating-point samples, extra alpha/sample channels, mixed bit depth, signed
@@ -243,6 +251,7 @@ Detailed notes live in `docs/`:
 - [Roadmap](docs/roadmap.md)
 - [Next steps](docs/next_steps.md)
 - [Optimization plan](docs/optimization_plan.md)
+- [SIMD plan](docs/simd_plan.md)
 - [Post-Part 1 feature plan](docs/feature_plan.md)
 - [Comparative benchmarks](docs/benchmarks.md)
 - [Multi-tile plan](docs/multi_tile_plan.md)

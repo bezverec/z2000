@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded Planar Component Layouts (F1c) And Grayscale Unification
+
+- New codestream-level surface for 1..4-component no-MCT layouts:
+  `color.SamplePlanes` carries one unsigned 8/16-bit plane per component,
+  `encodeLosslessPlanarWithOptions` encodes single-tile reversible 5/3 RPCL
+  streams with SIZ Csiz = plane count (quality layers and rates included),
+  and `decodeLosslessPlanar`/`decodeLosslessPlanarWithOptions` strict-decode
+  them back to planes. Non-3-component streams must be MCT-free; Csiz > 4
+  and the JP2 wrapper's 1/3-component rule stay fail-closed.
+- The strict metadata/catalog/assembly machinery was already component-count
+  generic; the {1,3} guards widened to the bounded envelope
+  (`max_codestream_components = 4`) and the [3]-sized catalog arrays grew
+  accordingly. Multi-tile remains 3-component only.
+- The grayscale encoder, decoder, and tile builder are now thin one-plane
+  delegates of the planar path (completing the F1 stage-b plumbing
+  deletion); grayscale and RGB outputs verified byte-identical to the
+  pre-change binary.
+- Interop: 64x48 2- and 4-component streams decode pixel-exactly through
+  OpenJPEG 2.5.4 and Grok 20.3.6 (12/12 per-component PGX legs).
+- Documentation pass: README (status/rc1, features, supported boundary,
+  docs index gained the SIMD plan), docs/api.md (planar API, z2k/shorthand
+  CLI examples), and docs/feature_plan.md (F1 marked complete, F2 next) are
+  reconciled with the current state.
+
 ### z2k Alias And All-Threads Default
 
 - The build installs the CLI twice: as `z2000` and as the short alias
