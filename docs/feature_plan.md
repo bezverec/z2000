@@ -59,8 +59,16 @@ decode scaffold sizes its carrier by the actual component count instead of
 allocating empty cb/cr, and six encode profiles (lossless, 9/7 lossy,
 multi-tile, layered LRCP, BYPASS+TERMALL, t10) plus lossy/lossless decode and
 grayscale are byte-identical to the pre-change binary with t10 perf neutral;
-(b) 1-component rides the same code (delete the
-parallel grayscale plumbing), (c) open 2- and 4-component no-MCT layouts.
+(b) 1-component rides the same code — **first slice landed 2026-07-14**: the
+duplicated single-tile codestream assembly (SIZ/COD/QCD/POC/TLM/PPM main
+header, tile-part SOT/POC/PLT/PPT/SOD/packet loop, EOC) is now one
+component-count-generic `assembleSingleTileCodestream`, used by both the RGB
+and grayscale encoders with byte-identical output across ten profiles
+(including PPM, PPT, CPRL, multi-tile, and layered grayscale); the tile
+scaffold engine was already shared. Remaining (b) work: unify the gray
+decode driver with the generic strict decode surface and widen the gray
+encode gate beyond RPCL/R-divisions where interop-gated; (c) open 2- and
+4-component no-MCT layouts.
 
 **Verify:** byte-identical RGB/gray regression corpus at every PR;
 2-component (gray+alpha shaped) and 4-component synthetic roundtrips;

@@ -461,73 +461,16 @@ pub fn encodeLosslessGrayWithOptions(
         return CodestreamError.InvalidCodestream;
     }
 
-    const packets = try makePacketPlanForComponents(gray.width, gray.height, levels, 1, encode_options);
-    if (artifacts.stream.packet_lengths.len != packets.packets or
-        artifacts.stream.packet_header_lengths.len != packets.packets)
-    {
-        return CodestreamError.InvalidCodestream;
-    }
-    const tile_parts = tilePartCountForOptions(levels, encode_options);
-    var psots: [33]u32 = undefined;
-    var tile_part_index: usize = 0;
-    while (tile_part_index < tile_parts) : (tile_part_index += 1) {
-        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
-        const packet_lengths = artifacts.stream.packet_lengths[packet_range.start..][0..packet_range.count];
-        const packet_bytes = try rpclPacketPayloadByteCount(encode_options, packet_lengths);
-        const plt_bytes = try pltBytesForRpclPacketLengths(encode_options, packet_lengths);
-        const tile_part_bytes = try std.math.add(usize, packet_bytes, plt_bytes);
-        psots[tile_part_index] = std.math.cast(u32, try std.math.add(usize, 14, tile_part_bytes)) orelse
-            return CodestreamError.ImageTooLarge;
-    }
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try appendMarker(allocator, &out, .soc);
-    try appendSizForComponents(allocator, &out, .{
-        .width = @intCast(gray.width),
-        .height = @intCast(gray.height),
+    return assembleSingleTileCodestream(allocator, .{
+        .width = gray.width,
+        .height = gray.height,
         .bit_depth = gray.bit_depth,
         .components = 1,
-        .tile_width = encode_options.tile_width,
-        .tile_height = encode_options.tile_height,
-    });
-    try appendCod(allocator, &out, levels, encode_options);
-    try appendQcd(allocator, &out, levels, gray.bit_depth, encode_options);
-    if (encode_options.tlm) try appendTlm(allocator, &out, psots[0..tile_parts]);
-
-    var packet_sequence: u16 = 0;
-    tile_part_index = 0;
-    while (tile_part_index < tile_parts) : (tile_part_index += 1) {
-        const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
-        const packet_lengths = artifacts.stream.packet_lengths[packet_range.start..][0..packet_range.count];
-        const packet_header_lengths = artifacts.stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
-        const packet_bytes_start = try rpclPacketByteOffset(artifacts.stream.packet_lengths, packet_range.start);
-        const packet_bytes_end = try rpclPacketByteOffset(
-            artifacts.stream.packet_lengths,
-            packet_range.start + packet_range.count,
-        );
-        try appendSot(
-            allocator,
-            &out,
-            0,
-            psots[tile_part_index],
-            @intCast(tile_part_index),
-            @intCast(tile_parts),
-        );
-        try appendPltFromRpclPacketLengths(allocator, &out, encode_options, packet_lengths);
-        try appendMarker(allocator, &out, .sod);
-        try appendRpclPackets(
-            allocator,
-            &out,
-            encode_options,
-            packet_lengths,
-            packet_header_lengths,
-            artifacts.stream.bytes[packet_bytes_start..packet_bytes_end],
-            &packet_sequence,
-        );
-    }
-    try appendMarker(allocator, &out, .eoc);
-    return out.toOwnedSlice(allocator);
+        .levels = levels,
+        .packet_lengths = artifacts.stream.packet_lengths,
+        .packet_header_lengths = artifacts.stream.packet_header_lengths,
+        .packet_bytes = artifacts.stream.bytes,
+    }, encode_options);
 }
 
 const ComponentSlices = struct {
@@ -1811,22 +1754,73 @@ fn encodeLosslessWithOptionsMeasured(
         try reorderPacketStreamFromRpcl(allocator, &rpcl_stream, rgb.width, rgb.height, levels, encode_options);
     }
 
+    const marker_start = monotonicNs();
+    const encoded = try assembleSingleTileCodestream(allocator, .{
+        .width = rgb.width,
+        .height = rgb.height,
+        .bit_depth = rgb.bit_depth,
+        .components = 3,
+        .levels = levels,
+        .packet_lengths = rpcl_stream.packet_lengths,
+        .packet_header_lengths = rpcl_stream.packet_header_lengths,
+        .packet_bytes = rpcl_stream.packet_bytes,
+        .sidecar_payload = tile_payload.items,
+    }, encode_options);
+    if (timings) |t| {
+        t.marker_ns = elapsedNs(marker_start);
+        t.total_ns = elapsedNs(total_start);
+    }
+    return encoded;
+}
+
+/// Component-count-generic single-tile codestream assembly shared by the RGB
+/// and grayscale encoders: main header (SIZ/COD/QCD, optional POC, sidecar
+/// comments, TLM, PPM), then the tile-part loop (SOT, optional tile POC,
+/// PLT/PPT, SOD, packet bodies), then EOC. Options whose branches a caller's
+/// gate rejects (POC/PPM/PPT for grayscale) simply never fire, so both
+/// callers keep their previous byte-exact output.
+const SingleTileAssemblyInput = struct {
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    components: u16,
+    levels: u8,
+    packet_lengths: []const u32,
+    packet_header_lengths: []const u32,
+    packet_bytes: []const u8,
+    sidecar_payload: []const u8 = &.{},
+};
+
+fn assembleSingleTileCodestream(
+    allocator: std.mem.Allocator,
+    input: SingleTileAssemblyInput,
+    encode_options: LosslessOptions,
+) ![]u8 {
+    const levels = input.levels;
+    const packets = try makePacketPlanForComponents(input.width, input.height, levels, input.components, encode_options);
+
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    const marker_start = monotonicNs();
     try appendMarker(allocator, &out, .soc);
-    try appendSiz(allocator, &out, rgb, encode_options);
+    try appendSizForComponents(allocator, &out, .{
+        .width = @intCast(input.width),
+        .height = @intCast(input.height),
+        .bit_depth = input.bit_depth,
+        .components = input.components,
+        .tile_width = encode_options.tile_width,
+        .tile_height = encode_options.tile_height,
+    });
     try appendCod(allocator, &out, levels, encode_options);
-    try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+    try appendQcd(allocator, &out, levels, input.bit_depth, encode_options);
     if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
         try appendPoc(allocator, &out, levels, encode_options);
     }
     if (encode_options.emit_temporary_payload_sidecar) {
-        try appendTemporaryPayloadComments(allocator, &out, tile_payload.items);
+        try appendTemporaryPayloadComments(allocator, &out, input.sidecar_payload);
     }
-    if (rpcl_stream.packet_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
-    if (rpcl_stream.packet_header_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
+    if (input.packet_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
+    if (input.packet_header_lengths.len != packets.packets) return CodestreamError.InvalidCodestream;
     const tile_parts = tilePartCountForOptions(levels, encode_options);
     const uses_packed_headers = encode_options.ppm or encode_options.ppt;
     var psots: [33]u32 = undefined;
@@ -1834,8 +1828,8 @@ fn encodeLosslessWithOptionsMeasured(
     var tile_part_index: usize = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
         const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
-        const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
-        const packet_header_lengths = rpcl_stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
+        const packet_lengths = input.packet_lengths[packet_range.start..][0..packet_range.count];
+        const packet_header_lengths = input.packet_header_lengths[packet_range.start..][0..packet_range.count];
         tile_part_payload_bytes[tile_part_index] = if (uses_packed_headers)
             try packedPacketBodyByteCount(encode_options, packet_lengths, packet_header_lengths)
         else
@@ -1851,7 +1845,8 @@ fn encodeLosslessWithOptionsMeasured(
         else
             0;
         const tile_part_bytes = try std.math.add(usize, try std.math.add(usize, plt_bytes, ppt_bytes), tile_part_payload_bytes[tile_part_index]);
-        psots[tile_part_index] = try std.math.add(u32, 14, @as(u32, @intCast(tile_part_bytes)));
+        psots[tile_part_index] = std.math.cast(u32, try std.math.add(usize, 14, tile_part_bytes)) orelse
+            return CodestreamError.ImageTooLarge;
         if (encode_options.poc_in_tile_header and tile_part_index == 0) {
             psots[tile_part_index] = try std.math.add(u32, psots[tile_part_index], try pocMarkerByteCount(encode_options));
         }
@@ -1864,16 +1859,16 @@ fn encodeLosslessWithOptionsMeasured(
         tile_part_index = 0;
         while (tile_part_index < tile_parts) : (tile_part_index += 1) {
             const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
-            const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
-            const packet_header_lengths = rpcl_stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
-            const packet_bytes_start = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start);
-            const packet_bytes_end = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start + packet_range.count);
+            const packet_lengths = input.packet_lengths[packet_range.start..][0..packet_range.count];
+            const packet_header_lengths = input.packet_header_lengths[packet_range.start..][0..packet_range.count];
+            const packet_bytes_start = try rpclPacketByteOffset(input.packet_lengths, packet_range.start);
+            const packet_bytes_end = try rpclPacketByteOffset(input.packet_lengths, packet_range.start + packet_range.count);
             ppm_groups[tile_part_index] = try collectPackedPacketHeaders(
                 allocator,
                 encode_options,
                 packet_lengths,
                 packet_header_lengths,
-                rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
+                input.packet_bytes[packet_bytes_start..packet_bytes_end],
             );
         }
         var marker_payloads = ppm.buildMarkerPayloads(allocator, ppm_groups[0..tile_parts], 65533) catch |err| switch (err) {
@@ -1892,10 +1887,10 @@ fn encodeLosslessWithOptionsMeasured(
     tile_part_index = 0;
     while (tile_part_index < tile_parts) : (tile_part_index += 1) {
         const packet_range = tilePartPacketRange(packets, tile_part_index, tile_parts, encode_options);
-        const packet_lengths = rpcl_stream.packet_lengths[packet_range.start..][0..packet_range.count];
-        const packet_header_lengths = rpcl_stream.packet_header_lengths[packet_range.start..][0..packet_range.count];
-        const packet_bytes_start = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start);
-        const packet_bytes_end = try rpclPacketByteOffset(rpcl_stream.packet_lengths, packet_range.start + packet_range.count);
+        const packet_lengths = input.packet_lengths[packet_range.start..][0..packet_range.count];
+        const packet_header_lengths = input.packet_header_lengths[packet_range.start..][0..packet_range.count];
+        const packet_bytes_start = try rpclPacketByteOffset(input.packet_lengths, packet_range.start);
+        const packet_bytes_end = try rpclPacketByteOffset(input.packet_lengths, packet_range.start + packet_range.count);
         try appendSot(allocator, &out, 0, psots[tile_part_index], @intCast(tile_part_index), @intCast(tile_parts));
         if (encode_options.poc_in_tile_header and tile_part_index == 0) {
             try appendPoc(allocator, &out, levels, encode_options);
@@ -1911,7 +1906,7 @@ fn encodeLosslessWithOptionsMeasured(
                     encode_options,
                     packet_lengths,
                     packet_header_lengths,
-                    rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
+                    input.packet_bytes[packet_bytes_start..packet_bytes_end],
                     &ppt_marker_index,
                 );
             }
@@ -1926,7 +1921,7 @@ fn encodeLosslessWithOptionsMeasured(
                 encode_options,
                 packet_lengths,
                 packet_header_lengths,
-                rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
+                input.packet_bytes[packet_bytes_start..packet_bytes_end],
                 &packet_sequence,
             );
         } else {
@@ -1936,16 +1931,12 @@ fn encodeLosslessWithOptionsMeasured(
                 encode_options,
                 packet_lengths,
                 packet_header_lengths,
-                rpcl_stream.packet_bytes[packet_bytes_start..packet_bytes_end],
+                input.packet_bytes[packet_bytes_start..packet_bytes_end],
                 &packet_sequence,
             );
         }
     }
     try appendMarker(allocator, &out, .eoc);
-    if (timings) |t| {
-        t.marker_ns = elapsedNs(marker_start);
-        t.total_ns = elapsedNs(total_start);
-    }
 
     return out.toOwnedSlice(allocator);
 }

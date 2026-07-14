@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Shared Single-Tile Codestream Assembly (F1 Stage B, First Slice)
+
+- The RGB and grayscale encoders now share one component-count-generic
+  `assembleSingleTileCodestream`: main header (SIZ/COD/QCD, optional POC,
+  sidecar comments, TLM, PPM), the tile-part loop (SOT, tile-header POC,
+  PLT/PPT, SOD, packet bodies), and EOC live in a single assembler driven
+  by a `SingleTileAssemblyInput` view over the packet stream. The grayscale
+  encoder's duplicated ~90-line assembly is gone; branches its gate rejects
+  (POC/PPM/PPT) simply never fire.
+- Byte-identical output verified against the pre-change binary across ten
+  profiles: lossless archival, 9/7 lossy, three-layer LRCP, PPM, PPT,
+  BYPASS+TERMALL, CPRL, 512x512 multi-tile, and grayscale with and without
+  quality layers. Full suite green in Debug and ReleaseFast.
+- The tile-part Psot length now uses a checked u32 cast in the shared
+  assembler (previously the RGB path used an unchecked cast; oversized
+  tile-parts now fail closed as ImageTooLarge).
+
 ### Component-Generic Plane Carrier (F1 Stage A)
 
 - `color.RctPlanes` and `color.IctPlanes` are now instances of a shared
