@@ -67,6 +67,11 @@ pub fn ComponentPlanesOf(comptime Sample: type) type {
 pub const RctPlanes = ComponentPlanesOf(i32);
 pub const IctPlanes = ComponentPlanesOf(f32);
 
+/// Unsigned sample planes as they enter/leave the codec (one plane per
+/// component, no interleaving): the input/output carrier for the bounded
+/// 1..4-component no-MCT layouts.
+pub const SamplePlanes = ComponentPlanesOf(u16);
+
 fn validatePixelPlanes(comptime Sample: type, planes: ComponentPlanesOf(Sample), expected_components: usize) !usize {
     const pixels = try std.math.mul(usize, planes.width, planes.height);
     if (planes.planes.len != expected_components) return ColorError.InvalidImage;

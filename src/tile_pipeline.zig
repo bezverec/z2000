@@ -1493,7 +1493,7 @@ pub fn buildPacketScaffold(
     options: PacketScaffoldOptions,
 ) !PacketScaffold {
     if (options.layers == 0 or options.precincts.len == 0) return packet_plan.PacketPlanError.InvalidDimensions;
-    if (options.components != 1 and options.components != 3) return packet_plan.PacketPlanError.InvalidDimensions;
+    if (options.components < 1 or options.components > color.max_components) return packet_plan.PacketPlanError.InvalidDimensions;
     const width = rct_tile.planes.width;
     const height = rct_tile.planes.height;
     if (width != rct_tile.tile.rect.width() or height != rct_tile.tile.rect.height()) {
@@ -2085,13 +2085,40 @@ pub fn buildGrayRpclEncodeArtifactsIsoMq(
     options: PacketScaffoldOptions,
     style: ebcot.CodeBlockStyle,
 ) !TileRpclEncodeArtifacts {
-    if (source.width == 0 or source.height == 0 or source.white_is_zero) {
+    if (source.white_is_zero) return PacketScaffoldError.InvalidPlane;
+    // Borrowed one-plane carrier: the grayscale front end is the planar
+    // builder's single-component special case.
+    var plane_slices = [1][]u16{source.samples};
+    return buildPlanarRpclEncodeArtifactsIsoMq(allocator, .{
+        .allocator = allocator,
+        .width = source.width,
+        .height = source.height,
+        .bit_depth = source.bit_depth,
+        .planes = &plane_slices,
+    }, requested_levels, options, style);
+}
+
+/// Bounded planar front end (F1c): 1..4 unsigned 8/16-bit component planes,
+/// no inter-component transform, single tile, RPCL. Each plane gets the ISO
+/// B.1.1 DC level shift and an independent reversible 5/3 DWT before the
+/// shared scaffold/T1/T2 engine runs with `components = planes.len`.
+pub fn buildPlanarRpclEncodeArtifactsIsoMq(
+    allocator: std.mem.Allocator,
+    source: color.SamplePlanes,
+    requested_levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+) !TileRpclEncodeArtifacts {
+    if (source.width == 0 or source.height == 0) return PacketScaffoldError.InvalidPlane;
+    if (source.bit_depth != 8 and source.bit_depth != 16) return PacketScaffoldError.InvalidPlane;
+    if (source.planes.len == 0 or source.planes.len > color.max_components) {
         return PacketScaffoldError.InvalidPlane;
     }
-    if (source.bit_depth != 8 and source.bit_depth != 16) return PacketScaffoldError.InvalidPlane;
     if (options.front_end != null) return PacketScaffoldError.InvalidPlane;
     const pixels = try std.math.mul(usize, source.width, source.height);
-    if (source.samples.len != pixels) return PacketScaffoldError.InvalidPlane;
+    for (source.planes) |plane| {
+        if (plane.len != pixels) return PacketScaffoldError.InvalidPlane;
+    }
 
     const width_u32 = std.math.cast(u32, source.width) orelse return PacketScaffoldError.InvalidPlane;
     const height_u32 = std.math.cast(u32, source.height) orelse return PacketScaffoldError.InvalidPlane;
@@ -2099,15 +2126,23 @@ pub fn buildGrayRpclEncodeArtifactsIsoMq(
         return PacketScaffoldError.InvalidPlane;
     const tile = grid.tile(0) catch return PacketScaffoldError.InvalidPlane;
 
-    var planes_carrier = try color.RctPlanes.init(allocator, source.width, source.height, source.bit_depth, 1);
+    var planes_carrier = try color.RctPlanes.init(
+        allocator,
+        source.width,
+        source.height,
+        source.bit_depth,
+        source.planes.len,
+    );
     var planes_moved = false;
     errdefer if (!planes_moved) planes_carrier.deinit();
 
     const max_sample: u16 = if (source.bit_depth == 8) 255 else std.math.maxInt(u16);
     const level_shift = @as(i32, 1) << @as(u5, @intCast(source.bit_depth - 1));
-    for (source.samples, planes_carrier.planes[0]) |sample, *coefficient| {
-        if (sample > max_sample) return PacketScaffoldError.InvalidPlane;
-        coefficient.* = @as(i32, sample) - level_shift;
+    for (source.planes, planes_carrier.planes) |samples, coefficients| {
+        for (samples, coefficients) |sample, *coefficient| {
+            if (sample > max_sample) return PacketScaffoldError.InvalidPlane;
+            coefficient.* = @as(i32, sample) - level_shift;
+        }
     }
 
     var transformed = RctTile{
@@ -2119,28 +2154,36 @@ pub fn buildGrayRpclEncodeArtifactsIsoMq(
 
     var workspace = try wavelet_int.Workspace.init(allocator, @max(source.width, source.height));
     defer workspace.deinit();
-    const levels = try wavelet_int.forward53WithWorkspace(
-        &workspace,
-        transformed.planes.planes[0],
-        source.width,
-        source.height,
-        requested_levels,
-    );
+    var levels: u8 = 0;
+    for (transformed.planes.planes, 0..) |plane, component| {
+        const plane_levels = try wavelet_int.forward53WithWorkspace(
+            &workspace,
+            plane,
+            source.width,
+            source.height,
+            requested_levels,
+        );
+        if (component == 0) {
+            levels = plane_levels;
+        } else if (plane_levels != levels) {
+            return wavelet_int.TransformError.InvalidDimensions;
+        }
+    }
 
-    var gray_options = options;
-    gray_options.components = 1;
+    var planar_options = options;
+    planar_options.components = @intCast(source.planes.len);
     var artifact = try buildTileRpclEncodeArtifactsFromTransformedTile(
         allocator,
         transformed,
         levels,
-        gray_options,
+        planar_options,
         style,
     );
     errdefer artifact.deinit();
     try applyGridPcrdTargets(
         allocator,
         @as([*]TileRpclEncodeArtifacts, @ptrCast(&artifact))[0..1],
-        gray_options,
+        planar_options,
     );
     return artifact;
 }

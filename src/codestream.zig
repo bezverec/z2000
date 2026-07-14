@@ -48,6 +48,11 @@ const Marker = enum(u16) {
     eoc = 0xffd9,
 };
 
+/// F1 component-layout bound: SIZ Csiz values 1..4 are the implemented
+/// envelope (grayscale=1, RGB=3 as MCT-capable specials; 2 and 4 ride the
+/// no-MCT planar path). Mirrors color.max_components.
+pub const max_codestream_components = color.max_components;
+
 const temporary_magic_v0 = "ZJ2K-CBLK-BP0";
 const temporary_magic_v1 = "ZJ2K-CBLK-BP1";
 const temporary_magic_v2 = "ZJ2K-CBLK-BP2";
@@ -374,21 +379,50 @@ pub fn encodeLosslessWithOptionsProfiled(
 
 /// Encodes the narrow ISO/IEC 15444-1 grayscale profile currently supported
 /// by z2000: one unsigned component, one tile, reversible 5/3, ISO MQ, RPCL,
-/// in-band packet headers, PLT, and optional TLM/SOP/EPH markers.
+/// in-band packet headers, PLT, and optional TLM/SOP/EPH markers. This is
+/// the one-plane special case of the planar encoder below.
 pub fn encodeLosslessGrayWithOptions(
     allocator: std.mem.Allocator,
     gray: image.GrayImage,
     options: LosslessOptions,
 ) ![]u8 {
-    if (gray.width == 0 or gray.height == 0 or
-        gray.width > std.math.maxInt(u32) or gray.height > std.math.maxInt(u32))
+    if (gray.white_is_zero) return CodestreamError.UnsupportedPayload;
+    const pixels = std.math.mul(usize, gray.width, gray.height) catch return CodestreamError.ImageTooLarge;
+    if (gray.samples.len != pixels) return CodestreamError.InvalidCodestream;
+    var plane_slices = [1][]u16{gray.samples};
+    return encodeLosslessPlanarWithOptions(allocator, .{
+        .allocator = allocator,
+        .width = gray.width,
+        .height = gray.height,
+        .bit_depth = gray.bit_depth,
+        .planes = &plane_slices,
+    }, options);
+}
+
+/// F1c planar profile: 1..4 unsigned 8/16-bit component planes without any
+/// inter-component transform (SIZ Csiz = plane count, MCT none), one tile,
+/// reversible 5/3, ISO MQ, RPCL, in-band packet headers, PLT, optional
+/// TLM/SOP/EPH. Grayscale (1) and the RGB special case (3, via the RCT/ICT
+/// front ends) stay byte-identical; 2- and 4-component layouts are the new
+/// public surface.
+pub fn encodeLosslessPlanarWithOptions(
+    allocator: std.mem.Allocator,
+    planar: color.SamplePlanes,
+    options: LosslessOptions,
+) ![]u8 {
+    if (planar.width == 0 or planar.height == 0 or
+        planar.width > std.math.maxInt(u32) or planar.height > std.math.maxInt(u32))
     {
         return CodestreamError.ImageTooLarge;
     }
-    if (gray.bit_depth != 8 and gray.bit_depth != 16) return CodestreamError.UnsupportedPayload;
-    const pixels = std.math.mul(usize, gray.width, gray.height) catch return CodestreamError.ImageTooLarge;
-    if (gray.samples.len != pixels) return CodestreamError.InvalidCodestream;
-    if (gray.white_is_zero) return CodestreamError.UnsupportedPayload;
+    if (planar.bit_depth != 8 and planar.bit_depth != 16) return CodestreamError.UnsupportedPayload;
+    if (planar.planes.len == 0 or planar.planes.len > max_codestream_components) {
+        return CodestreamError.UnsupportedPayload;
+    }
+    const pixels = std.math.mul(usize, planar.width, planar.height) catch return CodestreamError.ImageTooLarge;
+    for (planar.planes) |plane| {
+        if (plane.len != pixels) return CodestreamError.InvalidCodestream;
+    }
     if (options.levels > 32) return CodestreamError.TooManyLevels;
     if (options.layers == 0 or options.layers > max_quality_layers or
         options.rate_count > options.layers or options.threads == 0)
@@ -414,8 +448,8 @@ pub fn encodeLosslessGrayWithOptions(
     }
 
     const grid = tile_grid.Grid.fromImageSize(
-        gray.width,
-        gray.height,
+        planar.width,
+        planar.height,
         options.tile_width,
         options.tile_height,
     ) catch |err| switch (err) {
@@ -424,7 +458,7 @@ pub fn encodeLosslessGrayWithOptions(
     };
     if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
 
-    const levels = actualDwtLevels(gray.width, gray.height, options.levels);
+    const levels = actualDwtLevels(planar.width, planar.height, options.levels);
     const encode_options = normalizedEncodePrecinctOptions(options, levels);
     try validatePrecinctBlockSpans(encode_options);
 
@@ -440,9 +474,9 @@ pub fn encodeLosslessGrayWithOptions(
         .predictable_termination = encode_options.predictable_termination,
         .segmentation_symbols = encode_options.segmentation_symbols,
     };
-    var artifacts = try tile_pipeline.buildGrayRpclEncodeArtifactsIsoMq(
+    var artifacts = try tile_pipeline.buildPlanarRpclEncodeArtifactsIsoMq(
         allocator,
-        gray,
+        planar,
         levels,
         .{
             .layers = encode_options.layers,
@@ -455,17 +489,18 @@ pub fn encodeLosslessGrayWithOptions(
         block_style,
     );
     defer artifacts.deinit();
-    if (artifacts.levels != levels or artifacts.scaffold.components != 1 or
-        artifacts.catalog.components != 1)
+    const component_count: u16 = @intCast(planar.planes.len);
+    if (artifacts.levels != levels or artifacts.scaffold.components != component_count or
+        artifacts.catalog.components != component_count)
     {
         return CodestreamError.InvalidCodestream;
     }
 
     return assembleSingleTileCodestream(allocator, .{
-        .width = gray.width,
-        .height = gray.height,
-        .bit_depth = gray.bit_depth,
-        .components = 1,
+        .width = planar.width,
+        .height = planar.height,
+        .bit_depth = planar.bit_depth,
+        .components = component_count,
         .levels = levels,
         .packet_lengths = artifacts.stream.packet_lengths,
         .packet_header_lengths = artifacts.stream.packet_header_lengths,
@@ -1128,8 +1163,8 @@ pub const StrictPacketBlock = struct {
 pub const StrictPacketBlockCatalog = struct {
     allocator: std.mem.Allocator = undefined,
     component_count: u16 = 3,
-    components: [3][]StrictPacketBlock = [_][]StrictPacketBlock{&.{}} ** 3,
-    payloads: [3][]u8 = [_][]u8{&.{}} ** 3,
+    components: [max_codestream_components][]StrictPacketBlock = [_][]StrictPacketBlock{&.{}} ** max_codestream_components,
+    payloads: [max_codestream_components][]u8 = [_][]u8{&.{}} ** max_codestream_components,
 
     pub fn deinit(self: *StrictPacketBlockCatalog) void {
         for (0..self.component_count) |component| {
@@ -1360,7 +1395,7 @@ const StrictComponentAssembly = struct {
 };
 
 const StrictComponentAssemblySet = struct {
-    assemblies: [3]StrictComponentAssembly = undefined,
+    assemblies: [max_codestream_components]StrictComponentAssembly = undefined,
     initialized: usize = 0,
 
     fn init(
@@ -1369,7 +1404,7 @@ const StrictComponentAssemblySet = struct {
         block_count: usize,
         use_component_payloads: bool,
     ) !StrictComponentAssemblySet {
-        if (component_count != 1 and component_count != 3) return CodestreamError.UnsupportedPayload;
+        if (component_count < 1 or component_count > max_codestream_components) return CodestreamError.UnsupportedPayload;
         var set = StrictComponentAssemblySet{};
         errdefer set.deinit();
         for (0..component_count) |component| {
@@ -1398,7 +1433,7 @@ const RpclBlockIndex = struct {
     cells: []RpclBlockIndexCell,
 
     fn init(allocator: std.mem.Allocator, plan: packet_plan.Plan, component_count: u16) !RpclBlockIndex {
-        if (component_count != 1 and component_count != 3) return CodestreamError.UnsupportedPayload;
+        if (component_count < 1 or component_count > max_codestream_components) return CodestreamError.UnsupportedPayload;
         var resolution_offsets: [33]usize = [_]usize{0} ** 33;
         var cell_count: usize = 0;
         var resolution_index: usize = 0;
@@ -1997,6 +2032,43 @@ fn decodeLosslessGrayWithOptionsMeasured(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !image.GrayImage {
+    // Cheap pre-check so a multi-component stream fails closed before any
+    // block decoding happens; the planar decoder re-reads the metadata.
+    const header = try readStrictCodestreamMetadata(allocator, bytes);
+    if (header.component_count != 1) return CodestreamError.UnsupportedPayload;
+
+    var planar = try decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, timings);
+    const samples = planar.planes[0];
+    planar.allocator.free(planar.planes);
+    return .{
+        .allocator = allocator,
+        .width = planar.width,
+        .height = planar.height,
+        .bit_depth = planar.bit_depth,
+        .samples = samples,
+    };
+}
+
+/// F1c planar strict decode: single-tile no-MCT reversible 5/3 streams with
+/// SIZ Csiz in 1..4 decode into one owned sample plane per component.
+pub fn decodeLosslessPlanar(allocator: std.mem.Allocator, bytes: []const u8) !color.SamplePlanes {
+    return decodeLosslessPlanarWithOptions(allocator, bytes, .{});
+}
+
+pub fn decodeLosslessPlanarWithOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+) !color.SamplePlanes {
+    return decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, null);
+}
+
+fn decodeLosslessPlanarWithOptionsMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !color.SamplePlanes {
     const total_start = monotonicNs();
     defer {
         if (timings) |t| t.total_ns = elapsedNs(total_start);
@@ -2006,7 +2078,8 @@ fn decodeLosslessGrayWithOptionsMeasured(
     const metadata_start = monotonicNs();
     const header = try readStrictCodestreamMetadata(allocator, bytes);
     if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
-    if (header.component_count != 1 or header.mct != .none or
+    if (header.component_count < 1 or header.component_count > max_codestream_components or
+        header.mct != .none or
         header.transform != .reversible_5_3 or header.quantization != .none)
     {
         return CodestreamError.UnsupportedPayload;
@@ -2017,49 +2090,53 @@ fn decodeLosslessGrayWithOptionsMeasured(
     var catalog = try readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, timings);
     defer catalog.deinit();
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
-    if (catalog.component_count != 1) return CodestreamError.InvalidCodestream;
+    if (catalog.component_count != header.component_count) return CodestreamError.InvalidCodestream;
 
-    const payload_start = monotonicNs();
-    const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+    var out = try color.SamplePlanes.init(
         allocator,
         header.width,
         header.height,
-        catalog,
-        0,
-        options,
-        timings,
+        header.bit_depth,
+        header.component_count,
     );
-    defer allocator.free(coefficients);
-    if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
+    errdefer out.deinit();
 
-    const wavelet_start = monotonicNs();
     var workspace = try wavelet_int.Workspace.init(allocator, @max(header.width, header.height));
     defer workspace.deinit();
-    try wavelet_int.inverse53WithWorkspace(
-        &workspace,
-        coefficients,
-        header.width,
-        header.height,
-        header.levels,
-    );
-    if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
-
-    const samples = try allocator.alloc(u16, coefficients.len);
-    errdefer allocator.free(samples);
     const max_sample: i32 = if (header.bit_depth == 8) 255 else std.math.maxInt(u16);
     const level_shift = @as(i32, 1) << @as(u5, @intCast(header.bit_depth - 1));
-    for (coefficients, samples) |coefficient, *sample| {
-        const value = coefficient + level_shift;
-        if (value < 0 or value > max_sample) return CodestreamError.InvalidCodestream;
-        sample.* = @intCast(value);
+
+    for (out.planes, 0..) |samples, component| {
+        const payload_start = monotonicNs();
+        const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+            allocator,
+            header.width,
+            header.height,
+            catalog,
+            component,
+            options,
+            timings,
+        );
+        defer allocator.free(coefficients);
+        if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
+
+        const wavelet_start = monotonicNs();
+        try wavelet_int.inverse53WithWorkspace(
+            &workspace,
+            coefficients,
+            header.width,
+            header.height,
+            header.levels,
+        );
+        if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
+
+        for (coefficients, samples) |coefficient, *sample| {
+            const value = coefficient + level_shift;
+            if (value < 0 or value > max_sample) return CodestreamError.InvalidCodestream;
+            sample.* = @intCast(value);
+        }
     }
-    return .{
-        .allocator = allocator,
-        .width = header.width,
-        .height = header.height,
-        .bit_depth = header.bit_depth,
-        .samples = samples,
-    };
+    return out;
 }
 
 fn decodeLosslessTemporaryWithOptionsMeasured(
@@ -2472,7 +2549,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             const ytosiz = readU32Be(segment, 30);
             if (xsiz <= xosiz or ysiz <= yosiz) return CodestreamError.InvalidCodestream;
             component_count = readU16Be(segment, 34);
-            if (component_count != 1 and component_count != 3) return CodestreamError.UnsupportedPayload;
+            if (component_count < 1 or component_count > max_codestream_components) return CodestreamError.UnsupportedPayload;
             if (segment.len != 36 + @as(usize, component_count) * 3) return CodestreamError.InvalidCodestream;
             width = xsiz - xosiz;
             height = ysiz - yosiz;
@@ -2654,7 +2731,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     if (!saw_siz or !saw_cod or !saw_qcd or width == 0 or height == 0 or layers == 0) {
         return CodestreamError.InvalidCodestream;
     }
-    if (component_count == 1 and parsed_mct != .none) return CodestreamError.UnsupportedPayload;
+    if (component_count != 3 and parsed_mct != .none) return CodestreamError.UnsupportedPayload;
     if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
 
     if (coc_payload_first.len != 0) {
@@ -4285,7 +4362,7 @@ fn strictPacketBlockCatalogFromAssembliesChecked(
     allocator: std.mem.Allocator,
     assemblies: []StrictComponentAssembly,
 ) !StrictPacketBlockCatalogBuild {
-    if (assemblies.len != 1 and assemblies.len != 3) return CodestreamError.UnsupportedPayload;
+    if (assemblies.len < 1 or assemblies.len > max_codestream_components) return CodestreamError.UnsupportedPayload;
     var catalog = StrictPacketBlockCatalog{
         .allocator = allocator,
         .component_count = @intCast(assemblies.len),
@@ -7308,7 +7385,7 @@ fn readStrictMainHeaderIndex(
     bytes: []const u8,
     component_count: u16,
 ) !StrictMainHeaderIndex {
-    if (component_count != 1 and component_count != 3) return CodestreamError.UnsupportedPayload;
+    if (component_count < 1 or component_count > max_codestream_components) return CodestreamError.UnsupportedPayload;
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
