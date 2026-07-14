@@ -25,9 +25,29 @@ certification or a claim of arbitrary JP2/JPX support. Bounded gray+alpha/RGBA
 JP2 `cdef` and TIFF ExtraSamples conversion are now present. RGBA additionally
 supports reversible MCT over RGB only while alpha stays independent; no-MCT
 RGBA remains available. Live no-MCT and RCT+alpha outputs are accepted by
-OpenJPEG/Grok/Kakadu and are pixel-exact through Grok/Kakadu. Mixed precision,
-subsampling, general N-component layouts, and broader palette mappings remain
-explicit breadth work. PCRD quality research also continues independently.
+OpenJPEG/Grok/Kakadu and are pixel-exact through Grok/Kakadu. Mixed-precision
+single-tile planar encode/decode has since landed, as has a bounded foreign
+Kakadu 4:2:0 decode vertical; general subsampling, mixed multi-tile/MCT,
+general N-component layouts, and broader palette mappings remain explicit
+breadth work. PCRD quality research continues independently.
+
+F3a slices 1-3 (2026-07-14) now parse and emit bounded mixed unsigned 8/16-bit `BPCC`,
+require exact SIZ agreement, carry per-component QCD/QCC state through strict
+T2/T1, and reconstruct an embedded Kakadu 8/16/8 fixture pixel-exactly with
+per-plane DC shifts. Matching SIZ/QCC/BPCC output is pixel-exact through live
+OpenJPEG/Grok/Kakadu PGX decode. The bounded profile is single-tile RPCL,
+reversible 5/3, and no-MCT. Next embed or regenerate foreign OpenJPEG/Grok
+mixed-precision encode fixtures, then begin F3b subsampling.
+
+F3b slices 1-2 (2026-07-14) now audit and reconstruct bounded subsampling:
+per-component `XRsiz/YRsiz` is exposed and reported, and a real Kakadu 4:2:0
+fixture pins `1x1,2x2,2x2` plus malformed-zero handling. Component-local
+sampled bounds, subbands, code-block catalogs, packet selectors, inverse-DWT
+origins, and output dimensions reconstruct its 8x8/4x4/4x4 planes exactly.
+The first profile requires single-tile RPCL/no-MCT/5-3 and one precinct per
+component and resolution. Next replace that one-precinct bound with a
+reference-grid packet iterator that merges unequal component precinct grids;
+normal wrappers and convenience RGB conversion remain unit-sampling-only.
 
 Performance checkpoint (2026-07-13): rate-targeted direct-MQ encode now
 captures exact per-pass distortion during the real T1 traversal. Removing the
@@ -252,12 +272,12 @@ format, codestream profile, and container semantics are explicit.
 
 - **ISO clause:** A.6.2 (COC), A.6.5 (QCC) — component-specific coding/
   quantization markers.
-- **State:** the strict main-header walk and JP2 wrapper accept COC/QCC only
+- **State:** for uniform profiles, the strict main-header walk and JP2 wrapper accept COC/QCC only
   when they byte-replicate the main COD/QCD for a valid RGB component, or when
   they provide a uniform override across all three RGB components for an
-  otherwise supported COD/QCD payload model. Partial or divergent
-  per-component overrides fail closed because z2000 still has no independent
-  per-component coding path.
+  otherwise supported COD/QCD payload model. The explicit BPCC mixed-precision
+  profile additionally accepts and emits component-specific QCC; other partial
+  or divergent per-component overrides remain fail-closed.
 - **Coverage:** splice oracle inserts redundant COC/QCC into a valid z2000
   codestream and asserts byte-exact strict decode plus JP2 acceptance.
   Mismatched COC and QCC rewrites fail closed in both strict decode and JP2

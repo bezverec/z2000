@@ -569,7 +569,7 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
 
     const info = try jp2.parseInfo(bytes);
     std.debug.print(
-        "JP2: {s}: {}x{}, {} codestream component{s}, {} output component{s}, {} bits/component, {} codestream bytes, ICC {s}",
+        "JP2: {s}: {}x{}, {} codestream component{s}, {} output component{s}",
         .{
             args[0],
             info.width,
@@ -578,7 +578,36 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
             if (info.components == 1) "" else "s",
             info.output_components,
             if (info.output_components == 1) "" else "s",
-            info.bits_per_component,
+        },
+    );
+    if (info.bits_per_component != 0) {
+        std.debug.print(", {} bits/component", .{info.bits_per_component});
+    } else {
+        std.debug.print(", component bits [", .{});
+        for (info.component_bit_depths[0..info.components], 0..) |bit_depth, component| {
+            if (component != 0) std.debug.print(",", .{});
+            std.debug.print("{}", .{bit_depth});
+        }
+        std.debug.print("]", .{});
+    }
+    var has_subsampling = false;
+    for (0..info.components) |component| {
+        if (info.component_xrsiz[component] != 1 or info.component_yrsiz[component] != 1) {
+            has_subsampling = true;
+            break;
+        }
+    }
+    if (has_subsampling) {
+        std.debug.print(", sampling [", .{});
+        for (0..info.components) |component| {
+            if (component != 0) std.debug.print(",", .{});
+            std.debug.print("{}x{}", .{ info.component_xrsiz[component], info.component_yrsiz[component] });
+        }
+        std.debug.print("]", .{});
+    }
+    std.debug.print(
+        ", {} codestream bytes, ICC {s}",
+        .{
             info.codestream_bytes,
             if (info.has_icc_profile) "yes" else "no",
         },

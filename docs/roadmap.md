@@ -81,9 +81,16 @@ interop gate.
    and general component layouts while keeping RGB byte behavior stable. The
    alpha `cdef`, TIFF ExtraSamples CLI, and RGB-triplet-only RCT slices are
    landed. Both no-MCT and RCT RGBA smokes are accepted by all three reference
-   decoders (pixel-exact through Grok and Kakadu); next begin F3 mixed
-   precision/BPCC and subsampling with foreign decode fixtures before enabling
-   encode.
+   decoders (pixel-exact through Grok and Kakadu). F3a now carries mixed
+   unsigned 8/16-bit BPCC/SIZ/QCC state through
+   strict T2/T1 and pixel-exactly reconstructs an embedded Kakadu 8/16/8
+   fixture with per-component DC shifts. Matching encode is live and decodes
+   pixel-exactly through OpenJPEG/Grok/Kakadu; API-generated foreign encoder
+   fixtures remain optional matrix breadth. F3b now exposes and validates
+   per-component SIZ sampling and reconstructs an embedded Kakadu 4:2:0
+   fixture through component-local packet/T1/DWT geometry. Next generalize
+   RPCL packet ordering beyond the current one-precinct-per-component bound,
+   then decide the explicit chroma-upsample/conversion API.
 2. Keep the landed direct-MQ PCRD distortion capture pinned against its symbol
    oracle and byte-identical rate-target streams. Continue the measured
    optimization campaign with decode T1 and the AVX2/NEON lane audit; retain a

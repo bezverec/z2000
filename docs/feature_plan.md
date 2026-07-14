@@ -127,6 +127,27 @@ fail-closed for alpha definitions the codec cannot represent.
 
 **Depends on:** F1 (F3a partially independent on the grayscale path).
 
+**F3a bounded encode/decode slices landed 2026-07-14:** `jp2.Info` carries a bounded
+per-component precision table, variable-BPC `ihdr`/`BPCC` accepts mixed
+unsigned 8/16-bit descriptors, and the JP2 validator compares each descriptor
+with its SIZ `Ssiz`. The strict planar path also carries per-component QCD/QCC
+state through T2/T1 and reconstructs an embedded foreign Kakadu 8/16/8 fixture
+pixel-exactly with per-plane DC shifts. The matching writer emits SIZ/QCC and
+JP2 BPCC; live output decodes pixel-exactly through OpenJPEG, Grok, and Kakadu.
+The bounded profile is single-tile RPCL, reversible 5/3, and no-MCT. Additional
+API-generated OpenJPEG/Grok foreign encode fixtures remain useful matrix
+breadth, but their CLIs expose only a common RAW precision.
+
+**F3b slices 1-2 landed 2026-07-14:** JP2/SIZ parsing exposes nonzero
+per-component `XRsiz/YRsiz`, `jp2-info` reports them, and an embedded Kakadu
+4:2:0 fixture now reconstructs its 8x8/4x4/4x4 planes pixel-exactly through
+strict T2/T1 and origin-aware 5/3. The strict catalog owns per-component
+sampled bounds, bands, blocks, packet indexes, and output dimensions. This
+first vertical is single-tile RPCL/no-MCT with one precinct per component and
+resolution. Next generalize packet ordering to unequal component precinct
+grids, then add a deliberate chroma-upsample/conversion layer; writers remain
+unit-sampling-only meanwhile.
+
 ## Stage F4 — colourspace breadth
 
 **What:** enumerated `colr` values beyond sRGB(16)/grayscale(17): sYCC (18)

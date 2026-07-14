@@ -38,6 +38,7 @@ pub const TileFrontEnd = struct {
 
 pub const PacketScaffoldOptions = struct {
     components: u16 = 3,
+    component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
     layers: u16 = 1,
     block_width: usize = 64,
     block_height: usize = 64,
@@ -61,6 +62,7 @@ pub const PacketScaffold = struct {
     tile: tile_grid.Tile,
     levels: u8,
     components: u16,
+    component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
     layers: u16,
     block_width: usize,
     block_height: usize,
@@ -78,6 +80,12 @@ pub const PacketScaffold = struct {
 
     pub fn componentBlockCount(self: PacketScaffold) !usize {
         return std.math.mul(usize, self.blocks.len, self.components);
+    }
+
+    pub fn componentBitDepth(self: PacketScaffold, component: usize, fallback: u8) !u8 {
+        if (component >= self.components) return PacketScaffoldError.InvalidComponentBlock;
+        const depth = self.component_bit_depths[component];
+        return if (depth != 0) depth else fallback;
     }
 
     pub fn componentBlock(self: PacketScaffold, index: usize) !ComponentBlock {
@@ -977,10 +985,11 @@ pub const RpclPacketBandGroups = struct {
             const encoded = catalog.blocks[catalog_index];
             // Irreversible tiles carry their signalled per-band Mb table;
             // the reversible path derives Mb from the bit depth and gain.
+            const component_bit_depth = try scaffold.componentBitDepth(self.packet.component, bit_depth);
             const nominal_bitplanes = if (scaffold.nominal_bitplanes) |table|
                 table[encoded.job.band.level][@intFromEnum(encoded.job.band.kind)]
             else
-                try reversible53NominalBitplanes(bit_depth, encoded.job.band.kind);
+                try reversible53NominalBitplanes(component_bit_depth, encoded.job.band.kind);
             out_block.* = try encoded.asEncodedLayerBlock(scaffold, nominal_bitplanes);
         }
 
@@ -1527,6 +1536,7 @@ pub fn buildPacketScaffold(
         .tile = rct_tile.tile,
         .levels = levels,
         .components = options.components,
+        .component_bit_depths = options.component_bit_depths,
         .layers = options.layers,
         .block_width = options.block_width,
         .block_height = options.block_height,
@@ -2148,15 +2158,22 @@ fn buildPlanarRpclEncodeArtifactsIsoMqInternal(
     rct_alpha: bool,
 ) !TileRpclEncodeArtifacts {
     if (source.width == 0 or source.height == 0) return PacketScaffoldError.InvalidPlane;
-    if (source.bit_depth != 8 and source.bit_depth != 16) return PacketScaffoldError.InvalidPlane;
+    if (source.bit_depth != 0 and source.bit_depth != 8 and source.bit_depth != 16) {
+        return PacketScaffoldError.InvalidPlane;
+    }
     if (source.planes.len == 0 or source.planes.len > color.max_components) {
         return PacketScaffoldError.InvalidPlane;
     }
     if (options.front_end != null) return PacketScaffoldError.InvalidPlane;
     const pixels = try std.math.mul(usize, source.width, source.height);
-    for (source.planes) |plane| {
+    var component_bit_depths = [_]u8{0} ** color.max_components;
+    for (source.planes, 0..) |plane, component| {
         if (plane.len != pixels) return PacketScaffoldError.InvalidPlane;
+        const component_depth = source.componentBitDepth(component) orelse return PacketScaffoldError.InvalidPlane;
+        if (component_depth != 8 and component_depth != 16) return PacketScaffoldError.InvalidPlane;
+        component_bit_depths[component] = component_depth;
     }
+    if (rct_alpha and source.bit_depth == 0) return PacketScaffoldError.InvalidPlane;
 
     const width_u32 = std.math.cast(u32, source.width) orelse return PacketScaffoldError.InvalidPlane;
     const height_u32 = std.math.cast(u32, source.height) orelse return PacketScaffoldError.InvalidPlane;
@@ -2167,20 +2184,20 @@ fn buildPlanarRpclEncodeArtifactsIsoMqInternal(
     var planes_carrier = if (rct_alpha)
         try color.forwardRctAlpha(allocator, source)
     else
-        try color.RctPlanes.init(
+        try color.RctPlanes.initWithComponentBitDepths(
             allocator,
             source.width,
             source.height,
-            source.bit_depth,
-            source.planes.len,
+            component_bit_depths[0..source.planes.len],
         );
     var planes_moved = false;
     errdefer if (!planes_moved) planes_carrier.deinit();
 
     if (!rct_alpha) {
-        const max_sample: u16 = if (source.bit_depth == 8) 255 else std.math.maxInt(u16);
-        const level_shift = @as(i32, 1) << @as(u5, @intCast(source.bit_depth - 1));
-        for (source.planes, planes_carrier.planes) |samples, coefficients| {
+        for (source.planes, planes_carrier.planes, 0..) |samples, coefficients, component| {
+            const component_depth = source.componentBitDepth(component) orelse return PacketScaffoldError.InvalidPlane;
+            const max_sample = (@as(u32, 1) << @as(u5, @intCast(component_depth))) - 1;
+            const level_shift = @as(i32, 1) << @as(u5, @intCast(component_depth - 1));
             for (samples, coefficients) |sample, *coefficient| {
                 if (sample > max_sample) return PacketScaffoldError.InvalidPlane;
                 coefficient.* = @as(i32, sample) - level_shift;
@@ -2215,6 +2232,7 @@ fn buildPlanarRpclEncodeArtifactsIsoMqInternal(
 
     var planar_options = options;
     planar_options.components = @intCast(source.planes.len);
+    planar_options.component_bit_depths = component_bit_depths;
     var artifact = try buildTileRpclEncodeArtifactsFromTransformedTile(
         allocator,
         transformed,

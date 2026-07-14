@@ -5318,6 +5318,7 @@ test "JP2 wrapper validates 16-bit z2000 codestream SIZ metadata" {
     try std.testing.expectEqual(@as(u32, 2), info.height);
     try std.testing.expectEqual(@as(u16, 3), info.components);
     try std.testing.expectEqual(@as(u8, 16), info.bits_per_component);
+    try std.testing.expectEqualSlices(u8, &.{ 16, 16, 16 }, info.component_bit_depths[0..3]);
     try std.testing.expectEqual(codestream_bytes.len, info.codestream_bytes);
     try std.testing.expectEqualSlices(u8, codestream_bytes, try jp2.extractCodestream(wrapped));
 
@@ -5359,6 +5360,297 @@ test "JP2 wrapper validates 16-bit z2000 codestream SIZ metadata" {
     try std.testing.expectError(
         jp2.Jp2Error.InvalidCodestream,
         jp2.wrapRgbCodestream(allocator, mismatched_depth, codestream_bytes),
+    );
+}
+
+test "JP2 BPCC carries mixed 8 and 16 bit component precision" {
+    const allocator = std.testing.allocator;
+    var rgb = try makeJp2RealCodestreamFixtureRgb(allocator, 16);
+    defer rgb.deinit();
+
+    const codestream_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .mct = .none,
+    });
+    defer allocator.free(codestream_bytes);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, codestream_bytes);
+    defer allocator.free(wrapped);
+
+    const variable_header = try allocator.dupe(u8, wrapped);
+    defer allocator.free(variable_header);
+    const original_jp2h = try findJp2BoxPayload(variable_header, "jp2h");
+    const ihdr = try findJp2ChildBoxPayload(variable_header, original_jp2h, "ihdr");
+    const colr = try findJp2ChildBoxPayload(variable_header, original_jp2h, "colr");
+    variable_header[ihdr.start + 10] = 0xff;
+    const mixed = try insertJp2BoxInsideJp2HeaderForTest(
+        allocator,
+        variable_header,
+        original_jp2h,
+        colr.start - 8,
+        "bpcc",
+        &.{ 7, 15, 7 },
+    );
+    defer allocator.free(mixed);
+
+    const jp2c = try findJp2BoxPayload(mixed, "jp2c");
+    // SOC(2) + SIZ marker/length(4) + fixed SIZ fields(36).
+    mixed[jp2c.start + 42] = 7;
+    mixed[jp2c.start + 45] = 15;
+    mixed[jp2c.start + 48] = 7;
+
+    const info = try jp2.parseInfo(mixed);
+    try std.testing.expectEqual(@as(u8, 0), info.bits_per_component);
+    try std.testing.expectEqualSlices(u8, &.{ 8, 16, 8 }, info.component_bit_depths[0..3]);
+    try std.testing.expectEqual(@as(?u8, 8), info.componentBitDepth(0));
+    try std.testing.expectEqual(@as(?u8, 16), info.componentBitDepth(1));
+    try std.testing.expectEqual(@as(?u8, null), info.componentBitDepth(3));
+    const extracted = try jp2.extractCodestream(mixed);
+    try std.testing.expectEqualSlices(u8, mixed[jp2c.start..jp2c.end], extracted);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, extracted),
+    );
+
+    const mismatch = try allocator.dupe(u8, mixed);
+    defer allocator.free(mismatch);
+    const mismatch_jp2h = try findJp2BoxPayload(mismatch, "jp2h");
+    const mismatch_bpcc = try findJp2ChildBoxPayload(mismatch, mismatch_jp2h, "bpcc");
+    mismatch[mismatch_bpcc.start + 1] = 7;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(mismatch));
+
+    const signed = try allocator.dupe(u8, mixed);
+    defer allocator.free(signed);
+    const signed_jp2h = try findJp2BoxPayload(signed, "jp2h");
+    const signed_bpcc = try findJp2ChildBoxPayload(signed, signed_jp2h, "bpcc");
+    signed[signed_bpcc.start] |= 0x80;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(signed));
+}
+
+test "strict planar decode reconstructs foreign Kakadu mixed precision QCC" {
+    const allocator = std.testing.allocator;
+    const mixed = [_]u8{
+        0xff, 0x4f, 0xff, 0x51, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x07, 0x01, 0x01, 0x0f, 0x01, 0x01,
+        0x07, 0x01, 0x01, 0xff, 0x52, 0x00, 0x0c, 0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x04, 0x04, 0x00,
+        0x01, 0xff, 0x5c, 0x00, 0x07, 0x20, 0x50, 0x50, 0x50, 0x58, 0xff, 0x5d, 0x00, 0x08, 0x01, 0x20,
+        0x90, 0x90, 0x90, 0x98, 0xff, 0x64, 0x00, 0x11, 0x00, 0x01, 0x4b, 0x61, 0x6b, 0x61, 0x64, 0x75,
+        0x2d, 0x76, 0x38, 0x2e, 0x34, 0x2e, 0x31, 0xff, 0x64, 0x00, 0x5c, 0x00, 0x01, 0x4b, 0x64, 0x75,
+        0x2d, 0x4c, 0x61, 0x79, 0x65, 0x72, 0x2d, 0x49, 0x6e, 0x66, 0x6f, 0x3a, 0x20, 0x6c, 0x6f, 0x67,
+        0x5f, 0x32, 0x7b, 0x44, 0x65, 0x6c, 0x74, 0x61, 0x2d, 0x44, 0x28, 0x73, 0x71, 0x75, 0x61, 0x72,
+        0x65, 0x64, 0x2d, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x29, 0x2f, 0x44, 0x65, 0x6c, 0x74, 0x61, 0x2d,
+        0x4c, 0x28, 0x62, 0x79, 0x74, 0x65, 0x73, 0x29, 0x7d, 0x2c, 0x20, 0x4c, 0x28, 0x62, 0x79, 0x74,
+        0x65, 0x73, 0x29, 0x0a, 0x2d, 0x31, 0x39, 0x32, 0x2e, 0x30, 0x2c, 0x20, 0x20, 0x32, 0x2e, 0x38,
+        0x65, 0x2b, 0x30, 0x32, 0x0a, 0xff, 0x90, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5a, 0x00,
+        0x01, 0xff, 0x58, 0x00, 0x09, 0x00, 0x09, 0x0d, 0x08, 0x09, 0x11, 0x09, 0xff, 0x93, 0xcf, 0xc0,
+        0x18, 0x07, 0x81, 0x57, 0x5a, 0x42, 0x26, 0xc7, 0xfe, 0x18, 0x12, 0x06, 0x47, 0x05, 0xc6, 0xe9,
+        0xc0, 0x03, 0x6d, 0x06, 0xc7, 0xda, 0x0a, 0x08, 0x80, 0x9f, 0xdd, 0x65, 0xc0, 0x10, 0xc0, 0x7c,
+        0x21, 0x00, 0x0c, 0x0b, 0x3d, 0xc0, 0x7f, 0x20, 0x90, 0x7f, 0xe0, 0x00, 0xa0, 0x0c, 0xf7, 0xd7,
+        0xb9, 0x0b, 0x38, 0x6d, 0xdd, 0x5a, 0xc0, 0x10, 0xc0, 0x7c, 0x21, 0x00, 0x0c, 0x0b, 0x3d, 0xff,
+        0xd9,
+    };
+
+    var decoded = try codestream.decodeLosslessPlanar(allocator, &mixed);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(u8, 0), decoded.bit_depth);
+    try std.testing.expectEqualSlices(u8, &.{ 8, 16, 8 }, decoded.component_bit_depths[0..3]);
+    for (0..16) |index| {
+        try std.testing.expectEqual(@as(u16, @intCast(index)), decoded.planes[0][index]);
+        try std.testing.expectEqual(@as(u16, @intCast(1000 + index * 2000)), decoded.planes[1][index]);
+        try std.testing.expectEqual(@as(u16, @intCast(15 + index)), decoded.planes[2][index]);
+    }
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, &mixed),
+    );
+
+    const invalid_qcc = try allocator.dupe(u8, &mixed);
+    defer allocator.free(invalid_qcc);
+    invalid_qcc[80] |= 0x01;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, invalid_qcc),
+    );
+
+    const invalid_mct = try allocator.dupe(u8, &mixed);
+    defer allocator.free(invalid_mct);
+    invalid_mct[59] = 1;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, invalid_mct),
+    );
+}
+
+test "mixed precision planar encode emits SIZ QCC BPCC and roundtrips" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    var source = try color.SamplePlanes.initWithComponentBitDepths(
+        allocator,
+        width,
+        height,
+        &.{ 8, 16, 8 },
+    );
+    defer source.deinit();
+    for (0..width * height) |index| {
+        source.planes[0][index] = @intCast((index * 17 + 3) & 0xff);
+        source.planes[1][index] = @intCast((index * 997 + 1000) & 0xffff);
+        source.planes[2][index] = @intCast((index * 29 + 11) & 0xff);
+    }
+
+    const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, source, .{
+        .levels = 2,
+        .layers = 2,
+        .mct = .none,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+
+    const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    try std.testing.expectEqual(@as(u8, 7), encoded[siz + 40]);
+    try std.testing.expectEqual(@as(u8, 15), encoded[siz + 43]);
+    try std.testing.expectEqual(@as(u8, 7), encoded[siz + 46]);
+    try std.testing.expectEqual(@as(usize, 1), countMarker(encoded, codestream.markerValue("qcc")));
+    const qcc = findMarker(encoded, codestream.markerValue("qcc")) orelse return error.MissingMarker;
+    try std.testing.expectEqual(@as(u8, 1), encoded[qcc + 4]);
+
+    var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(u8, 0), decoded.bit_depth);
+    try std.testing.expectEqualSlices(u8, &.{ 8, 16, 8 }, decoded.component_bit_depths[0..3]);
+    for (source.planes, decoded.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+
+    const wrapped = try jp2.wrapPlanarCodestream(allocator, source, null, encoded);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u8, 0), info.bits_per_component);
+    try std.testing.expectEqualSlices(u8, &.{ 8, 16, 8 }, info.component_bit_depths[0..3]);
+    var decoded_wrapped = try codestream.decodeLosslessPlanar(allocator, try jp2.extractCodestream(wrapped));
+    defer decoded_wrapped.deinit();
+    for (source.planes, decoded_wrapped.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessPlanarWithOptions(allocator, source, .{ .levels = 2, .mct = .rct }),
+    );
+}
+
+test "JP2 metadata exposes foreign Kakadu component subsampling" {
+    const allocator = std.testing.allocator;
+    const subsampled = [_]u8{
+        0x00, 0x00, 0x00, 0x0c, 0x6a, 0x50, 0x20, 0x20, 0x0d, 0x0a, 0x87, 0x0a, 0x00, 0x00, 0x00, 0x14,
+        0x66, 0x74, 0x79, 0x70, 0x6a, 0x70, 0x32, 0x20, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x70, 0x32, 0x20,
+        0x00, 0x00, 0x00, 0x2d, 0x6a, 0x70, 0x32, 0x68, 0x00, 0x00, 0x00, 0x16, 0x69, 0x68, 0x64, 0x72,
+        0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x00, 0x03, 0x07, 0x07, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x0f, 0x63, 0x6f, 0x6c, 0x72, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+        0x00, 0x6a, 0x70, 0x32, 0x63, 0xff, 0x4f, 0xff, 0x51, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x08, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x08, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x07,
+        0x01, 0x01, 0x07, 0x02, 0x02, 0x07, 0x02, 0x02, 0xff, 0x52, 0x00, 0x0c, 0x00, 0x02, 0x00, 0x01,
+        0x00, 0x02, 0x04, 0x04, 0x00, 0x01, 0xff, 0x5c, 0x00, 0x0a, 0x20, 0x50, 0x58, 0x58, 0x58, 0x50,
+        0x50, 0x58, 0xff, 0x64, 0x00, 0x11, 0x00, 0x01, 0x4b, 0x61, 0x6b, 0x61, 0x64, 0x75, 0x2d, 0x76,
+        0x38, 0x2e, 0x34, 0x2e, 0x31, 0xff, 0x64, 0x00, 0x5c, 0x00, 0x01, 0x4b, 0x64, 0x75, 0x2d, 0x4c,
+        0x61, 0x79, 0x65, 0x72, 0x2d, 0x49, 0x6e, 0x66, 0x6f, 0x3a, 0x20, 0x6c, 0x6f, 0x67, 0x5f, 0x32,
+        0x7b, 0x44, 0x65, 0x6c, 0x74, 0x61, 0x2d, 0x44, 0x28, 0x73, 0x71, 0x75, 0x61, 0x72, 0x65, 0x64,
+        0x2d, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x29, 0x2f, 0x44, 0x65, 0x6c, 0x74, 0x61, 0x2d, 0x4c, 0x28,
+        0x62, 0x79, 0x74, 0x65, 0x73, 0x29, 0x7d, 0x2c, 0x20, 0x4c, 0x28, 0x62, 0x79, 0x74, 0x65, 0x73,
+        0x29, 0x0a, 0x2d, 0x31, 0x39, 0x32, 0x2e, 0x30, 0x2c, 0x20, 0x20, 0x32, 0x2e, 0x39, 0x65, 0x2b,
+        0x30, 0x32, 0x0a, 0xff, 0x90, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x00, 0x01, 0xff,
+        0x58, 0x00, 0x0c, 0x00, 0x08, 0x05, 0x05, 0x0c, 0x0a, 0x09, 0x0c, 0x0b, 0x0c, 0xff, 0x93, 0xc7,
+        0xda, 0x0a, 0x06, 0x6b, 0x63, 0x02, 0xc0, 0xc3, 0xea, 0x02, 0x09, 0x88, 0xc3, 0xea, 0x02, 0x04,
+        0x88, 0xc0, 0x3e, 0x10, 0xa0, 0xfa, 0x80, 0xc0, 0x0c, 0xf6, 0x0b, 0x39, 0x8c, 0xc0, 0x7c, 0x80,
+        0x60, 0xfa, 0x80, 0x80, 0x03, 0x03, 0x1f, 0xc0, 0xf9, 0xc0, 0xc1, 0xf5, 0x00, 0x80, 0x07, 0x09,
+        0xc0, 0x3a, 0x1c, 0x1f, 0x38, 0x30, 0x22, 0x18, 0x21, 0x03, 0x7e, 0x96, 0xc0, 0x7c, 0x20, 0xc1,
+        0xf3, 0x83, 0x00, 0x0c, 0x0b, 0x3c, 0x62, 0xc0, 0x7c, 0x21, 0x41, 0xf3, 0x83, 0x00, 0x0e, 0x04,
+        0x0c, 0x15, 0x02, 0xff, 0xd9,
+    };
+
+    const info = try jp2.parseInfo(&subsampled);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 2 }, info.component_xrsiz[0..3]);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 2 }, info.component_yrsiz[0..3]);
+    try std.testing.expectEqual(@as(?[2]u8, .{ 2, 2 }), info.componentSampling(1));
+    const extracted = try jp2.extractCodestream(&subsampled);
+
+    var decoded = try codestream.decodeLosslessPlanar(allocator, extracted);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(?[2]usize, .{ 8, 8 }), decoded.componentDimensions(0));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 4, 4 }), decoded.componentDimensions(1));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 4, 4 }), decoded.componentDimensions(2));
+    const expected_y = [_]u16{
+        7,   10,  13,  16,  19,  22,  25,  28,  31,  34,  37,  40,  43,  46,  49,  52,
+        55,  58,  61,  64,  67,  70,  73,  76,  79,  82,  85,  88,  91,  94,  97,  100,
+        103, 106, 109, 112, 115, 118, 121, 124, 127, 130, 133, 136, 139, 142, 145, 148,
+        151, 154, 157, 160, 163, 166, 169, 172, 175, 178, 181, 184, 187, 190, 193, 196,
+    };
+    const expected_cb = [_]u16{ 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100, 105, 110, 115 };
+    const expected_cr = [_]u16{ 200, 193, 186, 179, 172, 165, 158, 151, 144, 137, 130, 123, 116, 109, 102, 95 };
+    try std.testing.expectEqualSlices(u16, &expected_y, decoded.planes[0]);
+    try std.testing.expectEqualSlices(u16, &expected_cb, decoded.planes[1]);
+    try std.testing.expectEqualSlices(u16, &expected_cr, decoded.planes[2]);
+
+    var block_catalog = try codestream.readStrictPacketBlockCatalog(allocator, extracted);
+    defer block_catalog.deinit();
+    try std.testing.expectEqualSlices(usize, &.{ 8, 4, 4 }, block_catalog.component_widths[0..3]);
+    try std.testing.expectEqualSlices(usize, &.{ 8, 4, 4 }, block_catalog.component_heights[0..3]);
+    const audit = try codestream.auditStrictPacketHeaders(allocator, extracted);
+    try std.testing.expectEqual(@as(u64, 9), audit.packets);
+    try std.testing.expectEqual(audit.payload_bytes, audit.assembled_bytes);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, extracted),
+    );
+
+    const malformed = try allocator.dupe(u8, &subsampled);
+    defer allocator.free(malformed);
+    const siz = findMarker(malformed, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    malformed[siz + 44] = 0;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(malformed));
+
+    const rgb_samples = try allocator.alloc(u16, 8 * 8 * 3);
+    defer allocator.free(rgb_samples);
+    @memset(rgb_samples, 0);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 8,
+        .height = 8,
+        .bit_depth = 8,
+        .samples = rgb_samples,
+    };
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedProfile,
+        jp2.wrapRgbCodestream(allocator, rgb, extracted),
+    );
+}
+
+test "subsampled strict decode fails closed for divergent precinct topology" {
+    const allocator = std.testing.allocator;
+    var source = try color.SamplePlanes.init(allocator, 32, 32, 8, 3);
+    defer source.deinit();
+    for (source.planes, 0..) |plane, component| {
+        for (plane, 0..) |*sample, index| sample.* = @intCast((index + component * 29) & 0xff);
+    }
+
+    const precincts = [_]codestream.PrecinctSize{.{ .width = 16, .height = 16 }} ** 33;
+    const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, source, .{
+        .levels = 1,
+        .mct = .none,
+        .block_width = 8,
+        .block_height = 8,
+        .precincts = precincts,
+        .precinct_count = 2,
+    });
+    defer allocator.free(encoded);
+
+    const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    encoded[siz + 44] = 2;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, encoded),
     );
 }
 
@@ -6209,7 +6501,11 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
         const component_subsampling = try allocator.dupe(u8, wrapped);
         defer allocator.free(component_subsampling);
         component_subsampling[jp2c_payload.start + 43] = 2;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(component_subsampling));
+        const sampling_info = try jp2.parseInfo(component_subsampling);
+        try std.testing.expectEqualSlices(u8, &.{ 2, 1, 1 }, sampling_info.component_xrsiz[0..3]);
+        try std.testing.expectEqualSlices(u8, &.{ 1, 1, 1 }, sampling_info.component_yrsiz[0..3]);
+        component_subsampling[jp2c_payload.start + 43] = 0;
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(component_subsampling));
     }
 
     {
@@ -6416,16 +6712,16 @@ test "JP2 reader accepts uniform BPCC bits-per-component child box" {
         const with_variable_ihdr = try allocator.dupe(u8, wrapped);
         defer allocator.free(with_variable_ihdr);
         with_variable_ihdr[ihdr_payload.start + 10] = 0xff;
-        const mixed_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
+        const unsupported_bpcc = try insertJp2BoxInsideJp2HeaderForTest(
             allocator,
             with_variable_ihdr,
             jp2h_payload,
             colr_payload.start - 8,
             "bpcc",
-            &.{ 7, 15, 7 },
+            &.{ 7, 11, 7 },
         );
-        defer allocator.free(mixed_bpcc);
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(mixed_bpcc));
+        defer allocator.free(unsupported_bpcc);
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(unsupported_bpcc));
     }
 
     {

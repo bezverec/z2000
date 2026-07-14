@@ -172,7 +172,12 @@ Primary public functions:
 - `encodeLosslessWithOptionsProfiled(allocator, rgb, options, timings)`
 - `encodeLosslessPlanarWithOptions(allocator, planes, options)` — bounded
   1..4-component layouts over `color.SamplePlanes`; reversible RGBA may use
-  RCT over planes 0..2 while plane 3 remains independent
+  RCT over planes 0..2 while plane 3 remains independent. Mixed unsigned
+  8/16-bit planes are supported for single-tile RPCL, reversible 5/3, no-MCT
+  encoding and emit component-specific SIZ/QCC state
+- `jp2.wrapPlanarCodestream(allocator, planes, icc, bytes)` — wraps bounded
+  one-/three-component planar streams; mixed precision emits variable-BPC
+  `ihdr` plus `BPCC`
 - `jp2.AlphaMode` and
   `jp2.wrapPlanarAlphaCodestream(allocator, planes, alpha_mode, icc, bytes)` —
   bounded gray+alpha/RGBA JP2 wrapping for 2/4-component reversible streams;
@@ -180,7 +185,12 @@ Primary public functions:
 - `decodeLosslessPlanar(allocator, bytes)` /
   `decodeLosslessPlanarWithOptions(allocator, bytes, options)` — strict
   decode of single-tile reversible 5/3 streams with SIZ Csiz 1..4, including
-  no-MCT layouts and four-component RGB-triplet RCT
+  no-MCT layouts, four-component RGB-triplet RCT, and bounded mixed unsigned
+  8/16-bit no-MCT streams. Mixed output uses `SamplePlanes.bit_depth == 0` and
+  exposes each precision through `component_bit_depths`/
+  `componentBitDepth(component)`. Bounded subsampled no-MCT streams expose
+  variable plane shapes through `component_widths`, `component_heights`, and
+  `componentDimensions(component)`
 - `decodeLosslessTemporary(allocator, bytes)`
 - `decodeLosslessTemporaryWithOptions(allocator, bytes, options)`
 - `analyzeLosslessTemporary(bytes)`
@@ -255,6 +265,24 @@ Primary public types:
 - `Info`
 - `Palette`
 
+`Info.bits_per_component` contains the common precision for uniform files and
+is zero for mixed `BPCC` layouts. In the latter case
+`Info.component_bit_depths[0..Info.components]` carries the unsigned 8/16-bit
+precision of every codestream component; `componentBitDepth(index)` provides a
+checked lookup. The strict planar decoder reconstructs matching single-tile
+RPCL, reversible 5/3, no-MCT codestreams with per-component QCD/QCC state.
+The legacy RGB/TIFF API remains uniform-depth; mixed multi-tile, MCT, 9/7, and
+quantized profiles remain fail-closed.
+
+`Info.component_xrsiz` and `Info.component_yrsiz` expose each codestream
+component's SIZ sampling factors; `componentSampling(index)` returns the pair.
+Metadata parsing accepts nonzero factors, while current wrapping requires
+unit sampling. Strict planar decode supports single-tile RPCL, reversible 5/3,
+no-MCT subsampling when every component has one precinct per resolution; it
+uses component-local sampled bounds, subbands, code-block catalogs, T1 planes,
+and origin-aware inverse DWT. General multi-precinct subsampling, MCT over
+subsampled planes, and convenience RGB/grayscale conversion remain fail-closed.
+
 Primary public functions:
 
 - `encodeLosslessGrayWithOptions(allocator, input, options)`
@@ -263,6 +291,7 @@ Primary public functions:
 - `decodeLosslessGrayWithOptionsProfiled(allocator, codestream, options, timings)`
 - `wrapRgbCodestream(allocator, input, codestream)`
 - `wrapGrayCodestream(allocator, input, codestream)`
+- `wrapPlanarCodestream(allocator, planes, icc, codestream)`
 - `wrapPlanarAlphaCodestream(allocator, planes, alpha_mode, icc, codestream)`
 - `wrapPaletteCodestream(allocator, indexed, palette, codestream)`
 - `parseInfo(bytes)`
@@ -274,7 +303,10 @@ The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
 enumerated sRGB (16) or grayscale (17) `colr`, and one contiguous `jp2c`
 codestream. The reader accepts uniform unsigned 8-bit and 16-bit one- or
-three-component metadata plus two bounded extensions: a palette layout with
+three-component metadata. A variable-BPC `ihdr` plus `BPCC` may describe a
+bounded mixture of unsigned 8/16-bit component precisions and is checked
+component-by-component against SIZ. Two additional bounded extensions are a
+palette layout with
 one index component, three uniform unsigned 8/16-bit `pclr` columns, and
 explicit `cmap` records to sRGB output channels; and 2/4-component
 gray+alpha/RGBA layouts whose final plane has complete Typ 1/2, Asoc 0 `cdef`

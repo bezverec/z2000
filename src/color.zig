@@ -37,7 +37,11 @@ pub fn ComponentPlanesOf(comptime Sample: type) type {
         allocator: std.mem.Allocator,
         width: usize,
         height: usize,
+        /// Common precision, or zero for a mixed-precision sample carrier.
         bit_depth: u8,
+        component_bit_depths: [max_components]u8 = [_]u8{0} ** max_components,
+        component_widths: [max_components]usize = [_]usize{0} ** max_components,
+        component_heights: [max_components]usize = [_]usize{0} ** max_components,
         planes: [][]Sample,
 
         pub fn init(
@@ -58,12 +62,108 @@ pub fn ComponentPlanesOf(comptime Sample: type) type {
             while (allocated < component_count) : (allocated += 1) {
                 planes[allocated] = try allocator.alloc(Sample, pixels);
             }
+            var component_bit_depths = [_]u8{0} ** max_components;
+            @memset(component_bit_depths[0..component_count], bit_depth);
+            var component_widths = [_]usize{0} ** max_components;
+            var component_heights = [_]usize{0} ** max_components;
+            @memset(component_widths[0..component_count], width);
+            @memset(component_heights[0..component_count], height);
             return .{
                 .allocator = allocator,
                 .width = width,
                 .height = height,
                 .bit_depth = bit_depth,
+                .component_bit_depths = component_bit_depths,
+                .component_widths = component_widths,
+                .component_heights = component_heights,
                 .planes = planes,
+            };
+        }
+
+        pub fn initWithComponentBitDepths(
+            allocator: std.mem.Allocator,
+            width: usize,
+            height: usize,
+            bit_depths: []const u8,
+        ) !Self {
+            if (bit_depths.len == 0 or bit_depths.len > max_components) {
+                return ColorError.InvalidImage;
+            }
+            var common = bit_depths[0];
+            for (bit_depths) |bit_depth| {
+                if (bit_depth == 0 or bit_depth > 16) return ColorError.InvalidImage;
+                if (bit_depth != common) common = 0;
+            }
+            var out = try Self.init(allocator, width, height, common, bit_depths.len);
+            @memcpy(out.component_bit_depths[0..bit_depths.len], bit_depths);
+            return out;
+        }
+
+        pub fn initWithComponentLayouts(
+            allocator: std.mem.Allocator,
+            width: usize,
+            height: usize,
+            bit_depths: []const u8,
+            component_widths: []const usize,
+            component_heights: []const usize,
+        ) !Self {
+            if (bit_depths.len == 0 or bit_depths.len > max_components or
+                component_widths.len != bit_depths.len or component_heights.len != bit_depths.len)
+            {
+                return ColorError.InvalidImage;
+            }
+
+            var common = bit_depths[0];
+            const planes = try allocator.alloc([]Sample, bit_depths.len);
+            errdefer allocator.free(planes);
+            var allocated: usize = 0;
+            errdefer for (planes[0..allocated]) |plane_slice| allocator.free(plane_slice);
+
+            var stored_depths = [_]u8{0} ** max_components;
+            var stored_widths = [_]usize{0} ** max_components;
+            var stored_heights = [_]usize{0} ** max_components;
+            while (allocated < bit_depths.len) : (allocated += 1) {
+                const component_depth = bit_depths[allocated];
+                const component_width = component_widths[allocated];
+                const component_height = component_heights[allocated];
+                if (component_depth == 0 or component_depth > 16 or
+                    component_width == 0 or component_height == 0)
+                {
+                    return ColorError.InvalidImage;
+                }
+                if (component_depth != common) common = 0;
+                const pixels = try std.math.mul(usize, component_width, component_height);
+                planes[allocated] = try allocator.alloc(Sample, pixels);
+                stored_depths[allocated] = component_depth;
+                stored_widths[allocated] = component_width;
+                stored_heights[allocated] = component_height;
+            }
+
+            return .{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = common,
+                .component_bit_depths = stored_depths,
+                .component_widths = stored_widths,
+                .component_heights = stored_heights,
+                .planes = planes,
+            };
+        }
+
+        pub fn componentBitDepth(self: Self, component: usize) ?u8 {
+            if (component >= self.planes.len) return null;
+            const component_depth = self.component_bit_depths[component];
+            return if (component_depth != 0) component_depth else self.bit_depth;
+        }
+
+        pub fn componentDimensions(self: Self, component: usize) ?[2]usize {
+            if (component >= self.planes.len) return null;
+            const component_width = self.component_widths[component];
+            const component_height = self.component_heights[component];
+            return .{
+                if (component_width != 0) component_width else self.width,
+                if (component_height != 0) component_height else self.height,
             };
         }
 

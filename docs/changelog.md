@@ -5,6 +5,63 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Component-Local Subsampling Decode (F3b Slice 2)
+
+- Added component-local sampled bounds, subbands, code-block partitions, RPCL
+  selectors, strict block-catalog dimensions, and origin-aware inverse 5/3
+  reconstruction for bounded subsampled streams.
+- Extended `SamplePlanes` with per-component dimensions and a checked
+  variable-layout allocator. The planar decoder now returns native-size planes
+  instead of silently upsampling chroma.
+- Promoted the embedded Kakadu 4:2:0 fixture from metadata-only rejection to a
+  pixel-exact 8x8/4x4/4x4 strict T2/T1/DWT roundtrip. General multi-precinct
+  subsampling has an explicit `UnsupportedPayload` regression gate.
+
+### Component-Subsampling Metadata Audit (F3b Slice 1)
+
+- Added per-component SIZ `XRsiz/YRsiz` metadata to `jp2.Info` and exposed it
+  through `componentSampling`; `jp2-info` prints non-unit sampling layouts.
+- JP2 parsing accepts bounded nonzero sampling factors while normal writer
+  wrappers retain unit-sampling validation. Pixel reconstruction followed in
+  F3b Slice 2.
+- Added an embedded Kakadu 8x8 4:2:0 JP2 fixture (`1x1,2x2,2x2`) plus zero
+  sampling corruption and wrapper rejection gates.
+
+### Mixed-Precision Strict Encode (F3a Slice 3)
+
+- Extended the bounded planar encoder to unsigned mixed 8/16-bit components
+  on the single-tile RPCL, reversible 5/3, no-MCT path. Component-local DC
+  shifts and packet-scaffold Mb values now follow each SIZ precision.
+- Added component-specific SIZ output, QCD inheritance from component zero,
+  and QCC emission for differing components. The JP2 writer now emits
+  variable-BPC `ihdr` plus `BPCC` through `wrapPlanarCodestream`.
+- Added an 8/16/8 codestream/JP2 roundtrip with exact marker checks. A live
+  64x64 output decoded pixel-exactly through OpenJPEG 2.5.4, Grok 20.3.6, and
+  Kakadu 8.4.1 (all nine PGX component comparisons had zero mismatches).
+
+### Mixed-Precision Strict Decode (F3a Slice 2)
+
+- Carried unsigned 8/16-bit component precision and per-component QCD/QCC
+  metadata through the strict codestream header, packet geometry, and T1
+  nominal-bitplane reconstruction.
+- Added per-plane inverse DC shifts and a mixed-precision `SamplePlanes`
+  carrier for bounded single-tile RPCL, reversible 5/3, no-MCT decode.
+- Added a pixel-exact embedded Kakadu 8/16/8 QCC fixture plus malformed-QCC
+  and unsupported-MCT gates. The legacy RGB/TIFF API and mixed-precision
+  encode remain fail-closed.
+
+### Mixed-Precision BPCC Metadata Audit (F3a Slice 1)
+
+- Extended `jp2.Info` with fixed per-component bit-depth metadata. Uniform
+  files retain the existing `bits_per_component` value; mixed BPCC files use
+  zero there and expose their unsigned 8/16-bit values through
+  `component_bit_depths` and `componentBitDepth`.
+- JP2 parsing now accepts bounded mixed 8/16-bit BPCC layouts only when every
+  descriptor agrees with the matching codestream SIZ component. Signed,
+  unsupported, missing, duplicate, or mismatched descriptors fail closed.
+- `jp2-info` reports mixed component depths explicitly. Pixel reconstruction
+  followed in F3a Slice 2.
+
 ### RGB-Triplet RCT With Independent Alpha (F2 Slice 3)
 
 - Extended the bounded four-component reversible path so COD MCT=1 applies

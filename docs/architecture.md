@@ -41,6 +41,33 @@ MCT=1: `forwardRctAlpha`/`inverseRctAlpha` transform planes 0..2 with the ISO
 RCT while plane 3 receives only the normal unsigned DC level shift. Explicit
 no-MCT RGBA remains supported; gray+alpha cannot request MCT.
 
+The F3a decode-first boundary keeps fixed four-entry component-precision and
+QCD/QCC tables in strict metadata. Uniform `ihdr` fills precision directly and
+a variable-BPC `ihdr` obtains unsigned 8/16-bit values from `BPCC`; JP2-to-SIZ
+validation compares every descriptor rather than inferring the file from
+component zero. Strict T2 geometry derives nominal bitplanes from each
+component's signalled exponents, and inverse reconstruction applies that
+component's unsigned DC shift. This is deliberately bounded to single-tile
+RPCL, reversible 5/3, no-MCT streams. Mixed `SamplePlanes` use a zero common
+`bit_depth` plus explicit per-component depths. The encode path mirrors this:
+per-component DC shifts feed the shared 5/3/T1 pipeline, packet scaffolds pick
+Mb from the packet component, SIZ records every precision, and QCC is emitted
+only where a component differs from QCD's component-zero default. JP2 writing
+uses variable-BPC `ihdr` plus `BPCC`. Legacy RGB/TIFF conversion and mixed
+multi-tile/MCT/irreversible profiles stay fail-closed.
+
+F3b now crosses the strict decode pipeline. `jp2.Info` records SIZ
+`XRsiz/YRsiz` values per component and `jp2-info` reports non-unit layouts.
+`StrictComponentGeometrySet` derives sampled reference-grid bounds, bands,
+code-blocks, packet selectors, coefficient-plane sizes, and inverse-DWT origins
+for each component instead of sharing component-zero geometry. `SamplePlanes`
+likewise records each output plane's dimensions. The first public vertical is
+single-tile RPCL, reversible 5/3, no-MCT, with one precinct per component and
+resolution; the embedded Kakadu 4:2:0 fixture reconstructs 8x8/4x4/4x4 planes
+pixel-exactly. A divergent precinct topology fails closed until packet ordering
+can merge component precinct positions on the common reference grid. Writers
+and RGB/grayscale convenience conversion still require unit sampling.
+
 The project is intentionally fail-closed. Profile options that would require
 payload behavior not implemented yet are rejected with `UnsupportedPayload`.
 

@@ -19,7 +19,12 @@ pub const Info = struct {
     height: u32,
     components: u16,
     output_components: u16,
+    /// Uniform component precision, or zero when `component_bit_depths`
+    /// contains a mixed BPCC layout.
     bits_per_component: u8,
+    component_bit_depths: [color.max_components]u8,
+    component_xrsiz: [color.max_components]u8,
+    component_yrsiz: [color.max_components]u8,
     has_palette: bool = false,
     palette_entries: u16 = 0,
     palette_bits_per_component: u8 = 0,
@@ -27,6 +32,16 @@ pub const Info = struct {
     icc_profile_bytes: usize = 0,
     alpha_mode: ?AlphaMode = null,
     codestream_bytes: usize,
+
+    pub fn componentBitDepth(self: Info, component: usize) ?u8 {
+        if (component >= self.components) return null;
+        return self.component_bit_depths[component];
+    }
+
+    pub fn componentSampling(self: Info, component: usize) ?[2]u8 {
+        if (component >= self.components) return null;
+        return .{ self.component_xrsiz[component], self.component_yrsiz[component] };
+    }
 };
 
 /// JP2 channel-definition semantics for a whole-image alpha channel. TIFF
@@ -126,6 +141,13 @@ const CodestreamShape = struct {
     height: u32,
     components: u16,
     bits_per_component: u8,
+    component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
+    require_unit_sampling: bool = true,
+};
+
+const ComponentSampling = struct {
+    xrsiz: [color.max_components]u8 = [_]u8{0} ** color.max_components,
+    yrsiz: [color.max_components]u8 = [_]u8{0} ** color.max_components,
 };
 
 const CodSegmentInfo = struct {
@@ -219,6 +241,56 @@ pub fn wrapGrayCodestream(
     }, codestream);
 }
 
+/// Wraps the bounded no-alpha planar profile. Mixed unsigned 8/16-bit
+/// components use JP2's variable-BPC `ihdr` value and a matching `BPCC` box.
+pub fn wrapPlanarCodestream(
+    allocator: std.mem.Allocator,
+    input: color.SamplePlanes,
+    icc_profile: ?[]const u8,
+    codestream: []const u8,
+) ![]u8 {
+    if (input.width == 0 or input.height == 0) return Jp2Error.InvalidBox;
+    if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
+        return Jp2Error.ImageTooLarge;
+    }
+    if (input.planes.len != 1 and input.planes.len != 3) return Jp2Error.UnsupportedProfile;
+    const pixels = std.math.mul(usize, input.width, input.height) catch return Jp2Error.ImageTooLarge;
+    var component_bit_depths = [_]u8{0} ** color.max_components;
+    for (input.planes, 0..) |plane, component| {
+        if (plane.len != pixels) return Jp2Error.InvalidBox;
+        const component_depth = input.componentBitDepth(component) orelse return Jp2Error.UnsupportedProfile;
+        if (component_depth != 8 and component_depth != 16) return Jp2Error.UnsupportedProfile;
+        component_bit_depths[component] = component_depth;
+    }
+    const mixed = input.bit_depth == 0;
+    if (mixed) {
+        var differs = false;
+        for (1..input.planes.len) |component| {
+            if (component_bit_depths[component] != component_bit_depths[0]) {
+                differs = true;
+                break;
+            }
+        }
+        if (!differs) return Jp2Error.InvalidBox;
+    } else if (input.bit_depth != 8 and input.bit_depth != 16) {
+        return Jp2Error.UnsupportedProfile;
+    } else {
+        for (component_bit_depths[0..input.planes.len]) |component_depth| {
+            if (component_depth != input.bit_depth) return Jp2Error.InvalidBox;
+        }
+    }
+
+    return wrapCodestream(allocator, .{
+        .width = @intCast(input.width),
+        .height = @intCast(input.height),
+        .components = @intCast(input.planes.len),
+        .bits_per_component = input.bit_depth,
+        .component_bit_depths = component_bit_depths,
+        .enumerated_color_space = if (input.planes.len == 1) enum_cs_grayscale else enum_cs_srgb,
+        .icc_profile = icc_profile,
+    }, codestream);
+}
+
 /// Wraps the bounded F2 alpha layouts: gray+alpha (2 components) or RGBA
 /// (4 components), with the alpha plane last. Gray+alpha remains no-MCT;
 /// reversible RGBA may signal MCT=1 for RCT over the RGB triplet only.
@@ -302,6 +374,7 @@ const WrapProfile = struct {
     height: u32,
     components: u16,
     bits_per_component: u8,
+    component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
     enumerated_color_space: u32,
     icc_profile: ?[]const u8,
     palette: ?Palette = null,
@@ -343,7 +416,8 @@ fn wrapCodestream(
         .height = profile.height,
         .components = profile.components,
         .bits_per_component = profile.bits_per_component,
-    });
+        .component_bit_depths = profile.component_bit_depths,
+    }, null);
     if (codestream.len > std.math.maxInt(u32) - 8) return Jp2Error.CodestreamTooLarge;
 
     var out: std.ArrayList(u8) = .empty;
@@ -366,11 +440,21 @@ fn wrapCodestream(
     try appendU32Be(allocator, &ihdr, profile.height);
     try appendU32Be(allocator, &ihdr, profile.width);
     try appendU16Be(allocator, &ihdr, profile.components);
-    try ihdr.append(allocator, profile.bits_per_component - 1);
+    try ihdr.append(allocator, if (profile.bits_per_component == 0) 255 else profile.bits_per_component - 1);
     try ihdr.append(allocator, 7);
     try ihdr.append(allocator, 0);
     try ihdr.append(allocator, 0);
     try appendBox(allocator, &jp2h, .image_header, ihdr.items);
+
+    if (profile.bits_per_component == 0) {
+        var bpcc: std.ArrayList(u8) = .empty;
+        defer bpcc.deinit(allocator);
+        for (profile.component_bit_depths[0..profile.components]) |component_depth| {
+            if (component_depth != 8 and component_depth != 16) return Jp2Error.UnsupportedProfile;
+            try bpcc.append(allocator, component_depth - 1);
+        }
+        try appendBox(allocator, &jp2h, .bits_per_component, bpcc.items);
+    }
 
     var colr: std.ArrayList(u8) = .empty;
     defer colr.deinit(allocator);
@@ -433,6 +517,9 @@ pub fn parseInfo(bytes: []const u8) !Info {
         .components = 0,
         .output_components = 0,
         .bits_per_component = 0,
+        .component_bit_depths = [_]u8{0} ** color.max_components,
+        .component_xrsiz = [_]u8{0} ** color.max_components,
+        .component_yrsiz = [_]u8{0} ** color.max_components,
         .has_palette = false,
         .palette_entries = 0,
         .palette_bits_per_component = 0,
@@ -468,12 +555,17 @@ pub fn parseInfo(bytes: []const u8) !Info {
             },
             @intFromEnum(BoxType.contiguous_codestream) => {
                 if (!saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
+                var sampling = ComponentSampling{};
                 try validateCodestreamPayload(box.payload, .{
                     .width = info.width,
                     .height = info.height,
                     .components = info.components,
                     .bits_per_component = info.bits_per_component,
-                });
+                    .component_bit_depths = info.component_bit_depths,
+                    .require_unit_sampling = false,
+                }, &sampling);
+                info.component_xrsiz = sampling.xrsiz;
+                info.component_yrsiz = sampling.yrsiz;
                 info.codestream_bytes = box.payload.len;
                 saw_jp2c = true;
             },
@@ -660,6 +752,9 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                     if (info.bits_per_component != 8 and info.bits_per_component != 16) {
                         return Jp2Error.UnsupportedColorSpace;
                     }
+                    for (info.component_bit_depths[0..info.components]) |*component_bits| {
+                        component_bits.* = info.bits_per_component;
+                    }
                 }
                 saw_ihdr = true;
             },
@@ -668,20 +763,22 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 if (!requires_bpcc) return Jp2Error.InvalidBox;
                 if (box.payload.len != info.components) return Jp2Error.InvalidBox;
                 var bits_per_component: u8 = 0;
-                for (box.payload) |component_bpc| {
+                var mixed_precision = false;
+                for (box.payload, 0..) |component_bpc, component| {
                     if ((component_bpc & 0x80) != 0) return Jp2Error.UnsupportedProfile;
                     const component_bits = (component_bpc & 0x7f) + 1;
                     if (component_bits != 8 and component_bits != 16) {
                         return Jp2Error.UnsupportedColorSpace;
                     }
+                    info.component_bit_depths[component] = component_bits;
                     if (bits_per_component == 0) {
                         bits_per_component = component_bits;
                     } else if (component_bits != bits_per_component) {
-                        return Jp2Error.UnsupportedColorSpace;
+                        mixed_precision = true;
                     }
                 }
                 if (bits_per_component == 0) return Jp2Error.InvalidBox;
-                info.bits_per_component = bits_per_component;
+                info.bits_per_component = if (mixed_precision) 0 else bits_per_component;
                 saw_bpcc = true;
             },
             @intFromEnum(BoxType.color) => {
@@ -956,7 +1053,11 @@ fn validateFileTypeBox(payload: []const u8) !void {
     if (!compatible) return Jp2Error.UnsupportedProfile;
 }
 
-fn validateCodestreamPayload(payload: []const u8, expected: CodestreamShape) !void {
+fn validateCodestreamPayload(
+    payload: []const u8,
+    expected: CodestreamShape,
+    sampling_out: ?*ComponentSampling,
+) !void {
     if (payload.len < 4) return Jp2Error.InvalidCodestream;
     if (try readU16Be(payload, 0) != marker_soc) return Jp2Error.InvalidCodestream;
     if (try readU16Be(payload, payload.len - 2) != marker_eoc) return Jp2Error.InvalidCodestream;
@@ -1005,12 +1106,9 @@ fn validateCodestreamPayload(payload: []const u8, expected: CodestreamShape) !vo
     // unsupported in the wrapper profile until the walker is generalized.
     if (tile_count_u64 == 0 or tile_count_u64 > 256) return Jp2Error.UnsupportedProfile;
     const tile_count: u32 = @intCast(tile_count_u64);
-    const bits_per_component = (segment[36] & 0x7f) + 1;
-    if ((segment[36] & 0x80) != 0) return Jp2Error.UnsupportedProfile;
     if (width != expected.width or
         height != expected.height or
-        components != expected.components or
-        bits_per_component != expected.bits_per_component)
+        components != expected.components)
     {
         return Jp2Error.InvalidCodestream;
     }
@@ -1020,15 +1118,35 @@ fn validateCodestreamPayload(payload: []const u8, expected: CodestreamShape) !vo
         const component_offset = 36 + component_index * 3;
         const ssiz = segment[component_offset];
         if ((ssiz & 0x80) != 0) return Jp2Error.UnsupportedProfile;
-        if ((ssiz & 0x7f) + 1 != bits_per_component) return Jp2Error.InvalidCodestream;
-        if (segment[component_offset + 1] != 1 or segment[component_offset + 2] != 1) {
+        const component_bits = (ssiz & 0x7f) + 1;
+        const expected_bits = if (expected.bits_per_component != 0)
+            expected.bits_per_component
+        else
+            expected.component_bit_depths[component_index];
+        if (expected_bits == 0 or component_bits != expected_bits) {
+            return Jp2Error.InvalidCodestream;
+        }
+        const xrsiz = segment[component_offset + 1];
+        const yrsiz = segment[component_offset + 2];
+        if (xrsiz == 0 or yrsiz == 0) return Jp2Error.InvalidCodestream;
+        if (expected.require_unit_sampling and (xrsiz != 1 or yrsiz != 1)) {
             return Jp2Error.UnsupportedProfile;
         }
+        if (sampling_out) |sampling| {
+            sampling.xrsiz[component_index] = xrsiz;
+            sampling.yrsiz[component_index] = yrsiz;
+        }
     }
-    try validateMainHeaderMarkers(payload, segment_end, tile_count, components);
+    try validateMainHeaderMarkers(payload, segment_end, tile_count, components, expected.bits_per_component == 0);
 }
 
-fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_count: u32, components: u16) !void {
+fn validateMainHeaderMarkers(
+    payload: []const u8,
+    cursor_after_siz: usize,
+    tile_count: u32,
+    components: u16,
+    allow_component_qcc: bool,
+) !void {
     var cursor = cursor_after_siz;
     var cod_info: ?CodSegmentInfo = null;
     var cod_payload: []const u8 = &.{};
@@ -1043,7 +1161,7 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
         switch (marker) {
             marker_sot => {
                 if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
-                try validateUniformComponentOverrides(&override_state, cod_payload, qcd_payload, components);
+                try validateUniformComponentOverrides(&override_state, cod_payload, qcd_payload, components, allow_component_qcc);
                 if (tile_count == 1) {
                     try validateTilePartSequence(payload, cursor, cod_info.?, components, if (tlm_state.saw) &tlm_state else null, ppm_state.saw);
                 } else {
@@ -1062,9 +1180,9 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
                 if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
             },
             marker_com => {},
-            // COC/QCC are accepted structurally here (after their main COD/QCD);
-            // the strict codestream reader enforces that they byte-replicate the
-            // main marker (z2000 has no per-component coding/quantization path).
+            // COC/QCC are accepted structurally here after their main COD/QCD.
+            // Uniform JP2 profiles retain the uniform-override rule; BPCC
+            // mixed-precision profiles may carry divergent per-component QCC.
             marker_coc => {
                 if (cod_info == null) return Jp2Error.InvalidCodestream;
             },
@@ -1100,7 +1218,7 @@ fn validateMainHeaderMarkers(payload: []const u8, cursor_after_siz: usize, tile_
                 saw_qcd = true;
             },
             marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, components, &override_state),
-            marker_qcc => try validateUniformQccSegment(payload, length_offset, marker_length, cod_info.?, components, &override_state),
+            marker_qcc => try validateUniformQccSegment(payload, length_offset, marker_length, cod_info.?, components, &override_state, allow_component_qcc),
             else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state, &ppm_state, cod_info, components),
         }
         cursor = next;
@@ -1480,12 +1598,11 @@ fn validateCodeBlockStyleByte(code_block_style: u8) !void {
     if ((code_block_style & ~@as(u8, 0x3f)) != 0) return Jp2Error.UnsupportedProfile;
 }
 
-/// Cross-marker state for COC/QCC handling: z2000 accepts them either as
-/// byte-replications of the main COD/QCD or as a *uniform override* where
-/// every component carries identical data (Kakadu signals uniform
-/// per-component Cmodes/Qguard requests this way). Genuinely per-component
-/// divergence fails closed in validateUniformComponentOverrides. The fixed
-/// storage follows the bounded 1..4-component JP2 boundary.
+/// Cross-marker state for COC/QCC handling. Uniform JP2 profiles accept marker
+/// replication or a complete uniform override (as emitted by Kakadu Cmodes /
+/// Qguard requests). A BPCC mixed-precision profile may diverge in QCC only;
+/// strict codestream validation consumes and checks every signalled table.
+/// The fixed storage follows the bounded 1..4-component JP2 boundary.
 const ComponentOverrideState = struct {
     coc_seen: [color.max_components]bool = [_]bool{false} ** color.max_components,
     coc_first: []const u8 = &.{},
@@ -1512,7 +1629,13 @@ fn validateUniformCocSegment(payload: []const u8, length_offset: usize, marker_l
     }
 }
 
-fn validateUniformComponentOverrides(state: *ComponentOverrideState, cod_payload: []const u8, qcd_payload: []const u8, components: u16) !void {
+fn validateUniformComponentOverrides(
+    state: *ComponentOverrideState,
+    cod_payload: []const u8,
+    qcd_payload: []const u8,
+    components: u16,
+    allow_component_qcc: bool,
+) !void {
     if (state.coc_first.len != 0) {
         const spcoc = state.coc_first[1..];
         const cod_coding = cod_payload[5..];
@@ -1531,7 +1654,7 @@ fn validateUniformComponentOverrides(state: *ComponentOverrideState, cod_payload
             try validateCodeBlockStyleByte(spcoc[3]);
         }
     }
-    if (state.qcc_first.len != 0) {
+    if (state.qcc_first.len != 0 and !allow_component_qcc) {
         // A uniform QCC override replaces the QCD wholesale and requires all
         // components; each segment was already bounds-validated, so the JP2
         // boundary only enforces the uniformity (strict decode consumes the
@@ -1559,7 +1682,15 @@ fn validateCocCodingPayload(segment: []const u8, scoc: u8) !void {
     try validateCodPrecinctBytes(segment, 5, @intCast(precinct_bytes));
 }
 
-fn validateUniformQccSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod: CodSegmentInfo, components: u16, state: *ComponentOverrideState) !void {
+fn validateUniformQccSegment(
+    payload: []const u8,
+    length_offset: usize,
+    marker_length: u16,
+    cod: CodSegmentInfo,
+    components: u16,
+    state: *ComponentOverrideState,
+    allow_component_qcc: bool,
+) !void {
     const component = payload[length_offset + 2];
     if (component >= components) return Jp2Error.UnsupportedProfile;
     const qcc_quantization = payload[length_offset + 3 .. length_offset + marker_length];
@@ -1568,7 +1699,7 @@ fn validateUniformQccSegment(payload: []const u8, length_offset: usize, marker_l
     state.qcc_seen[component] = true;
     if (state.qcc_first.len == 0) {
         state.qcc_first = qcc_quantization;
-    } else if (!std.mem.eql(u8, qcc_quantization, state.qcc_first)) {
+    } else if (!allow_component_qcc and !std.mem.eql(u8, qcc_quantization, state.qcc_first)) {
         return Jp2Error.UnsupportedProfile;
     }
 }

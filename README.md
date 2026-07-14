@@ -31,12 +31,19 @@ certification.
   planar layouts, alpha-aware JP2 `cdef` signalling, and reversible RGBA RCT
   over the RGB triplet only, with strict malformed-input handling and
   OpenJPEG/Grok/Kakadu interoperability tests.
+- Bounded planar encode/decode for mixed unsigned 8/16-bit component
+  precision, including JP2 `BPCC`/codestream `SIZ` agreement and
+  per-component QCD/QCC on the single-tile RPCL 5/3 path. z2000 output is
+  pixel-exact through OpenJPEG, Grok, and Kakadu PGX decode.
+- Bounded component-subsampling decode with per-component SIZ `XRsiz/YRsiz`,
+  component-local packet/T1/DWT geometry, and variable-size planar output. An
+  embedded Kakadu 4:2:0 fixture reconstructs its 8x8/4x4/4x4 planes exactly.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
-bounded 1..4 envelope (subsampling and mixed depth),
+bounded 1..4 envelope (general subsampling and mixed-precision multi-tile/MCT),
 non-empty PLT-less multi-part tiles, broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
@@ -241,8 +248,15 @@ pixel-exact). The CLI now maps TIFF `ExtraSamples` values 1/2 to strict
 gray+alpha or RGBA JP2 `cdef` semantics and back without changing
 associated/unassociated samples. Gray+alpha uses no MCT; RGBA defaults to RCT
 over RGB while alpha remains an independently level-shifted component.
-Explicit `--mct none` remains available for RGBA. Multi-tile grayscale and
-mixed component depths remain fail-closed.
+Explicit `--mct none` remains available for RGBA. Mixed unsigned 8/16-bit
+foreign codestreams can be reconstructed through the strict planar library
+API when they are single-tile RPCL, reversible 5/3, and no-MCT; the same
+bounded library path can encode them and emit JP2 `BPCC`. The TIFF CLI remains
+uniform-depth and mixed multi-tile/MCT profiles stay fail-closed. The planar
+decoder also accepts the bounded single-tile RPCL/no-MCT/5-3 subsampling
+profile when every component has one precinct per resolution; component
+dimensions are available through `SamplePlanes.componentDimensions`. General
+multi-precinct subsampling and automatic chroma upsampling remain fail-closed.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
 floating-point samples, unspecified or multiple auxiliary channels, mixed bit
