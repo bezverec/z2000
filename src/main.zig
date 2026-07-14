@@ -53,10 +53,35 @@ pub fn main(init: std.process.Init) !void {
         try jp2StatsCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "decode-temp-jp2")) {
         try decodeTempJp2Command(io, allocator, args[2..]);
+    } else if (inferConversion(args[1..])) |conversion| {
+        switch (conversion) {
+            .tiff_to_jp2 => try tiffToJp2Command(io, allocator, args[1..]),
+            .jp2_to_tiff => try decodeTempJp2Command(io, allocator, args[1..]),
+        }
     } else {
         usage();
         return error.InvalidCommand;
     }
+}
+
+const InferredConversion = enum { tiff_to_jp2, jp2_to_tiff };
+
+/// Shorthand dispatch: `z2000 input.tif output.jp2 [options]` needs no
+/// subcommand — the conversion direction is inferred from the two leading
+/// path extensions (case-insensitive; `.tif`/`.tiff` on the TIFF side).
+/// Explicit subcommand names always win because they are matched first.
+fn inferConversion(args: []const []const u8) ?InferredConversion {
+    if (args.len < 2) return null;
+    if (std.mem.startsWith(u8, args[0], "-") or std.mem.startsWith(u8, args[1], "-")) return null;
+    const input_ext = std.fs.path.extension(args[0]);
+    const output_ext = std.fs.path.extension(args[1]);
+    const input_is_tiff = std.ascii.eqlIgnoreCase(input_ext, ".tif") or std.ascii.eqlIgnoreCase(input_ext, ".tiff");
+    const output_is_tiff = std.ascii.eqlIgnoreCase(output_ext, ".tif") or std.ascii.eqlIgnoreCase(output_ext, ".tiff");
+    const input_is_jp2 = std.ascii.eqlIgnoreCase(input_ext, ".jp2");
+    const output_is_jp2 = std.ascii.eqlIgnoreCase(output_ext, ".jp2");
+    if (input_is_tiff and output_is_jp2) return .tiff_to_jp2;
+    if (input_is_jp2 and output_is_tiff) return .jp2_to_tiff;
+    return null;
 }
 
 fn encodeCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -1272,6 +1297,8 @@ fn usage() void {
     std.debug.print(
         \\Usage:
         \\  z2000 --version
+        \\  z2000 <input.tif> <output.jp2> [options]   (shorthand for tiff-to-jp2)
+        \\  z2000 <input.jp2> <output.tif> [options]   (shorthand for decode-temp-jp2)
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
