@@ -5,6 +5,16 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### CLI: --threads 0 Selects All Logical CPUs
+
+- The README has documented `--threads 0` as "use all logical CPU threads",
+  but the CLI passed the zero straight into the codec layers, which
+  correctly require an explicit nonzero worker count - so the documented
+  conversion examples failed with InvalidCodestream. The zero is now
+  resolved to the logical CPU count at the CLI boundary (encode and decode
+  commands alike), and every README example runs verbatim; the rate-layered
+  conversion example was verified through to a lossless roundtrip.
+
 ### Shared Single-Tile Codestream Assembly (F1 Stage B, First Slice)
 
 - The RGB and grayscale encoders now share one component-count-generic

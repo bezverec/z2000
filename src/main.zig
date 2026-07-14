@@ -346,7 +346,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         } else if (std.mem.eql(u8, args[index], "--threads")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
-            options.threads = try std.fmt.parseInt(u8, args[index], 10);
+            options.threads = try parseThreadCount(args[index]);
         } else if (std.mem.eql(u8, args[index], "--t1-backend")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -570,7 +570,7 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         if (std.mem.eql(u8, args[index], "--threads")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
-            options.threads = try std.fmt.parseInt(u8, args[index], 10);
+            options.threads = try parseThreadCount(args[index]);
         } else if (std.mem.eql(u8, args[index], "--t1-backend")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -1142,6 +1142,16 @@ fn parseJpeg2000Transform(value: []const u8) !codestream.WaveletTransform {
         return .irreversible_9_7;
     }
     return error.InvalidValue;
+}
+
+/// README-documented convention: `--threads 0` selects all logical CPU
+/// threads. The codec layers require an explicit nonzero worker count, so
+/// the resolution happens here at the CLI boundary.
+fn parseThreadCount(value: []const u8) !u8 {
+    const requested = try std.fmt.parseInt(u8, value, 10);
+    if (requested != 0) return requested;
+    const logical = std.Thread.getCpuCount() catch 1;
+    return @intCast(@min(logical, @as(usize, std.math.maxInt(u8))));
 }
 
 fn parseT1Backend(value: []const u8) !codestream.T1Backend {
