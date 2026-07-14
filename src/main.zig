@@ -242,6 +242,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
     }
 
     var options = codestream.LosslessOptions{};
+    options.threads = defaultThreadCount();
     var poc_storage: [64]codestream.PocRecord = undefined;
     var tile_parts_explicit = false;
     var mct_explicit = false;
@@ -589,6 +590,7 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     }
 
     var options = codestream.DecodeOptions{};
+    options.threads = defaultThreadCount();
     var show_timings = false;
     var index: usize = 2;
     while (index < args.len) {
@@ -1169,14 +1171,19 @@ fn parseJpeg2000Transform(value: []const u8) !codestream.WaveletTransform {
     return error.InvalidValue;
 }
 
-/// README-documented convention: `--threads 0` selects all logical CPU
-/// threads. The codec layers require an explicit nonzero worker count, so
-/// the resolution happens here at the CLI boundary.
+/// README-documented convention: the CLI defaults to all logical CPU
+/// threads and `--threads 0` selects the same. The codec layers require an
+/// explicit nonzero worker count (their library default stays 1), so the
+/// resolution happens here at the CLI boundary.
+fn defaultThreadCount() u8 {
+    const logical = std.Thread.getCpuCount() catch 1;
+    return @intCast(@min(@max(logical, 1), @as(usize, std.math.maxInt(u8))));
+}
+
 fn parseThreadCount(value: []const u8) !u8 {
     const requested = try std.fmt.parseInt(u8, value, 10);
     if (requested != 0) return requested;
-    const logical = std.Thread.getCpuCount() catch 1;
-    return @intCast(@min(logical, @as(usize, std.math.maxInt(u8))));
+    return defaultThreadCount();
 }
 
 fn parseT1Backend(value: []const u8) !codestream.T1Backend {
@@ -1295,7 +1302,7 @@ fn t1BackendLabel(backend: codestream.T1Backend) []const u8 {
 
 fn usage() void {
     std.debug.print(
-        \\Usage:
+        \\Usage: (z2k is an installed alias for z2000; --threads defaults to all logical CPUs)
         \\  z2000 --version
         \\  z2000 <input.tif> <output.jp2> [options]   (shorthand for tiff-to-jp2)
         \\  z2000 <input.jp2> <output.tif> [options]   (shorthand for decode-temp-jp2)

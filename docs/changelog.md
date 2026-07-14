@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### z2k Alias And All-Threads Default
+
+- The build installs the CLI twice: as `z2000` and as the short alias
+  `z2k` (a portable copy of the same artifact). Every command and option
+  behaves identically under both names.
+- The encode and decode commands now default to all logical CPU threads
+  instead of one; `--threads N` limits the workers and `--threads 0` still
+  means all. The resolution happens at the CLI boundary only — the library
+  defaults (`LosslessOptions.threads`/`DecodeOptions.threads` = 1) are
+  unchanged, and output streams are thread-count invariant (covered by the
+  existing cross-thread determinism gates), so encoded bytes do not change.
+- README examples use the alias and drop the now-redundant `--threads 0`.
+
 ### CLI Shorthand Conversion Syntax
 
 - Conversions no longer need a subcommand: `z2000 input.tif output.jp2`

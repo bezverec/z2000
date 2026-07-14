@@ -74,6 +74,10 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_module,
     });
     b.installArtifact(exe);
+    // Short alias: the same binary is installed a second time as `z2k`.
+    // A plain copy keeps the alias portable (symlinks are unreliable on
+    // Windows checkouts).
+    b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{ .dest_sub_path = "z2k" }).step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
