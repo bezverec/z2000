@@ -531,17 +531,10 @@ pub fn encodeLosslessGrayWithOptions(
 }
 
 const ComponentSlices = struct {
-    y: []i32,
-    cb: []i32,
-    cr: []i32,
+    slices: [3][]i32,
 
     fn get(self: ComponentSlices, index: usize) []i32 {
-        return switch (index) {
-            0 => self.y,
-            1 => self.cb,
-            2 => self.cr,
-            else => unreachable,
-        };
+        return self.slices[index];
     }
 };
 
@@ -551,7 +544,7 @@ fn forwardComponents53(
     options: LosslessOptions,
 ) !u8 {
     const levels = actualDwtLevels(planes.width, planes.height, options.levels);
-    const slices = ComponentSlices{ .y = planes.y, .cb = planes.cb, .cr = planes.cr };
+    const slices = ComponentSlices{ .slices = .{ planes.planes[0], planes.planes[1], planes.planes[2] } };
     if (componentThreadCount(options) < 2) {
         var wavelet_workspace = try wavelet_int.Workspace.init(allocator, @max(planes.width, planes.height));
         defer wavelet_workspace.deinit();
@@ -702,13 +695,11 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
         );
     }
 
-    const pixels = try std.math.mul(usize, ict.width, ict.height);
-    const y = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(y);
-    const cb = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(cb);
-    const cr = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(cr);
+    var out = try color.RctPlanes.init(allocator, ict.width, ict.height, rgb.bit_depth, 3);
+    errdefer out.deinit();
+    const y = out.planes[0];
+    const cb = out.planes[1];
+    const cr = out.planes[2];
 
     const wavelet_start = monotonicNs();
     if (thread_count > 1) {
@@ -720,7 +711,7 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
         // bit-identical.
         const done = try wavelet.forward97Parallel(
             std.heap.smp_allocator,
-            .{ ict.y, ict.cb, ict.cr },
+            .{ ict.planes[0], ict.planes[1], ict.planes[2] },
             ict.width,
             ict.height,
             levels,
@@ -730,9 +721,9 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
         );
         if (done != levels) return CodestreamError.InvalidCodestream;
         var jobs = [3]IrreversibleQuantizePlaneJob{
-            .{ .plane = ict.y, .quantized = y, .width = ict.width, .bands = bands, .deltas = deltas },
-            .{ .plane = ict.cb, .quantized = cb, .width = ict.width, .bands = bands, .deltas = deltas },
-            .{ .plane = ict.cr, .quantized = cr, .width = ict.width, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.planes[0], .quantized = y, .width = ict.width, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.planes[1], .quantized = cb, .width = ict.width, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.planes[2], .quantized = cr, .width = ict.width, .bands = bands, .deltas = deltas },
         };
         try runComponentJobs(IrreversibleQuantizePlaneJob, &jobs, componentThreadCountFor(thread_count), irreversibleQuantizePlaneWorker);
     } else {
@@ -740,23 +731,15 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
         // quantization is independent, so the three planes run as fused
         // component jobs (same pattern as the 5/3 path).
         var jobs = [3]IrreversibleForwardPlaneJob{
-            .{ .plane = ict.y, .quantized = y, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
-            .{ .plane = ict.cb, .quantized = cb, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
-            .{ .plane = ict.cr, .quantized = cr, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.planes[0], .quantized = y, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.planes[1], .quantized = cb, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
+            .{ .plane = ict.planes[2], .quantized = cr, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
         };
         try runComponentJobs(IrreversibleForwardPlaneJob, &jobs, thread_count, irreversibleForwardPlaneWorker);
     }
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
-    return .{
-        .allocator = allocator,
-        .width = ict.width,
-        .height = ict.height,
-        .bit_depth = rgb.bit_depth,
-        .y = y,
-        .cb = cb,
-        .cr = cr,
-    };
+    return out;
 }
 
 /// Tile front end for the irreversible multi-tile path: extracts the tile
@@ -2156,14 +2139,12 @@ fn decodeTemporaryPayloadWithOptionsMeasured(
 
     if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
-    const pixels = try std.math.mul(usize, width, height);
 
-    const y = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(y);
-    const cb = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(cb);
-    const cr = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(cr);
+    var planes = try color.RctPlanes.init(allocator, width, height, bit_depth, 3);
+    defer planes.deinit();
+    const y = planes.planes[0];
+    const cb = planes.planes[1];
+    const cr = planes.planes[2];
     @memset(y, 0);
     @memset(cb, 0);
     @memset(cr, 0);
@@ -2174,19 +2155,8 @@ fn decodeTemporaryPayloadWithOptionsMeasured(
     if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(legacy_start);
 
     const wavelet_start = monotonicNs();
-    try inverseComponents53(allocator, .{ .y = y, .cb = cb, .cr = cr }, width, height, levels, 0, 0, options);
+    try inverseComponents53(allocator, .{ .slices = .{ y, cb, cr } }, width, height, levels, 0, 0, options);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
-
-    var planes = color.RctPlanes{
-        .allocator = allocator,
-        .width = width,
-        .height = height,
-        .bit_depth = bit_depth,
-        .y = y,
-        .cb = cb,
-        .cr = cr,
-    };
-    defer planes.deinit();
 
     const color_start = monotonicNs();
     defer {
@@ -3870,7 +3840,7 @@ fn decodeStrictRpclImageFromPackets(
     const full_resolution = plan.resolutions[plan.resolution_count - 1];
     try inverseComponents53(
         allocator,
-        .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr },
+        .{ .slices = .{ strict_planes.planes[0], strict_planes.planes[1], strict_planes.planes[2] } },
         header.width,
         header.height,
         header.levels,
@@ -4851,45 +4821,30 @@ fn reconstructStrictComponentCoefficientPlanes(
     assemblies: [3]StrictComponentAssembly,
     options: DecodeOptions,
 ) !color.RctPlanes {
-    const y = try reconstructStrictComponentCoefficients(
-        allocator,
-        header.width,
-        header.height,
-        catalogs[0].blocks,
-        assemblies[0],
-        header.layers,
-        options,
-    );
-    errdefer allocator.free(y);
-    const cb = try reconstructStrictComponentCoefficients(
-        allocator,
-        header.width,
-        header.height,
-        catalogs[1].blocks,
-        assemblies[1],
-        header.layers,
-        options,
-    );
-    errdefer allocator.free(cb);
-    const cr = try reconstructStrictComponentCoefficients(
-        allocator,
-        header.width,
-        header.height,
-        catalogs[2].blocks,
-        assemblies[2],
-        header.layers,
-        options,
-    );
-    errdefer allocator.free(cr);
+    const plane_slices = try allocator.alloc([]i32, 3);
+    var reconstructed: usize = 0;
+    errdefer {
+        for (plane_slices[0..reconstructed]) |plane_slice| allocator.free(plane_slice);
+        allocator.free(plane_slices);
+    }
+    while (reconstructed < 3) : (reconstructed += 1) {
+        plane_slices[reconstructed] = try reconstructStrictComponentCoefficients(
+            allocator,
+            header.width,
+            header.height,
+            catalogs[reconstructed].blocks,
+            assemblies[reconstructed],
+            header.layers,
+            options,
+        );
+    }
 
     return .{
         .allocator = allocator,
         .width = header.width,
         .height = header.height,
         .bit_depth = header.bit_depth,
-        .y = y,
-        .cb = cb,
-        .cr = cr,
+        .planes = plane_slices,
     };
 }
 
@@ -4954,7 +4909,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     const full_resolution = plan.resolutions[plan.resolution_count - 1];
     try inverseComponents53(
         allocator,
-        .{ .y = strict_planes.y, .cb = strict_planes.cb, .cr = strict_planes.cr },
+        .{ .slices = .{ strict_planes.planes[0], strict_planes.planes[1], strict_planes.planes[2] } },
         header.width,
         header.height,
         header.levels,
@@ -5530,8 +5485,9 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     timings: ?*DecodeTimings,
 ) !image.RgbImage {
     const pixels = try std.math.mul(usize, header.width, header.height);
-    if (quantized.y.len != pixels or quantized.cb.len != pixels or quantized.cr.len != pixels) {
-        return CodestreamError.InvalidCodestream;
+    if (quantized.planes.len != 3) return CodestreamError.InvalidCodestream;
+    for (quantized.planes) |plane_slice| {
+        if (plane_slice.len != pixels) return CodestreamError.InvalidCodestream;
     }
 
     const plan = temporaryPacketPlan(header);
@@ -5575,21 +5531,22 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     // so three fused plane jobs avoid extra full-plane traffic. A wider
     // intra-plane inverse was bit-exact but regressed the maintained t16 gate.
     var jobs = [3]IrreversibleInversePlaneJob{
-        .{ .quantized = quantized.y, .plane = y_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
-        .{ .quantized = quantized.cb, .plane = cb_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
-        .{ .quantized = quantized.cr, .plane = cr_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
+        .{ .quantized = quantized.planes[0], .plane = y_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
+        .{ .quantized = quantized.planes[1], .plane = cb_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
+        .{ .quantized = quantized.planes[2], .plane = cr_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
     };
     try runComponentJobs(IrreversibleInversePlaneJob, &jobs, componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
+    // Borrowed carrier: the planes stay owned by the y_f/cb_f/cr_f defers
+    // above, so no deinit is called on this instance.
+    var ict_plane_slices = [3][]f32{ y_f, cb_f, cr_f };
     const ict = color.IctPlanes{
         .allocator = allocator,
         .width = header.width,
         .height = header.height,
         .bit_depth = header.bit_depth,
-        .y = y_f,
-        .cb = cb_f,
-        .cr = cr_f,
+        .planes = &ict_plane_slices,
     };
     const color_start = monotonicNs();
     defer {
@@ -5755,45 +5712,30 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     // load-balanced at exactly 3 threads and left a 2:1 imbalance at 2
     // threads (~1.31x); block-level balancing raises 2 threads to ~1.66x and
     // keeps scaling monotone across thread counts.
-    const y = try reconstructStrictComponentCoefficientsFromBlockCatalog(
-        allocator,
-        header.width,
-        header.height,
-        catalog,
-        0,
-        options,
-        timings,
-    );
-    errdefer allocator.free(y);
-    const cb = try reconstructStrictComponentCoefficientsFromBlockCatalog(
-        allocator,
-        header.width,
-        header.height,
-        catalog,
-        1,
-        options,
-        timings,
-    );
-    errdefer allocator.free(cb);
-    const cr = try reconstructStrictComponentCoefficientsFromBlockCatalog(
-        allocator,
-        header.width,
-        header.height,
-        catalog,
-        2,
-        options,
-        timings,
-    );
-    errdefer allocator.free(cr);
+    const plane_slices = try allocator.alloc([]i32, 3);
+    var reconstructed: usize = 0;
+    errdefer {
+        for (plane_slices[0..reconstructed]) |plane_slice| allocator.free(plane_slice);
+        allocator.free(plane_slices);
+    }
+    while (reconstructed < 3) : (reconstructed += 1) {
+        plane_slices[reconstructed] = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+            allocator,
+            header.width,
+            header.height,
+            catalog,
+            reconstructed,
+            options,
+            timings,
+        );
+    }
 
     return .{
         .allocator = allocator,
         .width = header.width,
         .height = header.height,
         .bit_depth = header.bit_depth,
-        .y = y,
-        .cb = cb,
-        .cr = cr,
+        .planes = plane_slices,
     };
 }
 
@@ -9227,7 +9169,7 @@ fn buildPcrdData(
 ) !PcrdData {
     const levels = dwtLevelsFromBands(bands);
     const total_blocks = blocks.len * 3;
-    const component_planes = [3][]const i32{ planes.y, planes.cb, planes.cr };
+    const component_planes = [3][]const i32{ planes.planes[0], planes.planes[1], planes.planes[2] };
 
     const base_style = ebcot.CodeBlockStyle{
         .bypass = options.bypass,
@@ -9443,18 +9385,18 @@ fn buildComponentRpclShadowCatalogs(
         errdefer {
             for (catalogs[0..initialized]) |*catalog| catalog.deinit();
         }
-        catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.y, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
+        catalogs[0] = try buildComponentRpclShadowCatalog(allocator, planes.planes[0], planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
         initialized += 1;
-        catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.cb, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
+        catalogs[1] = try buildComponentRpclShadowCatalog(allocator, planes.planes[1], planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
         initialized += 1;
-        catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.cr, planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
+        catalogs[2] = try buildComponentRpclShadowCatalog(allocator, planes.planes[2], planes.width, bands, blocks, planes.bit_depth, options, include_bitplane_payload, pass_stats);
         return catalogs;
     }
 
     var jobs = [_]ComponentCatalogJob{
-        .{ .plane = planes.y, .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
-        .{ .plane = planes.cb, .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
-        .{ .plane = planes.cr, .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+        .{ .plane = planes.planes[0], .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+        .{ .plane = planes.planes[1], .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
+        .{ .plane = planes.planes[2], .stride = planes.width, .bands = bands, .blocks = blocks, .nominal_bitplanes = planes.bit_depth, .options = options, .include_bitplane_payload = include_bitplane_payload },
     };
     defer for (&jobs) |*job| job.deinit();
 
@@ -9511,7 +9453,7 @@ fn buildComponentRpclShadowCatalogsBlocksParallel(
     for (jobs) |*job| {
         job.* = .{
             .allocator = allocator,
-            .planes = .{ planes.y, planes.cb, planes.cr },
+            .planes = .{ planes.planes[0], planes.planes[1], planes.planes[2] },
             .stride = planes.width,
             .bands = bands,
             .blocks = blocks,
