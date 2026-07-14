@@ -174,9 +174,12 @@ silently break elsewhere).
    8-lane policy confirmed, `f32_block_lanes` raised 16 -> 32 (kept, gated),
    `ict_lanes` narrowing rejected below gate, and the generated-code spot
    check confirmed 256-bit AVX2 lowering with no silent scalar fallback and
-   intentionally no FMA. Remaining follow-up: re-run the `f32_block_lanes`
-   A/B on the M4 (NEON has 4-wide registers, so 32-lane blocks mean 8 q-regs
-   per step — the Ryzen win does not automatically transfer).
+   intentionally no FMA. The remaining follow-up — the `f32_block_lanes`
+   A/B on the M4 — **completed 2026-07-14**: 32 lanes beats 16 on NEON as
+   well (lossy encode t1 477.5 vs 495.2 ms = -3.6%, decode t1 435.0 vs
+   449.7 ms = -3.3%, 10-run, non-overlapping +/-sigma; t10 within noise;
+   streams byte-identical). The 32-lane default is now confirmed on both
+   gating hosts and S3 is fully closed.
 6. **S6** (RISC-V gate) — **completed (2026-07-13)**: cross-compile green
    (riscv64+v exe and AVX-512 `x86_64_v4` builds) and the full 360-test
    suite passed on `riscv64/alpine` under Docker's qemu binfmt emulation.

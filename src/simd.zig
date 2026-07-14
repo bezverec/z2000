@@ -22,8 +22,9 @@ pub const f32_pair_lanes: comptime_int = 2;
 /// so one constant serves every ISA. The S3 lane audit on the Ryzen 5700X
 /// measured 32 lanes ahead of both 16 (the prior value) and 8 on the lossy
 /// profile: encode t1 -6.0%, decode t1 -4.3% (20-run), encode/decode t16
-/// -4.9%/-5.1%, lossless unchanged, streams bit-identical. Re-run the A/B on
-/// the M4 before assuming the same win on NEON.
+/// -4.9%/-5.1%, lossless unchanged, streams bit-identical. The M4/NEON A/B
+/// (2026-07-14, 10-run) confirmed the same direction: 32 lanes beats 16 by
+/// 3.6% on lossy encode t1 and 3.3% on decode t1, t10 within noise.
 pub const f32_block_lanes: comptime_int = 32;
 
 pub const family: []const u8 = switch (builtin.target.cpu.arch) {
