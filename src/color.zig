@@ -11,6 +11,21 @@ pub const ColorError = error{
 /// surface (grayscale=1 and RGB=3 exist today; alpha and CMYK arrive on top).
 pub const max_components = 4;
 
+/// Whole-image alpha semantics shared by TIFF ExtraSamples and JP2 cdef.
+/// Samples are preserved as stored; the codec never silently changes between
+/// associated (premultiplied) and unassociated alpha.
+pub const AlphaMode = enum {
+    unassociated,
+    associated,
+
+    pub fn label(self: AlphaMode) []const u8 {
+        return switch (self) {
+            .unassociated => "unassociated",
+            .associated => "associated",
+        };
+    }
+};
+
 /// N-plane sample carrier shared by the reversible (i32) and irreversible
 /// (f32) pipelines. `init` allocates and owns `component_count` planes of
 /// `width * height` samples; a borrowed instance (planes filled in from
@@ -110,6 +125,67 @@ pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbIma
         .bit_depth = planes.bit_depth,
         .samples = samples,
     };
+}
+
+/// JPEG2000 Part 1 MCT=1 on an RGBA layout: the reversible color transform
+/// consumes components 0..2 while component 3 remains an independent alpha
+/// plane with only the unsigned-sample DC level shift.
+pub fn forwardRctAlpha(allocator: std.mem.Allocator, samples: SamplePlanes) !RctPlanes {
+    const pixels = try validatePixelPlanes(u16, samples, 4);
+    if (samples.width == 0 or samples.height == 0) return ColorError.InvalidImage;
+    const level_shift = try dcLevelShift(samples.bit_depth);
+    const max_sample = try maxSample(samples.bit_depth);
+
+    var out = try RctPlanes.init(allocator, samples.width, samples.height, samples.bit_depth, 4);
+    errdefer out.deinit();
+    const r = samples.planes[0];
+    const g = samples.planes[1];
+    const b = samples.planes[2];
+    const alpha = samples.planes[3];
+    for (0..pixels) |pixel| {
+        const r_value: i32 = r[pixel];
+        const g_value: i32 = g[pixel];
+        const b_value: i32 = b[pixel];
+        const alpha_value: i32 = alpha[pixel];
+        if (r_value > max_sample or g_value > max_sample or
+            b_value > max_sample or alpha_value > max_sample)
+        {
+            return ColorError.SampleOutOfRange;
+        }
+        out.planes[0][pixel] = floorQuarter(r_value + 2 * g_value + b_value) - level_shift;
+        out.planes[1][pixel] = b_value - g_value;
+        out.planes[2][pixel] = r_value - g_value;
+        out.planes[3][pixel] = alpha_value - level_shift;
+    }
+    return out;
+}
+
+pub fn inverseRctAlpha(allocator: std.mem.Allocator, planes: RctPlanes) !SamplePlanes {
+    const pixels = try validatePixelPlanes(i32, planes, 4);
+    const level_shift = try dcLevelShift(planes.bit_depth);
+    const max_sample = try maxSample(planes.bit_depth);
+
+    var out = try SamplePlanes.init(allocator, planes.width, planes.height, planes.bit_depth, 4);
+    errdefer out.deinit();
+    for (0..pixels) |pixel| {
+        const y = planes.planes[0][pixel] + level_shift;
+        const cb = planes.planes[1][pixel];
+        const cr = planes.planes[2][pixel];
+        const g = y - floorQuarter(cb + cr);
+        const r = cr + g;
+        const b = cb + g;
+        const alpha = planes.planes[3][pixel] + level_shift;
+        if (r < 0 or g < 0 or b < 0 or alpha < 0 or
+            r > max_sample or g > max_sample or b > max_sample or alpha > max_sample)
+        {
+            return ColorError.SampleOutOfRange;
+        }
+        out.planes[0][pixel] = @intCast(r);
+        out.planes[1][pixel] = @intCast(g);
+        out.planes[2][pixel] = @intCast(b);
+        out.planes[3][pixel] = @intCast(alpha);
+    }
+    return out;
 }
 
 /// mct = none: no inter-component decorrelation. Each component is coded

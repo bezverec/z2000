@@ -31,17 +31,7 @@ pub const Info = struct {
 
 /// JP2 channel-definition semantics for a whole-image alpha channel. TIFF
 /// ExtraSamples value 2 maps to unassociated; value 1 maps to associated.
-pub const AlphaMode = enum {
-    unassociated,
-    associated,
-
-    pub fn label(self: AlphaMode) []const u8 {
-        return switch (self) {
-            .unassociated => "unassociated",
-            .associated => "associated",
-        };
-    }
-};
+pub const AlphaMode = color.AlphaMode;
 
 /// The bounded JP2 Part 1 palette profile currently accepted by z2000:
 /// three unsigned, uniform 8- or 16-bit columns mapped to sRGB.
@@ -230,8 +220,8 @@ pub fn wrapGrayCodestream(
 }
 
 /// Wraps the bounded F2 alpha layouts: gray+alpha (2 components) or RGBA
-/// (4 components), with the alpha plane last. This first container slice is
-/// intentionally no-MCT; the codestream validator enforces that profile.
+/// (4 components), with the alpha plane last. Gray+alpha remains no-MCT;
+/// reversible RGBA may signal MCT=1 for RCT over the RGB triplet only.
 pub fn wrapPlanarAlphaCodestream(
     allocator: std.mem.Allocator,
     input: color.SamplePlanes,
@@ -1443,7 +1433,7 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     if (layers > rate_alloc.max_layers) return Jp2Error.UnsupportedProfile;
     const mct = payload[length_offset + 6];
     if (mct != 0 and mct != 1) return Jp2Error.UnsupportedProfile;
-    if (components != 3 and mct != 0) return Jp2Error.UnsupportedProfile;
+    if (components != 3 and components != 4 and mct != 0) return Jp2Error.UnsupportedProfile;
     const levels = payload[length_offset + 7];
     if (levels > 32) return Jp2Error.InvalidCodestream;
     const block_width = try codeBlockSizeFromCodExponent(payload[length_offset + 8]);
@@ -1452,6 +1442,7 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     try validateCodeBlockStyleByte(payload[length_offset + 10]);
     const transform = payload[length_offset + 11];
     if (transform != 0 and transform != 1) return Jp2Error.InvalidCodestream;
+    if (components == 4 and mct != 0 and transform != 1) return Jp2Error.UnsupportedProfile;
     // Scod bit 0 unset (no precinct partition, ISO B.6) is a supported
     // profile: the codestream layer maps it to maximal 2^15 precincts.
     const precinct_bytes: u16 = if ((scod & 0x01) != 0) @as(u16, levels) + 1 else 0;

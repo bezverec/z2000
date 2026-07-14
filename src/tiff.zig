@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const color = @import("color.zig");
 const image = @import("image.zig");
 const simd = @import("simd.zig");
 
@@ -13,6 +14,7 @@ pub const TiffError = error{
     UnsupportedBitsPerSample,
     UnsupportedPlanarConfiguration,
     UnsupportedSampleFormat,
+    UnsupportedExtraSamples,
     TruncatedData,
     ImageTooLarge,
 };
@@ -36,14 +38,126 @@ const IfdEntry = struct {
     value_or_offset: u32,
 };
 
+pub const AlphaColorSpace = enum {
+    grayscale,
+    rgb,
+
+    pub fn colorComponentCount(self: AlphaColorSpace) usize {
+        return switch (self) {
+            .grayscale => 1,
+            .rgb => 3,
+        };
+    }
+};
+
+/// Bounded TIFF alpha layout: chunky gray+alpha or RGBA with one final
+/// associated/unassociated alpha sample. The samples remain interleaved so a
+/// TIFF read/write roundtrip does not change their numeric representation.
+pub const AlphaImage = struct {
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    color_space: AlphaColorSpace,
+    alpha_mode: color.AlphaMode,
+    samples: []u16,
+    white_is_zero: bool = false,
+    icc_profile: ?[]u8 = null,
+
+    pub fn componentCount(self: AlphaImage) usize {
+        return self.color_space.colorComponentCount() + 1;
+    }
+
+    pub fn deinit(self: *AlphaImage) void {
+        if (self.icc_profile) |profile| self.allocator.free(profile);
+        self.allocator.free(self.samples);
+        self.* = undefined;
+    }
+
+    /// Converts chunky TIFF samples into the planar no-MCT codec boundary.
+    /// WhiteIsZero normalization affects only the grayscale color plane.
+    pub fn toSamplePlanes(self: AlphaImage, allocator: std.mem.Allocator) !color.SamplePlanes {
+        if (self.width == 0 or self.height == 0 or
+            (self.bit_depth != 8 and self.bit_depth != 16) or
+            (self.color_space == .rgb and self.white_is_zero))
+        {
+            return TiffError.InvalidTagValue;
+        }
+        const pixels = try std.math.mul(usize, self.width, self.height);
+        const components = self.componentCount();
+        if (self.samples.len != try std.math.mul(usize, pixels, components)) {
+            return TiffError.InvalidTagValue;
+        }
+        var planes = try color.SamplePlanes.init(
+            allocator,
+            self.width,
+            self.height,
+            self.bit_depth,
+            components,
+        );
+        errdefer planes.deinit();
+        const max_sample: u16 = if (self.bit_depth == 8) 255 else std.math.maxInt(u16);
+        for (0..pixels) |pixel| {
+            for (0..components) |component| {
+                const sample = self.samples[pixel * components + component];
+                if (sample > max_sample) return TiffError.InvalidTagValue;
+                planes.planes[component][pixel] = if (self.white_is_zero and component == 0)
+                    max_sample - sample
+                else
+                    sample;
+            }
+        }
+        return planes;
+    }
+
+    pub fn fromSamplePlanes(
+        allocator: std.mem.Allocator,
+        planes: color.SamplePlanes,
+        alpha_mode: color.AlphaMode,
+    ) !AlphaImage {
+        if (planes.width == 0 or planes.height == 0 or
+            (planes.bit_depth != 8 and planes.bit_depth != 16) or
+            (planes.planes.len != 2 and planes.planes.len != 4))
+        {
+            return TiffError.UnsupportedExtraSamples;
+        }
+        const pixels = try std.math.mul(usize, planes.width, planes.height);
+        const max_sample: u16 = if (planes.bit_depth == 8) 255 else std.math.maxInt(u16);
+        for (planes.planes) |plane| {
+            if (plane.len != pixels) return TiffError.InvalidTagValue;
+            for (plane) |sample| {
+                if (sample > max_sample) return TiffError.InvalidTagValue;
+            }
+        }
+        const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, planes.planes.len));
+        errdefer allocator.free(samples);
+        for (0..pixels) |pixel| {
+            for (planes.planes, 0..) |plane, component| {
+                samples[pixel * planes.planes.len + component] = plane[pixel];
+            }
+        }
+        return .{
+            .allocator = allocator,
+            .width = planes.width,
+            .height = planes.height,
+            .bit_depth = planes.bit_depth,
+            .color_space = if (planes.planes.len == 2) .grayscale else .rgb,
+            .alpha_mode = alpha_mode,
+            .samples = samples,
+        };
+    }
+};
+
 pub const DecodedImage = union(enum) {
     rgb: image.RgbImage,
     grayscale: image.GrayImage,
+    alpha: AlphaImage,
 
     pub fn deinit(self: *DecodedImage) void {
         switch (self.*) {
             .rgb => |*rgb| rgb.deinit(),
             .grayscale => |*gray| gray.deinit(),
+            .alpha => |*alpha| alpha.deinit(),
         }
         self.* = undefined;
     }
@@ -83,6 +197,18 @@ pub fn readGray(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !ima
     defer allocator.free(bytes);
 
     return parseGray(allocator, bytes);
+}
+
+pub fn readAlpha(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !AlphaImage {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        allocator,
+        .limited(max_file_size),
+    );
+    defer allocator.free(bytes);
+
+    return parseAlpha(allocator, bytes);
 }
 
 pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, path: []const u8) !void {
@@ -206,6 +332,85 @@ pub fn writeGray(io: std.Io, allocator: std.mem.Allocator, gray: image.GrayImage
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.items });
 }
 
+pub fn writeAlpha(io: std.Io, allocator: std.mem.Allocator, alpha: AlphaImage, path: []const u8) !void {
+    if (alpha.width == 0 or alpha.height == 0 or
+        (alpha.bit_depth != 8 and alpha.bit_depth != 16) or
+        (alpha.color_space == .rgb and alpha.white_is_zero))
+    {
+        return TiffError.InvalidTagValue;
+    }
+    const pixels = try std.math.mul(usize, alpha.width, alpha.height);
+    const component_count = alpha.componentCount();
+    const sample_count = try std.math.mul(usize, pixels, component_count);
+    if (alpha.samples.len != sample_count) return TiffError.InvalidTagValue;
+
+    const bytes_per_sample: usize = if (alpha.bit_depth == 8) 1 else 2;
+    const raster_bytes = try std.math.mul(usize, sample_count, bytes_per_sample);
+    if (alpha.width > std.math.maxInt(u32) or
+        alpha.height > std.math.maxInt(u32) or
+        raster_bytes > std.math.maxInt(u32))
+    {
+        return TiffError.ImageTooLarge;
+    }
+
+    const icc_profile = alpha.icc_profile;
+    if (icc_profile) |profile| {
+        if (profile.len == 0 or profile.len > max_icc_profile_bytes) return TiffError.InvalidTagValue;
+        if (profile.len > std.math.maxInt(u32)) return TiffError.ImageTooLarge;
+    }
+
+    const entry_count: u16 = if (icc_profile != null) 12 else 11;
+    const metadata_end: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
+    const external_bits_bytes: u32 = if (component_count == 4) 8 else 0;
+    const raster_offset = try std.math.add(u32, metadata_end, external_bits_bytes);
+    const icc_offset = try std.math.add(u32, raster_offset, @as(u32, @intCast(raster_bytes)));
+    const total_bytes = try std.math.add(usize, @as(usize, icc_offset), if (icc_profile) |profile| profile.len else 0);
+    const bits_value: u32 = if (component_count == 2)
+        @as(u32, alpha.bit_depth) | (@as(u32, alpha.bit_depth) << 16)
+    else
+        metadata_end;
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, total_bytes);
+
+    try out.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &out, 42);
+    try appendU32Le(allocator, &out, 8);
+    try appendU16Le(allocator, &out, entry_count);
+    try appendIfdEntryLe(allocator, &out, 256, 4, 1, @intCast(alpha.width));
+    try appendIfdEntryLe(allocator, &out, 257, 4, 1, @intCast(alpha.height));
+    try appendIfdEntryLe(allocator, &out, 258, 3, @intCast(component_count), bits_value);
+    try appendIfdEntryLe(allocator, &out, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &out, 262, 3, 1, switch (alpha.color_space) {
+        .grayscale => if (alpha.white_is_zero) 0 else 1,
+        .rgb => 2,
+    });
+    try appendIfdEntryLe(allocator, &out, 273, 4, 1, raster_offset);
+    try appendIfdEntryLe(allocator, &out, 277, 3, 1, @intCast(component_count));
+    try appendIfdEntryLe(allocator, &out, 278, 4, 1, @intCast(alpha.height));
+    try appendIfdEntryLe(allocator, &out, 279, 4, 1, @intCast(raster_bytes));
+    try appendIfdEntryLe(allocator, &out, 284, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &out, 338, 3, 1, switch (alpha.alpha_mode) {
+        .associated => 1,
+        .unassociated => 2,
+    });
+    if (icc_profile) |profile| {
+        try appendIfdEntryLe(allocator, &out, 34675, 7, @intCast(profile.len), icc_offset);
+    }
+    try appendU32Le(allocator, &out, 0);
+    if (component_count == 4) {
+        for (0..component_count) |_| try appendU16Le(allocator, &out, alpha.bit_depth);
+    }
+
+    appendRasterLe(&out, alpha.samples, alpha.bit_depth) catch |err| switch (err) {
+        error.InvalidTagValue => return TiffError.InvalidTagValue,
+    };
+    if (icc_profile) |profile| try out.appendSlice(allocator, profile);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.items });
+}
+
 fn appendRasterLe(out: *std.ArrayList(u8), samples: []const u16, bit_depth: u8) error{InvalidTagValue}!void {
     const start = out.items.len;
     errdefer out.items.len = start;
@@ -250,6 +455,7 @@ const ParsedChunkyImage = struct {
     height: usize,
     bit_depth: u8,
     photometric: u16,
+    alpha_mode: ?color.AlphaMode,
     samples: []u16,
     icc_profile: ?[]u8,
 
@@ -262,6 +468,19 @@ const ParsedChunkyImage = struct {
 
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !DecodedImage {
     const parsed = try parseChunky(allocator, bytes);
+    if (parsed.alpha_mode) |alpha_mode| {
+        return .{ .alpha = .{
+            .allocator = allocator,
+            .width = parsed.width,
+            .height = parsed.height,
+            .bit_depth = parsed.bit_depth,
+            .color_space = if (parsed.photometric == 2) .rgb else .grayscale,
+            .alpha_mode = alpha_mode,
+            .samples = parsed.samples,
+            .white_is_zero = parsed.photometric == 0,
+            .icc_profile = parsed.icc_profile,
+        } };
+    }
     return switch (parsed.photometric) {
         2 => .{ .rgb = .{
             .allocator = allocator,
@@ -286,6 +505,10 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !DecodedImage {
 
 pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage {
     var parsed = try parseChunky(allocator, bytes);
+    if (parsed.alpha_mode != null) {
+        parsed.deinit(allocator);
+        return TiffError.UnsupportedExtraSamples;
+    }
     if (parsed.photometric != 2) {
         parsed.deinit(allocator);
         return TiffError.UnsupportedPhotometric;
@@ -302,6 +525,10 @@ pub fn parseRgb(allocator: std.mem.Allocator, bytes: []const u8) !image.RgbImage
 
 pub fn parseGray(allocator: std.mem.Allocator, bytes: []const u8) !image.GrayImage {
     var parsed = try parseChunky(allocator, bytes);
+    if (parsed.alpha_mode != null) {
+        parsed.deinit(allocator);
+        return TiffError.UnsupportedExtraSamples;
+    }
     if (parsed.photometric != 0 and parsed.photometric != 1) {
         parsed.deinit(allocator);
         return TiffError.UnsupportedPhotometric;
@@ -311,6 +538,25 @@ pub fn parseGray(allocator: std.mem.Allocator, bytes: []const u8) !image.GrayIma
         .width = parsed.width,
         .height = parsed.height,
         .bit_depth = parsed.bit_depth,
+        .samples = parsed.samples,
+        .white_is_zero = parsed.photometric == 0,
+        .icc_profile = parsed.icc_profile,
+    };
+}
+
+pub fn parseAlpha(allocator: std.mem.Allocator, bytes: []const u8) !AlphaImage {
+    var parsed = try parseChunky(allocator, bytes);
+    const alpha_mode = parsed.alpha_mode orelse {
+        parsed.deinit(allocator);
+        return TiffError.UnsupportedExtraSamples;
+    };
+    return .{
+        .allocator = allocator,
+        .width = parsed.width,
+        .height = parsed.height,
+        .bit_depth = parsed.bit_depth,
+        .color_space = if (parsed.photometric == 2) .rgb else .grayscale,
+        .alpha_mode = alpha_mode,
         .samples = parsed.samples,
         .white_is_zero = parsed.photometric == 0,
         .icc_profile = parsed.icc_profile,
@@ -349,6 +595,7 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     var samples_per_pixel: u16 = 1;
     var planar_config: u16 = 1;
     var sample_format: u16 = 1;
+    var extra_samples_ref: ?ValueRef = null;
     var icc_profile_ref: ?ValueRef = null;
 
     for (0..entry_count) |i| {
@@ -364,6 +611,10 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             278 => {},
             279 => strip_counts_ref = try valueRef(bytes, entry),
             284 => planar_config = try readSingleU16(bytes, endian, entry),
+            338 => {
+                if (extra_samples_ref != null) return TiffError.InvalidIfd;
+                extra_samples_ref = try valueRef(bytes, entry);
+            },
             339 => sample_format = try readSampleFormat(bytes, endian, entry),
             34675 => icc_profile_ref = try valueRef(bytes, entry),
             else => {},
@@ -378,12 +629,30 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
 
     if (w == 0 or h == 0) return TiffError.InvalidTagValue;
     if (compression != 1) return TiffError.UnsupportedCompression;
-    const component_count: usize = switch (photo) {
+    const color_component_count: usize = switch (photo) {
         0, 1 => 1,
         2 => 3,
         else => return TiffError.UnsupportedPhotometric,
     };
-    if (@as(usize, samples_per_pixel) != component_count) return TiffError.InvalidTagValue;
+    const component_count = @as(usize, samples_per_pixel);
+    if (component_count < color_component_count) return TiffError.InvalidTagValue;
+    const extra_count = component_count - color_component_count;
+    const alpha_mode: ?color.AlphaMode = switch (extra_count) {
+        0 => no_alpha: {
+            if (extra_samples_ref != null) return TiffError.InvalidTagValue;
+            break :no_alpha null;
+        },
+        1 => has_alpha: {
+            const extra = extra_samples_ref orelse return TiffError.InvalidTagValue;
+            if (extra.count != 1) return TiffError.UnsupportedExtraSamples;
+            break :has_alpha switch (try readU16Value(bytes, endian, extra, 0)) {
+                1 => .associated,
+                2 => .unassociated,
+                else => return TiffError.UnsupportedExtraSamples,
+            };
+        },
+        else => return TiffError.UnsupportedExtraSamples,
+    };
     if (planar_config != 1) return TiffError.UnsupportedPlanarConfiguration;
     if (sample_format != 1) return TiffError.UnsupportedSampleFormat;
     const bit_values = bits_ref orelse return TiffError.UnsupportedBitsPerSample;
@@ -446,6 +715,7 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         .height = height_usize,
         .bit_depth = @as(u8, @intCast(bit_depth)),
         .photometric = photo,
+        .alpha_mode = alpha_mode,
         .samples = samples,
         .icc_profile = icc_profile,
     };

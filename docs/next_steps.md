@@ -21,11 +21,13 @@ expansion and live OpenJPEG/Grok pixel agreement.
 | Containers 9→10 | **N6 palette vertical:** one index component, unsigned uniform RGB `pclr`, identity `cmap`, checked expansion | LANDED | Bounded semantics keep the codestream core one-component and fail closed elsewhere | Yes: local malformed matrix plus OpenJPEG/Grok live decode |
 
 The engineering scorecard is complete, but this is not a formal ISO
-certification or a claim of arbitrary JP2/JPX support. The first bounded
-gray+alpha/RGBA JP2 `cdef` slice is now present at the planar API boundary;
-TIFF ExtraSamples, RGB-triplet-only MCT with alpha, mixed precision, general
-N-component layouts, and broader palette mappings remain explicit breadth
-work. PCRD quality research also continues independently.
+certification or a claim of arbitrary JP2/JPX support. Bounded gray+alpha/RGBA
+JP2 `cdef` and TIFF ExtraSamples conversion are now present. RGBA additionally
+supports reversible MCT over RGB only while alpha stays independent; no-MCT
+RGBA remains available. Live no-MCT and RCT+alpha outputs are accepted by
+OpenJPEG/Grok/Kakadu and are pixel-exact through Grok/Kakadu. Mixed precision,
+subsampling, general N-component layouts, and broader palette mappings remain
+explicit breadth work. PCRD quality research also continues independently.
 
 Performance checkpoint (2026-07-13): rate-targeted direct-MQ encode now
 captures exact per-pass distortion during the real T1 traversal. Removing the

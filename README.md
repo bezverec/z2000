@@ -16,8 +16,9 @@ certification.
 
 ## Features
 
-- TIFF 6.0 RGB and grayscale input: uncompressed chunky 8-bit or 16-bit
-  strips, including optional ICC profile preservation.
+- TIFF 6.0 RGB, grayscale, gray+alpha, and RGBA input: uncompressed chunky
+  8-bit or 16-bit strips, including optional ICC profile preservation and
+  associated/unassociated alpha semantics.
 - Lossless JP2 encoding with RCT, reversible 5/3 DWT, quality layers, all five
   progression orders, PLT/TLM, and strict no-sidecar decode.
 - Lossy JP2 encoding with ICT, irreversible 9/7 DWT, scalar-derived or
@@ -27,16 +28,15 @@ certification.
 - ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
   PPM, and PPT packet headers on their documented profiles.
 - Bounded grayscale and palette JP2 profiles, plus bounded 1..4-component
-  no-MCT planar layouts and alpha-aware JP2 `cdef` signalling at the API
-  level, with strict malformed-input handling and OpenJPEG/Grok/Kakadu
-  interoperability tests.
+  planar layouts, alpha-aware JP2 `cdef` signalling, and reversible RGBA RCT
+  over the RGB triplet only, with strict malformed-input handling and
+  OpenJPEG/Grok/Kakadu interoperability tests.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
-bounded 1..4 no-MCT envelope (TIFF alpha input, RGB-only MCT with alpha,
-subsampling, mixed depth),
+bounded 1..4 envelope (subsampling and mixed depth),
 non-empty PLT-less multi-part tiles, broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
@@ -148,7 +148,8 @@ than silently changing the codestream profile.
 ### Profile And Quality
 
 - **--mct MODE**: Color transform: **rct** for reversible RGB, **ict** for
-  irreversible RGB, or **none** for component-independent coding.
+  irreversible RGB, or **none** for component-independent coding. RGBA
+  defaults to **rct** over RGB only; gray+alpha always uses **none**.
 - **--transform MODE**: Wavelet transform: reversible **5-3** or irreversible
   **9-7**.
 - **--qstyle STYLE**: Quantization: **none**, **scalar-derived**, or
@@ -222,7 +223,8 @@ The production `tiff-to-jp2` path is deliberately narrow:
 
 - one TIFF image / first IFD;
 - RGB, BlackIsZero grayscale, or WhiteIsZero grayscale photometric
-  interpretation;
+  interpretation, optionally with one final associated or unassociated alpha
+  sample;
 - chunky/interleaved samples;
 - 8 or 16 unsigned bits per channel;
 - uncompressed strip storage;
@@ -233,16 +235,18 @@ ISO MQ, in-band packet headers, PLT, optional TLM/SOP/EPH, and either one tile
 part or `R` resolution tile-parts. OpenJPEG 2.5.4 and Grok 20.3.6 decode the
 8-bit and 16-bit output pixel-exactly; z2000 strict-decodes both references'
 grayscale output pixel-exactly too. The same planar engine also serves
-bounded 2- and 4-component no-MCT layouts through the library API
+bounded 2- and 4-component planar layouts through the library API
 (`encodeLosslessPlanarWithOptions`/`decodeLosslessPlanar`, OpenJPEG/Grok
-pixel-exact). `wrapPlanarAlphaCodestream` adds strict gray+alpha and RGBA JP2
-`cdef` semantics for those planar streams. TIFF ExtraSamples input/output and
-RCT over only the RGB triplet are the next feature-plan slices. Multi-tile
-grayscale and mixed component depths remain fail-closed.
+pixel-exact). The CLI now maps TIFF `ExtraSamples` values 1/2 to strict
+gray+alpha or RGBA JP2 `cdef` semantics and back without changing
+associated/unassociated samples. Gray+alpha uses no MCT; RGBA defaults to RCT
+over RGB while alpha remains an independently level-shifted component.
+Explicit `--mct none` remains available for RGBA. Multi-tile grayscale and
+mixed component depths remain fail-closed.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
-floating-point samples, extra alpha/sample channels, mixed bit depth, signed
-sample formats, and multipage handling fail closed.
+floating-point samples, unspecified or multiple auxiliary channels, mixed bit
+depth, signed sample formats, and multipage handling fail closed.
 
 ## Documentation
 

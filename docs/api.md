@@ -37,15 +37,21 @@ zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N]
 its Git-derived build number and revision. It does not describe the internal
 legacy `.z2000` payload version or JPEG2000 marker/profile syntax.
 
-The TIFF module exposes `read`/`parse` for tagged RGB-or-grayscale dispatch,
-plus strict `readRgb`/`parseRgb` and `readGray`/`parseGray` adapters. `writeGray`
-roundtrips uncompressed 8/16-bit BlackIsZero or WhiteIsZero strips. The public
-`tiff-to-jp2` dispatches RGB or grayscale input. The grayscale branch
+The TIFF module exposes `read`/`parse` for tagged RGB, grayscale, or alpha
+dispatch, plus strict `readRgb`/`parseRgb`, `readGray`/`parseGray`, and
+`readAlpha`/`parseAlpha` adapters. `AlphaImage` carries chunky gray+alpha or
+RGBA samples plus `color.AlphaMode`; `writeAlpha` emits exactly one final TIFF
+`ExtraSamples` value 1/2. The public `tiff-to-jp2` dispatches all three image
+families. The grayscale branch
 normalizes WhiteIsZero, selects no MCT by default, and emits the bounded
 single-tile reversible 5/3/RPCL/ISO-MQ profile. Explicit incompatible options
-fail closed. `decode-temp-jp2` dispatches one- or three-component JP2 output to
-the grayscale or RGB strict decoder and TIFF writer; a supported one-component
-`pclr`/`cmap` stream is expanded to RGB first.
+fail closed. The alpha branch normalizes only a WhiteIsZero gray plane and
+preserves alpha samples verbatim. Gray+alpha selects no MCT; RGBA selects RCT
+by default, transforming only RGB while alpha receives the ordinary unsigned
+DC level shift. Explicit `--mct none` keeps all four components independent.
+`decode-temp-jp2` dispatches one- through four-component bounded JP2 output to
+the matching TIFF writer; a supported one-component `pclr`/`cmap` stream is
+expanded to RGB first.
 
 Important `tiff-to-jp2` options:
 
@@ -79,6 +85,11 @@ Supported public JP2 profiles are still narrow:
 - reversible grayscale: one component, single tile, `--mct none --transform
   5-3 --qstyle none --progression RPCL`, in-band headers, PLT, and optional
   `R` resolution tile-parts/TLM/SOP/EPH
+- reversible gray+alpha: two components with one final Typ 1/2 alpha channel,
+  `--mct none --transform 5-3 --qstyle none --progression RPCL`
+- reversible RGBA: four components with one final Typ 1/2 alpha channel;
+  `--mct rct` transforms only RGB and is the CLI default, while `--mct none`
+  keeps all four components independent; ICT remains fail-closed
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution
@@ -160,15 +171,16 @@ Primary public functions:
 - `encodeLosslessWithOptions(allocator, rgb, options)`
 - `encodeLosslessWithOptionsProfiled(allocator, rgb, options, timings)`
 - `encodeLosslessPlanarWithOptions(allocator, planes, options)` — bounded
-  1..4-component no-MCT layouts over `color.SamplePlanes`; grayscale is its
-  one-plane special case
+  1..4-component layouts over `color.SamplePlanes`; reversible RGBA may use
+  RCT over planes 0..2 while plane 3 remains independent
 - `jp2.AlphaMode` and
   `jp2.wrapPlanarAlphaCodestream(allocator, planes, alpha_mode, icc, bytes)` —
-  bounded gray+alpha/RGBA JP2 wrapping for 2/4-component no-MCT streams;
+  bounded gray+alpha/RGBA JP2 wrapping for 2/4-component reversible streams;
   alpha is the final plane and is signalled explicitly through `cdef`
 - `decodeLosslessPlanar(allocator, bytes)` /
   `decodeLosslessPlanarWithOptions(allocator, bytes, options)` — strict
-  decode of single-tile no-MCT reversible 5/3 streams with SIZ Csiz 1..4
+  decode of single-tile reversible 5/3 streams with SIZ Csiz 1..4, including
+  no-MCT layouts and four-component RGB-triplet RCT
 - `decodeLosslessTemporary(allocator, bytes)`
 - `decodeLosslessTemporaryWithOptions(allocator, bytes, options)`
 - `analyzeLosslessTemporary(bytes)`
@@ -274,12 +286,13 @@ agreement, and no MCT for one component. `wrapGrayCodestream` accepts only
 BlackIsZero-normalized samples; WhiteIsZero must be explicitly inverted before
 codestream encoding. `Palette.expand` validates every index before copying an
 interleaved RGB triplet, and reports `PaletteIndexOutOfRange` on malformed data.
-`wrapPlanarAlphaCodestream` requires alpha to be the final plane and currently
-wraps only no-MCT codestreams; TIFF ExtraSamples and RCT over only the RGB
-triplet are not yet public.
+`wrapPlanarAlphaCodestream` requires alpha to be the final plane. Gray+alpha
+must use no MCT; RGBA accepts either no MCT or reversible MCT=1, interpreted as
+RCT over RGB only with alpha independent. TIFF ExtraSamples input/output is
+connected to both profiles.
 
 ICC support is staged as metadata preservation before color conversion. TIFF
-tag 34675 is stored as owned RGB or grayscale image metadata; both wrappers
+tag 34675 is stored as owned RGB, grayscale, or alpha image metadata; wrappers
 write a JP2 restricted ICC `colr` box when present, `parseInfo` reports ICC
 presence and profile byte count, and `extractIccProfile` returns an owned copy
 of the profile payload. Profiles are treated as opaque payloads and preserved

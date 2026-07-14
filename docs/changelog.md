@@ -5,6 +5,42 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### RGB-Triplet RCT With Independent Alpha (F2 Slice 3)
+
+- Extended the bounded four-component reversible path so COD MCT=1 applies
+  RCT only to RGB planes 0..2; the final alpha plane is independently DC
+  level-shifted, wavelet transformed, packetized, and reconstructed.
+- The strict planar reader and JP2 validator now accept this reversible RGBA
+  profile while gray+alpha MCT, RGBA ICT, and irreversible four-component MCT
+  remain fail-closed. Explicit no-MCT RGBA remains supported.
+- `tiff-to-jp2` now selects RCT by default for RGBA and no MCT for gray+alpha.
+  Added 8/16-bit transform and codestream roundtrips, COD MCT marker checks,
+  JP2 `cdef` validation, and an RCT-backed TIFF/ICC alpha roundtrip.
+- A live 32x32 RCT+alpha JP2 is accepted by OpenJPEG 2.5.4, Grok 20.3.6,
+  and Kakadu 8.4.1. Grok/Kakadu TIFF output is pixel-exact and preserves
+  unassociated alpha; OpenJPEG again proves codestream acceptance but omits
+  TIFF ExtraSamples tag 338.
+
+### TIFF ExtraSamples Alpha Conversion (F2 Slice 2)
+
+- Added a shared `color.AlphaMode` plus `tiff.AlphaImage` for chunky 8/16-bit
+  gray+alpha and RGBA. The strict TIFF reader/writer accepts exactly one final
+  ExtraSamples value 1 (associated) or 2 (unassociated), preserves ICC bytes,
+  and rejects unspecified, malformed, or multiple auxiliary samples.
+- Connected `tiff-to-jp2` and strict JP2-to-TIFF decode to the 2/4-component
+  reversible no-MCT planar path. WhiteIsZero normalization changes only the
+  grayscale plane; alpha samples are never silently premultiplied or
+  unpremultiplied. At this intermediate slice explicit RCT/ICT remained
+  fail-closed; reversible RGBA RCT lands in slice 3 above.
+- Added 8-bit gray+alpha and 16-bit RGBA TIFF roundtrips, malformed
+  ExtraSamples coverage, and a complete TIFF RGBA -> JP2 -> strict decode ->
+  TIFF regression preserving pixels, alpha mode, and ICC payload bytes.
+- Live 32x32 RGBA output is accepted by OpenJPEG 2.5.4, Grok 20.3.6, and
+  Kakadu 8.4.1. Grok/Kakadu TIFF outputs preserve unassociated alpha and are
+  pixel-exact against the source. OpenJPEG decodes the JP2 but its TIFF writer
+  omits ExtraSamples tag 338, so that leg is recorded as codestream acceptance
+  rather than a semantic TIFF roundtrip.
+
 ### Bounded JP2 Alpha Channel Definitions (F2 Slice 1)
 
 - Added `jp2.AlphaMode` and `wrapPlanarAlphaCodestream` for gray+alpha and
@@ -17,8 +53,9 @@ entries are grouped by development milestone rather than semantic version.
   `Info`, and rejects missing, duplicate, mistyped, or reassociated entries.
   COC/QCC validation storage now follows the four-component bound.
 - Added local gray+alpha/RGBA wrapper-to-strict-planar roundtrips and malformed
-  `cdef` coverage. TIFF ExtraSamples and RGB-triplet-only MCT remain
-  fail-closed and are the next F2 slices.
+  `cdef` coverage. TIFF ExtraSamples is connected by F2 slice 2 above;
+  RGB-triplet-only MCT was still fail-closed at this first slice and lands in
+  slice 3 above.
 
 ### Bounded Planar Component Layouts (F1c) And Grayscale Unification
 
@@ -27,8 +64,9 @@ entries are grouped by development milestone rather than semantic version.
   `encodeLosslessPlanarWithOptions` encodes single-tile reversible 5/3 RPCL
   streams with SIZ Csiz = plane count (quality layers and rates included),
   and `decodeLosslessPlanar`/`decodeLosslessPlanarWithOptions` strict-decode
-  them back to planes. Non-3-component streams must be MCT-free; Csiz > 4
-  and the JP2 wrapper's 1/3-component rule stay fail-closed.
+  them back to planes. At this F1 milestone non-3-component streams were
+  MCT-free; the bounded RGBA RCT extension lands in F2 slice 3 above.
+  Csiz > 4 stays fail-closed.
 - The strict metadata/catalog/assembly machinery was already component-count
   generic; the {1,3} guards widened to the bounded envelope
   (`max_codestream_components = 4`) and the [3]-sized catalog arrays grew

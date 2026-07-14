@@ -28,14 +28,18 @@ The JP2 boundary also owns a deliberately bounded palette vertical:
 same one-component grayscale pipeline, so palette metadata does not leak into
 the codestream core.
 
-The first F2 alpha boundary is likewise container-owned:
+The F2 alpha boundary is container-owned:
 `wrapPlanarAlphaCodestream` maps a two-plane no-MCT stream to gray+alpha and a
 four-plane stream to RGBA, always with alpha last. JP2 `cdef` distinguishes
 unassociated opacity (Typ 1) from associated/premultiplied opacity (Typ 2),
 both associated with the whole image (Asoc 0). Strict parsing requires that
 complete mapping for every 2/4-component JP2; arbitrary auxiliary channels do
-not become alpha implicitly. TIFF ExtraSamples and RGB-triplet-only MCT are
-still fail-closed and remain separate F2 front-end/core slices.
+not become alpha implicitly. `src/tiff.zig` now maps exactly one final TIFF
+ExtraSamples value 1/2 to the same shared alpha mode, preserving chunky sample
+values and ICC metadata through the reversible CLI path. RGBA defaults to
+MCT=1: `forwardRctAlpha`/`inverseRctAlpha` transform planes 0..2 with the ISO
+RCT while plane 3 receives only the normal unsigned DC level shift. Explicit
+no-MCT RGBA remains supported; gray+alpha cannot request MCT.
 
 The project is intentionally fail-closed. Profile options that would require
 payload behavior not implemented yet are rejected with `UnsupportedPayload`.
@@ -111,7 +115,8 @@ Current TIFF to JP2 encode:
 11. `src/jp2.zig` wraps the codestream in JP2 boxes, using enumerated sRGB or
     grayscale `colr` by default, or restricted ICC `colr` when the source
     supplied an ICC profile. The public conversion pipeline dispatches to the
-    RGB or grayscale wrapper after TIFF photometric normalization.
+    RGB, grayscale, or bounded gray+alpha/RGBA wrapper after TIFF photometric
+    normalization; WhiteIsZero inversion never touches the alpha plane.
 
 JP2 decode for z2000-produced files now uses the strict RPCL packet block
 catalog for the current RPCL/RCT/5-3 path. Debug sidecar decode remains as an

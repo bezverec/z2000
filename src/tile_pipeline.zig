@@ -2109,6 +2109,44 @@ pub fn buildPlanarRpclEncodeArtifactsIsoMq(
     options: PacketScaffoldOptions,
     style: ebcot.CodeBlockStyle,
 ) !TileRpclEncodeArtifacts {
+    return buildPlanarRpclEncodeArtifactsIsoMqInternal(
+        allocator,
+        source,
+        requested_levels,
+        options,
+        style,
+        false,
+    );
+}
+
+/// Four-component reversible profile: MCT=1 transforms only RGB (planes
+/// 0..2); the final alpha plane remains independent apart from DC shifting.
+pub fn buildPlanarRctAlphaRpclEncodeArtifactsIsoMq(
+    allocator: std.mem.Allocator,
+    source: color.SamplePlanes,
+    requested_levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+) !TileRpclEncodeArtifacts {
+    if (source.planes.len != 4) return PacketScaffoldError.InvalidPlane;
+    return buildPlanarRpclEncodeArtifactsIsoMqInternal(
+        allocator,
+        source,
+        requested_levels,
+        options,
+        style,
+        true,
+    );
+}
+
+fn buildPlanarRpclEncodeArtifactsIsoMqInternal(
+    allocator: std.mem.Allocator,
+    source: color.SamplePlanes,
+    requested_levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+    rct_alpha: bool,
+) !TileRpclEncodeArtifacts {
     if (source.width == 0 or source.height == 0) return PacketScaffoldError.InvalidPlane;
     if (source.bit_depth != 8 and source.bit_depth != 16) return PacketScaffoldError.InvalidPlane;
     if (source.planes.len == 0 or source.planes.len > color.max_components) {
@@ -2126,22 +2164,27 @@ pub fn buildPlanarRpclEncodeArtifactsIsoMq(
         return PacketScaffoldError.InvalidPlane;
     const tile = grid.tile(0) catch return PacketScaffoldError.InvalidPlane;
 
-    var planes_carrier = try color.RctPlanes.init(
-        allocator,
-        source.width,
-        source.height,
-        source.bit_depth,
-        source.planes.len,
-    );
+    var planes_carrier = if (rct_alpha)
+        try color.forwardRctAlpha(allocator, source)
+    else
+        try color.RctPlanes.init(
+            allocator,
+            source.width,
+            source.height,
+            source.bit_depth,
+            source.planes.len,
+        );
     var planes_moved = false;
     errdefer if (!planes_moved) planes_carrier.deinit();
 
-    const max_sample: u16 = if (source.bit_depth == 8) 255 else std.math.maxInt(u16);
-    const level_shift = @as(i32, 1) << @as(u5, @intCast(source.bit_depth - 1));
-    for (source.planes, planes_carrier.planes) |samples, coefficients| {
-        for (samples, coefficients) |sample, *coefficient| {
-            if (sample > max_sample) return PacketScaffoldError.InvalidPlane;
-            coefficient.* = @as(i32, sample) - level_shift;
+    if (!rct_alpha) {
+        const max_sample: u16 = if (source.bit_depth == 8) 255 else std.math.maxInt(u16);
+        const level_shift = @as(i32, 1) << @as(u5, @intCast(source.bit_depth - 1));
+        for (source.planes, planes_carrier.planes) |samples, coefficients| {
+            for (samples, coefficients) |sample, *coefficient| {
+                if (sample > max_sample) return PacketScaffoldError.InvalidPlane;
+                coefficient.* = @as(i32, sample) - level_shift;
+            }
         }
     }
 

@@ -180,6 +180,24 @@ fn tiffInfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
                 gray.samples.len,
             },
         ),
+        .alpha => |alpha| std.debug.print(
+            "TIFF {s}+alpha ({s}, {s}): {s}: {}x{}, {} bits/channel, {} samples\n",
+            .{
+                @tagName(alpha.color_space),
+                alpha.alpha_mode.label(),
+                if (alpha.color_space == .rgb)
+                    "RGB"
+                else if (alpha.white_is_zero)
+                    "WhiteIsZero"
+                else
+                    "BlackIsZero",
+                args[0],
+                alpha.width,
+                alpha.height,
+                alpha.bit_depth,
+                alpha.samples.len,
+            },
+        ),
     }
 }
 
@@ -459,6 +477,33 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             wrapped = try jp2.wrapGrayCodestream(allocator, normalized, j2k);
             command_timings.jp2_wrap_ns = elapsedNs(wrap_start);
         },
+        .alpha => |alpha| {
+            if (!mct_explicit) {
+                options.mct = if (alpha.color_space == .rgb) .rct else .none;
+            }
+            width = alpha.width;
+            height = alpha.height;
+            bit_depth = alpha.bit_depth;
+            components = @intCast(alpha.componentCount());
+
+            var planes = try alpha.toSamplePlanes(allocator);
+            defer planes.deinit();
+            const encode_start = monotonicNs();
+            const j2k = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, options);
+            defer allocator.free(j2k);
+            command_timings.codestream_ns = elapsedNs(encode_start);
+            encode_timings.total_ns = command_timings.codestream_ns;
+
+            const wrap_start = monotonicNs();
+            wrapped = try jp2.wrapPlanarAlphaCodestream(
+                allocator,
+                planes,
+                alpha.alpha_mode,
+                alpha.icc_profile,
+                j2k,
+            );
+            command_timings.jp2_wrap_ns = elapsedNs(wrap_start);
+        },
     }
     defer allocator.free(wrapped);
 
@@ -651,6 +696,16 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             try codestream.decodeLosslessTemporaryWithOptionsProfiled(allocator, j2k, options, &decode_timings)
         else
             try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options) },
+        2, 4 => alpha: {
+            const alpha_mode = info.alpha_mode orelse return error.UnsupportedComponentCount;
+            var planes = try codestream.decodeLosslessPlanarWithOptions(allocator, j2k, options);
+            defer planes.deinit();
+            break :alpha .{ .alpha = try tiff.AlphaImage.fromSamplePlanes(
+                allocator,
+                planes,
+                alpha_mode,
+            ) };
+        },
         else => return error.UnsupportedComponentCount,
     };
     defer decoded.deinit();
@@ -667,6 +722,10 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
                 if (gray.icc_profile) |existing| allocator.free(existing);
                 gray.icc_profile = profile;
             },
+            .alpha => |*alpha| {
+                if (alpha.icc_profile) |existing| allocator.free(existing);
+                alpha.icc_profile = profile;
+            },
         }
     }
     command_timings.icc_extract_ns = elapsedNs(icc_start);
@@ -675,6 +734,7 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     switch (decoded) {
         .rgb => |rgb| try tiff.writeRgb(io, allocator, rgb, args[1]),
         .grayscale => |gray| try tiff.writeGray(io, allocator, gray, args[1]),
+        .alpha => |alpha| try tiff.writeAlpha(io, allocator, alpha, args[1]),
     }
     command_timings.tiff_write_ns = elapsedNs(write_start);
     command_timings.total_ns = command_timings.jp2_read_ns +

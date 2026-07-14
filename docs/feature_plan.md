@@ -72,9 +72,9 @@ and 4-component no-MCT layouts are public at the codestream API level
 (`color.SamplePlanes`, `encodeLosslessPlanarWithOptions`,
 `decodeLosslessPlanar`), with synthetic roundtrips, fail-closed envelope
 tests, and OpenJPEG/Grok pixel-exact decode of both layouts (per-component
-PGX comparison). Widening the gray/planar encode gate beyond
-RPCL/R-divisions stays open as interop-gated breadth work; **F2 (alpha
-TIFF front ends + `cdef` semantics) is now unblocked and next.**
+PGX comparison). Widening the gray/planar encode gate beyond RPCL/R-divisions
+stays open as interop-gated breadth work; **F2 is complete for the bounded
+single-tile reversible profile, and F3 is the next component-layout campaign.**
 
 **Verify:** byte-identical RGB/gray regression corpus at every PR;
 2-component (gray+alpha shaped) and 4-component synthetic roundtrips;
@@ -95,8 +95,24 @@ codestreams as gray+alpha or RGBA. The writer emits identity color-channel
 definitions plus one final whole-image alpha channel (`cdef` Typ 1 for
 unassociated, Typ 2 for associated, Asoc 0); the strict reader preserves the
 mode and rejects missing, duplicate, mistyped, or reassociated definitions.
-TIFF ExtraSamples parsing/writing and MCT over only the RGB triplet remain the
-next F2 slices, so the CLI still fails closed on alpha TIFFs.
+
+**Second TIFF/CLI slice landed 2026-07-14:** the strict TIFF reader/writer
+accepts exactly one final `ExtraSamples` value 1 (associated) or 2
+(unassociated) on gray/RGB chunky 8/16-bit strips. `tiff-to-jp2` and strict
+JP2-to-TIFF decode preserve that mode, pixels, WhiteIsZero normalization, and
+ICC bytes through the reversible no-MCT planar path. Unspecified/multiple
+auxiliary samples remain fail-closed. A live no-MCT RGBA smoke is
+pixel-exact through Grok and Kakadu with unassociated alpha preserved;
+OpenJPEG accepts and decodes the JP2, although its TIFF writer omits tag 338.
+
+**Third core slice landed 2026-07-14:** four-component MCT=1 now applies the
+reversible color transform only to RGB planes 0..2. Alpha remains an
+independent DC-shifted and 5/3-transformed component throughout T1/T2. The CLI
+defaults RGBA to this profile, retains explicit no-MCT RGBA, and keeps ICT or
+MCT on gray+alpha fail-closed. Local 8/16-bit strict roundtrips pin COD MCT,
+alpha samples, `cdef`, and ICC preservation. A live RCT+alpha JP2 is accepted
+by OpenJPEG, Grok, and Kakadu and is pixel-exact through Grok/Kakadu with
+unassociated alpha preserved.
 
 **Verify:** TIFF RGBA roundtrip; OpenJPEG/Grok decode with alpha preserved;
 fail-closed for alpha definitions the codec cannot represent.

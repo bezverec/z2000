@@ -3441,7 +3441,7 @@ test "TIFF grayscale writer roundtrips BlackIsZero and WhiteIsZero rasters" {
     defer generic8.deinit();
     switch (generic8) {
         .grayscale => |gray| try std.testing.expectEqualSlices(u16, samples8, gray.samples),
-        .rgb => return error.TestUnexpectedResult,
+        .rgb, .alpha => return error.TestUnexpectedResult,
     }
 
     const samples16 = try allocator.dupe(u16, &.{ 0x0000, 0x0102, 0x7fff, 0xabcd, 0xff00, 0xffff });
@@ -3464,6 +3464,204 @@ test "TIFF grayscale writer roundtrips BlackIsZero and WhiteIsZero rasters" {
     try std.testing.expect(decoded16.white_is_zero);
     try std.testing.expectEqualSlices(u16, samples16, decoded16.samples);
     try std.testing.expectEqualSlices(u8, icc, decoded16.icc_profile.?);
+}
+
+test "TIFF alpha writer roundtrips gray-alpha and RGBA semantics" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [2][96]u8 = undefined;
+    const gray_path = try std.fmt.bufPrint(&path_buffer[0], ".zig-cache/tmp/{s}/gray-alpha8.tif", .{tmp.sub_path});
+    const rgba_path = try std.fmt.bufPrint(&path_buffer[1], ".zig-cache/tmp/{s}/rgba16.tif", .{tmp.sub_path});
+
+    const gray_samples = try allocator.dupe(u16, &.{ 0, 255, 17, 193, 255, 0 });
+    defer allocator.free(gray_samples);
+    const gray_alpha = tiff.AlphaImage{
+        .allocator = allocator,
+        .width = 3,
+        .height = 1,
+        .bit_depth = 8,
+        .color_space = .grayscale,
+        .alpha_mode = .unassociated,
+        .samples = gray_samples,
+        .white_is_zero = true,
+    };
+    try tiff.writeAlpha(io, allocator, gray_alpha, gray_path);
+
+    var decoded_gray = try tiff.readAlpha(io, allocator, gray_path);
+    defer decoded_gray.deinit();
+    try std.testing.expectEqual(tiff.AlphaColorSpace.grayscale, decoded_gray.color_space);
+    try std.testing.expectEqual(color.AlphaMode.unassociated, decoded_gray.alpha_mode);
+    try std.testing.expect(decoded_gray.white_is_zero);
+    try std.testing.expectEqualSlices(u16, gray_samples, decoded_gray.samples);
+
+    var normalized = try decoded_gray.toSamplePlanes(allocator);
+    defer normalized.deinit();
+    try std.testing.expectEqualSlices(u16, &.{ 255, 238, 0 }, normalized.planes[0]);
+    try std.testing.expectEqualSlices(u16, &.{ 255, 193, 0 }, normalized.planes[1]);
+
+    const rgba_samples = try allocator.dupe(u16, &.{
+        0x0000, 0x0102, 0x0304, 0xffff,
+        0x1001, 0x2002, 0x3003, 0x7fff,
+    });
+    defer allocator.free(rgba_samples);
+    const icc = try allocator.dupe(u8, "synthetic RGBA ICC");
+    defer allocator.free(icc);
+    const rgba = tiff.AlphaImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 16,
+        .color_space = .rgb,
+        .alpha_mode = .associated,
+        .samples = rgba_samples,
+        .icc_profile = icc,
+    };
+    try tiff.writeAlpha(io, allocator, rgba, rgba_path);
+
+    var decoded_rgba = try tiff.readAlpha(io, allocator, rgba_path);
+    defer decoded_rgba.deinit();
+    try std.testing.expectEqual(tiff.AlphaColorSpace.rgb, decoded_rgba.color_space);
+    try std.testing.expectEqual(color.AlphaMode.associated, decoded_rgba.alpha_mode);
+    try std.testing.expect(!decoded_rgba.white_is_zero);
+    try std.testing.expectEqualSlices(u16, rgba_samples, decoded_rgba.samples);
+    try std.testing.expectEqualSlices(u8, icc, decoded_rgba.icc_profile.?);
+
+    var generic = try tiff.read(io, allocator, rgba_path);
+    defer generic.deinit();
+    switch (generic) {
+        .alpha => |alpha| try std.testing.expectEqual(color.AlphaMode.associated, alpha.alpha_mode),
+        .rgb, .grayscale => return error.TestUnexpectedResult,
+    }
+}
+
+test "TIFF alpha ExtraSamples metadata fails closed" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/rgba-extra.tif", .{tmp.sub_path});
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40 });
+    defer allocator.free(samples);
+    const rgba = tiff.AlphaImage{
+        .allocator = allocator,
+        .width = 1,
+        .height = 1,
+        .bit_depth = 8,
+        .color_space = .rgb,
+        .alpha_mode = .unassociated,
+        .samples = samples,
+    };
+    try tiff.writeAlpha(io, allocator, rgba, path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096));
+    defer allocator.free(bytes);
+
+    try std.testing.expectError(tiff.TiffError.UnsupportedExtraSamples, tiff.parseRgb(allocator, bytes));
+    for ([_]u16{ 0, 3 }) |unsupported_mode| {
+        const mutated = try allocator.dupe(u8, bytes);
+        defer allocator.free(mutated);
+        try writeTiffIfdInlineU16ForTest(mutated, 338, unsupported_mode);
+        try std.testing.expectError(tiff.TiffError.UnsupportedExtraSamples, tiff.parseAlpha(allocator, mutated));
+    }
+
+    {
+        const mutated = try allocator.dupe(u8, bytes);
+        defer allocator.free(mutated);
+        try writeTiffIfdInlineU16ForTest(mutated, 277, 5);
+        try std.testing.expectError(tiff.TiffError.UnsupportedExtraSamples, tiff.parseAlpha(allocator, mutated));
+    }
+    {
+        const mutated = try allocator.dupe(u8, bytes);
+        defer allocator.free(mutated);
+        const extra_entry = try tiffIfdEntryOffsetForTest(mutated, 338);
+        writeU16LeTest(mutated, extra_entry + 4, 2);
+        writeU16LeTest(mutated, extra_entry + 6, 0);
+        try std.testing.expectError(tiff.TiffError.UnsupportedExtraSamples, tiff.parseAlpha(allocator, mutated));
+    }
+    {
+        const mutated = try allocator.dupe(u8, bytes);
+        defer allocator.free(mutated);
+        const planar_entry = try tiffIfdEntryOffsetForTest(mutated, 284);
+        writeU16LeTest(mutated, planar_entry, 338);
+        try std.testing.expectError(tiff.TiffError.InvalidIfd, tiff.parseAlpha(allocator, mutated));
+    }
+}
+
+test "TIFF RGBA to JP2 strict roundtrip preserves pixels alpha and ICC" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [2][96]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&path_buffer[0], ".zig-cache/tmp/{s}/rgba-input.tif", .{tmp.sub_path});
+    const output_path = try std.fmt.bufPrint(&path_buffer[1], ".zig-cache/tmp/{s}/rgba-output.tif", .{tmp.sub_path});
+    const width = 19;
+    const height = 13;
+    const samples = try allocator.alloc(u16, width * height * 4);
+    defer allocator.free(samples);
+    for (0..width * height) |pixel| {
+        samples[pixel * 4] = @intCast((pixel * 17 + 3) & 0xff);
+        samples[pixel * 4 + 1] = @intCast((pixel * 29 + 7) & 0xff);
+        samples[pixel * 4 + 2] = @intCast((pixel * 43 + 11) & 0xff);
+        samples[pixel * 4 + 3] = @intCast((pixel * 13 + 191) & 0xff);
+    }
+    const icc = try allocator.dupe(u8, "synthetic RGBA roundtrip ICC");
+    defer allocator.free(icc);
+    const source = tiff.AlphaImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .color_space = .rgb,
+        .alpha_mode = .unassociated,
+        .samples = samples,
+        .icc_profile = icc,
+    };
+    try tiff.writeAlpha(io, allocator, source, input_path);
+
+    var parsed = try tiff.readAlpha(io, allocator, input_path);
+    defer parsed.deinit();
+    var planes = try parsed.toSamplePlanes(allocator);
+    defer planes.deinit();
+    const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, .{
+        .levels = 2,
+        .mct = .rct,
+        .block_width = 16,
+        .block_height = 16,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+    const wrapped = try jp2.wrapPlanarAlphaCodestream(
+        allocator,
+        planes,
+        parsed.alpha_mode,
+        parsed.icc_profile,
+        encoded,
+    );
+    defer allocator.free(wrapped);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u16, 4), info.components);
+    try std.testing.expectEqual(color.AlphaMode.unassociated, info.alpha_mode.?);
+    try std.testing.expect(info.has_icc_profile);
+    var decoded_planes = try codestream.decodeLosslessPlanar(allocator, try jp2.extractCodestream(wrapped));
+    defer decoded_planes.deinit();
+    var reconstructed = try tiff.AlphaImage.fromSamplePlanes(allocator, decoded_planes, info.alpha_mode.?);
+    defer reconstructed.deinit();
+    reconstructed.icc_profile = (try jp2.extractIccProfile(allocator, wrapped)) orelse
+        return error.TestUnexpectedResult;
+    try tiff.writeAlpha(io, allocator, reconstructed, output_path);
+
+    var roundtrip = try tiff.readAlpha(io, allocator, output_path);
+    defer roundtrip.deinit();
+    try std.testing.expectEqual(color.AlphaMode.unassociated, roundtrip.alpha_mode);
+    try std.testing.expectEqualSlices(u16, samples, roundtrip.samples);
+    try std.testing.expectEqualSlices(u8, icc, roundtrip.icc_profile.?);
 }
 
 test "TIFF grayscale adapters and writer fail closed" {
@@ -5771,9 +5969,15 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
         const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
         const identity_cdef = [_]u8{
             0x00, 0x03,
-            0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-            0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
+            0x00, 0x02,
+            0x00, 0x00,
+            0x00, 0x03,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x00, 0x01,
+            0x00, 0x01,
+            0x00, 0x00,
+            0x00, 0x02,
         };
         const with_cdef_ok = try insertJp2BoxInsideJp2HeaderForTest(
             allocator,
@@ -6354,6 +6558,27 @@ test "RCT transform matches JPEG2000 reversible equations" {
     var reconstructed = try color.inverseRct(allocator, planes);
     defer reconstructed.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, reconstructed.samples);
+}
+
+test "RCT alpha transforms RGB only and roundtrips 8 and 16 bit planes" {
+    const allocator = std.testing.allocator;
+    for ([_]u8{ 8, 16 }) |bit_depth| {
+        var source = try makePlanarTestPlanes(allocator, 17, 9, bit_depth, 4);
+        defer source.deinit();
+
+        var transformed = try color.forwardRctAlpha(allocator, source);
+        defer transformed.deinit();
+        const level_shift = @as(i32, 1) << @as(u5, @intCast(bit_depth - 1));
+        for (source.planes[3], transformed.planes[3]) |alpha, coefficient| {
+            try std.testing.expectEqual(@as(i32, alpha) - level_shift, coefficient);
+        }
+
+        var reconstructed = try color.inverseRctAlpha(allocator, transformed);
+        defer reconstructed.deinit();
+        for (source.planes, reconstructed.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
 }
 
 test "threaded forward RCT matches the serial transform byte-for-byte" {
@@ -23725,6 +23950,55 @@ test "planar 4-component 16-bit layout roundtrips losslessly with layers" {
     }
 }
 
+test "planar RGBA RCT applies MCT to RGB and roundtrips losslessly" {
+    const allocator = std.testing.allocator;
+    for ([_]u8{ 8, 16 }) |bit_depth| {
+        var source = try makePlanarTestPlanes(allocator, 19, 13, bit_depth, 4);
+        defer source.deinit();
+
+        const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, source, .{
+            .levels = 2,
+            .mct = .rct,
+            .layers = 2,
+            .block_width = 16,
+            .block_height = 16,
+            .tile_part_divisions = null,
+        });
+        defer allocator.free(encoded);
+
+        const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingMarker;
+        const cod = findMarker(encoded, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(@as(u16, 4), readU16BeTest(encoded, siz + 38));
+        try std.testing.expectEqual(@as(u8, 1), encoded[cod + 8]);
+        try std.testing.expectEqual(@as(u8, 1), encoded[cod + 13]);
+
+        const wrapped = try jp2.wrapPlanarAlphaCodestream(
+            allocator,
+            source,
+            .unassociated,
+            null,
+            encoded,
+        );
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(@as(u16, 4), info.components);
+        try std.testing.expectEqual(color.AlphaMode.unassociated, info.alpha_mode.?);
+
+        const irreversible_mct = try allocator.dupe(u8, wrapped);
+        defer allocator.free(irreversible_mct);
+        const wrapped_cod = findMarker(irreversible_mct, codestream.markerValue("cod")) orelse
+            return error.MissingCod;
+        irreversible_mct[wrapped_cod + 13] = 0;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(irreversible_mct));
+
+        var decoded = try codestream.decodeLosslessPlanar(allocator, try jp2.extractCodestream(wrapped));
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
+}
+
 test "JP2 planar alpha wrapper preserves gray-alpha and RGBA cdef semantics" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
@@ -23822,10 +24096,17 @@ test "planar encode fails closed outside the bounded envelope" {
     var source = try makePlanarTestPlanes(allocator, 8, 8, 8, 2);
     defer source.deinit();
 
-    // MCT requires the 3-component RGB front ends.
+    // The bounded planar MCT path is defined only for RGBA: two-component
+    // gray+alpha cannot apply the three-component reversible color transform.
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessPlanarWithOptions(allocator, source, .{ .levels = 2, .mct = .rct }),
+    );
+    var rgba = try makePlanarTestPlanes(allocator, 8, 8, 8, 4);
+    defer rgba.deinit();
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessPlanarWithOptions(allocator, rgba, .{ .levels = 2, .mct = .ict }),
     );
     // A five-plane carrier cannot even be constructed through the bounded
     // init; a hand-built one must be rejected by the encoder.
