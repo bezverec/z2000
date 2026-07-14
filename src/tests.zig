@@ -5683,7 +5683,7 @@ test "JP2 reader rejects unsupported basic RGB profile boxes" {
         defer allocator.free(corrupted);
         const ihdr_payload = try findJp2ChildBoxPayload(corrupted, jp2h_payload, "ihdr");
         corrupted[ihdr_payload.start + 9] = 4;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(corrupted));
+        try std.testing.expectError(jp2.Jp2Error.MissingRequiredBox, jp2.parseInfo(corrupted));
     }
 
     {
@@ -23723,6 +23723,98 @@ test "planar 4-component 16-bit layout roundtrips losslessly with layers" {
     for (source.planes, decoded.planes) |expected, actual| {
         try std.testing.expectEqualSlices(u16, expected, actual);
     }
+}
+
+test "JP2 planar alpha wrapper preserves gray-alpha and RGBA cdef semantics" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        components: usize,
+        bit_depth: u8,
+        mode: jp2.AlphaMode,
+        color_space: u32,
+        channel_type: u16,
+    }{
+        .{ .components = 2, .bit_depth = 8, .mode = .unassociated, .color_space = 17, .channel_type = 1 },
+        .{ .components = 4, .bit_depth = 16, .mode = .associated, .color_space = 16, .channel_type = 2 },
+    };
+
+    for (cases) |case| {
+        var source = try makePlanarTestPlanes(allocator, 19, 13, case.bit_depth, case.components);
+        defer source.deinit();
+        const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, source, .{
+            .levels = 2,
+            .mct = .none,
+            .block_width = 16,
+            .block_height = 16,
+            .tile_part_divisions = null,
+        });
+        defer allocator.free(encoded);
+
+        const wrapped = try jp2.wrapPlanarAlphaCodestream(allocator, source, case.mode, null, encoded);
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(@as(u16, @intCast(case.components)), info.components);
+        try std.testing.expectEqual(@as(u16, @intCast(case.components)), info.output_components);
+        try std.testing.expectEqual(case.mode, info.alpha_mode.?);
+
+        const jp2h = try findJp2BoxPayload(wrapped, "jp2h");
+        const colr = try findJp2ChildBoxPayload(wrapped, jp2h, "colr");
+        const cdef = try findJp2ChildBoxPayload(wrapped, jp2h, "cdef");
+        try std.testing.expectEqual(case.color_space, readU32BeTest(wrapped, colr.start + 3));
+        try std.testing.expectEqual(@as(u16, @intCast(case.components)), readU16BeTest(wrapped, cdef.start));
+        const color_components = case.components - 1;
+        for (0..color_components) |component| {
+            const offset = cdef.start + 2 + component * 6;
+            try std.testing.expectEqual(@as(u16, @intCast(component)), readU16BeTest(wrapped, offset));
+            try std.testing.expectEqual(@as(u16, 0), readU16BeTest(wrapped, offset + 2));
+            try std.testing.expectEqual(@as(u16, @intCast(component + 1)), readU16BeTest(wrapped, offset + 4));
+        }
+        const alpha_offset = cdef.start + 2 + color_components * 6;
+        try std.testing.expectEqual(@as(u16, @intCast(color_components)), readU16BeTest(wrapped, alpha_offset));
+        try std.testing.expectEqual(case.channel_type, readU16BeTest(wrapped, alpha_offset + 2));
+        try std.testing.expectEqual(@as(u16, 0), readU16BeTest(wrapped, alpha_offset + 4));
+
+        var decoded = try codestream.decodeLosslessPlanar(allocator, try jp2.extractCodestream(wrapped));
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
+}
+
+test "JP2 planar alpha cdef fails closed for missing or malformed semantics" {
+    const allocator = std.testing.allocator;
+    var source = try makePlanarTestPlanes(allocator, 9, 7, 8, 2);
+    defer source.deinit();
+    const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, source, .{
+        .levels = 2,
+        .mct = .none,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+    const wrapped = try jp2.wrapPlanarAlphaCodestream(allocator, source, .unassociated, null, encoded);
+    defer allocator.free(wrapped);
+    const jp2h = try findJp2BoxPayload(wrapped, "jp2h");
+    const cdef = try findJp2ChildBoxPayload(wrapped, jp2h, "cdef");
+
+    const missing = try removeJp2ChildBoxForTest(allocator, wrapped, jp2h, cdef);
+    defer allocator.free(missing);
+    try std.testing.expectError(jp2.Jp2Error.MissingRequiredBox, jp2.parseInfo(missing));
+
+    const invalid_type = try allocator.dupe(u8, wrapped);
+    defer allocator.free(invalid_type);
+    invalid_type[cdef.start + 11] = 3;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(invalid_type));
+
+    const invalid_association = try allocator.dupe(u8, wrapped);
+    defer allocator.free(invalid_association);
+    invalid_association[cdef.start + 13] = 1;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(invalid_association));
+
+    const duplicate_channel = try allocator.dupe(u8, wrapped);
+    defer allocator.free(duplicate_channel);
+    duplicate_channel[cdef.start + 9] = 0;
+    try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(duplicate_channel));
 }
 
 test "planar encode fails closed outside the bounded envelope" {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const color = @import("color.zig");
 const image = @import("image.zig");
 const rate_alloc = @import("rate_alloc.zig");
 
@@ -24,7 +25,22 @@ pub const Info = struct {
     palette_bits_per_component: u8 = 0,
     has_icc_profile: bool = false,
     icc_profile_bytes: usize = 0,
+    alpha_mode: ?AlphaMode = null,
     codestream_bytes: usize,
+};
+
+/// JP2 channel-definition semantics for a whole-image alpha channel. TIFF
+/// ExtraSamples value 2 maps to unassociated; value 1 maps to associated.
+pub const AlphaMode = enum {
+    unassociated,
+    associated,
+
+    pub fn label(self: AlphaMode) []const u8 {
+        return switch (self) {
+            .unassociated => "unassociated",
+            .associated => "associated",
+        };
+    }
 };
 
 /// The bounded JP2 Part 1 palette profile currently accepted by z2000:
@@ -213,6 +229,39 @@ pub fn wrapGrayCodestream(
     }, codestream);
 }
 
+/// Wraps the bounded F2 alpha layouts: gray+alpha (2 components) or RGBA
+/// (4 components), with the alpha plane last. This first container slice is
+/// intentionally no-MCT; the codestream validator enforces that profile.
+pub fn wrapPlanarAlphaCodestream(
+    allocator: std.mem.Allocator,
+    input: color.SamplePlanes,
+    alpha_mode: AlphaMode,
+    icc_profile: ?[]const u8,
+    codestream: []const u8,
+) ![]u8 {
+    if (input.width == 0 or input.height == 0) return Jp2Error.InvalidBox;
+    if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
+        return Jp2Error.ImageTooLarge;
+    }
+    if (input.bit_depth != 8 and input.bit_depth != 16) return Jp2Error.UnsupportedProfile;
+    if (input.planes.len != 2 and input.planes.len != 4) return Jp2Error.UnsupportedProfile;
+    const pixels = std.math.mul(usize, input.width, input.height) catch
+        return Jp2Error.ImageTooLarge;
+    for (input.planes) |plane| {
+        if (plane.len != pixels) return Jp2Error.InvalidBox;
+    }
+
+    return wrapCodestream(allocator, .{
+        .width = @intCast(input.width),
+        .height = @intCast(input.height),
+        .components = @intCast(input.planes.len),
+        .bits_per_component = input.bit_depth,
+        .enumerated_color_space = if (input.planes.len == 2) enum_cs_grayscale else enum_cs_srgb,
+        .icc_profile = icc_profile,
+        .alpha_mode = alpha_mode,
+    }, codestream);
+}
+
 pub fn wrapPaletteCodestream(
     allocator: std.mem.Allocator,
     indexed: image.GrayImage,
@@ -266,7 +315,33 @@ const WrapProfile = struct {
     enumerated_color_space: u32,
     icc_profile: ?[]const u8,
     palette: ?Palette = null,
+    alpha_mode: ?AlphaMode = null,
 };
+
+fn appendAlphaChannelDefinition(
+    allocator: std.mem.Allocator,
+    jp2_header: *std.ArrayList(u8),
+    components: u16,
+    alpha_mode: AlphaMode,
+) !void {
+    if (components != 2 and components != 4) return Jp2Error.UnsupportedProfile;
+    var cdef: std.ArrayList(u8) = .empty;
+    defer cdef.deinit(allocator);
+    try appendU16Be(allocator, &cdef, components);
+    const color_components = components - 1;
+    for (0..color_components) |component| {
+        try appendU16Be(allocator, &cdef, @intCast(component));
+        try appendU16Be(allocator, &cdef, 0);
+        try appendU16Be(allocator, &cdef, @intCast(component + 1));
+    }
+    try appendU16Be(allocator, &cdef, color_components);
+    try appendU16Be(allocator, &cdef, switch (alpha_mode) {
+        .unassociated => 1,
+        .associated => 2,
+    });
+    try appendU16Be(allocator, &cdef, 0);
+    try appendBox(allocator, jp2_header, .channel_definition, cdef.items);
+}
 
 fn wrapCodestream(
     allocator: std.mem.Allocator,
@@ -323,6 +398,9 @@ fn wrapCodestream(
         try appendU32Be(allocator, &colr, profile.enumerated_color_space);
     }
     try appendBox(allocator, &jp2h, .color, colr.items);
+    if (profile.alpha_mode) |alpha_mode| {
+        try appendAlphaChannelDefinition(allocator, &jp2h, profile.components, alpha_mode);
+    }
     if (profile.palette) |palette| {
         var pclr: std.ArrayList(u8) = .empty;
         defer pclr.deinit(allocator);
@@ -370,6 +448,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
         .palette_bits_per_component = 0,
         .has_icc_profile = false,
         .icc_profile_bytes = 0,
+        .alpha_mode = null,
         .codestream_bytes = 0,
     };
 
@@ -578,7 +657,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 if (compression_type != 7 or colorspace_unknown > 1 or intellectual_property != 0) {
                     return Jp2Error.UnsupportedProfile;
                 }
-                if (info.components != 1 and info.components != 3) {
+                if (info.components == 0 or info.components > color.max_components) {
                     return Jp2Error.UnsupportedColorSpace;
                 }
                 info.output_components = info.components;
@@ -657,7 +736,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
                 if (saw_channel_definition) return Jp2Error.InvalidBox;
                 if (saw_palette and !saw_component_mapping) return Jp2Error.MissingRequiredBox;
-                try validateIdentityChannelDefinition(
+                info.alpha_mode = try validateChannelDefinition(
                     box.payload,
                     if (saw_palette) 3 else info.components,
                 );
@@ -701,8 +780,17 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     if (!saw_ihdr or !saw_colr) return Jp2Error.MissingRequiredBox;
     if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
     if (saw_palette != saw_component_mapping) return Jp2Error.MissingRequiredBox;
+    const alpha_layout = info.components == 2 or info.components == 4;
+    if (alpha_layout and (!saw_channel_definition or info.alpha_mode == null)) {
+        return Jp2Error.MissingRequiredBox;
+    }
+    if (!alpha_layout and info.alpha_mode != null) return Jp2Error.UnsupportedProfile;
 
-    const expected_colr_index = switch (info.output_components) {
+    const color_components = if (info.alpha_mode != null)
+        info.output_components - 1
+    else
+        info.output_components;
+    const expected_colr_index = switch (color_components) {
         1 => grayscale_colr_index,
         3 => srgb_colr_index,
         else => null,
@@ -777,20 +865,20 @@ fn validatePaletteComponentMapping(payload: []const u8) !void {
     }
 }
 
-/// ISO 15444-1 I.5.3.6: the channel definition box is accepted when it
-/// describes exactly the identity colour mapping the one- or three-component
-/// profile already implies: every codestream channel k is colour component k
-/// (Typ 0) associated with colour k+1, in any entry order. Alpha or auxiliary
-/// channel definitions imply semantics the codec does not implement and fail
-/// closed.
-fn validateIdentityChannelDefinition(payload: []const u8, components: u16) !void {
+/// ISO 15444-1 I.5.3.6: color channels use the identity association. The
+/// bounded 2/4-component layouts add one final whole-image opacity channel,
+/// either unassociated (Typ 1) or associated/premultiplied (Typ 2).
+fn validateChannelDefinition(payload: []const u8, components: u16) !?AlphaMode {
     if (payload.len < 2) return Jp2Error.InvalidBox;
     const entry_count = try readU16Be(payload, 0);
     if (payload.len != 2 + @as(usize, entry_count) * 6) return Jp2Error.InvalidBox;
-    if (entry_count != components or (components != 1 and components != 3)) {
+    if (entry_count != components or components == 0 or components > color.max_components) {
         return Jp2Error.UnsupportedProfile;
     }
-    var seen = [_]bool{false} ** 3;
+    const has_alpha = components == 2 or components == 4;
+    const color_components = if (has_alpha) components - 1 else components;
+    var seen = [_]bool{false} ** color.max_components;
+    var alpha_mode: ?AlphaMode = null;
     var index: usize = 0;
     while (index < entry_count) : (index += 1) {
         const offset = 2 + index * 6;
@@ -800,15 +888,29 @@ fn validateIdentityChannelDefinition(payload: []const u8, components: u16) !void
         if (channel >= components) return Jp2Error.UnsupportedProfile;
         if (seen[channel]) return Jp2Error.InvalidBox;
         seen[channel] = true;
-        if (channel_type != 0) return Jp2Error.UnsupportedProfile;
-        if (association != channel + 1) return Jp2Error.UnsupportedProfile;
+        if (channel < color_components) {
+            if (channel_type != 0 or association != channel + 1) {
+                return Jp2Error.UnsupportedProfile;
+            }
+            continue;
+        }
+        if (!has_alpha or channel != color_components or association != 0 or alpha_mode != null) {
+            return Jp2Error.UnsupportedProfile;
+        }
+        alpha_mode = switch (channel_type) {
+            1 => .unassociated,
+            2 => .associated,
+            else => return Jp2Error.UnsupportedProfile,
+        };
     }
+    if (has_alpha) return alpha_mode orelse return Jp2Error.UnsupportedProfile;
+    return null;
 }
 
 fn enumeratedColorSpace(components: u16) u32 {
     return switch (components) {
-        1 => enum_cs_grayscale,
-        3 => enum_cs_srgb,
+        1, 2 => enum_cs_grayscale,
+        3, 4 => enum_cs_srgb,
         else => 0,
     };
 }
@@ -1392,12 +1494,11 @@ fn validateCodeBlockStyleByte(code_block_style: u8) !void {
 /// every component carries identical data (Kakadu signals uniform
 /// per-component Cmodes/Qguard requests this way). Genuinely per-component
 /// divergence fails closed in validateUniformComponentOverrides. The fixed
-/// storage is sufficient because the current JP2 boundary accepts one or
-/// three components only.
+/// storage follows the bounded 1..4-component JP2 boundary.
 const ComponentOverrideState = struct {
-    coc_seen: [3]bool = .{ false, false, false },
+    coc_seen: [color.max_components]bool = [_]bool{false} ** color.max_components,
     coc_first: []const u8 = &.{},
-    qcc_seen: [3]bool = .{ false, false, false },
+    qcc_seen: [color.max_components]bool = [_]bool{false} ** color.max_components,
     qcc_first: []const u8 = &.{},
 };
 

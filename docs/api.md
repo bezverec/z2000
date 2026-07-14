@@ -162,6 +162,10 @@ Primary public functions:
 - `encodeLosslessPlanarWithOptions(allocator, planes, options)` — bounded
   1..4-component no-MCT layouts over `color.SamplePlanes`; grayscale is its
   one-plane special case
+- `jp2.AlphaMode` and
+  `jp2.wrapPlanarAlphaCodestream(allocator, planes, alpha_mode, icc, bytes)` —
+  bounded gray+alpha/RGBA JP2 wrapping for 2/4-component no-MCT streams;
+  alpha is the final plane and is signalled explicitly through `cdef`
 - `decodeLosslessPlanar(allocator, bytes)` /
   `decodeLosslessPlanarWithOptions(allocator, bytes, options)` — strict
   decode of single-tile no-MCT reversible 5/3 streams with SIZ Csiz 1..4
@@ -247,6 +251,7 @@ Primary public functions:
 - `decodeLosslessGrayWithOptionsProfiled(allocator, codestream, options, timings)`
 - `wrapRgbCodestream(allocator, input, codestream)`
 - `wrapGrayCodestream(allocator, input, codestream)`
+- `wrapPlanarAlphaCodestream(allocator, planes, alpha_mode, icc, codestream)`
 - `wrapPaletteCodestream(allocator, indexed, palette, codestream)`
 - `parseInfo(bytes)`
 - `extractCodestream(bytes)`
@@ -257,15 +262,21 @@ The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
 enumerated sRGB (16) or grayscale (17) `colr`, and one contiguous `jp2c`
 codestream. The reader accepts uniform unsigned 8-bit and 16-bit one- or
-three-component metadata plus a bounded palette layout: one index component,
-three uniform unsigned 8/16-bit `pclr` columns, and explicit `cmap` records to
-sRGB output channels. Signed/mixed palettes, alpha, arbitrary mappings, and
+three-component metadata plus two bounded extensions: a palette layout with
+one index component, three uniform unsigned 8/16-bit `pclr` columns, and
+explicit `cmap` records to sRGB output channels; and 2/4-component
+gray+alpha/RGBA layouts whose final plane has complete Typ 1/2, Asoc 0 `cdef`
+semantics. `Info.alpha_mode` preserves whether that plane is unassociated or
+associated. Signed/mixed palettes, arbitrary auxiliary-channel mappings, and
 JPX-only features fail closed. The writers require non-empty
 dimensions, 8/16 bit depth, matching sample counts, codestream/JP2 shape
 agreement, and no MCT for one component. `wrapGrayCodestream` accepts only
 BlackIsZero-normalized samples; WhiteIsZero must be explicitly inverted before
 codestream encoding. `Palette.expand` validates every index before copying an
 interleaved RGB triplet, and reports `PaletteIndexOutOfRange` on malformed data.
+`wrapPlanarAlphaCodestream` requires alpha to be the final plane and currently
+wraps only no-MCT codestreams; TIFF ExtraSamples and RCT over only the RGB
+triplet are not yet public.
 
 ICC support is staged as metadata preservation before color conversion. TIFF
 tag 34675 is stored as owned RGB or grayscale image metadata; both wrappers

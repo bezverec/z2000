@@ -78,7 +78,9 @@ interop gate.
 1. Harden the landed grayscale and bounded palette paths with checked-in
    independent fixtures, then continue the component-generic campaign toward
    multi-tile grayscale, mixed precision/BPCC, alpha, richer palette mappings,
-   and general component layouts while keeping RGB byte behavior stable.
+   and general component layouts while keeping RGB byte behavior stable. The
+   first alpha `cdef` writer/reader slice is landed; next connect TIFF
+   ExtraSamples and then apply MCT to only the RGB triplet.
 2. Keep the landed direct-MQ PCRD distortion capture pinned against its symbol
    oracle and byte-identical rate-target streams. Continue the measured
    optimization campaign with decode T1 and the AVX2/NEON lane audit; retain a

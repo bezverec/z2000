@@ -541,6 +541,9 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
     if (info.has_icc_profile) {
         std.debug.print(" ({} bytes)", .{info.icc_profile_bytes});
     }
+    if (info.alpha_mode) |alpha_mode| {
+        std.debug.print(", alpha {s}", .{alpha_mode.label()});
+    }
     if (info.has_palette) {
         std.debug.print(
             ", palette {}x3 at {} bits",

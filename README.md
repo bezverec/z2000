@@ -27,14 +27,16 @@ certification.
 - ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
   PPM, and PPT packet headers on their documented profiles.
 - Bounded grayscale and palette JP2 profiles, plus bounded 1..4-component
-  no-MCT planar layouts at the codestream API level, with strict
-  malformed-input handling and OpenJPEG/Grok/Kakadu interoperability tests.
+  no-MCT planar layouts and alpha-aware JP2 `cdef` signalling at the API
+  level, with strict malformed-input handling and OpenJPEG/Grok/Kakadu
+  interoperability tests.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
-bounded 1..4 no-MCT envelope (alpha semantics, subsampling, mixed depth),
+bounded 1..4 no-MCT envelope (TIFF alpha input, RGB-only MCT with alpha,
+subsampling, mixed depth),
 non-empty PLT-less multi-part tiles, broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
@@ -233,9 +235,10 @@ part or `R` resolution tile-parts. OpenJPEG 2.5.4 and Grok 20.3.6 decode the
 grayscale output pixel-exactly too. The same planar engine also serves
 bounded 2- and 4-component no-MCT layouts through the library API
 (`encodeLosslessPlanarWithOptions`/`decodeLosslessPlanar`, OpenJPEG/Grok
-pixel-exact); TIFF front ends for those layouts (alpha channels) are the next
-feature-plan stage. Multi-tile grayscale and mixed component depths remain
-fail-closed.
+pixel-exact). `wrapPlanarAlphaCodestream` adds strict gray+alpha and RGBA JP2
+`cdef` semantics for those planar streams. TIFF ExtraSamples input/output and
+RCT over only the RGB triplet are the next feature-plan slices. Multi-tile
+grayscale and mixed component depths remain fail-closed.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
 floating-point samples, extra alpha/sample channels, mixed bit depth, signed

@@ -89,6 +89,15 @@ applied to the color triplet only.
 
 **Depends on:** F1. **Size:** M.
 
+**First container slice landed 2026-07-14:** `jp2.AlphaMode` and
+`wrapPlanarAlphaCodestream` wrap the existing 2/4-component no-MCT planar
+codestreams as gray+alpha or RGBA. The writer emits identity color-channel
+definitions plus one final whole-image alpha channel (`cdef` Typ 1 for
+unassociated, Typ 2 for associated, Asoc 0); the strict reader preserves the
+mode and rejects missing, duplicate, mistyped, or reassociated definitions.
+TIFF ExtraSamples parsing/writing and MCT over only the RGB triplet remain the
+next F2 slices, so the CLI still fails closed on alpha TIFFs.
+
 **Verify:** TIFF RGBA roundtrip; OpenJPEG/Grok decode with alpha preserved;
 fail-closed for alpha definitions the codec cannot represent.
 

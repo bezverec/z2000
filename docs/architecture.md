@@ -28,6 +28,15 @@ The JP2 boundary also owns a deliberately bounded palette vertical:
 same one-component grayscale pipeline, so palette metadata does not leak into
 the codestream core.
 
+The first F2 alpha boundary is likewise container-owned:
+`wrapPlanarAlphaCodestream` maps a two-plane no-MCT stream to gray+alpha and a
+four-plane stream to RGBA, always with alpha last. JP2 `cdef` distinguishes
+unassociated opacity (Typ 1) from associated/premultiplied opacity (Typ 2),
+both associated with the whole image (Asoc 0). Strict parsing requires that
+complete mapping for every 2/4-component JP2; arbitrary auxiliary channels do
+not become alpha implicitly. TIFF ExtraSamples and RGB-triplet-only MCT are
+still fail-closed and remain separate F2 front-end/core slices.
+
 The project is intentionally fail-closed. Profile options that would require
 payload behavior not implemented yet are rejected with `UnsupportedPayload`.
 

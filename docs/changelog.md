@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded JP2 Alpha Channel Definitions (F2 Slice 1)
+
+- Added `jp2.AlphaMode` and `wrapPlanarAlphaCodestream` for gray+alpha and
+  RGBA wrappers over the existing 2/4-component no-MCT planar codestreams.
+  The final plane is signalled as unassociated opacity (`cdef` Typ 1) or
+  associated/premultiplied opacity (Typ 2), with whole-image association 0;
+  pixels are never silently premultiplied or unpremultiplied.
+- The strict JP2 reader now accepts 2/4-component layouts only when a complete
+  identity-color-plus-alpha `cdef` is present, exposes the alpha mode through
+  `Info`, and rejects missing, duplicate, mistyped, or reassociated entries.
+  COC/QCC validation storage now follows the four-component bound.
+- Added local gray+alpha/RGBA wrapper-to-strict-planar roundtrips and malformed
+  `cdef` coverage. TIFF ExtraSamples and RGB-triplet-only MCT remain
+  fail-closed and are the next F2 slices.
+
 ### Bounded Planar Component Layouts (F1c) And Grayscale Unification
 
 - New codestream-level surface for 1..4-component no-MCT layouts:
