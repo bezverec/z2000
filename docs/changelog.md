@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Component-Generic Plane Carrier (F1 Stage A)
+
+- `color.RctPlanes` and `color.IctPlanes` are now instances of a shared
+  generic `ComponentPlanesOf(Sample)` carrier holding `planes: [][]Sample`
+  (bounded by `color.max_components = 4`) instead of fixed `y`/`cb`/`cr`
+  fields. All call sites across the color, codestream, and tile-pipeline
+  layers index components generically; the tile decode scaffold now sizes
+  its carrier by the actual component count instead of allocating empty
+  cb/cr planes for grayscale.
+- Behavior is unchanged by construction and verified: six encode profiles
+  (lossless archival, 9/7 lossy, 512x512 multi-tile, three-layer LRCP,
+  BYPASS+TERMALL, 10-thread) plus grayscale encode and lossy/lossless decode
+  are byte-identical to the pre-change binary, the full suite is green in
+  Debug and ReleaseFast, and the maintained t10 metrics are perf-neutral
+  (within +/-1.2%, inside the no-regression tolerance).
+- The refactor also removes a latent double-free: the legacy sidecar decode
+  path declared `errdefer` frees for planes whose ownership had already
+  moved into the carrier that a `defer deinit` also released; ownership now
+  transfers exactly once. This is the enabling slice for alpha, mixed
+  precision, and CMYK layouts (`docs/feature_plan.md` F1).
+
 ### Release Candidate Infrastructure
 
 - Added a portable static `riscv64-linux-musl` release archive and a full

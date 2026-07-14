@@ -7,22 +7,74 @@ pub const ColorError = error{
     SampleOutOfRange,
 };
 
-pub const RctPlanes = struct {
-    allocator: std.mem.Allocator,
-    width: usize,
-    height: usize,
-    bit_depth: u8,
-    y: []i32,
-    cb: []i32,
-    cr: []i32,
+/// F1 component-generic bound: layouts with 1..4 components are the public
+/// surface (grayscale=1 and RGB=3 exist today; alpha and CMYK arrive on top).
+pub const max_components = 4;
 
-    pub fn deinit(self: *RctPlanes) void {
-        self.allocator.free(self.y);
-        self.allocator.free(self.cb);
-        self.allocator.free(self.cr);
-        self.* = undefined;
+/// N-plane sample carrier shared by the reversible (i32) and irreversible
+/// (f32) pipelines. `init` allocates and owns `component_count` planes of
+/// `width * height` samples; a borrowed instance (planes filled in from
+/// slices owned elsewhere) must simply not call `deinit`.
+pub fn ComponentPlanesOf(comptime Sample: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: std.mem.Allocator,
+        width: usize,
+        height: usize,
+        bit_depth: u8,
+        planes: [][]Sample,
+
+        pub fn init(
+            allocator: std.mem.Allocator,
+            width: usize,
+            height: usize,
+            bit_depth: u8,
+            component_count: usize,
+        ) !Self {
+            if (component_count == 0 or component_count > max_components) {
+                return ColorError.InvalidImage;
+            }
+            const pixels = try std.math.mul(usize, width, height);
+            const planes = try allocator.alloc([]Sample, component_count);
+            errdefer allocator.free(planes);
+            var allocated: usize = 0;
+            errdefer for (planes[0..allocated]) |plane_slice| allocator.free(plane_slice);
+            while (allocated < component_count) : (allocated += 1) {
+                planes[allocated] = try allocator.alloc(Sample, pixels);
+            }
+            return .{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = bit_depth,
+                .planes = planes,
+            };
+        }
+
+        pub fn componentCount(self: Self) usize {
+            return self.planes.len;
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.planes) |plane_slice| self.allocator.free(plane_slice);
+            self.allocator.free(self.planes);
+            self.* = undefined;
+        }
+    };
+}
+
+pub const RctPlanes = ComponentPlanesOf(i32);
+pub const IctPlanes = ComponentPlanesOf(f32);
+
+fn validatePixelPlanes(comptime Sample: type, planes: ComponentPlanesOf(Sample), expected_components: usize) !usize {
+    const pixels = try std.math.mul(usize, planes.width, planes.height);
+    if (planes.planes.len != expected_components) return ColorError.InvalidImage;
+    for (planes.planes) |plane_slice| {
+        if (plane_slice.len != pixels) return ColorError.InvalidImage;
     }
-};
+    return pixels;
+}
 
 pub fn forwardRct(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes {
     if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
@@ -30,31 +82,14 @@ pub fn forwardRct(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes 
     const sample_count = try std.math.mul(usize, pixels, 3);
     if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
 
-    const y = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(y);
-    const cb = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(cb);
-    const cr = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(cr);
-
-    forwardRctVector(rgb.samples, y, cb, cr, pixels, try dcLevelShift(rgb.bit_depth));
-
-    return .{
-        .allocator = allocator,
-        .width = rgb.width,
-        .height = rgb.height,
-        .bit_depth = rgb.bit_depth,
-        .y = y,
-        .cb = cb,
-        .cr = cr,
-    };
+    var out = try RctPlanes.init(allocator, rgb.width, rgb.height, rgb.bit_depth, 3);
+    errdefer out.deinit();
+    forwardRctVector(rgb.samples, out.planes[0], out.planes[1], out.planes[2], pixels, try dcLevelShift(rgb.bit_depth));
+    return out;
 }
 
 pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbImage {
-    const pixels = try std.math.mul(usize, planes.width, planes.height);
-    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
-        return ColorError.InvalidImage;
-    }
+    const pixels = try validatePixelPlanes(i32, planes, 3);
     const sample_count = try std.math.mul(usize, pixels, 3);
 
     const max_sample = try maxSample(planes.bit_depth);
@@ -74,20 +109,18 @@ pub fn inverseRct(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbIma
 
 /// mct = none: no inter-component decorrelation. Each component is coded
 /// independently, so it carries only the ISO B.1.1 DC level shift
-/// (2^(Ssiz-1)). The three output planes reuse the generic RctPlanes carrier
-/// (y/cb/cr hold component 0/1/2 directly).
+/// (2^(Ssiz-1)); component 0/1/2 land in planes 0/1/2 directly.
 pub fn forwardNoTransform(allocator: std.mem.Allocator, rgb: image.RgbImage) !RctPlanes {
     if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
     const pixels = try std.math.mul(usize, rgb.width, rgb.height);
     const sample_count = try std.math.mul(usize, pixels, 3);
     if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
 
-    const c0 = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(c0);
-    const c1 = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(c1);
-    const c2 = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(c2);
+    var out = try RctPlanes.init(allocator, rgb.width, rgb.height, rgb.bit_depth, 3);
+    errdefer out.deinit();
+    const c0 = out.planes[0];
+    const c1 = out.planes[1];
+    const c2 = out.planes[2];
 
     const level_shift = try dcLevelShift(rgb.bit_depth);
     var i: usize = 0;
@@ -97,22 +130,11 @@ pub fn forwardNoTransform(allocator: std.mem.Allocator, rgb: image.RgbImage) !Rc
         c2[i] = @as(i32, rgb.samples[i * 3 + 2]) - level_shift;
     }
 
-    return .{
-        .allocator = allocator,
-        .width = rgb.width,
-        .height = rgb.height,
-        .bit_depth = rgb.bit_depth,
-        .y = c0,
-        .cb = c1,
-        .cr = c2,
-    };
+    return out;
 }
 
 pub fn inverseNoTransform(allocator: std.mem.Allocator, planes: RctPlanes) !image.RgbImage {
-    const pixels = try std.math.mul(usize, planes.width, planes.height);
-    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
-        return ColorError.InvalidImage;
-    }
+    const pixels = try validatePixelPlanes(i32, planes, 3);
     const sample_count = try std.math.mul(usize, pixels, 3);
     const max_sample_value = try maxSample(planes.bit_depth);
     const level_shift = try dcLevelShift(planes.bit_depth);
@@ -120,11 +142,14 @@ pub fn inverseNoTransform(allocator: std.mem.Allocator, planes: RctPlanes) !imag
     const samples = try allocator.alloc(u16, sample_count);
     errdefer allocator.free(samples);
 
+    const plane0 = planes.planes[0];
+    const plane1 = planes.planes[1];
+    const plane2 = planes.planes[2];
     var i: usize = 0;
     while (i < pixels) : (i += 1) {
-        const c0 = planes.y[i] + level_shift;
-        const c1 = planes.cb[i] + level_shift;
-        const c2 = planes.cr[i] + level_shift;
+        const c0 = plane0[i] + level_shift;
+        const c1 = plane1[i] + level_shift;
+        const c2 = plane2[i] + level_shift;
         if (c0 < 0 or c1 < 0 or c2 < 0 or
             c0 > max_sample_value or c1 > max_sample_value or c2 > max_sample_value)
         {
@@ -196,12 +221,15 @@ fn inverseRctRange(samples: []u16, planes: RctPlanes, begin: usize, end: usize, 
     const zero: RctVector = @splat(0);
     const max: RctVector = @splat(max_sample);
     const shift_vec: RctVector = @splat(level_shift);
+    const y_plane = planes.planes[0];
+    const cb_plane = planes.planes[1];
+    const cr_plane = planes.planes[2];
 
     var i: usize = begin;
     while (i + rct_lanes <= end) : (i += rct_lanes) {
-        const y: RctVector = @as(RctVector, planes.y[i..][0..rct_lanes].*) + shift_vec;
-        const cb: RctVector = planes.cb[i..][0..rct_lanes].*;
-        const cr: RctVector = planes.cr[i..][0..rct_lanes].*;
+        const y: RctVector = @as(RctVector, y_plane[i..][0..rct_lanes].*) + shift_vec;
+        const cb: RctVector = cb_plane[i..][0..rct_lanes].*;
+        const cr: RctVector = cr_plane[i..][0..rct_lanes].*;
         const g = y - floorQuarterVector(cb + cr);
         const r = cr + g;
         const b = cb + g;
@@ -214,9 +242,9 @@ fn inverseRctRange(samples: []u16, planes: RctPlanes, begin: usize, end: usize, 
     }
 
     while (i < end) : (i += 1) {
-        const g = planes.y[i] + level_shift - floorQuarter(planes.cb[i] + planes.cr[i]);
-        const r = planes.cr[i] + g;
-        const b = planes.cb[i] + g;
+        const g = y_plane[i] + level_shift - floorQuarter(cb_plane[i] + cr_plane[i]);
+        const r = cr_plane[i] + g;
+        const b = cb_plane[i] + g;
 
         if (r < 0 or g < 0 or b < 0 or
             r > max_sample or g > max_sample or b > max_sample)
@@ -330,10 +358,7 @@ pub fn inverseRctThreaded(
     planes: RctPlanes,
     requested_threads: usize,
 ) !image.RgbImage {
-    const pixels = try std.math.mul(usize, planes.width, planes.height);
-    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
-        return ColorError.InvalidImage;
-    }
+    const pixels = try validatePixelPlanes(i32, planes, 3);
     const sample_count = try std.math.mul(usize, pixels, 3);
     const max_sample = try maxSample(planes.bit_depth);
     const level_shift = try dcLevelShift(planes.bit_depth);
@@ -371,12 +396,11 @@ pub fn forwardRctThreaded(allocator: std.mem.Allocator, rgb: image.RgbImage, thr
     const sample_count = try std.math.mul(usize, pixels, 3);
     if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
 
-    const y = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(y);
-    const cb = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(cb);
-    const cr = try allocator.alloc(i32, pixels);
-    errdefer allocator.free(cr);
+    var out = try RctPlanes.init(allocator, rgb.width, rgb.height, rgb.bit_depth, 3);
+    errdefer out.deinit();
+    const y = out.planes[0];
+    const cb = out.planes[1];
+    const cr = out.planes[2];
 
     const level_shift = try dcLevelShift(rgb.bit_depth);
     var ranges: [max_rct_workers][2]usize = undefined;
@@ -397,7 +421,7 @@ pub fn forwardRctThreaded(allocator: std.mem.Allocator, rgb: image.RgbImage, thr
         for (threads[0..spawned]) |thread| thread.join();
     }
 
-    return .{ .allocator = allocator, .width = rgb.width, .height = rgb.height, .bit_depth = rgb.bit_depth, .y = y, .cb = cb, .cr = cr };
+    return out;
 }
 
 const RgbVector = struct {
@@ -428,23 +452,6 @@ fn storeRgbVector(samples: []u16, pixel_index: usize, r: RctVector, g: RctVector
     }
 }
 
-pub const IctPlanes = struct {
-    allocator: std.mem.Allocator,
-    width: usize,
-    height: usize,
-    bit_depth: u8,
-    y: []f32,
-    cb: []f32,
-    cr: []f32,
-
-    pub fn deinit(self: *IctPlanes) void {
-        self.allocator.free(self.y);
-        self.allocator.free(self.cb);
-        self.allocator.free(self.cr);
-        self.* = undefined;
-    }
-};
-
 /// ISO/IEC 15444-1 G.3: irreversible component transform on DC level shifted
 /// samples.
 pub fn forwardIct(allocator: std.mem.Allocator, rgb: image.RgbImage) !IctPlanes {
@@ -454,31 +461,14 @@ pub fn forwardIct(allocator: std.mem.Allocator, rgb: image.RgbImage) !IctPlanes 
     if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
     const shift: f32 = @floatFromInt(try dcLevelShift(rgb.bit_depth));
 
-    const y = try allocator.alloc(f32, pixels);
-    errdefer allocator.free(y);
-    const cb = try allocator.alloc(f32, pixels);
-    errdefer allocator.free(cb);
-    const cr = try allocator.alloc(f32, pixels);
-    errdefer allocator.free(cr);
-
-    forwardIctVector(rgb.samples, y, cb, cr, pixels, shift);
-
-    return .{
-        .allocator = allocator,
-        .width = rgb.width,
-        .height = rgb.height,
-        .bit_depth = rgb.bit_depth,
-        .y = y,
-        .cb = cb,
-        .cr = cr,
-    };
+    var out = try IctPlanes.init(allocator, rgb.width, rgb.height, rgb.bit_depth, 3);
+    errdefer out.deinit();
+    forwardIctVector(rgb.samples, out.planes[0], out.planes[1], out.planes[2], pixels, shift);
+    return out;
 }
 
 pub fn inverseIct(allocator: std.mem.Allocator, planes: IctPlanes) !image.RgbImage {
-    const pixels = try std.math.mul(usize, planes.width, planes.height);
-    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
-        return ColorError.InvalidImage;
-    }
+    const pixels = try validatePixelPlanes(f32, planes, 3);
     const sample_count = try std.math.mul(usize, pixels, 3);
     const max_sample = try maxSample(planes.bit_depth);
     const shift: f32 = @floatFromInt(try dcLevelShift(planes.bit_depth));
@@ -537,11 +527,14 @@ fn inverseIctRange(samples: []u16, planes: IctPlanes, begin: usize, end: usize, 
     const cr_to_g: IctVector = @splat(0.71414);
     const cb_to_b: IctVector = @splat(1.772);
 
+    const y_plane = planes.planes[0];
+    const cb_plane = planes.planes[1];
+    const cr_plane = planes.planes[2];
     var i: usize = begin;
     while (i + ict_lanes <= end) : (i += ict_lanes) {
-        const y_vec: IctVector = planes.y[i..][0..ict_lanes].*;
-        const cb_vec: IctVector = planes.cb[i..][0..ict_lanes].*;
-        const cr_vec: IctVector = planes.cr[i..][0..ict_lanes].*;
+        const y_vec: IctVector = y_plane[i..][0..ict_lanes].*;
+        const cb_vec: IctVector = cb_plane[i..][0..ict_lanes].*;
+        const cr_vec: IctVector = cr_plane[i..][0..ict_lanes].*;
         const r = y_vec + cr_to_r * cr_vec + shift_vec;
         const g = y_vec - cb_to_g * cb_vec - cr_to_g * cr_vec + shift_vec;
         const b = y_vec + cb_to_b * cb_vec + shift_vec;
@@ -549,9 +542,9 @@ fn inverseIctRange(samples: []u16, planes: IctPlanes, begin: usize, end: usize, 
     }
 
     while (i < end) : (i += 1) {
-        const y = planes.y[i];
-        const cb = planes.cb[i];
-        const cr = planes.cr[i];
+        const y = y_plane[i];
+        const cb = cb_plane[i];
+        const cr = cr_plane[i];
         const r = y + 1.402 * cr;
         const g = y - 0.34413 * cb - 0.71414 * cr;
         const b = y + 1.772 * cb;
@@ -579,10 +572,7 @@ pub fn inverseIctThreaded(
     planes: IctPlanes,
     requested_threads: usize,
 ) !image.RgbImage {
-    const pixels = try std.math.mul(usize, planes.width, planes.height);
-    if (planes.y.len != pixels or planes.cb.len != pixels or planes.cr.len != pixels) {
-        return ColorError.InvalidImage;
-    }
+    const pixels = try validatePixelPlanes(f32, planes, 3);
     const sample_count = try std.math.mul(usize, pixels, 3);
     const max_sample = try maxSample(planes.bit_depth);
     const shift: f32 = @floatFromInt(try dcLevelShift(planes.bit_depth));

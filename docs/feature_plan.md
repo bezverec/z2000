@@ -51,7 +51,15 @@ machinery works; F1 unifies instead of adding a third parallel pipeline.
 
 **Size/risk:** LARGE / HIGH — this is the next multi-PR campaign, on par
 with multi-tile. Stage internally: (a) representation swap with 3-component
-behavior byte-identical, (b) 1-component rides the same code (delete the
+behavior byte-identical — **landed 2026-07-14**: `color.RctPlanes`/`IctPlanes`
+are now instances of the generic `ComponentPlanesOf(Sample)` N-plane carrier
+(`planes: [][]Sample`, bounded by `color.max_components = 4`), all fixed
+y/cb/cr field access is gone across color/codestream/tile_pipeline, the tile
+decode scaffold sizes its carrier by the actual component count instead of
+allocating empty cb/cr, and six encode profiles (lossless, 9/7 lossy,
+multi-tile, layered LRCP, BYPASS+TERMALL, t10) plus lossy/lossless decode and
+grayscale are byte-identical to the pre-change binary with t10 perf neutral;
+(b) 1-component rides the same code (delete the
 parallel grayscale plumbing), (c) open 2- and 4-component no-MCT layouts.
 
 **Verify:** byte-identical RGB/gray regression corpus at every PR;

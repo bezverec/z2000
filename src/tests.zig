@@ -6347,9 +6347,9 @@ test "RCT transform matches JPEG2000 reversible equations" {
 
     // Y carries the ISO B.1.1 DC level shift (-2^(Ssiz-1)); Cb/Cr are
     // component differences, so the shift cancels there.
-    try std.testing.expectEqual(@as(i32, 20 - 128), planes.y[0]);
-    try std.testing.expectEqual(@as(i32, 10), planes.cb[0]);
-    try std.testing.expectEqual(@as(i32, -10), planes.cr[0]);
+    try std.testing.expectEqual(@as(i32, 20 - 128), planes.planes[0][0]);
+    try std.testing.expectEqual(@as(i32, 10), planes.planes[1][0]);
+    try std.testing.expectEqual(@as(i32, -10), planes.planes[2][0]);
 
     var reconstructed = try color.inverseRct(allocator, planes);
     defer reconstructed.deinit();
@@ -6382,9 +6382,9 @@ test "threaded forward RCT matches the serial transform byte-for-byte" {
         for (thread_counts) |threads| {
             var threaded = try color.forwardRctThreaded(allocator, rgb, threads);
             defer threaded.deinit();
-            try std.testing.expectEqualSlices(i32, serial.y, threaded.y);
-            try std.testing.expectEqualSlices(i32, serial.cb, threaded.cb);
-            try std.testing.expectEqualSlices(i32, serial.cr, threaded.cr);
+            try std.testing.expectEqualSlices(i32, serial.planes[0], threaded.planes[0]);
+            try std.testing.expectEqualSlices(i32, serial.planes[1], threaded.planes[1]);
+            try std.testing.expectEqualSlices(i32, serial.planes[2], threaded.planes[2]);
 
             // Roundtrip through the serial inverse restores the input.
             var back = try color.inverseRct(allocator, threaded);
@@ -6460,7 +6460,7 @@ test "threaded inverse RCT propagates worker range errors" {
     };
     var planes = try color.forwardRct(allocator, rgb);
     defer planes.deinit();
-    planes.y[0] = 1000;
+    planes.planes[0][0] = 1000;
     try std.testing.expectError(color.ColorError.SampleOutOfRange, color.inverseRctThreaded(allocator, planes, 8));
 }
 
@@ -19880,7 +19880,7 @@ test "tile pipeline component block view borrows tile-local plane slice" {
     try std.testing.expectEqual(rct_tile.planes.width, view.stride);
     try std.testing.expectEqualDeep(cb_job.rect, view.rect);
     try std.testing.expectEqual(
-        rct_tile.planes.cb[view.rect.y * view.stride + view.rect.x],
+        rct_tile.planes.planes[1][view.rect.y * view.stride + view.rect.x],
         try view.sample(0, 0),
     );
 

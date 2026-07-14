@@ -1130,12 +1130,8 @@ const tile_part_tlm_entry_bytes: usize = 6;
 const tile_part_tlm_stlm_u16_u32: u8 = 0x60;
 
 fn componentPlane(rct_tile: RctTile, component: u8) ?[]i32 {
-    return switch (component) {
-        0 => rct_tile.planes.y,
-        1 => rct_tile.planes.cb,
-        2 => rct_tile.planes.cr,
-        else => null,
-    };
+    if (component >= rct_tile.planes.planes.len) return null;
+    return rct_tile.planes.planes[component];
 }
 
 fn validateRectInPlane(rect: subband.Rect, width: usize, height: usize) !void {
@@ -1470,9 +1466,9 @@ pub fn forward53TileInPlace(allocator: std.mem.Allocator, rct_tile: *RctTile, re
 
     const x0 = rct_tile.tile.rect.x0;
     const y0 = rct_tile.tile.rect.y0;
-    const y_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.y, width, height, requested_levels, x0, y0);
-    const cb_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.cb, width, height, requested_levels, x0, y0);
-    const cr_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.cr, width, height, requested_levels, x0, y0);
+    const y_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.planes[0], width, height, requested_levels, x0, y0);
+    const cb_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.planes[1], width, height, requested_levels, x0, y0);
+    const cr_levels = try wavelet_int.forward53WithWorkspaceOrigin(&workspace, rct_tile.planes.planes[2], width, height, requested_levels, x0, y0);
     if (cb_levels != y_levels or cr_levels != y_levels) return wavelet_int.TransformError.InvalidDimensions;
     return y_levels;
 }
@@ -1485,9 +1481,9 @@ pub fn inverse53TileInPlace(allocator: std.mem.Allocator, rct_tile: *RctTile, le
 
     const x0 = rct_tile.tile.rect.x0;
     const y0 = rct_tile.tile.rect.y0;
-    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.y, width, height, levels, x0, y0);
-    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.cb, width, height, levels, x0, y0);
-    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.cr, width, height, levels, x0, y0);
+    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.planes[0], width, height, levels, x0, y0);
+    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.planes[1], width, height, levels, x0, y0);
+    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, rct_tile.planes.planes[2], width, height, levels, x0, y0);
 }
 
 pub fn buildPacketScaffold(
@@ -1853,36 +1849,22 @@ pub fn decodeEncodedBlockCatalogIsoMqToRctTile(
     try validateEncodedBlockCatalogCoversTile(allocator, scaffold, catalog);
     if (style.bypass) return PacketScaffoldError.InvalidPacket;
 
-    const pixels = try std.math.mul(usize, scaffold.tile.rect.width(), scaffold.tile.rect.height());
-    const y = try allocator.alloc(i32, pixels);
-    var y_moved = false;
-    errdefer if (!y_moved) allocator.free(y);
-    const auxiliary_pixels: usize = if (scaffold.components == 3) pixels else 0;
-    const cb = try allocator.alloc(i32, auxiliary_pixels);
-    var cb_moved = false;
-    errdefer if (!cb_moved) allocator.free(cb);
-    const cr = try allocator.alloc(i32, auxiliary_pixels);
-    var cr_moved = false;
-    errdefer if (!cr_moved) allocator.free(cr);
-    @memset(y, 0);
-    @memset(cb, 0);
-    @memset(cr, 0);
+    var planes_carrier = try color.RctPlanes.init(
+        allocator,
+        scaffold.tile.rect.width(),
+        scaffold.tile.rect.height(),
+        bit_depth,
+        scaffold.components,
+    );
+    var planes_moved = false;
+    errdefer if (!planes_moved) planes_carrier.deinit();
+    for (planes_carrier.planes) |plane_slice| @memset(plane_slice, 0);
 
     var rct_tile = RctTile{
         .tile = scaffold.tile,
-        .planes = .{
-            .allocator = allocator,
-            .width = scaffold.tile.rect.width(),
-            .height = scaffold.tile.rect.height(),
-            .bit_depth = bit_depth,
-            .y = y,
-            .cb = cb,
-            .cr = cr,
-        },
+        .planes = planes_carrier,
     };
-    y_moved = true;
-    cb_moved = true;
-    cr_moved = true;
+    planes_moved = true;
     errdefer rct_tile.deinit();
 
     var scratch = ebcot.DecodeBlockScratch.init(allocator);
@@ -1941,17 +1923,17 @@ pub fn reconstructGrayRpclEncodeArtifactsIsoMq(
     defer workspace.deinit();
     try wavelet_int.inverse53WithWorkspace(
         &workspace,
-        tile.planes.y,
+        tile.planes.planes[0],
         tile.planes.width,
         tile.planes.height,
         artifacts.levels,
     );
 
-    const samples = try allocator.alloc(u16, tile.planes.y.len);
+    const samples = try allocator.alloc(u16, tile.planes.planes[0].len);
     errdefer allocator.free(samples);
     const max_sample: i32 = if (artifacts.bit_depth == 8) 255 else std.math.maxInt(u16);
     const level_shift = @as(i32, 1) << @as(u5, @intCast(artifacts.bit_depth - 1));
-    for (tile.planes.y, samples) |coefficient, *sample| {
+    for (tile.planes.planes[0], samples) |coefficient, *sample| {
         const value = coefficient + level_shift;
         if (value < 0 or value > max_sample) return PacketScaffoldError.InvalidPlane;
         sample.* = @intCast(value);
@@ -2117,45 +2099,29 @@ pub fn buildGrayRpclEncodeArtifactsIsoMq(
         return PacketScaffoldError.InvalidPlane;
     const tile = grid.tile(0) catch return PacketScaffoldError.InvalidPlane;
 
-    const y = try allocator.alloc(i32, pixels);
-    var y_moved = false;
-    errdefer if (!y_moved) allocator.free(y);
-    const cb = try allocator.alloc(i32, 0);
-    var cb_moved = false;
-    errdefer if (!cb_moved) allocator.free(cb);
-    const cr = try allocator.alloc(i32, 0);
-    var cr_moved = false;
-    errdefer if (!cr_moved) allocator.free(cr);
+    var planes_carrier = try color.RctPlanes.init(allocator, source.width, source.height, source.bit_depth, 1);
+    var planes_moved = false;
+    errdefer if (!planes_moved) planes_carrier.deinit();
 
     const max_sample: u16 = if (source.bit_depth == 8) 255 else std.math.maxInt(u16);
     const level_shift = @as(i32, 1) << @as(u5, @intCast(source.bit_depth - 1));
-    for (source.samples, y) |sample, *coefficient| {
+    for (source.samples, planes_carrier.planes[0]) |sample, *coefficient| {
         if (sample > max_sample) return PacketScaffoldError.InvalidPlane;
         coefficient.* = @as(i32, sample) - level_shift;
     }
 
     var transformed = RctTile{
         .tile = tile,
-        .planes = .{
-            .allocator = allocator,
-            .width = source.width,
-            .height = source.height,
-            .bit_depth = source.bit_depth,
-            .y = y,
-            .cb = cb,
-            .cr = cr,
-        },
+        .planes = planes_carrier,
     };
-    y_moved = true;
-    cb_moved = true;
-    cr_moved = true;
+    planes_moved = true;
     defer transformed.deinit();
 
     var workspace = try wavelet_int.Workspace.init(allocator, @max(source.width, source.height));
     defer workspace.deinit();
     const levels = try wavelet_int.forward53WithWorkspace(
         &workspace,
-        transformed.planes.y,
+        transformed.planes.planes[0],
         source.width,
         source.height,
         requested_levels,
