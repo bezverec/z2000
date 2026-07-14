@@ -56,10 +56,11 @@ Build an optimized native binary:
 zig build -Doptimize=ReleaseFast -Dtarget=native
 ```
 
-The executable is written to:
+The executable is written to `zig-out/bin` under two equivalent names:
 
 ```sh
 zig-out/bin/z2000
+zig-out/bin/z2k
 ```
 
 Inspect the application version and exact source provenance:
@@ -79,16 +80,19 @@ and `COMMIT` is the eight-character revision. See
 ## Command Examples
 
 The examples call the built binary directly; add `zig-out/bin` to `PATH` or
-prefix the commands with `./zig-out/bin/`. Conversions need no subcommand —
-the direction is inferred from the file extensions (`.tif`/`.tiff` and
-`.jp2`, case-insensitive); the explicit `tiff-to-jp2` and `decode-temp-jp2`
-subcommands keep working.
+prefix the commands with `./zig-out/bin/`. The build installs the binary
+twice: as `z2000` and as the short alias `z2k` — every command works
+identically under both names. Conversions need no subcommand — the
+direction is inferred from the file extensions (`.tif`/`.tiff` and `.jp2`,
+case-insensitive); the explicit `tiff-to-jp2` and `decode-temp-jp2`
+subcommands keep working. All commands default to using every logical CPU
+thread; pass `--threads N` to limit the worker count.
 
 Convert TIFF to lossless JP2 (the defaults already produce the archival
 RCT + reversible 5/3 profile):
 
 ```sh
-z2000 input.tif output.jp2
+z2k input.tif output.jp2
 ```
 
 Convert TIFF to a rate-layered JP2 (the `--rates` list sets the layer count;
@@ -96,15 +100,15 @@ the final layer always carries the complete stream, so a trailing `1` makes
 the lossless-final intent explicit):
 
 ```sh
-z2000 input.tif output.jp2 --rates 16,8,1 --threads 0 --timings
+z2k input.tif output.jp2 --rates 16,8,1 --timings
 ```
 
 Decode a JP2 back to TIFF and inspect it:
 
 ```sh
-z2000 output.jp2 reconstructed.tif --threads 0
-z2000 jp2-info output.jp2
-z2000 jp2-stats output.jp2
+z2k output.jp2 reconstructed.tif
+z2k jp2-info output.jp2
+z2k jp2-stats output.jp2
 ```
 
 Inspect TIFF or DNG metadata:
@@ -187,7 +191,8 @@ Boolean marker and style options also accept a **--no-...** form.
 
 ### Runtime And Diagnostics
 
-- **--threads N**: Worker count. Zero uses all logical CPU threads.
+- **--threads N**: Worker count. The default already uses all logical CPU
+  threads; pass an explicit N to limit the workers (0 also means all).
 - **--timings**: Print encode/decode phase timings and available T1 profiles.
 - **--debug-temp-sidecar**: Emit the private BP8 COM sidecar for diagnostics.
   Normal files omit it.
