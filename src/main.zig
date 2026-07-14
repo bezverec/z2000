@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const codec = @import("codec.zig");
+const color = @import("color.zig");
 const codestream = @import("codestream.zig");
 const dng = @import("formats/dng.zig");
 const image = @import("image.zig");
@@ -721,10 +722,30 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             try codestream.decodeLosslessGrayWithOptionsProfiled(allocator, j2k, options, &decode_timings)
         else
             try codestream.decodeLosslessGrayWithOptions(allocator, j2k, options) },
-        3 => .{ .rgb = if (show_timings)
-            try codestream.decodeLosslessTemporaryWithOptionsProfiled(allocator, j2k, options, &decode_timings)
-        else
-            try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options) },
+        3 => rgb: {
+            var has_subsampling = false;
+            for (0..info.components) |component| {
+                const sampling = info.componentSampling(component) orelse return error.UnsupportedComponentCount;
+                has_subsampling = has_subsampling or sampling[0] != 1 or sampling[1] != 1;
+            }
+            if (has_subsampling) {
+                var planes = if (show_timings)
+                    try codestream.decodeLosslessPlanarUpsampledWithOptionsProfiled(
+                        allocator,
+                        j2k,
+                        options,
+                        &decode_timings,
+                    )
+                else
+                    try codestream.decodeLosslessPlanarUpsampledWithOptions(allocator, j2k, options);
+                defer planes.deinit();
+                break :rgb .{ .rgb = try color.interleaveRgb(allocator, planes) };
+            }
+            break :rgb .{ .rgb = if (show_timings)
+                try codestream.decodeLosslessTemporaryWithOptionsProfiled(allocator, j2k, options, &decode_timings)
+            else
+                try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options) };
+        },
         2, 4 => alpha: {
             const alpha_mode = info.alpha_mode orelse return error.UnsupportedComponentCount;
             var planes = try codestream.decodeLosslessPlanarWithOptions(allocator, j2k, options);

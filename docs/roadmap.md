@@ -1,338 +1,91 @@
 # Roadmap
 
-The roadmap is organized around reaching a narrow, honest JPEG2000 Part 1
-encoder before broadening profile coverage.
+This is the strategic plan for z2000. The exact execution order lives in
+[`next_steps.md`](next_steps.md); detailed feature and performance campaigns
+live in [`feature_plan.md`](feature_plan.md) and
+[`optimization_plan.md`](optimization_plan.md).
 
-Quantified ISO readiness is tracked in `docs/iso_coverage.md`. Keep that
-scorecard in sync with this roadmap whenever a feature moves from fail-closed
-metadata to tested payload behavior or when an independent decoder changes the
-interop gate.
+## Current Baseline
 
-## Guiding Rules
+The two project scorecards are 100/100 for their explicitly bounded targets.
+That does **not** mean every JPEG2000 Part 1 profile or JPX feature exists.
+The production baseline is a strict, fail-closed codec family with tested
+lossless and lossy RGB paths, real T1/T2 payloads, quality layers, all five
+progression orders, bounded tile-part divisions, multi-tile support, code-block
+style coverage, JP2 wrapping, strict foreign decode, and reference-decoder
+interop. See [`iso_coverage.md`](iso_coverage.md) for the exact envelope.
 
-- Fail closed when marker options imply payload behavior that is not implemented.
-- Keep strict no-sidecar RPCL/RCT/5-3 roundtrip stable; keep the temporary BP8
-  sidecar only as an opt-in oracle/compatibility path.
-- Prefer small independently tested T1/T2 components over large hidden rewrites.
-- Keep benchmarks comparable against Grok, OpenJPEG, and Kakadu.
-- Avoid license contamination: use external implementations only for behavioral
-  understanding, tests, and benchmarks, not copied code.
+The component-generic campaign has additionally landed grayscale, bounded
+palette and alpha layouts, mixed 8/16-bit planar precision, and native-plane
+decode for bounded RPCL/no-MCT/reversible-5/3 component subsampling. F3b now
+includes component-local packet/T1/DWT geometry, PLT and PLT-less streams,
+matching nonzero origins, multi-tile assembly, canonical RPCL POC, and explicit
+origin-anchored reference-grid upsampling for bounded sRGB JP2-to-TIFF output.
 
-## Near-Term ISO Task Ledger
+## Rules For Promotion
 
-- T1/EBCOT: all six Part 1 code-block style bits are public in the tested
-  ISO-MQ envelope, including combined BYPASS/RESET/TERMALL/CAUSAL/ERTERM/
-  SEGMARK profiles. Keep row-mask, stripe-mask, flag-word, and SIMD-aware T1
-  optimization going only when byte-for-byte oracle and interop tests remain
-  green.
-- T2 packet state: all five progression orders preserve inclusion tag-tree,
-  zero-bitplane tag-tree, `numlenbits`, layer deltas, and packet state through
-  strict decode. PLT-backed tile-part divisions now cover all direct modes on
-  matching orders: `R`/RPCL, `L`/LRCP, `C`/CPRL, and `P`/PCRL. PPT and PPM are
-  public on the bounded RPCL path with every SOP/EPH combination: single-tile
-  accepts one or `R` parts, and multi-tile requires `R` parts. Packed EPH stays
-  with the T2 header, packed SOP stays in SOD and contributes to PLT/`Psot`.
-  The 16-tile/48-part two-layer PPM gate now decodes pixel-exactly through
-  z2000, OpenJPEG, and Grok.
-- JP2/JPX compatibility: the strict basic `.jp2` reader/writer covers
-  signature, `ftyp`, `jp2h`, `ihdr`, `colr`, and contiguous codestream boxes.
-  Start with 8-bit and 16-bit RGB plus sRGB `colr`; the reader now also accepts
-  final length-to-EOF codestream boxes, 64-bit `XLBox` lengths, and a bounded
-  one-index-component sRGB `pclr`/`cmap` encode/decode profile. Keep
-  JPX-only features rejected until JPX boxes are intentionally implemented.
-- ICC profile preservation: TIFF tag 34675 now roundtrips as a JP2 restricted
-  ICC `colr` box and back to TIFF as opaque metadata for common RGB profiles
-  such as eciRGBv2 and Adobe RGB. Malformed ICC box/tag rejection coverage is
-  in place; optional LittleCMS-backed conversion should come only after the
-  preservation path has interop coverage.
-- Profiles: ICT, irreversible 9/7, scalar-expounded and scalar-derived QCD,
-  BYPASS, reversible `--mct none`, and the currently wired style-bit
-  combinations are supported on their documented narrow paths. Keep unsupported
-  style combinations, broader profile mixes, and JPX-only behavior fail-closed
-  until they have payload behavior and interop coverage.
-- Rate allocation: `--rates` uses PCRD-style global slope allocation with
-  distortion metadata, byte-targeted layer deltas, and gain-normalized 9/7
-  synthesis weights. Profile-matched OpenJPEG deficits average 0.68 dB; further
-  extreme-low-rate tuning is optimization work rather than missing coverage.
-- Multi-tile: the bounded-grid model is implemented for reversible RCT/5-3 and
-  irreversible ICT/9-7, with per-tile DWT, packet state, strict decode, all
-  five progression orders, global cross-tile PCRD, and the implemented
-  resilience style matrix. `R`, `L`, and `C` divisions are independently
-  lossless through z2000/OpenJPEG/Grok/Kakadu. Next broaden rate-target/style
-  matrices and add tile scheduling while keeping unsupported combinations
-  fail-closed.
-  Strict decode anchors tile precincts to the reference grid and accepts
-  PLT-less foreign default-precinct multi-tile files. Encode now anchors
-  precincts, subband code-blocks, and tag-tree leaves too, and reversible 5/3
-  lifting now preserves parity across arbitrary viable tile origins.
-- Interop gate: for each major phase, keep OpenJPEG/Grok/Kakadu checks for
-  encode/decode roundtrip, marker conformance, output size, strict reader
-  validation, and single-thread plus multi-thread encode/decode benchmarks.
-  Treat valid2000/jpylyzer-style validators as explicit hygiene gates rather
-  than absolute truth: every warning should be checked against the strict
-  reader, independent decoders, and the Part 1 text. ICC absence is acceptable
-  when the source TIFF has no ICC tag.
+- Unsupported payload behavior fails closed; metadata parsing alone never
+  unlocks an encode/decode profile.
+- A profile becomes public only after writer/reader symmetry or a deliberate
+  decode-only contract, malformed-input tests, and deterministic threading.
+- Interop gates use z2000 strict decode plus OpenJPEG, Grok, and Kakadu where
+  the reference tool supports the profile. Validators are useful evidence,
+  not an absolute source of truth.
+- Performance changes are kept only when profile-matched measurements improve
+  without changing pixels, packet semantics, safety, or determinism.
+- Native component planes remain the codec boundary. Upsampling, colour
+  conversion, alpha interpretation, and metadata mapping stay explicit in the
+  conversion/container layer.
 
-## Next Implementation Slice
+## Strategic Sequence
 
-1. Harden the landed grayscale and bounded palette paths with checked-in
-   independent fixtures, then continue the component-generic campaign toward
-   multi-tile grayscale, mixed precision/BPCC, alpha, richer palette mappings,
-   and general component layouts while keeping RGB byte behavior stable. The
-   alpha `cdef`, TIFF ExtraSamples CLI, and RGB-triplet-only RCT slices are
-   landed. Both no-MCT and RCT RGBA smokes are accepted by all three reference
-   decoders (pixel-exact through Grok and Kakadu). F3a now carries mixed
-   unsigned 8/16-bit BPCC/SIZ/QCC state through
-   strict T2/T1 and pixel-exactly reconstructs an embedded Kakadu 8/16/8
-   fixture with per-component DC shifts. Matching encode is live and decodes
-   pixel-exactly through OpenJPEG/Grok/Kakadu; API-generated foreign encoder
-   fixtures remain optional matrix breadth. F3b now exposes and validates
-   per-component SIZ sampling and reconstructs an embedded Kakadu 4:2:0
-   fixture through component-local packet/T1/DWT geometry. Next generalize
-   RPCL packet ordering beyond the current one-precinct-per-component bound,
-   then decide the explicit chroma-upsample/conversion API.
-2. Keep the landed direct-MQ PCRD distortion capture pinned against its symbol
-   oracle and byte-identical rate-target streams. Continue the measured
-   optimization campaign with decode T1 and the AVX2/NEON lane audit; retain a
-   change only when the profile-matched gate improves without correctness or
-   safety regressions.
-3. Add a small checked-in packed-header fixture matrix from an independent
-   producer when PPM/PPT encode controls are available locally; current live
-   z2000 output is already pixel-exact through OpenJPEG and Grok.
+### 1. Finish F3 Component Layout Breadth
 
-## Post-Part 1 Conversion Roadmap
+Broaden sampled strict decode from inline headers to PPT and PPM, then add
+sampled no-MCT reversible encode. Follow with reordered sampled POC and
+distinct tile-partition origins only when packet ordering and geometry have
+independent fixtures. Keep sampled MCT and irreversible combinations closed
+until their transform and registration semantics are explicit.
 
-These items are intentionally outside the current ISO scorecard. They should
-start after the full JPEG2000 Part 1 codec target is much closer to complete, or
-when a small metadata/input-format slice is clearly isolated from codec
-correctness work.
+### 2. Colour And ICC
 
-- Input formats: add JPEG, PNG, and BMP import before heavier camera/HDR
-  formats. Later, build RAW/DNG workflows around explicit demosaic/color
-  decisions and add OpenEXR for HDR/float-heavy production imagery.
-- Color spaces: broaden from the current RGB/sRGB, bounded sRGB palette, and
-  opaque ICC preservation into YCC, extended YCC, CIELab, and CMYK.
-  ICC-based conversion should be an optional color-management layer rather than
-  hidden pixel mutation.
-- Metadata: preserve and validate EXIF, IPTC, and XMP alongside ICC. Keep a
-  clear policy for what is copied byte-for-byte, normalized into JP2/JPX boxes,
-  or rejected as ambiguous.
-- Component precision: keep 8/16-bit integer RGB as the stable baseline, then
-  evaluate higher-than-16-bit integer and float paths only where the source
-  format, JP2/JPX container, codestream precision, transform, and quantization
-  semantics are all explicit.
-- JPX boundary: many of the richer color/metadata cases may belong in JPX
-  rather than basic JP2. Keep JPX-only features rejected until box parsing,
-  writing, and interop tests are intentional.
+Preserve ICC profiles byte-for-byte as today, then add optional colour
+conversion as a separate tool-layer operation. Prioritize sYCC and common RGB
+profiles such as eciRGB v2 and Adobe RGB; follow with CMYK, extended YCC,
+CIELab, monochrome refinements, and palette breadth. Never silently reinterpret
+component samples from codestream metadata alone.
 
-## Phase 1: Finish The Narrow Lossless RPCL Path
+### 3. Format Front Ends And Metadata
 
-Goal: single-tile RGB lossless JP2 with RCT, 5/3, RPCL, no exotic code-block
-style behavior, and real packet payload interleaving.
+Implement isolated, fuzz-gated adapters in this order: BMP, PNG, JPEG, linear
+DNG/RAW, then OpenEXR. Preserve EXIF, XMP, and IPTC through explicit JP2 box or
+side metadata mappings. Evaluate depths above 16 bits only after the internal
+sample carrier and each source format have checked semantics.
 
-Tasks:
+### 4. Performance And Scale
 
-- Keep the real RPCL packet stream as the main tile-part payload.
-- Keep `PLT` sourced from real RPCL packet lengths.
-- Keep the old temporary payload only as an opt-in debug `COM` sidecar.
-- Keep strict RPCL/T2 packet state validation active for the same narrow path.
-- Keep the current no-sidecar strict decode path green for RPCL/RCT/5-3:
-  strict T2 block catalog, inferred continuous MQ/T1 pass metadata, quality
-  layers snapped to pass truncation points, inverse 5/3, and inverse RCT.
-- Keep ISO-MQ debug sidecar validation on the same strict SOD reconstruction
-  path after BP8 metadata and shadow-stream bytes are checked.
-- Close remaining packet-header/T1 conformance gaps found by OpenJPEG, Grok,
-  and Kakadu smoke tests.
+Continue separate 5/3 lossless and 9/7 lossy campaigns. Near-term value is in
+decode parallel efficiency, catalog/T1 overlap, I/O locality, and carefully
+measured T1 work. Portable Zig vectors remain the default SIMD abstraction;
+AVX2, AVX-512, NEON, and RVV must share scalar-oracle tests. The long-term goal
+is to exceed Grok and then Kakadu without relaxing correctness or safety.
 
-Exit criteria:
+### 5. Release Readiness
 
-- z2000 output decodes in at least one independent JPEG2000 decoder.
-- z2000 can decode its own strict packets without private payload data.
-- Existing fail-closed unsupported profile tests still pass.
+Keep prereleases intentional rather than commit-triggered. A release candidate
+requires native Windows and Linux builds, the RISC-V compile/functional gate,
+the full corruption suite, deterministic threaded output, current four-codec
+interop, documented CLI/API boundaries, and reproducible benchmark provenance.
+The detailed policy is in [`versioning.md`](versioning.md).
 
-## Phase 2: Complete T1 Behavior For The Narrow Path
+## Explicitly Outside The Current Baseline
 
-Goal: make the EBCOT/MQ segment payload the primary T1 output.
+- arbitrary JPX box families and JPX-only composition;
+- arbitrary component counts, signed/floating codestream samples, and general
+  mixed subsampling/precision/MCT combinations;
+- sampled packed headers, reordered sampled POC, sampled encode, and distinct
+  tile-partition origins until the gates in `next_steps.md` land;
+- automatic non-sRGB colour conversion;
+- tiled/compressed TIFF variants and broad camera-RAW workflows;
+- unchecked architecture-specific fast paths.
 
-Tasks:
-
-- Audit cleanup, significance, and refinement pass behavior against Part 1.
-- Add missing context modeling details and edge cases.
-- Implement or reject each code-block style bit based on payload behavior:
-  bypass, reset context, terminate all, vertical causal, predictable termination,
-  and segmentation symbols.
-- Add conformance-style tests for empty blocks, sparse blocks, dense blocks,
-  sign handling, stripe boundaries, and truncation points.
-- Verify marker-stuffing and termination behavior under random-symbol tests.
-
-Exit criteria:
-
-- Temporary bitplane payload is no longer required for lossless decode.
-- EBCOT payload byte counts and truncation points remain deterministic across
-  thread counts.
-
-## Phase 3: T2 Robustness And Packet Ordering
-
-Goal: make T2 packetization strict, inspectable, and ready for more profiles.
-
-Tasks:
-
-- Keep packet parsing from codestream tile-parts active in the strict
-  no-sidecar path.
-- Keep SOP/EPH sequencing validation active. SOP remains default-on; EPH is
-  opt-in until OpenJPEG/Kakadu packet-boundary interop is stable.
-- Keep benchmarking gated on interop: current no-sidecar/no-EPH smoke decodes
-  through z2000 strict path, OpenJPEG, Grok, and Kakadu without pixel
-  differences; jpylyzer 2.2.1 accepts the current JP2. Validator reports remain
-  diagnostic rather than authoritative.
-- Validate PLT/TLM consistency against actual packet and tile-part lengths
-  through z2000 strict path, OpenJPEG, Grok, Kakadu, and a validator where
-  available; disagreements should be reduced to a minimal packet/marker case
-  before treating either side as authoritative.
-- Keep PLT/TLM consistency validation against actual packet and tile-part
-  lengths, including ordered multi-segment TLM/PLT coverage.
-- Keep RPCL as the first supported progression, with bounded per-precinct state
-  and whole-packet reader validation.
-- Keep all five implemented progression orders under packet-state regression.
-- Keep all direct tile-part divisions (none/`R`/`L`/`C`/`P`) under marker,
-  packet-state, and independent-decoder regression.
-
-Exit criteria:
-
-- Packet writer and reader agree on packet lengths, payload slices, and state.
-- Corrupted packet headers fail with bounded, deterministic errors.
-
-## Phase 4: Multi-Tile And Memory Scaling
-
-Goal: broaden the v1 bounded multi-tile envelope and use it as the route to
-large-image memory scaling and tile-level parallelism.
-
-Tasks:
-
-- Keep the current positive multi-tile encode/decode path green: lossless
-  RCT/5-3 and irreversible ICT/9-7, quality layers with global cross-tile PCRD,
-  one tile-part per tile or PLT-backed `R`/`L`/`C`/`P` divisions, deterministic
-  row-major encode plus reordered foreign multipart decode, the complete T1
-  style-bit envelope, and ISO B.6/B.7-aligned geometry.
-- Expand the tile/profile matrix one axis at a time: more fixtures for edge
-  tiles and non-divisible dimensions, then broader rate-target/style coverage,
-  non-empty PLT-less multi-part decode, and remaining progression/tile-part
-  combinations after the reference-grid packet/block/DWT path and its interop
-  coverage are green.
-- Preserve tile-component independence in DWT, T1, and T2 scheduling while
-  keeping packet order deterministic.
-- Rework scratch pools for tile-local reuse and later persistent worker
-  resources.
-- Add memory usage benchmarks.
-- Add OpenJPEG/Grok/Kakadu interop fixtures for each newly opened multi-tile
-  profile.
-
-Exit criteria:
-
-- The v1 envelope remains accepted by z2000 strict decode and independent
-  decoders.
-- Unsupported multi-tile/profile combinations fail closed with deterministic
-  errors.
-- Tile-level scheduling improves memory or throughput without changing output
-  bytes.
-
-## Phase 5: Irreversible And Lossy Paths
-
-Goal: harden ICT, 9/7, scalar quantization, and rate allocation beyond the
-first supported single-tile path.
-
-Tasks:
-
-- Keep the JP2 irreversible RGB path with ICT and 9/7 covered by OpenJPEG/Grok
-  decode checks.
-- Harden scalar-expounded quantization marker and inverse-quantization behavior
-  against malformed QCD/QCC-style inputs.
-- Keep scalar-derived marker behavior and payload decode covered by strict
-  reader, JP2 wrapper, and reference-decoder checks.
-- Keep odd-origin multi-tile 9/7 encode/decode covered bidirectionally against
-  OpenJPEG, Grok, and Kakadu; lifting parity must follow the reference grid at
-  every decomposition level.
-- Add PCRD-style rate-control tests that compare quality layers, output bytes,
-  and decoded error bounds against Grok/OpenJPEG on shared corpora.
-
-Exit criteria:
-
-- `--mct ict`, `--transform 9-7`, and scalar-expounded/scalar-derived QCD stay
-  green across z2000, OpenJPEG, Grok, and the local strict reader.
-- Access-profile output size and quality are close enough to Grok/OpenJPEG to
-  make benchmark comparisons fair.
-
-## Phase 6: Performance Work
-
-Goal: reduce the gap to Grok/OpenJPEG/Kakadu without sacrificing clarity.
-
-Tasks:
-
-- Benchmark single-thread and multi-thread encode/decode after each major T1/T2
-  change.
-- Keep SIMD abstraction portable across AVX2 and NEON.
-- Prioritize strict decode T1/MQ absolute CPU work: context update helpers,
-  byte-in locality, flag book-keeping, and remaining per-symbol branch cost.
-- Keep packed T1 experiments narrow and byte-exact; the full guarded packed
-  context-word path is currently slower, so prefer smaller RLC/ZC/SC subpaths
-  before replacing the u16 flag layer.
-- Keep the completed 5/3 and 9/7 SIMD/band scheduling byte-exact. The wider
-  single-tile 9/7 forward pool clears the encode gate; its inverse promotion
-  was slower, so future decode work should test catalog/T1 overlap, TIFF output
-  parallelism, or a fused dequantize-to-lifting design instead of retrying the
-  same split traversal. A separate four-worker inverse RCT/ICT tail clears the
-  lossy t16 decode gate and remains serial for small images and t1.
-- Treat the strict packet catalog as a measured serial Amdahl term. Recent scan,
-  header, and finalize reductions keep it near 9-10 ms on the current smoke
-  file; further T2 work should be justified by larger-image or multi-tile
-  profiles unless it also improves ISO correctness.
-- Do not flatten RGB T1 blocks into one cross-component decode queue: the
-  measured candidate reduced worker creation but increased variance and failed
-  the lossless gate. Any persistent pool must retain component phases or begin
-  from block-ready catalog/T1 pipelining.
-- Avoid more block-order scheduling experiments until worker-balance counters
-  show a real tail; the tested LPT-by-payload ordering was slower than the
-  atomic next-block scheduler.
-- Improve IO and memory locality for large TIFF inputs.
-- Track output size separately from speed.
-- Use real multi-tile support as the route to Grok-like many-core scaling once
-  the single-tile T1/DWT costs are lower.
-
-Exit criteria:
-
-- Benchmarks are reproducible from documented commands.
-- Performance changes include tests or checks that preserve deterministic output.
-
-## External Implementation Study Notes
-
-Grok and OpenJPEG are useful references for architecture and behavior, not for
-copying code. The current takeaways for z2000 are:
-
-- T1 should treat code-block coding as reusable per-thread state: aligned data
-  buffers, padded flag rows, and per-worker coder/scratch objects reused across
-  blocks. z2000 already has scratch reuse; the next step is to reduce flag clear
-  and neighbor-update work with row/stripe masks while preserving byte-for-byte
-  oracle tests.
-- Cleanup run mode should be implemented as an explicit stripe-level path before
-  further micro-optimizing byte packing. It is a correctness and speed feature:
-  all-clean four-sample stripes avoid per-sample work and emit compact run
-  information.
-- T2 should keep packet progression geometry cached rather than recomputing
-  packet-to-precinct/block mapping in the hot loop. z2000's RPCL index should be
-  extended into a durable packet/progression cache before LRCP/PCRL/CPRL are
-  enabled.
-- Segment length coding should be modeled around terminated pass groups, not
-  only per-layer byte totals. `numlenbits`, pass counts, termination points, and
-  payload byte slices need to remain visible in the internal catalog so COD
-  style flags can be implemented one at a time.
-- Rate allocation should eventually move from even byte/pass splitting toward a
-  PCRD-style slope model. A conservative histogram of pass slopes can later be
-  used to avoid coding passes that are very likely to be discarded, but only
-  after T1 distortion metadata is trustworthy.
-- Decode scheduling can benefit from strict region-of-interest and empty-block
-  skips even before full random-access decode exists. The same block catalog that
-  drives strict T2 validation should expose enough geometry to skip irrelevant
-  or all-zero blocks cheaply.
-- Parallelism should remain deterministic but move toward persistent worker
-  resources: per-thread T1 coders, per-thread DWT buffers, and packet/precinct
-  work queues. Tile-level scheduling belongs after real multi-tile support.

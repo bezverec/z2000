@@ -5,6 +5,105 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Documentation Plan Consolidation
+
+- Made `roadmap.md` the strategic source and `next_steps.md` the only ordered
+  implementation queue. Added `docs/README.md` to describe document ownership
+  and update rules.
+- Replaced the checkpoint-heavy active optimization plan and scaffold-era
+  architecture with concise current documents. Preserved the full architecture,
+  optimization, SIMD, multi-tile, roadmap, and next-steps histories under
+  `docs/archive/`.
+- Clarified throughout that 100/100 applies to the explicitly bounded
+  scorecards and is not a claim of complete JPEG2000 Part 1 or JPX coverage.
+
+### Reference-Grid Sampled Output (F3b Slice 9)
+
+- Added `decodeLosslessPlanarUpsampled` and its options/profiled variants.
+  They expand native component planes by nearest-neighbour replication anchored
+  to absolute SIZ `XOsiz/YOsiz` and `XRsiz/YRsiz`, without silently applying a
+  colour transform.
+- Added checked RGB interleaving for three equal-precision full-resolution
+  planes. `decode-temp-jp2` now converts bounded sampled sRGB JP2 input to TIFF
+  through that explicit boundary while preserving the native-plane API.
+- Pinned zero-origin, shifted-origin, multi-tile, PLT-less, and canonical-POC
+  cases against the existing independent Kakadu fixtures. Sampled packed
+  headers, reordered POC, and sampled encode remain fail-closed.
+
+### Canonical Sampled RPCL POC Decode (F3b Slice 8)
+
+- Added sampled-component POC schedule validation over the canonical
+  reference-grid RPCL sequence. Main-header and first-tile-part-header records
+  may overlap, but their first visits must preserve packet-for-packet RPCL
+  order and cover the complete stream.
+- Added independent Kakadu 4:2:0 POC fixtures for main- and tile-header marker
+  placement, PLT and PLT-less packet spans, and shifted-origin four-tile decode.
+- Non-RPCL or reordered sampled schedules fail as `UnsupportedPayload`;
+  incomplete schedules fail as `InvalidCodestream`. Packed sampled packet
+  headers remain fail-closed pending an independent generator.
+
+### Shifted-Origin Multi-Tile Subsampling Decode (F3b Slice 7)
+
+- Carried SIZ `XOsiz/YOsiz` through strict metadata and rebuilt multi-tile
+  grids from the original absolute reference coordinates instead of silently
+  normalizing them to zero.
+- Made sampled-plane and RGB tile assembly translate absolute tile/component
+  rectangles back to image-local output coordinates while retaining absolute
+  origins for packet planning and inverse 5/3 lifting.
+- Added PLT-backed and PLT-less Kakadu 4:2:0 four-tile fixtures at
+  `XOsiz/YOsiz=5/3`. Both audit 102 packets and 198 blocks and reconstruct the
+  native 32x32/16x16/16x16 planes pixel-exactly. Distinct tile-partition
+  origins remain fail-closed.
+
+### Multi-Tile Component Subsampling Decode (F3b Slice 6)
+
+- Extended the bounded RPCL/no-MCT/reversible-5/3 planar decoder across real
+  tile grids. Each tile now derives aggregate packet counts from its sampled
+  component plans and preserves independent inclusion, zero-bitplane, and
+  `numlenbits` state while PLT-backed or open-ended inline packets are read.
+- Corrected sampled RPCL ordering at non-top-left tile boundaries by clamping
+  precinct reference positions to the tile origin before component ordering.
+- Added independent Kakadu 4:2:0 four-tile fixtures with and without PLT. Both
+  audit 36 packets and 86 blocks and reconstruct the native 32x32/16x16/16x16
+  planes pixel-exactly. Packed headers, POC, shifted multi-tile origins, and
+  subsampled encode remain fail-closed.
+
+### Origin-Aware Subsampling Decode (F3b Slice 5)
+
+- Single-tile strict metadata now builds packet plans from the actual SIZ tile
+  rectangle instead of normalizing `XOsiz/YOsiz` to zero.
+- Relaxed JP2 validation for matching nonzero image/tile origins while keeping
+  a distinct tile-partition origin fail-closed.
+- Added PLT-backed and PLT-less Kakadu 4:2:0 fixtures at `XOsiz/YOsiz=5/3`.
+  Their clipped 3x3/5x5 precinct grids audit 60 packets and 139 blocks and
+  reconstruct all 32x32/16x16/16x16 samples exactly.
+
+### Component-Local PLT-Less T2 State (F3b Slice 4)
+
+- Reworked the strict open-ended packet reader to own separate precinct-state
+  slots over each component's sampled geometry instead of sharing the
+  component-zero block index.
+- Inclusion and zero-bitplane tag trees plus `numlenbits` now persist correctly
+  while PLT-less packet spans are derived from unequal component precinct
+  grids.
+- Added a second independent Kakadu 32x32/16x16/16x16 4:2:0 fixture without
+  PLT. Both PLT-backed and PLT-less streams audit 30 packets and 85 blocks and
+  reconstruct every native-plane sample exactly.
+
+### Reference-Grid Subsampling Packets (F3b Slice 3)
+
+- Added an RPCL sequence builder that projects component-local precincts by
+  `XRsiz/YRsiz` onto the image reference grid and merges unequal grids in ISO
+  resolution-position-component-layer order.
+- Strict metadata now derives aggregate per-resolution packet counts from all
+  component plans, and strict T2/T1 reconstruction consumes those local
+  precinct indexes without a shared-grid scan.
+- Added a checked-in Kakadu 32x32/16x16/16x16 4:2:0 JP2 with 8x8 precincts and
+  a pixel-exact 30-packet decode gate. SIZ/PLT topology mismatches fail as
+  `InvalidCodestream`; PLT-less state followed in Slice 4 and nonzero origins
+  in Slice 5, while packed-header, POC, and multi-tile profiles remain
+  fail-closed.
+
 ### Component-Local Subsampling Decode (F3b Slice 2)
 
 - Added component-local sampled bounds, subbands, code-block partitions, RPCL
@@ -14,8 +113,8 @@ entries are grouped by development milestone rather than semantic version.
   variable-layout allocator. The planar decoder now returns native-size planes
   instead of silently upsampling chroma.
 - Promoted the embedded Kakadu 4:2:0 fixture from metadata-only rejection to a
-  pixel-exact 8x8/4x4/4x4 strict T2/T1/DWT roundtrip. General multi-precinct
-  subsampling has an explicit `UnsupportedPayload` regression gate.
+  pixel-exact 8x8/4x4/4x4 strict T2/T1/DWT roundtrip. Unequal multi-precinct
+  component grids followed in F3b Slice 3.
 
 ### Component-Subsampling Metadata Audit (F3b Slice 1)
 
@@ -278,7 +377,7 @@ entries are grouped by development milestone rather than semantic version.
   signalling-first), F5 format front ends (BMP -> PNG -> JPEG -> linear
   DNG -> OpenEXR), F6 EXIF/IPTC/XMP preservation — with dependencies,
   sizes, verification requirements, and explicit non-goals.
-- Added `optimization_plan.md` Checkpoint #6: the honest remaining-levers
+- Added optimization-plan Checkpoint #6: the honest remaining-levers
   assessment after the micro-optimization space measured out — parallel
   decode efficiency (t16 gap 2.1x vs Kakadu against 1.5x at t1) and the
   fused dequantize-into-inverse-DWT angle rank ahead of the S5 T1 SWAR
@@ -406,7 +505,7 @@ entries are grouped by development milestone rather than semantic version.
   decode t1 -13.2%, t10 -28.9%. The lossless archival profile is unchanged.
 - The follow-up S2 candidate (vectorized quantize/dequantize band loops)
   measured -1.0% to -2.1% and was reverted per the keep rule; numbers are
-  recorded in the `docs/simd_plan.md` progress log.
+  recorded in the archived SIMD-plan progress log.
 
 ### Reproducible Comparative Benchmark Ledger
 
@@ -1345,7 +1444,7 @@ entries are grouped by development milestone rather than semantic version.
   counts), so encode bytes and external interop are unaffected. Measured on
   a 2048x2048 noise image (Apple M4, 4P+6E): encode t10 143 -> 121 ms
   (-15.4%), decode t10 115 -> 110 ms (-4.2%); single-thread encode/decode
-  unchanged (serial path untouched). See `docs/optimization_plan.md`.
+  unchanged (serial path untouched). See the optimization-plan history.
 
 ### Predictable Termination (ERTERM) Bring-up
 
@@ -1506,7 +1605,7 @@ entries are grouped by development milestone rather than semantic version.
   public `tiff-to-jp2` CLI. At that milestone, RESET (`0x02`) and ERTERM
   (`0x10`) still stayed fail-closed; accepted-profile and rejected-bit COD
   mutation tests were added.
-- Passed the external interop gates staged in `docs/next_steps.md`:
+- Passed the external interop gates staged in the next-steps history:
   OpenJPEG 2.5.4 and Grok 20.3.6 decode z2000 output pixel-losslessly for
   vertical-causal, segmentation-symbols, terminate-all, `--mct none`, and
   genuine multi-tile streams (2x2 aligned grid and 3x3 edge-tile grid), and

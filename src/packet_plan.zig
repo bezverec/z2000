@@ -56,6 +56,15 @@ pub const Position = struct {
     y_ref: u64,
 };
 
+/// One component-local packet plan plus its SIZ sampling factors. Component
+/// plans use a component count of one; the merged stream assigns the slice
+/// index as the packet component number.
+pub const SampledComponentPlan = struct {
+    plan: Plan,
+    xrsiz: u8,
+    yrsiz: u8,
+};
+
 /// Upper-left precinct position on the image reference grid used by the PCRL
 /// and CPRL ordering rules. Keeping this projection here prevents tile-part
 /// writers from duplicating the resolution scaling math.
@@ -69,6 +78,41 @@ pub fn packetPosition(plan: Plan, packet: Packet) !Position {
     return .{
         .x_ref = (@as(u64, packet.precinct_x) * resolution.precinct_width) << shift,
         .y_ref = (@as(u64, packet.precinct_y) * resolution.precinct_height) << shift,
+    };
+}
+
+fn sampledPacketPosition(
+    component: SampledComponentPlan,
+    packet: Packet,
+    reference_x0: u32,
+    reference_y0: u32,
+) !Position {
+    if (component.xrsiz == 0 or component.yrsiz == 0 or
+        component.plan.resolution_count == 0 or packet.resolution >= component.plan.resolution_count)
+    {
+        return PacketPlanError.InvalidDimensions;
+    }
+    const levels: u8 = component.plan.resolution_count - 1;
+    const resolution = component.plan.resolutions[packet.resolution];
+    const shift: u6 = @intCast(levels - packet.resolution);
+    const x = std.math.mul(u64, packet.precinct_x, resolution.precinct_width) catch
+        return PacketPlanError.InvalidDimensions;
+    const y = std.math.mul(u64, packet.precinct_y, resolution.precinct_height) catch
+        return PacketPlanError.InvalidDimensions;
+    const sampled_x = std.math.mul(u64, x, component.xrsiz) catch
+        return PacketPlanError.InvalidDimensions;
+    const sampled_y = std.math.mul(u64, y, component.yrsiz) catch
+        return PacketPlanError.InvalidDimensions;
+    const shifted_limit: u64 = @as(u64, std.math.maxInt(u64)) >> shift;
+    if (sampled_x > shifted_limit or sampled_y > shifted_limit) {
+        return PacketPlanError.InvalidDimensions;
+    }
+    return .{
+        // A precinct aligned before a tile-component boundary is visited at
+        // the tile boundary, not before the tile. This matters for sampled
+        // components in all tiles except the top-left tile.
+        .x_ref = @max(sampled_x << shift, reference_x0),
+        .y_ref = @max(sampled_y << shift, reference_y0),
     };
 }
 
@@ -276,6 +320,73 @@ const PositionKeyedPacket = struct {
     x_ref: u64,
     y_ref: u64,
 };
+
+fn sampledRpclLessThan(_: void, a: PositionKeyedPacket, b: PositionKeyedPacket) bool {
+    if (a.packet.resolution != b.packet.resolution) return a.packet.resolution < b.packet.resolution;
+    if (a.y_ref != b.y_ref) return a.y_ref < b.y_ref;
+    if (a.x_ref != b.x_ref) return a.x_ref < b.x_ref;
+    if (a.packet.component != b.packet.component) return a.packet.component < b.packet.component;
+    return a.packet.layer < b.packet.layer;
+}
+
+/// Builds ISO RPCL order for components whose precinct grids differ because
+/// of SIZ sampling. Precinct positions are projected onto the image reference
+/// grid, then merged as resolution, position, component, layer.
+pub fn sampledRpclPackets(
+    allocator: std.mem.Allocator,
+    components: []const SampledComponentPlan,
+    layers: u16,
+    reference_x0: u32,
+    reference_y0: u32,
+) ![]Packet {
+    if (components.len == 0 or components.len > std.math.maxInt(u16) or layers == 0) {
+        return PacketPlanError.InvalidDimensions;
+    }
+
+    const resolution_count = components[0].plan.resolution_count;
+    var total: u64 = 0;
+    for (components) |component| {
+        if (component.xrsiz == 0 or component.yrsiz == 0 or
+            component.plan.resolution_count != resolution_count)
+        {
+            return PacketPlanError.InvalidDimensions;
+        }
+        try validatePlan(component.plan, 1, layers);
+        total = std.math.add(u64, total, component.plan.packets) catch
+            return PacketPlanError.InvalidDimensions;
+    }
+
+    const packet_count = std.math.cast(usize, total) orelse return PacketPlanError.InvalidDimensions;
+    const keyed = try allocator.alloc(PositionKeyedPacket, packet_count);
+    defer allocator.free(keyed);
+
+    var count: usize = 0;
+    for (components, 0..) |component, component_index| {
+        var iterator = try RpclIterator.init(component.plan, 1, layers);
+        while (iterator.next()) |local_packet| {
+            if (count >= keyed.len) return PacketPlanError.InvalidDimensions;
+            var packet = local_packet;
+            packet.component = @intCast(component_index);
+            const position = try sampledPacketPosition(component, packet, reference_x0, reference_y0);
+            keyed[count] = .{
+                .packet = packet,
+                .x_ref = position.x_ref,
+                .y_ref = position.y_ref,
+            };
+            count += 1;
+        }
+    }
+    if (count != keyed.len) return PacketPlanError.InvalidDimensions;
+
+    std.sort.pdq(PositionKeyedPacket, keyed, {}, sampledRpclLessThan);
+    const packets = try allocator.alloc(Packet, packet_count);
+    errdefer allocator.free(packets);
+    for (keyed, 0..) |entry, index| {
+        packets[index] = entry.packet;
+        packets[index].sequence = @intCast(index);
+    }
+    return packets;
+}
 
 fn positionKeyLessThan(order: PositionOrder, a: PositionKeyedPacket, b: PositionKeyedPacket) bool {
     if (order == .cprl and a.packet.component != b.packet.component) {

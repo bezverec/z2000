@@ -187,6 +187,51 @@ pub const IctPlanes = ComponentPlanesOf(f32);
 /// 1..4-component no-MCT layouts.
 pub const SamplePlanes = ComponentPlanesOf(u16);
 
+/// Converts three full-resolution, equal-precision component planes to the
+/// interleaved RGB carrier used by the TIFF boundary. This function performs
+/// no colour-space conversion; callers must establish RGB semantics from the
+/// container before using it.
+pub fn interleaveRgb(allocator: std.mem.Allocator, planes: SamplePlanes) !image.RgbImage {
+    if (planes.planes.len != 3 or planes.width == 0 or planes.height == 0) {
+        return ColorError.InvalidImage;
+    }
+    const bit_depth = planes.componentBitDepth(0) orelse return ColorError.InvalidImage;
+    if (bit_depth == 0 or bit_depth > 16) return ColorError.InvalidImage;
+    const pixels = try std.math.mul(usize, planes.width, planes.height);
+    for (0..3) |component| {
+        const dimensions = planes.componentDimensions(component) orelse return ColorError.InvalidImage;
+        if (planes.componentBitDepth(component) != bit_depth or
+            dimensions[0] != planes.width or dimensions[1] != planes.height or
+            planes.planes[component].len != pixels)
+        {
+            return ColorError.InvalidImage;
+        }
+    }
+
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    const samples = try allocator.alloc(u16, sample_count);
+    errdefer allocator.free(samples);
+    const max_sample: u16 = @intCast((@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1);
+    for (0..pixels) |pixel| {
+        const red = planes.planes[0][pixel];
+        const green = planes.planes[1][pixel];
+        const blue = planes.planes[2][pixel];
+        if (red > max_sample or green > max_sample or blue > max_sample) {
+            return ColorError.SampleOutOfRange;
+        }
+        samples[pixel * 3] = red;
+        samples[pixel * 3 + 1] = green;
+        samples[pixel * 3 + 2] = blue;
+    }
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = bit_depth,
+        .samples = samples,
+    };
+}
+
 fn validatePixelPlanes(comptime Sample: type, planes: ComponentPlanesOf(Sample), expected_components: usize) !usize {
     const pixels = try std.math.mul(usize, planes.width, planes.height);
     if (planes.planes.len != expected_components) return ColorError.InvalidImage;

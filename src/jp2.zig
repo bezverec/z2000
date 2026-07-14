@@ -1092,13 +1092,12 @@ fn validateCodestreamPayload(
     const xtosiz = try readU32Be(segment, 26);
     const ytosiz = try readU32Be(segment, 30);
     if (xsiz <= xosiz or ysiz <= yosiz) return Jp2Error.InvalidCodestream;
-    if (xosiz != 0 or yosiz != 0) return Jp2Error.UnsupportedProfile;
     if (xtsiz == 0 or ytsiz == 0) return Jp2Error.InvalidCodestream;
     if (xtosiz != xosiz or ytosiz != yosiz) return Jp2Error.UnsupportedProfile;
     const width = xsiz - xosiz;
     const height = ysiz - yosiz;
-    // Multi-tile SIZ (XTSiz < width) is accepted: with zero tile offsets any
-    // nonzero tile size partitions the image into a valid ISO B.3 grid.
+    // XTOsiz/YTOsiz are pinned to the image origin, so any nonzero tile size
+    // partitions the image into a valid ISO B.3 grid even at a nonzero origin.
     const tile_columns = (@as(u64, width) + xtsiz - 1) / xtsiz;
     const tile_rows = (@as(u64, height) + ytsiz - 1) / ytsiz;
     const tile_count_u64 = tile_columns * tile_rows;

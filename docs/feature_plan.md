@@ -1,8 +1,8 @@
 # Feature Plan — Components, Color Spaces, and Formats
 
-Companion to `docs/roadmap.md` (direction), `docs/next_steps.md` (ISO
-scorecard history), and `docs/multi_tile_plan.md`/`docs/simd_plan.md` (the
-two prior campaign plans whose staged, gated style this plan reuses). It
+Companion to `docs/roadmap.md` (direction) and `docs/next_steps.md` (the only
+ordered work queue). The completed multi-tile and SIMD campaign plans are
+preserved under `docs/archive/`; this plan reuses their staged, gated style. It
 turns the post-Part 1 conversion backlog into concrete stages with
 dependencies, sizes, and verification requirements.
 
@@ -73,8 +73,9 @@ and 4-component no-MCT layouts are public at the codestream API level
 `decodeLosslessPlanar`), with synthetic roundtrips, fail-closed envelope
 tests, and OpenJPEG/Grok pixel-exact decode of both layouts (per-component
 PGX comparison). Widening the gray/planar encode gate beyond RPCL/R-divisions
-stays open as interop-gated breadth work; **F2 is complete for the bounded
-single-tile reversible profile, and F3 is the next component-layout campaign.**
+stays open as interop-gated breadth work. **F2 and F3a are complete for their
+bounded profiles; F3b is active, with sampled packed headers and sampled encode
+as the next component-layout gates.**
 
 **Verify:** byte-identical RGB/gray regression corpus at every PR;
 2-component (gray+alpha shaped) and 4-component synthetic roundtrips;
@@ -138,15 +139,33 @@ The bounded profile is single-tile RPCL, reversible 5/3, and no-MCT. Additional
 API-generated OpenJPEG/Grok foreign encode fixtures remain useful matrix
 breadth, but their CLIs expose only a common RAW precision.
 
-**F3b slices 1-2 landed 2026-07-14:** JP2/SIZ parsing exposes nonzero
+**F3b slices 1-9 landed 2026-07-14:** JP2/SIZ parsing exposes nonzero
 per-component `XRsiz/YRsiz`, `jp2-info` reports them, and an embedded Kakadu
 4:2:0 fixture now reconstructs its 8x8/4x4/4x4 planes pixel-exactly through
 strict T2/T1 and origin-aware 5/3. The strict catalog owns per-component
-sampled bounds, bands, blocks, packet indexes, and output dimensions. This
-first vertical is single-tile RPCL/no-MCT with one precinct per component and
-resolution. Next generalize packet ordering to unequal component precinct
-grids, then add a deliberate chroma-upsample/conversion layer; writers remain
-unit-sampling-only meanwhile.
+sampled bounds, bands, blocks, packet indexes, and output dimensions. Slice 3
+adds reference-grid RPCL merging for unequal precinct grids, pinned by a second
+Kakadu 32x32/16x16/16x16 fixture with 8x8 precincts and 30 audited packets.
+Slice 4 makes strict open-ended T2 state component-local and proves the same
+stream pixel-exact without PLT. Slice 5 retains matching nonzero image/tile
+origins through packet planning and lifting, pinned by PLT and PLT-less Kakadu
+fixtures with clipped 3x3/5x5 precinct grids. Slice 6 extends the same native
+planar reconstruction across a zero-origin tile grid and fixes RPCL position
+ordering where sampled precincts begin before a right or lower tile boundary.
+Independent four-tile Kakadu fixtures with and without PLT audit 36 packets
+and 86 blocks and reconstruct 32x32/16x16/16x16 planes exactly. Slice 7 carries
+matching nonzero image/tile origins through the multi-tile context and local
+plane assembly; PLT and PLT-less Kakadu variants at `XOsiz/YOsiz=5/3` audit
+102 packets/198 blocks and remain pixel-exact. Packed headers, distinct
+tile-partition origins, and writers remain fail-closed. Slice 8 admits explicit
+main- or first-tile-header POC when its complete schedule preserves canonical
+sampled RPCL order; Kakadu PLT/PLT-less single- and four-tile fixtures are
+pixel-exact. Slice 9 adds explicit origin-anchored nearest-neighbour expansion
+from native component planes to the full reference grid, plus checked sRGB
+interleaving for JP2-to-TIFF conversion. It is pinned across zero/shifted
+origins, single/multi-tile, PLT-less, and canonical-POC fixtures. Reordered
+sampled POC, packed headers, and sampled encode remain fail-closed; packed
+header state is the next strict-decode breadth gate.
 
 ## Stage F4 — colourspace breadth
 
@@ -198,7 +217,10 @@ structured extraction, re-emission, and a preservation test matrix.
 **Depends on:** nothing hard; pairs naturally with F5b/F5c inputs that
 carry EXIF/XMP. **Size:** M.
 
-## Suggested order
+## Dependency Order (Not The Active Queue)
+
+This sequence describes technical dependencies only. The current implementation
+order is maintained exclusively in `docs/next_steps.md`.
 
 F1 (campaign) -> F2 -> F3a -> F5a+F5b (can interleave with F3/F4) -> F4 ->
 F3b -> F5c -> F6 -> F5d -> F5e. BMP/PNG can start before F1 finishes if

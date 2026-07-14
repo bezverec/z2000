@@ -36,14 +36,20 @@ certification.
   per-component QCD/QCC on the single-tile RPCL 5/3 path. z2000 output is
   pixel-exact through OpenJPEG, Grok, and Kakadu PGX decode.
 - Bounded component-subsampling decode with per-component SIZ `XRsiz/YRsiz`,
-  component-local packet/T1/DWT geometry, and variable-size planar output. An
-  embedded Kakadu 4:2:0 fixture reconstructs its 8x8/4x4/4x4 planes exactly.
+  reference-grid RPCL merging across unequal component precinct grids,
+  component-local T1/DWT geometry, and variable-size planar output. Embedded
+  Kakadu 4:2:0 fixtures reconstruct one- and multi-precinct single-tile planes
+  plus four-tile planes at zero or matching nonzero image/tile origins exactly,
+  with or without PLT. Canonical RPCL POC is accepted from the main or first
+  tile-part header. A reference-grid nearest-neighbour API expands native
+  planes without colour conversion, and `jp2-to-tiff` uses it for bounded
+  three-component sRGB output.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
-bounded 1..4 envelope (general subsampling and mixed-precision multi-tile/MCT),
+bounded 1..4 envelope (subsampled encode and mixed-precision multi-tile/MCT),
 non-empty PLT-less multi-part tiles, broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
@@ -253,10 +259,17 @@ foreign codestreams can be reconstructed through the strict planar library
 API when they are single-tile RPCL, reversible 5/3, and no-MCT; the same
 bounded library path can encode them and emit JP2 `BPCC`. The TIFF CLI remains
 uniform-depth and mixed multi-tile/MCT profiles stay fail-closed. The planar
-decoder also accepts the bounded single-tile RPCL/no-MCT/5-3 subsampling
-profile when every component has one precinct per resolution; component
-dimensions are available through `SamplePlanes.componentDimensions`. General
-multi-precinct subsampling and automatic chroma upsampling remain fail-closed.
+decoder also accepts the bounded RPCL/no-MCT/5-3 subsampling
+profile with inline packet headers, with or without PLT, including unequal
+component precinct grids; component dimensions are available through
+`SamplePlanes.componentDimensions`. Matching nonzero image/tile origins are
+supported for single- and multi-tile streams, which assemble native component
+planes tile by tile. `decodeLosslessPlanarUpsampled` provides explicit
+origin-anchored nearest-neighbour expansion to full reference-grid planes;
+the JP2-to-TIFF CLI interleaves those planes only after the JP2 wrapper has
+established bounded sRGB semantics. Subsampled packed-header streams, distinct
+tile-partition origins, reordered sampled POC, and subsampled encode remain
+fail-closed.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
 floating-point samples, unspecified or multiple auxiliary channels, mixed bit
@@ -266,18 +279,18 @@ depth, signed sample formats, and multipage handling fail closed.
 
 Detailed notes live in `docs/`:
 
+- [Documentation index](docs/README.md)
 - [Architecture](docs/architecture.md)
 - [API notes](docs/api.md)
 - [ISO coverage scorecard](docs/iso_coverage.md)
 - [Roadmap](docs/roadmap.md)
 - [Next steps](docs/next_steps.md)
 - [Optimization plan](docs/optimization_plan.md)
-- [SIMD plan](docs/simd_plan.md)
 - [Post-Part 1 feature plan](docs/feature_plan.md)
 - [Comparative benchmarks](docs/benchmarks.md)
-- [Multi-tile plan](docs/multi_tile_plan.md)
 - [Versioning](docs/versioning.md)
 - [Changelog](docs/changelog.md)
+- [Completed plan archive](docs/archive/README.md)
 
 Run the maintained four-codec benchmark on Windows with an optional lossy
 ICT/9/7 rate-target profile:
@@ -291,9 +304,10 @@ The POSIX harness accepts the same extension through `INCLUDE_LOSSY=1`.
 
 ## Project Direction
 
-Near term: keep both engineering scorecards at 100/100 while hardening release
-gates, strict decode, interoperability, and performance inside the documented
-profile envelope.
+Near term: keep both engineering scorecards at 100/100 while completing sampled
+component layouts, hardening release gates and interoperability, and improving
+performance inside the documented profile envelope. The score is for that
+bounded envelope, not a claim that every Part 1 or JPX profile is implemented.
 
 Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.

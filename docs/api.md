@@ -21,7 +21,7 @@ z2000 encode input.pgm output.z2000 --wavelet 5-3 --levels 3 --quant 1
 z2000 decode output.z2000 reconstructed.pgm
 ```
 
-TIFF and temporary JP2 scaffold:
+TIFF and JP2 conversion:
 
 ```sh
 zig build run -- --version
@@ -184,13 +184,22 @@ Primary public functions:
   alpha is the final plane and is signalled explicitly through `cdef`
 - `decodeLosslessPlanar(allocator, bytes)` /
   `decodeLosslessPlanarWithOptions(allocator, bytes, options)` — strict
-  decode of single-tile reversible 5/3 streams with SIZ Csiz 1..4, including
-  no-MCT layouts, four-component RGB-triplet RCT, and bounded mixed unsigned
+  decode of bounded reversible 5/3 streams with SIZ Csiz 1..4, including
+  single-tile no-MCT layouts, four-component RGB-triplet RCT, and bounded mixed unsigned
   8/16-bit no-MCT streams. Mixed output uses `SamplePlanes.bit_depth == 0` and
   exposes each precision through `component_bit_depths`/
   `componentBitDepth(component)`. Bounded subsampled no-MCT streams expose
   variable plane shapes through `component_widths`, `component_heights`, and
   `componentDimensions(component)`
+- `decodeLosslessPlanarUpsampled(allocator, bytes)` /
+  `decodeLosslessPlanarUpsampledWithOptions(allocator, bytes, options)` /
+  `decodeLosslessPlanarUpsampledWithOptionsProfiled(...)` — decodes the same
+  bounded planar profile and expands every component to the full SIZ reference
+  grid by nearest-neighbour replication anchored to absolute image origin;
+  no colour transform is implied
+- `color.interleaveRgb(allocator, planes)` — checked conversion of three
+  equal-precision, full-resolution planes to `RgbImage`; callers remain
+  responsible for establishing RGB semantics from the container
 - `decodeLosslessTemporary(allocator, bytes)`
 - `decodeLosslessTemporaryWithOptions(allocator, bytes, options)`
 - `analyzeLosslessTemporary(bytes)`
@@ -277,11 +286,21 @@ quantized profiles remain fail-closed.
 `Info.component_xrsiz` and `Info.component_yrsiz` expose each codestream
 component's SIZ sampling factors; `componentSampling(index)` returns the pair.
 Metadata parsing accepts nonzero factors, while current wrapping requires
-unit sampling. Strict planar decode supports single-tile RPCL, reversible 5/3,
-no-MCT subsampling when every component has one precinct per resolution; it
-uses component-local sampled bounds, subbands, code-block catalogs, T1 planes,
-and origin-aware inverse DWT. General multi-precinct subsampling, MCT over
-subsampled planes, and convenience RGB/grayscale conversion remain fail-closed.
+unit sampling. Strict planar decode supports RPCL, reversible 5/3, no-MCT
+subsampling with inline packet headers, with or without PLT. It merges
+unequal component precinct grids in reference-grid RPCL order and uses
+component-local sampled bounds, subbands, code-block catalogs, T1 planes, and
+origin-aware inverse DWT. Matching nonzero image/tile origins are retained in
+single- and multi-tile component plans; absolute tile rectangles are translated
+into native-size image-local output planes per component. Subsampled
+packed-header streams, distinct tile-partition origins, MCT over subsampled
+planes, and non-RGB colour conversion remain fail-closed. The explicit
+`decodeLosslessPlanarUpsampled` boundary expands native planes using absolute
+reference-grid registration; `decode-temp-jp2` interleaves them only for a
+bounded three-component sRGB JP2 wrapper. Explicit POC in the main or first
+tile-part header is accepted only when the composed schedule completely
+preserves canonical sampled RPCL order; reordered sampled POC remains
+unsupported.
 
 Primary public functions:
 
@@ -455,23 +474,14 @@ metadata stay aligned across portable, AVX2-width, and NEON-width builds.
 The direct ISO-MQ path is the default T1 backend. Cleanup run mode, directional
 sign prediction contexts, refined magnitude-refinement contexts, direct MQ
 emission, BYPASS raw segments, and terminated codeword segment metadata are
-covered by oracle tests in the current narrow path. Segmentation-symbol cleanup
-trailers, terminate-all pass-terminated MQ slices, vertical-causal context
-formation, TERMALL-scoped reset-context, and TERMALL-scoped ERTERM are wired
-through public codestream paths where their payload behavior has writer,
-reader, tests, and interop coverage. BYPASS+TERMALL is public with per-pass
-raw/MQ segment lengths and strict decode; OpenJPEG, Grok, and Kakadu decode the
-current smoke losslessly. The bounded multi-tile
-envelope accepts all five progression orders with untargeted quality layers,
-CAUSAL, SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL.
-Larger no-sidecar ERTERM files are
-accepted by z2000 strict decode, OpenJPEG, Grok, and Kakadu, including the
-block-parallel strict decode path. Unsupported combinations, such as standalone
-ERTERM or BYPASS with ERTERM/RESET, still return `UnsupportedPayload`.
-The inferred continuous payload decoder and partial coefficient decode helpers
-accept the same internal style state for future strict T2 audits and
-quality-layer prefix validation; inferred decode rejects terminate-all payloads
-because pass byte lengths are required.
+covered by oracle tests. All six Part 1 code-block style bits and every style
+byte `0x00..0x3f` are public on the documented ISO-MQ path: BYPASS, RESET,
+TERMALL, vertical causal, predictable termination, segmentation symbols, and
+their combinations carry segment/style metadata through strict T2/T1 decode.
+Representative single- and multi-tile combinations are pixel-exact through
+OpenJPEG, Grok, and Kakadu. The inferred continuous-payload helper remains a
+narrow internal API and rejects TERMALL when pass byte lengths are unavailable;
+the legacy MQ backend also keeps its separate fail-closed envelope.
 
 ## `src/rate_alloc.zig`
 
