@@ -78,19 +78,17 @@ and `COMMIT` is the eight-character revision. See
 
 ## Command Examples
 
-Inspect TIFF or DNG metadata:
+The examples call the built binary directly; add `zig-out/bin` to `PATH` or
+prefix the commands with `./zig-out/bin/`. Conversions need no subcommand —
+the direction is inferred from the file extensions (`.tif`/`.tiff` and
+`.jp2`, case-insensitive); the explicit `tiff-to-jp2` and `decode-temp-jp2`
+subcommands keep working.
+
+Convert TIFF to lossless JP2 (the defaults already produce the archival
+RCT + reversible 5/3 profile):
 
 ```sh
-zig build run -- tiff-info input.tif
-zig build run -- dng-info input.dng
-```
-
-Convert TIFF to lossless JP2:
-
-```sh
-zig build run -- tiff-to-jp2 input.tif output.jp2 \
-  --mct rct --transform 5-3 --qstyle none \
-  --levels 5 --progression RPCL --block 64 --layers 1 --tlm
+z2000 input.tif output.jp2
 ```
 
 Convert TIFF to a rate-layered JP2 (the `--rates` list sets the layer count;
@@ -98,31 +96,38 @@ the final layer always carries the complete stream, so a trailing `1` makes
 the lossless-final intent explicit):
 
 ```sh
-zig build run -- tiff-to-jp2 input.tif output.jp2 \
-  --mct rct --transform 5-3 --qstyle none \
-  --rates 16,8,1 --threads 0 --timings
+z2000 input.tif output.jp2 --rates 16,8,1 --threads 0 --timings
 ```
 
-Inspect and decode a JP2 produced by z2000:
+Decode a JP2 back to TIFF and inspect it:
 
 ```sh
-zig build run -- jp2-info output.jp2
-zig build run -- jp2-stats output.jp2
-zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif --threads 0
+z2000 output.jp2 reconstructed.tif --threads 0
+z2000 jp2-info output.jp2
+z2000 jp2-stats output.jp2
+```
+
+Inspect TIFF or DNG metadata:
+
+```sh
+z2000 tiff-info input.tif
+z2000 dng-info input.dng
 ```
 
 Run the older educational grayscale codec:
 
 ```sh
-zig build run -- encode input.pgm output.z2000 --wavelet 5-3 --levels 3 --quant 1
-zig build run -- decode output.z2000 reconstructed.pgm
+z2000 encode input.pgm output.z2000 --wavelet 5-3 --levels 3 --quant 1
+z2000 decode output.z2000 reconstructed.pgm
 ```
 
 ## CLI Reference
 
-Main conversion command:
+Main conversion command (the subcommand is optional when the extensions
+identify the direction):
 
 ```sh
+z2000 input.tif output.jp2 [options]
 z2000 tiff-to-jp2 input.tif output.jp2 [options]
 ```
 

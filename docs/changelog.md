@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### CLI Shorthand Conversion Syntax
+
+- Conversions no longer need a subcommand: `z2000 input.tif output.jp2`
+  routes to the TIFF encoder and `z2000 input.jp2 output.tif` to the strict
+  JP2 decoder, inferred from the two leading path extensions
+  (case-insensitive `.tif`/`.tiff`/`.jp2`; options follow as before).
+  Explicit subcommand names are matched first and keep working, and
+  unrecognized extension pairs still print usage and fail.
+- README command examples now call the built binary directly with the
+  shorthand syntax instead of `zig build run --` invocations, and the usage
+  text documents both shorthand forms.
+
 ### CLI: --threads 0 Selects All Logical CPUs
 
 - The README has documented `--threads 0` as "use all logical CPU threads",
