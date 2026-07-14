@@ -12,11 +12,13 @@ zig build
 zig build test
 ```
 
-Custom grayscale codec:
+The binary installs as both `z2000` and the `z2k` alias; conversions accept
+the extension-inferred shorthand (`z2k input.tif output.jp2`). The custom
+grayscale codec:
 
 ```sh
-zig build run -- encode input.pgm output.z2000 --wavelet 5-3 --levels 3 --quant 1
-zig build run -- decode output.z2000 reconstructed.pgm
+z2000 encode input.pgm output.z2000 --wavelet 5-3 --levels 3 --quant 1
+z2000 decode output.z2000 reconstructed.pgm
 ```
 
 TIFF and temporary JP2 scaffold:
@@ -157,6 +159,12 @@ Primary public functions:
 - `encodeLosslessSkeleton(allocator, rgb, requested_levels)`
 - `encodeLosslessWithOptions(allocator, rgb, options)`
 - `encodeLosslessWithOptionsProfiled(allocator, rgb, options, timings)`
+- `encodeLosslessPlanarWithOptions(allocator, planes, options)` — bounded
+  1..4-component no-MCT layouts over `color.SamplePlanes`; grayscale is its
+  one-plane special case
+- `decodeLosslessPlanar(allocator, bytes)` /
+  `decodeLosslessPlanarWithOptions(allocator, bytes, options)` — strict
+  decode of single-tile no-MCT reversible 5/3 streams with SIZ Csiz 1..4
 - `decodeLosslessTemporary(allocator, bytes)`
 - `decodeLosslessTemporaryWithOptions(allocator, bytes, options)`
 - `analyzeLosslessTemporary(bytes)`

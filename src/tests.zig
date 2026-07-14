@@ -4292,7 +4292,7 @@ test "grayscale strict decoder rejects malformed component and packet metadata" 
     defer allocator.free(with_two_components);
     writeU16BeTest(with_two_components, siz + 38, 2);
     try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
+        codestream.CodestreamError.InvalidCodestream,
         codestream.decodeLosslessGray(allocator, with_two_components),
     );
 
@@ -15507,9 +15507,14 @@ test "strict SIZ marker reader rejects unsupported component layout" {
         }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "unsupported component count", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
-                writeU16BeTest(corrupted, siz + 38, 4);
+                writeU16BeTest(corrupted, siz + 38, 5);
             }
         }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        .{ .label = "four-component count with RGB-sized SIZ payload", .mutate = struct {
+            fn mutate(corrupted: []u8, siz: usize) void {
+                writeU16BeTest(corrupted, siz + 38, 4);
+            }
+        }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "grayscale component count with RGB-sized SIZ payload", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
                 writeU16BeTest(corrupted, siz + 38, 1);
@@ -23654,4 +23659,93 @@ test "9/7 split and vertical-band kernels match the interleaved reference bit fo
             }
         }
     }
+}
+
+fn makePlanarTestPlanes(allocator: std.mem.Allocator, width: usize, height: usize, bit_depth: u8, component_count: usize) !color.SamplePlanes {
+    var planes = try color.SamplePlanes.init(allocator, width, height, bit_depth, component_count);
+    errdefer planes.deinit();
+    const max_sample: u32 = if (bit_depth == 8) 255 else 65535;
+    for (planes.planes, 0..) |plane, component| {
+        for (plane, 0..) |*sample, index| {
+            sample.* = @intCast((index * (17 + component * 29) + component * 101) % (max_sample + 1));
+        }
+    }
+    return planes;
+}
+
+test "planar 2-component no-MCT layout roundtrips losslessly" {
+    const allocator = std.testing.allocator;
+    var source = try makePlanarTestPlanes(allocator, 21, 17, 8, 2);
+    defer source.deinit();
+
+    const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, source, .{
+        .levels = 3,
+        .mct = .none,
+        .block_width = 16,
+        .block_height = 16,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+
+    // SIZ advertises exactly two components.
+    const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    try std.testing.expectEqual(@as(u16, 2), (@as(u16, encoded[siz + 38]) << 8) | encoded[siz + 39]);
+
+    var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 2), decoded.planes.len);
+    try std.testing.expectEqual(source.width, decoded.width);
+    try std.testing.expectEqual(source.height, decoded.height);
+    for (source.planes, decoded.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+}
+
+test "planar 4-component 16-bit layout roundtrips losslessly with layers" {
+    const allocator = std.testing.allocator;
+    var source = try makePlanarTestPlanes(allocator, 32, 24, 16, 4);
+    defer source.deinit();
+
+    const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, source, .{
+        .levels = 2,
+        .mct = .none,
+        .layers = 2,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+
+    const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    try std.testing.expectEqual(@as(u16, 4), (@as(u16, encoded[siz + 38]) << 8) | encoded[siz + 39]);
+
+    var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 4), decoded.planes.len);
+    for (source.planes, decoded.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+}
+
+test "planar encode fails closed outside the bounded envelope" {
+    const allocator = std.testing.allocator;
+    var source = try makePlanarTestPlanes(allocator, 8, 8, 8, 2);
+    defer source.deinit();
+
+    // MCT requires the 3-component RGB front ends.
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessPlanarWithOptions(allocator, source, .{ .levels = 2, .mct = .rct }),
+    );
+    // A five-plane carrier cannot even be constructed through the bounded
+    // init; a hand-built one must be rejected by the encoder.
+    var five = [5][]u16{ source.planes[0], source.planes[1], source.planes[0], source.planes[1], source.planes[0] };
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessPlanarWithOptions(allocator, .{
+            .allocator = allocator,
+            .width = source.width,
+            .height = source.height,
+            .bit_depth = source.bit_depth,
+            .planes = &five,
+        }, .{ .levels = 2, .mct = .none }),
+    );
 }

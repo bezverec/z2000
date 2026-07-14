@@ -65,10 +65,16 @@ header, tile-part SOT/POC/PLT/PPT/SOD/packet loop, EOC) is now one
 component-count-generic `assembleSingleTileCodestream`, used by both the RGB
 and grayscale encoders with byte-identical output across ten profiles
 (including PPM, PPT, CPRL, multi-tile, and layered grayscale); the tile
-scaffold engine was already shared. Remaining (b) work: unify the gray
-decode driver with the generic strict decode surface and widen the gray
-encode gate beyond RPCL/R-divisions where interop-gated; (c) open 2- and
-4-component no-MCT layouts.
+scaffold engine was already shared. **(b) completed 2026-07-14**: the grayscale
+encoder, decoder, and tile builder are one-plane delegates of the planar
+path — no parallel plumbing remains. **(c) landed 2026-07-14**: bounded 2-
+and 4-component no-MCT layouts are public at the codestream API level
+(`color.SamplePlanes`, `encodeLosslessPlanarWithOptions`,
+`decodeLosslessPlanar`), with synthetic roundtrips, fail-closed envelope
+tests, and OpenJPEG/Grok pixel-exact decode of both layouts (per-component
+PGX comparison). Widening the gray/planar encode gate beyond
+RPCL/R-divisions stays open as interop-gated breadth work; **F2 (alpha
+TIFF front ends + `cdef` semantics) is now unblocked and next.**
 
 **Verify:** byte-identical RGB/gray regression corpus at every PR;
 2-component (gray+alpha shaped) and 4-component synthetic roundtrips;
