@@ -24656,3 +24656,112 @@ test "planar encode fails closed outside the bounded envelope" {
         }, .{ .levels = 2, .mct = .none }),
     );
 }
+
+/// Repacks a strict inline-header PLT-less codestream into PPT form: every
+/// tile-part keeps its SOT..SOD frame (with Psot recomputed), gains one PPT
+/// marker holding the concatenated packet headers, and the SOD body carries
+/// only the packet bodies. The packet payload bytes are untouched, so the
+/// decoded planes must match the inline original exactly.
+fn repackInlineHeadersToPpt(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var report = try codestream.collectStrictInlinePacketSpans(allocator, bytes);
+    defer report.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..report.first_sot]);
+
+    for (report.tile_parts, 0..) |tile_part, part_index| {
+        var headers_len: usize = 0;
+        var bodies_len: usize = 0;
+        for (report.spans) |span| {
+            if (span.tile_part_index != part_index) continue;
+            headers_len += span.header_length;
+            bodies_len += span.body_length;
+        }
+        // Single PPT segment: Lppt = 2 (length) + 1 (Zppt) + headers.
+        if (headers_len + 3 > 65535) return error.TestUnexpectedResult;
+        const inter_header = bytes[tile_part.sot_offset + 12 .. tile_part.sod_offset];
+        const ppt_bytes = 2 + 2 + 1 + headers_len;
+        const new_psot = 12 + inter_header.len + ppt_bytes + 2 + bodies_len;
+
+        // SOT segment with recomputed Psot.
+        try out.appendSlice(allocator, bytes[tile_part.sot_offset..][0..6]);
+        var psot_be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &psot_be, @intCast(new_psot), .big);
+        try out.appendSlice(allocator, &psot_be);
+        try out.appendSlice(allocator, bytes[tile_part.sot_offset + 10 ..][0..2]);
+        // Anything the original carried between SOT and SOD (e.g. tile POC).
+        try out.appendSlice(allocator, inter_header);
+        // PPT with the concatenated packet headers in stream order.
+        try out.appendSlice(allocator, &.{ 0xff, 0x61 });
+        var lppt_be: [2]u8 = undefined;
+        std.mem.writeInt(u16, &lppt_be, @intCast(3 + headers_len), .big);
+        try out.appendSlice(allocator, &lppt_be);
+        try out.append(allocator, 0);
+        for (report.spans) |span| {
+            if (span.tile_part_index != part_index) continue;
+            try out.appendSlice(allocator, bytes[span.header_offset..][0..span.header_length]);
+        }
+        // SOD followed by the packet bodies only.
+        try out.appendSlice(allocator, &.{ 0xff, 0x93 });
+        for (report.spans) |span| {
+            if (span.tile_part_index != part_index) continue;
+            try out.appendSlice(allocator, bytes[span.body_offset..][0..span.body_length]);
+        }
+    }
+    try out.appendSlice(allocator, bytes[report.eoc_offset..]);
+    return out.toOwnedSlice(allocator);
+}
+
+test "sampled single-tile PPT streams decode identically to their inline originals" {
+    const allocator = std.testing.allocator;
+    const fixtures = [_][]const u8{
+        @embedFile("testdata/kakadu-rpcl-420-multi-precinct-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-origin-multi-precinct-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-poc-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-tile-poc-pltless.jp2"),
+    };
+    for (fixtures) |fixture| {
+        const inline_stream = try jp2.extractCodestream(fixture);
+
+        const ppt_stream = try repackInlineHeadersToPpt(allocator, inline_stream);
+        defer allocator.free(ppt_stream);
+        try std.testing.expect(codestream.hasMarker(ppt_stream, codestream.markerValue("ppt")));
+
+        var expected = try codestream.decodeLosslessPlanar(allocator, inline_stream);
+        defer expected.deinit();
+        var actual = try codestream.decodeLosslessPlanar(allocator, ppt_stream);
+        defer actual.deinit();
+        try std.testing.expectEqual(expected.planes.len, actual.planes.len);
+        for (expected.planes, actual.planes) |expected_plane, actual_plane| {
+            try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+        }
+
+        const inline_audit = try codestream.auditStrictPacketHeaders(allocator, inline_stream);
+        const ppt_audit = try codestream.auditStrictPacketHeaders(allocator, ppt_stream);
+        try std.testing.expectEqual(inline_audit.packets, ppt_audit.packets);
+        try std.testing.expectEqual(inline_audit.assembled_blocks, ppt_audit.assembled_blocks);
+
+        // Corruption: a flipped bit inside the packed headers must not decode
+        // into different planes silently.
+        const corrupted = try allocator.dupe(u8, ppt_stream);
+        defer allocator.free(corrupted);
+        const ppt_offset = findMarker(corrupted, codestream.markerValue("ppt")) orelse return error.MissingMarker;
+        corrupted[ppt_offset + 5] ^= 0x80;
+        if (codestream.decodeLosslessPlanar(allocator, corrupted)) |*decoded_corrupt| {
+            var owned = decoded_corrupt.*;
+            defer owned.deinit();
+            var any_difference = false;
+            for (expected.planes, owned.planes) |expected_plane, actual_plane| {
+                if (!std.mem.eql(u16, expected_plane, actual_plane)) any_difference = true;
+            }
+            try std.testing.expect(any_difference);
+        } else |_| {}
+
+        // Truncated PPT payload fails closed.
+        const truncated = try allocator.dupe(u8, ppt_stream);
+        defer allocator.free(truncated);
+        writeU16BeTest(truncated, ppt_offset + 2, 3);
+        try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, truncated)));
+    }
+}
