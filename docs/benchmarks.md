@@ -346,3 +346,33 @@ parallel efficiency as meaningful optimization targets.
   has no ICC profile. This is a profile failure, not an ISO/JP2 validity failure.
   Its z2000 scan also warned that PLT was absent; this benchmark requests TLM,
   not PLT.
+
+## 2026-07-15: Ryzen 7 5700X, 5/3 DWT worker cap — KEPT
+
+Same host, corpus, and archival profile as the records above. The 9/7 driver
+(`wavelet.zig`) already caps its DWT phase at eight workers because the wide,
+short-lived bands are memory-bound and oversubscribing the 8-core/16-thread
+host adds phase-spawn and SMT contention. The 5/3 driver (`wavelet_int.zig`)
+still allowed up to 32, so the lossless inverse DWT *regressed* from 12.8 ms at
+t8 to 17.3 ms at t16. Lowering its `max_dwt_workers` from 32 to 8 restores
+t16 to t8 behaviour. T1 keeps the full caller thread count; only the DWT phase
+is capped. Lossless codestreams and decoded pixels are byte-identical to the
+uncapped build (SHA-256 encode `5FFE4C5C…`, decode `D8E3038C…`); the lossy 9/7
+path is untouched.
+
+Per-stage `--timings` at t16 (lossless): inverse DWT 17.3 ms -> 12.1 ms;
+forward DWT (encode) 20.1 ms -> 18.2 ms.
+
+Hyperfine, two warmups, twelve runs, `--threads 16` unless noted:
+
+| Metric | Baseline (`=32`) | Candidate (`=8`) | Ratio |
+| --- | ---: | ---: | ---: |
+| Lossless decode t16 | 144.3 +/- 5.6 ms | 133.1 +/- 4.7 ms | 1.08x faster |
+| Lossless encode t16 | 144.4 +/- 7.2 ms | 135.6 +/- 2.4 ms | 1.06x faster |
+| Lossless decode t1 | 768.1 +/- 12.5 ms | 779.3 +/- 11.6 ms | 1.01x (tie) |
+
+The t1 pair is a statistical tie: with one worker both builds take the
+`@max(1, @min(1, 8|32))` = 1 path, so the code is identical and the 1.5%
+difference is inside the combined noise. Lossy encode/decode were not re-timed
+because the change does not touch the 9/7 path; those bands were already capped
+at eight.
