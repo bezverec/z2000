@@ -8,7 +8,7 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-14, both the narrow RGB lossless JP2 target and the broader
+of 2026-07-15, both the narrow RGB lossless JP2 target and the broader
 JPEG2000 Part 1 engineering scorecard are estimated at **100/100**, and the
 first release candidate (`v0.1.0-rc.1`) is published on the GitHub releases
 page. This is a project-readiness estimate, not a formal ISO conformance
@@ -31,6 +31,10 @@ certification.
   planar layouts, alpha-aware JP2 `cdef` signalling, and reversible RGBA RCT
   over the RGB triplet only, with strict malformed-input handling and
   OpenJPEG/Grok/Kakadu interoperability tests.
+- Explicit JP2 colour metadata with sRGB, grayscale, restricted ICC, and sYCC
+  recognition. The JP2-to-TIFF path converts unsigned 8/16-bit sYCC 4:4:4 to
+  sRGB; sampled sYCC and general ICC transforms remain fail-closed rather than
+  being silently interpreted as RGB.
 - Bounded planar encode/decode for mixed unsigned 8/16-bit component
   precision, including JP2 `BPCC`/codestream `SIZ` agreement and
   per-component QCD/QCC on the single-tile RPCL 5/3 path. z2000 output is
@@ -39,21 +43,22 @@ certification.
   reference-grid RPCL merging across unequal component precinct grids,
   component-local T1/DWT geometry, and variable-size planar output. Embedded
   Kakadu 4:2:0 fixtures reconstruct one- and multi-precinct single-tile planes
-  plus four-tile planes at zero or matching nonzero image/tile origins exactly,
-  with or without PLT. Canonical RPCL POC is accepted from the main or first
-  tile-part header. A reference-grid nearest-neighbour API expands native
+  plus multi-tile planes at zero, matching, or distinct image/tile-partition
+  origins exactly, with or without PLT. Checked POC schedules may use LRCP, RLCP, RPCL, PCRL,
+  or CPRL from the main or first tile-part header. A reference-grid
+  nearest-neighbour API expands native
   planes without colour conversion, and `jp2-to-tiff` uses it for bounded
   three-component sRGB output. Inline, PPT, and PPM headers plus SOP/EPH are
-  covered. The sampled reversible API emits single-tile inline+PLT RPCL with
-  one or more quality layers.
+  covered. The sampled reversible API emits single- and multi-tile RPCL with
+  inline PLT/PLT-less, PPT, or PPM packet headers; all layouts carry one or
+  more quality layers.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
-bounded 1..4 envelope (sampled multi-tile encode and mixed-precision
-multi-tile/MCT),
-non-empty PLT-less multi-part tiles, broad color management,
+bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
+non-empty PLT-less multi-part tiles, sampled sYCC and broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.
@@ -265,15 +270,19 @@ uniform-depth and mixed multi-tile/MCT profiles stay fail-closed. The planar
 decoder also accepts the bounded RPCL/no-MCT/5-3 subsampling
 profile with inline packet headers, with or without PLT, including unequal
 component precinct grids; component dimensions are available through
-`SamplePlanes.componentDimensions`. Matching nonzero image/tile origins are
-supported for single- and multi-tile streams, which assemble native component
-planes tile by tile. `decodeLosslessPlanarUpsampled` provides explicit
+`SamplePlanes.componentDimensions`. Matching or distinct image and
+tile-partition origins are supported for single- and multi-tile streams, which
+assemble native component planes tile by tile.
+`decodeLosslessPlanarUpsampled` provides explicit
 origin-anchored nearest-neighbour expansion to full reference-grid planes;
 the JP2-to-TIFF CLI interleaves those planes only after the JP2 wrapper has
 established bounded sRGB semantics. Sampled PPT/PPM and SOP/EPH decode are
-covered; the sampled writer currently emits single-tile inline+PLT RPCL with
-untargeted layers. Packed/PLT-less sampled encode, sampled multi-tile encode,
-distinct tile-partition origins, and reordered sampled POC remain fail-closed.
+covered; the sampled writer emits single- and multi-tile RPCL with inline PLT,
+inline PLT-less, PPT, or PPM packet headers, untargeted layers, and SOP/EPH
+framing. Reordered sampled POC is supported except with PPM. The sampled
+library encoder accepts absolute SIZ origins through
+`LosslessOptions.image_origin_x/y` and `tile_origin_x/y`; the TIFF CLI
+continues to emit zero-origin images.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
 floating-point samples, unspecified or multiple auxiliary channels, mixed bit

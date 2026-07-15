@@ -43,6 +43,11 @@ nearest-neighbour expansion anchored to absolute SIZ `XOsiz/YOsiz` and
 `XRsiz/YRsiz`. It does not infer YCC or perform colour conversion.
 `color.interleaveRgb` is called only after the JP2 container has established a
 bounded three-component sRGB interpretation.
+Enumerated sYCC is equally explicit: `jp2.Info.color_space` records the selected
+`colr` specification, native component decode remains unchanged, and
+`color.sycc444ToSrgb` performs the 8/16-bit 4:4:4 conversion only at the
+JP2-to-TIFF boundary. Sampled sYCC remains closed until its chroma registration
+and reconstruction policy has an independent interop gate.
 
 ## Encode Pipeline
 
@@ -139,20 +144,32 @@ axis contiguous: resolution (`R`), layer (`L`), component (`C`), and position
 Bounded sampled decode uses a distinct component geometry for each
 `XRsiz/YRsiz` pair. Each geometry owns sampled bounds, subbands, code-block
 locations, RPCL precinct indexes, inverse-DWT origin, and output dimensions.
-`sampledRpclPackets` projects component-local precincts onto reference-grid
-positions and merges them in canonical RPCL order.
+`sampledOrderedPackets` projects component-local precincts onto reference-grid
+positions and provides all five Part 1 orders; canonical RPCL is its default
+specialization.
 
 The current sampled decode profile is no-MCT, reversible 5/3, RPCL, one or more
-tiles, inline/PPT/PPM packet headers, all SOP/EPH combinations, matching
-image/tile origins, and optional canonical-order POC in the main or first
-tile-part header. PLT-less and packed-header state is component-local. Sampled
-PPM+POC, reordered POC, and distinct tile-partition origins remain fail-closed.
+tiles, inline/PPT/PPM packet headers, all SOP/EPH combinations, independent
+image and tile-partition origins, and checked POC in the main or first
+tile-part header.
+POC intervals may use any Part 1 progression and must cover every packet once.
+PLT-less and packed-header state is component-local. Sampled PPM+POC remains
+fail-closed.
 
-The sampled writer currently emits one single tile in canonical RPCL order with
-inline headers, PLT, and one or more untargeted quality layers. It encodes each
-native component through the shared one-component machinery, then merges packet
-streams using the same sampled RPCL sequence consumed by strict decode.
-PLT-less/PPT/PPM and multi-tile sampled output are the next encode slices.
+The sampled writer emits single- and multi-tile canonical RPCL with inline
+PLT/PLT-less, PPT, or PPM packet headers, SOP/EPH framing, and one or more
+untargeted quality layers. Each tile-component is cropped on
+the component grid, transformed with its absolute origin, encoded through the
+shared one-component machinery, and merged with the same sampled RPCL sequence
+consumed by strict decode. Both single- and multi-tile framing delegate to the
+common inline/PPT/PPM helpers and never rebuild T1 artifacts for a layout.
+Reordered POC permutes those complete packet views. Strict T2 detects whether
+layers remain precinct-contiguous; canonical streams retain the one-active-
+precinct fast path, while reordered schedules use persistent per-precinct
+inclusion, zero-bitplane, and `numlenbits` state.
+The public strict packet diagnostic follows the same per-tile sampled catalogs
+and rebases only their normalized byte storage when returning a whole-stream
+view, so it does not maintain a second geometry or T2 parser.
 
 ## JP2 And Metadata
 
@@ -162,8 +179,10 @@ exactly one contiguous codestream. Required ordering, duplicate boxes, lengths,
 component precision, sampling, and SIZ agreement are checked.
 
 Restricted ICC profiles are preserved byte-for-byte. Preservation is not colour
-conversion. Unsupported JPX composition, arbitrary ICC interpretation, and
-unknown component mappings fail closed.
+conversion. Enumerated sYCC (18) is recognized for three unsigned uniform
+8/16-bit components; the CLI converts only full-resolution 4:4:4 input to sRGB.
+Unsupported JPX composition, sampled sYCC conversion, arbitrary ICC
+interpretation, and unknown component mappings fail closed.
 
 ## Parallelism And Memory
 

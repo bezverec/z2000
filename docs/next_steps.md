@@ -4,7 +4,7 @@ This is the only active implementation queue. Strategic policy is in
 [`roadmap.md`](roadmap.md); completed plans and campaign detail are in
 [`archive/`](archive/README.md).
 
-## Current State (After PR #157)
+## Current State
 
 - The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
@@ -22,77 +22,59 @@ This is the only active implementation queue. Strategic policy is in
   no-MCT, 5/3, inline headers with PLT, and one or more untargeted quality
   layers. Output is deterministic and plane-exact through z2000, OpenJPEG, and
   Grok on the tested 4:2:0 profile.
+- The packet-layout follow-up completed sampled inline PLT/PLT-less, PPT with
+  body-length PLT, PPM without redundant PLT, and all SOP/EPH combinations.
+  One- through three-layer strict payloads are equivalent and live 4:2:0
+  output is accepted by OpenJPEG, Grok, and Kakadu.
+- Sampled multi-tile encode now covers one tile-part per tile with inline PLT,
+  inline PLT-less, PPT with body-length PLT, or PPM without PLT. The full
+  SOP/EPH matrix, packed-header corruption, one/three layers, and 1/8-thread
+  determinism are pinned on odd component/tile boundaries. OpenJPEG, Grok, and
+  Kakadu accept every live three-layer 4:2:0 layout; Kakadu reproduces the
+  native planes exactly.
+- `readStrictPacketCatalog` now joins the same checked tile-local sampled
+  catalogs used by production decode. Normalized packet entries and bytes are
+  identical across the multi-tile inline/PPT/PPM and SOP/EPH matrix.
+- Sampled POC now composes LRCP, RLCP, RPCL, PCRL, and CPRL intervals over
+  component-local precinct grids on single- and multi-tile output. Main- and
+  tile-header markers, PPT, malformed/incomplete schedules, and deterministic
+  threading are covered. Kakadu 8.4.1 reconstructs live output for every order
+  exactly; OpenJPEG/Grok accept it but disagree on sampled POC raster output,
+  so that combination remains an explicit reference-decoder caveat. PPM+POC
+  stays fail-closed.
+- Sampled strict decode and encode retain `XOsiz/YOsiz` independently from
+  `XTOsiz/YTOsiz`. An odd clipped 3x3 4:2:0 grid is plane-exact and
+  deterministic; an independent Kakadu 8.4.1 fixture decodes exactly through
+  z2000, and Kakadu reproduces matching z2000 output exactly on all native
+  planes.
 - PRs #156–#157 capped the 5/3 DWT phase at eight workers and gave it a
   persistent pool. Lossless output stayed byte-identical while t16 encode
   improved; detailed numbers live in `benchmarks.md`.
 
 ## Ordered Queue
 
-### 1. Sampled Encode Packet Layouts
+### 1. Colour And ICC Conversion Boundary
 
-Extend `encodeLosslessSampledPlanarWithOptions` without widening its transform
-profile:
+Keep native component decode and byte-preserving ICC storage unchanged. The
+first slice recognizes EnumCS 18 and converts unsigned 8/16-bit sYCC 4:4:4 at
+the JP2-to-TIFF boundary; an embedded Kakadu fixture matches OpenJPEG's sRGB
+raster exactly. Continue the separate conversion API in this order:
 
-1. PLT-less inline output;
-2. PPT output with body-length PLT accounting;
-3. PPM output with one checked header group per tile-part and no redundant PLT;
-4. all SOP/EPH combinations for inline, PPT, and PPM.
-
-Reuse the same sampled RPCL packet merge and packed-header framing helpers used
-by uniform-component encode. Do not create a second packet-state model.
-
-Acceptance gate:
-
-- one-, two-, and three-layer 4:2:0 roundtrips are native-plane exact;
-- inline/PLT-less/PPT/PPM variants carry the same T1 payload contributions;
-- PLT, PPM group, SOP sequence, EPH placement, truncation, and corruption cases
-  fail deterministically;
-- OpenJPEG, Grok, and Kakadu accept representative output where supported;
-- threads 1 and all produce byte-identical codestreams.
-
-### 2. Sampled Multi-Tile Encode
-
-Move the sampled per-component artifacts into the existing production tile
-grid. Each tile must derive component-local sampled bounds, DWT origins,
-precinct indexes, packet state, and output spans from the absolute SIZ grid.
-Start with inline+PLT, then reuse item 1's packet layouts.
-
-Acceptance gate:
-
-- aligned and shifted-origin 4:2:0 grids, including clipped edge tiles;
-- one and multiple quality layers;
-- strict native-plane decode plus OpenJPEG/Grok/Kakadu component-raster checks;
-- deterministic tile scheduling;
-- sampled MCT, 9/7, unsupported progressions, and inconsistent dimensions stay
-  fail-closed.
-
-### 3. Remaining Sampled Geometry Breadth
-
-Implement reordered sampled POC over component-local precinct grids, then
-distinct tile-partition origins (`XTOsiz/YTOsiz`). These are separate slices:
-POC changes packet visitation; tile origins change geometry and lifting parity.
-Each needs an independent producer fixture and edge-tile corruption cases.
-
-### 4. Colour And ICC Conversion Boundary
-
-Keep native component decode and byte-preserving ICC storage unchanged. Add
-explicit container colour metadata and a separate conversion API, starting with:
-
-1. sYCC to sRGB;
+1. sampled sYCC 4:2:2/4:2:0 registration and reconstruction;
 2. ICC-backed RGB conversion with eciRGB v2 and Adobe RGB fixtures;
 3. CMYK, extended YCC, and CIELab signalling/preservation before conversion.
 
 No colour conversion belongs inside T1/T2, and no component layout may be
 silently interpreted as RGB or YCC.
 
-### 5. Format And Metadata Adapters
+### 2. Format And Metadata Adapters
 
 Add isolated, fuzz-gated modules in this order: BMP, PNG, JPEG, linear DNG/RAW,
 then OpenEXR. Preserve EXIF, XMP, and IPTC through explicit mappings. Evaluate
 depths above 16 bits only after the internal carrier and target JP2 profile have
 checked semantics.
 
-### 6. Release Readiness
+### 3. Release Readiness
 
 Prepare intentional prereleases rather than commit-triggered releases. Keep
 Windows/Linux native builds, RISC-V/RVV compile and functional gates, strict

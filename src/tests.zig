@@ -3998,7 +3998,70 @@ test "JP2 wrapper records RGB image header" {
     try std.testing.expectEqual(@as(u32, 1), info.height);
     try std.testing.expectEqual(@as(u16, 3), info.components);
     try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
+    try std.testing.expectEqual(jp2.ColorSpace.srgb, info.color_space);
     try std.testing.expectEqual(@as(usize, minimal_jp2_codestream.len), info.codestream_bytes);
+
+    const sycc = try allocator.dupe(u8, wrapped);
+    defer allocator.free(sycc);
+    const jp2h_payload = try findJp2BoxPayload(sycc, "jp2h");
+    const colr_payload = try findJp2ChildBoxPayload(sycc, jp2h_payload, "colr");
+    writeU32BeTest(sycc, colr_payload.start + 3, 18);
+    const sycc_info = try jp2.parseInfo(sycc);
+    try std.testing.expectEqual(jp2.ColorSpace.sycc, sycc_info.color_space);
+    try std.testing.expectEqualStrings("sYCC", sycc_info.color_space.label());
+    try std.testing.expect(!sycc_info.has_icc_profile);
+
+    const sampled_sycc = try allocator.dupe(u8, sycc);
+    defer allocator.free(sampled_sycc);
+    const jp2c_payload = try findJp2BoxPayload(sampled_sycc, "jp2c");
+    // SIZ component descriptors begin 42 bytes after SOC. Signal 4:2:2 by
+    // changing the horizontal sampling factor for both chroma components.
+    sampled_sycc[jp2c_payload.start + 46] = 2;
+    sampled_sycc[jp2c_payload.start + 49] = 2;
+    const sampled_info = try jp2.parseInfo(sampled_sycc);
+    try std.testing.expectEqual(@as(?[2]u8, .{ 2, 1 }), sampled_info.componentSampling(1));
+    try std.testing.expectEqual(@as(?[2]u8, .{ 2, 1 }), sampled_info.componentSampling(2));
+
+    sampled_sycc[jp2c_payload.start + 50] = 2;
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedColorSpace,
+        jp2.parseInfo(sampled_sycc),
+    );
+}
+
+test "foreign Kakadu sYCC 4:4:4 JP2 converts to OpenJPEG-matching sRGB" {
+    const allocator = std.testing.allocator;
+    // Kakadu 8.4.1 writes the JP2 with `-jp2_space sYCC`; the expected RGB
+    // bytes are the PPM raster produced by OpenJPEG 2.5.4 from this fixture.
+    const wrapped = @embedFile("testdata/kakadu-sycc444.jp2");
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(jp2.ColorSpace.sycc, info.color_space);
+    try std.testing.expectEqual(@as(u32, 4), info.width);
+    try std.testing.expectEqual(@as(u32, 2), info.height);
+    try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
+    for (0..3) |component| {
+        try std.testing.expectEqual(@as(?[2]u8, .{ 1, 1 }), info.componentSampling(component));
+    }
+
+    const codestream_bytes = try jp2.extractCodestream(wrapped);
+    var sycc = try codestream.decodeLosslessPlanar(allocator, codestream_bytes);
+    defer sycc.deinit();
+    try std.testing.expectEqualSlices(u16, &.{ 0, 64, 128, 255, 76, 149, 29, 200 }, sycc.planes[0]);
+    try std.testing.expectEqualSlices(u16, &.{ 128, 128, 255, 0, 85, 43, 255, 128 }, sycc.planes[1]);
+    try std.testing.expectEqualSlices(u16, &.{ 128, 255, 128, 128, 255, 21, 107, 0 }, sycc.planes[2]);
+
+    var rgb = try color.sycc444ToSrgb(allocator, sycc);
+    defer rgb.deinit();
+    try std.testing.expectEqualSlices(u16, &.{
+        0,   0,   0,
+        242, 0,   64,
+        128, 85,  255,
+        255, 255, 29,
+        254, 1,   0,
+        0,   254, 0,
+        0,   1,   254,
+        21,  255, 200,
+    }, rgb.samples);
 }
 
 test "JP2 grayscale wrapper validates one-component metadata and polarity" {
@@ -4022,6 +4085,7 @@ test "JP2 grayscale wrapper validates one-component metadata and polarity" {
     try std.testing.expectEqual(@as(u32, 1), info.height);
     try std.testing.expectEqual(@as(u16, 1), info.components);
     try std.testing.expectEqual(@as(u8, 8), info.bits_per_component);
+    try std.testing.expectEqual(jp2.ColorSpace.grayscale, info.color_space);
     try std.testing.expect(!info.has_icc_profile);
     try std.testing.expectEqualSlices(u8, minimal_gray_jp2_codestream[0..], try jp2.extractCodestream(wrapped));
 
@@ -4035,6 +4099,11 @@ test "JP2 grayscale wrapper validates one-component metadata and polarity" {
     defer allocator.free(rgb_colr);
     writeU32BeTest(rgb_colr, colr_payload.start + 3, 16);
     try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(rgb_colr));
+
+    const sycc_colr = try allocator.dupe(u8, wrapped);
+    defer allocator.free(sycc_colr);
+    writeU32BeTest(sycc_colr, colr_payload.start + 3, 18);
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedColorSpace, jp2.parseInfo(sycc_colr));
 
     const identity_cdef = [_]u8{
         0x00, 0x01, // one entry
@@ -5706,8 +5775,8 @@ test "Kakadu sampled RPCL multi-precinct streams decode across origin and PLT va
     const mismatched_tile_origin = try allocator.dupe(u8, fixtures[2].bytes);
     defer allocator.free(mismatched_tile_origin);
     const siz = findMarker(mismatched_tile_origin, codestream.markerValue("siz")) orelse return error.MissingMarker;
-    mismatched_tile_origin[siz + 33] ^= 1;
-    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(mismatched_tile_origin));
+    writeU32BeTest(mismatched_tile_origin, siz + 30, readU32BeTest(mismatched_tile_origin, siz + 14) + 1);
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(mismatched_tile_origin));
 
     const poc_source = try jp2.extractCodestream(fixtures[4].bytes);
     const unsupported_order = try allocator.dupe(u8, poc_source);
@@ -5715,7 +5784,7 @@ test "Kakadu sampled RPCL multi-precinct streams decode across origin and PLT va
     const poc_offset = findMarker(unsupported_order, codestream.markerValue("poc")) orelse return error.MissingMarker;
     unsupported_order[poc_offset + 10] = @intFromEnum(codestream.ProgressionOrder.pcrl);
     try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
+        codestream.CodestreamError.InvalidCodestream,
         codestream.decodeLosslessPlanar(allocator, unsupported_order),
     );
 
@@ -5767,6 +5836,43 @@ test "Kakadu sampled RPCL multi-tile streams decode across PLT variants" {
         for (decoded.planes[0], 0..) |sample, index| try std.testing.expectEqual(@as(u16, @intCast((7 + index * 3) & 0xff)), sample);
         for (decoded.planes[1], 0..) |sample, index| try std.testing.expectEqual(@as(u16, @intCast((40 + index * 5) & 0xff)), sample);
         for (decoded.planes[2], 0..) |sample, index| try std.testing.expectEqual(@as(u16, @intCast((200 + index * 249) & 0xff)), sample);
+    }
+}
+
+test "Kakadu sampled multi-tile stream decodes with a distinct tile-partition origin" {
+    const allocator = std.testing.allocator;
+    // Kakadu 8.4.1, three PGM planes (63x55, 31x27, 31x27):
+    // Sorigin={3,5}, Stile_origin={0,1}, Stiles={20,24},
+    // Ssampling={1,1},{2,2},{2,2}, RPCL, reversible 5/3, PLT.
+    const wrapped = @embedFile("testdata/kakadu-rpcl-420-distinct-tile-origin.jp2");
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(@as(u32, 63), info.width);
+    try std.testing.expectEqual(@as(u32, 55), info.height);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 2 }, info.component_xrsiz[0..3]);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 2 }, info.component_yrsiz[0..3]);
+
+    const bytes = try jp2.extractCodestream(wrapped);
+    const siz = findMarker(bytes, codestream.markerValue("siz")) orelse return error.MissingSiz;
+    try std.testing.expectEqual(@as(u32, 68), readU32BeTest(bytes, siz + 6));
+    try std.testing.expectEqual(@as(u32, 58), readU32BeTest(bytes, siz + 10));
+    try std.testing.expectEqual(@as(u32, 5), readU32BeTest(bytes, siz + 14));
+    try std.testing.expectEqual(@as(u32, 3), readU32BeTest(bytes, siz + 18));
+    try std.testing.expectEqual(@as(u32, 1), readU32BeTest(bytes, siz + 30));
+    try std.testing.expectEqual(@as(u32, 0), readU32BeTest(bytes, siz + 34));
+    try std.testing.expectEqual(@as(usize, 9), countMarker(bytes, codestream.markerValue("sot")));
+
+    const audit = try codestream.auditStrictPacketHeaders(allocator, bytes);
+    try std.testing.expect(audit.packets > 0);
+    try std.testing.expectEqual(audit.payload_bytes, audit.assembled_bytes);
+    var decoded = try codestream.decodeLosslessPlanar(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(?[2]usize, .{ 63, 55 }), decoded.componentDimensions(0));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 31, 27 }), decoded.componentDimensions(1));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 31, 27 }), decoded.componentDimensions(2));
+    for (decoded.planes, 0..) |plane, component| {
+        for (plane, 0..) |sample, index| {
+            try std.testing.expectEqual(@as(u16, @intCast((index * (13 + component * 7) + component * 41) & 0xff)), sample);
+        }
     }
 }
 
@@ -6676,14 +6782,16 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
         image_origin_offset[jp2c_payload.start + 19] = 1;
         image_origin_offset[jp2c_payload.start + 11] = 3;
         image_origin_offset[jp2c_payload.start + 27] = 3;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(image_origin_offset));
+        const origin_info = try jp2.parseInfo(image_origin_offset);
+        try std.testing.expectEqual(@as(u32, 2), origin_info.width);
+        try std.testing.expectEqual(@as(u32, 1), origin_info.height);
     }
 
     {
         const tile_origin_offset = try allocator.dupe(u8, wrapped);
         defer allocator.free(tile_origin_offset);
         tile_origin_offset[jp2c_payload.start + 35] = 1;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(tile_origin_offset));
+        try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(tile_origin_offset));
     }
 
     {
@@ -7016,6 +7124,71 @@ test "JP2 reader accepts uniform BPCC bits-per-component child box" {
         defer allocator.free(unexpected_bpcc);
         try std.testing.expectError(jp2.Jp2Error.InvalidBox, jp2.parseInfo(unexpected_bpcc));
     }
+}
+
+test "sYCC 4:4:4 converts explicitly to clipped sRGB at 8 and 16 bits" {
+    const allocator = std.testing.allocator;
+    var sycc8 = try color.SamplePlanes.init(allocator, 5, 1, 8, 3);
+    defer sycc8.deinit();
+    @memcpy(sycc8.planes[0], &[_]u16{ 0, 255, 128, 76, 128 });
+    @memcpy(sycc8.planes[1], &[_]u16{ 128, 128, 128, 85, 255 });
+    @memcpy(sycc8.planes[2], &[_]u16{ 128, 128, 128, 255, 128 });
+    var rgb8 = try color.sycc444ToSrgb(allocator, sycc8);
+    defer rgb8.deinit();
+    try std.testing.expectEqualSlices(u16, &.{
+        0,   0,   0,
+        255, 255, 255,
+        128, 128, 128,
+        254, 1,   0,
+        128, 85,  255,
+    }, rgb8.samples);
+
+    var sycc16 = try color.SamplePlanes.init(allocator, 3, 1, 16, 3);
+    defer sycc16.deinit();
+    @memcpy(sycc16.planes[0], &[_]u16{ 0, 32768, 65535 });
+    @memset(sycc16.planes[1], 32768);
+    @memset(sycc16.planes[2], 32768);
+    var rgb16 = try color.sycc444ToSrgb(allocator, sycc16);
+    defer rgb16.deinit();
+    try std.testing.expectEqualSlices(u16, &.{
+        0,     0,     0,
+        32768, 32768, 32768,
+        65535, 65535, 65535,
+    }, rgb16.samples);
+}
+
+test "sYCC 4:4:4 conversion rejects invalid precision range and layouts" {
+    const allocator = std.testing.allocator;
+    var out_of_range = try color.SamplePlanes.init(allocator, 1, 1, 8, 3);
+    defer out_of_range.deinit();
+    out_of_range.planes[0][0] = 256;
+    out_of_range.planes[1][0] = 128;
+    out_of_range.planes[2][0] = 128;
+    try std.testing.expectError(
+        color.ColorError.SampleOutOfRange,
+        color.sycc444ToSrgb(allocator, out_of_range),
+    );
+
+    var mixed = try color.SamplePlanes.initWithComponentBitDepths(allocator, 1, 1, &.{ 8, 16, 8 });
+    defer mixed.deinit();
+    try std.testing.expectError(
+        color.ColorError.UnsupportedColorSpace,
+        color.sycc444ToSrgb(allocator, mixed),
+    );
+
+    var sampled = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        2,
+        2,
+        &.{ 8, 8, 8 },
+        &.{ 2, 1, 1 },
+        &.{ 2, 1, 1 },
+    );
+    defer sampled.deinit();
+    try std.testing.expectError(
+        color.ColorError.UnsupportedColorSpace,
+        color.sycc444ToSrgb(allocator, sampled),
+    );
 }
 
 test "RCT transform matches JPEG2000 reversible equations" {
@@ -14490,6 +14663,39 @@ test "sampled RPCL packet sequence merges component precinct grids on reference 
     try std.testing.expectEqual(@as(u16, 1), right_packets[1].component);
 }
 
+test "sampled packet sequences cover all five progression orders without duplicates" {
+    const allocator = std.testing.allocator;
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 8, .height = 8 },
+        .{ .width = 8, .height = 8 },
+    };
+    const luma = try packet_plan.rpclSingleTile(32, 24, 1, 1, 2, &precincts);
+    const chroma = try packet_plan.rpclSingleTile(16, 12, 1, 1, 2, &precincts);
+    const components = [_]packet_plan.SampledComponentPlan{
+        .{ .plan = luma, .xrsiz = 1, .yrsiz = 1 },
+        .{ .plan = chroma, .xrsiz = 2, .yrsiz = 2 },
+    };
+    const orders = [_]packet_plan.SampledOrder{ .lrcp, .rlcp, .rpcl, .pcrl, .cprl };
+    var first_packets: [orders.len]packet_plan.Packet = undefined;
+    for (orders, 0..) |order, order_index| {
+        const packets = try packet_plan.sampledOrderedPackets(allocator, &components, 2, 0, 0, order);
+        defer allocator.free(packets);
+        try std.testing.expectEqual(@as(usize, 42), packets.len);
+        first_packets[order_index] = packets[0];
+        for (packets, 0..) |packet, index| {
+            try std.testing.expectEqual(@as(u64, @intCast(index)), packet.sequence);
+            for (packets[0..index]) |earlier| {
+                try std.testing.expect(!(earlier.resolution == packet.resolution and
+                    earlier.precinct_index == packet.precinct_index and
+                    earlier.component == packet.component and earlier.layer == packet.layer));
+            }
+        }
+    }
+    try std.testing.expect(first_packets[0].layer == 0);
+    try std.testing.expect(first_packets[1].resolution == 0);
+    try std.testing.expect(first_packets[4].component == 0);
+}
+
 test "RPCL precinct rectangles clip edge precincts and test block overlap" {
     const precincts = [_]packet_plan.Precinct{
         .{ .width = 4, .height = 4 },
@@ -16263,7 +16469,7 @@ test "strict SIZ marker reader rejects unsupported component layout" {
             fn mutate(corrupted: []u8, siz: usize) void {
                 writeU32BeTest(corrupted, siz + 30, 1);
             }
-        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
+        }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported component count", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
                 writeU16BeTest(corrupted, siz + 38, 5);
@@ -19656,6 +19862,12 @@ test "multi-tile encode fails closed outside the bounded envelope" {
                 options.emit_temporary_payload_sidecar = true;
             }
         }.mutate },
+        .{ .label = "nonzero origins remain sampled-planar only", .mutate = struct {
+            fn mutate(options: *codestream.LosslessOptions) void {
+                options.image_origin_x = 3;
+                options.tile_origin_x = 1;
+            }
+        }.mutate },
         // Irreversible 9/7 multi-tile encode (ICT + scalar quantization,
         // including rate targets) is supported now; its roundtrips live in
         // "multi-tile irreversible 9/7 roundtrips within lossy tolerance".
@@ -20310,6 +20522,19 @@ test "tile grid rejects malformed geometry" {
             .xtsiz = 8,
             .ytsiz = 8,
             .xtosiz = 1,
+            .ytosiz = 0,
+        }),
+    );
+    try std.testing.expectError(
+        tile_grid.TileGridError.InvalidTileGrid,
+        tile_grid.Grid.init(.{
+            .xsiz = 40,
+            .ysiz = 8,
+            .xosiz = 8,
+            .yosiz = 0,
+            .xtsiz = 8,
+            .ytsiz = 8,
+            .xtosiz = 0,
             .ytosiz = 0,
         }),
     );
@@ -25026,12 +25251,27 @@ fn sampledEncodeTestPlanes(
     height: usize,
     sampling: []const codestream.ComponentSampling,
 ) !color.SamplePlanes {
+    return sampledEncodeTestPlanesAtOrigin(allocator, width, height, 0, 0, sampling);
+}
+
+fn sampledEncodeTestPlanesAtOrigin(
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    image_origin_x: u32,
+    image_origin_y: u32,
+    sampling: []const codestream.ComponentSampling,
+) !color.SamplePlanes {
     var widths: [4]usize = undefined;
     var heights: [4]usize = undefined;
     var depths: [4]u8 = undefined;
+    const reference_x1 = image_origin_x + @as(u32, @intCast(width));
+    const reference_y1 = image_origin_y + @as(u32, @intCast(height));
     for (sampling, 0..) |factor, component| {
-        widths[component] = (width + factor.xrsiz - 1) / factor.xrsiz;
-        heights[component] = (height + factor.yrsiz - 1) / factor.yrsiz;
+        widths[component] = (reference_x1 + factor.xrsiz - 1) / factor.xrsiz -
+            (image_origin_x + factor.xrsiz - 1) / factor.xrsiz;
+        heights[component] = (reference_y1 + factor.yrsiz - 1) / factor.yrsiz -
+            (image_origin_y + factor.yrsiz - 1) / factor.yrsiz;
         depths[component] = 8;
     }
     var planes = try color.SamplePlanes.initWithComponentLayouts(
@@ -25049,6 +25289,64 @@ fn sampledEncodeTestPlanes(
         }
     }
     return planes;
+}
+
+test "sampled reversible encode supports distinct image and tile-partition origins" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(allocator, 63, 55, 5, 3, &sampling);
+    defer planes.deinit();
+    try std.testing.expectEqual([2]usize{ 31, 27 }, planes.componentDimensions(1).?);
+
+    var options = codestream.LosslessOptions{
+        .levels = 2,
+        .layers = 2,
+        .mct = .none,
+        .image_origin_x = 5,
+        .image_origin_y = 3,
+        .tile_origin_x = 1,
+        .tile_origin_y = 0,
+        .tile_width = 24,
+        .tile_height = 20,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+        .sop = true,
+        .eph = true,
+        .threads = 1,
+    };
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
+    defer allocator.free(encoded);
+
+    const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingSiz;
+    try std.testing.expectEqual(@as(u32, 68), readU32BeTest(encoded, siz + 6));
+    try std.testing.expectEqual(@as(u32, 58), readU32BeTest(encoded, siz + 10));
+    try std.testing.expectEqual(@as(u32, 5), readU32BeTest(encoded, siz + 14));
+    try std.testing.expectEqual(@as(u32, 3), readU32BeTest(encoded, siz + 18));
+    try std.testing.expectEqual(@as(u32, 24), readU32BeTest(encoded, siz + 22));
+    try std.testing.expectEqual(@as(u32, 20), readU32BeTest(encoded, siz + 26));
+    try std.testing.expectEqual(@as(u32, 1), readU32BeTest(encoded, siz + 30));
+    try std.testing.expectEqual(@as(u32, 0), readU32BeTest(encoded, siz + 34));
+    try std.testing.expectEqual(@as(usize, 9), countMarker(encoded, codestream.markerValue("sot")));
+
+    var catalog = try codestream.readStrictPacketCatalog(allocator, encoded);
+    defer catalog.deinit();
+    try std.testing.expect(catalog.entries.len > 0);
+    var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+    defer decoded.deinit();
+    for (planes.planes, decoded.planes, 0..) |expected, actual, component| {
+        try std.testing.expectEqual(planes.componentDimensions(component).?, decoded.componentDimensions(component).?);
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+
+    options.threads = 8;
+    const threaded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, encoded, threaded);
 }
 
 test "sampled reversible encode roundtrips native component planes" {
@@ -25124,6 +25422,475 @@ test "sampled reversible encode carries untargeted quality layers" {
     }
 }
 
+test "sampled reversible encode emits packet layouts across layers" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    const layouts = [_]struct { plt: bool = true, ppt: bool = false, ppm: bool = false }{
+        .{ .plt = false },
+        .{ .ppt = true },
+        .{ .ppm = true },
+    };
+    for (layouts) |layout| {
+        for ([_]u16{ 1, 2, 3 }) |layer_count| {
+            var planes = try sampledEncodeTestPlanes(allocator, 48, 32, &sampling);
+            defer planes.deinit();
+            const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+                .levels = 2,
+                .mct = .none,
+                .layers = layer_count,
+                .block_width = 16,
+                .block_height = 16,
+                .tile_part_divisions = null,
+                .plt = layout.plt,
+                .ppt = layout.ppt,
+                .ppm = layout.ppm,
+            });
+            defer allocator.free(encoded);
+
+            try std.testing.expectEqual(layout.ppt, codestream.hasMarker(encoded, codestream.markerValue("ppt")));
+            try std.testing.expectEqual(layout.ppm, codestream.hasMarker(encoded, codestream.markerValue("ppm")));
+            try std.testing.expectEqual(layout.plt and !layout.ppm, codestream.hasMarker(encoded, codestream.markerValue("plt")));
+            try std.testing.expect(codestream.hasMarker(encoded, codestream.markerValue("tlm")));
+
+            var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+            defer decoded.deinit();
+            for (planes.planes, decoded.planes) |expected, actual| {
+                try std.testing.expectEqualSlices(u16, expected, actual);
+            }
+        }
+    }
+}
+
+test "sampled reversible packet layouts preserve strict packet payloads" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    const Layout = struct { plt: bool = true, ppt: bool = false, ppm: bool = false };
+    const layouts = [_]Layout{
+        .{},
+        .{ .plt = false },
+        .{ .ppt = true },
+        .{ .ppm = true },
+    };
+    const marker_modes = [_]struct { sop: bool, eph: bool }{
+        .{ .sop = false, .eph = false },
+        .{ .sop = true, .eph = false },
+        .{ .sop = false, .eph = true },
+        .{ .sop = true, .eph = true },
+    };
+
+    var planes = try sampledEncodeTestPlanes(allocator, 32, 24, &sampling);
+    defer planes.deinit();
+    const baseline = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+        .levels = 2,
+        .layers = 3,
+        .mct = .none,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+        .sop = false,
+    });
+    defer allocator.free(baseline);
+    var baseline_catalog = try codestream.readStrictPacketCatalog(allocator, baseline);
+    defer baseline_catalog.deinit();
+
+    for (layouts) |layout| {
+        for (marker_modes) |markers| {
+            const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+                .levels = 2,
+                .layers = 3,
+                .mct = .none,
+                .block_width = 8,
+                .block_height = 8,
+                .tile_part_divisions = null,
+                .plt = layout.plt,
+                .ppt = layout.ppt,
+                .ppm = layout.ppm,
+                .sop = markers.sop,
+                .eph = markers.eph,
+            });
+            defer allocator.free(encoded);
+
+            try std.testing.expectEqual(layout.ppt, codestream.hasMarker(encoded, codestream.markerValue("ppt")));
+            try std.testing.expectEqual(layout.ppm, codestream.hasMarker(encoded, codestream.markerValue("ppm")));
+            try std.testing.expectEqual(layout.plt and !layout.ppm, codestream.hasMarker(encoded, codestream.markerValue("plt")));
+
+            var catalog = try codestream.readStrictPacketCatalog(allocator, encoded);
+            defer catalog.deinit();
+            try std.testing.expectEqual(baseline_catalog.entries.len, catalog.entries.len);
+            try std.testing.expectEqualSlices(codestream.StrictPacketEntry, baseline_catalog.entries, catalog.entries);
+            try std.testing.expectEqualSlices(u8, baseline_catalog.packet_bytes, catalog.packet_bytes);
+
+            var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+            defer decoded.deinit();
+            for (planes.planes, decoded.planes) |expected, actual| {
+                try std.testing.expectEqualSlices(u16, expected, actual);
+            }
+        }
+    }
+}
+
+test "sampled reversible multi-tile encode roundtrips aligned and odd tile bounds" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    const Case = struct {
+        width: usize,
+        height: usize,
+        tile_width: u32,
+        tile_height: u32,
+        expected_tiles: usize,
+    };
+    const cases = [_]Case{
+        .{ .width = 64, .height = 48, .tile_width = 32, .tile_height = 24, .expected_tiles = 4 },
+        .{ .width = 50, .height = 46, .tile_width = 17, .tile_height = 19, .expected_tiles = 9 },
+    };
+    for (cases) |case| {
+        for ([_]u16{ 1, 3 }) |layers| {
+            var planes = try sampledEncodeTestPlanes(allocator, case.width, case.height, &sampling);
+            defer planes.deinit();
+            const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+                .levels = 2,
+                .layers = layers,
+                .mct = .none,
+                .tile_width = case.tile_width,
+                .tile_height = case.tile_height,
+                .block_width = 8,
+                .block_height = 8,
+                .tile_part_divisions = null,
+            });
+            defer allocator.free(encoded);
+
+            try std.testing.expectEqual(case.expected_tiles, countMarker(encoded, codestream.markerValue("sot")));
+            try std.testing.expectEqual(case.expected_tiles, countMarker(encoded, codestream.markerValue("plt")));
+            try std.testing.expect(codestream.hasMarker(encoded, codestream.markerValue("tlm")));
+
+            var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+            defer decoded.deinit();
+            for (planes.planes, decoded.planes, 0..) |expected, actual, component| {
+                try std.testing.expectEqual(planes.componentDimensions(component).?, decoded.componentDimensions(component).?);
+                try std.testing.expectEqualSlices(u16, expected, actual);
+            }
+        }
+    }
+}
+
+test "sampled reversible multi-tile packet layouts roundtrip across marker modes" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    const Layout = struct { plt: bool = true, ppt: bool = false, ppm: bool = false };
+    const layouts = [_]Layout{
+        .{},
+        .{ .plt = false },
+        .{ .ppt = true },
+        .{ .ppm = true },
+    };
+    const marker_modes = [_]struct { sop: bool, eph: bool }{
+        .{ .sop = false, .eph = false },
+        .{ .sop = true, .eph = false },
+        .{ .sop = false, .eph = true },
+        .{ .sop = true, .eph = true },
+    };
+
+    var planes = try sampledEncodeTestPlanes(allocator, 50, 46, &sampling);
+    defer planes.deinit();
+    const baseline = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+        .levels = 2,
+        .layers = 3,
+        .mct = .none,
+        .tile_width = 17,
+        .tile_height = 19,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(baseline);
+    var baseline_catalog = try codestream.readStrictPacketCatalog(allocator, baseline);
+    defer baseline_catalog.deinit();
+
+    for (layouts) |layout| {
+        for (marker_modes) |markers| {
+            const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+                .levels = 2,
+                .layers = 3,
+                .mct = .none,
+                .tile_width = 17,
+                .tile_height = 19,
+                .block_width = 8,
+                .block_height = 8,
+                .tile_part_divisions = null,
+                .plt = layout.plt,
+                .ppt = layout.ppt,
+                .ppm = layout.ppm,
+                .sop = markers.sop,
+                .eph = markers.eph,
+            });
+            defer allocator.free(encoded);
+
+            try std.testing.expectEqual(@as(usize, 9), countMarker(encoded, codestream.markerValue("sot")));
+            try std.testing.expectEqual(layout.ppt, codestream.hasMarker(encoded, codestream.markerValue("ppt")));
+            try std.testing.expectEqual(layout.ppm, codestream.hasMarker(encoded, codestream.markerValue("ppm")));
+            try std.testing.expectEqual(layout.plt and !layout.ppm, codestream.hasMarker(encoded, codestream.markerValue("plt")));
+            try std.testing.expectEqual(markers.sop, codestream.hasMarker(encoded, codestream.markerValue("sop")));
+            try std.testing.expectEqual(markers.eph, codestream.hasMarker(encoded, codestream.markerValue("eph")));
+
+            var catalog = try codestream.readStrictPacketCatalog(allocator, encoded);
+            defer catalog.deinit();
+            try std.testing.expectEqual(baseline_catalog.entries.len, catalog.entries.len);
+            try std.testing.expectEqualSlices(u8, baseline_catalog.packet_bytes, catalog.packet_bytes);
+
+            var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+            defer decoded.deinit();
+            for (planes.planes, decoded.planes, 0..) |expected, actual, component| {
+                try std.testing.expectEqual(planes.componentDimensions(component).?, decoded.componentDimensions(component).?);
+                try std.testing.expectEqualSlices(u16, expected, actual);
+            }
+        }
+    }
+}
+
+test "sampled reversible reordered POC roundtrips all progression orders" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    const progressions = [_]poc.Progression{ .lrcp, .rlcp, .rpcl, .pcrl, .cprl };
+    var planes = try sampledEncodeTestPlanes(allocator, 50, 46, &sampling);
+    defer planes.deinit();
+    const baseline = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+        .levels = 2,
+        .layers = 2,
+        .mct = .none,
+        .tile_width = 17,
+        .tile_height = 19,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+        .sop = true,
+        .eph = true,
+    });
+    defer allocator.free(baseline);
+    var baseline_catalog = try codestream.readStrictPacketCatalog(allocator, baseline);
+    defer baseline_catalog.deinit();
+
+    for (progressions) |progression| {
+        const records = [_]codestream.PocRecord{
+            .{
+                .resolution_start = 0,
+                .component_start = 0,
+                .layer_end = 1,
+                .resolution_end = 3,
+                .component_end = 3,
+                .progression = progression,
+            },
+            .{
+                .resolution_start = 0,
+                .component_start = 0,
+                .layer_end = 2,
+                .resolution_end = 3,
+                .component_end = 3,
+                .progression = .rpcl,
+            },
+        };
+        const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+            .levels = 2,
+            .layers = 2,
+            .mct = .none,
+            .tile_width = 17,
+            .tile_height = 19,
+            .block_width = 8,
+            .block_height = 8,
+            .tile_part_divisions = null,
+            .poc_records = &records,
+            .sop = true,
+            .eph = true,
+        });
+        defer allocator.free(encoded);
+        const poc_offset = findMarker(encoded, codestream.markerValue("poc")) orelse return error.MissingPoc;
+        const sot_offset = findMarker(encoded, codestream.markerValue("sot")) orelse return error.MissingSot;
+        try std.testing.expect(poc_offset < sot_offset);
+        try std.testing.expectEqual(@as(usize, 9), countMarker(encoded, codestream.markerValue("sot")));
+
+        var catalog = try codestream.readStrictPacketCatalog(allocator, encoded);
+        defer catalog.deinit();
+        try std.testing.expectEqual(baseline_catalog.entries.len, catalog.entries.len);
+        for (catalog.entries) |entry| {
+            var match: ?codestream.StrictPacketEntry = null;
+            for (baseline_catalog.entries) |candidate| {
+                if (candidate.tile_index == entry.tile_index and
+                    candidate.packet.resolution == entry.packet.resolution and
+                    candidate.packet.precinct_index == entry.packet.precinct_index and
+                    candidate.packet.component == entry.packet.component and
+                    candidate.packet.layer == entry.packet.layer)
+                {
+                    match = candidate;
+                    break;
+                }
+            }
+            const expected = match orelse return error.MissingPacketIdentity;
+            try std.testing.expectEqualSlices(u8, baseline_catalog.packetBytes(expected), catalog.packetBytes(entry));
+        }
+        var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+        defer decoded.deinit();
+        for (planes.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
+}
+
+test "sampled reversible tile-header POC supports PPT and deterministic threads" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    const records = [_]codestream.PocRecord{
+        .{ .resolution_start = 0, .component_start = 0, .layer_end = 1, .resolution_end = 3, .component_end = 3, .progression = .pcrl },
+        .{ .resolution_start = 0, .component_start = 0, .layer_end = 3, .resolution_end = 3, .component_end = 3, .progression = .cprl },
+    };
+    var planes = try sampledEncodeTestPlanes(allocator, 50, 46, &sampling);
+    defer planes.deinit();
+    var options = codestream.LosslessOptions{
+        .levels = 2,
+        .layers = 3,
+        .mct = .none,
+        .tile_width = 17,
+        .tile_height = 19,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+        .poc_records = &records,
+        .poc_in_tile_header = true,
+        .ppt = true,
+        .sop = true,
+        .eph = true,
+        .threads = 1,
+    };
+    const single = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
+    defer allocator.free(single);
+    try std.testing.expectEqual(@as(usize, 9), countMarker(single, codestream.markerValue("poc")));
+    const first_sot = findMarker(single, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const first_poc = findMarker(single, codestream.markerValue("poc")) orelse return error.MissingPoc;
+    const first_sod = findMarkerAfter(single, codestream.markerValue("sod"), first_sot) orelse return error.MissingSod;
+    try std.testing.expect(first_sot < first_poc and first_poc < first_sod);
+    try std.testing.expectEqual(try codestream.firstSotPsot(single), try codestream.firstTlmPtlm(single));
+
+    var decoded = try codestream.decodeLosslessPlanar(allocator, single);
+    defer decoded.deinit();
+    for (planes.planes, decoded.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+
+    options.threads = 8;
+    const many = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
+    defer allocator.free(many);
+    try std.testing.expectEqualSlices(u8, single, many);
+}
+
+test "sampled reversible multi-tile packed headers and SOP fail closed on corruption" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanes(allocator, 50, 46, &sampling);
+    defer planes.deinit();
+    const layouts = [_]struct { ppt: bool = false, ppm: bool = false }{
+        .{ .ppt = true },
+        .{ .ppm = true },
+    };
+    for (layouts) |layout| {
+        const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+            .levels = 2,
+            .layers = 3,
+            .mct = .none,
+            .tile_width = 17,
+            .tile_height = 19,
+            .block_width = 8,
+            .block_height = 8,
+            .tile_part_divisions = null,
+            .ppt = layout.ppt,
+            .ppm = layout.ppm,
+            .sop = true,
+            .eph = true,
+        });
+        defer allocator.free(encoded);
+
+        const bad_header = try allocator.dupe(u8, encoded);
+        defer allocator.free(bad_header);
+        const packed_marker = if (layout.ppt) codestream.markerValue("ppt") else codestream.markerValue("ppm");
+        const packed_offset = findMarker(bad_header, packed_marker) orelse return error.MissingMarker;
+        writeU16BeTest(bad_header, packed_offset + 2, 3);
+        try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, bad_header)));
+
+        const bad_sequence = try allocator.dupe(u8, encoded);
+        defer allocator.free(bad_sequence);
+        const sod = findMarker(bad_sequence, codestream.markerValue("sod")) orelse return error.MissingSod;
+        try std.testing.expectEqual(codestream.markerValue("sop"), readU16BeTest(bad_sequence, sod + 2));
+        bad_sequence[sod + 7] +%= 1;
+        try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, bad_sequence)));
+    }
+}
+
+test "sampled reversible multi-tile encode is deterministic across threads" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanes(allocator, 50, 46, &sampling);
+    defer planes.deinit();
+    const layouts = [_]struct { plt: bool = true, ppt: bool = false, ppm: bool = false }{
+        .{},
+        .{ .plt = false },
+        .{ .ppt = true },
+        .{ .ppm = true },
+    };
+    for (layouts) |layout| {
+        var options = codestream.LosslessOptions{
+            .levels = 2,
+            .layers = 3,
+            .mct = .none,
+            .tile_width = 17,
+            .tile_height = 19,
+            .block_width = 8,
+            .block_height = 8,
+            .tile_part_divisions = null,
+            .plt = layout.plt,
+            .ppt = layout.ppt,
+            .ppm = layout.ppm,
+            .sop = true,
+            .eph = true,
+            .threads = 1,
+        };
+        const single = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
+        defer allocator.free(single);
+        options.threads = 8;
+        const many = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
+        defer allocator.free(many);
+        try std.testing.expectEqualSlices(u8, single, many);
+    }
+}
+
 test "sampled reversible encode is deterministic across thread counts" {
     const allocator = std.testing.allocator;
     const sampling = [_]codestream.ComponentSampling{
@@ -25133,21 +25900,35 @@ test "sampled reversible encode is deterministic across thread counts" {
     };
     var planes = try sampledEncodeTestPlanes(allocator, 64, 64, &sampling);
     defer planes.deinit();
-    const single = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
-        .levels = 3,
-        .mct = .none,
-        .tile_part_divisions = null,
-        .threads = 1,
-    });
-    defer allocator.free(single);
-    const many = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
-        .levels = 3,
-        .mct = .none,
-        .tile_part_divisions = null,
-        .threads = 8,
-    });
-    defer allocator.free(many);
-    try std.testing.expectEqualSlices(u8, single, many);
+    const layouts = [_]struct { plt: bool = true, ppt: bool = false, ppm: bool = false }{
+        .{},
+        .{ .plt = false },
+        .{ .ppt = true },
+        .{ .ppm = true },
+    };
+    for (layouts) |layout| {
+        const single = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+            .levels = 3,
+            .mct = .none,
+            .tile_part_divisions = null,
+            .plt = layout.plt,
+            .ppt = layout.ppt,
+            .ppm = layout.ppm,
+            .threads = 1,
+        });
+        defer allocator.free(single);
+        const many = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+            .levels = 3,
+            .mct = .none,
+            .tile_part_divisions = null,
+            .plt = layout.plt,
+            .ppt = layout.ppt,
+            .ppm = layout.ppm,
+            .threads = 8,
+        });
+        defer allocator.free(many);
+        try std.testing.expectEqualSlices(u8, single, many);
+    }
 }
 
 test "sampled reversible encode matches the Kakadu 4:2:0 fixture through z2000 decode" {
@@ -25208,7 +25989,7 @@ test "sampled reversible encode fails closed outside its envelope" {
     defer planes.deinit();
     const base = codestream.LosslessOptions{ .levels = 2, .mct = .none, .tile_part_divisions = null };
 
-    // MCT, irreversible 9/7, non-RPCL, and multi-layer all fail closed.
+    // MCT, irreversible 9/7, non-RPCL, and invalid layer counts fail closed.
     var mct = base;
     mct.mct = .rct;
     try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, mct));
@@ -25222,12 +26003,49 @@ test "sampled reversible encode fails closed outside its envelope" {
     var too_many_layers = base;
     too_many_layers.layers = 0;
     try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, too_many_layers));
-
+    var ppt_without_plt = base;
+    ppt_without_plt.ppt = true;
+    ppt_without_plt.plt = false;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, ppt_without_plt));
+    var both_packed = base;
+    both_packed.ppt = true;
+    both_packed.ppm = true;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, both_packed));
+    var missing_poc = base;
+    missing_poc.poc_in_tile_header = true;
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, missing_poc));
+    const incomplete_records = [_]codestream.PocRecord{.{
+        .resolution_start = 0,
+        .component_start = 0,
+        .layer_end = 1,
+        .resolution_end = 1,
+        .component_end = 3,
+        .progression = .rpcl,
+    }};
+    var incomplete_poc = base;
+    incomplete_poc.poc_records = &incomplete_records;
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, incomplete_poc));
+    var ppm_poc = base;
+    ppm_poc.poc_records = &incomplete_records;
+    ppm_poc.ppm = true;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, ppm_poc));
+    var tile_origin_after_image = base;
+    tile_origin_after_image.image_origin_x = 5;
+    tile_origin_after_image.tile_origin_x = 6;
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, tile_origin_after_image));
+    var non_intersecting_partition = base;
+    non_intersecting_partition.image_origin_x = 24;
+    non_intersecting_partition.tile_origin_x = 0;
+    non_intersecting_partition.tile_width = 24;
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, non_intersecting_partition));
     // All-1 sampling belongs on the planar path.
     const uniform = [_]codestream.ComponentSampling{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 1, .yrsiz = 1 } };
     var uniform_planes = try sampledEncodeTestPlanes(allocator, 32, 32, &uniform);
     defer uniform_planes.deinit();
     try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, uniform_planes, &uniform, base));
+    var uniform_no_plt = base;
+    uniform_no_plt.plt = false;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessPlanarWithOptions(allocator, uniform_planes, uniform_no_plt));
 
     // A sampling factor that disagrees with the supplied plane dimensions.
     const wrong = [_]codestream.ComponentSampling{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 4, .yrsiz = 4 }, .{ .xrsiz = 2, .yrsiz = 2 } };

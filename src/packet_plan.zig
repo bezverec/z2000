@@ -65,6 +65,8 @@ pub const SampledComponentPlan = struct {
     yrsiz: u8,
 };
 
+pub const SampledOrder = enum { lrcp, rlcp, rpcl, pcrl, cprl };
+
 /// Upper-left precinct position on the image reference grid used by the PCRL
 /// and CPRL ordering rules. Keeping this projection here prevents tile-part
 /// writers from duplicating the resolution scaling math.
@@ -329,6 +331,36 @@ fn sampledRpclLessThan(_: void, a: PositionKeyedPacket, b: PositionKeyedPacket) 
     return a.packet.layer < b.packet.layer;
 }
 
+fn sampledOrderLessThan(order: SampledOrder, a: PositionKeyedPacket, b: PositionKeyedPacket) bool {
+    switch (order) {
+        .lrcp => {
+            if (a.packet.layer != b.packet.layer) return a.packet.layer < b.packet.layer;
+            if (a.packet.resolution != b.packet.resolution) return a.packet.resolution < b.packet.resolution;
+            if (a.packet.component != b.packet.component) return a.packet.component < b.packet.component;
+            return a.packet.precinct_index < b.packet.precinct_index;
+        },
+        .rlcp => {
+            if (a.packet.resolution != b.packet.resolution) return a.packet.resolution < b.packet.resolution;
+            if (a.packet.layer != b.packet.layer) return a.packet.layer < b.packet.layer;
+            if (a.packet.component != b.packet.component) return a.packet.component < b.packet.component;
+            return a.packet.precinct_index < b.packet.precinct_index;
+        },
+        .rpcl => return sampledRpclLessThan({}, a, b),
+        .pcrl, .cprl => {
+            if (order == .cprl and a.packet.component != b.packet.component) {
+                return a.packet.component < b.packet.component;
+            }
+            if (a.y_ref != b.y_ref) return a.y_ref < b.y_ref;
+            if (a.x_ref != b.x_ref) return a.x_ref < b.x_ref;
+            if (order == .pcrl and a.packet.component != b.packet.component) {
+                return a.packet.component < b.packet.component;
+            }
+            if (a.packet.resolution != b.packet.resolution) return a.packet.resolution < b.packet.resolution;
+            return a.packet.layer < b.packet.layer;
+        },
+    }
+}
+
 /// Builds ISO RPCL order for components whose precinct grids differ because
 /// of SIZ sampling. Precinct positions are projected onto the image reference
 /// grid, then merged as resolution, position, component, layer.
@@ -338,6 +370,20 @@ pub fn sampledRpclPackets(
     layers: u16,
     reference_x0: u32,
     reference_y0: u32,
+) ![]Packet {
+    return sampledOrderedPackets(allocator, components, layers, reference_x0, reference_y0, .rpcl);
+}
+
+/// Builds any Part 1 progression order over component-local precinct grids.
+/// LRCP/RLCP retain component-local precinct order; RPCL/PCRL/CPRL compare
+/// projected precinct positions on the common reference grid.
+pub fn sampledOrderedPackets(
+    allocator: std.mem.Allocator,
+    components: []const SampledComponentPlan,
+    layers: u16,
+    reference_x0: u32,
+    reference_y0: u32,
+    order: SampledOrder,
 ) ![]Packet {
     if (components.len == 0 or components.len > std.math.maxInt(u16) or layers == 0) {
         return PacketPlanError.InvalidDimensions;
@@ -378,7 +424,13 @@ pub fn sampledRpclPackets(
     }
     if (count != keyed.len) return PacketPlanError.InvalidDimensions;
 
-    std.sort.pdq(PositionKeyedPacket, keyed, {}, sampledRpclLessThan);
+    const Context = struct {
+        order: SampledOrder,
+        fn lessThan(self: @This(), a: PositionKeyedPacket, b: PositionKeyedPacket) bool {
+            return sampledOrderLessThan(self.order, a, b);
+        }
+    };
+    std.sort.pdq(PositionKeyedPacket, keyed, Context{ .order = order }, Context.lessThan);
     const packets = try allocator.alloc(Packet, packet_count);
     errdefer allocator.free(packets);
     for (keyed, 0..) |entry, index| {

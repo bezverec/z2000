@@ -193,9 +193,15 @@ Primary public functions:
   `componentDimensions(component)`
 - `encodeLosslessSampledPlanarWithOptions(allocator, planes, sampling, options)`
   — sampled reversible encode: per-component dimensions + `ComponentSampling`
-  (XRsiz/YRsiz), single-tile RPCL, one or more untargeted quality layers,
-  inline+PLT headers, 5/3. Each component is encoded independently and the
-  packet streams are merged into the canonical sampled RPCL order
+  (XRsiz/YRsiz), RPCL, one or more untargeted quality layers, and reversible
+  5/3. Single- and multi-tile output support inline headers with or without
+  PLT, PPT with body-length PLT, or main-header PPM without PLT, with one
+  tile-part per tile. `LosslessOptions.plt` defaults to true. Each
+  tile-component is encoded independently and its packet streams are merged
+  into canonical sampled RPCL order by default; complete POC schedules may
+  compose LRCP, RLCP, RPCL, PCRL, and CPRL intervals. Absolute SIZ image and
+  tile-partition origins use `LosslessOptions.image_origin_x/y` and
+  `tile_origin_x/y`; these fields remain fail-closed on non-sampled encoders
 - `decodeLosslessPlanarUpsampled(allocator, bytes)` /
   `decodeLosslessPlanarUpsampledWithOptions(allocator, bytes, options)` /
   `decodeLosslessPlanarUpsampledWithOptionsProfiled(...)` — decodes the same
@@ -205,6 +211,9 @@ Primary public functions:
 - `color.interleaveRgb(allocator, planes)` — checked conversion of three
   equal-precision, full-resolution planes to `RgbImage`; callers remain
   responsible for establishing RGB semantics from the container
+- `color.sycc444ToSrgb(allocator, planes)` — explicit unsigned 8/16-bit sYCC
+  4:4:4 to interleaved sRGB conversion with checked layout/range and clipping;
+  sampled sYCC is intentionally rejected by this entry point
 - `decodeLosslessTemporary(allocator, bytes)`
 - `decodeLosslessTemporaryWithOptions(allocator, bytes, options)`
 - `analyzeLosslessTemporary(bytes)`
@@ -244,6 +253,9 @@ Notes:
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
   requiring private BP8 `COM` payloads.
+- `readStrictPacketCatalog` also covers sampled multi-tile streams by joining
+  the independently validated tile-local catalogs used by production decode;
+  returned byte offsets address one normalized owned packet buffer.
 - Strict decode accepts checked main-header and first-tile-part-header `POC` schedules on single- and
   multi-tile grids with one part per tile or compatible `R`/`L`/`C`/`P` parts,
   composes overlapping progression intervals without duplicate packets, and
@@ -296,19 +308,22 @@ no-MCT subsampling with inline, PPT, or PPM packet headers and all SOP/EPH
 combinations; PLT is optional where the layout permits it. It merges unequal
 component precinct grids in reference-grid RPCL order and uses component-local
 sampled bounds, subbands, code-block catalogs, T1 planes, and origin-aware
-inverse DWT. Matching nonzero image/tile origins are retained in single- and
-multi-tile component plans; absolute tile rectangles are translated into
-native-size image-local output planes per component. PPM combined with sampled
-POC, distinct tile-partition origins, MCT over subsampled planes, and non-RGB
-colour conversion remain fail-closed. The explicit
+inverse DWT. Image and tile-partition origins are retained independently in
+single- and multi-tile component plans; absolute tile rectangles are translated
+into native-size image-local output planes per component. PPM combined with sampled
+POC and MCT over subsampled planes remain fail-closed. The explicit
 `decodeLosslessPlanarUpsampled` boundary expands native planes using absolute
 reference-grid registration; `decode-temp-jp2` interleaves them only for a
-bounded three-component sRGB JP2 wrapper. Explicit POC in the main or first
-tile-part header is accepted only when the composed schedule completely
-preserves canonical sampled RPCL order; reordered sampled POC remains
-unsupported. Sampled encode currently covers single-tile inline+PLT RPCL with
-one or more untargeted layers; PLT-less/PPT/PPM and multi-tile sampled output
-remain queued.
+bounded three-component sRGB JP2 wrapper. `Info.color_space` preserves the
+selected grayscale, sRGB, sYCC, or restricted-ICC interpretation. For sYCC,
+`decode-temp-jp2` converts unsigned uniform 8/16-bit 4:4:4 planes through
+`color.sycc444ToSrgb`; 4:2:2/4:2:0 sYCC conversion remains fail-closed.
+Explicit POC in the main or first
+tile-part header may compose LRCP, RLCP, RPCL, PCRL, and CPRL intervals when
+the schedule covers every component-local packet exactly once. Sampled encode
+covers single- and multi-tile RPCL with inline
+PLT/PLT-less, PPT, or PPM headers, all with SOP/EPH framing and one or more
+untargeted layers. Mixed-precision sampled multi-tile output fails closed.
 
 Primary public functions:
 
@@ -328,7 +343,7 @@ Primary public functions:
 
 The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
-enumerated sRGB (16) or grayscale (17) `colr`, and one contiguous `jp2c`
+enumerated sRGB (16), grayscale (17), or bounded sYCC (18) `colr`, and one contiguous `jp2c`
 codestream. The reader accepts uniform unsigned 8-bit and 16-bit one- or
 three-component metadata. A variable-BPC `ihdr` plus `BPCC` may describe a
 bounded mixture of unsigned 8/16-bit component precisions and is checked

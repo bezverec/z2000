@@ -2157,6 +2157,51 @@ fn buildPlanarRpclEncodeArtifactsIsoMqInternal(
     style: ebcot.CodeBlockStyle,
     rct_alpha: bool,
 ) !TileRpclEncodeArtifacts {
+    const width_u32 = std.math.cast(u32, source.width) orelse return PacketScaffoldError.InvalidPlane;
+    const height_u32 = std.math.cast(u32, source.height) orelse return PacketScaffoldError.InvalidPlane;
+    const grid = tile_grid.Grid.fromImageSize(source.width, source.height, width_u32, height_u32) catch
+        return PacketScaffoldError.InvalidPlane;
+    return buildPlanarTileRpclEncodeArtifactsIsoMqInternal(
+        allocator,
+        source,
+        try grid.tile(0),
+        requested_levels,
+        options,
+        style,
+        rct_alpha,
+    );
+}
+
+/// Planar reversible tile front end with explicit component-grid coordinates.
+/// This is the origin-aware building block used by sampled multi-tile encode.
+pub fn buildPlanarTileRpclEncodeArtifactsIsoMq(
+    allocator: std.mem.Allocator,
+    source: color.SamplePlanes,
+    tile: tile_grid.Tile,
+    requested_levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+) !TileRpclEncodeArtifacts {
+    return buildPlanarTileRpclEncodeArtifactsIsoMqInternal(
+        allocator,
+        source,
+        tile,
+        requested_levels,
+        options,
+        style,
+        false,
+    );
+}
+
+fn buildPlanarTileRpclEncodeArtifactsIsoMqInternal(
+    allocator: std.mem.Allocator,
+    source: color.SamplePlanes,
+    tile: tile_grid.Tile,
+    requested_levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+    rct_alpha: bool,
+) !TileRpclEncodeArtifacts {
     if (source.width == 0 or source.height == 0) return PacketScaffoldError.InvalidPlane;
     if (source.bit_depth != 0 and source.bit_depth != 8 and source.bit_depth != 16) {
         return PacketScaffoldError.InvalidPlane;
@@ -2175,11 +2220,9 @@ fn buildPlanarRpclEncodeArtifactsIsoMqInternal(
     }
     if (rct_alpha and source.bit_depth == 0) return PacketScaffoldError.InvalidPlane;
 
-    const width_u32 = std.math.cast(u32, source.width) orelse return PacketScaffoldError.InvalidPlane;
-    const height_u32 = std.math.cast(u32, source.height) orelse return PacketScaffoldError.InvalidPlane;
-    const grid = tile_grid.Grid.fromImageSize(source.width, source.height, width_u32, height_u32) catch
+    if (source.width != tile.rect.width() or source.height != tile.rect.height()) {
         return PacketScaffoldError.InvalidPlane;
-    const tile = grid.tile(0) catch return PacketScaffoldError.InvalidPlane;
+    }
 
     var planes_carrier = if (rct_alpha)
         try color.forwardRctAlpha(allocator, source)
@@ -2216,12 +2259,14 @@ fn buildPlanarRpclEncodeArtifactsIsoMqInternal(
     defer workspace.deinit();
     var levels: u8 = 0;
     for (transformed.planes.planes, 0..) |plane, component| {
-        const plane_levels = try wavelet_int.forward53WithWorkspace(
+        const plane_levels = try wavelet_int.forward53WithWorkspaceOrigin(
             &workspace,
             plane,
             source.width,
             source.height,
             requested_levels,
+            tile.rect.x0,
+            tile.rect.y0,
         );
         if (component == 0) {
             levels = plane_levels;

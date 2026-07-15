@@ -1,9 +1,90 @@
 # Changelog
 
+## sYCC 4:4:4 Conversion Boundary
+
+- Added explicit JP2 colour-space metadata for grayscale, sRGB, enumerated
+  sYCC, and restricted ICC selection. `jp2-info` now reports the selected
+  interpretation instead of leaving three-component samples ambiguous.
+- Added checked unsigned 8/16-bit sYCC 4:4:4 to sRGB conversion at the
+  JP2-to-TIFF boundary. Native codestream planes remain unchanged, and sampled
+  sYCC conversion stays fail-closed pending a registration/interpolation gate.
+- Embedded a Kakadu 8.4.1 sYCC fixture whose converted raster matches OpenJPEG
+  2.5.4, plus clipping, precision, layout, and malformed chroma-sampling tests.
+
 This file tracks notable project changes. The repository is still pre-release;
 entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
+
+### Sampled Tile-Partition Origins
+
+- Added explicit sampled-planar SIZ image and tile-partition origins through
+  `LosslessOptions`. Component dimensions, tile cropping, packet geometry, DWT
+  parity, strict multi-tile context, and JP2 tile counts now retain the two
+  coordinate origins independently; other encode entry points stay fail-closed.
+- Added malformed-grid gates plus an odd clipped 3x3 4:2:0 roundtrip with exact
+  strict packet audit and 1/8-thread determinism.
+- Embedded an independent Kakadu 8.4.1 fixture with `Sorigin={3,5}` and
+  `Stile_origin={0,1}`. z2000 reconstructs its native planes exactly, while
+  Kakadu reconstructs matching z2000 output byte-for-byte.
+
+### Sampled Reordered POC
+
+- Added one reference-grid scheduler for LRCP, RLCP, RPCL, PCRL, and CPRL over
+  unequal component precinct grids. Sampled POC composition uses a stable
+  component-local packet identity, rejects incomplete schedules, and drives
+  both encode merge and strict decode without duplicating T1 payloads.
+- Added main- and first-tile-part-header POC emission for single- and
+  multi-tile sampled output, including `Psot`/TLM accounting, PPT, SOP/EPH,
+  all five progression orders, odd 3x3 tile grids, and 1/8-thread determinism.
+  PPM+POC remains fail-closed.
+- Strict T2 now detects non-contiguous precinct revisits. Canonical streams keep
+  the existing one-active-precinct fast path; reordered schedules preserve
+  inclusion tag-tree, zero-bitplane tag-tree, and block state per precinct.
+- Live single- and multi-tile 4:2:0 output for all five orders is accepted by
+  OpenJPEG 2.5.4, Grok 20.3.6, and Kakadu 8.4.1. Kakadu reconstructs every
+  native plane pixel-exactly. OpenJPEG and Grok both report success but their
+  upsampled sampled+POC rasters disagree, recorded as an interop caveat rather
+  than claimed pixel agreement.
+
+### Sampled Multi-Tile Packet Layouts
+
+- Generalized the planar tile front end to accept explicit component-grid tile
+  coordinates and run reversible 5/3 with absolute-origin parity. The original
+  single-tile entry point delegates to the same implementation.
+- Added sampled multi-tile encode with one tile-part per reference tile. Every
+  tile derives component-local bounds, DWT origins, precinct plans, T2 state,
+  and output packet order from the absolute SIZ grid; one and three untargeted
+  layers roundtrip native planes on aligned and odd-boundary grids.
+- Reused the single-tile framing helpers for inline PLT/PLT-less, tile-local
+  PPT with body-length PLT, and one checked PPM group per codestream-order tile
+  part without PLT. Layout selection reuses each tile's merged RPCL stream and
+  does not rebuild DWT, T1, or T2 artifacts.
+- The full SOP/EPH matrix, malformed PPT/PPM lengths, tile-local SOP sequence,
+  and 1/8-thread determinism are covered. Live odd-boundary 3x3, three-layer
+  4:2:0 streams in all four layouts decode through OpenJPEG 2.5.4 and Grok
+  20.3.6 to identical component rasters; Kakadu 8.4.1 reproduces all native
+  planes pixel-exactly. Mixed precision, sampled MCT, and sampled 9/7 remain
+  fail-closed.
+- Extended `readStrictPacketCatalog` to aggregate the same validated tile-local
+  sampled catalogs used by strict pixel decode. The layout matrix now requires
+  identical packet identities, normalized offsets/lengths, and packet bytes
+  across inline PLT/PLT-less, PPT, PPM, and every SOP/EPH combination.
+
+### Sampled Encode Packet Layouts
+
+- Added `LosslessOptions.plt`, defaulting to true, and opened PLT-less output
+  for the bounded sampled single-tile encoder. `Psot` and optional TLM account
+  for the shorter tile-part while strict decode derives packet spans from T2
+  headers.
+- Reused the common packed-header helpers to emit sampled PPT with body-length
+  PLT and sampled main-header PPM without redundant PLT. Inline, PLT-less,
+  PPT, and PPM now cover every SOP/EPH combination and one or more untargeted
+  layers without a second packet-state model.
+- The layout matrix reconstructs identical strict packet payloads, native
+  planes, and byte-identical 1/8-thread output. Live three-layer 4:2:0 streams
+  decoded through OpenJPEG 2.5.4 and Grok 20.3.6 with identical component
+  outputs across layouts; Kakadu 8.4.1 returned all native planes pixel-exactly.
 
 ### Planning Sync After PRs #150-#157
 

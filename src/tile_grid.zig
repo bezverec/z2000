@@ -191,6 +191,7 @@ fn validateAxis(end: u32, image_origin: u32, tile_size: u32, tile_origin: u32) T
     if (end <= image_origin) return TileGridError.InvalidTileGrid;
     if (tile_size == 0) return TileGridError.InvalidTileGrid;
     if (tile_origin > image_origin) return TileGridError.InvalidTileGrid;
+    if (image_origin - tile_origin >= tile_size) return TileGridError.InvalidTileGrid;
 }
 
 fn firstTileIndex(image_origin: u32, tile_origin: u32, tile_size: u32) u32 {

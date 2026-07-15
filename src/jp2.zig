@@ -14,6 +14,24 @@ pub const Jp2Error = error{
     UnsupportedProfile,
 };
 
+pub const ColorSpace = enum {
+    unknown,
+    grayscale,
+    srgb,
+    sycc,
+    restricted_icc,
+
+    pub fn label(self: ColorSpace) []const u8 {
+        return switch (self) {
+            .unknown => "unknown",
+            .grayscale => "grayscale",
+            .srgb => "sRGB",
+            .sycc => "sYCC",
+            .restricted_icc => "restricted ICC",
+        };
+    }
+};
+
 pub const Info = struct {
     width: u32,
     height: u32,
@@ -25,6 +43,7 @@ pub const Info = struct {
     component_bit_depths: [color.max_components]u8,
     component_xrsiz: [color.max_components]u8,
     component_yrsiz: [color.max_components]u8,
+    color_space: ColorSpace = .unknown,
     has_palette: bool = false,
     palette_entries: u16 = 0,
     palette_bits_per_component: u8 = 0,
@@ -115,6 +134,7 @@ const signature_payload = [_]u8{ 0x0d, 0x0a, 0x87, 0x0a };
 const brand_jp2 = fourcc("jp2 ");
 const enum_cs_srgb: u32 = 16;
 const enum_cs_grayscale: u32 = 17;
+const enum_cs_sycc: u32 = 18;
 const marker_soc = 0xff4f;
 const marker_cap = 0xff50;
 const marker_siz = 0xff51;
@@ -520,6 +540,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
         .component_bit_depths = [_]u8{0} ** color.max_components,
         .component_xrsiz = [_]u8{0} ** color.max_components,
         .component_yrsiz = [_]u8{0} ** color.max_components,
+        .color_space = .unknown,
         .has_palette = false,
         .palette_entries = 0,
         .palette_bits_per_component = 0,
@@ -591,6 +612,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
     if (!saw_signature or !saw_ftyp or !saw_jp2h or !saw_jp2c) {
         return Jp2Error.MissingRequiredBox;
     }
+    try validateSelectedColorSpace(info);
     return info;
 }
 
@@ -617,7 +639,7 @@ pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8
             return extractIccProfileFromJp2Header(
                 allocator,
                 box.payload,
-                enumeratedColorSpace(info.output_components),
+                info,
             );
         }
     }
@@ -678,7 +700,7 @@ const Box = struct {
 fn extractIccProfileFromJp2Header(
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    expected_enumerated_color_space: u32,
+    info: Info,
 ) !?[]u8 {
     // Mirrors parseJp2Header's colr choice: the first *supported*
     // specification wins (method 1 sRGB carries no profile; method 2 carries
@@ -692,7 +714,7 @@ fn extractIccProfileFromJp2Header(
             1 => {
                 if (box.payload.len == 7) {
                     const enum_cs = try readU32Be(box.payload, 3);
-                    if (enum_cs == expected_enumerated_color_space) return null;
+                    if (isSupportedEnumeratedColorSpace(info, enum_cs)) return null;
                 }
             },
             2 => {
@@ -716,6 +738,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var requires_bpcc = false;
     var srgb_colr_index: ?usize = null;
     var grayscale_colr_index: ?usize = null;
+    var sycc_colr_index: ?usize = null;
     var icc_colr_index: ?usize = null;
     var icc_profile_bytes: usize = 0;
     var box_index: usize = 0;
@@ -805,6 +828,9 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                             enum_cs_grayscale => if (grayscale_colr_index == null) {
                                 grayscale_colr_index = box_index;
                             },
+                            enum_cs_sycc => if (sycc_colr_index == null) {
+                                sycc_colr_index = box_index;
+                            },
                             else => {},
                         }
                     },
@@ -877,11 +903,21 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
         info.output_components - 1
     else
         info.output_components;
-    const expected_colr_index = switch (color_components) {
-        1 => grayscale_colr_index,
-        3 => srgb_colr_index,
-        else => null,
-    };
+    var expected_colr_index: ?usize = null;
+    var expected_color_space: ColorSpace = .unknown;
+    if (color_components == 1) {
+        expected_colr_index = grayscale_colr_index;
+        expected_color_space = .grayscale;
+    } else if (color_components == 3) {
+        expected_colr_index = srgb_colr_index;
+        expected_color_space = .srgb;
+        if (!info.has_palette and info.alpha_mode == null and sycc_colr_index != null and
+            (expected_colr_index == null or sycc_colr_index.? < expected_colr_index.?))
+        {
+            expected_colr_index = sycc_colr_index;
+            expected_color_space = .sycc;
+        }
+    }
     if (info.has_palette) {
         // The current expansion API produces RGB samples, so a restricted ICC
         // palette profile is deferred until the palette owns colour metadata.
@@ -892,17 +928,21 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
         }
         info.has_icc_profile = false;
         info.icc_profile_bytes = 0;
+        info.color_space = .srgb;
     } else if (expected_colr_index) |enumerated_index| {
         if (icc_colr_index == null or enumerated_index < icc_colr_index.?) {
             info.has_icc_profile = false;
             info.icc_profile_bytes = 0;
+            info.color_space = expected_color_space;
         } else {
             info.has_icc_profile = true;
             info.icc_profile_bytes = icc_profile_bytes;
+            info.color_space = .restricted_icc;
         }
     } else if (icc_colr_index != null) {
         info.has_icc_profile = true;
         info.icc_profile_bytes = icc_profile_bytes;
+        info.color_space = .restricted_icc;
     } else {
         return Jp2Error.UnsupportedColorSpace;
     }
@@ -994,12 +1034,41 @@ fn validateChannelDefinition(payload: []const u8, components: u16) !?AlphaMode {
     return null;
 }
 
-fn enumeratedColorSpace(components: u16) u32 {
-    return switch (components) {
-        1, 2 => enum_cs_grayscale,
-        3, 4 => enum_cs_srgb,
-        else => 0,
+fn isSupportedEnumeratedColorSpace(info: Info, enum_cs: u32) bool {
+    if (info.has_palette) return enum_cs == enum_cs_srgb;
+    const color_components = if (info.alpha_mode != null)
+        info.output_components - 1
+    else
+        info.output_components;
+    return switch (color_components) {
+        1 => enum_cs == enum_cs_grayscale,
+        3 => enum_cs == enum_cs_srgb or (info.alpha_mode == null and enum_cs == enum_cs_sycc),
+        else => false,
     };
+}
+
+fn validateSelectedColorSpace(info: Info) !void {
+    if (info.color_space != .sycc) return;
+    if (info.components != 3 or info.output_components != 3 or info.has_palette or
+        info.has_icc_profile or info.alpha_mode != null or
+        (info.bits_per_component != 8 and info.bits_per_component != 16))
+    {
+        return Jp2Error.UnsupportedColorSpace;
+    }
+    if (info.component_xrsiz[0] != 1 or info.component_yrsiz[0] != 1 or
+        info.component_xrsiz[1] != info.component_xrsiz[2] or
+        info.component_yrsiz[1] != info.component_yrsiz[2])
+    {
+        return Jp2Error.UnsupportedColorSpace;
+    }
+    const chroma_x = info.component_xrsiz[1];
+    const chroma_y = info.component_yrsiz[1];
+    if (!((chroma_x == 1 and chroma_y == 1) or
+        (chroma_x == 2 and chroma_y == 1) or
+        (chroma_x == 2 and chroma_y == 2)))
+    {
+        return Jp2Error.UnsupportedColorSpace;
+    }
 }
 
 /// ISO 15444-1 I.5.3.7: the resolution superbox holds at most one capture
@@ -1093,13 +1162,15 @@ fn validateCodestreamPayload(
     const ytosiz = try readU32Be(segment, 30);
     if (xsiz <= xosiz or ysiz <= yosiz) return Jp2Error.InvalidCodestream;
     if (xtsiz == 0 or ytsiz == 0) return Jp2Error.InvalidCodestream;
-    if (xtosiz != xosiz or ytosiz != yosiz) return Jp2Error.UnsupportedProfile;
+    if (xtosiz > xosiz or ytosiz > yosiz or
+        xosiz - xtosiz >= xtsiz or yosiz - ytosiz >= ytsiz)
+    {
+        return Jp2Error.InvalidCodestream;
+    }
     const width = xsiz - xosiz;
     const height = ysiz - yosiz;
-    // XTOsiz/YTOsiz are pinned to the image origin, so any nonzero tile size
-    // partitions the image into a valid ISO B.3 grid even at a nonzero origin.
-    const tile_columns = (@as(u64, width) + xtsiz - 1) / xtsiz;
-    const tile_rows = (@as(u64, height) + ytsiz - 1) / ytsiz;
+    const tile_columns = (@as(u64, xsiz - xtosiz) + xtsiz - 1) / xtsiz;
+    const tile_rows = (@as(u64, ysiz - ytosiz) + ytsiz - 1) / ytsiz;
     const tile_count_u64 = tile_columns * tile_rows;
     // The tile-part walker tracks up to 256 TLM entries; larger grids stay
     // unsupported in the wrapper profile until the walker is generalized.

@@ -252,6 +252,12 @@ pub const LosslessOptions = struct {
     transform: WaveletTransform = .reversible_5_3,
     quantization: QuantizationStyle = .none,
     guard_bits: u8 = 2,
+    /// Absolute SIZ image and tile-partition origins. Nonzero values are
+    /// currently public only through the sampled planar encoder.
+    image_origin_x: u32 = 0,
+    image_origin_y: u32 = 0,
+    tile_origin_x: u32 = 0,
+    tile_origin_y: u32 = 0,
     tile_width: u32 = 4096,
     tile_height: u32 = 4096,
     block_width: u16 = 64,
@@ -267,6 +273,9 @@ pub const LosslessOptions = struct {
     sop: bool = true,
     eph: bool = false,
     tlm: bool = true,
+    /// Emit PLT packet-length markers. PLT-less output is currently public
+    /// only through the bounded sampled single-tile encoder.
+    plt: bool = true,
     ppm: bool = false,
     ppt: bool = false,
     tile_part_divisions: ?u8 = 'R',
@@ -538,11 +547,12 @@ pub const ComponentSampling = struct {
 
 /// F3b sampled reversible encode: 1..4 unsigned 8/16-bit component planes with
 /// explicit per-component dimensions and XRsiz/YRsiz subsampling, no MCT,
-/// single tile, reversible 5/3, ISO MQ, RPCL, one layer, inline packet
-/// headers with PLT. Each component is encoded independently through the
-/// single-component scaffold at its own dimensions; the per-component packet
-/// streams are then merged into the canonical sampled RPCL order the strict
-/// decoder expects. Everything outside that envelope fails closed.
+/// single or multi-tile, reversible 5/3, ISO MQ, RPCL, one or more untargeted layers,
+/// and inline PLT/PLT-less, PPT, or PPM packet headers. Each component is
+/// encoded independently through the single-component scaffold at its own
+/// dimensions; the per-component packet streams are then merged into the
+/// default sampled RPCL order or a checked complete POC schedule. Everything
+/// outside that envelope fails closed.
 pub fn encodeLosslessSampledPlanarWithOptions(
     allocator: std.mem.Allocator,
     planar: color.SamplePlanes,
@@ -560,28 +570,46 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     }
     if (sampling.len != component_count) return CodestreamError.InvalidCodestream;
 
-    // First-slice envelope: reversible 5/3, no MCT, RPCL, one layer, inline
-    // headers, no rate/POC/packed-header machinery, single tile.
+    // Current envelope: reversible 5/3, no MCT, RPCL, untargeted layers,
+    // shared inline/PPT/PPM framing, and optional checked POC scheduling.
     if (options.transform != .reversible_5_3 or options.quantization != .none or
         options.mct != .none or options.progression != .rpcl or
         options.layers == 0 or options.layers > max_quality_layers or
         options.rate_count != 0 or
-        options.poc_records.len != 0 or options.poc_in_tile_header or
-        options.ppm or options.ppt or options.emit_temporary_payload_sidecar or
+        options.emit_temporary_payload_sidecar or
         options.t1_backend != .iso_mq or options.bypass or options.terminate_all or
         options.reset_context or options.vertical_causal or
         options.predictable_termination or options.segmentation_symbols)
     {
         return CodestreamError.UnsupportedPayload;
     }
+    if (options.poc_in_tile_header and options.poc_records.len == 0) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (options.ppm and options.ppt) return CodestreamError.UnsupportedPayload;
+    if (options.ppm and options.poc_records.len != 0) return CodestreamError.UnsupportedPayload;
+    // PPT tile-parts retain body-length PLT accounting. PPM owns packet-header
+    // grouping in the main header and intentionally omits PLT.
+    if (options.ppt and !options.plt) return CodestreamError.UnsupportedPayload;
     if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
     if (options.levels > 32) return CodestreamError.TooManyLevels;
 
     const width_u32: u32 = @intCast(planar.width);
     const height_u32: u32 = @intCast(planar.height);
-    const grid = tile_grid.Grid.fromImageSize(planar.width, planar.height, options.tile_width, options.tile_height) catch
-        return CodestreamError.InvalidCodestream;
-    if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
+    const reference_x1 = std.math.add(u32, options.image_origin_x, width_u32) catch
+        return CodestreamError.ImageTooLarge;
+    const reference_y1 = std.math.add(u32, options.image_origin_y, height_u32) catch
+        return CodestreamError.ImageTooLarge;
+    const grid = tile_grid.Grid.init(.{
+        .xsiz = reference_x1,
+        .ysiz = reference_y1,
+        .xosiz = options.image_origin_x,
+        .yosiz = options.image_origin_y,
+        .xtsiz = options.tile_width,
+        .ytsiz = options.tile_height,
+        .xtosiz = options.tile_origin_x,
+        .ytosiz = options.tile_origin_y,
+    }) catch return CodestreamError.InvalidCodestream;
 
     const reference_levels = actualDwtLevels(planar.width, planar.height, options.levels);
 
@@ -593,8 +621,8 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         const xrsiz = sampling[component].xrsiz;
         const yrsiz = sampling[component].yrsiz;
         if (xrsiz == 0 or yrsiz == 0) return CodestreamError.InvalidCodestream;
-        const expected_width = ceilDivU32(width_u32, xrsiz);
-        const expected_height = ceilDivU32(height_u32, yrsiz);
+        const expected_width = ceilDivU32(reference_x1, xrsiz) - ceilDivU32(options.image_origin_x, xrsiz);
+        const expected_height = ceilDivU32(reference_y1, yrsiz) - ceilDivU32(options.image_origin_y, yrsiz);
         const dims = planar.componentDimensions(component) orelse return CodestreamError.InvalidCodestream;
         if (dims[0] != expected_width or dims[1] != expected_height) {
             return CodestreamError.InvalidCodestream;
@@ -624,34 +652,156 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     };
     const block_style = ebcot.CodeBlockStyle{};
 
+    if (!grid.isSingleTile()) {
+        if (planar.bit_depth != 8 and planar.bit_depth != 16) {
+            return CodestreamError.UnsupportedPayload;
+        }
+        return assembleSampledMultiTileCodestream(
+            allocator,
+            planar,
+            grid,
+            component_bit_depths,
+            component_xrsiz,
+            component_yrsiz,
+            reference_levels,
+            scaffold_options,
+            block_style,
+            encode_options,
+        );
+    }
+
+    var stream = try buildSampledTilePacketStream(
+        allocator,
+        planar,
+        try grid.tile(0),
+        component_bit_depths,
+        component_xrsiz,
+        component_yrsiz,
+        options.image_origin_x,
+        options.image_origin_y,
+        reference_levels,
+        scaffold_options,
+        block_style,
+        encode_options.layers,
+        encode_options.poc_records,
+    );
+    defer stream.deinit();
+
+    return assembleSampledSingleTileCodestream(allocator, .{
+        .width = planar.width,
+        .height = planar.height,
+        .bit_depth = planar.bit_depth,
+        .component_bit_depths = component_bit_depths,
+        .component_xrsiz = component_xrsiz,
+        .component_yrsiz = component_yrsiz,
+        .components = @intCast(component_count),
+        .levels = reference_levels,
+        .packet_lengths = stream.packet_lengths,
+        .packet_header_lengths = stream.packet_header_lengths,
+        .packet_bytes = stream.packet_bytes,
+    }, encode_options);
+}
+
+const SampledTilePacketStream = struct {
+    allocator: std.mem.Allocator,
+    tile: tile_grid.Tile,
+    packet_lengths: []u32,
+    packet_header_lengths: []u32,
+    packet_bytes: []u8,
+
+    fn deinit(self: *SampledTilePacketStream) void {
+        self.allocator.free(self.packet_bytes);
+        self.allocator.free(self.packet_header_lengths);
+        self.allocator.free(self.packet_lengths);
+        self.* = undefined;
+    }
+};
+
+fn buildSampledTilePacketStream(
+    allocator: std.mem.Allocator,
+    planar: color.SamplePlanes,
+    reference_tile: tile_grid.Tile,
+    component_bit_depths: [max_codestream_components]u8,
+    component_xrsiz: [max_codestream_components]u8,
+    component_yrsiz: [max_codestream_components]u8,
+    reference_x0: u32,
+    reference_y0: u32,
+    reference_levels: u8,
+    scaffold_options: tile_pipeline.PacketScaffoldOptions,
+    block_style: ebcot.CodeBlockStyle,
+    layer_count: u16,
+    poc_records: []const poc.Record,
+) !SampledTilePacketStream {
+    const component_count = planar.planes.len;
     var per_component: [max_codestream_components]tile_pipeline.TileRpclEncodeArtifacts = undefined;
     var built: usize = 0;
     defer for (per_component[0..built]) |*artifact| artifact.deinit();
 
     var sampled_plans: [max_codestream_components]packet_plan.SampledComponentPlan = undefined;
     while (built < component_count) : (built += 1) {
-        const dims = planar.componentDimensions(built).?;
-        const depth = component_bit_depths[built];
-        var comp_planes = try color.SamplePlanes.initWithComponentLayouts(
-            allocator,
-            dims[0],
-            dims[1],
-            &.{depth},
-            &.{dims[0]},
-            &.{dims[1]},
-        );
-        defer comp_planes.deinit();
-        @memcpy(comp_planes.planes[0], planar.planes[built]);
+        const full_dims = planar.componentDimensions(built) orelse return CodestreamError.InvalidCodestream;
+        const xrsiz = component_xrsiz[built];
+        const yrsiz = component_yrsiz[built];
+        const component_x0 = ceilDivU32(reference_tile.rect.x0, xrsiz);
+        const component_y0 = ceilDivU32(reference_tile.rect.y0, yrsiz);
+        const component_x1 = ceilDivU32(reference_tile.rect.x1, xrsiz);
+        const component_y1 = ceilDivU32(reference_tile.rect.y1, yrsiz);
+        const image_component_x0 = ceilDivU32(reference_x0, xrsiz);
+        const image_component_y0 = ceilDivU32(reference_y0, yrsiz);
+        if (component_x1 <= component_x0 or component_y1 <= component_y0) {
+            return CodestreamError.UnsupportedPayload;
+        }
+        if (component_x0 < image_component_x0 or component_y0 < image_component_y0) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const tile_width: usize = component_x1 - component_x0;
+        const tile_height: usize = component_y1 - component_y0;
+        if (component_x1 - image_component_x0 > full_dims[0] or
+            component_y1 - image_component_y0 > full_dims[1])
+        {
+            return CodestreamError.InvalidCodestream;
+        }
 
-        per_component[built] = try tile_pipeline.buildPlanarRpclEncodeArtifactsIsoMq(
+        const depth = component_bit_depths[built];
+        var component_tile_planes = try color.SamplePlanes.initWithComponentLayouts(
             allocator,
-            comp_planes,
+            tile_width,
+            tile_height,
+            &.{depth},
+            &.{tile_width},
+            &.{tile_height},
+        );
+        defer component_tile_planes.deinit();
+        for (0..tile_height) |row| {
+            const source_x = component_x0 - image_component_x0;
+            const source_y = component_y0 - image_component_y0;
+            const source_start = (@as(usize, source_y) + row) * full_dims[0] + source_x;
+            const destination_start = row * tile_width;
+            @memcpy(
+                component_tile_planes.planes[0][destination_start..][0..tile_width],
+                planar.planes[built][source_start..][0..tile_width],
+            );
+        }
+
+        const component_tile = tile_grid.Tile{
+            .index = reference_tile.index,
+            .column = reference_tile.column,
+            .row = reference_tile.row,
+            .rect = .{
+                .x0 = component_x0,
+                .y0 = component_y0,
+                .x1 = component_x1,
+                .y1 = component_y1,
+            },
+        };
+        per_component[built] = try tile_pipeline.buildPlanarTileRpclEncodeArtifactsIsoMq(
+            allocator,
+            component_tile_planes,
+            component_tile,
             reference_levels,
             scaffold_options,
             block_style,
         );
-        // Every component must reach the reference decomposition depth so all
-        // component plans share the codestream's resolution count.
         if (per_component[built].levels != reference_levels or
             per_component[built].scaffold.components != 1)
         {
@@ -659,28 +809,22 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         }
         sampled_plans[built] = .{
             .plan = per_component[built].scaffold.plan,
-            .xrsiz = component_xrsiz[built],
-            .yrsiz = component_yrsiz[built],
+            .xrsiz = xrsiz,
+            .yrsiz = yrsiz,
         };
     }
 
-    const global = packet_plan.sampledRpclPackets(
+    const global = try buildSampledPocPacketSequence(
         allocator,
         sampled_plans[0..component_count],
-        options.layers,
-        0,
-        0,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return CodestreamError.InvalidCodestream,
-    };
+        layer_count,
+        reference_tile.rect.x0,
+        reference_tile.rect.y0,
+        poc_records,
+    );
     defer allocator.free(global);
 
-    // Merge per-component streams into the global sampled order. Each
-    // component's packet stream is in RPCL order (resolution, precinct,
-    // layer), so the local index is the resolution's packet offset plus
-    // precinct_index * layers + layer.
-    const layers: u64 = options.layers;
+    const layers: u64 = layer_count;
     var resolution_offsets: [max_codestream_components][33]u64 = undefined;
     for (0..component_count) |component| {
         const plan = per_component[component].scaffold.plan;
@@ -692,11 +836,11 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     }
 
     var merged_bytes: std.ArrayList(u8) = .empty;
-    defer merged_bytes.deinit(allocator);
+    errdefer merged_bytes.deinit(allocator);
     var merged_lengths: std.ArrayList(u32) = .empty;
-    defer merged_lengths.deinit(allocator);
+    errdefer merged_lengths.deinit(allocator);
     var merged_header_lengths: std.ArrayList(u32) = .empty;
-    defer merged_header_lengths.deinit(allocator);
+    errdefer merged_header_lengths.deinit(allocator);
     try merged_lengths.ensureTotalCapacity(allocator, global.len);
     try merged_header_lengths.ensureTotalCapacity(allocator, global.len);
 
@@ -723,19 +867,18 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         try merged_bytes.appendSlice(allocator, stream.bytes[offset..][0..length]);
     }
 
-    return assembleSampledSingleTileCodestream(allocator, .{
-        .width = planar.width,
-        .height = planar.height,
-        .bit_depth = planar.bit_depth,
-        .component_bit_depths = component_bit_depths,
-        .component_xrsiz = component_xrsiz,
-        .component_yrsiz = component_yrsiz,
-        .components = @intCast(component_count),
-        .levels = reference_levels,
-        .packet_lengths = merged_lengths.items,
-        .packet_header_lengths = merged_header_lengths.items,
-        .packet_bytes = merged_bytes.items,
-    }, encode_options);
+    const packet_lengths = try merged_lengths.toOwnedSlice(allocator);
+    errdefer allocator.free(packet_lengths);
+    const packet_header_lengths = try merged_header_lengths.toOwnedSlice(allocator);
+    errdefer allocator.free(packet_header_lengths);
+    const packet_bytes = try merged_bytes.toOwnedSlice(allocator);
+    return .{
+        .allocator = allocator,
+        .tile = reference_tile,
+        .packet_lengths = packet_lengths,
+        .packet_header_lengths = packet_header_lengths,
+        .packet_bytes = packet_bytes,
+    };
 }
 
 const SampledAssemblyInput = struct {
@@ -752,10 +895,195 @@ const SampledAssemblyInput = struct {
     packet_bytes: []const u8,
 };
 
-/// Single tile-part inline-header assembly for the sampled encoder. The
-/// packet count is component-geometry dependent, so this bypasses the uniform
-/// packet-plan check the RGB/planar assembler runs and emits every merged
-/// packet as one resolution-agnostic tile-part.
+fn assembleSampledMultiTileCodestream(
+    allocator: std.mem.Allocator,
+    planar: color.SamplePlanes,
+    grid: tile_grid.Grid,
+    component_bit_depths: [max_codestream_components]u8,
+    component_xrsiz: [max_codestream_components]u8,
+    component_yrsiz: [max_codestream_components]u8,
+    levels: u8,
+    scaffold_options: tile_pipeline.PacketScaffoldOptions,
+    block_style: ebcot.CodeBlockStyle,
+    encode_options: LosslessOptions,
+) ![]u8 {
+    const tile_count = std.math.cast(usize, grid.tileCount()) orelse return CodestreamError.ImageTooLarge;
+    if (tile_count == 0 or tile_count > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+    const streams = try allocator.alloc(SampledTilePacketStream, tile_count);
+    defer allocator.free(streams);
+    var initialized: usize = 0;
+    defer for (streams[0..initialized]) |*stream| stream.deinit();
+
+    var iterator = grid.iterator();
+    while (try iterator.next()) |tile| {
+        if (initialized >= streams.len) return CodestreamError.InvalidCodestream;
+        streams[initialized] = try buildSampledTilePacketStream(
+            allocator,
+            planar,
+            tile,
+            component_bit_depths,
+            component_xrsiz,
+            component_yrsiz,
+            grid.params.xosiz,
+            grid.params.yosiz,
+            levels,
+            scaffold_options,
+            block_style,
+            encode_options.layers,
+            encode_options.poc_records,
+        );
+        initialized += 1;
+    }
+    if (initialized != streams.len) return CodestreamError.InvalidCodestream;
+
+    const parts = try allocator.alloc(MultiTilePacketPart, tile_count);
+    defer allocator.free(parts);
+    const uses_packed_headers = encode_options.ppm or encode_options.ppt;
+    const tile_poc_bytes = if (encode_options.poc_in_tile_header)
+        try pocMarkerByteCount(encode_options)
+    else
+        0;
+    for (streams, parts) |stream, *part| {
+        if (stream.tile.index > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+        const framed_bytes = if (uses_packed_headers)
+            try packedPacketBodyByteCount(encode_options, stream.packet_lengths, stream.packet_header_lengths)
+        else
+            try rpclPacketPayloadByteCount(encode_options, stream.packet_lengths);
+        const plt_bytes = if (encode_options.ppm or !encode_options.plt)
+            0
+        else if (uses_packed_headers)
+            try pltBytesForPackedPacketLengths(encode_options, stream.packet_lengths, stream.packet_header_lengths)
+        else
+            try pltBytesForRpclPacketLengths(encode_options, stream.packet_lengths);
+        const ppt_bytes = if (encode_options.ppt)
+            try pptMarkerByteCount(encode_options, stream.packet_header_lengths)
+        else
+            0;
+        const psot = std.math.cast(
+            u32,
+            try std.math.add(
+                usize,
+                14,
+                try std.math.add(
+                    usize,
+                    framed_bytes,
+                    try std.math.add(usize, plt_bytes, try std.math.add(usize, ppt_bytes, tile_poc_bytes)),
+                ),
+            ),
+        ) orelse return CodestreamError.ImageTooLarge;
+        part.* = .{
+            .tile_index = @intCast(stream.tile.index),
+            .tile_part_index = 0,
+            .tile_part_count = 1,
+            .first_packet = 0,
+            .packet_count = stream.packet_lengths.len,
+            .psot = psot,
+        };
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendMarker(allocator, &out, .soc);
+    try appendSizForComponents(allocator, &out, .{
+        .width = @intCast(planar.width),
+        .height = @intCast(planar.height),
+        .bit_depth = planar.bit_depth,
+        .component_bit_depths = component_bit_depths,
+        .component_xrsiz = component_xrsiz,
+        .component_yrsiz = component_yrsiz,
+        .components = @intCast(planar.planes.len),
+        .image_origin_x = encode_options.image_origin_x,
+        .image_origin_y = encode_options.image_origin_y,
+        .tile_width = encode_options.tile_width,
+        .tile_height = encode_options.tile_height,
+        .tile_origin_x = encode_options.tile_origin_x,
+        .tile_origin_y = encode_options.tile_origin_y,
+    });
+    try appendCod(allocator, &out, levels, encode_options);
+    try appendQcd(allocator, &out, levels, planar.bit_depth, encode_options);
+    if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
+        try appendPocForComponents(allocator, &out, levels, @intCast(planar.planes.len), encode_options);
+    }
+    if (encode_options.tlm) try appendMultiTileTlm(allocator, &out, parts);
+
+    var ppm_groups: [][]u8 = &.{};
+    var ppm_group_count: usize = 0;
+    defer {
+        for (ppm_groups[0..ppm_group_count]) |group| allocator.free(group);
+        if (ppm_groups.len != 0) allocator.free(ppm_groups);
+    }
+    if (encode_options.ppm) {
+        ppm_groups = try allocator.alloc([]u8, streams.len);
+        for (streams) |stream| {
+            ppm_groups[ppm_group_count] = try collectPackedPacketHeaders(
+                allocator,
+                encode_options,
+                stream.packet_lengths,
+                stream.packet_header_lengths,
+                stream.packet_bytes,
+            );
+            ppm_group_count += 1;
+        }
+        try appendPpmPacketHeaderGroups(allocator, &out, ppm_groups);
+    }
+
+    for (streams, parts) |stream, part| {
+        try appendSot(allocator, &out, part.tile_index, part.psot, 0, 1);
+        if (encode_options.poc_in_tile_header) {
+            try appendPocForComponents(allocator, &out, levels, @intCast(planar.planes.len), encode_options);
+        }
+        if (encode_options.ppt) {
+            try appendPltFromPackedPacketLengths(
+                allocator,
+                &out,
+                encode_options,
+                stream.packet_lengths,
+                stream.packet_header_lengths,
+            );
+            var ppt_marker_index: u16 = 0;
+            try appendPptPacketHeaders(
+                allocator,
+                &out,
+                encode_options,
+                stream.packet_lengths,
+                stream.packet_header_lengths,
+                stream.packet_bytes,
+                &ppt_marker_index,
+            );
+        } else if (encode_options.plt and !encode_options.ppm) {
+            try appendPltFromRpclPacketLengths(allocator, &out, encode_options, stream.packet_lengths);
+        }
+        try appendMarker(allocator, &out, .sod);
+        var packet_sequence: u16 = 0;
+        if (uses_packed_headers) {
+            try appendPackedPacketBodies(
+                allocator,
+                &out,
+                encode_options,
+                stream.packet_lengths,
+                stream.packet_header_lengths,
+                stream.packet_bytes,
+                &packet_sequence,
+            );
+        } else {
+            try appendRpclPackets(
+                allocator,
+                &out,
+                encode_options,
+                stream.packet_lengths,
+                stream.packet_header_lengths,
+                stream.packet_bytes,
+                &packet_sequence,
+            );
+        }
+    }
+    try appendMarker(allocator, &out, .eoc);
+    return out.toOwnedSlice(allocator);
+}
+
+/// Single tile-part assembly for the sampled encoder. The packet count is
+/// component-geometry dependent, so this bypasses the uniform packet-plan
+/// check while reusing the common inline/PPT/PPM framing helpers.
 fn assembleSampledSingleTileCodestream(
     allocator: std.mem.Allocator,
     input: SampledAssemblyInput,
@@ -766,9 +1094,30 @@ fn assembleSampledSingleTileCodestream(
         return CodestreamError.InvalidCodestream;
     }
 
-    const packet_bytes = try rpclPacketPayloadByteCount(encode_options, input.packet_lengths);
-    const plt_bytes = try pltBytesForRpclPacketLengths(encode_options, input.packet_lengths);
-    const tile_part_bytes = try std.math.add(usize, packet_bytes, plt_bytes);
+    const uses_packed_headers = encode_options.ppm or encode_options.ppt;
+    const packet_bytes = if (uses_packed_headers)
+        try packedPacketBodyByteCount(encode_options, input.packet_lengths, input.packet_header_lengths)
+    else
+        try rpclPacketPayloadByteCount(encode_options, input.packet_lengths);
+    const plt_bytes = if (encode_options.ppm or !encode_options.plt)
+        0
+    else if (uses_packed_headers)
+        try pltBytesForPackedPacketLengths(encode_options, input.packet_lengths, input.packet_header_lengths)
+    else
+        try pltBytesForRpclPacketLengths(encode_options, input.packet_lengths);
+    const ppt_bytes = if (encode_options.ppt)
+        try pptMarkerByteCount(encode_options, input.packet_header_lengths)
+    else
+        0;
+    const poc_bytes = if (encode_options.poc_in_tile_header)
+        try pocMarkerByteCount(encode_options)
+    else
+        0;
+    const tile_part_bytes = try std.math.add(
+        usize,
+        packet_bytes,
+        try std.math.add(usize, plt_bytes, try std.math.add(usize, ppt_bytes, poc_bytes)),
+    );
     const psot = std.math.cast(u32, try std.math.add(usize, 14, tile_part_bytes)) orelse
         return CodestreamError.ImageTooLarge;
 
@@ -783,26 +1132,81 @@ fn assembleSampledSingleTileCodestream(
         .component_xrsiz = input.component_xrsiz,
         .component_yrsiz = input.component_yrsiz,
         .components = input.components,
+        .image_origin_x = encode_options.image_origin_x,
+        .image_origin_y = encode_options.image_origin_y,
         .tile_width = encode_options.tile_width,
         .tile_height = encode_options.tile_height,
+        .tile_origin_x = encode_options.tile_origin_x,
+        .tile_origin_y = encode_options.tile_origin_y,
     });
     try appendCod(allocator, &out, levels, encode_options);
     try appendQcd(allocator, &out, levels, input.bit_depth, encode_options);
+    if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
+        try appendPocForComponents(allocator, &out, levels, input.components, encode_options);
+    }
     if (encode_options.tlm) try appendTlm(allocator, &out, &.{psot});
 
+    var packed_headers: []u8 = &.{};
+    defer if (packed_headers.len != 0) allocator.free(packed_headers);
+    if (encode_options.ppm) {
+        packed_headers = try collectPackedPacketHeaders(
+            allocator,
+            encode_options,
+            input.packet_lengths,
+            input.packet_header_lengths,
+            input.packet_bytes,
+        );
+        try appendPpmPacketHeaderGroups(allocator, &out, &.{packed_headers});
+    }
+
     try appendSot(allocator, &out, 0, psot, 0, 1);
-    try appendPltFromRpclPacketLengths(allocator, &out, encode_options, input.packet_lengths);
+    if (encode_options.poc_in_tile_header) {
+        try appendPocForComponents(allocator, &out, levels, input.components, encode_options);
+    }
+    if (encode_options.ppt) {
+        try appendPltFromPackedPacketLengths(
+            allocator,
+            &out,
+            encode_options,
+            input.packet_lengths,
+            input.packet_header_lengths,
+        );
+        var ppt_marker_index: u16 = 0;
+        try appendPptPacketHeaders(
+            allocator,
+            &out,
+            encode_options,
+            input.packet_lengths,
+            input.packet_header_lengths,
+            input.packet_bytes,
+            &ppt_marker_index,
+        );
+    } else if (encode_options.plt and !encode_options.ppm) {
+        try appendPltFromRpclPacketLengths(allocator, &out, encode_options, input.packet_lengths);
+    }
     try appendMarker(allocator, &out, .sod);
     var packet_sequence: u16 = 0;
-    try appendRpclPackets(
-        allocator,
-        &out,
-        encode_options,
-        input.packet_lengths,
-        input.packet_header_lengths,
-        input.packet_bytes,
-        &packet_sequence,
-    );
+    if (uses_packed_headers) {
+        try appendPackedPacketBodies(
+            allocator,
+            &out,
+            encode_options,
+            input.packet_lengths,
+            input.packet_header_lengths,
+            input.packet_bytes,
+            &packet_sequence,
+        );
+    } else {
+        try appendRpclPackets(
+            allocator,
+            &out,
+            encode_options,
+            input.packet_lengths,
+            input.packet_header_lengths,
+            input.packet_bytes,
+            &packet_sequence,
+        );
+    }
     try appendMarker(allocator, &out, .eoc);
     return out.toOwnedSlice(allocator);
 }
@@ -2447,16 +2851,7 @@ fn assembleSingleTileCodestream(
                 input.packet_bytes[packet_bytes_start..packet_bytes_end],
             );
         }
-        var marker_payloads = ppm.buildMarkerPayloads(allocator, ppm_groups[0..tile_parts], 65533) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return CodestreamError.UnsupportedPayload,
-        };
-        defer marker_payloads.deinit();
-        for (marker_payloads.items) |payload| {
-            try appendMarker(allocator, &out, .ppm);
-            try appendU16Be(allocator, &out, @intCast(payload.len + 2));
-            try out.appendSlice(allocator, payload);
-        }
+        try appendPpmPacketHeaderGroups(allocator, &out, ppm_groups[0..tile_parts]);
     }
     var packet_sequence: u16 = 0;
     var ppt_marker_index: u16 = 0;
@@ -3143,6 +3538,9 @@ fn analyzeStrictMultiTilePacketStats(
 
 pub fn readStrictPacketCatalog(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketCatalog {
     const header = try readStrictCodestreamMetadata(allocator, bytes);
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return readStrictMultiTilePacketCatalog(allocator, bytes, header);
+    }
     return readStrictPacketCatalogWithHeader(allocator, bytes, header);
 }
 
@@ -3298,7 +3696,6 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             width = xsiz - xosiz;
             height = ysiz - yosiz;
             if (xtsiz == 0 or ytsiz == 0) return CodestreamError.InvalidCodestream;
-            if (xtosiz != xosiz or ytosiz != yosiz) return CodestreamError.UnsupportedPayload;
             parsed_grid = tile_grid.Grid.init(.{
                 .xsiz = xsiz,
                 .ysiz = ysiz,
@@ -3740,6 +4137,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .block_height = block_height,
             .tile_width = grid.params.xtsiz,
             .tile_height = grid.params.ytsiz,
+            .tile_origin_x = grid.params.xtosiz,
+            .tile_origin_y = grid.params.ytosiz,
             .guard_bits = parsed_guard_bits,
             .qcd_exponents = parsed_qcd_exponents,
             .qcd_exponent_count = parsed_qcd_exponent_count,
@@ -3808,6 +4207,8 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .code_block_style = parsed_code_block_style,
         .block_width = block_width,
         .block_height = block_height,
+        .tile_origin_x = grid.params.xtosiz,
+        .tile_origin_y = grid.params.ytosiz,
         .guard_bits = parsed_guard_bits,
         .qcd_exponents = parsed_qcd_exponents,
         .qcd_exponent_count = parsed_qcd_exponent_count,
@@ -5002,7 +5403,14 @@ fn assembleStrictPacketCatalogHeaders(
         );
     }
 
-    const use_packet_group_arena = header.layers == 1;
+    const persistent_precinct_state = packetCatalogRevisitsPrecincts(catalog.entries);
+    var stateful_groups: ?StrictStatefulPrecinctGroups = if (persistent_precinct_state)
+        try StrictStatefulPrecinctGroups.init(allocator, header)
+    else
+        null;
+    defer if (stateful_groups) |*groups| groups.deinit();
+
+    const use_packet_group_arena = header.layers == 1 and !persistent_precinct_state;
     var packet_group_arena = std.heap.ArenaAllocator.init(allocator);
     defer packet_group_arena.deinit();
     const group_allocator = if (use_packet_group_arena) packet_group_arena.allocator() else allocator;
@@ -5010,7 +5418,7 @@ fn assembleStrictPacketCatalogHeaders(
     var active_group_storage: [max_rpcl_packet_band_groups]StrictPacketAuditBandGroup = undefined;
     var active_group_count: usize = 0;
     defer {
-        if (!use_packet_group_arena) {
+        if (!persistent_precinct_state and !use_packet_group_arena) {
             deinitStrictPacketAuditBandGroups(group_allocator, active_group_storage[0..active_group_count]);
         }
     }
@@ -5020,7 +5428,9 @@ fn assembleStrictPacketCatalogHeaders(
         const selected = try geometry.rpcl_index.indexesFor(local_packet.resolution, local_packet.precinct_index, 0);
         const packet_bytes = catalog.packetBytes(entry);
         audit.packets += 1;
-        if (entry.packet.layer == 0) {
+        const active_groups = if (persistent_precinct_state)
+            try stateful_groups.?.groupsFor(entry.packet)
+        else if (entry.packet.layer == 0) blk: {
             if (use_packet_group_arena) {
                 _ = packet_group_arena.reset(.retain_capacity);
             } else {
@@ -5038,10 +5448,10 @@ fn assembleStrictPacketCatalogHeaders(
                     &active_group_storage,
                 );
             }
+            break :blk active_group_storage[0..active_group_count];
         } else if (selected.len > 0 and active_group_count == 0) {
             return CodestreamError.InvalidCodestream;
-        }
-        const active_groups = active_group_storage[0..active_group_count];
+        } else active_group_storage[0..active_group_count];
 
         if (selected.len == 0) {
             const read = try readStrictPacketHeaderForAudit(packet_bytes, entry.packet, &.{}, null, &.{});
@@ -5080,6 +5490,22 @@ fn assembleStrictPacketCatalogHeaders(
     if (audit.present_packets + audit.absent_packets != audit.packets) return CodestreamError.InvalidCodestream;
     if (audit.header_decoded_packets != audit.packets) return CodestreamError.InvalidCodestream;
     return assemblies;
+}
+
+fn packetCatalogRevisitsPrecincts(entries: []const StrictPacketEntry) bool {
+    for (entries, 0..) |entry, index| {
+        if (entry.packet.layer == 0) continue;
+        if (index == 0) return true;
+        const previous = entries[index - 1].packet;
+        if (previous.component != entry.packet.component or
+            previous.resolution != entry.packet.resolution or
+            previous.precinct_index != entry.packet.precinct_index or
+            previous.layer + 1 != entry.packet.layer)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 const StrictPacketHeaderRead = struct {
@@ -6213,6 +6639,77 @@ fn readStrictMultiTilePacketCatalogForTile(
     };
 }
 
+/// Joins the already-validated per-tile packet catalogs for diagnostics. Each
+/// tile keeps its own T2 state and packet identity; only the backing packet
+/// byte storage and byte offsets are rebased into one owned result.
+fn readStrictMultiTilePacketCatalog(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+) !StrictPacketCatalog {
+    var context = try readStrictMultiTileContext(allocator, bytes, header);
+    defer context.deinit();
+
+    var entries: std.ArrayList(StrictPacketEntry) = .empty;
+    errdefer entries.deinit(allocator);
+    var packet_bytes: std.ArrayList(u8) = .empty;
+    errdefer packet_bytes.deinit(allocator);
+
+    var tile_index: u32 = 0;
+    while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
+        const tile = context.grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
+        const tile_header = try context.tileHeader(header, tile);
+        const tile_plan = temporaryPacketPlan(tile_header);
+        {
+            var effective_poc_records: std.ArrayList(poc.Record) = .empty;
+            defer effective_poc_records.deinit(allocator);
+            const tile_poc_records = try context.appendEffectivePocRecords(
+                allocator,
+                tile_index,
+                &effective_poc_records,
+            );
+            if (context.main_header.ppm_headers != null and tile_poc_records != null) {
+                return CodestreamError.UnsupportedPayload;
+            }
+
+            var tile_catalog = try readStrictMultiTilePacketCatalogForTile(
+                allocator,
+                bytes,
+                context.spans.items,
+                @intCast(tile_index),
+                tile_header,
+                tile_plan,
+                header.layers,
+                header.progression,
+                tile_poc_records,
+                context.main_header.packet_markers,
+                context.main_header.ppm_headers,
+            );
+            defer tile_catalog.deinit();
+
+            const byte_base = packet_bytes.items.len;
+            try packet_bytes.appendSlice(allocator, tile_catalog.packet_bytes);
+            for (tile_catalog.entries) |entry| {
+                var joined = entry;
+                joined.byte_offset = try std.math.add(usize, byte_base, entry.byte_offset);
+                try entries.append(allocator, joined);
+            }
+        }
+    }
+    const expected_packets = std.math.cast(usize, header.packet_count) orelse
+        return CodestreamError.InvalidCodestream;
+    if (entries.items.len != expected_packets) return CodestreamError.InvalidCodestream;
+
+    const owned_entries = try entries.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_entries);
+    const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
+    return .{
+        .allocator = allocator,
+        .entries = owned_entries,
+        .packet_bytes = owned_packet_bytes,
+    };
+}
+
 /// Shared setup for the multi-tile strict stages: the SIZ grid, the decode
 /// options reconstructed from the whole-image plan (precinct dims per
 /// resolution are geometry independent), the main-header index (packet
@@ -6289,8 +6786,8 @@ fn readStrictMultiTileContext(
         .yosiz = header.reference_y0,
         .xtsiz = header.tile_width,
         .ytsiz = header.tile_height,
-        .xtosiz = header.reference_x0,
-        .ytosiz = header.reference_y0,
+        .xtosiz = header.tile_origin_x,
+        .ytosiz = header.tile_origin_y,
     }) catch return CodestreamError.InvalidCodestream;
     if (grid.isSingleTile()) return CodestreamError.InvalidCodestream;
     if (header.packet_plan_count == 0) return CodestreamError.InvalidCodestream;
@@ -7801,6 +8298,102 @@ fn buildStrictPacketSequence(
     };
 }
 
+fn sampledOrderForPoc(progression: poc.Progression) packet_plan.SampledOrder {
+    return switch (progression) {
+        .lrcp => .lrcp,
+        .rlcp => .rlcp,
+        .rpcl => .rpcl,
+        .pcrl => .pcrl,
+        .cprl => .cprl,
+    };
+}
+
+fn sampledPacketIdentity(
+    components: []const packet_plan.SampledComponentPlan,
+    layers: u16,
+    packet: packet_plan.Packet,
+) !usize {
+    if (packet.component >= components.len) return CodestreamError.InvalidCodestream;
+    var offset: u64 = 0;
+    for (components[0..packet.component]) |component| {
+        offset = std.math.add(u64, offset, component.plan.packets) catch
+            return CodestreamError.InvalidCodestream;
+    }
+    var local = packet;
+    local.component = 0;
+    const local_identity = packet_plan.rpclSequenceForPacket(
+        components[packet.component].plan,
+        1,
+        layers,
+        local,
+    ) catch return CodestreamError.InvalidCodestream;
+    return std.math.cast(usize, std.math.add(u64, offset, local_identity) catch
+        return CodestreamError.InvalidCodestream) orelse return CodestreamError.InvalidCodestream;
+}
+
+fn buildSampledPocPacketSequence(
+    allocator: std.mem.Allocator,
+    component_plans: []const packet_plan.SampledComponentPlan,
+    layers: u16,
+    reference_x0: u32,
+    reference_y0: u32,
+    records: []const poc.Record,
+) ![]packet_plan.Packet {
+    const canonical = packet_plan.sampledRpclPackets(
+        allocator,
+        component_plans,
+        layers,
+        reference_x0,
+        reference_y0,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return CodestreamError.InvalidCodestream,
+    };
+    if (records.len == 0) return canonical;
+    defer allocator.free(canonical);
+
+    const output = try allocator.alloc(packet_plan.Packet, canonical.len);
+    errdefer allocator.free(output);
+    const seen = try allocator.alloc(bool, canonical.len);
+    defer allocator.free(seen);
+    @memset(seen, false);
+
+    var output_count: usize = 0;
+    for (records) |record| {
+        const ordered = packet_plan.sampledOrderedPackets(
+            allocator,
+            component_plans,
+            layers,
+            reference_x0,
+            reference_y0,
+            sampledOrderForPoc(record.progression),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return CodestreamError.InvalidCodestream,
+        };
+        defer allocator.free(ordered);
+        for (ordered) |candidate| {
+            if (candidate.resolution < record.resolution_start or candidate.resolution >= record.resolution_end or
+                candidate.component < record.component_start or candidate.component >= record.component_end or
+                candidate.layer >= record.layer_end)
+            {
+                continue;
+            }
+            const identity = try sampledPacketIdentity(component_plans, layers, candidate);
+            if (identity >= seen.len) return CodestreamError.InvalidCodestream;
+            if (seen[identity]) continue;
+            if (output_count >= output.len) return CodestreamError.InvalidCodestream;
+            var packet = candidate;
+            packet.sequence = output_count;
+            output[output_count] = packet;
+            output_count += 1;
+            seen[identity] = true;
+        }
+    }
+    if (output_count != output.len) return CodestreamError.InvalidCodestream;
+    return output;
+}
+
 fn buildSampledStrictPacketSequence(
     allocator: std.mem.Allocator,
     plan: packet_plan.Plan,
@@ -7819,58 +8412,18 @@ fn buildSampledStrictPacketSequence(
         component_yrsiz,
     );
     const full = plan.resolutions[plan.resolution_count - 1];
-    const canonical = packet_plan.sampledRpclPackets(
+    var records: std.ArrayList(poc.Record) = .empty;
+    defer records.deinit(allocator);
+    if (main_records) |main| try records.appendSlice(allocator, main);
+    try records.appendSlice(allocator, tile_records);
+    return buildSampledPocPacketSequence(
         allocator,
         component_plans.components[0..component_count],
         layers,
         full.x0,
         full.y0,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return CodestreamError.InvalidCodestream,
-    };
-    errdefer allocator.free(canonical);
-    if (main_records == null and tile_records.len == 0) return canonical;
-
-    const seen = try allocator.alloc(bool, canonical.len);
-    defer allocator.free(seen);
-    @memset(seen, false);
-    var output_count: usize = 0;
-    var reordered = false;
-    const RecordSet = struct {
-        fn append(
-            records: []const poc.Record,
-            packets: []const packet_plan.Packet,
-            visited: []bool,
-            count: *usize,
-            changed_order: *bool,
-        ) !void {
-            for (records) |record| {
-                if (record.progression != .rpcl) return CodestreamError.UnsupportedPayload;
-                for (packets) |packet| {
-                    if (packet.resolution < record.resolution_start or packet.resolution >= record.resolution_end or
-                        packet.component < record.component_start or packet.component >= record.component_end or
-                        packet.layer >= record.layer_end)
-                    {
-                        continue;
-                    }
-                    const identity = std.math.cast(usize, packet.sequence) orelse return CodestreamError.InvalidCodestream;
-                    if (identity >= visited.len) return CodestreamError.InvalidCodestream;
-                    if (visited[identity]) continue;
-                    // This bounded slice accepts explicit POC signalling only
-                    // when it preserves canonical sampled RPCL stream order.
-                    if (identity != count.*) changed_order.* = true;
-                    visited[identity] = true;
-                    count.* += 1;
-                }
-            }
-        }
-    };
-    if (main_records) |records| try RecordSet.append(records, canonical, seen, &output_count, &reordered);
-    try RecordSet.append(tile_records, canonical, seen, &output_count, &reordered);
-    if (output_count != canonical.len) return CodestreamError.InvalidCodestream;
-    if (reordered) return CodestreamError.UnsupportedPayload;
-    return canonical;
+        records.items,
+    );
 }
 
 fn readStrictFirstTilePartPocRecords(
@@ -9376,6 +9929,8 @@ const TemporaryHeader = struct {
     /// the tile grid.
     tile_width: u32 = 0,
     tile_height: u32 = 0,
+    tile_origin_x: u32 = 0,
+    tile_origin_y: u32 = 0,
     /// Signalled QCD guard bits and per-band epsilon_b for strict streams;
     /// zero exponent count means "derive Mb from the z2000 formula" (sidecar
     /// and legacy paths). Irreversible streams also carry step mantissas below
@@ -9750,6 +10305,8 @@ fn appendSiz(
 const SizProfile = struct {
     width: u32,
     height: u32,
+    image_origin_x: u32 = 0,
+    image_origin_y: u32 = 0,
     bit_depth: u8,
     component_bit_depths: [max_codestream_components]u8 = [_]u8{0} ** max_codestream_components,
     component_xrsiz: [max_codestream_components]u8 = [_]u8{1} ** max_codestream_components,
@@ -9757,6 +10314,8 @@ const SizProfile = struct {
     components: u16,
     tile_width: u32,
     tile_height: u32,
+    tile_origin_x: u32 = 0,
+    tile_origin_y: u32 = 0,
 };
 
 fn appendSizForComponents(
@@ -9768,6 +10327,18 @@ fn appendSizForComponents(
         return CodestreamError.InvalidCodestream;
     }
     if (profile.components > max_codestream_components) return CodestreamError.UnsupportedPayload;
+    const xsiz = std.math.add(u32, profile.image_origin_x, profile.width) catch
+        return CodestreamError.ImageTooLarge;
+    const ysiz = std.math.add(u32, profile.image_origin_y, profile.height) catch
+        return CodestreamError.ImageTooLarge;
+    if (profile.tile_width == 0 or profile.tile_height == 0 or
+        profile.tile_origin_x > profile.image_origin_x or
+        profile.tile_origin_y > profile.image_origin_y or
+        profile.image_origin_x - profile.tile_origin_x >= profile.tile_width or
+        profile.image_origin_y - profile.tile_origin_y >= profile.tile_height)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
     const component_bytes = try std.math.mul(u32, 3, profile.components);
     const lsiz_u32 = try std.math.add(u32, 38, component_bytes);
     if (lsiz_u32 > std.math.maxInt(u16)) return CodestreamError.ImageTooLarge;
@@ -9775,14 +10346,14 @@ fn appendSizForComponents(
     try appendMarker(allocator, out, .siz);
     try appendU16Be(allocator, out, @intCast(lsiz_u32));
     try appendU16Be(allocator, out, 0);
-    try appendU32Be(allocator, out, profile.width);
-    try appendU32Be(allocator, out, profile.height);
-    try appendU32Be(allocator, out, 0);
-    try appendU32Be(allocator, out, 0);
+    try appendU32Be(allocator, out, xsiz);
+    try appendU32Be(allocator, out, ysiz);
+    try appendU32Be(allocator, out, profile.image_origin_x);
+    try appendU32Be(allocator, out, profile.image_origin_y);
     try appendU32Be(allocator, out, profile.tile_width);
     try appendU32Be(allocator, out, profile.tile_height);
-    try appendU32Be(allocator, out, 0);
-    try appendU32Be(allocator, out, 0);
+    try appendU32Be(allocator, out, profile.tile_origin_x);
+    try appendU32Be(allocator, out, profile.tile_origin_y);
     try appendU16Be(allocator, out, profile.components);
     for (0..profile.components) |component| {
         const explicit_depth = profile.component_bit_depths[component];
@@ -9897,13 +10468,23 @@ fn appendPoc(
     levels: u8,
     options: LosslessOptions,
 ) !void {
+    return appendPocForComponents(allocator, out, levels, 3, options);
+}
+
+fn appendPocForComponents(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    levels: u8,
+    component_count: u16,
+    options: LosslessOptions,
+) !void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
     poc.appendSegmentPayload(
         allocator,
         &payload,
         options.poc_records,
-        3,
+        component_count,
         levels + 1,
         options.layers,
     ) catch |err| switch (err) {
@@ -10316,6 +10897,23 @@ fn appendPptPacketHeaders(
         try out.appendSlice(allocator, headers[offset..][0..count]);
         offset += count;
         marker_index.* += 1;
+    }
+}
+
+fn appendPpmPacketHeaderGroups(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    groups: []const []const u8,
+) !void {
+    var marker_payloads = ppm.buildMarkerPayloads(allocator, groups, 65533) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return CodestreamError.UnsupportedPayload,
+    };
+    defer marker_payloads.deinit();
+    for (marker_payloads.items) |payload| {
+        try appendMarker(allocator, out, .ppm);
+        try appendU16Be(allocator, out, @intCast(payload.len + 2));
+        try out.appendSlice(allocator, payload);
     }
 }
 
@@ -13547,6 +14145,15 @@ fn validateTilePartDivisions(value: ?u8) !void {
 }
 
 fn validateCodingPath(options: LosslessOptions) !void {
+    if (options.image_origin_x != 0 or options.image_origin_y != 0 or
+        options.tile_origin_x != 0 or options.tile_origin_y != 0)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    // The common RGB/planar and multi-tile assemblers still depend on their
+    // PLT-backed packet-part accounting. The sampled single-tile entry point
+    // owns the first PLT-less writer slice and does not call this validator.
+    if (!options.plt) return CodestreamError.UnsupportedPayload;
     switch (options.progression) {
         .rpcl => {},
         // LRCP (B.12.1.1), RLCP (B.12.1.2), PCRL (B.12.1.4), and CPRL

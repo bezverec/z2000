@@ -607,8 +607,9 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
         std.debug.print("]", .{});
     }
     std.debug.print(
-        ", {} codestream bytes, ICC {s}",
+        ", color {s}, {} codestream bytes, ICC {s}",
         .{
+            info.color_space.label(),
             info.codestream_bytes,
             if (info.has_icc_profile) "yes" else "no",
         },
@@ -723,6 +724,25 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         else
             try codestream.decodeLosslessGrayWithOptions(allocator, j2k, options) },
         3 => rgb: {
+            if (info.color_space == .sycc) {
+                for (0..info.components) |component| {
+                    const sampling = info.componentSampling(component) orelse return error.UnsupportedComponentCount;
+                    if (sampling[0] != 1 or sampling[1] != 1) {
+                        return jp2.Jp2Error.UnsupportedColorSpace;
+                    }
+                }
+                var planes = if (show_timings)
+                    try codestream.decodeLosslessPlanarUpsampledWithOptionsProfiled(
+                        allocator,
+                        j2k,
+                        options,
+                        &decode_timings,
+                    )
+                else
+                    try codestream.decodeLosslessPlanarUpsampledWithOptions(allocator, j2k, options);
+                defer planes.deinit();
+                break :rgb .{ .rgb = try color.sycc444ToSrgb(allocator, planes) };
+            }
             var has_subsampling = false;
             for (0..info.components) |component| {
                 const sampling = info.componentSampling(component) orelse return error.UnsupportedComponentCount;

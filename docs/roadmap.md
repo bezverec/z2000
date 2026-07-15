@@ -19,11 +19,15 @@ The component-generic campaign has additionally landed grayscale, bounded
 palette and alpha layouts, mixed 8/16-bit planar precision, and native-plane
 decode for bounded RPCL/no-MCT/reversible-5/3 component subsampling. F3b now
 includes component-local packet/T1/DWT geometry, PLT and PLT-less streams,
-matching nonzero origins, multi-tile assembly, canonical RPCL POC, sampled PPT
-and PPM with SOP/EPH coverage, and explicit origin-anchored reference-grid
+independent image/tile-partition origins, multi-tile assembly, complete POC
+schedules using all five progression orders, sampled PPT and PPM with SOP/EPH
+coverage, and explicit origin-anchored reference-grid
 upsampling for bounded sRGB JP2-to-TIFF output. The matching single-tile
-reversible writer emits canonical sampled RPCL with PLT and one or more quality
-layers; OpenJPEG and Grok reproduce the tested native planes.
+reversible writer emits canonical sampled RPCL or checked POC schedules on
+single- and multi-tile grids
+with inline PLT/PLT-less, PPT, or PPM packet headers, plus SOP/EPH and one or
+more quality layers. OpenJPEG, Grok, and Kakadu reproduce the tested component
+data.
 
 ## Rules For Promotion
 
@@ -44,17 +48,18 @@ layers; OpenJPEG and Grok reproduce the tested native planes.
 
 ### 1. Finish F3 Component Layout Breadth
 
-Extend sampled no-MCT reversible encode from inline+PLT to PLT-less, PPT, and
-PPM layouts, then move it onto the production tile grid. Follow with reordered
-sampled POC and distinct tile-partition origins only when packet ordering and
-geometry have independent fixtures. Keep sampled MCT and irreversible
-combinations closed until their transform and registration semantics are
-explicit.
+Distinct tile-partition origins now have an independent Kakadu fixture and
+bidirectional exact interop. Keep sampled MCT and irreversible combinations
+closed until their transform and registration semantics are explicit.
+Reordered sampled POC and the multi-tile diagnostic packet catalog share
+production decode's component-local topology.
 
 ### 2. Colour And ICC
 
-Preserve ICC profiles byte-for-byte as today, then add optional colour
-conversion as a separate tool-layer operation. Prioritize sYCC and common RGB
+Preserve ICC profiles byte-for-byte as today and keep optional colour
+conversion as a separate tool-layer operation. The first bounded slice now
+recognizes sYCC and converts unsigned 8/16-bit 4:4:4 input to sRGB with a
+Kakadu/OpenJPEG oracle. Next cover sampled sYCC registration and common RGB
 profiles such as eciRGB v2 and Adobe RGB; follow with CMYK, extended YCC,
 CIELab, monochrome refinements, and palette breadth. Never silently reinterpret
 component samples from codestream metadata alone.
@@ -87,9 +92,6 @@ The detailed policy is in [`versioning.md`](versioning.md).
 - arbitrary JPX box families and JPX-only composition;
 - arbitrary component counts, signed/floating codestream samples, and general
   mixed subsampling/precision/MCT combinations;
-- sampled encode packet layouts beyond inline+PLT, sampled multi-tile encode,
-  reordered sampled POC, and distinct tile-partition origins until the gates in
-  `next_steps.md` land;
-- automatic non-sRGB colour conversion;
+- automatic colour conversion beyond bounded sYCC 4:4:4;
 - tiled/compressed TIFF variants and broad camera-RAW workflows;
 - unchecked architecture-specific fast paths.

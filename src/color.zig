@@ -5,6 +5,7 @@ const simd = @import("simd.zig");
 pub const ColorError = error{
     InvalidImage,
     SampleOutOfRange,
+    UnsupportedColorSpace,
 };
 
 /// F1 component-generic bound: layouts with 1..4 components are the public
@@ -186,6 +187,58 @@ pub const IctPlanes = ComponentPlanesOf(f32);
 /// component, no interleaving): the input/output carrier for the bounded
 /// 1..4-component no-MCT layouts.
 pub const SamplePlanes = ComponentPlanesOf(u16);
+
+/// Converts full-resolution unsigned sYCC planes to interleaved sRGB samples.
+/// This is an explicit container/tool-layer operation; the codestream codec
+/// keeps the three reconstructed components unchanged. Subsampled sYCC uses a
+/// separate registration contract and remains unsupported by this entry point.
+pub fn sycc444ToSrgb(allocator: std.mem.Allocator, planes: SamplePlanes) !image.RgbImage {
+    if (planes.width == 0 or planes.height == 0 or planes.planes.len != 3) {
+        return ColorError.InvalidImage;
+    }
+    const bit_depth = planes.componentBitDepth(0) orelse return ColorError.InvalidImage;
+    if (bit_depth != 8 and bit_depth != 16) return ColorError.UnsupportedColorSpace;
+    const pixels = try std.math.mul(usize, planes.width, planes.height);
+    for (0..3) |component| {
+        const dimensions = planes.componentDimensions(component) orelse return ColorError.InvalidImage;
+        if (planes.componentBitDepth(component) != bit_depth or
+            dimensions[0] != planes.width or dimensions[1] != planes.height or
+            planes.planes[component].len != pixels)
+        {
+            return ColorError.UnsupportedColorSpace;
+        }
+    }
+
+    const max_sample: i32 = @intCast((@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1);
+    const chroma_offset: i32 = @as(i32, 1) << @as(u5, @intCast(bit_depth - 1));
+    const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
+    errdefer allocator.free(samples);
+    for (0..pixels) |pixel| {
+        const y_code = planes.planes[0][pixel];
+        const cb_code = planes.planes[1][pixel];
+        const cr_code = planes.planes[2][pixel];
+        if (y_code > max_sample or cb_code > max_sample or cr_code > max_sample) {
+            return ColorError.SampleOutOfRange;
+        }
+        const y: i32 = y_code;
+        const cb = @as(i32, cb_code) - chroma_offset;
+        const cr = @as(i32, cr_code) - chroma_offset;
+        const red_delta: i32 = @intFromFloat(1.402 * @as(f32, @floatFromInt(cr)));
+        const green_delta: i32 = @intFromFloat(0.344 * @as(f32, @floatFromInt(cb)) +
+            0.714 * @as(f32, @floatFromInt(cr)));
+        const blue_delta: i32 = @intFromFloat(1.772 * @as(f32, @floatFromInt(cb)));
+        samples[pixel * 3] = @intCast(std.math.clamp(y + red_delta, 0, max_sample));
+        samples[pixel * 3 + 1] = @intCast(std.math.clamp(y - green_delta, 0, max_sample));
+        samples[pixel * 3 + 2] = @intCast(std.math.clamp(y + blue_delta, 0, max_sample));
+    }
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = bit_depth,
+        .samples = samples,
+    };
+}
 
 /// Converts three full-resolution, equal-precision component planes to the
 /// interleaved RGB carrier used by the TIFF boundary. This function performs
