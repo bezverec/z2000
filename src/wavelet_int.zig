@@ -270,7 +270,12 @@ fn inverse53ColumnBand(data: []i32, stride: usize, col_begin: usize, col_end: us
 // `inverse53WithWorkspace` on each component (covered by a unit test).
 // ---------------------------------------------------------------------------
 
-const max_dwt_workers = 32;
+// Matches the 9/7 driver's cap: the 5/3 bands are equally memory-heavy and
+// short-lived, so beyond eight workers per-phase spawn and SMT contention make
+// the inverse DWT slower at the full 16-thread setting than at eight on the
+// maintained x86 benchmark host (t16 regressed to 17.3 ms from 12.8 ms at t8).
+// T1 still receives the full caller thread count; only the DWT phase is capped.
+const max_dwt_workers = 8;
 
 const DwtPhase = enum { forward_columns, forward_rows, inverse_columns, inverse_rows };
 

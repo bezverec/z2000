@@ -41,6 +41,14 @@ all-thread setting.
 - Persistent parallel forward 9/7 DWT and parallel inverse RCT/ICT were kept.
   The symmetric inverse-DWT pool and cross-component T1 pool were rejected by
   measurement.
+- The 5/3 DWT phase is now capped at eight workers to match the 9/7 driver: the
+  memory-bound bands stop scaling past the eight physical cores on the x86 host,
+  so the uncapped 32-worker setting let lossless inverse DWT regress at t16
+  (17.3 ms vs 12.8 ms at t8). Capping restored t16 to t8 and improved lossless
+  decode t16 by 7.8% and encode t16 by 6.1% with byte-identical output
+  (2026-07-15 record in `benchmarks.md`). The remaining DWT idea is to give the
+  5/3 driver the 9/7 driver's persistent barrier pool so it stops re-spawning
+  per phase; measure before assuming a win.
 - Portable `@Vector` kernels have scalar-oracle coverage on x86, ARM, and the
   RISC-V/RVV functional gate. ISA-specific intrinsics remain a last resort.
 

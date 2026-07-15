@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Performance
+
+- Capped the reversible 5/3 DWT phase at eight workers (`wavelet_int.zig`
+  `max_dwt_workers` 32 -> 8), matching the 9/7 driver. The memory-bound DWT
+  bands stop scaling past the eight physical cores on the x86 benchmark host,
+  so the uncapped setting let the lossless inverse DWT regress at the full
+  16-thread setting (17.3 ms) relative to eight threads (12.8 ms). Capping
+  restored t16 to t8 and improved lossless decode t16 by 7.8% and encode t16 by
+  6.1% with byte-identical codestreams and decoded pixels; T1 still receives
+  the full caller thread count. See the 2026-07-15 `benchmarks.md` record.
+- Removed `src/tmp_sl.zig`, an unreferenced hex-dump scaffold accidentally
+  committed with the sampled quality-layer work.
+
 ### Sampled Reversible Encode (Single-Tile RPCL)
 
 - New `codestream.encodeLosslessSampledPlanarWithOptions`: a planar no-MCT
