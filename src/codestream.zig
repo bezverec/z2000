@@ -5709,7 +5709,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
 
     const sampled_components = headerHasComponentSubsampling(tile_header);
     if (sampled_components and
-        (progression != .rpcl or packed_headers.items.len != 0 or external_packed_headers != null))
+        (progression != .rpcl or external_packed_headers != null))
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -7660,7 +7660,9 @@ pub fn collectStrictInlinePacketSpans(
     bytes: []const u8,
 ) !StrictInlineSpanReport {
     const header = try readStrictCodestreamMetadata(allocator, bytes);
-    if (header.tile_width != 0 or header.tile_height != 0) return CodestreamError.UnsupportedPayload;
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return collectStrictInlineMultiTileSpans(allocator, bytes, header);
+    }
     const plan = temporaryPacketPlan(header);
     const packet_capacity = std.math.cast(usize, header.packet_count) orelse return CodestreamError.InvalidCodestream;
 
@@ -7788,6 +7790,161 @@ pub fn collectStrictInlinePacketSpans(
         .tile_parts = parts_owned,
         .first_sot = main_header.first_sot,
         .eoc_offset = eoc_offset,
+    };
+}
+
+const StrictInlineTileState = struct {
+    header: TemporaryHeader,
+    sequence: []packet_plan.Packet,
+    stateful: StrictStatefulPrecinctGroups,
+};
+
+/// Multi-tile variant of collectStrictInlinePacketSpans: walks the Stage B
+/// tile-part spans in stream order with per-tile sequences and stateful
+/// precinct groups. The same inline PLT-less SOP/EPH-free envelope applies
+/// per tile-part.
+fn collectStrictInlineMultiTileSpans(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+) !StrictInlineSpanReport {
+    var context = try readStrictMultiTileContext(allocator, bytes, header);
+    defer context.deinit();
+    if (context.main_header.packet_markers.sop or context.main_header.packet_markers.eph) {
+        return CodestreamError.UnsupportedPayload;
+    }
+
+    const tile_count = std.math.cast(usize, context.grid.tileCount()) orelse
+        return CodestreamError.InvalidCodestream;
+    const states = try allocator.alloc(?StrictInlineTileState, tile_count);
+    defer {
+        for (states) |*state| {
+            if (state.*) |*active| {
+                allocator.free(active.sequence);
+                active.stateful.deinit();
+            }
+        }
+        allocator.free(states);
+    }
+    @memset(states, null);
+
+    var spans: std.ArrayList(StrictInlinePacketSpan) = .empty;
+    errdefer spans.deinit(allocator);
+    var tile_parts: std.ArrayList(StrictInlineTilePartSpan) = .empty;
+    errdefer tile_parts.deinit(allocator);
+
+    var stream_end: usize = context.main_header.first_sot;
+    for (context.spans.items, 0..) |span, stream_index| {
+        const tile_index = std.math.cast(usize, span.tile_index) orelse
+            return CodestreamError.InvalidCodestream;
+        if (tile_index >= states.len) return CodestreamError.InvalidCodestream;
+        if (states[tile_index] == null) {
+            const tile = context.grid.tile(span.tile_index) catch return CodestreamError.InvalidCodestream;
+            const tile_header = try context.tileHeader(header, tile);
+            const tile_plan = temporaryPacketPlan(tile_header);
+            var effective_records: std.ArrayList(poc.Record) = .empty;
+            defer effective_records.deinit(allocator);
+            if (context.main_header.poc_records) |main| {
+                try effective_records.appendSlice(allocator, main);
+            }
+            const main_records: ?[]const poc.Record = if (effective_records.items.len == 0)
+                null
+            else
+                effective_records.items;
+            const sequence = if (headerHasComponentSubsampling(tile_header)) blk: {
+                if (header.progression != .rpcl) return CodestreamError.UnsupportedPayload;
+                break :blk try buildSampledStrictPacketSequence(
+                    allocator,
+                    tile_plan,
+                    tile_header.component_count,
+                    header.layers,
+                    tile_header.component_xrsiz,
+                    tile_header.component_yrsiz,
+                    main_records,
+                    context.tile_poc_records[tile_index].items,
+                );
+            } else try buildStrictPacketSequence(
+                allocator,
+                header.progression,
+                tile_plan,
+                tile_header.component_count,
+                header.layers,
+                main_records,
+                context.tile_poc_records[tile_index].items,
+            );
+            errdefer allocator.free(sequence);
+            const stateful = try StrictStatefulPrecinctGroups.init(allocator, tile_header);
+            states[tile_index] = .{
+                .header = tile_header,
+                .sequence = sequence,
+                .stateful = stateful,
+            };
+        }
+        const state = &states[tile_index].?;
+
+        // The envelope is inline headers only: no PLT, no packed headers.
+        if (!span.missing_plt) return CodestreamError.UnsupportedPayload;
+        var packet_lengths: std.ArrayList(usize) = .empty;
+        defer packet_lengths.deinit(allocator);
+        var packed_headers: std.ArrayList(u8) = .empty;
+        defer packed_headers.deinit(allocator);
+        var expected_ppt_index: u16 = 0;
+        const sod = try readTilePartHeaderMarkers(
+            allocator,
+            bytes,
+            span.sot_start + 12,
+            span.end,
+            &packet_lengths,
+            &packed_headers,
+            &expected_ppt_index,
+            null,
+        );
+        if (sod != span.sod) return CodestreamError.InvalidCodestream;
+        if (packet_lengths.items.len != 0 or packed_headers.items.len != 0) {
+            return CodestreamError.UnsupportedPayload;
+        }
+
+        try tile_parts.append(allocator, .{
+            .sot_offset = span.sot_start,
+            .sod_offset = span.sod,
+            .end = span.end,
+        });
+
+        const sequence_end = try std.math.add(usize, span.first_packet, span.packet_count);
+        if (sequence_end > state.sequence.len) return CodestreamError.InvalidCodestream;
+        var cursor = span.sod + 2;
+        for (state.sequence[span.first_packet..sequence_end]) |packet| {
+            const groups = try state.stateful.groupsFor(packet);
+            const span_read = try readStrictPacketHeaderSpan(bytes[cursor..span.end], packet, groups);
+            const header_end = try std.math.add(usize, cursor, span_read.header_length);
+            const packet_end = try std.math.add(usize, header_end, span_read.payload_length);
+            if (packet_end > span.end) return CodestreamError.TruncatedData;
+            try spans.append(allocator, .{
+                .tile_part_index = std.math.cast(u8, stream_index) orelse return CodestreamError.InvalidCodestream,
+                .header_offset = cursor,
+                .header_length = span_read.header_length,
+                .body_offset = header_end,
+                .body_length = span_read.payload_length,
+            });
+            cursor = packet_end;
+        }
+        if (cursor != span.end) return CodestreamError.InvalidCodestream;
+        stream_end = @max(stream_end, span.end);
+    }
+
+    if (bytes.len < stream_end + 2 or readU16Be(bytes, stream_end) != @intFromEnum(Marker.eoc)) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    const spans_owned = try spans.toOwnedSlice(allocator);
+    errdefer allocator.free(spans_owned);
+    const parts_owned = try tile_parts.toOwnedSlice(allocator);
+    return .{
+        .allocator = allocator,
+        .spans = spans_owned,
+        .tile_parts = parts_owned,
+        .first_sot = context.main_header.first_sot,
+        .eoc_offset = stream_end,
     };
 }
 

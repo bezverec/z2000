@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Sampled Multi-Tile PPT Decode
+
+- The multi-tile per-tile-part reader now accepts PPT packed headers on
+  subsampled streams: its packed-header branch already consumed the sampled
+  sequence through the per-tile component-local stateful precinct groups, so
+  the sampled+PPT term leaves that gate as well. Sampled PPM (and external
+  packed headers generally) stay fail-closed.
+- `collectStrictInlinePacketSpans` handles multi-tile streams: it walks the
+  Stage B tile-part spans in stream order with lazily built per-tile
+  sequences and stateful groups, reporting the same header/body spans and
+  tile-part frames as the single-tile walk.
+- The test repacker additionally emits a PLT carrying the packed-header
+  body lengths, keeping Stage B span accounting on its PLT-backed path; the
+  three four-tile 4:2:0 Kakadu fixtures (aligned, shifted origin, shifted
+  origin with POC) repack into per-tile-part PPT form and must decode
+  plane-exact against the inline originals with matching audit counts,
+  failing closed on truncated packed headers.
+
 ### Sampled Single-Tile PPT Decode
 
 - The strict single-tile reader now accepts PPT packed headers on subsampled
