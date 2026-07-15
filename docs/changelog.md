@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Sampled SOP/EPH Placement Coverage
+
+- The strict decoder already handled SOP body frames and EPH header
+  terminators on subsampled streams in all three header layouts; this
+  slice proves it. The test repacker can now inject SOP/EPH while
+  repacking (advertising the bits in COD Scod): inline layouts frame each
+  packet as [SOP] header [EPH] body, packed layouts keep [SOP] body in the
+  tile part with EPH terminating each packed header, and PLT entries under
+  PPT count the SOP frame into the body length.
+- Coverage matrix: single-tile and shifted-origin four-tile 4:2:0 fixtures
+  x {inline, PPT, PPM} x {SOP+EPH, SOP-only, EPH-only} all decode
+  plane-exact against the unframed originals, and a corrupted SOP sequence
+  number fails closed in every placement.
+
 ### Sampled PPM Decode
 
 - Subsampled streams now accept main-header PPM packed headers: the strict

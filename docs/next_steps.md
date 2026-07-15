@@ -48,10 +48,16 @@ explicit PPM+POC fail-closed guard mirroring the non-sampled rule), and the
 repacker gained a `.ppm` placement mode (main-header PPM groups via
 `ppm.buildMarkerPayloads`, PLT-less tile-parts). Four fixtures (single- and
 four-tile, aligned and shifted origin) decode plane-exact via PPM against
-their inline originals; truncated PPM and PPM+POC fail closed. Remaining in
-this item: SOP/EPH placement cases and an independent producer fixture when
-a generator is available (the repacked fixtures prove structure, not
-interop).
+their inline originals; truncated PPM and PPM+POC fail closed. **Slice 4 landed (2026-07-15): SOP/EPH placement.** The repacker injects
+SOP body frames and EPH header terminators (with the COD Scod bits
+advertised) into all three layouts — inline, PPT, and PPM — and the strict
+decoder handles every combination on the sampled fixtures without code
+changes: single-tile and shifted-origin four-tile streams decode
+plane-exact with SOP+EPH, SOP-only, and EPH-only framing, and a wrong SOP
+sequence number fails closed. The one remaining piece of this item is an
+independent producer fixture when a generator is available (the repacked
+fixtures prove structure, not interop); the natural closure is queue item
+2, whose sampled encoder will produce native packed-header streams.
 
 Acceptance gate:
 
