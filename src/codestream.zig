@@ -564,7 +564,8 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     // headers, no rate/POC/packed-header machinery, single tile.
     if (options.transform != .reversible_5_3 or options.quantization != .none or
         options.mct != .none or options.progression != .rpcl or
-        options.layers != 1 or options.rate_count != 0 or
+        options.layers == 0 or options.layers > max_quality_layers or
+        options.rate_count != 0 or
         options.poc_records.len != 0 or options.poc_in_tile_header or
         options.ppm or options.ppt or options.emit_temporary_payload_sidecar or
         options.t1_backend != .iso_mq or options.bypass or options.terminate_all or
@@ -666,7 +667,7 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     const global = packet_plan.sampledRpclPackets(
         allocator,
         sampled_plans[0..component_count],
-        1,
+        options.layers,
         0,
         0,
     ) catch |err| switch (err) {
@@ -675,14 +676,18 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     };
     defer allocator.free(global);
 
-    // Merge per-component streams into the global sampled order.
+    // Merge per-component streams into the global sampled order. Each
+    // component's packet stream is in RPCL order (resolution, precinct,
+    // layer), so the local index is the resolution's packet offset plus
+    // precinct_index * layers + layer.
+    const layers: u64 = options.layers;
     var resolution_offsets: [max_codestream_components][33]u64 = undefined;
     for (0..component_count) |component| {
         const plan = per_component[component].scaffold.plan;
         var running: u64 = 0;
         for (0..plan.resolution_count) |resolution| {
             resolution_offsets[component][resolution] = running;
-            running += plan.resolutions[resolution].precincts;
+            running += plan.resolutions[resolution].packets;
         }
     }
 
@@ -699,10 +704,15 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         const component = packet.component;
         if (component >= component_count) return CodestreamError.InvalidCodestream;
         const stream = per_component[component].stream;
+        const local_position = try std.math.add(
+            u64,
+            try std.math.mul(u64, packet.precinct_index, layers),
+            packet.layer,
+        );
         const local = try std.math.add(
             u64,
             resolution_offsets[component][packet.resolution],
-            packet.precinct_index,
+            local_position,
         );
         const local_index = std.math.cast(usize, local) orelse return CodestreamError.InvalidCodestream;
         if (local_index >= stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
