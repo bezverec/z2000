@@ -25019,3 +25019,185 @@ test "sampled SOP/EPH placement decodes across inline, PPT, and PPM layouts" {
         }
     }
 }
+
+fn sampledEncodeTestPlanes(
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    sampling: []const codestream.ComponentSampling,
+) !color.SamplePlanes {
+    var widths: [4]usize = undefined;
+    var heights: [4]usize = undefined;
+    var depths: [4]u8 = undefined;
+    for (sampling, 0..) |factor, component| {
+        widths[component] = (width + factor.xrsiz - 1) / factor.xrsiz;
+        heights[component] = (height + factor.yrsiz - 1) / factor.yrsiz;
+        depths[component] = 8;
+    }
+    var planes = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        width,
+        height,
+        depths[0..sampling.len],
+        widths[0..sampling.len],
+        heights[0..sampling.len],
+    );
+    errdefer planes.deinit();
+    for (planes.planes, 0..) |plane, component| {
+        for (plane, 0..) |*sample, index| {
+            sample.* = @intCast((index * (13 + component * 7) + component * 41) & 0xff);
+        }
+    }
+    return planes;
+}
+
+test "sampled reversible encode roundtrips native component planes" {
+    const allocator = std.testing.allocator;
+    const Case = struct { width: usize, height: usize, sampling: []const codestream.ComponentSampling, levels: u8 };
+    const cases = [_]Case{
+        .{ .width = 32, .height = 32, .sampling = &.{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 2, .yrsiz = 2 }, .{ .xrsiz = 2, .yrsiz = 2 } }, .levels = 2 },
+        .{ .width = 40, .height = 24, .sampling = &.{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 2, .yrsiz = 1 } }, .levels = 1 },
+        .{ .width = 48, .height = 48, .sampling = &.{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 2, .yrsiz = 2 }, .{ .xrsiz = 2, .yrsiz = 2 }, .{ .xrsiz = 4, .yrsiz = 4 } }, .levels = 2 },
+    };
+    for (cases) |case| {
+        var planes = try sampledEncodeTestPlanes(allocator, case.width, case.height, case.sampling);
+        defer planes.deinit();
+        const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, case.sampling, .{
+            .levels = case.levels,
+            .mct = .none,
+            .block_width = 16,
+            .block_height = 16,
+            .tile_part_divisions = null,
+        });
+        defer allocator.free(encoded);
+
+        // SIZ advertises the component subsampling factors.
+        const siz = findMarker(encoded, codestream.markerValue("siz")) orelse return error.MissingMarker;
+        var offset = siz + 40;
+        for (case.sampling) |factor| {
+            try std.testing.expectEqual(factor.xrsiz, encoded[offset + 1]);
+            try std.testing.expectEqual(factor.yrsiz, encoded[offset + 2]);
+            offset += 3;
+        }
+
+        var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+        defer decoded.deinit();
+        try std.testing.expectEqual(planes.planes.len, decoded.planes.len);
+        for (planes.planes, decoded.planes, 0..) |expected, actual, component| {
+            const dims = planes.componentDimensions(component).?;
+            const decoded_dims = decoded.componentDimensions(component).?;
+            try std.testing.expectEqual(dims, decoded_dims);
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
+}
+
+test "sampled reversible encode is deterministic across thread counts" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanes(allocator, 64, 64, &sampling);
+    defer planes.deinit();
+    const single = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+        .levels = 3,
+        .mct = .none,
+        .tile_part_divisions = null,
+        .threads = 1,
+    });
+    defer allocator.free(single);
+    const many = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+        .levels = 3,
+        .mct = .none,
+        .tile_part_divisions = null,
+        .threads = 8,
+    });
+    defer allocator.free(many);
+    try std.testing.expectEqualSlices(u8, single, many);
+}
+
+test "sampled reversible encode matches the Kakadu 4:2:0 fixture through z2000 decode" {
+    const allocator = std.testing.allocator;
+    // The embedded Kakadu fixtures encode Y=(7+3i), Cb=(40+5i), Cr=(200+249i)
+    // masked to 8 bits at 32x32 with 4:2:0. Reproduce that exact content and
+    // require z2000 to decode our stream to the same planes it decodes the
+    // independent-producer fixture to.
+    const width = 32;
+    const height = 32;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        width,
+        height,
+        &.{ 8, 8, 8 },
+        &.{ 32, 16, 16 },
+        &.{ 32, 16, 16 },
+    );
+    defer planes.deinit();
+    for (planes.planes[0], 0..) |*s, i| s.* = @intCast((7 + i * 3) & 0xff);
+    for (planes.planes[1], 0..) |*s, i| s.* = @intCast((40 + i * 5) & 0xff);
+    for (planes.planes[2], 0..) |*s, i| s.* = @intCast((200 + i * 249) & 0xff);
+
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+        .levels = 2,
+        .mct = .none,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+
+    var ours = try codestream.decodeLosslessPlanar(allocator, encoded);
+    defer ours.deinit();
+    const kakadu = @embedFile("testdata/kakadu-rpcl-420-multi-precinct.jp2");
+    const kakadu_stream = try jp2.extractCodestream(kakadu);
+    var reference = try codestream.decodeLosslessPlanar(allocator, kakadu_stream);
+    defer reference.deinit();
+    try std.testing.expectEqual(reference.planes.len, ours.planes.len);
+    for (reference.planes, ours.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+}
+
+test "sampled reversible encode fails closed outside its envelope" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanes(allocator, 32, 32, &sampling);
+    defer planes.deinit();
+    const base = codestream.LosslessOptions{ .levels = 2, .mct = .none, .tile_part_divisions = null };
+
+    // MCT, irreversible 9/7, non-RPCL, and multi-layer all fail closed.
+    var mct = base;
+    mct.mct = .rct;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, mct));
+    var lossy = base;
+    lossy.transform = .irreversible_9_7;
+    lossy.mct = .none;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, lossy));
+    var order = base;
+    order.progression = .lrcp;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, order));
+    var layered = base;
+    layered.layers = 2;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, layered));
+
+    // All-1 sampling belongs on the planar path.
+    const uniform = [_]codestream.ComponentSampling{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 1, .yrsiz = 1 } };
+    var uniform_planes = try sampledEncodeTestPlanes(allocator, 32, 32, &uniform);
+    defer uniform_planes.deinit();
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, uniform_planes, &uniform, base));
+
+    // A sampling factor that disagrees with the supplied plane dimensions.
+    const wrong = [_]codestream.ComponentSampling{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 4, .yrsiz = 4 }, .{ .xrsiz = 2, .yrsiz = 2 } };
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &wrong, base));
+}

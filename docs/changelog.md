@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Sampled Reversible Encode (Single-Tile RPCL)
+
+- New `codestream.encodeLosslessSampledPlanarWithOptions`: a planar no-MCT
+  writer for 1..4 unsigned 8/16-bit components with explicit per-component
+  dimensions and XRsiz/YRsiz subsampling. It encodes each component
+  independently through the single-component scaffold at its own dimensions,
+  then merges the per-component packet streams into the canonical sampled
+  RPCL order (`packet_plan.sampledRpclPackets`); SIZ emits per-component
+  XRsiz/YRsiz and a dedicated single-tile-part inline+PLT assembler carries
+  the merged stream. First slice: single-tile, one layer, inline headers,
+  reversible 5/3.
+- Verified: z2000 strict decode reproduces every native component plane
+  across 2-, 3-, and 4-component 4:2:0/4:2:2/mixed layouts; the encoded
+  stream decodes byte-identically to the trusted Kakadu 4:2:0 fixture
+  through both z2000 (in-suite equivalence) and OpenJPEG 2.5.4 / Grok 20.3.6
+  (out-of-band per-component PGX); cross-thread output is deterministic; and
+  MCT, irreversible 9/7, non-RPCL orders, multi-layer, all-1 sampling, and
+  dimension mismatches fail closed.
+- This also supplies the independent-producer interop evidence the sampled
+  packed-header decode work (PPT/PPM/SOP-EPH) was missing: our sampled
+  encoder and Kakadu produce streams the reference decoders agree on.
+
 ### Sampled SOP/EPH Placement Coverage
 
 - The strict decoder already handled SOP body frames and EPH header
