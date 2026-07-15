@@ -41,9 +41,17 @@ repacker now also emits a PLT (packed-header body lengths) so Stage B span
 accounting stays on its PLT-backed path, and the four-tile 4:2:0 fixtures
 (aligned, shifted origin, shifted origin + POC) must decode plane-exact
 against their inline originals with matching audit counts and fail closed
-on truncated packed headers. Remaining in this item: PPM, SOP/EPH placement
-cases, and an independent producer fixture when a generator is available
-(the repacked fixtures prove structure, not interop).
+on truncated packed headers. **Slice 3 landed (2026-07-15): sampled PPM.** The metadata and per-part
+gates drop their sampled PPM terms, the sampled multi-tile driver forwards
+the main-header PPM groups into the per-tile catalog reader (with an
+explicit PPM+POC fail-closed guard mirroring the non-sampled rule), and the
+repacker gained a `.ppm` placement mode (main-header PPM groups via
+`ppm.buildMarkerPayloads`, PLT-less tile-parts). Four fixtures (single- and
+four-tile, aligned and shifted origin) decode plane-exact via PPM against
+their inline originals; truncated PPM and PPM+POC fail closed. Remaining in
+this item: SOP/EPH placement cases and an independent producer fixture when
+a generator is available (the repacked fixtures prove structure, not
+interop).
 
 Acceptance gate:
 
