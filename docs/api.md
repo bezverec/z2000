@@ -193,9 +193,9 @@ Primary public functions:
   `componentDimensions(component)`
 - `encodeLosslessSampledPlanarWithOptions(allocator, planes, sampling, options)`
   — sampled reversible encode: per-component dimensions + `ComponentSampling`
-  (XRsiz/YRsiz), single-tile RPCL, one layer, inline+PLT headers, 5/3. Each
-  component is encoded independently and the packet streams are merged into
-  the canonical sampled RPCL order
+  (XRsiz/YRsiz), single-tile RPCL, one or more untargeted quality layers,
+  inline+PLT headers, 5/3. Each component is encoded independently and the
+  packet streams are merged into the canonical sampled RPCL order
 - `decodeLosslessPlanarUpsampled(allocator, bytes)` /
   `decodeLosslessPlanarUpsampledWithOptions(allocator, bytes, options)` /
   `decodeLosslessPlanarUpsampledWithOptionsProfiled(...)` — decodes the same
@@ -290,22 +290,25 @@ quantized profiles remain fail-closed.
 
 `Info.component_xrsiz` and `Info.component_yrsiz` expose each codestream
 component's SIZ sampling factors; `componentSampling(index)` returns the pair.
-Metadata parsing accepts nonzero factors, while current wrapping requires
-unit sampling. Strict planar decode supports RPCL, reversible 5/3, no-MCT
-subsampling with inline packet headers, with or without PLT. It merges
-unequal component precinct grids in reference-grid RPCL order and uses
-component-local sampled bounds, subbands, code-block catalogs, T1 planes, and
-origin-aware inverse DWT. Matching nonzero image/tile origins are retained in
-single- and multi-tile component plans; absolute tile rectangles are translated
-into native-size image-local output planes per component. Subsampled
-packed-header streams, distinct tile-partition origins, MCT over subsampled
-planes, and non-RGB colour conversion remain fail-closed. The explicit
+Metadata parsing accepts nonzero factors, while normal JP2 wrapping still
+requires unit sampling. Strict planar decode supports RPCL, reversible 5/3,
+no-MCT subsampling with inline, PPT, or PPM packet headers and all SOP/EPH
+combinations; PLT is optional where the layout permits it. It merges unequal
+component precinct grids in reference-grid RPCL order and uses component-local
+sampled bounds, subbands, code-block catalogs, T1 planes, and origin-aware
+inverse DWT. Matching nonzero image/tile origins are retained in single- and
+multi-tile component plans; absolute tile rectangles are translated into
+native-size image-local output planes per component. PPM combined with sampled
+POC, distinct tile-partition origins, MCT over subsampled planes, and non-RGB
+colour conversion remain fail-closed. The explicit
 `decodeLosslessPlanarUpsampled` boundary expands native planes using absolute
 reference-grid registration; `decode-temp-jp2` interleaves them only for a
 bounded three-component sRGB JP2 wrapper. Explicit POC in the main or first
 tile-part header is accepted only when the composed schedule completely
 preserves canonical sampled RPCL order; reordered sampled POC remains
-unsupported.
+unsupported. Sampled encode currently covers single-tile inline+PLT RPCL with
+one or more untargeted layers; PLT-less/PPT/PPM and multi-tile sampled output
+remain queued.
 
 Primary public functions:
 

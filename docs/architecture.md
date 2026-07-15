@@ -142,12 +142,17 @@ locations, RPCL precinct indexes, inverse-DWT origin, and output dimensions.
 `sampledRpclPackets` projects component-local precincts onto reference-grid
 positions and merges them in canonical RPCL order.
 
-The current sampled profile is no-MCT, reversible 5/3, RPCL, one or more tiles,
-inline packet headers, optional PLT, matching image/tile origins, and optional
-canonical-order POC in the main or first tile-part header. PLT-less state is
-component-local. Sampled PPT/PPM, reordered POC, distinct tile-partition
-origins, and sampled encode remain fail-closed until the gates in
-`next_steps.md` land.
+The current sampled decode profile is no-MCT, reversible 5/3, RPCL, one or more
+tiles, inline/PPT/PPM packet headers, all SOP/EPH combinations, matching
+image/tile origins, and optional canonical-order POC in the main or first
+tile-part header. PLT-less and packed-header state is component-local. Sampled
+PPM+POC, reordered POC, and distinct tile-partition origins remain fail-closed.
+
+The sampled writer currently emits one single tile in canonical RPCL order with
+inline headers, PLT, and one or more untargeted quality layers. It encodes each
+native component through the shared one-component machinery, then merges packet
+streams using the same sampled RPCL sequence consumed by strict decode.
+PLT-less/PPT/PPM and multi-tile sampled output are the next encode slices.
 
 ## JP2 And Metadata
 
@@ -185,4 +190,3 @@ ReleaseSafe, and ReleaseFast configurations.
 - reproducible speed measurements belong in `benchmarks.md`;
 - strategy changes update `roadmap.md`, while completed work updates
   `changelog.md`.
-

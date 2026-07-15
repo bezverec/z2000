@@ -14,8 +14,6 @@ The active documentation is intentionally split by purpose. Only
 
 ## Focused Active Documents
 
-- [`feature_plan.md`](feature_plan.md) — F1–F6 component, colour, format, and
-  metadata breadth.
 - [`optimization_plan.md`](optimization_plan.md) — benchmark keep rule and
   current performance candidates.
 - [`benchmarks.md`](benchmarks.md) — reproducible benchmark results.
@@ -37,4 +35,3 @@ When a feature lands:
 3. remove or advance the item in `next_steps.md`;
 4. update `roadmap.md` only when strategy or profile policy changes;
 5. update API/architecture documentation when behavior or ownership changes.
-

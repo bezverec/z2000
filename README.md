@@ -43,13 +43,16 @@ certification.
   with or without PLT. Canonical RPCL POC is accepted from the main or first
   tile-part header. A reference-grid nearest-neighbour API expands native
   planes without colour conversion, and `jp2-to-tiff` uses it for bounded
-  three-component sRGB output.
+  three-component sRGB output. Inline, PPT, and PPM headers plus SOP/EPH are
+  covered. The sampled reversible API emits single-tile inline+PLT RPCL with
+  one or more quality layers.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
-bounded 1..4 envelope (subsampled encode and mixed-precision multi-tile/MCT),
+bounded 1..4 envelope (sampled multi-tile encode and mixed-precision
+multi-tile/MCT),
 non-empty PLT-less multi-part tiles, broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
@@ -267,9 +270,10 @@ supported for single- and multi-tile streams, which assemble native component
 planes tile by tile. `decodeLosslessPlanarUpsampled` provides explicit
 origin-anchored nearest-neighbour expansion to full reference-grid planes;
 the JP2-to-TIFF CLI interleaves those planes only after the JP2 wrapper has
-established bounded sRGB semantics. Subsampled packed-header streams, distinct
-tile-partition origins, reordered sampled POC, and subsampled encode remain
-fail-closed.
+established bounded sRGB semantics. Sampled PPT/PPM and SOP/EPH decode are
+covered; the sampled writer currently emits single-tile inline+PLT RPCL with
+untargeted layers. Packed/PLT-less sampled encode, sampled multi-tile encode,
+distinct tile-partition origins, and reordered sampled POC remain fail-closed.
 
 Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
 floating-point samples, unspecified or multiple auxiliary channels, mixed bit
@@ -286,7 +290,6 @@ Detailed notes live in `docs/`:
 - [Roadmap](docs/roadmap.md)
 - [Next steps](docs/next_steps.md)
 - [Optimization plan](docs/optimization_plan.md)
-- [Post-Part 1 feature plan](docs/feature_plan.md)
 - [Comparative benchmarks](docs/benchmarks.md)
 - [Versioning](docs/versioning.md)
 - [Changelog](docs/changelog.md)

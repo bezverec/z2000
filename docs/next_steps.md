@@ -1,141 +1,117 @@
 # Next Steps
 
-This is the only ordered implementation queue. Strategic context is in
-[`roadmap.md`](roadmap.md); completed campaign history is in
+This is the only active implementation queue. Strategic policy is in
+[`roadmap.md`](roadmap.md); completed plans and campaign detail are in
 [`archive/`](archive/README.md).
 
-## Current State
+## Current State (After PR #157)
 
-- Bounded ISO scorecards: 100/100, with the limits documented in
+- The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
-- F3b slices 1–9: sampled RPCL/no-MCT/reversible-5/3 strict decode supports
-  native component planes, PLT/PLT-less packet spans, matching shifted origins,
+- Sampled RPCL/no-MCT/reversible-5/3 strict decode supports native planes,
+  PLT/PLT-less inline headers, PPT, PPM, SOP/EPH, matching shifted origins,
   single/multi-tile streams, canonical main/tile-header POC, and explicit
-  reference-grid nearest-neighbour output for bounded sRGB JP2-to-TIFF.
-- Current sampled exclusions: PPT/PPM, reordered POC, distinct tile-partition
-  origins, encode, MCT, and irreversible transforms.
+  reference-grid upsampling for bounded sRGB JP2-to-TIFF.
+- PRs #150–#153 closed the sampled packed-header decode campaign. Repacked
+  Kakadu fixtures prove inline/PPT/PPM structure and corruption handling;
+  z2000 sampled output decoded by OpenJPEG and Grok supplies independent
+  cross-codec evidence for the common sampled packet/T1 path. A native packed-
+  header fixture from an independent producer remains useful matrix breadth,
+  not a blocker for the next slice.
+- PRs #154–#155 added sampled reversible encode for one single tile, RPCL,
+  no-MCT, 5/3, inline headers with PLT, and one or more untargeted quality
+  layers. Output is deterministic and plane-exact through z2000, OpenJPEG, and
+  Grok on the tested 4:2:0 profile.
+- PRs #156–#157 capped the 5/3 DWT phase at eight workers and gave it a
+  persistent pool. Lossless output stayed byte-identical while t16 encode
+  improved; detailed numbers live in `benchmarks.md`.
 
 ## Ordered Queue
 
-### 1. Sampled Packed Headers
+### 1. Sampled Encode Packet Layouts
 
-Implement strict sampled PPT first, then PPM. Reuse the existing
-component-local `StrictStatefulPrecinctGroups` and canonical sampled RPCL
-sequence rather than introducing a parallel packet reader.
+Extend `encodeLosslessSampledPlanarWithOptions` without widening its transform
+profile:
 
-**Slice 1 landed (2026-07-15): single-tile sampled PPT.** The single-tile
-strict reader's packed-header branch already consumed the canonical sampled
-sequence through the component-local stateful groups, so the sampled+PPT
-rejection is gone and the path is exercised by repacked fixtures: a new
-`collectStrictInlinePacketSpans` diagnostic walks an inline PLT-less stream
-and reports per-packet header/body spans, and the test suite repacks the
-four single-tile 4:2:0 Kakadu fixtures (multi-precinct, shifted origin,
-main-header POC, tile-header POC) into PPT form, requiring plane-exact
-decode against the inline originals plus packed-header corruption and
-truncation failure. **Slice 2 landed (2026-07-15): multi-tile sampled PPT.** The per-tile-part
-reader's packed-header branch already ran the sampled sequence through the
-per-tile stateful groups, so the sampled+PPT term is out of its gate too
-(sampled PPM stays closed), and `collectStrictInlinePacketSpans` gained a
-multi-tile walk over the Stage B spans with per-tile sequences. The test
-repacker now also emits a PLT (packed-header body lengths) so Stage B span
-accounting stays on its PLT-backed path, and the four-tile 4:2:0 fixtures
-(aligned, shifted origin, shifted origin + POC) must decode plane-exact
-against their inline originals with matching audit counts and fail closed
-on truncated packed headers. **Slice 3 landed (2026-07-15): sampled PPM.** The metadata and per-part
-gates drop their sampled PPM terms, the sampled multi-tile driver forwards
-the main-header PPM groups into the per-tile catalog reader (with an
-explicit PPM+POC fail-closed guard mirroring the non-sampled rule), and the
-repacker gained a `.ppm` placement mode (main-header PPM groups via
-`ppm.buildMarkerPayloads`, PLT-less tile-parts). Four fixtures (single- and
-four-tile, aligned and shifted origin) decode plane-exact via PPM against
-their inline originals; truncated PPM and PPM+POC fail closed. **Slice 4 landed (2026-07-15): SOP/EPH placement.** The repacker injects
-SOP body frames and EPH header terminators (with the COD Scod bits
-advertised) into all three layouts — inline, PPT, and PPM — and the strict
-decoder handles every combination on the sampled fixtures without code
-changes: single-tile and shifted-origin four-tile streams decode
-plane-exact with SOP+EPH, SOP-only, and EPH-only framing, and a wrong SOP
-sequence number fails closed. The one remaining piece of this item is an
-independent producer fixture when a generator is available (the repacked
-fixtures prove structure, not interop). **Interop closure (2026-07-15):**
-queue item 2's sampled encoder now produces native sampled streams that
-OpenJPEG 2.5.4 and Grok 20.3.6 decode byte-identically to the trusted
-independent-producer Kakadu 4:2:0 fixture carrying the same content, so the
-sampled RPCL decode path has genuine cross-codec interop evidence.
+1. PLT-less inline output;
+2. PPT output with body-length PLT accounting;
+3. PPM output with one checked header group per tile-part and no redundant PLT;
+4. all SOP/EPH combinations for inline, PPT, and PPM.
+
+Reuse the same sampled RPCL packet merge and packed-header framing helpers used
+by uniform-component encode. Do not create a second packet-state model.
 
 Acceptance gate:
 
-- single-tile and four-tile 4:2:0;
-- PLT-backed PPT, then PPM group accounting without PLT;
-- SOP/EPH placement and corruption cases;
-- matching nonzero origin and canonical POC combinations;
-- native planes and upsampled output pixel-exact;
-- independent producer fixture when available. A locally repacked fixture may
-  test structure but is not sufficient interop evidence by itself.
+- one-, two-, and three-layer 4:2:0 roundtrips are native-plane exact;
+- inline/PLT-less/PPT/PPM variants carry the same T1 payload contributions;
+- PLT, PPM group, SOP sequence, EPH placement, truncation, and corruption cases
+  fail deterministically;
+- OpenJPEG, Grok, and Kakadu accept representative output where supported;
+- threads 1 and all produce byte-identical codestreams.
 
-### 2. Sampled Reversible Encode
+### 2. Sampled Multi-Tile Encode
 
-**Slice 1 landed (2026-07-15): single-tile RPCL, one layer, inline headers,
-5/3.** `codestream.encodeLosslessSampledPlanarWithOptions` takes a
-`color.SamplePlanes` with per-component dimensions plus a
-`ComponentSampling{xrsiz,yrsiz}` list, encodes each component independently
-through the single-component scaffold at its own dimensions, and merges the
-per-component packet streams into the canonical sampled RPCL order via
-`packet_plan.sampledRpclPackets`. SIZ emits per-component XRsiz/YRsiz; a
-dedicated single-tile-part inline+PLT assembler carries the merged stream.
-z2000 strict decode reproduces every native plane, OpenJPEG/Grok decode the
-stream byte-identically to the trusted Kakadu 4:2:0 fixture (in-suite via
-equivalence and confirmed out-of-band with per-component PGX), cross-thread
-output is deterministic, and MCT/9-7/non-RPCL/all-1-sampling/dimension-
-mismatch fail closed. **Slice 2 landed (2026-07-15): untargeted quality
-layers** — the per-component encode runs at the requested layer count and the
-merge indexes each component's stream at resolution offset + precinct*layers +
-layer; a 3-layer 4:2:0 stream decodes byte-identically to the Kakadu-
-equivalent through OpenJPEG and Grok. Remaining: PLT-less/packed header
-variants and multi-tile; then a real Kakadu/OpenJPEG cross-decode of the
-z2000-produced stream on the interop box.
-
-Add a planar no-MCT writer with explicit per-component dimensions and
-`XRsiz/YRsiz`. Start with single-tile RPCL, one layer, inline headers, and 5/3;
-then add layers, PLT-less/packed variants, and multi-tile only after byte and
-pixel interop is green.
+Move the sampled per-component artifacts into the existing production tile
+grid. Each tile must derive component-local sampled bounds, DWT origins,
+precinct indexes, packet state, and output spans from the absolute SIZ grid.
+Start with inline+PLT, then reuse item 1's packet layouts.
 
 Acceptance gate:
 
-- SIZ/component dimensions agree exactly;
-- z2000 strict decode reproduces every native plane;
-- OpenJPEG, Grok, and Kakadu decode equivalent component rasters;
-- cross-thread output is deterministic;
-- malformed layout and unsupported MCT/9-7 combinations fail closed.
+- aligned and shifted-origin 4:2:0 grids, including clipped edge tiles;
+- one and multiple quality layers;
+- strict native-plane decode plus OpenJPEG/Grok/Kakadu component-raster checks;
+- deterministic tile scheduling;
+- sampled MCT, 9/7, unsupported progressions, and inconsistent dimensions stay
+  fail-closed.
 
 ### 3. Remaining Sampled Geometry Breadth
 
-Implement reordered RPCL POC over component-local grids, followed by distinct
-`XTOsiz/YTOsiz` tile-partition origins. Each requires independent origin and
-edge-tile fixtures; do not generalize common-grid helpers by assumption.
+Implement reordered sampled POC over component-local precinct grids, then
+distinct tile-partition origins (`XTOsiz/YTOsiz`). These are separate slices:
+POC changes packet visitation; tile origins change geometry and lifting parity.
+Each needs an independent producer fixture and edge-tile corruption cases.
 
-### 4. Colour Conversion Boundary
+### 4. Colour And ICC Conversion Boundary
 
-Add explicit colour-space metadata to the decoded container result and a
-separate conversion API. Start with sYCC to sRGB and ICC-backed RGB transforms
-(eciRGB v2 and Adobe RGB fixtures), preserving the existing no-conversion
-native-plane path. Then proceed according to `feature_plan.md`.
+Keep native component decode and byte-preserving ICC storage unchanged. Add
+explicit container colour metadata and a separate conversion API, starting with:
+
+1. sYCC to sRGB;
+2. ICC-backed RGB conversion with eciRGB v2 and Adobe RGB fixtures;
+3. CMYK, extended YCC, and CIELab signalling/preservation before conversion.
+
+No colour conversion belongs inside T1/T2, and no component layout may be
+silently interpreted as RGB or YCC.
 
 ### 5. Format And Metadata Adapters
 
-Begin BMP and PNG modules once the sampled encode surface is stable. Keep each
-parser isolated and fuzz-gated. JPEG, DNG/RAW, OpenEXR, EXIF, XMP, and IPTC
-follow in the order defined by `feature_plan.md`.
+Add isolated, fuzz-gated modules in this order: BMP, PNG, JPEG, linear DNG/RAW,
+then OpenEXR. Preserve EXIF, XMP, and IPTC through explicit mappings. Evaluate
+depths above 16 bits only after the internal carrier and target JP2 profile have
+checked semantics.
+
+### 6. Release Readiness
+
+Prepare intentional prereleases rather than commit-triggered releases. Keep
+Windows/Linux native builds, RISC-V/RVV compile and functional gates, strict
+corruption tests, deterministic threading, current interop, concise docs, and
+benchmark provenance green. See `versioning.md`.
 
 ## Parallel Performance Track
 
-Performance work may proceed between correctness slices under
-[`optimization_plan.md`](optimization_plan.md). Current preferred experiment:
-improve high-thread decode efficiency by overlapping packet/block readiness
-with T1 work or by reducing output/TIFF serialization cost. Measure lossless
-5/3 and lossy 9/7 separately. Do not reopen broad T1/SWAR rewrites without a
-new layout hypothesis and a profile-matched keep gate.
+Performance work may run between correctness slices under
+[`optimization_plan.md`](optimization_plan.md).
 
-## Required Gate For Every Slice
+The 5/3 worker-cap and persistent-pool experiments are complete. The preferred
+next measurement is high-thread decode pipeline efficiency: packet/block
+readiness overlap, output/TIFF serialization, and allocation locality. Measure
+5/3 lossless and 9/7 lossy separately at t1 and all threads. Reopen broad T1
+SWAR/packed-column work only with a new layout hypothesis and the normal keep
+rule.
+
+## Gate For Every Slice
 
 ```powershell
 zig build test
@@ -143,7 +119,7 @@ zig build test -Doptimize=ReleaseFast -Dtarget=native
 zig build -Doptimize=ReleaseFast -Dtarget=native
 ```
 
-Also run the focused tests for the touched subsystem, `git diff --check`, and
-the relevant OpenJPEG/Grok/Kakadu smoke. Update changelog, API/architecture,
-and this queue in the same change.
-
+Also run focused tests, `git diff --check`, and the relevant
+OpenJPEG/Grok/Kakadu smoke. Update `changelog.md`, `iso_coverage.md` when its
+boundary changes, API/architecture for behavioral changes, and this queue in
+the same commit.

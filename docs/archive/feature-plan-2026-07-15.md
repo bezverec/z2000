@@ -1,5 +1,9 @@
 # Feature Plan — Components, Color Spaces, and Formats
 
+> Archived on 2026-07-15 after PR #157. This is historical campaign context,
+> not an active queue. Use [`../next_steps.md`](../next_steps.md) for current
+> implementation order and [`../roadmap.md`](../roadmap.md) for strategy.
+
 Companion to `docs/roadmap.md` (direction) and `docs/next_steps.md` (the only
 ordered work queue). The completed multi-tile and SIMD campaign plans are
 preserved under `docs/archive/`; this plan reuses their staged, gated style. It

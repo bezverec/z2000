@@ -1,9 +1,9 @@
 # Roadmap
 
 This is the strategic plan for z2000. The exact execution order lives in
-[`next_steps.md`](next_steps.md); detailed feature and performance campaigns
-live in [`feature_plan.md`](feature_plan.md) and
-[`optimization_plan.md`](optimization_plan.md).
+[`next_steps.md`](next_steps.md); the measured performance campaign lives in
+[`optimization_plan.md`](optimization_plan.md). Completed feature campaigns
+are preserved under `archive/`.
 
 ## Current Baseline
 
@@ -19,8 +19,11 @@ The component-generic campaign has additionally landed grayscale, bounded
 palette and alpha layouts, mixed 8/16-bit planar precision, and native-plane
 decode for bounded RPCL/no-MCT/reversible-5/3 component subsampling. F3b now
 includes component-local packet/T1/DWT geometry, PLT and PLT-less streams,
-matching nonzero origins, multi-tile assembly, canonical RPCL POC, and explicit
-origin-anchored reference-grid upsampling for bounded sRGB JP2-to-TIFF output.
+matching nonzero origins, multi-tile assembly, canonical RPCL POC, sampled PPT
+and PPM with SOP/EPH coverage, and explicit origin-anchored reference-grid
+upsampling for bounded sRGB JP2-to-TIFF output. The matching single-tile
+reversible writer emits canonical sampled RPCL with PLT and one or more quality
+layers; OpenJPEG and Grok reproduce the tested native planes.
 
 ## Rules For Promotion
 
@@ -41,11 +44,12 @@ origin-anchored reference-grid upsampling for bounded sRGB JP2-to-TIFF output.
 
 ### 1. Finish F3 Component Layout Breadth
 
-Broaden sampled strict decode from inline headers to PPT and PPM, then add
-sampled no-MCT reversible encode. Follow with reordered sampled POC and
-distinct tile-partition origins only when packet ordering and geometry have
-independent fixtures. Keep sampled MCT and irreversible combinations closed
-until their transform and registration semantics are explicit.
+Extend sampled no-MCT reversible encode from inline+PLT to PLT-less, PPT, and
+PPM layouts, then move it onto the production tile grid. Follow with reordered
+sampled POC and distinct tile-partition origins only when packet ordering and
+geometry have independent fixtures. Keep sampled MCT and irreversible
+combinations closed until their transform and registration semantics are
+explicit.
 
 ### 2. Colour And ICC
 
@@ -83,9 +87,9 @@ The detailed policy is in [`versioning.md`](versioning.md).
 - arbitrary JPX box families and JPX-only composition;
 - arbitrary component counts, signed/floating codestream samples, and general
   mixed subsampling/precision/MCT combinations;
-- sampled packed headers, reordered sampled POC, sampled encode, and distinct
-  tile-partition origins until the gates in `next_steps.md` land;
+- sampled encode packet layouts beyond inline+PLT, sampled multi-tile encode,
+  reordered sampled POC, and distinct tile-partition origins until the gates in
+  `next_steps.md` land;
 - automatic non-sRGB colour conversion;
 - tiled/compressed TIFF variants and broad camera-RAW workflows;
 - unchecked architecture-specific fast paths.
-

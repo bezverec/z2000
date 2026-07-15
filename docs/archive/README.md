@@ -7,8 +7,6 @@ Use these active documents instead:
 
 - [`../roadmap.md`](../roadmap.md) for strategic direction and profile policy;
 - [`../next_steps.md`](../next_steps.md) for the ordered implementation queue;
-- [`../feature_plan.md`](../feature_plan.md) for component, colour, format, and
-  metadata breadth;
 - [`../optimization_plan.md`](../optimization_plan.md) for the measured
   performance campaign;
 - [`../iso_coverage.md`](../iso_coverage.md) for the current coverage score.
@@ -27,3 +25,5 @@ historical checkpoint and may no longer be current.
 - `multi-tile-plan-2026-07-13.md` — completed staged multi-tile campaign.
 - `architecture-2026-07-14.md` — accumulated scaffold-era architecture and
   implementation history superseded by the current architecture overview.
+- `feature-plan-2026-07-15.md` — completed F1–F3 campaign history and the
+  superseded F4–F6 dependency proposal.

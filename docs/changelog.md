@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Planning Sync After PRs #150-#157
+
+- Reconciled the active documentation with the sampled-component campaign:
+  PRs #150-#153 completed bounded sampled inline/PPT/PPM strict decode with
+  SOP/EPH coverage, while PRs #154-#155 added single-tile sampled reversible
+  encode with one or more untargeted quality layers.
+- Recorded PRs #156-#157 as the current 5/3 performance baseline: an eight
+  worker DWT cap followed by a persistent phase pool, both with byte-identical
+  lossless output.
+- Made `next_steps.md` the single active feature queue and archived the older
+  overlapping feature plan. The next ISO slice is sampled encode packet-layout
+  breadth, followed by sampled multi-tile encode and remaining origin/POC
+  geometry.
+
 ### Performance
 
 - Ported the 9/7 driver's persistent barrier thread pool to the reversible 5/3
@@ -349,7 +363,8 @@ entries are grouped by development milestone rather than semantic version.
   OpenJPEG 2.5.4 and Grok 20.3.6 (12/12 per-component PGX legs).
 - Documentation pass: README (status/rc1, features, supported boundary,
   docs index gained the SIMD plan), docs/api.md (planar API, z2k/shorthand
-  CLI examples), and docs/feature_plan.md (F1 marked complete, F2 next) are
+  CLI examples), and the now-archived feature plan (F1 marked complete, F2
+  next) are
   reconciled with the current state.
 
 ### z2k Alias And All-Threads Default
@@ -423,7 +438,7 @@ entries are grouped by development milestone rather than semantic version.
   path declared `errdefer` frees for planes whose ownership had already
   moved into the carrier that a `defer deinit` also released; ownership now
   transfers exactly once. This is the enabling slice for alpha, mixed
-  precision, and CMYK layouts (`docs/feature_plan.md` F1).
+  precision, and CMYK layouts (archived feature-plan F1).
 
 ### Release Candidate Infrastructure
 
@@ -485,7 +500,8 @@ entries are grouped by development milestone rather than semantic version.
   ISA policy. With S0-S4, S6 done and S3 closed, the SIMD plan's routine
   execution is complete; only the S5 research campaign remains as a
   deliberate decision.
-- Added `docs/feature_plan.md`: the staged post-Part 1 breadth plan —
+- Added the feature plan, now archived as
+  `docs/archive/feature-plan-2026-07-15.md`: the staged post-Part 1 breadth plan —
   F1 component-generic core (the enabling N-plane refactor), F2 alpha,
   F3 mixed precision/subsampling, F4 colourspace breadth (sYCC/CMYK,
   signalling-first), F5 format front ends (BMP -> PNG -> JPEG -> linear
