@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Sampled Single-Tile PPT Decode
+
+- The strict single-tile reader now accepts PPT packed headers on subsampled
+  streams: the packed-header branch already walked the canonical sampled
+  RPCL sequence through the component-local stateful precinct groups, so the
+  sampled+PPT rejection is removed for the single-tile path. Multi-tile
+  sampled PPT and PPM (sampled or not beyond the existing envelope) stay
+  fail-closed.
+- New `collectStrictInlinePacketSpans` diagnostic reports per-packet
+  header/body byte spans and tile-part frames for strict inline-header
+  PLT-less single-tile streams (SOP/EPH-free); it is the splitting oracle
+  the tests use to repack inline fixtures into PPT form for layouts the
+  encoder cannot produce yet.
+- Tests repack all four single-tile 4:2:0 Kakadu fixtures (multi-precinct,
+  shifted origin, main-header POC, tile-header POC) into PPT and require
+  plane-exact decode against the inline originals, matching audit counts,
+  and fail-closed/differing behavior for corrupted or truncated packed
+  headers. The repacked fixtures prove structure; an independent producer
+  fixture remains the open interop evidence per the queue.
+
 ### Documentation Plan Consolidation
 
 - Made `roadmap.md` the strategic source and `next_steps.md` the only ordered

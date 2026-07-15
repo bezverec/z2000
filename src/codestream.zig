@@ -7621,6 +7621,176 @@ fn readStrictFirstTilePartPocRecords(
     return records;
 }
 
+pub const StrictInlinePacketSpan = struct {
+    tile_part_index: u8,
+    header_offset: usize,
+    header_length: usize,
+    body_offset: usize,
+    body_length: usize,
+};
+
+pub const StrictInlineTilePartSpan = struct {
+    sot_offset: usize,
+    sod_offset: usize,
+    end: usize,
+};
+
+pub const StrictInlineSpanReport = struct {
+    allocator: std.mem.Allocator,
+    spans: []StrictInlinePacketSpan,
+    tile_parts: []StrictInlineTilePartSpan,
+    first_sot: usize,
+    eoc_offset: usize,
+
+    pub fn deinit(self: *StrictInlineSpanReport) void {
+        self.allocator.free(self.spans);
+        self.allocator.free(self.tile_parts);
+        self.* = undefined;
+    }
+};
+
+/// Diagnostic/test-support walk of a strict single-tile codestream with
+/// inline packet headers and no PLT/PPT/PPM/SOP/EPH: reports every packet's
+/// header and body byte spans in stream order plus the tile-part frame
+/// offsets. This is the splitting oracle used to repack inline headers into
+/// packed (PPT) form for layouts the encoder cannot produce yet, e.g.
+/// subsampled components. Streams outside that envelope fail closed.
+pub fn collectStrictInlinePacketSpans(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) !StrictInlineSpanReport {
+    const header = try readStrictCodestreamMetadata(allocator, bytes);
+    if (header.tile_width != 0 or header.tile_height != 0) return CodestreamError.UnsupportedPayload;
+    const plan = temporaryPacketPlan(header);
+    const packet_capacity = std.math.cast(usize, header.packet_count) orelse return CodestreamError.InvalidCodestream;
+
+    var main_header = try readStrictMainHeaderIndex(allocator, bytes, header.component_count);
+    defer main_header.deinit();
+    if (main_header.packet_markers.sop or main_header.packet_markers.eph) {
+        return CodestreamError.UnsupportedPayload;
+    }
+    const poc_limits = TilePartPocLimits{
+        .component_count = header.component_count,
+        .resolution_count = header.levels + 1,
+        .layer_count = header.layers,
+    };
+    var tile_poc_records = try readStrictFirstTilePartPocRecords(
+        allocator,
+        bytes,
+        main_header.first_sot,
+        poc_limits,
+    );
+    defer tile_poc_records.deinit(allocator);
+
+    const subsampled = headerHasComponentSubsampling(header);
+    const sequence = if (subsampled) blk: {
+        if (header.progression != .rpcl) return CodestreamError.UnsupportedPayload;
+        break :blk try buildSampledStrictPacketSequence(
+            allocator,
+            plan,
+            header.component_count,
+            header.layers,
+            header.component_xrsiz,
+            header.component_yrsiz,
+            main_header.poc_records,
+            tile_poc_records.items,
+        );
+    } else try buildStrictPacketSequence(
+        allocator,
+        header.progression,
+        plan,
+        header.component_count,
+        header.layers,
+        main_header.poc_records,
+        tile_poc_records.items,
+    );
+    defer allocator.free(sequence);
+    if (sequence.len != packet_capacity) return CodestreamError.InvalidCodestream;
+
+    var spans: std.ArrayList(StrictInlinePacketSpan) = .empty;
+    errdefer spans.deinit(allocator);
+    var tile_parts: std.ArrayList(StrictInlineTilePartSpan) = .empty;
+    errdefer tile_parts.deinit(allocator);
+
+    var stateful = try StrictStatefulPrecinctGroups.init(allocator, header);
+    defer stateful.deinit();
+    var sequence_index: usize = 0;
+    var cursor = main_header.first_sot;
+    var eoc_offset: usize = 0;
+    var tile_part_index: usize = 0;
+    var expected_tile_part_count: ?u8 = null;
+    var expected_ppt_index: u16 = 0;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
+        const marker = readU16Be(bytes, cursor);
+        if (marker == @intFromEnum(Marker.eoc)) {
+            eoc_offset = cursor;
+            cursor += 2;
+            if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            break;
+        }
+        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+
+        const sot_offset = cursor;
+        var tile_part = try readStrictTilePartHeader(
+            allocator,
+            bytes,
+            cursor,
+            tile_part_index,
+            &expected_tile_part_count,
+            null,
+            &expected_ppt_index,
+            null,
+            poc_limits,
+        );
+        defer tile_part.deinit(allocator);
+        cursor = tile_part.sod + 2;
+        if (tile_part.packet_lengths.items.len != 0 or tile_part.packed_headers.items.len != 0) {
+            return CodestreamError.UnsupportedPayload;
+        }
+        try tile_parts.append(allocator, .{
+            .sot_offset = sot_offset,
+            .sod_offset = tile_part.sod,
+            .end = tile_part.end,
+        });
+
+        while (cursor < tile_part.end) {
+            if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
+            const packet = sequence[sequence_index];
+            sequence_index += 1;
+
+            const groups = try stateful.groupsFor(packet);
+            const span = try readStrictPacketHeaderSpan(bytes[cursor..tile_part.end], packet, groups);
+            const header_end = try std.math.add(usize, cursor, span.header_length);
+            const packet_end = try std.math.add(usize, header_end, span.payload_length);
+            if (packet_end > tile_part.end) return CodestreamError.TruncatedData;
+            try spans.append(allocator, .{
+                .tile_part_index = @intCast(tile_part_index),
+                .header_offset = cursor,
+                .header_length = span.header_length,
+                .body_offset = header_end,
+                .body_length = span.payload_length,
+            });
+            cursor = packet_end;
+        }
+        if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
+        tile_part_index += 1;
+    }
+    if (sequence_index != sequence.len) return CodestreamError.InvalidCodestream;
+    if (eoc_offset == 0) return CodestreamError.InvalidCodestream;
+
+    const spans_owned = try spans.toOwnedSlice(allocator);
+    errdefer allocator.free(spans_owned);
+    const parts_owned = try tile_parts.toOwnedSlice(allocator);
+    return .{
+        .allocator = allocator,
+        .spans = spans_owned,
+        .tile_parts = parts_owned,
+        .first_sot = main_header.first_sot,
+        .eoc_offset = eoc_offset,
+    };
+}
+
 fn readStrictSodPacketCatalog(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -7725,9 +7895,6 @@ fn readStrictSodPacketCatalog(
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index, external_headers, poc_limits);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
-            if (subsampled and tile_part.packed_headers.items.len != 0) {
-                return CodestreamError.UnsupportedPayload;
-            }
             if (tile_part.packet_lengths.items.len == 0) {
                 if (tile_part.packed_headers.items.len != 0) {
                     if (stateful == null) stateful = try StrictStatefulPrecinctGroups.init(allocator, header);

@@ -23,6 +23,20 @@ Implement strict sampled PPT first, then PPM. Reuse the existing
 component-local `StrictStatefulPrecinctGroups` and canonical sampled RPCL
 sequence rather than introducing a parallel packet reader.
 
+**Slice 1 landed (2026-07-15): single-tile sampled PPT.** The single-tile
+strict reader's packed-header branch already consumed the canonical sampled
+sequence through the component-local stateful groups, so the sampled+PPT
+rejection is gone and the path is exercised by repacked fixtures: a new
+`collectStrictInlinePacketSpans` diagnostic walks an inline PLT-less stream
+and reports per-packet header/body spans, and the test suite repacks the
+four single-tile 4:2:0 Kakadu fixtures (multi-precinct, shifted origin,
+main-header POC, tile-header POC) into PPT form, requiring plane-exact
+decode against the inline originals plus packed-header corruption and
+truncation failure. Remaining in this item: four-tile sampled PPT (the
+multi-tile catalog gate stays closed), PPM, SOP/EPH placement cases, and an
+independent producer fixture when a generator is available (the repacked
+fixtures prove structure, not interop).
+
 Acceptance gate:
 
 - single-tile and four-tile 4:2:0;
