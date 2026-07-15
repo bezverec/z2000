@@ -7,6 +7,15 @@ entries are grouped by development milestone rather than semantic version.
 
 ### Performance
 
+- Ported the 9/7 driver's persistent barrier thread pool to the reversible 5/3
+  DWT (`wavelet_int.zig`), so both drivers share one design and the 5/3 phase
+  no longer spawns fresh threads for each of its ten per-transform phases. The
+  pool spawns `worker_count - 1` workers once and releases them per phase via a
+  generation counter; the caller runs the final band. Band splits are
+  unchanged, so lossless codestreams and decoded pixels stay byte-identical.
+  Kept for a clean 2.8% lossless encode t16 improvement (inverse DWT stage
+  ~27% faster) with no regression on decode or t1. See the second 2026-07-15
+  `benchmarks.md` record.
 - Capped the reversible 5/3 DWT phase at eight workers (`wavelet_int.zig`
   `max_dwt_workers` 32 -> 8), matching the 9/7 driver. The memory-bound DWT
   bands stop scaling past the eight physical cores on the x86 benchmark host,

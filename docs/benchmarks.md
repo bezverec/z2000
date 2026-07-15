@@ -376,3 +376,33 @@ The t1 pair is a statistical tie: with one worker both builds take the
 difference is inside the combined noise. Lossy encode/decode were not re-timed
 because the change does not touch the 9/7 path; those bands were already capped
 at eight.
+
+## 2026-07-15: Ryzen 7 5700X, 5/3 DWT persistent pool — KEPT
+
+Follow-up to the worker cap above. The 5/3 driver still spawned fresh threads
+for each of the ten DWT phases (two per level); the 9/7 driver had already
+moved to a persistent barrier pool that spawns `worker_count - 1` workers once
+and releases them per phase through a generation counter. This ports that pool
+to `wavelet_int.zig` so both drivers share one design. Band splits are
+unchanged, so lossless codestreams and decoded pixels stay byte-identical at
+t1 and t16 (SHA-256 encode `5FFE4C5C…`, decode `D8E3038C…`); the lossy path is
+untouched.
+
+Per-stage `--timings`, lossless decode t16: inverse DWT 12.97 ms -> 9.50 ms
+(the stage itself is ~27% faster; end-to-end it is diluted because the DWT is
+under a tenth of the decode).
+
+Hyperfine, three warmups, 14–20 runs, `--threads 16` unless noted:
+
+| Metric | Baseline (per-phase spawn) | Candidate (pool) | Ratio |
+| --- | ---: | ---: | ---: |
+| Lossless encode t16 | 133.8 +/- 1.2 ms | 130.1 +/- 2.2 ms | 1.03x faster |
+| Lossless decode t16 | 139.4 +/- 9.1 ms | 136.9 +/- 12.3 ms | 1.02x (noisy) |
+| Lossless decode t1 | 753.5 +/- 6.1 ms | 759.4 +/- 9.8 ms | 1.01x (tie) |
+
+Kept as a repeatable encode improvement with no regression on the other
+profiles: encode t16 is a clean 2.8% with non-overlapping mean±sd, decode t16
+trends the same way but the host was too noisy on the day to separate the ~2.5
+ms signal from variance, and the t1 pair is the identical single-worker path.
+The maintainability win — one pool design across both DWT drivers — carried the
+borderline decode number.
