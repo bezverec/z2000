@@ -14,10 +14,12 @@ entries are grouped by development milestone rather than semantic version.
   then merges the per-component packet streams into the canonical sampled
   RPCL order (`packet_plan.sampledRpclPackets`); SIZ emits per-component
   XRsiz/YRsiz and a dedicated single-tile-part inline+PLT assembler carries
-  the merged stream. First slice: single-tile, one layer, inline headers,
-  reversible 5/3.
+  the merged stream. Single-tile, inline headers, reversible 5/3, one or
+  more untargeted quality layers (the merge indexes each component's stream
+  at resolution offset + precinct * layers + layer).
 - Verified: z2000 strict decode reproduces every native component plane
-  across 2-, 3-, and 4-component 4:2:0/4:2:2/mixed layouts; the encoded
+  across 2-, 3-, and 4-component 4:2:0/4:2:2/mixed layouts and 1/2/3 quality
+  layers; the encoded
   stream decodes byte-identically to the trusted Kakadu 4:2:0 fixture
   through both z2000 (in-suite equivalence) and OpenJPEG 2.5.4 / Grok 20.3.6
   (out-of-band per-component PGX); cross-thread output is deterministic; and
