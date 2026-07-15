@@ -313,21 +313,98 @@ const DwtBandJob = struct {
     }
 };
 
-fn dwtBandWorker(job: *DwtBandJob) void {
-    job.run();
+// Persistent worker pool for the 5/3 DWT, mirroring the 9/7 driver's
+// `Dwt97Pool`. The per-level cascade issues ten short phases (two per level);
+// spawning fresh threads for each one cost more than the transform on the
+// 16-thread host. The pool spawns `worker_count - 1` workers once, then a
+// generation counter releases them per phase and a completion counter forms
+// the barrier. The caller thread runs the final band, so all workers stay busy.
+const DwtPoolWorker = struct {
+    pool: *DwtPool,
+    index: usize,
+};
+
+const DwtPool = struct {
+    jobs: [max_dwt_workers]DwtBandJob = undefined,
+    worker_args: [max_dwt_workers - 1]DwtPoolWorker = undefined,
+    threads: [max_dwt_workers - 1]std.Thread = undefined,
+    worker_count: usize = 1,
+    spawned: usize = 0,
+    active_jobs: usize = 0,
+    generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    completed: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn start(pool: *DwtPool, requested_workers: usize) void {
+        pool.worker_count = @max(1, @min(requested_workers, max_dwt_workers));
+        if (pool.worker_count == 1) return;
+
+        while (pool.spawned < pool.worker_count - 1) : (pool.spawned += 1) {
+            pool.worker_args[pool.spawned] = .{ .pool = pool, .index = pool.spawned };
+            pool.threads[pool.spawned] = std.Thread.spawn(.{}, dwtPoolWorker, .{&pool.worker_args[pool.spawned]}) catch {
+                // A partial pool cannot safely change its barrier width. Stop
+                // the threads already created and use the caller thread.
+                pool.stopping.store(true, .release);
+                _ = pool.generation.fetchAdd(1, .release);
+                for (pool.threads[0..pool.spawned]) |thread| thread.join();
+                pool.worker_count = 1;
+                pool.spawned = 0;
+                return;
+            };
+        }
+    }
+
+    fn dispatch(pool: *DwtPool, active_jobs: usize) void {
+        if (pool.worker_count == 1) {
+            pool.jobs[0].run();
+            return;
+        }
+
+        pool.active_jobs = active_jobs;
+        pool.completed.store(0, .monotonic);
+        _ = pool.generation.fetchAdd(1, .release);
+
+        const caller_index = pool.worker_count - 1;
+        if (caller_index < active_jobs) pool.jobs[caller_index].run();
+        while (pool.completed.load(.acquire) != pool.spawned) std.atomic.spinLoopHint();
+    }
+
+    fn stop(pool: *DwtPool) void {
+        if (pool.spawned == 0) return;
+        pool.stopping.store(true, .release);
+        _ = pool.generation.fetchAdd(1, .release);
+        for (pool.threads[0..pool.spawned]) |thread| thread.join();
+        pool.spawned = 0;
+    }
+};
+
+fn dwtPoolWorker(worker: *DwtPoolWorker) void {
+    const pool = worker.pool;
+    var observed_generation: u32 = 0;
+    while (true) {
+        var generation = pool.generation.load(.acquire);
+        while (generation == observed_generation) {
+            std.atomic.spinLoopHint();
+            generation = pool.generation.load(.acquire);
+        }
+        observed_generation = generation;
+        if (pool.stopping.load(.acquire)) return;
+        if (worker.index < pool.active_jobs) pool.jobs[worker.index].run();
+        _ = pool.completed.fetchAdd(1, .acq_rel);
+    }
 }
 
 /// Runs one DWT phase across `worker_count` bands. Column phases split the
 /// column index at `vertical_lanes` boundaries (the final band absorbs the
 /// scalar tail); row phases split the row index evenly. Bands touch disjoint
-/// output regions, so no synchronization beyond the join is needed.
+/// output regions, so no synchronization beyond the barrier is needed.
 fn runDwtPhase(
+    pool: *DwtPool,
     planes: [3][]i32,
     stride: usize,
     cur_width: usize,
     cur_height: usize,
     scratches: []const []i32,
-    worker_count: usize,
     phase: DwtPhase,
 ) void {
     const is_columns = phase == .forward_columns or phase == .inverse_columns;
@@ -335,8 +412,8 @@ fn runDwtPhase(
     const span = if (is_columns) cur_width else cur_height;
     if (span == 0) return;
 
-    var jobs: [max_dwt_workers]DwtBandJob = undefined;
-    var threads: [max_dwt_workers]std.Thread = undefined;
+    const jobs = &pool.jobs;
+    const worker_count = pool.worker_count;
     var job_count: usize = 0;
 
     if (is_columns) {
@@ -377,21 +454,7 @@ fn runDwtPhase(
         }
     }
 
-    if (job_count <= 1) {
-        jobs[0].run();
-        return;
-    }
-
-    var spawned: usize = 0;
-    while (spawned < job_count - 1) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, dwtBandWorker, .{&jobs[spawned]}) catch {
-            // Fall back to running the rest inline on spawn failure.
-            break;
-        };
-    }
-    var remaining = spawned;
-    while (remaining < job_count) : (remaining += 1) jobs[remaining].run();
-    for (threads[0..spawned]) |thread| thread.join();
+    pool.dispatch(job_count);
 }
 
 fn dwtWorkerCount(thread_count: usize) usize {
@@ -419,12 +482,16 @@ pub fn forward53Parallel(
     defer for (scratches[0..allocated]) |s| allocator.free(s);
     while (allocated < workers) : (allocated += 1) scratches[allocated] = try allocator.alloc(i32, scratch_len);
 
+    var pool = DwtPool{};
+    pool.start(workers);
+    defer pool.stop();
+
     var cur_width = width;
     var cur_height = height;
     var done: u8 = 0;
     while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
-        runDwtPhase(planes, width, cur_width, cur_height, scratches, workers, .forward_columns);
-        runDwtPhase(planes, width, cur_width, cur_height, scratches, workers, .forward_rows);
+        runDwtPhase(&pool, planes, width, cur_width, cur_height, scratches, .forward_columns);
+        runDwtPhase(&pool, planes, width, cur_width, cur_height, scratches, .forward_rows);
         cur_width = lowCount(cur_width);
         cur_height = lowCount(cur_height);
     }
@@ -463,12 +530,16 @@ pub fn inverse53Parallel(
         cur_height = lowCount(cur_height);
     }
 
+    var pool = DwtPool{};
+    pool.start(workers);
+    defer pool.stop();
+
     var level = actual_levels;
     while (level > 0) {
         level -= 1;
         const shape = shapes[level];
-        runDwtPhase(planes, width, shape.width, shape.height, scratches, workers, .inverse_rows);
-        runDwtPhase(planes, width, shape.width, shape.height, scratches, workers, .inverse_columns);
+        runDwtPhase(&pool, planes, width, shape.width, shape.height, scratches, .inverse_rows);
+        runDwtPhase(&pool, planes, width, shape.width, shape.height, scratches, .inverse_columns);
     }
 }
 

@@ -46,9 +46,14 @@ all-thread setting.
   so the uncapped 32-worker setting let lossless inverse DWT regress at t16
   (17.3 ms vs 12.8 ms at t8). Capping restored t16 to t8 and improved lossless
   decode t16 by 7.8% and encode t16 by 6.1% with byte-identical output
-  (2026-07-15 record in `benchmarks.md`). The remaining DWT idea is to give the
-  5/3 driver the 9/7 driver's persistent barrier pool so it stops re-spawning
-  per phase; measure before assuming a win.
+  (2026-07-15 record in `benchmarks.md`).
+- Both DWT drivers now share the 9/7 driver's persistent barrier pool: the 5/3
+  driver stopped re-spawning threads for each of its ten phases per transform.
+  Kept for a clean 2.8% lossless encode t16 improvement (inverse DWT stage
+  ~27% faster) with no regression on decode or t1 and byte-identical output;
+  the decode end-to-end signal was inside host noise on the day. Next DWT idea,
+  if the transform ever grows its profile share again: cache-block the
+  row+column passes per level so each plane streams once instead of twice.
 - Portable `@Vector` kernels have scalar-oracle coverage on x86, ARM, and the
   RISC-V/RVV functional gate. ISA-specific intrinsics remain a last resort.
 
