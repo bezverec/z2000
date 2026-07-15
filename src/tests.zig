@@ -25092,6 +25092,38 @@ test "sampled reversible encode roundtrips native component planes" {
     }
 }
 
+test "sampled reversible encode carries untargeted quality layers" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    for ([_]u16{ 2, 3 }) |layer_count| {
+        var planes = try sampledEncodeTestPlanes(allocator, 48, 32, &sampling);
+        defer planes.deinit();
+        const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+            .levels = 2,
+            .mct = .none,
+            .layers = layer_count,
+            .block_width = 16,
+            .block_height = 16,
+            .tile_part_divisions = null,
+        });
+        defer allocator.free(encoded);
+
+        // COD advertises the requested layer count.
+        const cod = findMarker(encoded, codestream.markerValue("cod")) orelse return error.MissingMarker;
+        try std.testing.expectEqual(layer_count, (@as(u16, encoded[cod + 6]) << 8) | encoded[cod + 7]);
+
+        var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);
+        defer decoded.deinit();
+        for (planes.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
+}
+
 test "sampled reversible encode is deterministic across thread counts" {
     const allocator = std.testing.allocator;
     const sampling = [_]codestream.ComponentSampling{
@@ -25187,9 +25219,9 @@ test "sampled reversible encode fails closed outside its envelope" {
     var order = base;
     order.progression = .lrcp;
     try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, order));
-    var layered = base;
-    layered.layers = 2;
-    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, layered));
+    var too_many_layers = base;
+    too_many_layers.layers = 0;
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, too_many_layers));
 
     // All-1 sampling belongs on the planar path.
     const uniform = [_]codestream.ComponentSampling{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 1, .yrsiz = 1 } };

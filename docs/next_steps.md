@@ -85,9 +85,13 @@ dedicated single-tile-part inline+PLT assembler carries the merged stream.
 z2000 strict decode reproduces every native plane, OpenJPEG/Grok decode the
 stream byte-identically to the trusted Kakadu 4:2:0 fixture (in-suite via
 equivalence and confirmed out-of-band with per-component PGX), cross-thread
-output is deterministic, and MCT/9-7/non-RPCL/multi-layer/all-1-sampling/
-dimension-mismatch fail closed. Remaining: quality layers, PLT-less/packed
-variants, and multi-tile; then a real Kakadu/OpenJPEG cross-decode of the
+output is deterministic, and MCT/9-7/non-RPCL/all-1-sampling/dimension-
+mismatch fail closed. **Slice 2 landed (2026-07-15): untargeted quality
+layers** — the per-component encode runs at the requested layer count and the
+merge indexes each component's stream at resolution offset + precinct*layers +
+layer; a 3-layer 4:2:0 stream decodes byte-identically to the Kakadu-
+equivalent through OpenJPEG and Grok. Remaining: PLT-less/packed header
+variants and multi-tile; then a real Kakadu/OpenJPEG cross-decode of the
 z2000-produced stream on the interop box.
 
 Add a planar no-MCT writer with explicit per-component dimensions and
