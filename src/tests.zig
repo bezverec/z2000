@@ -24657,7 +24657,12 @@ test "planar encode fails closed outside the bounded envelope" {
     );
 }
 
-const RepackedHeaderPlacement = enum { ppt, ppm };
+const RepackedHeaderPlacement = enum { inline_headers, ppt, ppm };
+
+const RepackedMarkers = struct {
+    sop: bool = false,
+    eph: bool = false,
+};
 
 /// Repacks a strict inline-header PLT-less codestream into packed-header
 /// form: every tile-part keeps its SOT..SOD frame (with Psot recomputed) and
@@ -24668,13 +24673,14 @@ const RepackedHeaderPlacement = enum { ppt, ppm };
 /// packet payload bytes are untouched, so the decoded planes must match the
 /// inline original exactly.
 fn repackInlineHeadersToPpt(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
-    return repackInlineHeadersToPacked(allocator, bytes, .ppt);
+    return repackInlineHeadersToPacked(allocator, bytes, .ppt, .{});
 }
 
 fn repackInlineHeadersToPacked(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     placement: RepackedHeaderPlacement,
+    markers: RepackedMarkers,
 ) ![]u8 {
     var report = try codestream.collectStrictInlinePacketSpans(allocator, bytes);
     defer report.deinit();
@@ -24682,6 +24688,12 @@ fn repackInlineHeadersToPacked(
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, bytes[0..report.first_sot]);
+    if (markers.sop or markers.eph) {
+        // Advertise the injected markers in the main-header COD Scod byte.
+        const cod = findMarker(out.items, codestream.markerValue("cod")) orelse return error.MissingMarker;
+        if (markers.sop) out.items[cod + 4] |= 0x02;
+        if (markers.eph) out.items[cod + 4] |= 0x04;
+    }
 
     if (placement == .ppm) {
         var groups = try allocator.alloc([]u8, report.tile_parts.len);
@@ -24696,6 +24708,7 @@ fn repackInlineHeadersToPacked(
             for (report.spans) |span| {
                 if (span.tile_part_index != part_index) continue;
                 try group.appendSlice(allocator, bytes[span.header_offset..][0..span.header_length]);
+                if (markers.eph) try group.appendSlice(allocator, &.{ 0xff, 0x92 });
             }
             groups[part_index] = try group.toOwnedSlice(allocator);
             group_count += 1;
@@ -24719,14 +24732,17 @@ fn repackInlineHeadersToPacked(
             headers_len += span.header_length;
             bodies_len += span.body_length;
         }
-        // PLT under PPT carries per-packet body lengths; PPM tile-parts
-        // carry no PLT (mirroring the encoder's layout).
+        const sop_frame: usize = if (markers.sop) 6 else 0;
+        const eph_frame: usize = if (markers.eph) 2 else 0;
+        // PLT under PPT carries per-packet body lengths (the SOP frame counts
+        // into the body); PPM tile-parts carry no PLT (mirroring the
+        // encoder's layout).
         var plt_lengths: std.ArrayList(u8) = .empty;
         defer plt_lengths.deinit(allocator);
         if (placement == .ppt) {
             for (report.spans) |span| {
                 if (span.tile_part_index != part_index) continue;
-                var value: usize = span.body_length;
+                var value: usize = span.body_length + sop_frame;
                 var groups: [5]u8 = undefined;
                 var group_count: usize = 0;
                 while (true) {
@@ -24742,13 +24758,22 @@ fn repackInlineHeadersToPacked(
                 }
             }
         }
+        var part_packets: usize = 0;
+        for (report.spans) |span| {
+            if (span.tile_part_index == part_index) part_packets += 1;
+        }
         // Single PLT/PPT segments are enough for the fixture sizes.
         if (plt_lengths.items.len + 3 > 65535) return error.TestUnexpectedResult;
         if (headers_len + 3 > 65535) return error.TestUnexpectedResult;
         const inter_header = bytes[tile_part.sot_offset + 12 .. tile_part.sod_offset];
         const plt_bytes: usize = if (placement == .ppt) 2 + 2 + 1 + plt_lengths.items.len else 0;
-        const ppt_bytes: usize = if (placement == .ppt) 2 + 2 + 1 + headers_len else 0;
-        const new_psot = 12 + inter_header.len + plt_bytes + ppt_bytes + 2 + bodies_len;
+        const packed_eph_bytes: usize = if (placement != .inline_headers) part_packets * eph_frame else 0;
+        const ppt_bytes: usize = if (placement == .ppt) 2 + 2 + 1 + headers_len + packed_eph_bytes else 0;
+        const sod_len: usize = switch (placement) {
+            .inline_headers => headers_len + bodies_len + part_packets * (sop_frame + eph_frame),
+            .ppt, .ppm => bodies_len + part_packets * sop_frame,
+        };
+        const new_psot = 12 + inter_header.len + plt_bytes + ppt_bytes + 2 + sod_len;
 
         // SOT segment with recomputed Psot.
         try out.appendSlice(allocator, bytes[tile_part.sot_offset..][0..6]);
@@ -24769,18 +24794,32 @@ fn repackInlineHeadersToPacked(
             // PPT with the concatenated packet headers in stream order.
             try out.appendSlice(allocator, &.{ 0xff, 0x61 });
             var lppt_be: [2]u8 = undefined;
-            std.mem.writeInt(u16, &lppt_be, @intCast(3 + headers_len), .big);
+            std.mem.writeInt(u16, &lppt_be, @intCast(3 + headers_len + packed_eph_bytes), .big);
             try out.appendSlice(allocator, &lppt_be);
             try out.append(allocator, 0);
             for (report.spans) |span| {
                 if (span.tile_part_index != part_index) continue;
                 try out.appendSlice(allocator, bytes[span.header_offset..][0..span.header_length]);
+                if (markers.eph) try out.appendSlice(allocator, &.{ 0xff, 0x92 });
             }
         }
-        // SOD followed by the packet bodies only.
+        // SOD followed by the per-packet payload: inline keeps
+        // [SOP] header [EPH] body per packet, packed layouts keep [SOP] body.
         try out.appendSlice(allocator, &.{ 0xff, 0x93 });
+        var part_sequence: u16 = 0;
         for (report.spans) |span| {
             if (span.tile_part_index != part_index) continue;
+            if (markers.sop) {
+                try out.appendSlice(allocator, &.{ 0xff, 0x91, 0x00, 0x04 });
+                var nsop_be: [2]u8 = undefined;
+                std.mem.writeInt(u16, &nsop_be, part_sequence, .big);
+                try out.appendSlice(allocator, &nsop_be);
+            }
+            part_sequence +%= 1;
+            if (placement == .inline_headers) {
+                try out.appendSlice(allocator, bytes[span.header_offset..][0..span.header_length]);
+                if (markers.eph) try out.appendSlice(allocator, &.{ 0xff, 0x92 });
+            }
             try out.appendSlice(allocator, bytes[span.body_offset..][0..span.body_length]);
         }
     }
@@ -24891,7 +24930,7 @@ test "sampled PPM streams decode identically to their inline originals" {
     for (fixtures) |fixture| {
         const inline_stream = try jp2.extractCodestream(fixture);
 
-        const ppm_stream = try repackInlineHeadersToPacked(allocator, inline_stream, .ppm);
+        const ppm_stream = try repackInlineHeadersToPacked(allocator, inline_stream, .ppm, .{});
         defer allocator.free(ppm_stream);
         const first_ppm = findMarker(ppm_stream, codestream.markerValue("ppm")) orelse return error.MissingMarker;
         const first_sot = findMarker(ppm_stream, codestream.markerValue("sot")) orelse return error.MissingMarker;
@@ -24921,7 +24960,62 @@ test "sampled PPM streams decode identically to their inline originals" {
     // PPM combined with POC stays fail-closed.
     const poc_fixture = @embedFile("testdata/kakadu-rpcl-420-origin-multitile-poc-pltless.jp2");
     const poc_inline = try jp2.extractCodestream(poc_fixture);
-    const poc_ppm = try repackInlineHeadersToPacked(allocator, poc_inline, .ppm);
+    const poc_ppm = try repackInlineHeadersToPacked(allocator, poc_inline, .ppm, .{});
     defer allocator.free(poc_ppm);
     try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, poc_ppm)));
+}
+
+test "sampled SOP/EPH placement decodes across inline, PPT, and PPM layouts" {
+    const allocator = std.testing.allocator;
+    const fixtures = [_][]const u8{
+        @embedFile("testdata/kakadu-rpcl-420-multi-precinct-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-origin-multitile-pltless.jp2"),
+    };
+    const placements = [_]RepackedHeaderPlacement{ .inline_headers, .ppt, .ppm };
+    for (fixtures) |fixture| {
+        const inline_stream = try jp2.extractCodestream(fixture);
+        var expected = try codestream.decodeLosslessPlanar(allocator, inline_stream);
+        defer expected.deinit();
+
+        for (placements) |placement| {
+            const framed = try repackInlineHeadersToPacked(allocator, inline_stream, placement, .{
+                .sop = true,
+                .eph = true,
+            });
+            defer allocator.free(framed);
+            const cod = findMarker(framed, codestream.markerValue("cod")) orelse return error.MissingMarker;
+            try std.testing.expectEqual(@as(u8, 0x06), framed[cod + 4] & 0x06);
+
+            var actual = try codestream.decodeLosslessPlanar(allocator, framed);
+            defer actual.deinit();
+            try std.testing.expectEqual(expected.planes.len, actual.planes.len);
+            for (expected.planes, actual.planes) |expected_plane, actual_plane| {
+                try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+            }
+
+            // A wrong SOP sequence number fails closed.
+            const bad_sequence = try allocator.dupe(u8, framed);
+            defer allocator.free(bad_sequence);
+            const sod = findMarker(bad_sequence, codestream.markerValue("sod")) orelse return error.MissingMarker;
+            try std.testing.expectEqual(@as(u16, 0xff91), (@as(u16, bad_sequence[sod + 2]) << 8) | bad_sequence[sod + 3]);
+            bad_sequence[sod + 7] +%= 1;
+            try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, bad_sequence)));
+
+            // SOP-only and EPH-only variants keep the placement honest.
+            const sop_only = try repackInlineHeadersToPacked(allocator, inline_stream, placement, .{ .sop = true });
+            defer allocator.free(sop_only);
+            var sop_decoded = try codestream.decodeLosslessPlanar(allocator, sop_only);
+            defer sop_decoded.deinit();
+            for (expected.planes, sop_decoded.planes) |expected_plane, actual_plane| {
+                try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+            }
+            const eph_only = try repackInlineHeadersToPacked(allocator, inline_stream, placement, .{ .eph = true });
+            defer allocator.free(eph_only);
+            var eph_decoded = try codestream.decodeLosslessPlanar(allocator, eph_only);
+            defer eph_decoded.deinit();
+            for (expected.planes, eph_decoded.planes) |expected_plane, actual_plane| {
+                try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+            }
+        }
+    }
 }
