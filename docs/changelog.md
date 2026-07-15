@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Sampled PPM Decode
+
+- Subsampled streams now accept main-header PPM packed headers: the strict
+  metadata gate and the per-tile-part reader drop their sampled PPM terms,
+  and the sampled multi-tile driver forwards the collected PPM groups into
+  the per-tile catalog reader. PPM combined with progression-order changes
+  stays fail-closed (an explicit guard mirrors the non-sampled rule).
+- The test repacker gained a `.ppm` placement mode: packet headers move
+  into main-header PPM markers with one group per tile-part (via the
+  encoder's own `ppm.buildMarkerPayloads` framing) and the tile-parts stay
+  PLT-less, mirroring the encoder's PPM layout.
+- Four 4:2:0 Kakadu fixtures (single- and four-tile, aligned and shifted
+  origin) repack into PPM form and must decode plane-exact against their
+  inline originals with matching audit counts; truncated PPM payloads and
+  PPM+POC combinations fail closed.
+
 ### Sampled Multi-Tile PPT Decode
 
 - The multi-tile per-tile-part reader now accepts PPT packed headers on

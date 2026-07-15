@@ -24657,18 +24657,59 @@ test "planar encode fails closed outside the bounded envelope" {
     );
 }
 
-/// Repacks a strict inline-header PLT-less codestream into PPT form: every
-/// tile-part keeps its SOT..SOD frame (with Psot recomputed), gains one PPT
-/// marker holding the concatenated packet headers, and the SOD body carries
-/// only the packet bodies. The packet payload bytes are untouched, so the
-/// decoded planes must match the inline original exactly.
+const RepackedHeaderPlacement = enum { ppt, ppm };
+
+/// Repacks a strict inline-header PLT-less codestream into packed-header
+/// form: every tile-part keeps its SOT..SOD frame (with Psot recomputed) and
+/// the SOD body carries only the packet bodies. With .ppt the concatenated
+/// packet headers ride one PPT marker per tile-part (plus a PLT with the
+/// body lengths); with .ppm they move into main-header PPM markers with one
+/// group per tile-part (no PLT, matching the encoder's PPM layout). The
+/// packet payload bytes are untouched, so the decoded planes must match the
+/// inline original exactly.
 fn repackInlineHeadersToPpt(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    return repackInlineHeadersToPacked(allocator, bytes, .ppt);
+}
+
+fn repackInlineHeadersToPacked(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    placement: RepackedHeaderPlacement,
+) ![]u8 {
     var report = try codestream.collectStrictInlinePacketSpans(allocator, bytes);
     defer report.deinit();
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, bytes[0..report.first_sot]);
+
+    if (placement == .ppm) {
+        var groups = try allocator.alloc([]u8, report.tile_parts.len);
+        var group_count: usize = 0;
+        defer {
+            for (groups[0..group_count]) |group| allocator.free(group);
+            allocator.free(groups);
+        }
+        for (report.tile_parts, 0..) |_, part_index| {
+            var group: std.ArrayList(u8) = .empty;
+            errdefer group.deinit(allocator);
+            for (report.spans) |span| {
+                if (span.tile_part_index != part_index) continue;
+                try group.appendSlice(allocator, bytes[span.header_offset..][0..span.header_length]);
+            }
+            groups[part_index] = try group.toOwnedSlice(allocator);
+            group_count += 1;
+        }
+        var marker_payloads = try ppm.buildMarkerPayloads(allocator, groups, 65533);
+        defer marker_payloads.deinit();
+        for (marker_payloads.items) |payload| {
+            try out.appendSlice(allocator, &.{ 0xff, 0x60 });
+            var lppm_be: [2]u8 = undefined;
+            std.mem.writeInt(u16, &lppm_be, @intCast(payload.len + 2), .big);
+            try out.appendSlice(allocator, &lppm_be);
+            try out.appendSlice(allocator, payload);
+        }
+    }
 
     for (report.tile_parts, 0..) |tile_part, part_index| {
         var headers_len: usize = 0;
@@ -24678,32 +24719,35 @@ fn repackInlineHeadersToPpt(allocator: std.mem.Allocator, bytes: []const u8) ![]
             headers_len += span.header_length;
             bodies_len += span.body_length;
         }
-        // PLT under packed headers carries per-packet body lengths.
+        // PLT under PPT carries per-packet body lengths; PPM tile-parts
+        // carry no PLT (mirroring the encoder's layout).
         var plt_lengths: std.ArrayList(u8) = .empty;
         defer plt_lengths.deinit(allocator);
-        for (report.spans) |span| {
-            if (span.tile_part_index != part_index) continue;
-            var value: usize = span.body_length;
-            var groups: [5]u8 = undefined;
-            var group_count: usize = 0;
-            while (true) {
-                groups[group_count] = @intCast(value & 0x7f);
-                group_count += 1;
-                value >>= 7;
-                if (value == 0) break;
-            }
-            while (group_count > 0) {
-                group_count -= 1;
-                const continuation: u8 = if (group_count != 0) 0x80 else 0;
-                try plt_lengths.append(allocator, groups[group_count] | continuation);
+        if (placement == .ppt) {
+            for (report.spans) |span| {
+                if (span.tile_part_index != part_index) continue;
+                var value: usize = span.body_length;
+                var groups: [5]u8 = undefined;
+                var group_count: usize = 0;
+                while (true) {
+                    groups[group_count] = @intCast(value & 0x7f);
+                    group_count += 1;
+                    value >>= 7;
+                    if (value == 0) break;
+                }
+                while (group_count > 0) {
+                    group_count -= 1;
+                    const continuation: u8 = if (group_count != 0) 0x80 else 0;
+                    try plt_lengths.append(allocator, groups[group_count] | continuation);
+                }
             }
         }
         // Single PLT/PPT segments are enough for the fixture sizes.
         if (plt_lengths.items.len + 3 > 65535) return error.TestUnexpectedResult;
         if (headers_len + 3 > 65535) return error.TestUnexpectedResult;
         const inter_header = bytes[tile_part.sot_offset + 12 .. tile_part.sod_offset];
-        const plt_bytes = 2 + 2 + 1 + plt_lengths.items.len;
-        const ppt_bytes = 2 + 2 + 1 + headers_len;
+        const plt_bytes: usize = if (placement == .ppt) 2 + 2 + 1 + plt_lengths.items.len else 0;
+        const ppt_bytes: usize = if (placement == .ppt) 2 + 2 + 1 + headers_len else 0;
         const new_psot = 12 + inter_header.len + plt_bytes + ppt_bytes + 2 + bodies_len;
 
         // SOT segment with recomputed Psot.
@@ -24714,22 +24758,24 @@ fn repackInlineHeadersToPpt(allocator: std.mem.Allocator, bytes: []const u8) ![]
         try out.appendSlice(allocator, bytes[tile_part.sot_offset + 10 ..][0..2]);
         // Anything the original carried between SOT and SOD (e.g. tile POC).
         try out.appendSlice(allocator, inter_header);
-        // PLT with the packed-header body lengths.
-        try out.appendSlice(allocator, &.{ 0xff, 0x58 });
-        var lplt_be: [2]u8 = undefined;
-        std.mem.writeInt(u16, &lplt_be, @intCast(3 + plt_lengths.items.len), .big);
-        try out.appendSlice(allocator, &lplt_be);
-        try out.append(allocator, 0);
-        try out.appendSlice(allocator, plt_lengths.items);
-        // PPT with the concatenated packet headers in stream order.
-        try out.appendSlice(allocator, &.{ 0xff, 0x61 });
-        var lppt_be: [2]u8 = undefined;
-        std.mem.writeInt(u16, &lppt_be, @intCast(3 + headers_len), .big);
-        try out.appendSlice(allocator, &lppt_be);
-        try out.append(allocator, 0);
-        for (report.spans) |span| {
-            if (span.tile_part_index != part_index) continue;
-            try out.appendSlice(allocator, bytes[span.header_offset..][0..span.header_length]);
+        if (placement == .ppt) {
+            // PLT with the packed-header body lengths.
+            try out.appendSlice(allocator, &.{ 0xff, 0x58 });
+            var lplt_be: [2]u8 = undefined;
+            std.mem.writeInt(u16, &lplt_be, @intCast(3 + plt_lengths.items.len), .big);
+            try out.appendSlice(allocator, &lplt_be);
+            try out.append(allocator, 0);
+            try out.appendSlice(allocator, plt_lengths.items);
+            // PPT with the concatenated packet headers in stream order.
+            try out.appendSlice(allocator, &.{ 0xff, 0x61 });
+            var lppt_be: [2]u8 = undefined;
+            std.mem.writeInt(u16, &lppt_be, @intCast(3 + headers_len), .big);
+            try out.appendSlice(allocator, &lppt_be);
+            try out.append(allocator, 0);
+            for (report.spans) |span| {
+                if (span.tile_part_index != part_index) continue;
+                try out.appendSlice(allocator, bytes[span.header_offset..][0..span.header_length]);
+            }
         }
         // SOD followed by the packet bodies only.
         try out.appendSlice(allocator, &.{ 0xff, 0x93 });
@@ -24830,4 +24876,52 @@ test "sampled multi-tile PPT streams decode identically to their inline original
         writeU16BeTest(truncated, ppt_offset + 2, 3);
         try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, truncated)));
     }
+}
+
+test "sampled PPM streams decode identically to their inline originals" {
+    const allocator = std.testing.allocator;
+    // PPM cannot combine with POC in the current envelope, so the POC
+    // fixtures stay with the PPT tests.
+    const fixtures = [_][]const u8{
+        @embedFile("testdata/kakadu-rpcl-420-multi-precinct-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-origin-multi-precinct-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-multitile-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-origin-multitile-pltless.jp2"),
+    };
+    for (fixtures) |fixture| {
+        const inline_stream = try jp2.extractCodestream(fixture);
+
+        const ppm_stream = try repackInlineHeadersToPacked(allocator, inline_stream, .ppm);
+        defer allocator.free(ppm_stream);
+        const first_ppm = findMarker(ppm_stream, codestream.markerValue("ppm")) orelse return error.MissingMarker;
+        const first_sot = findMarker(ppm_stream, codestream.markerValue("sot")) orelse return error.MissingMarker;
+        try std.testing.expect(first_ppm < first_sot);
+
+        var expected = try codestream.decodeLosslessPlanar(allocator, inline_stream);
+        defer expected.deinit();
+        var actual = try codestream.decodeLosslessPlanar(allocator, ppm_stream);
+        defer actual.deinit();
+        try std.testing.expectEqual(expected.planes.len, actual.planes.len);
+        for (expected.planes, actual.planes) |expected_plane, actual_plane| {
+            try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+        }
+
+        const inline_audit = try codestream.auditStrictPacketHeaders(allocator, inline_stream);
+        const ppm_audit = try codestream.auditStrictPacketHeaders(allocator, ppm_stream);
+        try std.testing.expectEqual(inline_audit.packets, ppm_audit.packets);
+        try std.testing.expectEqual(inline_audit.assembled_blocks, ppm_audit.assembled_blocks);
+
+        // A truncated PPM payload fails closed.
+        const truncated = try allocator.dupe(u8, ppm_stream);
+        defer allocator.free(truncated);
+        writeU16BeTest(truncated, first_ppm + 2, 3);
+        try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, truncated)));
+    }
+
+    // PPM combined with POC stays fail-closed.
+    const poc_fixture = @embedFile("testdata/kakadu-rpcl-420-origin-multitile-poc-pltless.jp2");
+    const poc_inline = try jp2.extractCodestream(poc_fixture);
+    const poc_ppm = try repackInlineHeadersToPacked(allocator, poc_inline, .ppm);
+    defer allocator.free(poc_ppm);
+    try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, poc_ppm)));
 }

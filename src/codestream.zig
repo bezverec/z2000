@@ -3230,8 +3230,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     if (subsampled_components and
         (parsed_mct != .none or parsed_transform != .reversible_5_3 or
             parsed_quantization != .none or
-            parsed_progression != .rpcl or
-            ppm_collector.expected_index != 0))
+            parsed_progression != .rpcl))
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -5708,9 +5707,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
     } else if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
 
     const sampled_components = headerHasComponentSubsampling(tile_header);
-    if (sampled_components and
-        (progression != .rpcl or external_packed_headers != null))
-    {
+    if (sampled_components and progression != .rpcl) {
         return CodestreamError.UnsupportedPayload;
     }
     const full_sequence = if (sampled_components)
@@ -6088,9 +6085,6 @@ fn decodeStrictMultiTilePlanarMeasured(
 
     var context = try readStrictMultiTileContext(allocator, bytes, header);
     defer context.deinit();
-    if (context.main_header.ppm_headers != null) {
-        return CodestreamError.UnsupportedPayload;
-    }
 
     const reference_width = std.math.cast(u32, header.width) orelse return CodestreamError.InvalidCodestream;
     const reference_height = std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream;
@@ -6128,6 +6122,11 @@ fn decodeStrictMultiTilePlanarMeasured(
             tile_index,
             &effective_poc_records,
         );
+        // PPM cannot combine with progression-order changes in the current
+        // envelope (mirrors the non-sampled restriction).
+        if (context.main_header.ppm_headers != null and tile_poc_records != null) {
+            return CodestreamError.UnsupportedPayload;
+        }
 
         const catalog_start = monotonicNs();
         var catalog = try readStrictMultiTilePacketCatalogForTile(
@@ -6141,7 +6140,7 @@ fn decodeStrictMultiTilePlanarMeasured(
             header.progression,
             tile_poc_records,
             context.main_header.packet_markers,
-            null,
+            context.main_header.ppm_headers,
         );
         defer catalog.deinit();
 
