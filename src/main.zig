@@ -606,6 +606,14 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
         }
         std.debug.print("]", .{});
     }
+    if (info.image_origin_x != 0 or info.image_origin_y != 0 or
+        info.tile_origin_x != info.image_origin_x or info.tile_origin_y != info.image_origin_y)
+    {
+        std.debug.print(
+            ", image origin {}x{}, tile origin {}x{}",
+            .{ info.image_origin_x, info.image_origin_y, info.tile_origin_x, info.tile_origin_y },
+        );
+    }
     std.debug.print(
         ", color {s}, {} codestream bytes, ICC {s}",
         .{
@@ -725,23 +733,24 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             try codestream.decodeLosslessGrayWithOptions(allocator, j2k, options) },
         3 => rgb: {
             if (info.color_space == .sycc) {
-                for (0..info.components) |component| {
-                    const sampling = info.componentSampling(component) orelse return error.UnsupportedComponentCount;
-                    if (sampling[0] != 1 or sampling[1] != 1) {
-                        return jp2.Jp2Error.UnsupportedColorSpace;
-                    }
-                }
+                const chroma_sampling = info.componentSampling(1) orelse
+                    return error.UnsupportedComponentCount;
                 var planes = if (show_timings)
-                    try codestream.decodeLosslessPlanarUpsampledWithOptionsProfiled(
+                    try codestream.decodeLosslessPlanarWithOptionsProfiled(
                         allocator,
                         j2k,
                         options,
                         &decode_timings,
                     )
                 else
-                    try codestream.decodeLosslessPlanarUpsampledWithOptions(allocator, j2k, options);
+                    try codestream.decodeLosslessPlanarWithOptions(allocator, j2k, options);
                 defer planes.deinit();
-                break :rgb .{ .rgb = try color.sycc444ToSrgb(allocator, planes) };
+                break :rgb .{ .rgb = try color.syccToSrgb(allocator, planes, .{
+                    .image_origin_x = info.image_origin_x,
+                    .image_origin_y = info.image_origin_y,
+                    .chroma_x = chroma_sampling[0],
+                    .chroma_y = chroma_sampling[1],
+                }) };
             }
             var has_subsampling = false;
             for (0..info.components) |component| {

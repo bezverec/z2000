@@ -44,10 +44,12 @@ nearest-neighbour expansion anchored to absolute SIZ `XOsiz/YOsiz` and
 `color.interleaveRgb` is called only after the JP2 container has established a
 bounded three-component sRGB interpretation.
 Enumerated sYCC is equally explicit: `jp2.Info.color_space` records the selected
-`colr` specification, native component decode remains unchanged, and
-`color.sycc444ToSrgb` performs the 8/16-bit 4:4:4 conversion only at the
-JP2-to-TIFF boundary. Sampled sYCC remains closed until its chroma registration
-and reconstruction policy has an independent interop gate.
+`colr` specification, while `Info.image_origin_x/y` and
+`tile_origin_x/y` retain the SIZ registration. Native component decode remains
+unchanged. `color.syccToSrgb` converts 8/16-bit 4:4:4, 4:2:2, or 4:2:0 native
+planes directly at the JP2-to-TIFF boundary without materializing three
+upsampled planes. Sampled conversion requires a chroma-grid-aligned image
+origin; unaligned edge semantics remain fail-closed.
 
 ## Encode Pipeline
 
@@ -180,9 +182,9 @@ component precision, sampling, and SIZ agreement are checked.
 
 Restricted ICC profiles are preserved byte-for-byte. Preservation is not colour
 conversion. Enumerated sYCC (18) is recognized for three unsigned uniform
-8/16-bit components; the CLI converts only full-resolution 4:4:4 input to sRGB.
-Unsupported JPX composition, sampled sYCC conversion, arbitrary ICC
-interpretation, and unknown component mappings fail closed.
+8/16-bit components; the CLI converts aligned 4:4:4, 4:2:2, and 4:2:0 input to
+sRGB. Unsupported JPX composition, unaligned sampled sYCC conversion, arbitrary
+ICC interpretation, and unknown component mappings fail closed.
 
 ## Parallelism And Memory
 

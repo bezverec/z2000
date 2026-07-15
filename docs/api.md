@@ -208,12 +208,18 @@ Primary public functions:
   bounded planar profile and expands every component to the full SIZ reference
   grid by nearest-neighbour replication anchored to absolute image origin;
   no colour transform is implied
+- `decodeLosslessPlanarWithOptionsProfiled(allocator, bytes, options, timings)`
+  — native-size planar decode with the same timing breakdown as the upsampled
+  entry point
 - `color.interleaveRgb(allocator, planes)` — checked conversion of three
   equal-precision, full-resolution planes to `RgbImage`; callers remain
   responsible for establishing RGB semantics from the container
-- `color.sycc444ToSrgb(allocator, planes)` — explicit unsigned 8/16-bit sYCC
-  4:4:4 to interleaved sRGB conversion with checked layout/range and clipping;
-  sampled sYCC is intentionally rejected by this entry point
+- `color.syccToSrgb(allocator, planes, sampling)` — explicit unsigned 8/16-bit
+  sYCC 4:4:4, 4:2:2, or 4:2:0 native-plane conversion with checked dimensions,
+  chroma-grid registration, range, and clipping; sampled conversion currently
+  requires an aligned image origin
+- `color.sycc444ToSrgb(allocator, planes)` — full-resolution convenience
+  entry point delegating to `syccToSrgb`
 - `decodeLosslessTemporary(allocator, bytes)`
 - `decodeLosslessTemporaryWithOptions(allocator, bytes, options)`
 - `analyzeLosslessTemporary(bytes)`
@@ -302,6 +308,8 @@ quantized profiles remain fail-closed.
 
 `Info.component_xrsiz` and `Info.component_yrsiz` expose each codestream
 component's SIZ sampling factors; `componentSampling(index)` returns the pair.
+`Info.image_origin_x/y` and `Info.tile_origin_x/y` retain the independent SIZ
+image and tile-partition origins for container/tool-layer registration.
 Metadata parsing accepts nonzero factors, while normal JP2 wrapping still
 requires unit sampling. Strict planar decode supports RPCL, reversible 5/3,
 no-MCT subsampling with inline, PPT, or PPM packet headers and all SOP/EPH
@@ -316,8 +324,9 @@ POC and MCT over subsampled planes remain fail-closed. The explicit
 reference-grid registration; `decode-temp-jp2` interleaves them only for a
 bounded three-component sRGB JP2 wrapper. `Info.color_space` preserves the
 selected grayscale, sRGB, sYCC, or restricted-ICC interpretation. For sYCC,
-`decode-temp-jp2` converts unsigned uniform 8/16-bit 4:4:4 planes through
-`color.sycc444ToSrgb`; 4:2:2/4:2:0 sYCC conversion remains fail-closed.
+`decode-temp-jp2` converts unsigned uniform 8/16-bit 4:4:4, 4:2:2, and 4:2:0
+native planes directly through `color.syccToSrgb` when `XOsiz/YOsiz` are
+aligned to the chroma sampling grid. Unaligned sampled sYCC remains fail-closed.
 Explicit POC in the main or first
 tile-part header may compose LRCP, RLCP, RPCL, PCRL, and CPRL intervals when
 the schedule covers every component-local packet exactly once. Sampled encode

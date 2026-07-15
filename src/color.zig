@@ -188,22 +188,58 @@ pub const IctPlanes = ComponentPlanesOf(f32);
 /// 1..4-component no-MCT layouts.
 pub const SamplePlanes = ComponentPlanesOf(u16);
 
-/// Converts full-resolution unsigned sYCC planes to interleaved sRGB samples.
-/// This is an explicit container/tool-layer operation; the codestream codec
-/// keeps the three reconstructed components unchanged. Subsampled sYCC uses a
-/// separate registration contract and remains unsupported by this entry point.
-pub fn sycc444ToSrgb(allocator: std.mem.Allocator, planes: SamplePlanes) !image.RgbImage {
+pub const SyccSampling = struct {
+    image_origin_x: u32 = 0,
+    image_origin_y: u32 = 0,
+    chroma_x: u8 = 1,
+    chroma_y: u8 = 1,
+};
+
+/// Converts unsigned native-size sYCC planes to interleaved sRGB samples.
+/// Chroma may be full-resolution, 4:2:2, or 4:2:0. Sampled layouts require an
+/// image origin aligned to the chroma grid; unaligned edge semantics remain
+/// fail-closed until they have an independent interoperability contract.
+pub fn syccToSrgb(
+    allocator: std.mem.Allocator,
+    planes: SamplePlanes,
+    sampling: SyccSampling,
+) !image.RgbImage {
     if (planes.width == 0 or planes.height == 0 or planes.planes.len != 3) {
         return ColorError.InvalidImage;
     }
     const bit_depth = planes.componentBitDepth(0) orelse return ColorError.InvalidImage;
     if (bit_depth != 8 and bit_depth != 16) return ColorError.UnsupportedColorSpace;
     const pixels = try std.math.mul(usize, planes.width, planes.height);
-    for (0..3) |component| {
+    const luma_dimensions = planes.componentDimensions(0) orelse return ColorError.InvalidImage;
+    if (luma_dimensions[0] != planes.width or luma_dimensions[1] != planes.height or
+        planes.planes[0].len != pixels)
+    {
+        return ColorError.UnsupportedColorSpace;
+    }
+    if (!((sampling.chroma_x == 1 and sampling.chroma_y == 1) or
+        (sampling.chroma_x == 2 and sampling.chroma_y == 1) or
+        (sampling.chroma_x == 2 and sampling.chroma_y == 2)) or
+        sampling.image_origin_x % sampling.chroma_x != 0 or
+        sampling.image_origin_y % sampling.chroma_y != 0)
+    {
+        return ColorError.UnsupportedColorSpace;
+    }
+    const width_u32 = std.math.cast(u32, planes.width) orelse return ColorError.InvalidImage;
+    const height_u32 = std.math.cast(u32, planes.height) orelse return ColorError.InvalidImage;
+    const reference_x1 = std.math.add(u32, sampling.image_origin_x, width_u32) catch
+        return ColorError.InvalidImage;
+    const reference_y1 = std.math.add(u32, sampling.image_origin_y, height_u32) catch
+        return ColorError.InvalidImage;
+    const chroma_x0 = ceilDivU32Color(sampling.image_origin_x, sampling.chroma_x);
+    const chroma_y0 = ceilDivU32Color(sampling.image_origin_y, sampling.chroma_y);
+    const chroma_width = @as(usize, ceilDivU32Color(reference_x1, sampling.chroma_x) - chroma_x0);
+    const chroma_height = @as(usize, ceilDivU32Color(reference_y1, sampling.chroma_y) - chroma_y0);
+    const chroma_pixels = try std.math.mul(usize, chroma_width, chroma_height);
+    for (1..3) |component| {
         const dimensions = planes.componentDimensions(component) orelse return ColorError.InvalidImage;
         if (planes.componentBitDepth(component) != bit_depth or
-            dimensions[0] != planes.width or dimensions[1] != planes.height or
-            planes.planes[component].len != pixels)
+            dimensions[0] != chroma_width or dimensions[1] != chroma_height or
+            planes.planes[component].len != chroma_pixels)
         {
             return ColorError.UnsupportedColorSpace;
         }
@@ -213,23 +249,23 @@ pub fn sycc444ToSrgb(allocator: std.mem.Allocator, planes: SamplePlanes) !image.
     const chroma_offset: i32 = @as(i32, 1) << @as(u5, @intCast(bit_depth - 1));
     const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
     errdefer allocator.free(samples);
-    for (0..pixels) |pixel| {
-        const y_code = planes.planes[0][pixel];
-        const cb_code = planes.planes[1][pixel];
-        const cr_code = planes.planes[2][pixel];
-        if (y_code > max_sample or cb_code > max_sample or cr_code > max_sample) {
-            return ColorError.SampleOutOfRange;
+    for (0..planes.height) |y| {
+        const absolute_y = @as(u64, sampling.image_origin_y) + y;
+        const chroma_y = @as(usize, @intCast(absolute_y / sampling.chroma_y - chroma_y0));
+        for (0..planes.width) |x| {
+            const absolute_x = @as(u64, sampling.image_origin_x) + x;
+            const chroma_x = @as(usize, @intCast(absolute_x / sampling.chroma_x - chroma_x0));
+            const luma_index = y * planes.width + x;
+            const chroma_index = chroma_y * chroma_width + chroma_x;
+            const rgb = try syccSampleToRgb(
+                planes.planes[0][luma_index],
+                planes.planes[1][chroma_index],
+                planes.planes[2][chroma_index],
+                max_sample,
+                chroma_offset,
+            );
+            @memcpy(samples[luma_index * 3 ..][0..3], &rgb);
         }
-        const y: i32 = y_code;
-        const cb = @as(i32, cb_code) - chroma_offset;
-        const cr = @as(i32, cr_code) - chroma_offset;
-        const red_delta: i32 = @intFromFloat(1.402 * @as(f32, @floatFromInt(cr)));
-        const green_delta: i32 = @intFromFloat(0.344 * @as(f32, @floatFromInt(cb)) +
-            0.714 * @as(f32, @floatFromInt(cr)));
-        const blue_delta: i32 = @intFromFloat(1.772 * @as(f32, @floatFromInt(cb)));
-        samples[pixel * 3] = @intCast(std.math.clamp(y + red_delta, 0, max_sample));
-        samples[pixel * 3 + 1] = @intCast(std.math.clamp(y - green_delta, 0, max_sample));
-        samples[pixel * 3 + 2] = @intCast(std.math.clamp(y + blue_delta, 0, max_sample));
     }
     return .{
         .allocator = allocator,
@@ -238,6 +274,33 @@ pub fn sycc444ToSrgb(allocator: std.mem.Allocator, planes: SamplePlanes) !image.
         .bit_depth = bit_depth,
         .samples = samples,
     };
+}
+
+/// Convenience entry point for full-resolution sYCC planes.
+pub fn sycc444ToSrgb(allocator: std.mem.Allocator, planes: SamplePlanes) !image.RgbImage {
+    return syccToSrgb(allocator, planes, .{});
+}
+
+fn syccSampleToRgb(y_code: u16, cb_code: u16, cr_code: u16, max_sample: i32, chroma_offset: i32) ![3]u16 {
+    if (y_code > max_sample or cb_code > max_sample or cr_code > max_sample) {
+        return ColorError.SampleOutOfRange;
+    }
+    const y: i32 = y_code;
+    const cb = @as(i32, cb_code) - chroma_offset;
+    const cr = @as(i32, cr_code) - chroma_offset;
+    const red_delta: i32 = @intFromFloat(1.402 * @as(f32, @floatFromInt(cr)));
+    const green_delta: i32 = @intFromFloat(0.344 * @as(f32, @floatFromInt(cb)) +
+        0.714 * @as(f32, @floatFromInt(cr)));
+    const blue_delta: i32 = @intFromFloat(1.772 * @as(f32, @floatFromInt(cb)));
+    return .{
+        @intCast(std.math.clamp(y + red_delta, 0, max_sample)),
+        @intCast(std.math.clamp(y - green_delta, 0, max_sample)),
+        @intCast(std.math.clamp(y + blue_delta, 0, max_sample)),
+    };
+}
+
+fn ceilDivU32Color(value: u32, divisor: u8) u32 {
+    return @intCast((@as(u64, value) + divisor - 1) / divisor);
 }
 
 /// Converts three full-resolution, equal-precision component planes to the

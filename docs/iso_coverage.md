@@ -19,7 +19,7 @@ Both bounded scorecards are complete. The narrow target measures one practical
 archival profile; the full-family target measures the broader Part 1 features
 listed below. Neither score claims formal certification or arbitrary-profile
 support. Remaining work expands component layouts and colour conversion beyond
-the bounded sYCC 4:4:4 slice,
+the bounded aligned sYCC 4:4:4/4:2:2/4:2:0 slice,
 containers, producer diversity, and performance outside those scored bounds.
 
 ## Narrow RGB Lossless Target
@@ -52,9 +52,10 @@ containers, producer diversity, and performance outside those scored bounds.
 | **Total** | **100** | **100** |  |
 
 The container score now also includes explicit enumerated sYCC (18) metadata
-and unsigned 8/16-bit 4:4:4 conversion matching OpenJPEG for an embedded Kakadu
-fixture. References to remaining non-sRGB conversion breadth mean sampled sYCC
-and colour spaces beyond that bounded slice; the score itself is unchanged.
+and unsigned 8/16-bit 4:4:4 plus aligned 4:2:2/4:2:0 conversion. Embedded Kakadu
+fixtures match the complete OpenJPEG and Grok RGB rasters. Remaining non-sRGB
+conversion breadth means unaligned sampled sYCC and colour spaces beyond that
+bounded slice; the score itself is unchanged.
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more

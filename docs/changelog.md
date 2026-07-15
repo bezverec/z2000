@@ -1,6 +1,22 @@
 # Changelog
 
-## sYCC 4:4:4 Conversion Boundary
+This file tracks notable project changes. The repository is still pre-release;
+entries are grouped by development milestone rather than semantic version.
+
+## Unreleased
+
+### Sampled sYCC Conversion Boundary
+
+- Added direct unsigned 8/16-bit sYCC 4:2:2 and 4:2:0 native-plane conversion
+  for chroma-grid-aligned image origins. The converter validates Cb/Cr geometry
+  and avoids materializing three full-resolution intermediate planes.
+- Embedded 7x5 Kakadu 8.4.1 sYCC fixtures with odd right/bottom dimensions;
+  every converted RGB sample matches both OpenJPEG 2.5.4 and Grok 20.3.5.
+  Unaligned image origins remain explicitly fail-closed.
+- Exposed independent SIZ image and tile-partition origins through `jp2.Info`,
+  added native planar decode profiling, and taught `jp2-info` to report origins.
+
+### sYCC 4:4:4 Conversion Boundary
 
 - Added explicit JP2 colour-space metadata for grayscale, sRGB, enumerated
   sYCC, and restricted ICC selection. `jp2-info` now reports the selected
@@ -10,11 +26,6 @@
   sYCC conversion stays fail-closed pending a registration/interpolation gate.
 - Embedded a Kakadu 8.4.1 sYCC fixture whose converted raster matches OpenJPEG
   2.5.4, plus clipping, precision, layout, and malformed chroma-sampling tests.
-
-This file tracks notable project changes. The repository is still pre-release;
-entries are grouped by development milestone rather than semantic version.
-
-## Unreleased
 
 ### Sampled Tile-Partition Origins
 

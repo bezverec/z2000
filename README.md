@@ -32,9 +32,9 @@ certification.
   over the RGB triplet only, with strict malformed-input handling and
   OpenJPEG/Grok/Kakadu interoperability tests.
 - Explicit JP2 colour metadata with sRGB, grayscale, restricted ICC, and sYCC
-  recognition. The JP2-to-TIFF path converts unsigned 8/16-bit sYCC 4:4:4 to
-  sRGB; sampled sYCC and general ICC transforms remain fail-closed rather than
-  being silently interpreted as RGB.
+  recognition. The JP2-to-TIFF path converts unsigned 8/16-bit sYCC 4:4:4,
+  4:2:2, and 4:2:0 to sRGB when the image origin is chroma-grid aligned;
+  unaligned sampled sYCC and general ICC transforms remain fail-closed.
 - Bounded planar encode/decode for mixed unsigned 8/16-bit component
   precision, including JP2 `BPCC`/codestream `SIZ` agreement and
   per-component QCD/QCC on the single-tile RPCL 5/3 path. z2000 output is
@@ -58,7 +58,7 @@ certification.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
-non-empty PLT-less multi-part tiles, sampled sYCC and broad color management,
+non-empty PLT-less multi-part tiles, unaligned-origin sampled sYCC and broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.

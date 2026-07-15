@@ -43,6 +43,10 @@ pub const Info = struct {
     component_bit_depths: [color.max_components]u8,
     component_xrsiz: [color.max_components]u8,
     component_yrsiz: [color.max_components]u8,
+    image_origin_x: u32 = 0,
+    image_origin_y: u32 = 0,
+    tile_origin_x: u32 = 0,
+    tile_origin_y: u32 = 0,
     color_space: ColorSpace = .unknown,
     has_palette: bool = false,
     palette_entries: u16 = 0,
@@ -165,9 +169,13 @@ const CodestreamShape = struct {
     require_unit_sampling: bool = true,
 };
 
-const ComponentSampling = struct {
+const CodestreamGeometry = struct {
     xrsiz: [color.max_components]u8 = [_]u8{0} ** color.max_components,
     yrsiz: [color.max_components]u8 = [_]u8{0} ** color.max_components,
+    image_origin_x: u32 = 0,
+    image_origin_y: u32 = 0,
+    tile_origin_x: u32 = 0,
+    tile_origin_y: u32 = 0,
 };
 
 const CodSegmentInfo = struct {
@@ -540,6 +548,10 @@ pub fn parseInfo(bytes: []const u8) !Info {
         .component_bit_depths = [_]u8{0} ** color.max_components,
         .component_xrsiz = [_]u8{0} ** color.max_components,
         .component_yrsiz = [_]u8{0} ** color.max_components,
+        .image_origin_x = 0,
+        .image_origin_y = 0,
+        .tile_origin_x = 0,
+        .tile_origin_y = 0,
         .color_space = .unknown,
         .has_palette = false,
         .palette_entries = 0,
@@ -576,7 +588,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
             },
             @intFromEnum(BoxType.contiguous_codestream) => {
                 if (!saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
-                var sampling = ComponentSampling{};
+                var geometry = CodestreamGeometry{};
                 try validateCodestreamPayload(box.payload, .{
                     .width = info.width,
                     .height = info.height,
@@ -584,9 +596,13 @@ pub fn parseInfo(bytes: []const u8) !Info {
                     .bits_per_component = info.bits_per_component,
                     .component_bit_depths = info.component_bit_depths,
                     .require_unit_sampling = false,
-                }, &sampling);
-                info.component_xrsiz = sampling.xrsiz;
-                info.component_yrsiz = sampling.yrsiz;
+                }, &geometry);
+                info.component_xrsiz = geometry.xrsiz;
+                info.component_yrsiz = geometry.yrsiz;
+                info.image_origin_x = geometry.image_origin_x;
+                info.image_origin_y = geometry.image_origin_y;
+                info.tile_origin_x = geometry.tile_origin_x;
+                info.tile_origin_y = geometry.tile_origin_y;
                 info.codestream_bytes = box.payload.len;
                 saw_jp2c = true;
             },
@@ -1125,7 +1141,7 @@ fn validateFileTypeBox(payload: []const u8) !void {
 fn validateCodestreamPayload(
     payload: []const u8,
     expected: CodestreamShape,
-    sampling_out: ?*ComponentSampling,
+    geometry_out: ?*CodestreamGeometry,
 ) !void {
     if (payload.len < 4) return Jp2Error.InvalidCodestream;
     if (try readU16Be(payload, 0) != marker_soc) return Jp2Error.InvalidCodestream;
@@ -1182,6 +1198,12 @@ fn validateCodestreamPayload(
     {
         return Jp2Error.InvalidCodestream;
     }
+    if (geometry_out) |geometry| {
+        geometry.image_origin_x = xosiz;
+        geometry.image_origin_y = yosiz;
+        geometry.tile_origin_x = xtosiz;
+        geometry.tile_origin_y = ytosiz;
+    }
 
     var component_index: usize = 0;
     while (component_index < components) : (component_index += 1) {
@@ -1202,9 +1224,9 @@ fn validateCodestreamPayload(
         if (expected.require_unit_sampling and (xrsiz != 1 or yrsiz != 1)) {
             return Jp2Error.UnsupportedProfile;
         }
-        if (sampling_out) |sampling| {
-            sampling.xrsiz[component_index] = xrsiz;
-            sampling.yrsiz[component_index] = yrsiz;
+        if (geometry_out) |geometry| {
+            geometry.xrsiz[component_index] = xrsiz;
+            geometry.yrsiz[component_index] = yrsiz;
         }
     }
     try validateMainHeaderMarkers(payload, segment_end, tile_count, components, expected.bits_per_component == 0);

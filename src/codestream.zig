@@ -3001,6 +3001,16 @@ pub fn decodeLosslessPlanarWithOptions(
     return decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, null);
 }
 
+pub fn decodeLosslessPlanarWithOptionsProfiled(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    timings: *DecodeTimings,
+) !color.SamplePlanes {
+    timings.* = .{};
+    return decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, timings);
+}
+
 /// Expands component-local decoded planes onto the SIZ reference grid without
 /// applying a colour transform. Nearest-neighbour replication is anchored to
 /// the absolute reference-grid origin, so cropped images whose XOsiz/YOsiz are

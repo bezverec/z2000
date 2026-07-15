@@ -58,9 +58,10 @@ production decode's component-local topology.
 
 Preserve ICC profiles byte-for-byte as today and keep optional colour
 conversion as a separate tool-layer operation. The first bounded slice now
-recognizes sYCC and converts unsigned 8/16-bit 4:4:4 input to sRGB with a
-Kakadu/OpenJPEG oracle. Next cover sampled sYCC registration and common RGB
-profiles such as eciRGB v2 and Adobe RGB; follow with CMYK, extended YCC,
+recognizes sYCC and converts unsigned 8/16-bit 4:4:4 plus aligned 4:2:2/4:2:0
+input to sRGB. Kakadu fixtures match OpenJPEG and Grok rasters. Next cover
+common RGB profiles such as eciRGB v2 and Adobe RGB while retaining unaligned
+sampled sYCC as an explicit edge-semantics task; follow with CMYK, extended YCC,
 CIELab, monochrome refinements, and palette breadth. Never silently reinterpret
 component samples from codestream metadata alone.
 
@@ -92,6 +93,6 @@ The detailed policy is in [`versioning.md`](versioning.md).
 - arbitrary JPX box families and JPX-only composition;
 - arbitrary component counts, signed/floating codestream samples, and general
   mixed subsampling/precision/MCT combinations;
-- automatic colour conversion beyond bounded sYCC 4:4:4;
+- automatic colour conversion beyond bounded aligned sYCC 4:4:4/4:2:2/4:2:0;
 - tiled/compressed TIFF variants and broad camera-RAW workflows;
 - unchecked architecture-specific fast paths.
