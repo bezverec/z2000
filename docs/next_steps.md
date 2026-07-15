@@ -56,8 +56,11 @@ changes: single-tile and shifted-origin four-tile streams decode
 plane-exact with SOP+EPH, SOP-only, and EPH-only framing, and a wrong SOP
 sequence number fails closed. The one remaining piece of this item is an
 independent producer fixture when a generator is available (the repacked
-fixtures prove structure, not interop); the natural closure is queue item
-2, whose sampled encoder will produce native packed-header streams.
+fixtures prove structure, not interop). **Interop closure (2026-07-15):**
+queue item 2's sampled encoder now produces native sampled streams that
+OpenJPEG 2.5.4 and Grok 20.3.6 decode byte-identically to the trusted
+independent-producer Kakadu 4:2:0 fixture carrying the same content, so the
+sampled RPCL decode path has genuine cross-codec interop evidence.
 
 Acceptance gate:
 
@@ -70,6 +73,22 @@ Acceptance gate:
   test structure but is not sufficient interop evidence by itself.
 
 ### 2. Sampled Reversible Encode
+
+**Slice 1 landed (2026-07-15): single-tile RPCL, one layer, inline headers,
+5/3.** `codestream.encodeLosslessSampledPlanarWithOptions` takes a
+`color.SamplePlanes` with per-component dimensions plus a
+`ComponentSampling{xrsiz,yrsiz}` list, encodes each component independently
+through the single-component scaffold at its own dimensions, and merges the
+per-component packet streams into the canonical sampled RPCL order via
+`packet_plan.sampledRpclPackets`. SIZ emits per-component XRsiz/YRsiz; a
+dedicated single-tile-part inline+PLT assembler carries the merged stream.
+z2000 strict decode reproduces every native plane, OpenJPEG/Grok decode the
+stream byte-identically to the trusted Kakadu 4:2:0 fixture (in-suite via
+equivalence and confirmed out-of-band with per-component PGX), cross-thread
+output is deterministic, and MCT/9-7/non-RPCL/multi-layer/all-1-sampling/
+dimension-mismatch fail closed. Remaining: quality layers, PLT-less/packed
+variants, and multi-tile; then a real Kakadu/OpenJPEG cross-decode of the
+z2000-produced stream on the interop box.
 
 Add a planar no-MCT writer with explicit per-component dimensions and
 `XRsiz/YRsiz`. Start with single-tile RPCL, one layer, inline headers, and 5/3;

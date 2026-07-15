@@ -191,6 +191,11 @@ Primary public functions:
   `componentBitDepth(component)`. Bounded subsampled no-MCT streams expose
   variable plane shapes through `component_widths`, `component_heights`, and
   `componentDimensions(component)`
+- `encodeLosslessSampledPlanarWithOptions(allocator, planes, sampling, options)`
+  — sampled reversible encode: per-component dimensions + `ComponentSampling`
+  (XRsiz/YRsiz), single-tile RPCL, one layer, inline+PLT headers, 5/3. Each
+  component is encoded independently and the packet streams are merged into
+  the canonical sampled RPCL order
 - `decodeLosslessPlanarUpsampled(allocator, bytes)` /
   `decodeLosslessPlanarUpsampledWithOptions(allocator, bytes, options)` /
   `decodeLosslessPlanarUpsampledWithOptionsProfiled(...)` — decodes the same

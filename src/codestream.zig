@@ -529,6 +529,274 @@ pub fn encodeLosslessPlanarWithOptions(
     }, encode_options);
 }
 
+/// Per-component subsampling factors (SIZ XRsiz/YRsiz) for the sampled
+/// planar encoder.
+pub const ComponentSampling = struct {
+    xrsiz: u8,
+    yrsiz: u8,
+};
+
+/// F3b sampled reversible encode: 1..4 unsigned 8/16-bit component planes with
+/// explicit per-component dimensions and XRsiz/YRsiz subsampling, no MCT,
+/// single tile, reversible 5/3, ISO MQ, RPCL, one layer, inline packet
+/// headers with PLT. Each component is encoded independently through the
+/// single-component scaffold at its own dimensions; the per-component packet
+/// streams are then merged into the canonical sampled RPCL order the strict
+/// decoder expects. Everything outside that envelope fails closed.
+pub fn encodeLosslessSampledPlanarWithOptions(
+    allocator: std.mem.Allocator,
+    planar: color.SamplePlanes,
+    sampling: []const ComponentSampling,
+    options: LosslessOptions,
+) ![]u8 {
+    if (planar.width == 0 or planar.height == 0 or
+        planar.width > std.math.maxInt(u32) or planar.height > std.math.maxInt(u32))
+    {
+        return CodestreamError.ImageTooLarge;
+    }
+    const component_count = planar.planes.len;
+    if (component_count == 0 or component_count > max_codestream_components) {
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (sampling.len != component_count) return CodestreamError.InvalidCodestream;
+
+    // First-slice envelope: reversible 5/3, no MCT, RPCL, one layer, inline
+    // headers, no rate/POC/packed-header machinery, single tile.
+    if (options.transform != .reversible_5_3 or options.quantization != .none or
+        options.mct != .none or options.progression != .rpcl or
+        options.layers != 1 or options.rate_count != 0 or
+        options.poc_records.len != 0 or options.poc_in_tile_header or
+        options.ppm or options.ppt or options.emit_temporary_payload_sidecar or
+        options.t1_backend != .iso_mq or options.bypass or options.terminate_all or
+        options.reset_context or options.vertical_causal or
+        options.predictable_termination or options.segmentation_symbols)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
+    if (options.levels > 32) return CodestreamError.TooManyLevels;
+
+    const width_u32: u32 = @intCast(planar.width);
+    const height_u32: u32 = @intCast(planar.height);
+    const grid = tile_grid.Grid.fromImageSize(planar.width, planar.height, options.tile_width, options.tile_height) catch
+        return CodestreamError.InvalidCodestream;
+    if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
+
+    const reference_levels = actualDwtLevels(planar.width, planar.height, options.levels);
+
+    var component_xrsiz = [_]u8{1} ** max_codestream_components;
+    var component_yrsiz = [_]u8{1} ** max_codestream_components;
+    var component_bit_depths = [_]u8{0} ** max_codestream_components;
+    var any_subsampled = false;
+    for (0..component_count) |component| {
+        const xrsiz = sampling[component].xrsiz;
+        const yrsiz = sampling[component].yrsiz;
+        if (xrsiz == 0 or yrsiz == 0) return CodestreamError.InvalidCodestream;
+        const expected_width = ceilDivU32(width_u32, xrsiz);
+        const expected_height = ceilDivU32(height_u32, yrsiz);
+        const dims = planar.componentDimensions(component) orelse return CodestreamError.InvalidCodestream;
+        if (dims[0] != expected_width or dims[1] != expected_height) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const depth = planar.componentBitDepth(component) orelse return CodestreamError.InvalidCodestream;
+        if (depth != 8 and depth != 16) return CodestreamError.UnsupportedPayload;
+        component_xrsiz[component] = xrsiz;
+        component_yrsiz[component] = yrsiz;
+        component_bit_depths[component] = depth;
+        if (xrsiz != 1 or yrsiz != 1) any_subsampled = true;
+    }
+    // An all-1 sampling layout is just the planar profile; route those there
+    // so the sampled path always carries genuine subsampling.
+    if (!any_subsampled) return CodestreamError.UnsupportedPayload;
+
+    const encode_options = normalizedEncodePrecinctOptions(options, reference_levels);
+    try validatePrecinctBlockSpans(encode_options);
+    var scaffold_precincts: [33]packet_plan.Precinct = undefined;
+    for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {
+        scaffold_precincts[index] = .{ .width = precinct.width, .height = precinct.height };
+    }
+    const scaffold_options = tile_pipeline.PacketScaffoldOptions{
+        .layers = encode_options.layers,
+        .block_width = encode_options.block_width,
+        .block_height = encode_options.block_height,
+        .precincts = scaffold_precincts[0..encode_options.precinct_count],
+    };
+    const block_style = ebcot.CodeBlockStyle{};
+
+    var per_component: [max_codestream_components]tile_pipeline.TileRpclEncodeArtifacts = undefined;
+    var built: usize = 0;
+    defer for (per_component[0..built]) |*artifact| artifact.deinit();
+
+    var sampled_plans: [max_codestream_components]packet_plan.SampledComponentPlan = undefined;
+    while (built < component_count) : (built += 1) {
+        const dims = planar.componentDimensions(built).?;
+        const depth = component_bit_depths[built];
+        var comp_planes = try color.SamplePlanes.initWithComponentLayouts(
+            allocator,
+            dims[0],
+            dims[1],
+            &.{depth},
+            &.{dims[0]},
+            &.{dims[1]},
+        );
+        defer comp_planes.deinit();
+        @memcpy(comp_planes.planes[0], planar.planes[built]);
+
+        per_component[built] = try tile_pipeline.buildPlanarRpclEncodeArtifactsIsoMq(
+            allocator,
+            comp_planes,
+            reference_levels,
+            scaffold_options,
+            block_style,
+        );
+        // Every component must reach the reference decomposition depth so all
+        // component plans share the codestream's resolution count.
+        if (per_component[built].levels != reference_levels or
+            per_component[built].scaffold.components != 1)
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+        sampled_plans[built] = .{
+            .plan = per_component[built].scaffold.plan,
+            .xrsiz = component_xrsiz[built],
+            .yrsiz = component_yrsiz[built],
+        };
+    }
+
+    const global = packet_plan.sampledRpclPackets(
+        allocator,
+        sampled_plans[0..component_count],
+        1,
+        0,
+        0,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return CodestreamError.InvalidCodestream,
+    };
+    defer allocator.free(global);
+
+    // Merge per-component streams into the global sampled order.
+    var resolution_offsets: [max_codestream_components][33]u64 = undefined;
+    for (0..component_count) |component| {
+        const plan = per_component[component].scaffold.plan;
+        var running: u64 = 0;
+        for (0..plan.resolution_count) |resolution| {
+            resolution_offsets[component][resolution] = running;
+            running += plan.resolutions[resolution].precincts;
+        }
+    }
+
+    var merged_bytes: std.ArrayList(u8) = .empty;
+    defer merged_bytes.deinit(allocator);
+    var merged_lengths: std.ArrayList(u32) = .empty;
+    defer merged_lengths.deinit(allocator);
+    var merged_header_lengths: std.ArrayList(u32) = .empty;
+    defer merged_header_lengths.deinit(allocator);
+    try merged_lengths.ensureTotalCapacity(allocator, global.len);
+    try merged_header_lengths.ensureTotalCapacity(allocator, global.len);
+
+    for (global) |packet| {
+        const component = packet.component;
+        if (component >= component_count) return CodestreamError.InvalidCodestream;
+        const stream = per_component[component].stream;
+        const local = try std.math.add(
+            u64,
+            resolution_offsets[component][packet.resolution],
+            packet.precinct_index,
+        );
+        const local_index = std.math.cast(usize, local) orelse return CodestreamError.InvalidCodestream;
+        if (local_index >= stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
+        const length = stream.packet_lengths[local_index];
+        const offset = try rpclPacketByteOffset(stream.packet_lengths, local_index);
+        try merged_lengths.append(allocator, length);
+        try merged_header_lengths.append(allocator, stream.packet_header_lengths[local_index]);
+        try merged_bytes.appendSlice(allocator, stream.bytes[offset..][0..length]);
+    }
+
+    return assembleSampledSingleTileCodestream(allocator, .{
+        .width = planar.width,
+        .height = planar.height,
+        .bit_depth = planar.bit_depth,
+        .component_bit_depths = component_bit_depths,
+        .component_xrsiz = component_xrsiz,
+        .component_yrsiz = component_yrsiz,
+        .components = @intCast(component_count),
+        .levels = reference_levels,
+        .packet_lengths = merged_lengths.items,
+        .packet_header_lengths = merged_header_lengths.items,
+        .packet_bytes = merged_bytes.items,
+    }, encode_options);
+}
+
+const SampledAssemblyInput = struct {
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    component_bit_depths: [max_codestream_components]u8,
+    component_xrsiz: [max_codestream_components]u8,
+    component_yrsiz: [max_codestream_components]u8,
+    components: u16,
+    levels: u8,
+    packet_lengths: []const u32,
+    packet_header_lengths: []const u32,
+    packet_bytes: []const u8,
+};
+
+/// Single tile-part inline-header assembly for the sampled encoder. The
+/// packet count is component-geometry dependent, so this bypasses the uniform
+/// packet-plan check the RGB/planar assembler runs and emits every merged
+/// packet as one resolution-agnostic tile-part.
+fn assembleSampledSingleTileCodestream(
+    allocator: std.mem.Allocator,
+    input: SampledAssemblyInput,
+    encode_options: LosslessOptions,
+) ![]u8 {
+    const levels = input.levels;
+    if (input.packet_lengths.len != input.packet_header_lengths.len) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    const packet_bytes = try rpclPacketPayloadByteCount(encode_options, input.packet_lengths);
+    const plt_bytes = try pltBytesForRpclPacketLengths(encode_options, input.packet_lengths);
+    const tile_part_bytes = try std.math.add(usize, packet_bytes, plt_bytes);
+    const psot = std.math.cast(u32, try std.math.add(usize, 14, tile_part_bytes)) orelse
+        return CodestreamError.ImageTooLarge;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendMarker(allocator, &out, .soc);
+    try appendSizForComponents(allocator, &out, .{
+        .width = @intCast(input.width),
+        .height = @intCast(input.height),
+        .bit_depth = input.bit_depth,
+        .component_bit_depths = input.component_bit_depths,
+        .component_xrsiz = input.component_xrsiz,
+        .component_yrsiz = input.component_yrsiz,
+        .components = input.components,
+        .tile_width = encode_options.tile_width,
+        .tile_height = encode_options.tile_height,
+    });
+    try appendCod(allocator, &out, levels, encode_options);
+    try appendQcd(allocator, &out, levels, input.bit_depth, encode_options);
+    if (encode_options.tlm) try appendTlm(allocator, &out, &.{psot});
+
+    try appendSot(allocator, &out, 0, psot, 0, 1);
+    try appendPltFromRpclPacketLengths(allocator, &out, encode_options, input.packet_lengths);
+    try appendMarker(allocator, &out, .sod);
+    var packet_sequence: u16 = 0;
+    try appendRpclPackets(
+        allocator,
+        &out,
+        encode_options,
+        input.packet_lengths,
+        input.packet_header_lengths,
+        input.packet_bytes,
+        &packet_sequence,
+    );
+    try appendMarker(allocator, &out, .eoc);
+    return out.toOwnedSlice(allocator);
+}
+
 const ComponentSlices = struct {
     slices: [3][]i32,
 
@@ -9474,6 +9742,8 @@ const SizProfile = struct {
     height: u32,
     bit_depth: u8,
     component_bit_depths: [max_codestream_components]u8 = [_]u8{0} ** max_codestream_components,
+    component_xrsiz: [max_codestream_components]u8 = [_]u8{1} ** max_codestream_components,
+    component_yrsiz: [max_codestream_components]u8 = [_]u8{1} ** max_codestream_components,
     components: u16,
     tile_width: u32,
     tile_height: u32,
@@ -9508,9 +9778,12 @@ fn appendSizForComponents(
         const explicit_depth = profile.component_bit_depths[component];
         const component_depth = if (explicit_depth != 0) explicit_depth else profile.bit_depth;
         if (component_depth == 0 or component_depth > 38) return CodestreamError.UnsupportedPayload;
+        const xrsiz = profile.component_xrsiz[component];
+        const yrsiz = profile.component_yrsiz[component];
+        if (xrsiz == 0 or yrsiz == 0) return CodestreamError.InvalidCodestream;
         try out.append(allocator, component_depth - 1);
-        try out.append(allocator, 1);
-        try out.append(allocator, 1);
+        try out.append(allocator, xrsiz);
+        try out.append(allocator, yrsiz);
     }
 }
 
