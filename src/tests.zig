@@ -24678,11 +24678,33 @@ fn repackInlineHeadersToPpt(allocator: std.mem.Allocator, bytes: []const u8) ![]
             headers_len += span.header_length;
             bodies_len += span.body_length;
         }
-        // Single PPT segment: Lppt = 2 (length) + 1 (Zppt) + headers.
+        // PLT under packed headers carries per-packet body lengths.
+        var plt_lengths: std.ArrayList(u8) = .empty;
+        defer plt_lengths.deinit(allocator);
+        for (report.spans) |span| {
+            if (span.tile_part_index != part_index) continue;
+            var value: usize = span.body_length;
+            var groups: [5]u8 = undefined;
+            var group_count: usize = 0;
+            while (true) {
+                groups[group_count] = @intCast(value & 0x7f);
+                group_count += 1;
+                value >>= 7;
+                if (value == 0) break;
+            }
+            while (group_count > 0) {
+                group_count -= 1;
+                const continuation: u8 = if (group_count != 0) 0x80 else 0;
+                try plt_lengths.append(allocator, groups[group_count] | continuation);
+            }
+        }
+        // Single PLT/PPT segments are enough for the fixture sizes.
+        if (plt_lengths.items.len + 3 > 65535) return error.TestUnexpectedResult;
         if (headers_len + 3 > 65535) return error.TestUnexpectedResult;
         const inter_header = bytes[tile_part.sot_offset + 12 .. tile_part.sod_offset];
+        const plt_bytes = 2 + 2 + 1 + plt_lengths.items.len;
         const ppt_bytes = 2 + 2 + 1 + headers_len;
-        const new_psot = 12 + inter_header.len + ppt_bytes + 2 + bodies_len;
+        const new_psot = 12 + inter_header.len + plt_bytes + ppt_bytes + 2 + bodies_len;
 
         // SOT segment with recomputed Psot.
         try out.appendSlice(allocator, bytes[tile_part.sot_offset..][0..6]);
@@ -24692,6 +24714,13 @@ fn repackInlineHeadersToPpt(allocator: std.mem.Allocator, bytes: []const u8) ![]
         try out.appendSlice(allocator, bytes[tile_part.sot_offset + 10 ..][0..2]);
         // Anything the original carried between SOT and SOD (e.g. tile POC).
         try out.appendSlice(allocator, inter_header);
+        // PLT with the packed-header body lengths.
+        try out.appendSlice(allocator, &.{ 0xff, 0x58 });
+        var lplt_be: [2]u8 = undefined;
+        std.mem.writeInt(u16, &lplt_be, @intCast(3 + plt_lengths.items.len), .big);
+        try out.appendSlice(allocator, &lplt_be);
+        try out.append(allocator, 0);
+        try out.appendSlice(allocator, plt_lengths.items);
         // PPT with the concatenated packet headers in stream order.
         try out.appendSlice(allocator, &.{ 0xff, 0x61 });
         var lppt_be: [2]u8 = undefined;
@@ -24761,6 +24790,43 @@ test "sampled single-tile PPT streams decode identically to their inline origina
         // Truncated PPT payload fails closed.
         const truncated = try allocator.dupe(u8, ppt_stream);
         defer allocator.free(truncated);
+        writeU16BeTest(truncated, ppt_offset + 2, 3);
+        try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, truncated)));
+    }
+}
+
+test "sampled multi-tile PPT streams decode identically to their inline originals" {
+    const allocator = std.testing.allocator;
+    const fixtures = [_][]const u8{
+        @embedFile("testdata/kakadu-rpcl-420-multitile-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-origin-multitile-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-origin-multitile-poc-pltless.jp2"),
+    };
+    for (fixtures) |fixture| {
+        const inline_stream = try jp2.extractCodestream(fixture);
+
+        const ppt_stream = try repackInlineHeadersToPpt(allocator, inline_stream);
+        defer allocator.free(ppt_stream);
+        try std.testing.expect(countMarker(ppt_stream, codestream.markerValue("ppt")) >= 4);
+
+        var expected = try codestream.decodeLosslessPlanar(allocator, inline_stream);
+        defer expected.deinit();
+        var actual = try codestream.decodeLosslessPlanar(allocator, ppt_stream);
+        defer actual.deinit();
+        try std.testing.expectEqual(expected.planes.len, actual.planes.len);
+        for (expected.planes, actual.planes) |expected_plane, actual_plane| {
+            try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+        }
+
+        const inline_audit = try codestream.auditStrictPacketHeaders(allocator, inline_stream);
+        const ppt_audit = try codestream.auditStrictPacketHeaders(allocator, ppt_stream);
+        try std.testing.expectEqual(inline_audit.packets, ppt_audit.packets);
+        try std.testing.expectEqual(inline_audit.assembled_blocks, ppt_audit.assembled_blocks);
+
+        // A truncated packed-header segment in any tile-part fails closed.
+        const truncated = try allocator.dupe(u8, ppt_stream);
+        defer allocator.free(truncated);
+        const ppt_offset = findMarker(truncated, codestream.markerValue("ppt")) orelse return error.MissingMarker;
         writeU16BeTest(truncated, ppt_offset + 2, 3);
         try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, truncated)));
     }

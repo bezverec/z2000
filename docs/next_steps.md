@@ -32,10 +32,18 @@ and reports per-packet header/body spans, and the test suite repacks the
 four single-tile 4:2:0 Kakadu fixtures (multi-precinct, shifted origin,
 main-header POC, tile-header POC) into PPT form, requiring plane-exact
 decode against the inline originals plus packed-header corruption and
-truncation failure. Remaining in this item: four-tile sampled PPT (the
-multi-tile catalog gate stays closed), PPM, SOP/EPH placement cases, and an
-independent producer fixture when a generator is available (the repacked
-fixtures prove structure, not interop).
+truncation failure. **Slice 2 landed (2026-07-15): multi-tile sampled PPT.** The per-tile-part
+reader's packed-header branch already ran the sampled sequence through the
+per-tile stateful groups, so the sampled+PPT term is out of its gate too
+(sampled PPM stays closed), and `collectStrictInlinePacketSpans` gained a
+multi-tile walk over the Stage B spans with per-tile sequences. The test
+repacker now also emits a PLT (packed-header body lengths) so Stage B span
+accounting stays on its PLT-backed path, and the four-tile 4:2:0 fixtures
+(aligned, shifted origin, shifted origin + POC) must decode plane-exact
+against their inline originals with matching audit counts and fail closed
+on truncated packed headers. Remaining in this item: PPM, SOP/EPH placement
+cases, and an independent producer fixture when a generator is available
+(the repacked fixtures prove structure, not interop).
 
 Acceptance gate:
 
