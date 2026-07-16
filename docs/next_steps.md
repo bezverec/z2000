@@ -128,15 +128,13 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
-The hosted `v0.1.0-rc.2` dry-run proved metadata validation plus native Linux,
-Windows, and macOS Debug/ReleaseFast builds before its long RISC-V QEMU job was
-cancelled to conserve Actions minutes. The next candidate should be assembled
-and verified locally, including the RISC-V functional gate, both CLI names in
-every archive, and a reviewed `SHA256SUMS`. Based on the documented pre-1.0
-increment policy and the many new formats/profiles since `v0.1.0-rc.1`, the
-next version is `v0.2.0-rc.1`. `VERSION` and release notes now reflect that
-choice. Tagging and publication remain manual until every local artifact plus
-the hosted macOS archive is reviewed.
+`v0.2.0-rc.1` was published on 2026-07-16 from commit `7b8c01c`. Windows and
+Linux x86-64 passed local Debug/ReleaseFast gates; the portable RISC-V
+ReleaseFast suite ran locally under QEMU; macOS arm64 passed its dedicated
+hosted Debug/ReleaseFast job. Every archive contains both CLI names and is
+covered by the published `SHA256SUMS`. The next release action is to collect
+candidate feedback and decide whether fixes require `v0.2.0-rc.2` or the same
+commit family is ready for a final `v0.2.0` gate.
 
 ## Parallel Performance Track
 

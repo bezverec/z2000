@@ -5,6 +5,10 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+No changes yet.
+
+## 0.2.0-rc.1 — 2026-07-16
+
 ### Documentation And Release Reconciliation
 
 - Reconciled README, roadmap, active queue, API, ISO coverage, and CLI help

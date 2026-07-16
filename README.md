@@ -9,9 +9,9 @@ implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
 of 2026-07-16, both the narrow RGB lossless JP2 target and the broader
-JPEG2000 Part 1 engineering scorecard are estimated at **100/100**, and the
-first release candidate (`v0.1.0-rc.1`) is published on the GitHub releases
-page. This is a project-readiness estimate, not a formal ISO conformance
+JPEG2000 Part 1 engineering scorecard are estimated at **100/100**. The current
+prerelease is [`v0.2.0-rc.1`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.1).
+This is a project-readiness estimate, not a formal ISO conformance
 certification.
 
 ## Features
