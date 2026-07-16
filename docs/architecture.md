@@ -10,7 +10,7 @@ Strategy and execution order live in `roadmap.md` and `next_steps.md`.
 z2000 has two deliberately separate codec surfaces:
 
 1. an educational grayscale `.z2000` format used by early wavelet experiments;
-2. the ISO JPEG2000/JP2 path used by TIFF/BMP conversion, strict codestream decode,
+2. the ISO JPEG2000/JP2 path used by TIFF/BMP/PNG conversion, strict codestream decode,
    interoperability, and benchmarks.
 
 The ISO path is fail-closed. Marker parsing may recognize more syntax than the
@@ -20,6 +20,8 @@ quantization, T1, T2, tile, and container behavior agree end to end.
 `src/main.zig` owns CLI routing and conversion policy. `src/tiff.zig` and the
 isolated format modules own source-file parsing; the bounded BMP adapter maps
 24/32-bit BI_RGB storage into the same owned `RgbImage` encode boundary.
+The PNG adapter maps checked gray/RGB/palette/alpha scanlines into the existing
+decoded raster union only after CRC, zlib, filter, and sample-bound validation.
 `src/jp2.zig` owns JP2 boxes and colour/
 channel metadata. `src/codestream.zig` is the integration layer for JPEG2000
 markers and the encode/decode pipeline.

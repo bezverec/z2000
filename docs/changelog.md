@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded PNG Input Adapter
+
+- Added isolated non-interlaced PNG input for every standard color type and
+  legal 1/2/4/8/16-bit depth. Critical chunk ordering, unknown critical chunks,
+  CRCs, palette/transparency bounds, exact zlib output/checksum, and filters
+  None/Sub/Up/Average/Paeth are checked before sample expansion.
+- `PLTE` and all three legal `tRNS` forms map onto existing grayscale, RGB,
+  gray+alpha, and RGBA carriers. Packed inputs expand to 8 bits; 8/16-bit
+  samples remain exact and PNG alpha stays unassociated.
+- Added `png-to-jp2`, shorthand and unquoted batch dispatch, truncation and
+  single-bit mutation sweeps, ten independent ImageMagick PNG/raw fixtures,
+  pixel-exact roundtrips for the full fixture matrix, and OpenJPEG/Grok `AE=0`
+  decode gates for 8/16-bit RGB. Adam7, APNG, and unmapped color profiles stay
+  fail-closed.
+
 ### Bounded BMP Input Adapter
 
 - Added isolated Windows BMP input for the 14-byte file header plus 40-byte
@@ -15,8 +30,8 @@ entries are grouped by development milestone rather than semantic version.
   unquoted non-recursive `z2k *.bmp .jp2` batch dispatch through the existing
   encode path and options.
 - Header/raster sizes and arithmetic fail closed. Focused malformed, full
-  truncation, and single-bit mutation sweeps accompany an independent ImageMagick BMP3/raw oracle and
-  a pixel-exact BMP -> JP2 -> TIFF live gate.
+  truncation, and single-bit mutation sweeps accompany an independent
+  ImageMagick BMP3/raw oracle and a pixel-exact BMP -> JP2 -> TIFF live gate.
 
 ### Extended Colour-Space Signalling And Preservation
 

@@ -13,8 +13,8 @@ zig build test
 ```
 
 The binary installs as both `z2000` and the `z2k` alias; conversions accept
-the extension-inferred shorthand (`z2k input.tif output.jp2` or
-`z2k input.bmp output.jp2`). The custom
+the extension-inferred shorthand (`z2k input.tif output.jp2`,
+`z2k input.bmp output.jp2`, or `z2k input.png output.jp2`). The custom
 grayscale codec:
 
 ```sh
@@ -30,11 +30,13 @@ zig build run -- tiff-info input.tif
 zig build run -- dng-info input.dng
 zig build run -- tiff-to-jp2 input.tif output.jp2 [options]
 zig build run -- bmp-to-jp2 input.bmp output.jp2 [options]
+zig build run -- png-to-jp2 input.png output.jp2 [options]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--convert-to-srgb]
 zig build run -- *.tif .jp2 [tiff-to-jp2 options]
 zig build run -- *.bmp .jp2 [tiff-to-jp2 options]
+zig build run -- *.png .jp2 [tiff-to-jp2 options]
 zig build run -- *.jp2 .tif [jp2-to-tiff options]
 ```
 
@@ -64,6 +66,15 @@ profile: a 14-byte file header, 40-byte `BITMAPINFOHEADER`, one plane,
 rows. It returns an owned 8-bit `RgbImage`; the reserved byte in 32-bit
 `BI_RGB` is not interpreted as alpha. Other DIB headers, palettes,
 compression/bitfields, and embedded colour profiles fail closed.
+
+`formats/png.zig` exposes `read` and `parse`, returning the same decoded-image
+union used by the raster encode boundary. The bounded profile accepts
+non-interlaced PNG color types 0/2/3/4/6 at their legal bit depths, validates
+all chunk CRCs and critical ordering, joins consecutive `IDAT`, inflates one
+exactly sized zlib stream, reverses filters 0..4, and expands `PLTE`/`tRNS`.
+PNG alpha is unassociated. Packed grayscale/palette samples expand to 8 bits;
+native 8/16-bit samples are unchanged. Adam7, APNG, and color-definition
+chunks not yet mapped to JP2 fail closed.
 
 The shorthand also has a non-recursive batch form. A first argument whose
 filename contains `*` or `?` is expanded internally within its concrete parent
@@ -133,6 +144,7 @@ Supported public JP2 profiles are still narrow:
   precinct/code-block/tag-tree partitions, and origin-aware reversible 5/3 lifting
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
 - 24/32-bit uncompressed Windows BMP input through the bounded adapter
+- non-interlaced PNG gray/RGB/palette/gray-alpha/RGBA input with `PLTE`/`tRNS`
 - `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
   segments and packet-header segment length accounting
 - all six Part 1 code-block style bits in the documented ISO-MQ envelope,
@@ -161,7 +173,7 @@ valid2000/jpylyzer-style validators remain diagnostic gates rather than
 absolute sources of truth.
 
 Future conversion-surface goals are deliberately not part of the current CLI
-contract yet: JPEG/PNG input, broader BMP profiles, RAW/DNG conversion, OpenEXR/HDR handling,
+contract yet: JPEG input, broader BMP/PNG profiles, RAW/DNG conversion, OpenEXR/HDR handling,
 display conversion for preserved e-sRGB/e-sYCC/CIELab/CMYK samples,
 EXIF/IPTC/XMP metadata, and component precision above 16 bits. Each should get
 an explicit option, fail-closed parser policy, and interop fixture before

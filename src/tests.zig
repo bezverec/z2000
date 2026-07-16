@@ -6,6 +6,7 @@ const color = @import("color.zig");
 const codec = @import("codec.zig");
 const codestream = @import("codestream.zig");
 const dng = @import("formats/dng.zig");
+const png = @import("formats/png.zig");
 const ebcot = @import("ebcot.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
@@ -186,6 +187,240 @@ test "BMP single-bit mutation sweep never panics or leaks" {
             } else |_| {}
         }
     }
+}
+
+const ExpectedPngKind = enum { rgb, grayscale, alpha };
+
+fn expectPngFixture(
+    encoded: []const u8,
+    expected_raw: []const u8,
+    kind: ExpectedPngKind,
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    components: usize,
+) !void {
+    var decoded = try png.parse(std.testing.allocator, encoded);
+    defer decoded.deinit();
+    const samples: []const u16 = switch (decoded) {
+        .rgb => |rgb| blk: {
+            try std.testing.expectEqual(ExpectedPngKind.rgb, kind);
+            try std.testing.expectEqual(width, rgb.width);
+            try std.testing.expectEqual(height, rgb.height);
+            try std.testing.expectEqual(bit_depth, rgb.bit_depth);
+            break :blk rgb.samples;
+        },
+        .grayscale => |gray| blk: {
+            try std.testing.expectEqual(ExpectedPngKind.grayscale, kind);
+            try std.testing.expectEqual(width, gray.width);
+            try std.testing.expectEqual(height, gray.height);
+            try std.testing.expectEqual(bit_depth, gray.bit_depth);
+            break :blk gray.samples;
+        },
+        .alpha => |alpha| blk: {
+            try std.testing.expectEqual(ExpectedPngKind.alpha, kind);
+            try std.testing.expectEqual(width, alpha.width);
+            try std.testing.expectEqual(height, alpha.height);
+            try std.testing.expectEqual(bit_depth, alpha.bit_depth);
+            try std.testing.expectEqual(color.AlphaMode.unassociated, alpha.alpha_mode);
+            break :blk alpha.samples;
+        },
+    };
+    const expected_samples = try std.math.mul(usize, try std.math.mul(usize, width, height), components);
+    try std.testing.expectEqual(expected_samples, samples.len);
+    try std.testing.expectEqual(expected_samples * (bit_depth / 8), expected_raw.len);
+    if (bit_depth == 8) {
+        for (expected_raw, samples) |expected, actual| {
+            try std.testing.expectEqual(@as(u16, expected), actual);
+        }
+    } else {
+        for (samples, 0..) |actual, index| {
+            const offset = index * 2;
+            const expected = (@as(u16, expected_raw[offset]) << 8) | expected_raw[offset + 1];
+            try std.testing.expectEqual(expected, actual);
+        }
+    }
+}
+
+test "PNG parser matches independent ImageMagick pixel oracles" {
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-gray2.png"),
+        @embedFile("testdata/imagemagick-png-gray2.raw"),
+        .grayscale,
+        8,
+        2,
+        8,
+        1,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-gray8.png"),
+        @embedFile("testdata/imagemagick-png-gray8.raw"),
+        .grayscale,
+        5,
+        3,
+        8,
+        1,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-graya8.png"),
+        @embedFile("testdata/imagemagick-png-graya8.raw"),
+        .alpha,
+        5,
+        3,
+        8,
+        2,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-gray-trns.png"),
+        @embedFile("testdata/imagemagick-png-gray-trns.raw"),
+        .alpha,
+        3,
+        1,
+        8,
+        2,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-rgb8.png"),
+        @embedFile("testdata/imagemagick-png-rgb8.raw"),
+        .rgb,
+        5,
+        3,
+        8,
+        3,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-rgb16.png"),
+        @embedFile("testdata/imagemagick-png-rgb16.raw"),
+        .rgb,
+        5,
+        3,
+        16,
+        3,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-rgb-trns.png"),
+        @embedFile("testdata/imagemagick-png-rgb-trns.raw"),
+        .alpha,
+        3,
+        1,
+        8,
+        4,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-rgba8.png"),
+        @embedFile("testdata/imagemagick-png-rgba8.raw"),
+        .alpha,
+        5,
+        3,
+        8,
+        4,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-rgba16.png"),
+        @embedFile("testdata/imagemagick-png-rgba16.raw"),
+        .alpha,
+        5,
+        3,
+        16,
+        4,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-palette-trns.png"),
+        @embedFile("testdata/imagemagick-png-palette-trns.raw"),
+        .alpha,
+        4,
+        2,
+        8,
+        4,
+    );
+}
+
+test "PNG truncation and single-bit mutation sweeps fail closed" {
+    const allocator = std.testing.allocator;
+    const valid = @embedFile("testdata/imagemagick-png-rgb8.png");
+    for (0..valid.len) |length| {
+        if (png.parse(allocator, valid[0..length])) |decoded| {
+            var owned = decoded;
+            owned.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+    for (0..valid.len) |offset| {
+        for (0..8) |bit| {
+            var changed: [valid.len]u8 = valid.*;
+            changed[offset] ^= @as(u8, 1) << @intCast(bit);
+            if (png.parse(allocator, &changed)) |decoded| {
+                var owned = decoded;
+                owned.deinit();
+                return error.TestUnexpectedResult;
+            } else |_| {}
+        }
+    }
+}
+
+fn putPngU32(bytes: []u8, offset: usize, value: u32) void {
+    bytes[offset] = @truncate(value >> 24);
+    bytes[offset + 1] = @truncate(value >> 16);
+    bytes[offset + 2] = @truncate(value >> 8);
+    bytes[offset + 3] = @truncate(value);
+}
+
+fn refreshPngChunkCrc(bytes: []u8, type_offset: usize, data_len: usize) void {
+    putPngU32(bytes, type_offset + 4 + data_len, std.hash.Crc32.hash(bytes[type_offset .. type_offset + 4 + data_len]));
+}
+
+test "PNG semantic malformed matrix fails after valid CRCs" {
+    const allocator = std.testing.allocator;
+    const valid = @embedFile("testdata/imagemagick-png-rgb8.png");
+    var changed: [valid.len]u8 = valid.*;
+
+    @memset(changed[16..20], 0);
+    refreshPngChunkCrc(&changed, 12, 13);
+    try std.testing.expectError(png.PngError.InvalidDimensions, png.parse(allocator, &changed));
+
+    changed = valid.*;
+    changed[25] = 5;
+    refreshPngChunkCrc(&changed, 12, 13);
+    try std.testing.expectError(png.PngError.UnsupportedColorType, png.parse(allocator, &changed));
+
+    changed = valid.*;
+    changed[26] = 1;
+    refreshPngChunkCrc(&changed, 12, 13);
+    try std.testing.expectError(png.PngError.UnsupportedCompression, png.parse(allocator, &changed));
+
+    changed = valid.*;
+    changed[27] = 1;
+    refreshPngChunkCrc(&changed, 12, 13);
+    try std.testing.expectError(png.PngError.UnsupportedFilterMethod, png.parse(allocator, &changed));
+
+    changed = valid.*;
+    changed[28] = 1;
+    refreshPngChunkCrc(&changed, 12, 13);
+    try std.testing.expectError(png.PngError.UnsupportedInterlace, png.parse(allocator, &changed));
+
+    changed = valid.*;
+    const idat_length: usize = (@as(usize, changed[33]) << 24) |
+        (@as(usize, changed[34]) << 16) | (@as(usize, changed[35]) << 8) | changed[36];
+    changed[37] = 'J';
+    refreshPngChunkCrc(&changed, 37, idat_length);
+    try std.testing.expectError(png.PngError.UnknownCriticalChunk, png.parse(allocator, &changed));
+}
+
+test "PNG palette and transparency semantic bounds fail closed" {
+    const allocator = std.testing.allocator;
+    const palette_valid = @embedFile("testdata/imagemagick-png-palette-trns.png");
+    var palette_changed: [palette_valid.len]u8 = palette_valid.*;
+    palette_changed[24] = 1;
+    refreshPngChunkCrc(&palette_changed, 12, 13);
+    try std.testing.expectError(png.PngError.InvalidPalette, png.parse(allocator, &palette_changed));
+
+    const gray_valid = @embedFile("testdata/imagemagick-png-gray-trns.png");
+    var gray_changed: [gray_valid.len]u8 = gray_valid.*;
+    // IHDR ends at byte 33; tRNS is the next chunk, with type at byte 37.
+    gray_changed[41] = 1;
+    gray_changed[42] = 0;
+    refreshPngChunkCrc(&gray_changed, 37, 2);
+    try std.testing.expectError(png.PngError.InvalidTransparency, png.parse(allocator, &gray_changed));
 }
 
 test "application version carries deterministic build provenance" {
