@@ -112,6 +112,28 @@ test "batch plan sorts matches derives targets and rejects collisions" {
     );
 }
 
+test "shell-expanded batch plan accepts unquoted explicit inputs" {
+    const allocator = std.testing.allocator;
+    const inputs = [_][]const u8{ "scan-02.TIF", "scan-01.tif" };
+    var plan = try batch.buildExplicitPlan(allocator, &inputs, ".jp2");
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), plan.items.len);
+    try std.testing.expectEqualStrings("scan-01.tif", plan.items[0].input_path);
+    try std.testing.expectEqualStrings("scan-01.jp2", plan.items[0].output_path);
+    try std.testing.expectEqualStrings("scan-02.TIF", plan.items[1].input_path);
+    try std.testing.expectEqualStrings("scan-02.jp2", plan.items[1].output_path);
+
+    const collision = [_][]const u8{ "same.tif", "same.tiff" };
+    try std.testing.expectError(
+        batch.BatchError.OutputCollision,
+        batch.buildExplicitPlan(allocator, &collision, ".jp2"),
+    );
+    try std.testing.expectError(
+        batch.BatchError.InvalidPattern,
+        batch.buildExplicitPlan(allocator, &.{"*.tif"}, ".jp2"),
+    );
+}
+
 const minimal_jp2_codestream = [_]u8{
     0xff, 0x4f, // SOC
     0xff, 0x51, // SIZ
@@ -4348,31 +4370,77 @@ test "foreign Kakadu sampled sYCC converts to OpenJPEG and Grok matching sRGB" {
     }
 }
 
-test "sampled sYCC conversion fails closed for an unaligned image origin" {
+test "foreign odd-origin Kakadu sYCC matches OpenJPEG edge conversion" {
     const allocator = std.testing.allocator;
-    const source = @embedFile("testdata/kakadu-rpcl-420-origin-multi-precinct-pltless.jp2");
-    const wrapped = try allocator.dupe(u8, source);
-    defer allocator.free(wrapped);
-    const jp2h_payload = try findJp2BoxPayload(wrapped, "jp2h");
-    const colr_payload = try findJp2ChildBoxPayload(wrapped, jp2h_payload, "colr");
-    writeU32BeTest(wrapped, colr_payload.start + 3, 18);
-
-    const info = try jp2.parseInfo(wrapped);
+    const source = @embedFile("testdata/kakadu-sycc420-origin.jp2");
+    const info = try jp2.parseInfo(source);
     try std.testing.expectEqual(jp2.ColorSpace.sycc, info.color_space);
     try std.testing.expectEqual(@as(u32, 5), info.image_origin_x);
     try std.testing.expectEqual(@as(u32, 3), info.image_origin_y);
-    const codestream_bytes = try jp2.extractCodestream(wrapped);
+    const codestream_bytes = try jp2.extractCodestream(source);
     var native = try codestream.decodeLosslessPlanar(allocator, codestream_bytes);
     defer native.deinit();
-    try std.testing.expectError(
-        color.ColorError.UnsupportedColorSpace,
-        color.syccToSrgb(allocator, native, .{
-            .image_origin_x = info.image_origin_x,
-            .image_origin_y = info.image_origin_y,
-            .chroma_x = 2,
-            .chroma_y = 2,
-        }),
+    var rgb = try color.syccToSrgb(allocator, native, .{
+        .image_origin_x = info.image_origin_x,
+        .image_origin_y = info.image_origin_y,
+        .chroma_x = 2,
+        .chroma_y = 2,
+    });
+    defer rgb.deinit();
+
+    var openjpeg = try tiff.parseRgb(
+        allocator,
+        @embedFile("testdata/openjpeg-sycc420-origin.tif"),
     );
+    defer openjpeg.deinit();
+    try std.testing.expectEqual(@as(usize, 32), rgb.width);
+    try std.testing.expectEqual(@as(usize, 32), rgb.height);
+    try std.testing.expectEqualSlices(u16, openjpeg.samples, rgb.samples);
+    try std.testing.expectEqualSlices(u16, &.{ 0, 142, 0 }, rgb.samples[0..3]);
+    try std.testing.expectEqualSlices(u16, &.{ 0, 238, 0 }, rgb.samples[32 * 3 ..][0..3]);
+    try std.testing.expectEqualSlices(u16, &.{ 255, 178, 44 }, rgb.samples[64 * 3 ..][0..3]);
+
+    const multitile = @embedFile("testdata/kakadu-rpcl-420-origin-multitile-pltless.jp2");
+    const multitile_codestream = try jp2.extractCodestream(multitile);
+    var multitile_native = try codestream.decodeLosslessPlanar(allocator, multitile_codestream);
+    defer multitile_native.deinit();
+    var multitile_rgb = try color.syccToSrgb(allocator, multitile_native, .{
+        .image_origin_x = info.image_origin_x,
+        .image_origin_y = info.image_origin_y,
+        .chroma_x = 2,
+        .chroma_y = 2,
+    });
+    defer multitile_rgb.deinit();
+    try std.testing.expectEqualSlices(u16, openjpeg.samples, multitile_rgb.samples);
+}
+
+test "foreign sampled e-sYCC signalling preserves native Kakadu planes" {
+    const allocator = std.testing.allocator;
+    const sycc = @embedFile("testdata/kakadu-sycc420-origin.jp2");
+    const esycc = try allocator.dupe(u8, sycc);
+    defer allocator.free(esycc);
+    const jp2h = try findJp2BoxPayload(esycc, "jp2h");
+    const colr = try findJp2ChildBoxPayload(esycc, jp2h, "colr");
+    writeU32BeTest(esycc, colr.start + 3, 24);
+
+    const info = try jp2.parseInfo(esycc);
+    try std.testing.expectEqual(jp2.ColorSpace.esycc, info.color_space);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 2 }, info.component_xrsiz[0..3]);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 2 }, info.component_yrsiz[0..3]);
+
+    var original = try codestream.decodeLosslessPlanar(
+        allocator,
+        try jp2.extractCodestream(sycc),
+    );
+    defer original.deinit();
+    var preserved = try codestream.decodeLosslessPlanar(
+        allocator,
+        try jp2.extractCodestream(esycc),
+    );
+    defer preserved.deinit();
+    for (original.planes, preserved.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
 }
 
 test "JP2 grayscale wrapper validates one-component metadata and polarity" {
@@ -5916,6 +5984,142 @@ test "mixed precision planar encode emits SIZ QCC BPCC and roundtrips" {
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeLosslessPlanarWithOptions(allocator, source, .{ .levels = 2, .mct = .rct }),
+    );
+}
+
+test "JP2 preserves explicit CMYK extended RGB YCC and default CIELab signalling" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        color_space: jp2.ColorSpace,
+        components: usize,
+        enum_cs: u32,
+    }{
+        .{ .color_space = .cmyk, .components = 4, .enum_cs = 12 },
+        .{ .color_space = .cielab, .components = 3, .enum_cs = 14 },
+        .{ .color_space = .esrgb, .components = 3, .enum_cs = 20 },
+        .{ .color_space = .esycc, .components = 3, .enum_cs = 24 },
+    };
+
+    var source3 = try color.SamplePlanes.init(allocator, 9, 7, 8, 3);
+    defer source3.deinit();
+    var source4 = try color.SamplePlanes.init(allocator, 9, 7, 8, 4);
+    defer source4.deinit();
+    for ([_]*color.SamplePlanes{ &source3, &source4 }) |source| {
+        for (source.planes, 0..) |plane, component| {
+            for (plane, 0..) |*sample, index| {
+                sample.* = @intCast((index * 29 + component * 53 + 7) & 0xff);
+            }
+        }
+    }
+    const encoded3 = try codestream.encodeLosslessPlanarWithOptions(allocator, source3, .{
+        .levels = 2,
+        .layers = 2,
+        .mct = .none,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded3);
+    const encoded4 = try codestream.encodeLosslessPlanarWithOptions(allocator, source4, .{
+        .levels = 2,
+        .layers = 2,
+        .mct = .none,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded4);
+
+    for (cases) |case| {
+        const source = if (case.components == 4) source4 else source3;
+        const encoded = if (case.components == 4) encoded4 else encoded3;
+        const wrapped = try jp2.wrapPlanarColorCodestream(
+            allocator,
+            source,
+            case.color_space,
+            encoded,
+        );
+        defer allocator.free(wrapped);
+
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(case.color_space, info.color_space);
+        try std.testing.expectEqual(@as(u16, @intCast(case.components)), info.components);
+        try std.testing.expectEqual(@as(u16, @intCast(case.components)), info.output_components);
+        try std.testing.expectEqual(@as(?jp2.AlphaMode, null), info.alpha_mode);
+        try std.testing.expect(!info.has_icc_profile);
+        try std.testing.expectEqual(@as(?u32, case.enum_cs), case.color_space.enumeratedCode());
+
+        const jp2h = try findJp2BoxPayload(wrapped, "jp2h");
+        const colr = try findJp2ChildBoxPayload(wrapped, jp2h, "colr");
+        try std.testing.expectEqual(@as(usize, 7), colr.end - colr.start);
+        try std.testing.expectEqual(@as(u8, 1), wrapped[colr.start]);
+        try std.testing.expectEqual(case.enum_cs, readU32BeTest(wrapped, colr.start + 3));
+
+        var decoded = try codestream.decodeLosslessPlanar(
+            allocator,
+            try jp2.extractCodestream(wrapped),
+        );
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
+}
+
+test "foreign Grok CMYK signalling and native planes match ImageMagick source" {
+    const allocator = std.testing.allocator;
+    const wrapped = @embedFile("testdata/grok-cmyk-8x8.jp2");
+    const source = @embedFile("testdata/imagemagick-cmyk-8x8.raw");
+    try std.testing.expectEqual(@as(usize, 8 * 8 * 4), source.len);
+
+    const info = try jp2.parseInfo(wrapped);
+    try std.testing.expectEqual(jp2.ColorSpace.cmyk, info.color_space);
+    try std.testing.expectEqual(@as(u16, 4), info.components);
+    try std.testing.expectEqual(@as(?jp2.AlphaMode, null), info.alpha_mode);
+
+    var decoded = try codestream.decodeLosslessPlanar(
+        allocator,
+        try jp2.extractCodestream(wrapped),
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 4), decoded.planes.len);
+    for (0..8 * 8) |pixel| {
+        for (0..4) |component| {
+            try std.testing.expectEqual(
+                @as(u16, source[pixel * 4 + component]),
+                decoded.planes[component][pixel],
+            );
+        }
+    }
+}
+
+test "explicit preserved colour signalling rejects ambiguous layouts and CIELab parameters" {
+    const allocator = std.testing.allocator;
+    var rgb = try color.SamplePlanes.init(allocator, 2, 1, 8, 3);
+    defer rgb.deinit();
+    const encoded = minimal_jp2_codestream[0..];
+
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedColorSpace,
+        jp2.wrapPlanarColorCodestream(allocator, rgb, .cmyk, encoded),
+    );
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedColorSpace,
+        jp2.wrapPlanarColorCodestream(allocator, rgb, .srgb, encoded),
+    );
+
+    const cielab = try jp2.wrapPlanarColorCodestream(allocator, rgb, .cielab, encoded);
+    defer allocator.free(cielab);
+    const jp2h = try findJp2BoxPayload(cielab, "jp2h");
+    const colr = try findJp2ChildBoxPayload(cielab, jp2h, "colr");
+    const with_partial_parameters = try replaceJp2ChildBoxForTest(
+        allocator,
+        cielab,
+        jp2h,
+        colr,
+        "colr",
+        &.{ 1, 0, 0, 0, 0, 0, 14, 0 },
+    );
+    defer allocator.free(with_partial_parameters);
+    try std.testing.expectError(
+        jp2.Jp2Error.UnsupportedProfile,
+        jp2.parseInfo(with_partial_parameters),
     );
 }
 
@@ -7504,6 +7708,83 @@ test "sYCC 4:4:4 converts explicitly to clipped sRGB at 8 and 16 bits" {
             .chroma_y = 2,
         }),
     );
+}
+
+test "unaligned sampled sYCC uses explicit OpenJPEG edge phases at 8 and 16 bits" {
+    const allocator = std.testing.allocator;
+
+    var sycc420 = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        3,
+        3,
+        &.{ 8, 8, 8 },
+        &.{ 3, 1, 1 },
+        &.{ 3, 1, 1 },
+    );
+    defer sycc420.deinit();
+    @memset(sycc420.planes[0], 128);
+    sycc420.planes[1][0] = 128;
+    sycc420.planes[2][0] = 128;
+    var rgb420 = try color.syccToSrgb(allocator, sycc420, .{
+        .image_origin_x = 1,
+        .image_origin_y = 1,
+        .chroma_x = 2,
+        .chroma_y = 2,
+    });
+    defer rgb420.deinit();
+    try std.testing.expectEqualSlices(u16, &.{
+        0,   255, 0,   0,   255, 0,   0,   255, 0,
+        0,   255, 0,   128, 128, 128, 128, 128, 128,
+        128, 128, 128, 128, 128, 128, 128, 128, 128,
+    }, rgb420.samples);
+
+    var sycc422 = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        3,
+        2,
+        &.{ 8, 8, 8 },
+        &.{ 3, 1, 1 },
+        &.{ 2, 2, 2 },
+    );
+    defer sycc422.deinit();
+    @memset(sycc422.planes[0], 128);
+    @memset(sycc422.planes[1], 128);
+    @memset(sycc422.planes[2], 128);
+    var rgb422 = try color.syccToSrgb(allocator, sycc422, .{
+        .image_origin_x = 1,
+        .image_origin_y = 0,
+        .chroma_x = 2,
+        .chroma_y = 1,
+    });
+    defer rgb422.deinit();
+    try std.testing.expectEqualSlices(u16, &.{
+        0, 255, 0, 128, 128, 128, 128, 128, 128,
+        0, 255, 0, 128, 128, 128, 128, 128, 128,
+    }, rgb422.samples);
+
+    var sycc16 = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        2,
+        2,
+        &.{ 16, 16, 16 },
+        &.{ 2, 1, 1 },
+        &.{ 2, 1, 1 },
+    );
+    defer sycc16.deinit();
+    @memset(sycc16.planes[0], 32768);
+    sycc16.planes[1][0] = 32768;
+    sycc16.planes[2][0] = 32768;
+    var rgb16 = try color.syccToSrgb(allocator, sycc16, .{
+        .image_origin_x = 1,
+        .image_origin_y = 1,
+        .chroma_x = 2,
+        .chroma_y = 2,
+    });
+    defer rgb16.deinit();
+    try std.testing.expectEqualSlices(u16, &.{
+        0, 65535, 0, 0,     65535, 0,
+        0, 65535, 0, 32768, 32768, 32768,
+    }, rgb16.samples);
 }
 
 test "sYCC 4:4:4 conversion rejects invalid precision range and layouts" {

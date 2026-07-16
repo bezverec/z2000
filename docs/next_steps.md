@@ -50,6 +50,10 @@ This is the only active implementation queue. Strategic policy is in
 - PRs #156–#157 capped the 5/3 DWT phase at eight workers and gave it a
   persistent pool. Lossless output stayed byte-identical while t16 encode
   improved; detailed numbers live in `benchmarks.md`.
+- The bounded colour-metadata boundary recognizes CMYK (12), default-parameter
+  CIELab (14), e-sRGB (20), and e-sYCC (24). Explicit writer output and strict
+  decode preserve native planes exactly; sampled e-sYCC retains the bounded
+  YCC geometry, while TIFF/display conversion remains fail-closed.
 
 ## Ordered Queue
 
@@ -57,14 +61,15 @@ This is the only active implementation queue. Strategic policy is in
 
 Keep native component decode and byte-preserving ICC storage unchanged. The
 current boundary recognizes EnumCS 18 and converts unsigned 8/16-bit sYCC
-4:4:4 plus chroma-aligned 4:2:2/4:2:0 directly from native planes at the
-JP2-to-TIFF boundary. Embedded Kakadu fixtures match the complete OpenJPEG and
-Grok sRGB rasters. The separate conversion API now supports bounded ICC v2/v4
+4:4:4 plus 4:2:2/4:2:0 directly from native planes at the JP2-to-TIFF boundary,
+including the pinned odd-origin OpenJPEG edge phase. Aligned Kakadu fixtures
+match the complete OpenJPEG and Grok sRGB rasters; the odd-origin fixture
+matches OpenJPEG exactly. The separate conversion API supports bounded ICC v2/v4
 RGB matrix/TRC profiles, with official eciRGB v2 and CC0 Adobe RGB-compatible
-fixtures matching LittleCMS reference vectors. Continue in this order:
-
-1. unaligned-origin sampled sYCC edge semantics;
-2. CMYK, extended YCC, and CIELab signalling/preservation before conversion.
+fixtures matching LittleCMS reference vectors. CMYK, default-parameter CIELab,
+e-sRGB, and e-sYCC now have explicit, plane-exact signalling/preservation APIs;
+they remain deliberately unavailable to TIFF/display conversion. The bounded
+colour slice is complete, so the next active implementation item is section 2.
 
 No colour conversion belongs inside T1/T2, and no component layout may be
 silently interpreted as RGB or YCC.

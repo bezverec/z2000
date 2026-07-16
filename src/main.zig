@@ -58,6 +58,8 @@ pub fn main(init: std.process.Init) !void {
         try decodeTempJp2Command(io, allocator, args[2..]);
     } else if (batch.hasWildcards(std.fs.path.basename(args[1]))) {
         try batchConversionCommand(io, allocator, args[1..]);
+    } else if (expandedBatchTargetIndex(args[1..])) |target_index| {
+        try expandedBatchConversionCommand(io, allocator, args[1..], target_index);
     } else if (inferConversion(args[1..])) |conversion| {
         switch (conversion) {
             .tiff_to_jp2 => try tiffToJp2Command(io, allocator, args[1..]),
@@ -94,6 +96,18 @@ fn inferConversionExtensions(input_ext: []const u8, output_ext: []const u8) ?Inf
     return null;
 }
 
+/// Detects the argument shape produced when a shell expands an unquoted glob:
+/// `z2000 a.tif b.tif .jp2 [options]`. A normal output filename never starts
+/// with a dot-only extension, so single-file shorthand remains unambiguous.
+fn expandedBatchTargetIndex(args: []const []const u8) ?usize {
+    if (args.len < 2) return null;
+    var index: usize = 1;
+    while (index < args.len and !std.mem.startsWith(u8, args[index], "-")) : (index += 1) {
+        if (batch.isTargetExtension(args[index])) return index;
+    }
+    return null;
+}
+
 /// Non-recursive shorthand batch dispatch: `z2000 *.tif .jp2 [options]`.
 /// The shell passes the wildcard through unchanged on Windows; z2000 expands
 /// it in the concrete parent directory and derives one target path per file.
@@ -119,22 +133,71 @@ fn batchConversionCommand(
         return err;
     };
     defer plan.deinit();
+    try executeBatchPlan(io, allocator, plan.items, conversion, args[2..]);
+}
 
+fn expandedBatchConversionCommand(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    target_index: usize,
+) !void {
+    if (target_index == 0 or target_index >= args.len) return batch.BatchError.InvalidPattern;
+    const target_extension = args[target_index];
+    const input_paths = args[0..target_index];
+    const conversion = inferConversionExtensions(
+        std.fs.path.extension(input_paths[0]),
+        target_extension,
+    ) orelse {
+        usage();
+        return error.InvalidCommand;
+    };
+    for (input_paths[1..]) |path| {
+        const candidate = inferConversionExtensions(
+            std.fs.path.extension(path),
+            target_extension,
+        ) orelse {
+            usage();
+            return error.InvalidCommand;
+        };
+        if (candidate != conversion) {
+            usage();
+            return error.InvalidCommand;
+        }
+    }
+
+    var plan = batch.buildExplicitPlan(allocator, input_paths, target_extension) catch |err| {
+        if (err == batch.BatchError.OutputCollision) {
+            std.debug.print("batch: multiple inputs map to the same target extension '{s}'\n", .{target_extension});
+        }
+        return err;
+    };
+    defer plan.deinit();
+    try executeBatchPlan(io, allocator, plan.items, conversion, args[target_index + 1 ..]);
+}
+
+fn executeBatchPlan(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    items: []const batch.Item,
+    conversion: InferredConversion,
+    options: []const []const u8,
+) !void {
     var file_args: std.ArrayList([]const u8) = .empty;
     defer file_args.deinit(allocator);
-    try file_args.ensureTotalCapacity(allocator, args.len);
-    for (plan.items) |item| {
+    try file_args.ensureTotalCapacity(allocator, options.len + 2);
+    for (items) |item| {
         file_args.clearRetainingCapacity();
         try file_args.appendSlice(allocator, &.{ item.input_path, item.output_path });
-        try file_args.appendSlice(allocator, args[2..]);
+        try file_args.appendSlice(allocator, options);
         switch (conversion) {
             .tiff_to_jp2 => try tiffToJp2Command(io, allocator, file_args.items),
             .jp2_to_tiff => try decodeTempJp2Command(io, allocator, file_args.items),
         }
     }
     std.debug.print("batch converted {} file{s}\n", .{
-        plan.items.len,
-        if (plan.items.len == 1) "" else "s",
+        items.len,
+        if (items.len == 1) "" else "s",
     });
 }
 
@@ -780,6 +843,13 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
                 return icc_color.IccError.UnsupportedProfile;
             }
         }
+    } else switch (info.color_space) {
+        // These spaces are intentionally preserved as native planes and
+        // metadata by the JP2 API. The TIFF command has no explicit mapping
+        // for them yet, so treating their samples as RGB/alpha would be a
+        // silent colour conversion.
+        .cmyk, .cielab, .esrgb, .esycc => return jp2.Jp2Error.UnsupportedColorSpace,
+        else => {},
     }
 
     var decode_timings = codestream.DecodeTimings{};
@@ -1528,8 +1598,8 @@ fn usage() void {
         \\  z2000 --version
         \\  z2000 <input.tif> <output.jp2> [options]   (shorthand for tiff-to-jp2)
         \\  z2000 <input.jp2> <output.tif> [options]   (shorthand for decode-temp-jp2)
-        \\  z2000 <pattern.tif> .jp2 [options]          (non-recursive batch; supports * and ?)
-        \\  z2000 <pattern.jp2> .tif [options]          (non-recursive reverse batch)
+        \\  z2000 *.tif .jp2 [options]                  (non-recursive batch; supports * and ?)
+        \\  z2000 *.jp2 .tif [options]                  (non-recursive reverse batch)
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
@@ -1541,7 +1611,8 @@ fn usage() void {
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.
-        \\  Batch patterns apply only to filenames in one concrete directory; existing targets follow single-file overwrite behavior.
+        \\  Batch patterns apply only to filenames in one concrete directory; shell-expanded input lists are accepted too.
+        \\  Existing targets follow single-file overwrite behavior.
         \\  .z2000 is an educational codestream, not ISO JPEG2000 yet.
         \\  tiff-to-jp2 writes strict RPCL packet payloads; --debug-temp-sidecar adds the legacy BP8 COM payload for diagnostics.
         \\  --poc uses quoted ISO records: RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;... and supports tile-parts none or compatible R/L/C/P; --poc-location defaults to main.

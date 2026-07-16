@@ -84,6 +84,47 @@ pub fn buildPlan(
     };
 }
 
+/// Builds the same deterministic plan after a shell has already expanded the
+/// wildcard into explicit input paths (for example Bash handling `*.tif`).
+pub fn buildExplicitPlan(
+    allocator: std.mem.Allocator,
+    input_paths: []const []const u8,
+    target_extension: []const u8,
+) !Plan {
+    if (!isTargetExtension(target_extension)) return BatchError.InvalidTargetExtension;
+    if (input_paths.len == 0) return BatchError.NoMatchingFiles;
+
+    var items: std.ArrayList(Item) = .empty;
+    errdefer {
+        for (items.items) |item| {
+            allocator.free(item.input_path);
+            allocator.free(item.output_path);
+        }
+        items.deinit(allocator);
+    }
+    var outputs: std.StringHashMap(void) = .init(allocator);
+    defer outputs.deinit();
+
+    for (input_paths) |path| {
+        if (path.len == 0 or hasWildcards(path)) return BatchError.InvalidPattern;
+        const input_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(input_path);
+        const output_path = try replaceExtension(allocator, input_path, target_extension);
+        errdefer allocator.free(output_path);
+        const output = try outputs.getOrPut(output_path);
+        if (output.found_existing) return BatchError.OutputCollision;
+        try items.append(allocator, .{
+            .input_path = input_path,
+            .output_path = output_path,
+        });
+    }
+    std.mem.sort(Item, items.items, {}, itemLessThan);
+    return .{
+        .allocator = allocator,
+        .items = try items.toOwnedSlice(allocator),
+    };
+}
+
 pub fn hasWildcards(text: []const u8) bool {
     return std.mem.findScalar(u8, text, '*') != null or
         std.mem.findScalar(u8, text, '?') != null;

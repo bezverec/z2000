@@ -48,8 +48,16 @@ Enumerated sYCC is equally explicit: `jp2.Info.color_space` records the selected
 `tile_origin_x/y` retain the SIZ registration. Native component decode remains
 unchanged. `color.syccToSrgb` converts 8/16-bit 4:4:4, 4:2:2, or 4:2:0 native
 planes directly at the JP2-to-TIFF boundary without materializing three
-upsampled planes. Sampled conversion requires a chroma-grid-aligned image
-origin; unaligned edge semantics remain fail-closed.
+upsampled planes. For an odd sampled image origin, missing leading chroma
+positions use code zero; 4:2:0 also preserves the pinned OpenJPEG two-row edge
+phase. Component geometry is still checked before conversion.
+CMYK (12), default-parameter CIELab (14), e-sRGB (20), and e-sYCC (24) stop at
+an explicit preservation boundary. `jp2.Info.color_space` records the selected
+interpretation and `jp2.wrapPlanarColorCodestream` can emit matching
+full-resolution native planes, but neither path converts them to RGB. Sampled
+e-sYCC is accepted on the same bounded geometry as sYCC and remains planar.
+The TIFF command rejects all four rather than silently interleaving their
+samples as RGB or treating CMYK's fourth channel as alpha.
 `src/icc.zig` owns the separate ICC conversion boundary. It parses only bounded
 ICC v2/v4 RGB matrix/TRC profiles with PCSXYZ and converts an already-decoded,
 full-resolution 8/16-bit `RgbImage` to sRGB. The codestream and native component
@@ -187,10 +195,13 @@ component precision, sampling, and SIZ agreement are checked.
 
 Restricted ICC profiles are preserved byte-for-byte by default. Preservation is
 not colour conversion. Enumerated sYCC (18) is recognized for three unsigned
-uniform 8/16-bit components; the CLI converts aligned 4:4:4, 4:2:2, and 4:2:0
+uniform 8/16-bit components; the CLI converts 4:4:4, 4:2:2, and 4:2:0
 input to sRGB. Opt-in ICC conversion accepts only full-resolution RGB matrix/TRC
-profiles with PCSXYZ. Unsupported JPX composition, unaligned sampled sYCC,
-LUT/general ICC interpretation, and unknown component mappings fail closed.
+profiles with PCSXYZ. Unsupported JPX composition, invalid sampled geometry,
+non-default CIELab parameters, LUT/general ICC interpretation, and unknown
+component mappings fail closed. CMYK, default CIELab, e-sRGB, and e-sYCC
+signalling preserve native planes but deliberately have no TIFF/sRGB conversion
+yet.
 
 ## Parallelism And Memory
 

@@ -196,9 +196,10 @@ pub const SyccSampling = struct {
 };
 
 /// Converts unsigned native-size sYCC planes to interleaved sRGB samples.
-/// Chroma may be full-resolution, 4:2:2, or 4:2:0. Sampled layouts require an
-/// image origin aligned to the chroma grid; unaligned edge semantics remain
-/// fail-closed until they have an independent interoperability contract.
+/// Chroma may be full-resolution, 4:2:2, or 4:2:0. For an image origin not
+/// aligned to the chroma grid, uncovered leading edge positions use zero-code
+/// Cb/Cr with the same row/column phase as OpenJPEG's sYCC conversion. Native
+/// planes remain unchanged; the edge rule exists only at this RGB boundary.
 pub fn syccToSrgb(
     allocator: std.mem.Allocator,
     planes: SamplePlanes,
@@ -218,9 +219,7 @@ pub fn syccToSrgb(
     }
     if (!((sampling.chroma_x == 1 and sampling.chroma_y == 1) or
         (sampling.chroma_x == 2 and sampling.chroma_y == 1) or
-        (sampling.chroma_x == 2 and sampling.chroma_y == 2)) or
-        sampling.image_origin_x % sampling.chroma_x != 0 or
-        sampling.image_origin_y % sampling.chroma_y != 0)
+        (sampling.chroma_x == 2 and sampling.chroma_y == 2)))
     {
         return ColorError.UnsupportedColorSpace;
     }
@@ -249,18 +248,27 @@ pub fn syccToSrgb(
     const chroma_offset: i32 = @as(i32, 1) << @as(u5, @intCast(bit_depth - 1));
     const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
     errdefer allocator.free(samples);
+    const edge_x = @as(usize, sampling.image_origin_x % sampling.chroma_x);
+    const edge_y = @as(usize, sampling.image_origin_y % sampling.chroma_y);
     for (0..planes.height) |y| {
-        const absolute_y = @as(u64, sampling.image_origin_y) + y;
-        const chroma_y = @as(usize, @intCast(absolute_y / sampling.chroma_y - chroma_y0));
         for (0..planes.width) |x| {
-            const absolute_x = @as(u64, sampling.image_origin_x) + x;
-            const chroma_x = @as(usize, @intCast(absolute_x / sampling.chroma_x - chroma_x0));
             const luma_index = y * planes.width + x;
-            const chroma_index = chroma_y * chroma_width + chroma_x;
+            const chroma_index = syccChromaIndex(
+                x,
+                y,
+                edge_x,
+                edge_y,
+                sampling.chroma_x,
+                sampling.chroma_y,
+                chroma_width,
+                chroma_height,
+            );
+            const cb_code = if (chroma_index) |index| planes.planes[1][index] else 0;
+            const cr_code = if (chroma_index) |index| planes.planes[2][index] else 0;
             const rgb = try syccSampleToRgb(
                 planes.planes[0][luma_index],
-                planes.planes[1][chroma_index],
-                planes.planes[2][chroma_index],
+                cb_code,
+                cr_code,
                 max_sample,
                 chroma_offset,
             );
@@ -274,6 +282,33 @@ pub fn syccToSrgb(
         .bit_depth = bit_depth,
         .samples = samples,
     };
+}
+
+/// Maps one full-resolution pixel to its sampled chroma plane. OpenJPEG's
+/// established 4:2:0 edge phase uses zero chroma for a leading odd-origin row
+/// and for the leading column of each first row in a two-row pair; the second
+/// row reuses the first stored chroma sample at that column. In 4:2:2 every
+/// leading odd-origin column position uses zero chroma.
+fn syccChromaIndex(
+    x: usize,
+    y: usize,
+    edge_x: usize,
+    edge_y: usize,
+    chroma_x: u8,
+    chroma_y: u8,
+    chroma_width: usize,
+    chroma_height: usize,
+) ?usize {
+    if (y < edge_y) return null;
+    const relative_y = y - edge_y;
+    const source_y = relative_y / chroma_y;
+    if (source_y >= chroma_height) return null;
+    const source_x = if (x < edge_x) edge: {
+        if (relative_y % chroma_y == 0) return null;
+        break :edge 0;
+    } else (x - edge_x) / chroma_x;
+    if (source_x >= chroma_width) return null;
+    return source_y * chroma_width + source_x;
 }
 
 /// Convenience entry point for full-resolution sYCC planes.

@@ -31,8 +31,8 @@ zig build run -- tiff-to-jp2 input.tif output.jp2 [options]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--convert-to-srgb]
-zig build run -- "*.tif" .jp2 [tiff-to-jp2 options]
-zig build run -- "*.jp2" .tif [jp2-to-tiff options]
+zig build run -- *.tif .jp2 [tiff-to-jp2 options]
+zig build run -- *.jp2 .tif [jp2-to-tiff options]
 ```
 
 `--version` (or `-V`) prints the generated SemVer application version including
@@ -59,11 +59,12 @@ The shorthand also has a non-recursive batch form. A first argument whose
 filename contains `*` or `?` is expanded internally within its concrete parent
 directory, and the second argument must be a bare target extension such as
 `.jp2` or `.tif`. Matching is ASCII case-insensitive, results are sorted before
-conversion, and all remaining options are applied to every file. Quote the
-pattern in shells that expand globs themselves. Empty matches, wildcard parent
-directories, and two inputs mapping to one output fail before any conversion;
-ordinary per-file errors stop the batch. Existing targets follow the same
-overwrite behavior as single-file conversion.
+conversion, and all remaining options are applied to every file. Quoting the
+pattern is unnecessary: z2000 accepts both an intact wildcard and the explicit
+input list produced by shells that expand globs themselves. Empty matches,
+wildcard parent directories, and two inputs mapping to one output fail before
+any conversion; ordinary per-file errors stop the batch. Existing targets
+follow the same overwrite behavior as single-file conversion.
 
 Important `tiff-to-jp2` options:
 
@@ -150,9 +151,10 @@ absolute sources of truth.
 
 Future conversion-surface goals are deliberately not part of the current CLI
 contract yet: JPEG/PNG/BMP input, RAW/DNG conversion, OpenEXR/HDR handling,
-monochrome/palette/YCC/eYCC/CIELab/CMYK color spaces, EXIF/IPTC/XMP metadata,
-and component precision above 16 bits. Each should get an explicit option,
-fail-closed parser policy, and interop fixture before becoming public.
+display conversion for preserved e-sRGB/e-sYCC/CIELab/CMYK samples,
+EXIF/IPTC/XMP metadata, and component precision above 16 bits. Each should get
+an explicit option, fail-closed parser policy, and interop fixture before
+becoming public.
 
 ## `src/codestream.zig`
 
@@ -228,10 +230,14 @@ Primary public functions:
   responsible for establishing RGB semantics from the container
 - `color.syccToSrgb(allocator, planes, sampling)` — explicit unsigned 8/16-bit
   sYCC 4:4:4, 4:2:2, or 4:2:0 native-plane conversion with checked dimensions,
-  chroma-grid registration, range, and clipping; sampled conversion currently
-  requires an aligned image origin
+  chroma-grid registration, range, and clipping; an odd image origin uses the
+  pinned OpenJPEG edge phase without changing the native planes
 - `color.sycc444ToSrgb(allocator, planes)` — full-resolution convenience
   entry point delegating to `syccToSrgb`
+- `jp2.wrapPlanarColorCodestream(allocator, planes, color_space, codestream)` —
+  emits full-resolution native planes with explicit CMYK (12),
+  default-parameter CIELab (14), e-sRGB (20), or e-sYCC (24) signalling; it
+  preserves samples and does not perform display conversion
 - `icc.convertRgbToSrgb(allocator, input, profile_bytes)` — converts an
   unsigned 8/16-bit full-resolution RGB image through a bounded ICC v2/v4
   matrix/TRC PCSXYZ profile to an owned sRGB raster; source pixels/profile stay
@@ -339,10 +345,19 @@ POC and MCT over subsampled planes remain fail-closed. The explicit
 `decodeLosslessPlanarUpsampled` boundary expands native planes using absolute
 reference-grid registration; `decode-temp-jp2` interleaves them only for a
 bounded three-component sRGB JP2 wrapper. `Info.color_space` preserves the
-selected grayscale, sRGB, sYCC, or restricted-ICC interpretation. For sYCC,
+selected grayscale, sRGB, sYCC, CMYK, default-parameter CIELab, e-sRGB,
+e-sYCC, or restricted-ICC interpretation. For sYCC,
 `decode-temp-jp2` converts unsigned uniform 8/16-bit 4:4:4, 4:2:2, and 4:2:0
-native planes directly through `color.syccToSrgb` when `XOsiz/YOsiz` are
-aligned to the chroma sampling grid. Unaligned sampled sYCC remains fail-closed.
+native planes directly through `color.syccToSrgb`. For sampled input with an
+odd `XOsiz/YOsiz`, missing leading chroma positions use code zero and 4:2:0
+retains OpenJPEG's two-row edge phase. Invalid component geometry remains
+fail-closed.
+CMYK, CIELab, e-sRGB, and e-sYCC remain native planar interpretations: strict
+codestream decode is plane-exact, while `decode-temp-jp2` rejects them until a
+target-format conversion/mapping is explicit. Sampled e-sYCC preserves the
+same bounded 4:4:4/4:2:2/4:2:0 geometry as sYCC without applying the sYCC
+matrix. CIELab currently accepts only the standard default encoding (no EP
+fields); partial or non-default parameter blocks fail closed.
 Explicit POC in the main or first
 tile-part header may compose LRCP, RLCP, RPCL, PCRL, and CPRL intervals when
 the schedule covers every component-local packet exactly once. Sampled encode
@@ -368,9 +383,10 @@ Primary public functions:
 
 The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
-enumerated sRGB (16), grayscale (17), or bounded sYCC (18) `colr`, and one contiguous `jp2c`
-codestream. The reader accepts uniform unsigned 8-bit and 16-bit one- or
-three-component metadata. A variable-BPC `ihdr` plus `BPCC` may describe a
+enumerated CMYK (12), default-parameter CIELab (14), sRGB (16), grayscale (17),
+bounded sYCC (18), e-sRGB (20), or bounded e-sYCC (24) `colr`, and one
+contiguous `jp2c` codestream. The reader accepts bounded unsigned 8-bit and
+16-bit one- through four-component metadata. A variable-BPC `ihdr` plus `BPCC` may describe a
 bounded mixture of unsigned 8/16-bit component precisions and is checked
 component-by-component against SIZ. Two additional bounded extensions are a
 palette layout with

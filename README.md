@@ -31,12 +31,14 @@ certification.
   planar layouts, alpha-aware JP2 `cdef` signalling, and reversible RGBA RCT
   over the RGB triplet only, with strict malformed-input handling and
   OpenJPEG/Grok/Kakadu interoperability tests.
-- Explicit JP2 colour metadata with sRGB, grayscale, restricted ICC, and sYCC
-  recognition. The JP2-to-TIFF path converts unsigned 8/16-bit sYCC 4:4:4,
-  4:2:2, and 4:2:0 to sRGB when the image origin is chroma-grid aligned;
+- Explicit JP2 colour metadata with sRGB, grayscale, restricted ICC, sYCC,
+  CMYK, default-parameter CIELab, e-sRGB, and e-sYCC recognition. The latter
+  four are lossless signalling/native-plane preservation boundaries and are
+  never silently treated as RGB. The JP2-to-TIFF path converts unsigned
+  8/16-bit sYCC 4:4:4,
+  4:2:2, and 4:2:0 to sRGB, including the explicit odd-origin edge phase;
   `--convert-to-srgb` separately converts bounded ICC v2/v4 RGB matrix/TRC
-  PCSXYZ profiles. Unaligned sampled sYCC and general/LUT ICC transforms remain
-  fail-closed.
+  PCSXYZ profiles. General/LUT ICC transforms remain fail-closed.
 - Bounded planar encode/decode for mixed unsigned 8/16-bit component
   precision, including JP2 `BPCC`/codestream `SIZ` agreement and
   per-component QCD/QCC on the single-tile RPCL 5/3 path. z2000 output is
@@ -60,7 +62,7 @@ certification.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
-non-empty PLT-less multi-part tiles, unaligned-origin sampled sYCC and broad color management,
+non-empty PLT-less multi-part tiles, broad color management,
 JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.
@@ -127,16 +129,17 @@ z2k input.tif output.jp2
 Convert every matching TIFF in one directory, keeping each basename:
 
 ```sh
-z2k "*.tif" .jp2
-z2k "incoming/*.tiff" .jp2 --threads 8
+z2k *.tif .jp2
+z2k incoming/*.tiff .jp2 --threads 8
 ```
 
 Batch patterns support `*` and `?`, are non-recursive and case-insensitive,
 and must have a concrete parent directory. The target is a bare extension.
-Quote the pattern in shells that expand wildcards; PowerShell also accepts the
-unquoted `z2k *.tif .jp2` form. All normal conversion options apply to every
-match. Output-name collisions are rejected before conversion; existing target
-files retain the single-file overwrite behavior.
+Quotes are not part of the syntax: PowerShell passes the pattern to z2000 for
+internal expansion, while shells such as Bash may expand it to an explicit
+input list that z2000 accepts as the same batch. All normal conversion options
+apply to every match. Output-name collisions are rejected before conversion;
+existing target files retain the single-file overwrite behavior.
 
 Convert TIFF to a rate-layered JP2 (the `--rates` list sets the layer count;
 the final layer always carries the complete stream, so a trailing `1` makes
@@ -342,7 +345,7 @@ Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.
 
 Later conversion-tool target: add JPEG/PNG/BMP input first, then RAW/DNG and
-OpenEXR workflows; broaden color spaces beyond the bounded sRGB palette path to YCC,
-extended YCC, CIELab, and CMYK; preserve EXIF/IPTC/XMP; and evaluate component
+OpenEXR workflows; add display conversion for the preserved extended YCC,
+CIELab, and CMYK spaces; preserve EXIF/IPTC/XMP; and evaluate component
 depths above 16 bits where the source format and JPEG2000 profile support them
 cleanly.

@@ -5,12 +5,42 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Extended Colour-Space Signalling And Preservation
+
+- Added explicit JP2 metadata for CMYK (EnumCS 12), default-parameter CIELab
+  (14), e-sRGB (20), and e-sYCC (24). `ColorSpace` reports their semantics and
+  `wrapPlanarColorCodestream` emits full-resolution native-plane wrappers.
+- Added plane-exact 8-bit encode/wrap/parse/decode roundtrips for all four
+  spaces and a sampled odd-origin e-sYCC regression using an independent
+  Kakadu codestream. An independent Grok 20.3.4 EnumCS 12 fixture additionally
+  matches every native CMYK sample from its ImageMagick source. The colour
+  boundary never mutates native samples.
+- Kept conversion fail-closed: `decode-temp-jp2` rejects these spaces rather
+  than treating three components as RGB or CMYK's fourth component as alpha.
+  CIELab EP parameters are not yet interpreted; only the standardized default
+  encoding with no EP fields is accepted.
+
+### Unaligned-Origin Sampled sYCC
+
+- Extended direct unsigned 8/16-bit sYCC 4:2:2 and 4:2:0 conversion to odd
+  image origins. Missing leading chroma positions use code zero, and 4:2:0
+  preserves OpenJPEG's two-row left-edge phase; native decoded planes remain
+  unchanged.
+- Added a Kakadu 8.4.1 native 4:2:0 codestream with `XOsiz=5`, `YOsiz=3`; only
+  its container colour-space enum is relabelled to sYCC. All 3,072 converted
+  samples match an embedded OpenJPEG 2.5.4 reference TIFF, for single- and
+  multi-tile decode, with focused 8/16-bit synthetic edge tests.
+- Live `z2k` output matches the OpenJPEG reference with ImageMagick `AE=0`.
+  Grok 20.3.4 retains this fixture as YCbCr rather than providing a converted
+  RGB reference, so that producer/decoder caveat stays explicit.
+
 ### Non-Recursive Batch Conversion
 
-- Added native shorthand batch dispatch for `z2k "*.tif" .jp2 [options]` and
-  the reverse `z2k "*.jp2" .tif [options]`. `*`/`?` matching is performed by
-  z2000 rather than the shell, is ASCII case-insensitive, and is limited to
-  filenames in one concrete directory.
+- Added native shorthand batch dispatch for `z2k *.tif .jp2 [options]` and the
+  reverse `z2k *.jp2 .tif [options]`. Quotes are not part of the syntax:
+  z2000 expands intact `*`/`?` patterns itself and also accepts the explicit
+  input list produced by shells such as Bash. Internal matching is ASCII
+  case-insensitive and limited to filenames in one concrete directory.
 - Batch planning is deterministic and happens before conversion. It rejects an
   empty match, wildcard directory segments, invalid target extensions, and
   output-name collisions. Per-file conversion reuses the ordinary command

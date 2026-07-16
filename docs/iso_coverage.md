@@ -19,7 +19,7 @@ Both bounded scorecards are complete. The narrow target measures one practical
 archival profile; the full-family target measures the broader Part 1 features
 listed below. Neither score claims formal certification or arbitrary-profile
 support. Remaining work expands component layouts and colour conversion beyond
-the bounded aligned sYCC and RGB matrix/TRC ICC slices,
+the bounded sYCC and RGB matrix/TRC ICC slices,
 containers, producer diversity, and performance outside those scored bounds.
 
 ## Narrow RGB Lossless Target
@@ -52,12 +52,21 @@ containers, producer diversity, and performance outside those scored bounds.
 | **Total** | **100** | **100** |  |
 
 The container score now also includes explicit enumerated sYCC (18) metadata
-and unsigned 8/16-bit 4:4:4 plus aligned 4:2:2/4:2:0 conversion. Embedded Kakadu
-fixtures match the complete OpenJPEG and Grok RGB rasters. The conversion
+and unsigned 8/16-bit 4:4:4 plus 4:2:2/4:2:0 conversion, including odd-origin
+edge phases. Aligned Kakadu fixtures match the complete OpenJPEG and Grok RGB
+rasters; an odd-origin Kakadu codestream matches OpenJPEG 2.5.4 exactly. Grok
+20.3.4 preserves that fixture as YCbCr instead of supplying a converted RGB
+reference. The conversion
 boundary additionally includes opt-in ICC v2/v4 RGB matrix/TRC PCSXYZ input,
 with eciRGB v2 and Adobe-compatible fixtures checked against LittleCMS.
-Remaining breadth means unaligned sampled sYCC, LUT/general ICC profiles, and
-other colour spaces; the score itself is unchanged.
+The signalling-only boundary also recognizes CMYK (12), default-parameter
+CIELab (14), e-sRGB (20), and e-sYCC (24), emits explicit full-resolution
+native-plane wrappers, and preserves bounded sampled e-sYCC geometry. Complete
+plane-exact roundtrips pin all four, with an independent Grok 20.3.4 CMYK
+fixture matching its ImageMagick source sample-for-sample; display/TIFF
+conversion and non-default CIELab parameters remain fail-closed. Remaining
+breadth means LUT/general ICC profiles and actual conversion of these spaces;
+the score itself is unchanged.
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more

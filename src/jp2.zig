@@ -19,6 +19,10 @@ pub const ColorSpace = enum {
     grayscale,
     srgb,
     sycc,
+    cmyk,
+    cielab,
+    esrgb,
+    esycc,
     restricted_icc,
 
     pub fn label(self: ColorSpace) []const u8 {
@@ -27,7 +31,26 @@ pub const ColorSpace = enum {
             .grayscale => "grayscale",
             .srgb => "sRGB",
             .sycc => "sYCC",
+            .cmyk => "CMYK",
+            .cielab => "CIELab",
+            .esrgb => "e-sRGB",
+            .esycc => "e-sYCC",
             .restricted_icc => "restricted ICC",
+        };
+    }
+
+    /// Returns the standardized JP2/JPX Enumerated Colourspace value for
+    /// colour spaces that can be carried by method 1 `colr` boxes.
+    pub fn enumeratedCode(self: ColorSpace) ?u32 {
+        return switch (self) {
+            .cmyk => enum_cs_cmyk,
+            .cielab => enum_cs_cielab,
+            .srgb => enum_cs_srgb,
+            .grayscale => enum_cs_grayscale,
+            .sycc => enum_cs_sycc,
+            .esrgb => enum_cs_esrgb,
+            .esycc => enum_cs_esycc,
+            .unknown, .restricted_icc => null,
         };
     }
 };
@@ -136,9 +159,13 @@ const BoxType = enum(u32) {
 
 const signature_payload = [_]u8{ 0x0d, 0x0a, 0x87, 0x0a };
 const brand_jp2 = fourcc("jp2 ");
+const enum_cs_cmyk: u32 = 12;
+const enum_cs_cielab: u32 = 14;
 const enum_cs_srgb: u32 = 16;
 const enum_cs_grayscale: u32 = 17;
 const enum_cs_sycc: u32 = 18;
+const enum_cs_esrgb: u32 = 20;
+const enum_cs_esycc: u32 = 24;
 const marker_soc = 0xff4f;
 const marker_cap = 0xff50;
 const marker_siz = 0xff51;
@@ -277,11 +304,56 @@ pub fn wrapPlanarCodestream(
     icc_profile: ?[]const u8,
     codestream: []const u8,
 ) ![]u8 {
+    if (input.planes.len != 1 and input.planes.len != 3) return Jp2Error.UnsupportedProfile;
+    return wrapPlanarEnumeratedCodestream(
+        allocator,
+        input,
+        if (input.planes.len == 1) enum_cs_grayscale else enum_cs_srgb,
+        icc_profile,
+        codestream,
+    );
+}
+
+/// Wraps full-resolution native planes with an explicit non-display colour
+/// interpretation. This is a signalling and sample-preservation boundary:
+/// CMYK, e-sRGB, e-sYCC, and default-parameter CIELab are not converted.
+pub fn wrapPlanarColorCodestream(
+    allocator: std.mem.Allocator,
+    input: color.SamplePlanes,
+    color_space: ColorSpace,
+    codestream: []const u8,
+) ![]u8 {
+    const enumerated_color_space = color_space.enumeratedCode() orelse
+        return Jp2Error.UnsupportedColorSpace;
+    const expected_components: usize = switch (color_space) {
+        .cmyk => 4,
+        .cielab, .esrgb, .esycc => 3,
+        else => return Jp2Error.UnsupportedColorSpace,
+    };
+    if (input.planes.len != expected_components) return Jp2Error.UnsupportedColorSpace;
+    return wrapPlanarEnumeratedCodestream(
+        allocator,
+        input,
+        enumerated_color_space,
+        null,
+        codestream,
+    );
+}
+
+fn wrapPlanarEnumeratedCodestream(
+    allocator: std.mem.Allocator,
+    input: color.SamplePlanes,
+    enumerated_color_space: u32,
+    icc_profile: ?[]const u8,
+    codestream: []const u8,
+) ![]u8 {
     if (input.width == 0 or input.height == 0) return Jp2Error.InvalidBox;
     if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
         return Jp2Error.ImageTooLarge;
     }
-    if (input.planes.len != 1 and input.planes.len != 3) return Jp2Error.UnsupportedProfile;
+    if (input.planes.len == 0 or input.planes.len > color.max_components) {
+        return Jp2Error.UnsupportedProfile;
+    }
     const pixels = std.math.mul(usize, input.width, input.height) catch return Jp2Error.ImageTooLarge;
     var component_bit_depths = [_]u8{0} ** color.max_components;
     for (input.planes, 0..) |plane, component| {
@@ -314,7 +386,7 @@ pub fn wrapPlanarCodestream(
         .components = @intCast(input.planes.len),
         .bits_per_component = input.bit_depth,
         .component_bit_depths = component_bit_depths,
-        .enumerated_color_space = if (input.planes.len == 1) enum_cs_grayscale else enum_cs_srgb,
+        .enumerated_color_space = enumerated_color_space,
         .icc_profile = icc_profile,
     }, codestream);
 }
@@ -755,6 +827,10 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var srgb_colr_index: ?usize = null;
     var grayscale_colr_index: ?usize = null;
     var sycc_colr_index: ?usize = null;
+    var cmyk_colr_index: ?usize = null;
+    var cielab_colr_index: ?usize = null;
+    var esrgb_colr_index: ?usize = null;
+    var esycc_colr_index: ?usize = null;
     var icc_colr_index: ?usize = null;
     var icc_profile_bytes: usize = 0;
     var box_index: usize = 0;
@@ -847,6 +923,18 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                             enum_cs_sycc => if (sycc_colr_index == null) {
                                 sycc_colr_index = box_index;
                             },
+                            enum_cs_cmyk => if (cmyk_colr_index == null) {
+                                cmyk_colr_index = box_index;
+                            },
+                            enum_cs_cielab => if (cielab_colr_index == null) {
+                                cielab_colr_index = box_index;
+                            },
+                            enum_cs_esrgb => if (esrgb_colr_index == null) {
+                                esrgb_colr_index = box_index;
+                            },
+                            enum_cs_esycc => if (esycc_colr_index == null) {
+                                esycc_colr_index = box_index;
+                            },
                             else => {},
                         }
                     },
@@ -909,11 +997,15 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     if (!saw_ihdr or !saw_colr) return Jp2Error.MissingRequiredBox;
     if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
     if (saw_palette != saw_component_mapping) return Jp2Error.MissingRequiredBox;
-    const alpha_layout = info.components == 2 or info.components == 4;
-    if (alpha_layout and (!saw_channel_definition or info.alpha_mode == null)) {
+    if (info.components == 2 and (!saw_channel_definition or info.alpha_mode == null)) {
         return Jp2Error.MissingRequiredBox;
     }
-    if (!alpha_layout and info.alpha_mode != null) return Jp2Error.UnsupportedProfile;
+    if (info.components == 4 and !saw_channel_definition and cmyk_colr_index == null) {
+        return Jp2Error.MissingRequiredBox;
+    }
+    if (info.components != 2 and info.components != 4 and info.alpha_mode != null) {
+        return Jp2Error.UnsupportedProfile;
+    }
 
     const color_components = if (info.alpha_mode != null)
         info.output_components - 1
@@ -925,20 +1017,26 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
         expected_colr_index = grayscale_colr_index;
         expected_color_space = .grayscale;
     } else if (color_components == 3) {
-        expected_colr_index = srgb_colr_index;
-        expected_color_space = .srgb;
-        if (!info.has_palette and info.alpha_mode == null and sycc_colr_index != null and
-            (expected_colr_index == null or sycc_colr_index.? < expected_colr_index.?))
-        {
-            expected_colr_index = sycc_colr_index;
-            expected_color_space = .sycc;
+        selectEarlierColor(srgb_colr_index, .srgb, &expected_colr_index, &expected_color_space);
+        if (!info.has_palette and info.alpha_mode == null) {
+            selectEarlierColor(sycc_colr_index, .sycc, &expected_colr_index, &expected_color_space);
+            selectEarlierColor(cielab_colr_index, .cielab, &expected_colr_index, &expected_color_space);
+            selectEarlierColor(esrgb_colr_index, .esrgb, &expected_colr_index, &expected_color_space);
+            selectEarlierColor(esycc_colr_index, .esycc, &expected_colr_index, &expected_color_space);
         }
+    } else if (color_components == 4 and info.alpha_mode == null) {
+        expected_colr_index = cmyk_colr_index;
+        expected_color_space = .cmyk;
     }
+    const supported_icc_index = if (color_components == 1 or color_components == 3)
+        icc_colr_index
+    else
+        null;
     if (info.has_palette) {
         // The current expansion API produces RGB samples, so a restricted ICC
         // palette profile is deferred until the palette owns colour metadata.
         if (expected_colr_index == null or
-            (icc_colr_index != null and icc_colr_index.? < expected_colr_index.?))
+            (supported_icc_index != null and supported_icc_index.? < expected_colr_index.?))
         {
             return Jp2Error.UnsupportedColorSpace;
         }
@@ -946,7 +1044,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
         info.icc_profile_bytes = 0;
         info.color_space = .srgb;
     } else if (expected_colr_index) |enumerated_index| {
-        if (icc_colr_index == null or enumerated_index < icc_colr_index.?) {
+        if (supported_icc_index == null or enumerated_index < supported_icc_index.?) {
             info.has_icc_profile = false;
             info.icc_profile_bytes = 0;
             info.color_space = expected_color_space;
@@ -955,12 +1053,25 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
             info.icc_profile_bytes = icc_profile_bytes;
             info.color_space = .restricted_icc;
         }
-    } else if (icc_colr_index != null) {
+    } else if (supported_icc_index != null) {
         info.has_icc_profile = true;
         info.icc_profile_bytes = icc_profile_bytes;
         info.color_space = .restricted_icc;
     } else {
         return Jp2Error.UnsupportedColorSpace;
+    }
+}
+
+fn selectEarlierColor(
+    candidate_index: ?usize,
+    candidate_space: ColorSpace,
+    selected_index: *?usize,
+    selected_space: *ColorSpace,
+) void {
+    const index = candidate_index orelse return;
+    if (selected_index.* == null or index < selected_index.*.?) {
+        selected_index.* = index;
+        selected_space.* = candidate_space;
     }
 }
 
@@ -1058,19 +1169,54 @@ fn isSupportedEnumeratedColorSpace(info: Info, enum_cs: u32) bool {
         info.output_components;
     return switch (color_components) {
         1 => enum_cs == enum_cs_grayscale,
-        3 => enum_cs == enum_cs_srgb or (info.alpha_mode == null and enum_cs == enum_cs_sycc),
+        3 => enum_cs == enum_cs_srgb or (info.alpha_mode == null and
+            (enum_cs == enum_cs_sycc or enum_cs == enum_cs_cielab or
+                enum_cs == enum_cs_esrgb or enum_cs == enum_cs_esycc)),
+        4 => info.alpha_mode == null and enum_cs == enum_cs_cmyk,
         else => false,
     };
 }
 
 fn validateSelectedColorSpace(info: Info) !void {
-    if (info.color_space != .sycc) return;
-    if (info.components != 3 or info.output_components != 3 or info.has_palette or
-        info.has_icc_profile or info.alpha_mode != null or
-        (info.bits_per_component != 8 and info.bits_per_component != 16))
-    {
-        return Jp2Error.UnsupportedColorSpace;
+    switch (info.color_space) {
+        .sycc => {
+            if (info.components != 3 or info.output_components != 3 or info.has_palette or
+                info.has_icc_profile or info.alpha_mode != null or
+                (info.bits_per_component != 8 and info.bits_per_component != 16))
+            {
+                return Jp2Error.UnsupportedColorSpace;
+            }
+            try validateYccSampling(info);
+        },
+        .esycc => {
+            if (info.components != 3 or info.output_components != 3 or info.has_palette or
+                info.has_icc_profile or info.alpha_mode != null)
+            {
+                return Jp2Error.UnsupportedColorSpace;
+            }
+            try validateYccSampling(info);
+        },
+        .cmyk => {
+            if (info.components != 4 or info.output_components != 4 or info.has_palette or
+                info.has_icc_profile or info.alpha_mode != null)
+            {
+                return Jp2Error.UnsupportedColorSpace;
+            }
+            try validateUnitSampling(info, 4);
+        },
+        .cielab, .esrgb => {
+            if (info.components != 3 or info.output_components != 3 or info.has_palette or
+                info.has_icc_profile or info.alpha_mode != null)
+            {
+                return Jp2Error.UnsupportedColorSpace;
+            }
+            try validateUnitSampling(info, 3);
+        },
+        else => {},
     }
+}
+
+fn validateYccSampling(info: Info) !void {
     if (info.component_xrsiz[0] != 1 or info.component_yrsiz[0] != 1 or
         info.component_xrsiz[1] != info.component_xrsiz[2] or
         info.component_yrsiz[1] != info.component_yrsiz[2])
@@ -1084,6 +1230,14 @@ fn validateSelectedColorSpace(info: Info) !void {
         (chroma_x == 2 and chroma_y == 2)))
     {
         return Jp2Error.UnsupportedColorSpace;
+    }
+}
+
+fn validateUnitSampling(info: Info, components: usize) !void {
+    for (0..components) |component| {
+        if (info.component_xrsiz[component] != 1 or info.component_yrsiz[component] != 1) {
+            return Jp2Error.UnsupportedColorSpace;
+        }
     }
 }
 
