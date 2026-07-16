@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded Normalized-Linear OpenEXR Input Adapter
+
+- Added an isolated OpenEXR v2 parser for one single-part, uncompressed
+  scanline image with exact full-resolution HALF B/G/R channels, matching
+  windows, checked offset/chunk coverage, and explicit chromaticities.
+- Finite linear `[0,1]` HALF samples map to the unsigned 16-bit carrier. A
+  Bradford-adapted PCSXYZ D50 matrix is emitted as a restricted linear ICC
+  profile; negative/HDR values and implicit tonemapping remain closed.
+- Added `exr-to-jp2`, `.exr` shorthand and unquoted batch dispatch,
+  truncation/single-bit mutation gates, and an ImageMagick-authored raster
+  interop fixture. Grok reproduces the stored linear raster exactly and
+  OpenJPEG's ICC output matches explicit z2000 sRGB conversion within the
+  bounded 16-bit tolerance.
+
 ### Bounded LinearRaw DNG Input Adapter
 
 - Added checked classic-TIFF selection of exactly one IFD0/direct-SubIFD

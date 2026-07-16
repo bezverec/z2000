@@ -7,6 +7,7 @@ const codestream = @import("codestream.zig");
 const bmp = @import("formats/bmp.zig");
 const dng = @import("formats/dng.zig");
 const jpeg = @import("formats/jpeg.zig");
+const openexr = @import("formats/openexr.zig");
 const png = @import("formats/png.zig");
 const image = @import("image.zig");
 const icc_color = @import("icc.zig");
@@ -61,6 +62,8 @@ pub fn main(init: std.process.Init) !void {
         try jpegToJp2Command(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "dng-to-jp2")) {
         try dngToJp2Command(io, allocator, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "exr-to-jp2")) {
+        try exrToJp2Command(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "jp2-info")) {
         try jp2InfoCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "jp2-stats")) {
@@ -78,6 +81,7 @@ pub fn main(init: std.process.Init) !void {
             .png_to_jp2 => try pngToJp2Command(io, allocator, args[1..]),
             .jpeg_to_jp2 => try jpegToJp2Command(io, allocator, args[1..]),
             .dng_to_jp2 => try dngToJp2Command(io, allocator, args[1..]),
+            .exr_to_jp2 => try exrToJp2Command(io, allocator, args[1..]),
             .jp2_to_tiff => try decodeTempJp2Command(io, allocator, args[1..]),
         }
     } else {
@@ -86,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-const InferredConversion = enum { tiff_to_jp2, bmp_to_jp2, png_to_jp2, jpeg_to_jp2, dng_to_jp2, jp2_to_tiff };
+const InferredConversion = enum { tiff_to_jp2, bmp_to_jp2, png_to_jp2, jpeg_to_jp2, dng_to_jp2, exr_to_jp2, jp2_to_tiff };
 
 /// Shorthand dispatch: `z2000 input.tif output.jp2 [options]` needs no
 /// subcommand — the conversion direction is inferred from the two leading
@@ -107,6 +111,7 @@ fn inferConversionExtensions(input_ext: []const u8, output_ext: []const u8) ?Inf
     const input_is_png = std.ascii.eqlIgnoreCase(input_ext, ".png");
     const input_is_jpeg = std.ascii.eqlIgnoreCase(input_ext, ".jpg") or std.ascii.eqlIgnoreCase(input_ext, ".jpeg");
     const input_is_dng = std.ascii.eqlIgnoreCase(input_ext, ".dng");
+    const input_is_exr = std.ascii.eqlIgnoreCase(input_ext, ".exr");
     const output_is_tiff = std.ascii.eqlIgnoreCase(output_ext, ".tif") or std.ascii.eqlIgnoreCase(output_ext, ".tiff");
     const input_is_jp2 = std.ascii.eqlIgnoreCase(input_ext, ".jp2");
     const output_is_jp2 = std.ascii.eqlIgnoreCase(output_ext, ".jp2");
@@ -115,6 +120,7 @@ fn inferConversionExtensions(input_ext: []const u8, output_ext: []const u8) ?Inf
     if (input_is_png and output_is_jp2) return .png_to_jp2;
     if (input_is_jpeg and output_is_jp2) return .jpeg_to_jp2;
     if (input_is_dng and output_is_jp2) return .dng_to_jp2;
+    if (input_is_exr and output_is_jp2) return .exr_to_jp2;
     if (input_is_jp2 and output_is_tiff) return .jp2_to_tiff;
     return null;
 }
@@ -219,6 +225,7 @@ fn executeBatchPlan(
             .png_to_jp2 => try pngToJp2Command(io, allocator, file_args.items),
             .jpeg_to_jp2 => try jpegToJp2Command(io, allocator, file_args.items),
             .dng_to_jp2 => try dngToJp2Command(io, allocator, file_args.items),
+            .exr_to_jp2 => try exrToJp2Command(io, allocator, file_args.items),
             .jp2_to_tiff => try decodeTempJp2Command(io, allocator, file_args.items),
         }
     }
@@ -403,6 +410,7 @@ const RasterInput = enum {
     png,
     jpeg,
     dng,
+    openexr,
 
     fn label(self: RasterInput) []const u8 {
         return switch (self) {
@@ -411,6 +419,7 @@ const RasterInput = enum {
             .png => "PNG",
             .jpeg => "JPEG",
             .dng => "DNG",
+            .openexr => "OpenEXR",
         };
     }
 };
@@ -433,6 +442,10 @@ fn jpegToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
 
 fn dngToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
     return rasterToJp2Command(io, allocator, args, .dng);
+}
+
+fn exrToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return rasterToJp2Command(io, allocator, args, .openexr);
 }
 
 fn rasterToJp2Command(
@@ -609,6 +622,7 @@ fn rasterToJp2Command(
         .png => try png.read(io, allocator, args[0]),
         .jpeg => try jpeg.read(io, allocator, args[0]),
         .dng => .{ .rgb = try dng.read(io, allocator, args[0]) },
+        .openexr => .{ .rgb = try openexr.read(io, allocator, args[0]) },
     };
     defer decoded.deinit();
     command_timings.input_read_ns = elapsedNs(read_start);
@@ -1684,12 +1698,14 @@ fn usage() void {
         \\  z2000 <input.png> <output.jp2> [options]   (shorthand for png-to-jp2)
         \\  z2000 <input.jpg> <output.jp2> [options]   (shorthand for jpeg-to-jp2)
         \\  z2000 <input.dng> <output.jp2> [options]   (shorthand for dng-to-jp2)
+        \\  z2000 <input.exr> <output.jp2> [options]   (shorthand for exr-to-jp2)
         \\  z2000 <input.jp2> <output.tif> [options]   (shorthand for decode-temp-jp2)
         \\  z2000 *.tif .jp2 [options]                  (non-recursive batch; supports * and ?)
         \\  z2000 *.bmp .jp2 [options]                  (non-recursive BMP batch)
         \\  z2000 *.png .jp2 [options]                  (non-recursive PNG batch)
         \\  z2000 *.jpg .jp2 [options]                  (non-recursive JPEG batch)
         \\  z2000 *.dng .jp2 [options]                  (non-recursive DNG batch)
+        \\  z2000 *.exr .jp2 [options]                  (non-recursive OpenEXR batch)
         \\  z2000 *.jp2 .tif [options]                  (non-recursive reverse batch)
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
@@ -1700,6 +1716,7 @@ fn usage() void {
         \\  z2000 png-to-jp2 <input.png> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jpeg-to-jp2 <input.jpg> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 dng-to-jp2 <input.dng> <output.jp2> [tiff-to-jp2 options]
+        \\  z2000 exr-to-jp2 <input.exr> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]

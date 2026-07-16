@@ -77,7 +77,7 @@ certification.
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
 non-empty PLT-less multi-part tiles, broad color management, CFA/general RAW
-and OpenEXR input, broader BMP/PNG/JPEG/DNG profiles, and metadata handling
+and HDR/general OpenEXR input, broader BMP/PNG/JPEG/DNG/EXR profiles, and metadata handling
 beyond the staged ICC path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.
 
@@ -129,10 +129,10 @@ prefix the commands with `./zig-out/bin/`. The build installs the binary
 twice: as `z2000` and as the short alias `z2k` — every command works
 identically under both names. Conversions need no subcommand — the
 direction is inferred from the file extensions (`.tif`/`.tiff`, `.bmp`,
-`.png`, `.jpg`/`.jpeg`, `.dng`, and `.jp2`,
+`.png`, `.jpg`/`.jpeg`, `.dng`, `.exr`, and `.jp2`,
 case-insensitive); the explicit `tiff-to-jp2` and `decode-temp-jp2`
 subcommands keep working, as do `bmp-to-jp2`, `png-to-jp2`, and
-`jpeg-to-jp2` and `dng-to-jp2`. All commands
+`jpeg-to-jp2`, `dng-to-jp2`, and `exr-to-jp2`. All commands
 default to using every logical CPU thread; pass `--threads N` to limit the
 worker count.
 
@@ -169,6 +169,12 @@ camera-to-PCS interpretation in a restricted ICC profile:
 z2k input.dng output.jp2
 ```
 
+Convert a bounded normalized-linear OpenEXR to JP2:
+
+```sh
+z2k input.exr output.jp2
+```
+
 Convert every matching TIFF in one directory, keeping each basename:
 
 ```sh
@@ -177,6 +183,7 @@ z2k *.bmp .jp2
 z2k *.png .jp2
 z2k *.jpg .jp2
 z2k *.dng .jp2
+z2k *.exr .jp2
 z2k incoming/*.tiff .jp2 --threads 8
 ```
 
@@ -234,6 +241,8 @@ z2000 input.jpg output.jp2 [options]
 z2000 jpeg-to-jp2 input.jpg output.jp2 [options]
 z2000 input.dng output.jp2 [options]
 z2000 dng-to-jp2 input.dng output.jp2 [options]
+z2000 input.exr output.jp2 [options]
+z2000 exr-to-jp2 input.exr output.jp2 [options]
 ```
 
 The DNG adapter accepts exactly one uncompressed, chunky, unsigned 8/16-bit
@@ -246,6 +255,15 @@ silently relabelled as sRGB. CFA mosaics, tiles, compression, crop/opcode
 processing, multiple calibrations, and EXIF/XMP/IPTC payloads fail closed.
 
 This product includes DNG technology under license by Adobe.
+
+The OpenEXR adapter accepts a single-part, uncompressed scanline image with
+exactly full-resolution HALF `R`, `G`, and `B` channels, matching data/display
+windows, square pixels, explicit chromaticities, and no unmapped attributes.
+Only finite linear samples in `[0,1]` are accepted; they are scaled to the
+unsigned 16-bit carrier and retain their primaries through a generated linear
+ICC profile. Negative/HDR values, alpha/arbitrary channels, compression,
+tiles, multipart/deep files, and metadata fail closed until the internal
+carrier and JP2 mappings can represent them without implicit tonemapping.
 
 For normal lossless conversion, the defaults are usually sufficient. The most
 useful options are grouped below. Unsupported combinations fail closed rather
@@ -462,8 +480,8 @@ bounded envelope, not a claim that every Part 1 or JPX profile is implemented.
 Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.
 
-Later conversion-tool target: add linear RAW/DNG input next, then
-OpenEXR workflows; add display conversion for the preserved extended YCC,
+Later conversion-tool target: broaden the bounded DNG/OpenEXR front ends,
+add display conversion for the preserved extended YCC,
 CIELab, and CMYK spaces; preserve EXIF/IPTC/XMP; and evaluate component
 depths above 16 bits where the source format and JPEG2000 profile support them
 cleanly.

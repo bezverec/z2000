@@ -15,7 +15,8 @@ zig build test
 The binary installs as both `z2000` and the `z2k` alias; conversions accept
 the extension-inferred shorthand (`z2k input.tif output.jp2`,
 `z2k input.bmp output.jp2`, `z2k input.png output.jp2`, or
-`z2k input.jpg output.jp2`, or `z2k input.dng output.jp2`). The custom
+`z2k input.jpg output.jp2`, `z2k input.dng output.jp2`, or
+`z2k input.exr output.jp2`). The custom
 grayscale codec:
 
 ```sh
@@ -34,6 +35,7 @@ zig build run -- bmp-to-jp2 input.bmp output.jp2 [options]
 zig build run -- png-to-jp2 input.png output.jp2 [options]
 zig build run -- jpeg-to-jp2 input.jpg output.jp2 [options]
 zig build run -- dng-to-jp2 input.dng output.jp2 [options]
+zig build run -- exr-to-jp2 input.exr output.jp2 [options]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--convert-to-srgb]
@@ -42,6 +44,7 @@ zig build run -- *.bmp .jp2 [tiff-to-jp2 options]
 zig build run -- *.png .jp2 [tiff-to-jp2 options]
 zig build run -- *.jpg .jp2 [tiff-to-jp2 options]
 zig build run -- *.dng .jp2 [tiff-to-jp2 options]
+zig build run -- *.exr .jp2 [tiff-to-jp2 options]
 zig build run -- *.jp2 .tif [jp2-to-tiff options]
 ```
 
@@ -102,6 +105,16 @@ to the full output range. A one-calibration profile with `ColorMatrix1`,
 restricted ICC v4 matrix/identity-TRC profile, so JP2 storage retains linear
 camera-to-PCS semantics. CFA mosaics, tiles, compression, crop/opcodes,
 multiple calibrations, and EXIF/XMP/IPTC payloads fail closed.
+
+`formats/openexr.zig` exposes `read` and `parse` for a single-part,
+uncompressed scanline profile with exactly alphabetically stored HALF
+`B`/`G`/`R` channels, unit sampling, matching data/display windows, square
+pixels, explicit `chromaticities`, and no unmapped attributes. Each finite
+linear sample must be in `[0,1]` and is rounded onto the unsigned 16-bit
+carrier. The RGB chromaticities are converted to a Bradford-adapted PCSXYZ D50
+matrix and stored in the same restricted linear ICC profile used by the JP2
+boundary. Negative/HDR values, UINT/FLOAT, alpha/arbitrary channels,
+compression, tiles, multipart/deep files, and metadata fail closed.
 
 The shorthand also has a non-recursive batch form. A first argument whose
 filename contains `*` or `?` is expanded internally within its concrete parent
@@ -201,7 +214,7 @@ valid2000/jpylyzer-style validators remain diagnostic gates rather than
 absolute sources of truth.
 
 Future conversion-surface goals are deliberately not part of the current CLI
-contract yet: broader BMP/PNG/JPEG/DNG profiles, CFA/general RAW conversion, OpenEXR/HDR handling,
+contract yet: broader BMP/PNG/JPEG/DNG/OpenEXR profiles, CFA/general RAW conversion, HDR handling,
 display conversion for preserved e-sRGB/e-sYCC/CIELab/CMYK samples,
 EXIF/IPTC/XMP metadata, and component precision above 16 bits. Each should get
 an explicit option, fail-closed parser policy, and interop fixture before

@@ -104,10 +104,16 @@ TIFF agrees with the explicit z2000 sRGB path within two 16-bit sample values.
 CFA/demosaicing, compression, tiles, crop/opcodes, multiple calibrations, and
 unmapped metadata remain closed.
 
-Continue with an isolated, fuzz-gated OpenEXR module.
-Preserve EXIF, XMP, and IPTC through explicit
-mappings. Evaluate depths above 16 bits only after the internal carrier and
-target JP2 profile have checked semantics.
+The bounded normalized-linear OpenEXR slice is complete: one single-part,
+uncompressed scanline image with exact HALF B/G/R channels, matching windows,
+explicit chromaticities, checked chunk coverage, CLI/batch, mutation gates,
+and ImageMagick/OpenJPEG/Grok interop. Only finite `[0,1]` samples enter the
+unsigned 16-bit carrier. HDR/negative values, compression, tiles,
+multipart/deep data, arbitrary channels, alpha, and metadata remain closed.
+
+The next format/metadata work is explicit EXIF, XMP, and IPTC mapping into
+checked JP2 boxes or side metadata. Evaluate depths above 16 bits only after
+the internal carrier and target JP2 profile have checked semantics.
 
 ### 3. Release Readiness
 

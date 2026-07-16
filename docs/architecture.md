@@ -217,6 +217,15 @@ the one-illuminant `ForwardMatrix1` and `AsShotNeutral` path. A generated ICC
 v4 matrix profile carries that linear interpretation through JP2; conversion
 to display sRGB remains the existing explicit ICC boundary.
 
+The bounded OpenEXR adapter is independent of TIFF/DNG parsing. It validates
+the version flags and nine allowed header attributes, exact B/G/R HALF channel
+layout, offset table, one uncompressed chunk per scanline, unique y coverage,
+contiguous non-overlapping chunks, and normalized finite samples. Explicit RGB
+chromaticities are converted to PCSXYZ D50 with Bradford adaptation and the
+same generated linear ICC carrier. This makes the current `[0,1]` subset
+deterministic while keeping HDR, negative, alpha, arbitrary-channel, tiled,
+compressed, multipart, deep, and metadata-bearing EXR fail-closed.
+
 ## Parallelism And Memory
 
 Persistent worker pools execute independent tile, component, DWT, colour, and

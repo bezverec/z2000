@@ -7,6 +7,7 @@ const codec = @import("codec.zig");
 const codestream = @import("codestream.zig");
 const dng = @import("formats/dng.zig");
 const jpeg = @import("formats/jpeg.zig");
+const openexr = @import("formats/openexr.zig");
 const png = @import("formats/png.zig");
 const ebcot = @import("ebcot.zig");
 const entropy = @import("entropy.zig");
@@ -4644,6 +4645,162 @@ fn expectSamplesNear(expected: []const u16, actual: []const u16, tolerance: u16)
         const difference = if (wanted > found) wanted - found else found - wanted;
         try std.testing.expect(difference <= tolerance);
     }
+}
+
+fn appendF32Le(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: f32) !void {
+    try appendU32Le(allocator, out, @bitCast(value));
+}
+
+fn appendU64Le(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u64) !void {
+    try appendU32Le(allocator, out, @intCast(value & 0xffffffff));
+    try appendU32Le(allocator, out, @intCast(value >> 32));
+}
+
+fn appendExrAttribute(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    name: []const u8,
+    attribute_type: []const u8,
+    value: []const u8,
+) !void {
+    try out.appendSlice(allocator, name);
+    try out.append(allocator, 0);
+    try out.appendSlice(allocator, attribute_type);
+    try out.append(allocator, 0);
+    try appendU32Le(allocator, out, @intCast(value.len));
+    try out.appendSlice(allocator, value);
+}
+
+fn buildOpenExrFixture(allocator: std.mem.Allocator) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    try appendU32Le(allocator, &bytes, 20_000_630);
+    try appendU32Le(allocator, &bytes, 2);
+
+    var channels: std.ArrayList(u8) = .empty;
+    defer channels.deinit(allocator);
+    for ([_][]const u8{ "B", "G", "R" }) |name| {
+        try channels.appendSlice(allocator, name);
+        try channels.append(allocator, 0);
+        try appendU32Le(allocator, &channels, 1);
+        try channels.appendSlice(allocator, &.{ 0, 0, 0, 0 });
+        try appendU32Le(allocator, &channels, 1);
+        try appendU32Le(allocator, &channels, 1);
+    }
+    try channels.append(allocator, 0);
+    try appendExrAttribute(allocator, &bytes, "channels", "chlist", channels.items);
+    try appendExrAttribute(allocator, &bytes, "compression", "compression", &.{0});
+
+    var window: std.ArrayList(u8) = .empty;
+    defer window.deinit(allocator);
+    for ([_]i32{ 0, 0, 1, 1 }) |value| try appendU32Le(allocator, &window, @bitCast(value));
+    try appendExrAttribute(allocator, &bytes, "dataWindow", "box2i", window.items);
+    try appendExrAttribute(allocator, &bytes, "displayWindow", "box2i", window.items);
+    try appendExrAttribute(allocator, &bytes, "lineOrder", "lineOrder", &.{0});
+
+    var scalar: std.ArrayList(u8) = .empty;
+    defer scalar.deinit(allocator);
+    try appendF32Le(allocator, &scalar, 1.0);
+    try appendExrAttribute(allocator, &bytes, "pixelAspectRatio", "float", scalar.items);
+    scalar.clearRetainingCapacity();
+    try appendF32Le(allocator, &scalar, 0.0);
+    try appendF32Le(allocator, &scalar, 0.0);
+    try appendExrAttribute(allocator, &bytes, "screenWindowCenter", "v2f", scalar.items);
+    scalar.clearRetainingCapacity();
+    try appendF32Le(allocator, &scalar, 1.0);
+    try appendExrAttribute(allocator, &bytes, "screenWindowWidth", "float", scalar.items);
+
+    var chromaticities: std.ArrayList(u8) = .empty;
+    defer chromaticities.deinit(allocator);
+    for ([_]f32{ 0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290 }) |value| {
+        try appendF32Le(allocator, &chromaticities, value);
+    }
+    try appendExrAttribute(allocator, &bytes, "chromaticities", "chromaticities", chromaticities.items);
+    try bytes.append(allocator, 0);
+
+    const first_chunk = bytes.items.len + 16;
+    try appendU64Le(allocator, &bytes, first_chunk);
+    try appendU64Le(allocator, &bytes, first_chunk + 20);
+    const row_halves = [_][6]u16{
+        .{ 0x3c00, 0x3c00, 0x3800, 0x3a00, 0x0000, 0x3400 },
+        .{ 0x3800, 0x0000, 0x0000, 0x3400, 0x3c00, 0x3800 },
+    };
+    for (row_halves, 0..) |row, y| {
+        try appendU32Le(allocator, &bytes, @intCast(y));
+        try appendU32Le(allocator, &bytes, 12);
+        for (row) |value| try appendU16Le(allocator, &bytes, value);
+    }
+    return bytes.toOwnedSlice(allocator);
+}
+
+test "bounded OpenEXR parser decodes normalized HALF RGB and builds linear ICC" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildOpenExrFixture(allocator);
+    defer allocator.free(bytes);
+    var decoded = try openexr.parse(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 2), decoded.width);
+    try std.testing.expectEqual(@as(usize, 2), decoded.height);
+    try std.testing.expectEqual(@as(u8, 16), decoded.bit_depth);
+    try std.testing.expectEqualSlices(u16, &.{
+        0,     32768, 65535, 16384, 49151, 65535,
+        65535, 0,     32768, 32768, 16384, 0,
+    }, decoded.samples);
+    try std.testing.expect(decoded.icc_profile != null);
+    var srgb = try icc_color.convertRgbToSrgb(allocator, decoded, decoded.icc_profile.?);
+    defer srgb.deinit();
+    // Bradford adaptation plus ICC s15Fixed16 quantization leaves a tiny
+    // cross-channel residual (about 31 of 65535 for this primary-edge vector).
+    try expectSamplesNear(&.{ 0, 48192, 65535 }, srgb.samples[0..3], 64);
+}
+
+test "bounded OpenEXR parser fails closed on compression metadata and HDR samples" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildOpenExrFixture(allocator);
+    defer allocator.free(bytes);
+
+    const compressed = try allocator.dupe(u8, bytes);
+    defer allocator.free(compressed);
+    const compression_marker = "compression\x00compression\x00";
+    const compression_offset = std.mem.indexOf(u8, compressed, compression_marker).? + compression_marker.len + 4;
+    compressed[compression_offset] = 3;
+    try std.testing.expectError(openexr.OpenExrError.UnsupportedOpenExr, openexr.parse(allocator, compressed));
+
+    const metadata = try allocator.dupe(u8, bytes);
+    defer allocator.free(metadata);
+    const line_order = std.mem.indexOf(u8, metadata, "lineOrder\x00").?;
+    @memcpy(metadata[line_order .. line_order + 9], "unknownxx");
+    try std.testing.expectError(openexr.OpenExrError.UnsupportedOpenExr, openexr.parse(allocator, metadata));
+
+    const hdr = try allocator.dupe(u8, bytes);
+    defer allocator.free(hdr);
+    putBmpU16(hdr, hdr.len - 2, 0x4000);
+    try std.testing.expectError(openexr.OpenExrError.SampleOutOfRange, openexr.parse(allocator, hdr));
+}
+
+test "bounded OpenEXR parser is safe across truncation and single-bit mutations" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildOpenExrFixture(allocator);
+    defer allocator.free(bytes);
+    var len: usize = 0;
+    while (len < bytes.len) : (len += 1) {
+        if (openexr.parse(allocator, bytes[0..len])) |decoded_value| {
+            var decoded = decoded_value;
+            decoded.deinit();
+            return error.TruncatedBufferShouldFail;
+        } else |_| {}
+    }
+
+    const mutated = try allocator.dupe(u8, bytes);
+    defer allocator.free(mutated);
+    for (0..mutated.len) |index| for (0..8) |bit| {
+        mutated[index] ^= @as(u8, 1) << @intCast(bit);
+        if (openexr.parse(allocator, mutated)) |decoded_value| {
+            var decoded = decoded_value;
+            decoded.deinit();
+        } else |_| {}
+        mutated[index] ^= @as(u8, 1) << @intCast(bit);
+    };
 }
 
 fn appendDngColorMetadata(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8)) !void {

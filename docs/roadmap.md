@@ -82,8 +82,12 @@ The 8-bit baseline sequential JPEG adapter is complete for gray and JFIF
 CLI/batch, and independent ImageMagick/OpenJPEG/Grok evidence. The bounded
 LinearRaw DNG adapter now covers uncompressed chunky 8/16-bit RGB,
 normalization, camera-to-PCS ICC signalling, CLI/batch, mutation gates, and
-OpenJPEG/Grok interop. Continue with an isolated, fuzz-gated OpenEXR adapter;
-CFA/demosaicing and broader RAW profiles remain a separate future boundary.
+OpenJPEG/Grok interop. The bounded OpenEXR adapter now covers normalized
+finite `[0,1]` HALF RGB in one uncompressed scanline part, explicit
+chromaticities, CLI/batch, mutation gates, and independent interop. HDR,
+negative, compressed, tiled, multipart/deep, alpha/arbitrary-channel, and
+metadata-bearing EXR remain future boundaries. Continue with explicit metadata
+mappings; CFA/demosaicing and broader RAW profiles stay separate.
 Preserve EXIF, XMP, and IPTC through explicit JP2 box or
 side metadata mappings. Evaluate depths above 16 bits only after the internal
 sample carrier and each source format have checked semantics.
