@@ -5,6 +5,14 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Release Readiness
+
+- Prepared the manual release workflow for `v0.1.0-rc.2`, added native
+  ReleaseFast test gates alongside Debug, and verify both installed CLI names
+  report the exact provenance-bearing release version.
+- Release archives now contain both `z2000` and the documented short `z2k`
+  alias on every platform.
+
 ### Bounded EXIF, XMP, And IPTC Preservation
 
 - Added checked JP2 UUID carriers for standalone-TIFF EXIF, UTF-8 XML XMP,

@@ -128,6 +128,13 @@ Windows/Linux native builds, RISC-V/RVV compile and functional gates, strict
 corruption tests, deterministic threading, current interop, concise docs, and
 benchmark provenance green. See `versioning.md`.
 
+The `v0.1.0-rc.2` preparation now has current release notes, native Debug plus
+ReleaseFast workflow tests, RISC-V ReleaseFast emulation, exact version checks
+for both CLI names, and archives containing both `z2000` and `z2k`. The next
+release action is an explicit `publish=false` workflow dry-run from clean
+`main`; tagging and publication remain manual only after all four platform
+artifacts and `SHA256SUMS` are reviewed.
+
 ## Parallel Performance Track
 
 Performance work may run between correctness slices under

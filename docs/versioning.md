@@ -113,12 +113,14 @@ release, advance it to the next planned pre-1.0 line in a normal commit.
 7. Run the same workflow with `publish=true`, the tag as both `tag` and the
    effective build ref, and review the resulting GitHub pre-release.
 
-The workflow builds Windows x86-64, Linux x86-64 musl, Linux RISC-V 64 musl,
-and macOS arm64 archives, then emits `SHA256SUMS`. The portable RISC-V build
-does not require RVV and its complete ReleaseFast test suite runs under
-`qemu-riscv64` before packaging. Release publication requires an existing tag
-that resolves to the exact tested checkout. Release candidates are marked as
-GitHub pre-releases; final tags omit that marker.
+The workflow runs native Debug and ReleaseFast suites, then builds Windows
+x86-64, Linux x86-64 musl, Linux RISC-V 64 musl, and macOS arm64 archives and
+emits `SHA256SUMS`. Each archive contains the identical application under both
+`z2000` and `z2k` names. The portable RISC-V build does not require RVV and its
+complete ReleaseFast test suite runs under `qemu-riscv64` before packaging.
+Release publication requires an existing tag that resolves to the exact tested
+checkout. Release candidates are marked as GitHub pre-releases; final tags omit
+that marker.
 
 ## Gate For 1.0.0
 

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Version tag to validate, for example v0.1.0-rc.1
+        description: Version tag to validate, for example v0.1.0-rc.2
         required: true
-        default: v0.1.0-rc.1
+        default: v0.1.0-rc.2
         type: string
       ref:
         description: Branch, tag, or commit to build when publish is false
@@ -103,6 +103,7 @@ jobs:
             zig_sha: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
             zig_dir: zig-x86_64-linux-0.16.0
             executable: z2000
+            alias: z2k
           - os: windows-latest
             platform: windows-x86_64
             target: native
@@ -111,6 +112,7 @@ jobs:
             zig_sha: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
             zig_dir: zig-x86_64-windows-0.16.0
             executable: z2000.exe
+            alias: z2k.exe
           - os: macos-15
             platform: macos-aarch64
             target: native
@@ -119,6 +121,7 @@ jobs:
             zig_sha: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
             zig_dir: zig-aarch64-macos-0.16.0
             executable: z2000
+            alias: z2k
           - os: ubuntu-latest
             platform: linux-riscv64
             target: riscv64-linux-musl
@@ -127,6 +130,7 @@ jobs:
             zig_sha: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
             zig_dir: zig-x86_64-linux-0.16.0
             executable: z2000
+            alias: z2k
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out requested revision
@@ -185,9 +189,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends qemu-user
 
-      - name: Run native tests
+      - name: Run native Debug tests
         if: ${{ !matrix.emulated }}
         run: zig build test -Dtarget=native
+
+      - name: Run native ReleaseFast tests
+        if: ${{ !matrix.emulated }}
+        run: zig build test -Dtarget=native -Doptimize=ReleaseFast
 
       - name: Run RISC-V tests under QEMU
         if: matrix.emulated
@@ -246,6 +254,8 @@ jobs:
           set -euo pipefail
           actual="$(./zig-out/bin/z2000 --version 2>&1)"
           test "$actual" = "$EXPECTED_VERSION"
+          alias_actual="$(./zig-out/bin/z2k --version 2>&1)"
+          test "$alias_actual" = "$EXPECTED_VERSION"
 
       - name: Verify embedded version (RISC-V)
         if: matrix.emulated
@@ -256,6 +266,8 @@ jobs:
           set -euo pipefail
           actual="$(qemu-riscv64 ./zig-out/bin/z2000 --version 2>&1)"
           test "$actual" = "$EXPECTED_VERSION"
+          alias_actual="$(qemu-riscv64 ./zig-out/bin/z2k --version 2>&1)"
+          test "$alias_actual" = "$EXPECTED_VERSION"
 
       - name: Verify embedded version (Windows)
         if: runner.os == 'Windows'
@@ -267,6 +279,10 @@ jobs:
           if ($actual -ne $env:EXPECTED_VERSION) {
             throw "expected '$env:EXPECTED_VERSION', got '$actual'"
           }
+          $aliasActual = (& .\zig-out\bin\z2k.exe --version 2>&1 | Out-String).Trim()
+          if ($aliasActual -ne $env:EXPECTED_VERSION) {
+            throw "expected z2k alias '$env:EXPECTED_VERSION', got '$aliasActual'"
+          }
 
       - name: Package release archive (Unix)
         if: runner.os != 'Windows'
@@ -274,12 +290,14 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           PLATFORM: ${{ matrix.platform }}
           EXECUTABLE: ${{ matrix.executable }}
+          ALIAS: ${{ matrix.alias }}
         shell: bash
         run: |
           set -euo pipefail
           package="z2000-${RELEASE_TAG}-${PLATFORM}"
           mkdir -p "dist/$package"
           install -m 755 "zig-out/bin/$EXECUTABLE" "dist/$package/$EXECUTABLE"
+          install -m 755 "zig-out/bin/$ALIAS" "dist/$package/$ALIAS"
           cp README.md LICENSE VERSION "dist/$package/"
           cp "docs/releases/${RELEASE_TAG}.md" "dist/$package/RELEASE_NOTES.md"
           tar -czf "dist/${package}.tar.gz" -C dist "$package"
@@ -290,12 +308,14 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           PLATFORM: ${{ matrix.platform }}
           EXECUTABLE: ${{ matrix.executable }}
+          ALIAS: ${{ matrix.alias }}
         shell: pwsh
         run: |
           $package = "z2000-$env:RELEASE_TAG-$env:PLATFORM"
           $packageDir = Join-Path dist $package
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
           Copy-Item "zig-out\bin\$env:EXECUTABLE" $packageDir
+          Copy-Item "zig-out\bin\$env:ALIAS" $packageDir
           Copy-Item README.md, LICENSE, VERSION $packageDir
           Copy-Item "docs\releases\$env:RELEASE_TAG.md" (Join-Path $packageDir RELEASE_NOTES.md)
           Compress-Archive -Path $packageDir -DestinationPath "dist\$package.zip"
