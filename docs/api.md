@@ -13,7 +13,8 @@ zig build test
 ```
 
 The binary installs as both `z2000` and the `z2k` alias; conversions accept
-the extension-inferred shorthand (`z2k input.tif output.jp2`). The custom
+the extension-inferred shorthand (`z2k input.tif output.jp2` or
+`z2k input.bmp output.jp2`). The custom
 grayscale codec:
 
 ```sh
@@ -28,10 +29,12 @@ zig build run -- --version
 zig build run -- tiff-info input.tif
 zig build run -- dng-info input.dng
 zig build run -- tiff-to-jp2 input.tif output.jp2 [options]
+zig build run -- bmp-to-jp2 input.bmp output.jp2 [options]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--convert-to-srgb]
 zig build run -- *.tif .jp2 [tiff-to-jp2 options]
+zig build run -- *.bmp .jp2 [tiff-to-jp2 options]
 zig build run -- *.jp2 .tif [jp2-to-tiff options]
 ```
 
@@ -54,6 +57,13 @@ DC level shift. Explicit `--mct none` keeps all four components independent.
 `decode-temp-jp2` dispatches one- through four-component bounded JP2 output to
 the matching TIFF writer; a supported one-component `pclr`/`cmap` stream is
 expanded to RGB first.
+
+`formats/bmp.zig` exposes `read` and `parse` for the bounded Windows BMP input
+profile: a 14-byte file header, 40-byte `BITMAPINFOHEADER`, one plane,
+`BI_RGB`, and 24/32-bit BGR pixels in top-down or bottom-up DWORD-aligned
+rows. It returns an owned 8-bit `RgbImage`; the reserved byte in 32-bit
+`BI_RGB` is not interpreted as alpha. Other DIB headers, palettes,
+compression/bitfields, and embedded colour profiles fail closed.
 
 The shorthand also has a non-recursive batch form. A first argument whose
 filename contains `*` or `?` is expanded internally within its concrete parent
@@ -122,6 +132,7 @@ Supported public JP2 profiles are still narrow:
   implemented CAUSAL/SEGMARK/terminated resilience styles, reference-grid
   precinct/code-block/tag-tree partitions, and origin-aware reversible 5/3 lifting
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
+- 24/32-bit uncompressed Windows BMP input through the bounded adapter
 - `--bypass` for the ISO-MQ backend, including terminated raw/MQ codeword
   segments and packet-header segment length accounting
 - all six Part 1 code-block style bits in the documented ISO-MQ envelope,
@@ -150,7 +161,7 @@ valid2000/jpylyzer-style validators remain diagnostic gates rather than
 absolute sources of truth.
 
 Future conversion-surface goals are deliberately not part of the current CLI
-contract yet: JPEG/PNG/BMP input, RAW/DNG conversion, OpenEXR/HDR handling,
+contract yet: JPEG/PNG input, broader BMP profiles, RAW/DNG conversion, OpenEXR/HDR handling,
 display conversion for preserved e-sRGB/e-sYCC/CIELab/CMYK samples,
 EXIF/IPTC/XMP metadata, and component precision above 16 bits. Each should get
 an explicit option, fail-closed parser policy, and interop fixture before

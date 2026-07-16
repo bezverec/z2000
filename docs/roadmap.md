@@ -72,8 +72,10 @@ reinterpret component samples from codestream metadata alone.
 
 ### 3. Format Front Ends And Metadata
 
-Implement isolated, fuzz-gated adapters in this order: BMP, PNG, JPEG, linear
-DNG/RAW, then OpenEXR. Preserve EXIF, XMP, and IPTC through explicit JP2 box or
+The bounded 24/32-bit BI_RGB BMP adapter is complete with checked row/storage
+semantics, fail-closed malformed coverage, CLI/batch dispatch, and an
+independent ImageMagick oracle. Continue with isolated, fuzz-gated adapters in
+this order: PNG, JPEG, linear DNG/RAW, then OpenEXR. Preserve EXIF, XMP, and IPTC through explicit JP2 box or
 side metadata mappings. Evaluate depths above 16 bits only after the internal
 sample carrier and each source format have checked semantics.
 

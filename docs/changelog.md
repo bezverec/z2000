@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded BMP Input Adapter
+
+- Added isolated Windows BMP input for the 14-byte file header plus 40-byte
+  `BITMAPINFOHEADER`, `BI_RGB`, one plane, and 24/32-bit BGR pixels. Both
+  bottom-up and top-down row order and DWORD padding are decoded into owned
+  8-bit RGB samples; the reserved 32-bit byte is deliberately not alpha.
+- Added `bmp-to-jp2`, extension-inferred `z2k input.bmp output.jp2`, and
+  unquoted non-recursive `z2k *.bmp .jp2` batch dispatch through the existing
+  encode path and options.
+- Header/raster sizes and arithmetic fail closed. Focused malformed, full
+  truncation, and single-bit mutation sweeps accompany an independent ImageMagick BMP3/raw oracle and
+  a pixel-exact BMP -> JP2 -> TIFF live gate.
+
 ### Extended Colour-Space Signalling And Preservation
 
 - Added explicit JP2 metadata for CMYK (EnumCS 12), default-parameter CIELab

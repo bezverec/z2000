@@ -4,6 +4,7 @@ const batch = @import("batch.zig");
 const codec = @import("codec.zig");
 const color = @import("color.zig");
 const codestream = @import("codestream.zig");
+const bmp = @import("formats/bmp.zig");
 const dng = @import("formats/dng.zig");
 const image = @import("image.zig");
 const icc_color = @import("icc.zig");
@@ -50,6 +51,8 @@ pub fn main(init: std.process.Init) !void {
         try dngInfoCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "tiff-to-jp2")) {
         try tiffToJp2Command(io, allocator, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "bmp-to-jp2")) {
+        try bmpToJp2Command(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "jp2-info")) {
         try jp2InfoCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "jp2-stats")) {
@@ -63,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (inferConversion(args[1..])) |conversion| {
         switch (conversion) {
             .tiff_to_jp2 => try tiffToJp2Command(io, allocator, args[1..]),
+            .bmp_to_jp2 => try bmpToJp2Command(io, allocator, args[1..]),
             .jp2_to_tiff => try decodeTempJp2Command(io, allocator, args[1..]),
         }
     } else {
@@ -71,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-const InferredConversion = enum { tiff_to_jp2, jp2_to_tiff };
+const InferredConversion = enum { tiff_to_jp2, bmp_to_jp2, jp2_to_tiff };
 
 /// Shorthand dispatch: `z2000 input.tif output.jp2 [options]` needs no
 /// subcommand — the conversion direction is inferred from the two leading
@@ -88,10 +92,12 @@ fn inferConversion(args: []const []const u8) ?InferredConversion {
 
 fn inferConversionExtensions(input_ext: []const u8, output_ext: []const u8) ?InferredConversion {
     const input_is_tiff = std.ascii.eqlIgnoreCase(input_ext, ".tif") or std.ascii.eqlIgnoreCase(input_ext, ".tiff");
+    const input_is_bmp = std.ascii.eqlIgnoreCase(input_ext, ".bmp");
     const output_is_tiff = std.ascii.eqlIgnoreCase(output_ext, ".tif") or std.ascii.eqlIgnoreCase(output_ext, ".tiff");
     const input_is_jp2 = std.ascii.eqlIgnoreCase(input_ext, ".jp2");
     const output_is_jp2 = std.ascii.eqlIgnoreCase(output_ext, ".jp2");
     if (input_is_tiff and output_is_jp2) return .tiff_to_jp2;
+    if (input_is_bmp and output_is_jp2) return .bmp_to_jp2;
     if (input_is_jp2 and output_is_tiff) return .jp2_to_tiff;
     return null;
 }
@@ -192,6 +198,7 @@ fn executeBatchPlan(
         try file_args.appendSlice(allocator, options);
         switch (conversion) {
             .tiff_to_jp2 => try tiffToJp2Command(io, allocator, file_args.items),
+            .bmp_to_jp2 => try bmpToJp2Command(io, allocator, file_args.items),
             .jp2_to_tiff => try decodeTempJp2Command(io, allocator, file_args.items),
         }
     }
@@ -370,7 +377,32 @@ fn dngInfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
     }
 }
 
+const RasterInput = enum {
+    tiff,
+    bmp,
+
+    fn label(self: RasterInput) []const u8 {
+        return switch (self) {
+            .tiff => "TIFF",
+            .bmp => "BMP",
+        };
+    }
+};
+
 fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return rasterToJp2Command(io, allocator, args, .tiff);
+}
+
+fn bmpToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return rasterToJp2Command(io, allocator, args, .bmp);
+}
+
+fn rasterToJp2Command(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    input: RasterInput,
+) !void {
     if (args.len < 2) {
         usage();
         return error.InvalidCommand;
@@ -531,11 +563,14 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         options.tile_part_divisions = null;
     }
 
-    var command_timings = TiffToJp2Timings{};
+    var command_timings = RasterToJp2Timings{};
     const read_start = monotonicNs();
-    var decoded = try tiff.read(io, allocator, args[0]);
+    var decoded: tiff.DecodedImage = switch (input) {
+        .tiff => try tiff.read(io, allocator, args[0]),
+        .bmp => .{ .rgb = try bmp.read(io, allocator, args[0]) },
+    };
     defer decoded.deinit();
-    command_timings.tiff_read_ns = elapsedNs(read_start);
+    command_timings.input_read_ns = elapsedNs(read_start);
 
     var encode_timings = codestream.EncodeTimings{};
     var width: usize = 0;
@@ -627,7 +662,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
     const write_start = monotonicNs();
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = wrapped });
     command_timings.write_ns = elapsedNs(write_start);
-    command_timings.total_ns = command_timings.tiff_read_ns +
+    command_timings.total_ns = command_timings.input_read_ns +
         command_timings.codestream_ns +
         command_timings.jp2_wrap_ns +
         command_timings.write_ns;
@@ -665,7 +700,7 @@ fn tiffToJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         },
     );
     if (show_timings) {
-        printTiffToJp2Timings(command_timings, encode_timings, components);
+        printRasterToJp2Timings(command_timings, encode_timings, components, input.label());
     }
 }
 
@@ -1185,9 +1220,9 @@ fn totalComponentStats(stats: codestream.TemporaryStats) codestream.ComponentSta
     return total;
 }
 
-const TiffToJp2Timings = struct {
+const RasterToJp2Timings = struct {
     total_ns: u64 = 0,
-    tiff_read_ns: u64 = 0,
+    input_read_ns: u64 = 0,
     codestream_ns: u64 = 0,
     jp2_wrap_ns: u64 = 0,
     write_ns: u64 = 0,
@@ -1202,11 +1237,18 @@ const DecodeTempJp2Timings = struct {
     tiff_write_ns: u64 = 0,
 };
 
-fn printTiffToJp2Timings(command: TiffToJp2Timings, encode: codestream.EncodeTimings, components: u16) void {
+fn printRasterToJp2Timings(
+    command: RasterToJp2Timings,
+    encode: codestream.EncodeTimings,
+    components: u16,
+    input_label: []const u8,
+) void {
     const total = command.total_ns;
     std.debug.print("timings:\n", .{});
     printTiming("total", total, total);
-    printTiming("TIFF read", command.tiff_read_ns, total);
+    var read_label_buffer: [32]u8 = undefined;
+    const read_label = std.fmt.bufPrint(&read_label_buffer, "{s} read", .{input_label}) catch "input read";
+    printTiming(read_label, command.input_read_ns, total);
     printTiming("codestream", command.codestream_ns, total);
     if (components == 3) {
         printTiming("  MCT", encode.color_transform_ns, total);
@@ -1597,14 +1639,17 @@ fn usage() void {
         \\Usage: (z2k is an installed alias for z2000; --threads defaults to all logical CPUs)
         \\  z2000 --version
         \\  z2000 <input.tif> <output.jp2> [options]   (shorthand for tiff-to-jp2)
+        \\  z2000 <input.bmp> <output.jp2> [options]   (shorthand for bmp-to-jp2)
         \\  z2000 <input.jp2> <output.tif> [options]   (shorthand for decode-temp-jp2)
         \\  z2000 *.tif .jp2 [options]                  (non-recursive batch; supports * and ?)
+        \\  z2000 *.bmp .jp2 [options]                  (non-recursive BMP batch)
         \\  z2000 *.jp2 .tif [options]                  (non-recursive reverse batch)
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
         \\  z2000 dng-info <input.dng>
         \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
+        \\  z2000 bmp-to-jp2 <input.bmp> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]

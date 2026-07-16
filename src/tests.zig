@@ -1,6 +1,7 @@
 const std = @import("std");
 const batch = @import("batch.zig");
 const bitplane = @import("bitplane.zig");
+const bmp = @import("formats/bmp.zig");
 const color = @import("color.zig");
 const codec = @import("codec.zig");
 const codestream = @import("codestream.zig");
@@ -25,6 +26,167 @@ const tiff = @import("tiff.zig");
 const version = @import("version.zig");
 const wavelet = @import("wavelet.zig");
 const wavelet_int = @import("wavelet_int.zig");
+
+fn putBmpU16(bytes: []u8, offset: usize, value: u16) void {
+    bytes[offset] = @truncate(value);
+    bytes[offset + 1] = @truncate(value >> 8);
+}
+
+fn putBmpU32(bytes: []u8, offset: usize, value: u32) void {
+    bytes[offset] = @truncate(value);
+    bytes[offset + 1] = @truncate(value >> 8);
+    bytes[offset + 2] = @truncate(value >> 16);
+    bytes[offset + 3] = @truncate(value >> 24);
+}
+
+fn putBmpI32(bytes: []u8, offset: usize, value: i32) void {
+    putBmpU32(bytes, offset, @bitCast(value));
+}
+
+fn bmp24Fixture() [70]u8 {
+    var bytes = [_]u8{0} ** 70;
+    bytes[0] = 'B';
+    bytes[1] = 'M';
+    putBmpU32(&bytes, 2, bytes.len);
+    putBmpU32(&bytes, 10, 54);
+    putBmpU32(&bytes, 14, 40);
+    putBmpI32(&bytes, 18, 2);
+    putBmpI32(&bytes, 22, 2);
+    putBmpU16(&bytes, 26, 1);
+    putBmpU16(&bytes, 28, 24);
+    putBmpU32(&bytes, 34, 16);
+    // Bottom-up storage: blue/white row, then red/green row. Each row has
+    // two padding bytes after the two BGR pixels.
+    @memcpy(bytes[54..70], &[_]u8{
+        255, 0, 0,   255, 255, 255, 0, 0,
+        0,   0, 255, 0,   255, 0,   0, 0,
+    });
+    return bytes;
+}
+
+test "BMP 24-bit BI_RGB decodes bottom-up BGR rows and padding" {
+    const allocator = std.testing.allocator;
+    const bytes = bmp24Fixture();
+    var decoded = try bmp.parse(allocator, &bytes);
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), decoded.width);
+    try std.testing.expectEqual(@as(usize, 2), decoded.height);
+    try std.testing.expectEqual(@as(u8, 8), decoded.bit_depth);
+    try std.testing.expectEqualSlices(u16, &[_]u16{
+        255, 0, 0,   0,   255, 0,
+        0,   0, 255, 255, 255, 255,
+    }, decoded.samples);
+}
+
+test "BMP 32-bit BI_RGB decodes top-down and ignores reserved byte" {
+    const allocator = std.testing.allocator;
+    var bytes = [_]u8{0} ** 62;
+    bytes[0] = 'B';
+    bytes[1] = 'M';
+    putBmpU32(&bytes, 2, bytes.len);
+    putBmpU32(&bytes, 10, 54);
+    putBmpU32(&bytes, 14, 40);
+    putBmpI32(&bytes, 18, 2);
+    putBmpI32(&bytes, 22, -1);
+    putBmpU16(&bytes, 26, 1);
+    putBmpU16(&bytes, 28, 32);
+    putBmpU32(&bytes, 34, 8);
+    @memcpy(bytes[54..62], &[_]u8{ 0, 255, 255, 17, 255, 255, 0, 99 });
+
+    var decoded = try bmp.parse(allocator, &bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, &[_]u16{
+        255, 255, 0,
+        0,   255, 255,
+    }, decoded.samples);
+}
+
+test "BMP bounded profile rejects malformed and unsupported headers" {
+    const allocator = std.testing.allocator;
+    const valid = bmp24Fixture();
+
+    try std.testing.expectError(bmp.BmpError.TruncatedImage, bmp.parse(allocator, valid[0..53]));
+
+    var changed = valid;
+    changed[0] = 'Z';
+    try std.testing.expectError(bmp.BmpError.InvalidSignature, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpU32(&changed, 2, changed.len - 1);
+    try std.testing.expectError(bmp.BmpError.InvalidFileSize, bmp.parse(allocator, &changed));
+    changed = valid;
+    changed[6] = 1;
+    try std.testing.expectError(bmp.BmpError.InvalidReservedField, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpU32(&changed, 14, 108);
+    try std.testing.expectError(bmp.BmpError.UnsupportedDibHeader, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpI32(&changed, 18, 0);
+    try std.testing.expectError(bmp.BmpError.InvalidDimensions, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpI32(&changed, 22, std.math.minInt(i32));
+    try std.testing.expectError(bmp.BmpError.InvalidDimensions, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpU16(&changed, 26, 2);
+    try std.testing.expectError(bmp.BmpError.InvalidPlanes, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpU16(&changed, 28, 16);
+    try std.testing.expectError(bmp.BmpError.UnsupportedBitDepth, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpU32(&changed, 30, 3);
+    try std.testing.expectError(bmp.BmpError.UnsupportedCompression, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpU32(&changed, 46, 1);
+    try std.testing.expectError(bmp.BmpError.UnsupportedPalette, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpU32(&changed, 10, 53);
+    try std.testing.expectError(bmp.BmpError.InvalidPixelOffset, bmp.parse(allocator, &changed));
+    changed = valid;
+    putBmpU32(&changed, 34, 15);
+    try std.testing.expectError(bmp.BmpError.InvalidImageSize, bmp.parse(allocator, &changed));
+}
+
+test "BMP parser matches independent ImageMagick BMP3 raster" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/imagemagick-bmp24-3x2.bmp");
+    const expected = @embedFile("testdata/imagemagick-bmp24-3x2.raw");
+    var decoded = try bmp.parse(allocator, bytes);
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), decoded.width);
+    try std.testing.expectEqual(@as(usize, 2), decoded.height);
+    try std.testing.expectEqual(expected.len, decoded.samples.len);
+    for (expected, decoded.samples) |want, actual| {
+        try std.testing.expectEqual(@as(u16, want), actual);
+    }
+}
+
+test "BMP truncation sweep fails closed without allocation leaks" {
+    const allocator = std.testing.allocator;
+    const bytes = bmp24Fixture();
+    for (0..bytes.len) |length| {
+        if (bmp.parse(allocator, bytes[0..length])) |decoded| {
+            var owned = decoded;
+            owned.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
+test "BMP single-bit mutation sweep never panics or leaks" {
+    const allocator = std.testing.allocator;
+    const valid = bmp24Fixture();
+    for (0..valid.len) |offset| {
+        for (0..8) |bit| {
+            var changed = valid;
+            changed[offset] ^= @as(u8, 1) << @intCast(bit);
+            if (bmp.parse(allocator, &changed)) |decoded| {
+                var owned = decoded;
+                owned.deinit();
+            } else |_| {}
+        }
+    }
+}
 
 test "application version carries deterministic build provenance" {
     _ = try std.SemanticVersion.parse(version.string);

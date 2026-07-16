@@ -19,6 +19,10 @@ certification.
 - TIFF 6.0 RGB, grayscale, gray+alpha, and RGBA input: uncompressed chunky
   8-bit or 16-bit strips, including optional ICC profile preservation and
   associated/unassociated alpha semantics.
+- Bounded Windows BMP input: uncompressed 24/32-bit `BITMAPINFOHEADER` pixels,
+  including DWORD row padding and top-down or bottom-up storage. Unsupported
+  compression, bitfields, palettes, alpha interpretation, and newer DIB
+  headers fail closed.
 - Lossless JP2 encoding with RCT, reversible 5/3 DWT, quality layers, all five
   progression orders, PLT/TLM, and strict no-sidecar decode.
 - Lossy JP2 encoding with ICT, irreversible 9/7 DWT, scalar-derived or
@@ -63,7 +67,7 @@ certification.
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
 non-empty PLT-less multi-part tiles, broad color management,
-JPEG/PNG/BMP/RAW/OpenEXR input, and metadata handling beyond the staged ICC
+JPEG/PNG/RAW/OpenEXR input, broader BMP profiles, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.
 
@@ -114,9 +118,9 @@ The examples call the built binary directly; add `zig-out/bin` to `PATH` or
 prefix the commands with `./zig-out/bin/`. The build installs the binary
 twice: as `z2000` and as the short alias `z2k` — every command works
 identically under both names. Conversions need no subcommand — the
-direction is inferred from the file extensions (`.tif`/`.tiff` and `.jp2`,
+direction is inferred from the file extensions (`.tif`/`.tiff`, `.bmp`, and `.jp2`,
 case-insensitive); the explicit `tiff-to-jp2` and `decode-temp-jp2`
-subcommands keep working. All commands default to using every logical CPU
+subcommands keep working, as does `bmp-to-jp2`. All commands default to using every logical CPU
 thread; pass `--threads N` to limit the worker count.
 
 Convert TIFF to lossless JP2 (the defaults already produce the archival
@@ -126,10 +130,17 @@ RCT + reversible 5/3 profile):
 z2k input.tif output.jp2
 ```
 
+Convert a bounded 24/32-bit BMP to lossless JP2:
+
+```sh
+z2k input.bmp output.jp2
+```
+
 Convert every matching TIFF in one directory, keeping each basename:
 
 ```sh
 z2k *.tif .jp2
+z2k *.bmp .jp2
 z2k incoming/*.tiff .jp2 --threads 8
 ```
 
@@ -179,6 +190,8 @@ identify the direction):
 ```sh
 z2000 input.tif output.jp2 [options]
 z2000 tiff-to-jp2 input.tif output.jp2 [options]
+z2000 input.bmp output.jp2 [options]
+z2000 bmp-to-jp2 input.bmp output.jp2 [options]
 ```
 
 For normal lossless conversion, the defaults are usually sufficient. The most
@@ -260,6 +273,13 @@ The full profile matrix and internal API surface are documented in
 
 ## Supported Input Boundary
 
+The BMP adapter accepts only the 14-byte Windows file header followed by the
+40-byte `BITMAPINFOHEADER`, `BI_RGB`, one plane, and 24- or 32-bit pixels.
+Widths must be positive; positive and negative heights select bottom-up and
+top-down storage. Rows are DWORD-aligned, BGR is converted to RGB, and the
+reserved fourth byte in 32-bit `BI_RGB` is ignored. Header lengths, offsets,
+dimensions, raster sizes, and arithmetic are checked before allocation.
+
 The production `tiff-to-jp2` path is deliberately narrow:
 
 - one TIFF image / first IFD;
@@ -334,6 +354,15 @@ ICT/9/7 rate-target profile:
 
 The POSIX harness accepts the same extension through `INCLUDE_LOSSY=1`.
 
+Run the bounded BMP adapter gate (z2000 roundtrip, OpenJPEG/Grok decode, and
+batch dispatch) with paths to locally installed reference tools when needed:
+
+```powershell
+.\tools\interop_bmp.ps1 -Magick magick `
+  -OpenJpeg C:\tools\openjpeg\bin\opj_decompress.exe `
+  -Grok C:\tools\grok\bin\grk_decompress.exe
+```
+
 ## Project Direction
 
 Near term: keep both engineering scorecards at 100/100 while completing sampled
@@ -344,7 +373,7 @@ bounded envelope, not a claim that every Part 1 or JPX profile is implemented.
 Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.
 
-Later conversion-tool target: add JPEG/PNG/BMP input first, then RAW/DNG and
+Later conversion-tool target: add PNG/JPEG input next, then RAW/DNG and
 OpenEXR workflows; add display conversion for the preserved extended YCC,
 CIELab, and CMYK spaces; preserve EXIF/IPTC/XMP; and evaluate component
 depths above 16 bits where the source format and JPEG2000 profile support them

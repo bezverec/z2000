@@ -76,8 +76,13 @@ silently interpreted as RGB or YCC.
 
 ### 2. Format And Metadata Adapters
 
-Add isolated, fuzz-gated modules in this order: BMP, PNG, JPEG, linear DNG/RAW,
-then OpenEXR. Preserve EXIF, XMP, and IPTC through explicit mappings. Evaluate
+The first bounded BMP slice is complete: isolated 24/32-bit BI_RGB parsing,
+top-down/bottom-up row semantics, checked padding/size arithmetic, explicit
+single-file and batch CLI dispatch, malformed/truncation/mutation sweeps, an independent
+ImageMagick BMP3 pixel oracle, and end-to-end BMP -> JP2 -> TIFF interop.
+
+Continue with an isolated, fuzz-gated PNG module, then JPEG, linear DNG/RAW,
+and OpenEXR. Preserve EXIF, XMP, and IPTC through explicit mappings. Evaluate
 depths above 16 bits only after the internal carrier and target JP2 profile have
 checked semantics.
 
