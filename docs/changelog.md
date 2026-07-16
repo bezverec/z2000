@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded LinearRaw DNG Input Adapter
+
+- Added checked classic-TIFF selection of exactly one IFD0/direct-SubIFD
+  `LinearRaw` raster: uncompressed chunky unsigned RGB, 8/16-bit uniform
+  channels, strips, and orientation 1.
+- Added optional SHORT linearization and scalar/per-channel black/white
+  normalization. The one-calibration `ForwardMatrix1`/`AsShotNeutral` path
+  generates a restricted ICC v4 matrix/identity-TRC profile instead of
+  silently treating camera-native linear samples as sRGB.
+- Added `dng-to-jp2`, `.dng` shorthand and unquoted batch dispatch plus
+  synthetic normalization/profile, malformed-strip, CFA rejection, and full
+  prefix-truncation/single-bit-mutation gates. Grok reproduces the stored
+  linear raster exactly; OpenJPEG's automatic ICC conversion agrees with
+  z2000's explicit sRGB path within two 16-bit sample values. Compression,
+  tiles, CFA/demosaicing, crops/opcodes, multiple calibrations, and
+  EXIF/XMP/IPTC remain fail-closed.
+
 ### Bounded Baseline JPEG Input Adapter
 
 - Added an independent 8-bit SOF0 decoder for one complete interleaved Huffman

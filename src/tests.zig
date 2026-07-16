@@ -4646,6 +4646,253 @@ fn expectSamplesNear(expected: []const u16, actual: []const u16, tolerance: u16)
     }
 }
 
+fn appendDngColorMetadata(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8)) !void {
+    for (0..3) |row| for (0..3) |column| {
+        try appendU32Le(allocator, bytes, if (row == column) 1 else 0);
+        try appendU32Le(allocator, bytes, 1);
+    };
+    for (0..3) |_| {
+        try appendU32Le(allocator, bytes, 1);
+        try appendU32Le(allocator, bytes, 1);
+    }
+    const forward = [_]u32{
+        436035, 385101, 143066,
+        222443, 716934, 60623,
+        13901,  97077,  713928,
+    };
+    for (forward) |value| {
+        try appendU32Le(allocator, bytes, value);
+        try appendU32Le(allocator, bytes, 1_000_000);
+    }
+}
+
+fn appendDngRasterMetadataAndSamples(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8)) !void {
+    try appendU16Le(allocator, bytes, 16);
+    try appendU16Le(allocator, bytes, 16);
+    try appendU16Le(allocator, bytes, 16);
+    for (0..3) |_| {
+        try appendU32Le(allocator, bytes, 0);
+        try appendU32Le(allocator, bytes, 1);
+    }
+    for (0..3) |_| try appendU32Le(allocator, bytes, 1000);
+    for ([_]u16{ 0, 500, 1000, 250, 750, 1000 }) |value| {
+        try appendU16Le(allocator, bytes, value);
+    }
+}
+
+fn buildLinearDngFixture(allocator: std.mem.Allocator) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    const ifd_offset: u32 = 8;
+    const entry_count: u16 = 21;
+    const data_offset = ifd_offset + 2 + @as(u32, entry_count) * 12 + 4;
+    const bits_offset = data_offset;
+    const model_offset = bits_offset + 6;
+    const black_offset = model_offset + 10;
+    const white_offset = black_offset + 24;
+    const color_offset = white_offset + 12;
+    const neutral_offset = color_offset + 72;
+    const forward_offset = neutral_offset + 24;
+    const raster_offset = forward_offset + 72;
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, ifd_offset);
+    try appendU16Le(allocator, &bytes, entry_count);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, bits_offset);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 34892);
+    try appendIfdEntryLe(allocator, &bytes, 273, 4, 1, raster_offset);
+    try appendIfdEntryLe(allocator, &bytes, 274, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 278, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 279, 4, 1, 12);
+    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 339, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 50706, 1, 4, 1 | (@as(u32, 4) << 8));
+    try appendIfdEntryLe(allocator, &bytes, 50708, 2, 10, model_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50713, 3, 2, 1 | (@as(u32, 1) << 16));
+    try appendIfdEntryLe(allocator, &bytes, 50714, 5, 3, black_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50717, 4, 3, white_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50721, 10, 9, color_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50728, 5, 3, neutral_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50778, 3, 1, 21);
+    try appendIfdEntryLe(allocator, &bytes, 50964, 10, 9, forward_offset);
+    try appendU32Le(allocator, &bytes, 0);
+
+    try appendU16Le(allocator, &bytes, 16);
+    try appendU16Le(allocator, &bytes, 16);
+    try appendU16Le(allocator, &bytes, 16);
+    try bytes.appendSlice(allocator, "Synthetic\x00");
+    for (0..3) |_| {
+        try appendU32Le(allocator, &bytes, 0);
+        try appendU32Le(allocator, &bytes, 1);
+    }
+    for (0..3) |_| try appendU32Le(allocator, &bytes, 1000);
+    try appendDngColorMetadata(allocator, &bytes);
+    for ([_]u16{ 0, 500, 1000, 250, 750, 1000 }) |value| {
+        try appendU16Le(allocator, &bytes, value);
+    }
+    try std.testing.expectEqual(@as(usize, raster_offset + 12), bytes.items.len);
+    return bytes.toOwnedSlice(allocator);
+}
+
+fn buildSubIfdLinearDngFixture(allocator: std.mem.Allocator) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    const ifd0_entries: u16 = 8;
+    const ifd0_data = 8 + 2 + @as(u32, ifd0_entries) * 12 + 4;
+    const model_offset = ifd0_data;
+    const color_offset = model_offset + 10;
+    const neutral_offset = color_offset + 72;
+    const forward_offset = neutral_offset + 24;
+    const raw_ifd_offset = forward_offset + 72;
+    const raw_entries: u16 = 15;
+    const raw_data = raw_ifd_offset + 2 + @as(u32, raw_entries) * 12 + 4;
+    const bits_offset = raw_data;
+    const black_offset = bits_offset + 6;
+    const white_offset = black_offset + 24;
+    const raster_offset = white_offset + 12;
+
+    try bytes.appendSlice(allocator, "II");
+    try appendU16Le(allocator, &bytes, 42);
+    try appendU32Le(allocator, &bytes, 8);
+    try appendU16Le(allocator, &bytes, ifd0_entries);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 330, 4, 1, raw_ifd_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50706, 1, 4, 1 | (@as(u32, 4) << 8));
+    try appendIfdEntryLe(allocator, &bytes, 50708, 2, 10, model_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50721, 10, 9, color_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50728, 5, 3, neutral_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50778, 3, 1, 21);
+    try appendIfdEntryLe(allocator, &bytes, 50964, 10, 9, forward_offset);
+    try appendU32Le(allocator, &bytes, 0);
+    try bytes.appendSlice(allocator, "Synthetic\x00");
+    try appendDngColorMetadata(allocator, &bytes);
+    try std.testing.expectEqual(@as(usize, raw_ifd_offset), bytes.items.len);
+
+    try appendU16Le(allocator, &bytes, raw_entries);
+    try appendIfdEntryLe(allocator, &bytes, 256, 4, 1, 2);
+    try appendIfdEntryLe(allocator, &bytes, 257, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 258, 3, 3, bits_offset);
+    try appendIfdEntryLe(allocator, &bytes, 259, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 262, 3, 1, 34892);
+    try appendIfdEntryLe(allocator, &bytes, 273, 4, 1, raster_offset);
+    try appendIfdEntryLe(allocator, &bytes, 274, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 277, 3, 1, 3);
+    try appendIfdEntryLe(allocator, &bytes, 278, 4, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 279, 4, 1, 12);
+    try appendIfdEntryLe(allocator, &bytes, 284, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 339, 3, 1, 1);
+    try appendIfdEntryLe(allocator, &bytes, 50713, 3, 2, 1 | (@as(u32, 1) << 16));
+    try appendIfdEntryLe(allocator, &bytes, 50714, 5, 3, black_offset);
+    try appendIfdEntryLe(allocator, &bytes, 50717, 4, 3, white_offset);
+    try appendU32Le(allocator, &bytes, 0);
+    try appendDngRasterMetadataAndSamples(allocator, &bytes);
+    try std.testing.expectEqual(@as(usize, raster_offset + 12), bytes.items.len);
+    return bytes.toOwnedSlice(allocator);
+}
+
+test "linear DNG parser normalizes samples and constructs a bounded ICC profile" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildLinearDngFixture(allocator);
+    defer allocator.free(bytes);
+
+    var decoded = try dng.parse(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 2), decoded.width);
+    try std.testing.expectEqual(@as(usize, 1), decoded.height);
+    try std.testing.expectEqual(@as(u8, 16), decoded.bit_depth);
+    try std.testing.expectEqualSlices(u16, &.{ 0, 32768, 65535, 16384, 49151, 65535 }, decoded.samples);
+    try std.testing.expect(decoded.icc_profile != null);
+
+    var converted = try icc_color.convertRgbToSrgb(allocator, decoded, decoded.icc_profile.?);
+    defer converted.deinit();
+    try std.testing.expectEqual(@as(u16, 0), converted.samples[0]);
+    try std.testing.expect(converted.samples[1] > decoded.samples[1]);
+    try std.testing.expectEqual(@as(u16, 65535), converted.samples[2]);
+}
+
+test "linear DNG parser selects one direct SubIFD raster" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildSubIfdLinearDngFixture(allocator);
+    defer allocator.free(bytes);
+    var decoded = try dng.parse(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, &.{ 0, 32768, 65535, 16384, 49151, 65535 }, decoded.samples);
+}
+
+test "linear DNG parser accepts SHORT AsShotNeutral" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildLinearDngFixture(allocator);
+    defer allocator.free(bytes);
+    putBmpU16(bytes, 8 + 2 + 18 * 12 + 2, 3);
+    putBmpU16(bytes, 390, 1);
+    putBmpU16(bytes, 392, 1);
+    putBmpU16(bytes, 394, 1);
+    var decoded = try dng.parse(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, &.{ 0, 32768, 65535, 16384, 49151, 65535 }, decoded.samples);
+}
+
+test "linear DNG parser fails closed on CFA, invalid strips, and truncation" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildLinearDngFixture(allocator);
+    defer allocator.free(bytes);
+
+    const cfa = try allocator.dupe(u8, bytes);
+    defer allocator.free(cfa);
+    putBmpU16(cfa, 8 + 2 + 4 * 12 + 8, 32803);
+    try std.testing.expectError(dng.DngError.UnsupportedDng, dng.parse(allocator, cfa));
+
+    const bad_strip = try allocator.dupe(u8, bytes);
+    defer allocator.free(bad_strip);
+    putBmpU32(bad_strip, 8 + 2 + 9 * 12 + 8, 10);
+    try std.testing.expectError(dng.DngError.InvalidRaster, dng.parse(allocator, bad_strip));
+
+    const exif = try allocator.dupe(u8, bytes);
+    defer allocator.free(exif);
+    putBmpU16(exif, 8 + 2 + 17 * 12, 34665);
+    try std.testing.expectError(dng.DngError.UnsupportedDng, dng.parse(allocator, exif));
+
+    const duplicate = try allocator.dupe(u8, bytes);
+    defer allocator.free(duplicate);
+    putBmpU16(duplicate, 8 + 2 + 13 * 12, 50706);
+    try std.testing.expectError(dng.DngError.InvalidDng, dng.parse(allocator, duplicate));
+
+    const old_version = try allocator.dupe(u8, bytes);
+    defer allocator.free(old_version);
+    putBmpU32(old_version, 8 + 2 + 12 * 12 + 8, 1 | (@as(u32, 1) << 8));
+    try std.testing.expectError(dng.DngError.UnsupportedDng, dng.parse(allocator, old_version));
+
+    var len: usize = 0;
+    while (len < bytes.len) : (len += 1) {
+        if (dng.parse(allocator, bytes[0..len])) |decoded_value| {
+            var decoded = decoded_value;
+            decoded.deinit();
+            return error.TruncatedBufferShouldFail;
+        } else |_| {}
+    }
+}
+
+test "linear DNG parser is memory-safe across single-bit mutations" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildLinearDngFixture(allocator);
+    defer allocator.free(bytes);
+    const mutated = try allocator.dupe(u8, bytes);
+    defer allocator.free(mutated);
+    for (0..mutated.len) |index| for (0..8) |bit| {
+        mutated[index] ^= @as(u8, 1) << @intCast(bit);
+        if (dng.parse(allocator, mutated)) |decoded_value| {
+            var decoded = decoded_value;
+            decoded.deinit();
+        } else |_| {}
+        mutated[index] ^= @as(u8, 1) << @intCast(bit);
+    };
+}
+
 test "DNG info parser reads primary IFD metadata and SubIFD summaries" {
     const allocator = std.testing.allocator;
     var bytes: std.ArrayList(u8) = .empty;

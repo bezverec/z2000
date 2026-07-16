@@ -15,7 +15,7 @@ zig build test
 The binary installs as both `z2000` and the `z2k` alias; conversions accept
 the extension-inferred shorthand (`z2k input.tif output.jp2`,
 `z2k input.bmp output.jp2`, `z2k input.png output.jp2`, or
-`z2k input.jpg output.jp2`). The custom
+`z2k input.jpg output.jp2`, or `z2k input.dng output.jp2`). The custom
 grayscale codec:
 
 ```sh
@@ -33,6 +33,7 @@ zig build run -- tiff-to-jp2 input.tif output.jp2 [options]
 zig build run -- bmp-to-jp2 input.bmp output.jp2 [options]
 zig build run -- png-to-jp2 input.png output.jp2 [options]
 zig build run -- jpeg-to-jp2 input.jpg output.jp2 [options]
+zig build run -- dng-to-jp2 input.dng output.jp2 [options]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
 zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--convert-to-srgb]
@@ -40,6 +41,7 @@ zig build run -- *.tif .jp2 [tiff-to-jp2 options]
 zig build run -- *.bmp .jp2 [tiff-to-jp2 options]
 zig build run -- *.png .jp2 [tiff-to-jp2 options]
 zig build run -- *.jpg .jp2 [tiff-to-jp2 options]
+zig build run -- *.dng .jp2 [tiff-to-jp2 options]
 zig build run -- *.jp2 .tif [jp2-to-tiff options]
 ```
 
@@ -88,6 +90,18 @@ One-component input returns `GrayImage`; three-component input returns
 `RgbImage`. The resulting JPEG raster is then encoded reversibly into JP2.
 Progressive, arithmetic, lossless, multiple scans, CMYK/YCCK, and unmapped
 metadata fail closed.
+
+`formats/dng.zig` exposes metadata-only `parseInfo` plus owned-raster `read`
+and `parse`. Raster decode selects exactly one IFD0 or direct-SubIFD
+`LinearRaw` image and accepts uncompressed chunky unsigned RGB at 8 or 16 bits
+with orientation 1 and DNG version 1.2 through 1.7.1. Optional SHORT
+`LinearizationTable`, scalar/per-channel
+`BlackLevel`, and scalar/per-channel `WhiteLevel` are applied before scaling
+to the full output range. A one-calibration profile with `ColorMatrix1`,
+`CalibrationIlluminant1`, `AsShotNeutral`, and `ForwardMatrix1` produces a
+restricted ICC v4 matrix/identity-TRC profile, so JP2 storage retains linear
+camera-to-PCS semantics. CFA mosaics, tiles, compression, crop/opcodes,
+multiple calibrations, and EXIF/XMP/IPTC payloads fail closed.
 
 The shorthand also has a non-recursive batch form. A first argument whose
 filename contains `*` or `?` is expanded internally within its concrete parent
@@ -187,7 +201,7 @@ valid2000/jpylyzer-style validators remain diagnostic gates rather than
 absolute sources of truth.
 
 Future conversion-surface goals are deliberately not part of the current CLI
-contract yet: broader BMP/PNG/JPEG profiles, RAW/DNG conversion, OpenEXR/HDR handling,
+contract yet: broader BMP/PNG/JPEG/DNG profiles, CFA/general RAW conversion, OpenEXR/HDR handling,
 display conversion for preserved e-sRGB/e-sYCC/CIELab/CMYK samples,
 EXIF/IPTC/XMP metadata, and component precision above 16 bits. Each should get
 an explicit option, fail-closed parser policy, and interop fixture before

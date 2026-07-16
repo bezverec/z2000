@@ -76,9 +76,9 @@ certification.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
-non-empty PLT-less multi-part tiles, broad color management,
-RAW/OpenEXR input, broader BMP/PNG/JPEG profiles, and metadata handling beyond the staged ICC
-path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
+non-empty PLT-less multi-part tiles, broad color management, CFA/general RAW
+and OpenEXR input, broader BMP/PNG/JPEG/DNG profiles, and metadata handling
+beyond the staged ICC path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.
 
 ## Build From Source
@@ -129,10 +129,10 @@ prefix the commands with `./zig-out/bin/`. The build installs the binary
 twice: as `z2000` and as the short alias `z2k` — every command works
 identically under both names. Conversions need no subcommand — the
 direction is inferred from the file extensions (`.tif`/`.tiff`, `.bmp`,
-`.png`, `.jpg`/`.jpeg`, and `.jp2`,
+`.png`, `.jpg`/`.jpeg`, `.dng`, and `.jp2`,
 case-insensitive); the explicit `tiff-to-jp2` and `decode-temp-jp2`
 subcommands keep working, as do `bmp-to-jp2`, `png-to-jp2`, and
-`jpeg-to-jp2`. All commands
+`jpeg-to-jp2` and `dng-to-jp2`. All commands
 default to using every logical CPU thread; pass `--threads N` to limit the
 worker count.
 
@@ -162,6 +162,13 @@ in JP2:
 z2k input.jpg output.jp2
 ```
 
+Convert a bounded three-channel LinearRaw DNG while retaining its linear
+camera-to-PCS interpretation in a restricted ICC profile:
+
+```sh
+z2k input.dng output.jp2
+```
+
 Convert every matching TIFF in one directory, keeping each basename:
 
 ```sh
@@ -169,6 +176,7 @@ z2k *.tif .jp2
 z2k *.bmp .jp2
 z2k *.png .jp2
 z2k *.jpg .jp2
+z2k *.dng .jp2
 z2k incoming/*.tiff .jp2 --threads 8
 ```
 
@@ -224,7 +232,20 @@ z2000 input.png output.jp2 [options]
 z2000 png-to-jp2 input.png output.jp2 [options]
 z2000 input.jpg output.jp2 [options]
 z2000 jpeg-to-jp2 input.jpg output.jp2 [options]
+z2000 input.dng output.jp2 [options]
+z2000 dng-to-jp2 input.dng output.jp2 [options]
 ```
+
+The DNG adapter accepts exactly one uncompressed, chunky, unsigned 8/16-bit
+three-channel `LinearRaw` IFD at orientation 1 and DNG version 1.2 through
+1.7.1. It applies optional
+`LinearizationTable`, scalar/per-channel black and white levels, and the
+bounded one-illuminant `ForwardMatrix1`/`AsShotNeutral` path. The normalized
+samples remain linear and carry a matrix/identity-TRC ICC profile; they are not
+silently relabelled as sRGB. CFA mosaics, tiles, compression, crop/opcode
+processing, multiple calibrations, and EXIF/XMP/IPTC payloads fail closed.
+
+This product includes DNG technology under license by Adobe.
 
 For normal lossless conversion, the defaults are usually sufficient. The most
 useful options are grouped below. Unsupported combinations fail closed rather

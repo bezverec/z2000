@@ -184,6 +184,28 @@ pub const ValueRef = struct {
         };
     }
 
+    pub fn rationalAt(self: ValueRef, document: Document, index: usize) Error!f64 {
+        if (index >= self.count or self.field_type != @intFromEnum(FieldType.rational)) {
+            return Error.InvalidTagValue;
+        }
+        const value_bytes = self.bytes(document);
+        const numerator = try readU32(value_bytes, index * 8, document.endian);
+        const denominator = try readU32(value_bytes, index * 8 + 4, document.endian);
+        if (denominator == 0) return Error.InvalidTagValue;
+        return @as(f64, @floatFromInt(numerator)) / @as(f64, @floatFromInt(denominator));
+    }
+
+    pub fn srationalAt(self: ValueRef, document: Document, index: usize) Error!f64 {
+        if (index >= self.count or self.field_type != @intFromEnum(FieldType.srational)) {
+            return Error.InvalidTagValue;
+        }
+        const value_bytes = self.bytes(document);
+        const numerator: i32 = @bitCast(try readU32(value_bytes, index * 8, document.endian));
+        const denominator: i32 = @bitCast(try readU32(value_bytes, index * 8 + 4, document.endian));
+        if (denominator == 0) return Error.InvalidTagValue;
+        return @as(f64, @floatFromInt(numerator)) / @as(f64, @floatFromInt(denominator));
+    }
+
     pub fn ascii(self: ValueRef, document: Document) Error![]const u8 {
         if (self.field_type != @intFromEnum(FieldType.ascii)) return Error.InvalidTagValue;
         return std.mem.sliceTo(self.bytes(document), 0);

@@ -95,7 +95,16 @@ malformed/mutation sweeps, independent ImageMagick oracles, and exact
 OpenJPEG/Grok reconstruction of the resulting reversible JP2. Progressive,
 arithmetic, CMYK/YCCK, multi-scan, and metadata-bearing JPEG remain closed.
 
-Continue with an isolated, fuzz-gated linear DNG/RAW module, then OpenEXR.
+The bounded LinearRaw DNG slice is complete: exactly one IFD0/direct-SubIFD
+uncompressed chunky unsigned three-channel 8/16-bit raster, checked strips,
+orientation 1, optional linearization and black/white normalization, and a
+one-illuminant camera-to-PCS matrix carried as a restricted linear ICC profile.
+Grok preserves the synthetic linear raster exactly; OpenJPEG's ICC-rendered
+TIFF agrees with the explicit z2000 sRGB path within two 16-bit sample values.
+CFA/demosaicing, compression, tiles, crop/opcodes, multiple calibrations, and
+unmapped metadata remain closed.
+
+Continue with an isolated, fuzz-gated OpenEXR module.
 Preserve EXIF, XMP, and IPTC through explicit
 mappings. Evaluate depths above 16 bits only after the internal carrier and
 target JP2 profile have checked semantics.

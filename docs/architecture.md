@@ -209,6 +209,14 @@ component mappings fail closed. CMYK, default CIELab, e-sRGB, and e-sYCC
 signalling preserve native planes but deliberately have no TIFF/sRGB conversion
 yet.
 
+The bounded LinearRaw DNG input adapter shares only checked classic-TIFF IFD
+value access with the general TIFF reader. It independently selects one raw
+IFD, validates uncompressed chunky 8/16-bit RGB strips, applies DNG
+linearization/black/white normalization, and derives `CameraToXYZ_D50` from
+the one-illuminant `ForwardMatrix1` and `AsShotNeutral` path. A generated ICC
+v4 matrix profile carries that linear interpretation through JP2; conversion
+to display sRGB remains the existing explicit ICC boundary.
+
 ## Parallelism And Memory
 
 Persistent worker pools execute independent tile, component, DWT, colour, and
