@@ -28,6 +28,11 @@ certification.
   `PLTE`/`tRNS`, all five scanline filters, zlib, and strict chunk CRC/order
   validation. Packed samples and transparency expand into existing grayscale,
   RGB, or unassociated-alpha carriers.
+- Bounded JPEG input: 8-bit Huffman-coded baseline sequential DCT with one
+  complete interleaved scan, grayscale or JFIF YCbCr 4:4:4/4:2:2/4:2:0,
+  centered chroma interpolation, and optional restart intervals. Progressive,
+  arithmetic/lossless, CMYK/YCCK, multi-scan, and metadata-bearing files fail
+  closed.
 - Lossless JP2 encoding with RCT, reversible 5/3 DWT, quality layers, all five
   progression orders, PLT/TLM, and strict no-sidecar decode.
 - Lossy JP2 encoding with ICT, irreversible 9/7 DWT, scalar-derived or
@@ -72,7 +77,7 @@ certification.
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
 non-empty PLT-less multi-part tiles, broad color management,
-JPEG/RAW/OpenEXR input, broader BMP/PNG profiles, and metadata handling beyond the staged ICC
+RAW/OpenEXR input, broader BMP/PNG/JPEG profiles, and metadata handling beyond the staged ICC
 path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.
 
@@ -124,9 +129,10 @@ prefix the commands with `./zig-out/bin/`. The build installs the binary
 twice: as `z2000` and as the short alias `z2k` — every command works
 identically under both names. Conversions need no subcommand — the
 direction is inferred from the file extensions (`.tif`/`.tiff`, `.bmp`,
-`.png`, and `.jp2`,
+`.png`, `.jpg`/`.jpeg`, and `.jp2`,
 case-insensitive); the explicit `tiff-to-jp2` and `decode-temp-jp2`
-subcommands keep working, as do `bmp-to-jp2` and `png-to-jp2`. All commands
+subcommands keep working, as do `bmp-to-jp2`, `png-to-jp2`, and
+`jpeg-to-jp2`. All commands
 default to using every logical CPU thread; pass `--threads N` to limit the
 worker count.
 
@@ -149,12 +155,20 @@ Convert a bounded PNG to lossless JP2:
 z2k input.png output.jp2
 ```
 
+Decode a bounded baseline JPEG and store its reconstructed raster losslessly
+in JP2:
+
+```sh
+z2k input.jpg output.jp2
+```
+
 Convert every matching TIFF in one directory, keeping each basename:
 
 ```sh
 z2k *.tif .jp2
 z2k *.bmp .jp2
 z2k *.png .jp2
+z2k *.jpg .jp2
 z2k incoming/*.tiff .jp2 --threads 8
 ```
 
@@ -208,6 +222,8 @@ z2000 input.bmp output.jp2 [options]
 z2000 bmp-to-jp2 input.bmp output.jp2 [options]
 z2000 input.png output.jp2 [options]
 z2000 png-to-jp2 input.png output.jp2 [options]
+z2000 input.jpg output.jp2 [options]
+z2000 jpeg-to-jp2 input.jpg output.jp2 [options]
 ```
 
 For normal lossless conversion, the defaults are usually sufficient. The most
@@ -304,6 +320,16 @@ scaled exactly to 8 bits; palette and `tRNS` are expanded without compositing;
 16-bit samples remain 16-bit. Adam7, APNG, ICC/cICP, and non-sRGB chromaticity/
 gamma chunks fail closed. Other ancillary metadata is not yet preserved.
 
+The JPEG adapter accepts one 8-bit SOF0 frame and one complete interleaved
+baseline scan using Huffman entropy coding and 8-bit quantization tables.
+One-component grayscale and three-component JFIF YCbCr with 1x1, 2x1, or 2x2
+luma sampling are decoded through dequantization, reference IDCT, and centered
+chroma interpolation. DRI/RST intervals are supported. Because JPEG input is
+already lossy, the JP2 contains the chosen decoded 8-bit raster losslessly; it
+does not preserve JPEG DCT coefficients. Progressive/multi-scan, arithmetic,
+lossless/hierarchical, CMYK/YCCK, non-8-bit, EXIF/ICC/IPTC, and unsupported
+sampling fail closed.
+
 The production `tiff-to-jp2` path is deliberately narrow:
 
 - one TIFF image / first IFD;
@@ -396,6 +422,15 @@ fixtures:
   -Grok C:\tools\grok\bin\grk_decompress.exe
 ```
 
+Run the baseline JPEG matrix, including grayscale, 4:4:4/4:2:2/4:2:0,
+restart markers, and lossless JP2 decode through OpenJPEG/Grok:
+
+```powershell
+.\tools\interop_jpeg.ps1 -Magick magick `
+  -OpenJpeg C:\tools\openjpeg\bin\opj_decompress.exe `
+  -Grok C:\tools\grok\bin\grk_decompress.exe
+```
+
 ## Project Direction
 
 Near term: keep both engineering scorecards at 100/100 while completing sampled
@@ -406,7 +441,7 @@ bounded envelope, not a claim that every Part 1 or JPX profile is implemented.
 Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.
 
-Later conversion-tool target: add baseline JPEG input next, then RAW/DNG and
+Later conversion-tool target: add linear RAW/DNG input next, then
 OpenEXR workflows; add display conversion for the preserved extended YCC,
 CIELab, and CMYK spaces; preserve EXIF/IPTC/XMP; and evaluate component
 depths above 16 bits where the source format and JPEG2000 profile support them

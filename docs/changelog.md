@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded Baseline JPEG Input Adapter
+
+- Added an independent 8-bit SOF0 decoder for one complete interleaved Huffman
+  scan: checked DQT/DHT/SOF0/DRI/SOS marker state, byte-stuffed entropy input,
+  DC prediction, AC run decoding, dequantization, reference IDCT, and restart
+  sequence validation.
+- Added grayscale and JFIF YCbCr 4:4:4/4:2:2/4:2:0 output with centered chroma
+  interpolation and fixed YCbCr-to-RGB conversion. ImageMagick oracle maxima
+  are 1/2/3/2 sample values for gray/444/422/420; mean error stays below one.
+- Added `jpeg-to-jp2`, `.jpg`/`.jpeg` shorthand and unquoted batch dispatch,
+  truncation/mutation/semantic malformed gates, five independent fixtures,
+  and a reproducible interop matrix. OpenJPEG and Grok reproduce z2000's
+  reversible JP2 raster exactly. Progressive, arithmetic/lossless, CMYK/YCCK,
+  multi-scan, and metadata-bearing JPEG stay fail-closed.
+
 ### Bounded PNG Input Adapter
 
 - Added isolated non-interlaced PNG input for every standard color type and

@@ -6,6 +6,7 @@ const color = @import("color.zig");
 const codec = @import("codec.zig");
 const codestream = @import("codestream.zig");
 const dng = @import("formats/dng.zig");
+const jpeg = @import("formats/jpeg.zig");
 const png = @import("formats/png.zig");
 const ebcot = @import("ebcot.zig");
 const entropy = @import("entropy.zig");
@@ -421,6 +422,142 @@ test "PNG palette and transparency semantic bounds fail closed" {
     gray_changed[42] = 0;
     refreshPngChunkCrc(&gray_changed, 37, 2);
     try std.testing.expectError(png.PngError.InvalidTransparency, png.parse(allocator, &gray_changed));
+}
+
+const ExpectedJpegKind = enum { rgb, grayscale };
+
+fn expectJpegFixture(
+    encoded: []const u8,
+    expected_raw: []const u8,
+    kind: ExpectedJpegKind,
+    max_difference: u16,
+) !void {
+    var decoded = try jpeg.parse(std.testing.allocator, encoded);
+    defer decoded.deinit();
+    const samples: []const u16 = switch (decoded) {
+        .rgb => |rgb| blk: {
+            try std.testing.expectEqual(ExpectedJpegKind.rgb, kind);
+            try std.testing.expectEqual(@as(usize, 19), rgb.width);
+            try std.testing.expectEqual(@as(usize, 17), rgb.height);
+            try std.testing.expectEqual(@as(u8, 8), rgb.bit_depth);
+            break :blk rgb.samples;
+        },
+        .grayscale => |gray| blk: {
+            try std.testing.expectEqual(ExpectedJpegKind.grayscale, kind);
+            try std.testing.expectEqual(@as(usize, 19), gray.width);
+            try std.testing.expectEqual(@as(usize, 17), gray.height);
+            try std.testing.expectEqual(@as(u8, 8), gray.bit_depth);
+            break :blk gray.samples;
+        },
+        .alpha => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(expected_raw.len, samples.len);
+    var total_difference: usize = 0;
+    for (expected_raw, samples) |expected, actual| {
+        const difference = if (actual > expected) actual - expected else expected - actual;
+        try std.testing.expect(difference <= max_difference);
+        total_difference += difference;
+    }
+    try std.testing.expect(total_difference <= expected_raw.len);
+}
+
+test "JPEG baseline decoder matches independent ImageMagick oracles" {
+    try expectJpegFixture(
+        @embedFile("testdata/imagemagick-jpeg-gray.jpg"),
+        @embedFile("testdata/imagemagick-jpeg-gray.raw"),
+        .grayscale,
+        1,
+    );
+    try expectJpegFixture(
+        @embedFile("testdata/imagemagick-jpeg-444.jpg"),
+        @embedFile("testdata/imagemagick-jpeg-444.raw"),
+        .rgb,
+        2,
+    );
+    try expectJpegFixture(
+        @embedFile("testdata/imagemagick-jpeg-422.jpg"),
+        @embedFile("testdata/imagemagick-jpeg-422.raw"),
+        .rgb,
+        3,
+    );
+    try expectJpegFixture(
+        @embedFile("testdata/imagemagick-jpeg-420.jpg"),
+        @embedFile("testdata/imagemagick-jpeg-420.raw"),
+        .rgb,
+        2,
+    );
+    try expectJpegFixture(
+        @embedFile("testdata/imagemagick-jpeg-restart.jpg"),
+        @embedFile("testdata/imagemagick-jpeg-restart.raw"),
+        .rgb,
+        2,
+    );
+}
+
+fn findJpegMarker(bytes: []const u8, marker: u8) ?usize {
+    var index: usize = 0;
+    while (index + 1 < bytes.len) : (index += 1) {
+        if (bytes[index] == 0xff and bytes[index + 1] == marker) return index;
+    }
+    return null;
+}
+
+test "JPEG truncation and mutation sweeps remain bounded" {
+    const allocator = std.testing.allocator;
+    const valid = @embedFile("testdata/imagemagick-jpeg-444.jpg");
+    for (0..valid.len) |length| {
+        if (jpeg.parse(allocator, valid[0..length])) |decoded| {
+            var owned = decoded;
+            owned.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+    for (0..valid.len) |offset| {
+        for (0..8) |bit| {
+            var changed: [valid.len]u8 = valid.*;
+            changed[offset] ^= @as(u8, 1) << @intCast(bit);
+            if (jpeg.parse(allocator, &changed)) |decoded| {
+                var owned = decoded;
+                owned.deinit();
+            } else |_| {}
+        }
+    }
+}
+
+test "JPEG semantic malformed matrix fails closed" {
+    const allocator = std.testing.allocator;
+    const valid = @embedFile("testdata/imagemagick-jpeg-444.jpg");
+    const sof = findJpegMarker(valid, 0xc0) orelse return error.TestUnexpectedResult;
+    const dqt = findJpegMarker(valid, 0xdb) orelse return error.TestUnexpectedResult;
+    const sos = findJpegMarker(valid, 0xda) orelse return error.TestUnexpectedResult;
+
+    var changed: [valid.len]u8 = valid.*;
+    changed[sof + 1] = 0xc2;
+    try std.testing.expectError(jpeg.JpegError.UnsupportedProgressive, jpeg.parse(allocator, &changed));
+
+    changed = valid.*;
+    changed[sof + 4] = 12;
+    try std.testing.expectError(jpeg.JpegError.UnsupportedPrecision, jpeg.parse(allocator, &changed));
+
+    changed = valid.*;
+    changed[sof + 11] = 0x30;
+    try std.testing.expectError(jpeg.JpegError.UnsupportedSampling, jpeg.parse(allocator, &changed));
+
+    changed = valid.*;
+    changed[dqt + 5] = 0;
+    try std.testing.expectError(jpeg.JpegError.InvalidQuantizationTable, jpeg.parse(allocator, &changed));
+
+    changed = valid.*;
+    const scan_components = changed[sos + 4];
+    const spectral_start = sos + 5 + @as(usize, scan_components) * 2;
+    changed[spectral_start] = 1;
+    try std.testing.expectError(jpeg.JpegError.UnsupportedFrame, jpeg.parse(allocator, &changed));
+
+    const restart = @embedFile("testdata/imagemagick-jpeg-restart.jpg");
+    const rst = findJpegMarker(restart, 0xd0) orelse return error.TestUnexpectedResult;
+    var restart_changed: [restart.len]u8 = restart.*;
+    restart_changed[rst + 1] = 0xd7;
+    try std.testing.expectError(jpeg.JpegError.InvalidRestartMarker, jpeg.parse(allocator, &restart_changed));
 }
 
 test "application version carries deterministic build provenance" {

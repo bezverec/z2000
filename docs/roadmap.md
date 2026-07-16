@@ -77,8 +77,11 @@ semantics, fail-closed malformed coverage, CLI/batch dispatch, and an
 independent ImageMagick oracle. The non-interlaced PNG adapter is likewise
 complete for all standard color types/bit depths, `PLTE`/`tRNS`, filters,
 CRC/zlib validation, CLI/batch, mutation sweeps, and independent pixel oracles.
-Continue with isolated, fuzz-gated adapters in this order: baseline sequential
-JPEG, linear DNG/RAW, then OpenEXR. Preserve EXIF, XMP, and IPTC through explicit JP2 box or
+The 8-bit baseline sequential JPEG adapter is complete for gray and JFIF
+4:4:4/4:2:2/4:2:0 with Huffman/DCT/restart decoding, strict malformed gates,
+CLI/batch, and independent ImageMagick/OpenJPEG/Grok evidence. Continue with
+isolated, fuzz-gated adapters in this order: linear DNG/RAW, then OpenEXR.
+Preserve EXIF, XMP, and IPTC through explicit JP2 box or
 side metadata mappings. Evaluate depths above 16 bits only after the internal
 sample carrier and each source format have checked semantics.
 

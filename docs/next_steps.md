@@ -88,8 +88,15 @@ CRC/order validation, packed-sample expansion, CLI/batch dispatch, mutation
 sweeps, independent ImageMagick pixel oracles, and pixel-exact z2000/OpenJPEG/
 Grok interop. Adam7 and color/metadata mappings remain explicitly closed.
 
-Continue with an isolated, fuzz-gated baseline sequential JPEG module, then
-linear DNG/RAW and OpenEXR. Preserve EXIF, XMP, and IPTC through explicit
+The bounded baseline JPEG slice is complete as well: one 8-bit SOF0/interleaved
+Huffman scan, checked DQT/DHT/DRI/RST and marker state, grayscale plus JFIF
+4:4:4/4:2:2/4:2:0, reference IDCT, centered chroma interpolation, CLI/batch,
+malformed/mutation sweeps, independent ImageMagick oracles, and exact
+OpenJPEG/Grok reconstruction of the resulting reversible JP2. Progressive,
+arithmetic, CMYK/YCCK, multi-scan, and metadata-bearing JPEG remain closed.
+
+Continue with an isolated, fuzz-gated linear DNG/RAW module, then OpenEXR.
+Preserve EXIF, XMP, and IPTC through explicit
 mappings. Evaluate depths above 16 bits only after the internal carrier and
 target JP2 profile have checked semantics.
 
