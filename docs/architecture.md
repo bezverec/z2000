@@ -209,6 +209,16 @@ component mappings fail closed. CMYK, default CIELab, e-sRGB, and e-sYCC
 signalling preserve native planes but deliberately have no TIFF/sRGB conversion
 yet.
 
+EXIF, XMP, and IPTC are separate opaque metadata families at this boundary.
+`attachMetadata` validates standalone classic-TIFF EXIF, UTF-8 XML XMP, and
+complete IPTC-IIM framing, then inserts canonical UUID boxes immediately before
+`jp2c` without rewriting the codestream. `extractMetadata` recognizes canonical
+and deployed alternate identifiers, returns owned byte-exact payloads, and
+rejects duplicate families. The first source wiring strips only the standard
+JPEG APP1 identifiers and the Photoshop APP13 IPTC resource wrapper. Semantic
+tag interpretation, extended XMP assembly, general Photoshop resources, ICC
+APP2 mapping, and JP2-to-TIFF restoration remain outside this bounded slice.
+
 The bounded LinearRaw DNG input adapter shares only checked classic-TIFF IFD
 value access with the general TIFF reader. It independently selects one raw
 IFD, validates uncompressed chunky 8/16-bit RGB strips, applies DNG

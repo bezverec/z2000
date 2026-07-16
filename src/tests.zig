@@ -503,6 +503,88 @@ fn findJpegMarker(bytes: []const u8, marker: u8) ?usize {
     return null;
 }
 
+fn appendJpegSegment(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    marker: u8,
+    payload: []const u8,
+) !void {
+    try out.appendSlice(allocator, &.{ 0xff, marker });
+    try out.append(allocator, @intCast((payload.len + 2) >> 8));
+    try out.append(allocator, @intCast((payload.len + 2) & 0xff));
+    try out.appendSlice(allocator, payload);
+}
+
+fn buildMetadataJpeg(allocator: std.mem.Allocator) ![]u8 {
+    const source = @embedFile("testdata/imagemagick-jpeg-444.jpg");
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, source[0..2]);
+
+    const exif = [_]u8{ 'I', 'I', 42, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var app1: std.ArrayList(u8) = .empty;
+    defer app1.deinit(allocator);
+    try app1.appendSlice(allocator, "Exif\x00\x00");
+    try app1.appendSlice(allocator, &exif);
+    try appendJpegSegment(allocator, &bytes, 0xe1, app1.items);
+    app1.clearRetainingCapacity();
+    try app1.appendSlice(allocator, "http://ns.adobe.com/xap/1.0/\x00");
+    try app1.appendSlice(allocator, "<x:xmpmeta xmlns:x='adobe:ns:meta/'/>");
+    try appendJpegSegment(allocator, &bytes, 0xe1, app1.items);
+
+    var app13: std.ArrayList(u8) = .empty;
+    defer app13.deinit(allocator);
+    try app13.appendSlice(allocator, "Photoshop 3.0\x00" ++ "8BIM");
+    try app13.appendSlice(allocator, &.{ 0x04, 0x04, 0, 0 });
+    const iptc = [_]u8{ 0x1c, 2, 5, 0, 4, 't', 'e', 's', 't' };
+    try app13.appendSlice(allocator, &.{ 0, 0, 0, iptc.len });
+    try app13.appendSlice(allocator, &iptc);
+    try app13.append(allocator, 0);
+    try appendJpegSegment(allocator, &bytes, 0xed, app13.items);
+    try bytes.appendSlice(allocator, source[2..]);
+    return bytes.toOwnedSlice(allocator);
+}
+
+test "JPEG APP1 and bounded APP13 metadata survive JP2 UUID mapping" {
+    const allocator = std.testing.allocator;
+    const bytes = try buildMetadataJpeg(allocator);
+    defer allocator.free(bytes);
+    try std.testing.expectError(jpeg.JpegError.UnsupportedMetadata, jpeg.parse(allocator, bytes));
+    var decoded = try jpeg.parsePreservingMetadata(allocator, bytes);
+    defer decoded.deinit();
+    const rgb = switch (decoded) {
+        .rgb => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(rgb.metadata.exif != null);
+    try std.testing.expect(rgb.metadata.xmp != null);
+    try std.testing.expect(rgb.metadata.iptc != null);
+
+    const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 1 });
+    defer allocator.free(encoded);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, encoded);
+    defer allocator.free(wrapped);
+    const with_metadata = try jp2.attachMetadata(allocator, wrapped, .{
+        .exif = rgb.metadata.exif,
+        .xmp = rgb.metadata.xmp,
+        .iptc = rgb.metadata.iptc,
+    });
+    defer allocator.free(with_metadata);
+    var extracted = try jp2.extractMetadata(allocator, with_metadata);
+    defer extracted.deinit();
+    try std.testing.expectEqualSlices(u8, rgb.metadata.exif.?, extracted.exif.?);
+    try std.testing.expectEqualSlices(u8, rgb.metadata.xmp.?, extracted.xmp.?);
+    try std.testing.expectEqualSlices(u8, rgb.metadata.iptc.?, extracted.iptc.?);
+
+    for (0..bytes.len) |length| {
+        if (jpeg.parsePreservingMetadata(allocator, bytes[0..length])) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
 test "JPEG truncation and mutation sweeps remain bounded" {
     const allocator = std.testing.allocator;
     const valid = @embedFile("testdata/imagemagick-jpeg-444.jpg");
@@ -5206,6 +5288,79 @@ test "JP2 wrapper records RGB image header" {
     try std.testing.expectError(
         jp2.Jp2Error.UnsupportedColorSpace,
         jp2.parseInfo(sampled_sycc),
+    );
+}
+
+test "JP2 metadata UUID mapping preserves EXIF XMP and IPTC byte-for-byte" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
+    defer allocator.free(wrapped);
+    const exif = [_]u8{ 'I', 'I', 42, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const xmp = "<?xpacket begin=''?><x:xmpmeta xmlns:x='adobe:ns:meta/'></x:xmpmeta>";
+    const iptc = [_]u8{ 0x1c, 2, 5, 0, 4, 't', 'e', 's', 't' };
+
+    const with_metadata = try jp2.attachMetadata(allocator, wrapped, .{
+        .exif = &exif,
+        .xmp = xmp,
+        .iptc = &iptc,
+    });
+    defer allocator.free(with_metadata);
+    _ = try jp2.parseInfo(with_metadata);
+    try std.testing.expectEqualSlices(u8, minimal_jp2_codestream[0..], try jp2.extractCodestream(with_metadata));
+
+    var metadata = try jp2.extractMetadata(allocator, with_metadata);
+    defer metadata.deinit();
+    try std.testing.expectEqualSlices(u8, &exif, metadata.exif.?);
+    try std.testing.expectEqualStrings(xmp, metadata.xmp.?);
+    try std.testing.expectEqualSlices(u8, &iptc, metadata.iptc.?);
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidBox,
+        jp2.attachMetadata(allocator, with_metadata, .{ .xmp = xmp }),
+    );
+
+    var len: usize = 0;
+    while (len < with_metadata.len) : (len += 1) {
+        if (jp2.extractMetadata(allocator, with_metadata[0..len])) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+            return error.TruncatedBufferShouldFail;
+        } else |_| {}
+    }
+}
+
+test "JP2 metadata UUID mapping rejects malformed payloads" {
+    const allocator = std.testing.allocator;
+    const samples = try allocator.dupe(u16, &.{ 10, 20, 30, 40, 50, 60 });
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, minimal_jp2_codestream[0..]);
+    defer allocator.free(wrapped);
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidBox,
+        jp2.attachMetadata(allocator, wrapped, .{ .exif = "Exif\x00\x00bad" }),
+    );
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidBox,
+        jp2.attachMetadata(allocator, wrapped, .{ .xmp = "not XML" }),
+    );
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidBox,
+        jp2.attachMetadata(allocator, wrapped, .{ .iptc = &.{ 0x1c, 2, 5, 0, 4, 'x' } }),
     );
 }
 

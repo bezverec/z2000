@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded EXIF, XMP, And IPTC Preservation
+
+- Added checked JP2 UUID carriers for standalone-TIFF EXIF, UTF-8 XML XMP,
+  and complete IPTC-IIM datasets. Writers use the deployed canonical UUIDs;
+  readers also recognize the established alternate EXIF and IPTC UUIDs.
+- Added byte-preserving `attachMetadata`/`extractMetadata` APIs. Managed UUID
+  collisions, duplicate families, malformed TIFF/XML/IIM payloads, and box
+  truncation fail closed while the original codestream remains unchanged.
+- Added a first source adapter for bounded baseline JPEG: standard Exif and XMP
+  APP1 payloads plus one Photoshop APP13 IPTC resource survive JPEG -> JP2
+  exactly. Extended XMP, ICC APP2, arbitrary Photoshop resources, and JP2 ->
+  TIFF metadata restoration remain closed.
+
 ### Bounded Normalized-Linear OpenEXR Input Adapter
 
 - Added an isolated OpenEXR v2 parser for one single-part, uncompressed
@@ -49,7 +62,8 @@ entries are grouped by development milestone rather than semantic version.
   truncation/mutation/semantic malformed gates, five independent fixtures,
   and a reproducible interop matrix. OpenJPEG and Grok reproduce z2000's
   reversible JP2 raster exactly. Progressive, arithmetic/lossless, CMYK/YCCK,
-  multi-scan, and metadata-bearing JPEG stay fail-closed.
+  multi-scan, and metadata outside the bounded preservation profile stay
+  fail-closed.
 
 ### Bounded PNG Input Adapter
 

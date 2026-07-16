@@ -30,9 +30,10 @@ certification.
   RGB, or unassociated-alpha carriers.
 - Bounded JPEG input: 8-bit Huffman-coded baseline sequential DCT with one
   complete interleaved scan, grayscale or JFIF YCbCr 4:4:4/4:2:2/4:2:0,
-  centered chroma interpolation, and optional restart intervals. Progressive,
-  arithmetic/lossless, CMYK/YCCK, multi-scan, and metadata-bearing files fail
-  closed.
+  centered chroma interpolation, optional restart intervals, and exact
+  preservation of standard Exif/XMP APP1 plus one Photoshop APP13 IPTC-IIM
+  resource. Progressive, arithmetic/lossless, CMYK/YCCK, multi-scan, extended
+  XMP, ICC APP2, and arbitrary Photoshop resources fail closed.
 - Lossless JP2 encoding with RCT, reversible 5/3 DWT, quality layers, all five
   progression orders, PLT/TLM, and strict no-sidecar decode.
 - Lossy JP2 encoding with ICT, irreversible 9/7 DWT, scalar-derived or
@@ -53,6 +54,9 @@ certification.
   4:2:2, and 4:2:0 to sRGB, including the explicit odd-origin edge phase;
   `--convert-to-srgb` separately converts bounded ICC v2/v4 RGB matrix/TRC
   PCSXYZ profiles. General/LUT ICC transforms remain fail-closed.
+- Byte-preserving EXIF, XMP, and IPTC-IIM metadata carriers in checked JP2 UUID
+  boxes, with bounded baseline JPEG APP1/APP13 ingestion. Managed duplicates
+  and malformed TIFF/XML/IIM payloads fail closed.
 - Bounded planar encode/decode for mixed unsigned 8/16-bit component
   precision, including JP2 `BPCC`/codestream `SIZ` agreement and
   per-component QCD/QCC on the single-tile RPCL 5/3 path. z2000 output is
@@ -78,7 +82,7 @@ Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
 non-empty PLT-less multi-part tiles, broad color management, CFA/general RAW
 and HDR/general OpenEXR input, broader BMP/PNG/JPEG/DNG/EXR profiles, and metadata handling
-beyond the staged ICC path. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
+beyond the staged ICC and JPEG UUID-carrier paths. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.
 
 ## Build From Source
@@ -365,9 +369,13 @@ One-component grayscale and three-component JFIF YCbCr with 1x1, 2x1, or 2x2
 luma sampling are decoded through dequantization, reference IDCT, and centered
 chroma interpolation. DRI/RST intervals are supported. Because JPEG input is
 already lossy, the JP2 contains the chosen decoded 8-bit raster losslessly; it
-does not preserve JPEG DCT coefficients. Progressive/multi-scan, arithmetic,
-lossless/hierarchical, CMYK/YCCK, non-8-bit, EXIF/ICC/IPTC, and unsupported
-sampling fail closed.
+does not preserve JPEG DCT coefficients. Standard Exif APP1 is normalized to a
+standalone TIFF payload, standard XMP APP1 to its UTF-8 XML packet, and one
+Photoshop APP13 IPTC resource to its exact IIM bytes; all three are stored in
+checked JP2 UUID boxes. Progressive/multi-scan, arithmetic,
+lossless/hierarchical, CMYK/YCCK, non-8-bit, extended XMP, ICC APP2, arbitrary
+Photoshop resources, and unsupported sampling fail closed. Metadata is not yet
+restored by the JP2-to-TIFF command.
 
 The production `tiff-to-jp2` path is deliberately narrow:
 

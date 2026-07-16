@@ -1,4 +1,5 @@
 const std = @import("std");
+const image = @import("../image.zig");
 const tiff = @import("../tiff.zig");
 
 const max_file_size: usize = 1024 * 1024 * 1024;
@@ -173,10 +174,30 @@ pub fn read(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !tiff.De
     return parse(allocator, bytes);
 }
 
+pub fn readPreservingMetadata(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) !tiff.DecodedImage {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_size));
+    defer allocator.free(bytes);
+    return parsePreservingMetadata(allocator, bytes);
+}
+
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !tiff.DecodedImage {
+    return parseImpl(allocator, bytes, false);
+}
+
+pub fn parsePreservingMetadata(allocator: std.mem.Allocator, bytes: []const u8) !tiff.DecodedImage {
+    return parseImpl(allocator, bytes, true);
+}
+
+fn parseImpl(allocator: std.mem.Allocator, bytes: []const u8, preserve_metadata: bool) !tiff.DecodedImage {
     if (bytes.len < 4 or bytes[0] != 0xff or bytes[1] != 0xd8) return JpegError.InvalidSignature;
     var decoder = Decoder{ .allocator = allocator };
     defer decoder.deinit();
+    var metadata = image.Metadata{};
+    errdefer metadata.deinit(allocator);
     var cursor: usize = 2;
     var saw_scan = false;
 
@@ -189,7 +210,16 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !tiff.DecodedImage
         switch (marker) {
             0xd9 => {
                 if (!saw_scan or cursor != bytes.len) return JpegError.InvalidMarkerOrder;
-                return try finishImage(allocator, &decoder);
+                var result = try finishImage(allocator, &decoder);
+                if (preserve_metadata) {
+                    switch (result) {
+                        .rgb => |*rgb| rgb.metadata = metadata,
+                        .grayscale => |*gray| gray.metadata = metadata,
+                        .alpha => unreachable,
+                    }
+                    metadata = .{};
+                }
+                return result;
             },
             0xc0 => {
                 if (decoder.frame != null or saw_scan) return JpegError.InvalidMarkerOrder;
@@ -210,7 +240,17 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !tiff.DecodedImage
             },
             0xe0 => try parseApp0(&decoder, try markerPayload(bytes, &cursor)),
             0xee => try parseApp14(&decoder, try markerPayload(bytes, &cursor)),
-            0xe1, 0xe2, 0xed => return JpegError.UnsupportedMetadata,
+            0xe1 => {
+                const payload = try markerPayload(bytes, &cursor);
+                if (!preserve_metadata) return JpegError.UnsupportedMetadata;
+                try parseApp1Metadata(allocator, payload, &metadata);
+            },
+            0xed => {
+                const payload = try markerPayload(bytes, &cursor);
+                if (!preserve_metadata) return JpegError.UnsupportedMetadata;
+                try parseApp13Metadata(allocator, payload, &metadata);
+            },
+            0xe2 => return JpegError.UnsupportedMetadata,
             0xe3...0xec, 0xef, 0xfe => _ = try markerPayload(bytes, &cursor),
             0xd0...0xd7, 0xd8 => return JpegError.InvalidMarkerOrder,
             0x01 => {},
@@ -218,6 +258,73 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !tiff.DecodedImage
         }
     }
     return JpegError.MissingEndMarker;
+}
+
+const xmp_app1_id = "http://ns.adobe.com/xap/1.0/\x00";
+
+fn parseApp1Metadata(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    metadata: *image.Metadata,
+) !void {
+    if (std.mem.startsWith(u8, payload, "Exif\x00\x00")) {
+        if (metadata.exif != null or payload.len == 6) return JpegError.UnsupportedMetadata;
+        metadata.exif = try allocator.dupe(u8, payload[6..]);
+        return;
+    }
+    if (std.mem.startsWith(u8, payload, xmp_app1_id)) {
+        if (metadata.xmp != null or payload.len == xmp_app1_id.len) return JpegError.UnsupportedMetadata;
+        metadata.xmp = try allocator.dupe(u8, payload[xmp_app1_id.len..]);
+        return;
+    }
+    return JpegError.UnsupportedMetadata;
+}
+
+fn parseApp13Metadata(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    metadata: *image.Metadata,
+) !void {
+    const photoshop_id = "Photoshop 3.0\x00";
+    if (!std.mem.startsWith(u8, payload, photoshop_id)) return JpegError.UnsupportedMetadata;
+    var cursor: usize = photoshop_id.len;
+    var saw_iptc = false;
+    while (cursor < payload.len) {
+        if (payload.len - cursor < 7 or !std.mem.eql(u8, payload[cursor .. cursor + 4], "8BIM")) {
+            return JpegError.UnsupportedMetadata;
+        }
+        const resource_id = readU16(payload, cursor + 4);
+        cursor += 6;
+        const name_length: usize = payload[cursor];
+        cursor += 1;
+        if (name_length > payload.len - cursor) return JpegError.TruncatedMarker;
+        cursor += name_length;
+        if ((1 + name_length) % 2 != 0) {
+            if (cursor >= payload.len or payload[cursor] != 0) return JpegError.UnsupportedMetadata;
+            cursor += 1;
+        }
+        if (payload.len - cursor < 4) return JpegError.TruncatedMarker;
+        const data_length = (@as(usize, payload[cursor]) << 24) |
+            (@as(usize, payload[cursor + 1]) << 16) |
+            (@as(usize, payload[cursor + 2]) << 8) |
+            payload[cursor + 3];
+        cursor += 4;
+        if (data_length > payload.len - cursor) return JpegError.TruncatedMarker;
+        const data = payload[cursor .. cursor + data_length];
+        cursor += data_length;
+        if (data_length % 2 != 0) {
+            if (cursor >= payload.len or payload[cursor] != 0) return JpegError.UnsupportedMetadata;
+            cursor += 1;
+        }
+        // The bounded APP13 profile accepts exactly one IPTC-IIM resource and
+        // refuses to discard any other Photoshop image resource blocks.
+        if (resource_id != 0x0404 or saw_iptc or metadata.iptc != null or data.len == 0) {
+            return JpegError.UnsupportedMetadata;
+        }
+        metadata.iptc = try allocator.dupe(u8, data);
+        saw_iptc = true;
+    }
+    if (!saw_iptc) return JpegError.UnsupportedMetadata;
 }
 
 fn nextMarker(bytes: []const u8, cursor: *usize) !u8 {

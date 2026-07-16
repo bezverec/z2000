@@ -12,6 +12,23 @@ pub const Image = struct {
     }
 };
 
+pub const Metadata = struct {
+    exif: ?[]u8 = null,
+    xmp: ?[]u8 = null,
+    iptc: ?[]u8 = null,
+
+    pub fn deinit(self: *Metadata, allocator: std.mem.Allocator) void {
+        if (self.exif) |value| allocator.free(value);
+        if (self.xmp) |value| allocator.free(value);
+        if (self.iptc) |value| allocator.free(value);
+        self.* = .{};
+    }
+
+    pub fn isEmpty(self: Metadata) bool {
+        return self.exif == null and self.xmp == null and self.iptc == null;
+    }
+};
+
 pub const RgbImage = struct {
     allocator: std.mem.Allocator,
     width: usize,
@@ -19,9 +36,11 @@ pub const RgbImage = struct {
     bit_depth: u8,
     samples: []u16,
     icc_profile: ?[]u8 = null,
+    metadata: Metadata = .{},
 
     pub fn deinit(self: *RgbImage) void {
         if (self.icc_profile) |profile| self.allocator.free(profile);
+        self.metadata.deinit(self.allocator);
         self.allocator.free(self.samples);
         self.* = undefined;
     }
@@ -35,9 +54,11 @@ pub const GrayImage = struct {
     samples: []u16,
     white_is_zero: bool = false,
     icc_profile: ?[]u8 = null,
+    metadata: Metadata = .{},
 
     pub fn deinit(self: *GrayImage) void {
         if (self.icc_profile) |profile| self.allocator.free(profile);
+        self.metadata.deinit(self.allocator);
         self.allocator.free(self.samples);
         self.* = undefined;
     }

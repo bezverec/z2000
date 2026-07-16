@@ -85,14 +85,20 @@ native 8/16-bit samples are unchanged. Adam7, APNG, and color-definition
 chunks not yet mapped to JP2 fail closed.
 
 `formats/jpeg.zig` exposes `read` and `parse` for the bounded 8-bit baseline
-sequential JPEG profile. It parses SOI/SOF0/DQT/DHT/DRI/SOS/EOI, validates
+sequential JPEG profile, plus `readPreservingMetadata` and
+`parsePreservingMetadata` for the CLI preservation boundary. It parses
+SOI/SOF0/DQT/DHT/DRI/SOS/EOI, validates
 canonical Huffman tables and marker order, decodes DC/AC coefficients with
 byte stuffing and RST sequencing, dequantizes and applies an 8x8 reference
 IDCT, then converts JFIF YCbCr to RGB with centered 4:4:4/4:2:2/4:2:0 sampling.
 One-component input returns `GrayImage`; three-component input returns
-`RgbImage`. The resulting JPEG raster is then encoded reversibly into JP2.
-Progressive, arithmetic, lossless, multiple scans, CMYK/YCCK, and unmapped
-metadata fail closed.
+`RgbImage`. The preservation entry points accept standard Exif/XMP APP1 and
+exactly one Photoshop APP13 IPTC-IIM resource. The legacy entry points retain
+their fail-closed metadata contract. The resulting JPEG raster is encoded
+reversibly into JP2, then normalized metadata payloads are attached without
+changing the codestream. Progressive, arithmetic, lossless, multiple scans,
+CMYK/YCCK, ICC APP2, extended XMP, arbitrary Photoshop resources, and other
+unmapped metadata fail closed.
 
 `formats/dng.zig` exposes metadata-only `parseInfo` plus owned-raster `read`
 and `parse`. Raster decode selects exactly one IFD0 or direct-SubIFD
@@ -216,7 +222,8 @@ absolute sources of truth.
 Future conversion-surface goals are deliberately not part of the current CLI
 contract yet: broader BMP/PNG/JPEG/DNG/OpenEXR profiles, CFA/general RAW conversion, HDR handling,
 display conversion for preserved e-sRGB/e-sYCC/CIELab/CMYK samples,
-EXIF/IPTC/XMP metadata, and component precision above 16 bits. Each should get
+metadata beyond the bounded JPEG EXIF/XMP/IPTC carrier, and component precision
+above 16 bits. Each should get
 an explicit option, fail-closed parser policy, and interop fixture before
 becoming public.
 
@@ -469,6 +476,18 @@ interleaved RGB triplet, and reports `PaletteIndexOutOfRange` on malformed data.
 must use no MCT; RGBA accepts either no MCT or reversible MCT=1, interpreted as
 RCT over RGB only with alpha independent. TIFF ExtraSamples input/output is
 connected to both profiles.
+
+`Metadata`, `OwnedMetadata`, `attachMetadata`, and `extractMetadata` provide a
+checked byte-preserving carrier for EXIF, XMP, and IPTC. EXIF is a standalone
+classic-TIFF stream without the JPEG `Exif\0\0` identifier, XMP is one nonempty
+NUL-free UTF-8 XML packet, and IPTC is one or more complete IIM datasets.
+Canonical writer UUIDs are `JpgTiffExif->JP2`,
+`be7acfcb-97a9-42e8-9c71-999491e3afac`, and
+`33c7a4d2-b81d-4723-a0ba-f1a3e097ad38`; extraction also accepts the deployed
+Adobe EXIF and alternate IPTC identifiers. Boxes are inserted immediately
+before `jp2c`; existing managed UUIDs and duplicate families fail closed.
+Unknown UUID boxes remain opaque. This API does not interpret metadata values
+or restore them into TIFF output.
 
 TIFF tag 34675 is stored as owned RGB, grayscale, or alpha image metadata;
 wrappers write a JP2 restricted ICC `colr` box when present, `parseInfo`

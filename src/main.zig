@@ -620,7 +620,7 @@ fn rasterToJp2Command(
         .tiff => try tiff.read(io, allocator, args[0]),
         .bmp => .{ .rgb = try bmp.read(io, allocator, args[0]) },
         .png => try png.read(io, allocator, args[0]),
-        .jpeg => try jpeg.read(io, allocator, args[0]),
+        .jpeg => try jpeg.readPreservingMetadata(io, allocator, args[0]),
         .dng => .{ .rgb = try dng.read(io, allocator, args[0]) },
         .openexr => .{ .rgb = try openexr.read(io, allocator, args[0]) },
     };
@@ -714,8 +714,16 @@ fn rasterToJp2Command(
     }
     defer allocator.free(wrapped);
 
+    var metadata_wrapped: ?[]u8 = null;
+    defer if (metadata_wrapped) |bytes| allocator.free(bytes);
+    const source_metadata = decodedMetadata(decoded);
+    if (source_metadata.exif != null or source_metadata.xmp != null or source_metadata.iptc != null) {
+        metadata_wrapped = try jp2.attachMetadata(allocator, wrapped, source_metadata);
+    }
+    const output_bytes = metadata_wrapped orelse wrapped;
+
     const write_start = monotonicNs();
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = wrapped });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = output_bytes });
     command_timings.write_ns = elapsedNs(write_start);
     command_timings.total_ns = command_timings.input_read_ns +
         command_timings.codestream_ns +
@@ -757,6 +765,19 @@ fn rasterToJp2Command(
     if (show_timings) {
         printRasterToJp2Timings(command_timings, encode_timings, components, input.label());
     }
+}
+
+fn decodedMetadata(decoded: tiff.DecodedImage) jp2.Metadata {
+    const metadata = switch (decoded) {
+        .rgb => |rgb| rgb.metadata,
+        .grayscale => |gray| gray.metadata,
+        .alpha => |alpha| alpha.metadata,
+    };
+    return .{
+        .exif = metadata.exif,
+        .xmp = metadata.xmp,
+        .iptc = metadata.iptc,
+    };
 }
 
 fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {

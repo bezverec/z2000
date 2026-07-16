@@ -88,12 +88,12 @@ CRC/order validation, packed-sample expansion, CLI/batch dispatch, mutation
 sweeps, independent ImageMagick pixel oracles, and pixel-exact z2000/OpenJPEG/
 Grok interop. Adam7 and color/metadata mappings remain explicitly closed.
 
-The bounded baseline JPEG slice is complete as well: one 8-bit SOF0/interleaved
+The bounded baseline JPEG raster slice is complete as well: one 8-bit SOF0/interleaved
 Huffman scan, checked DQT/DHT/DRI/RST and marker state, grayscale plus JFIF
 4:4:4/4:2:2/4:2:0, reference IDCT, centered chroma interpolation, CLI/batch,
 malformed/mutation sweeps, independent ImageMagick oracles, and exact
 OpenJPEG/Grok reconstruction of the resulting reversible JP2. Progressive,
-arithmetic, CMYK/YCCK, multi-scan, and metadata-bearing JPEG remain closed.
+arithmetic, CMYK/YCCK, and multi-scan JPEG remain closed.
 
 The bounded LinearRaw DNG slice is complete: exactly one IFD0/direct-SubIFD
 uncompressed chunky unsigned three-channel 8/16-bit raster, checked strips,
@@ -111,9 +111,15 @@ and ImageMagick/OpenJPEG/Grok interop. Only finite `[0,1]` samples enter the
 unsigned 16-bit carrier. HDR/negative values, compression, tiles,
 multipart/deep data, arbitrary channels, alpha, and metadata remain closed.
 
-The next format/metadata work is explicit EXIF, XMP, and IPTC mapping into
-checked JP2 boxes or side metadata. Evaluate depths above 16 bits only after
-the internal carrier and target JP2 profile have checked semantics.
+The first metadata slice is complete: standalone-TIFF EXIF, UTF-8 XML XMP, and
+IPTC-IIM map byte-for-byte into canonical checked JP2 UUID boxes, extraction
+accepts the deployed alternate EXIF/IPTC identifiers, and malformed/duplicate
+families fail closed. Bounded baseline JPEG now ingests standard Exif/XMP APP1
+and exactly one Photoshop APP13 IPTC resource without changing the reversible
+JP2 codestream. Extended XMP, ICC APP2, arbitrary Photoshop resources, semantic
+tag interpretation, and JP2-to-TIFF restoration remain explicit later breadth.
+Evaluate depths above 16 bits only after a source format and target JP2 profile
+have checked semantics. The next active implementation item is section 3.
 
 ### 3. Release Readiness
 

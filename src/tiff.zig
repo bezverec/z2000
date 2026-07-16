@@ -63,6 +63,7 @@ pub const AlphaImage = struct {
     samples: []u16,
     white_is_zero: bool = false,
     icc_profile: ?[]u8 = null,
+    metadata: image.Metadata = .{},
 
     pub fn componentCount(self: AlphaImage) usize {
         return self.color_space.colorComponentCount() + 1;
@@ -70,6 +71,7 @@ pub const AlphaImage = struct {
 
     pub fn deinit(self: *AlphaImage) void {
         if (self.icc_profile) |profile| self.allocator.free(profile);
+        self.metadata.deinit(self.allocator);
         self.allocator.free(self.samples);
         self.* = undefined;
     }

@@ -2,6 +2,7 @@ const std = @import("std");
 const color = @import("color.zig");
 const image = @import("image.zig");
 const rate_alloc = @import("rate_alloc.zig");
+const tiff_ifd = @import("formats/tiff_ifd.zig");
 
 pub const Jp2Error = error{
     ImageTooLarge,
@@ -90,6 +91,29 @@ pub const Info = struct {
     }
 };
 
+/// Opaque metadata payloads carried in interoperable JP2 UUID boxes. EXIF is
+/// a standalone TIFF stream without the JPEG `Exif\0\0` prefix; XMP is one
+/// UTF-8 XML packet; IPTC is one or more complete IIM datasets.
+pub const Metadata = struct {
+    exif: ?[]const u8 = null,
+    xmp: ?[]const u8 = null,
+    iptc: ?[]const u8 = null,
+};
+
+pub const OwnedMetadata = struct {
+    allocator: std.mem.Allocator,
+    exif: ?[]u8 = null,
+    xmp: ?[]u8 = null,
+    iptc: ?[]u8 = null,
+
+    pub fn deinit(self: *OwnedMetadata) void {
+        if (self.exif) |value| self.allocator.free(value);
+        if (self.xmp) |value| self.allocator.free(value);
+        if (self.iptc) |value| self.allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 /// JP2 channel-definition semantics for a whole-image alpha channel. TIFF
 /// ExtraSamples value 2 maps to unassociated; value 1 maps to associated.
 pub const AlphaMode = color.AlphaMode;
@@ -158,6 +182,11 @@ const BoxType = enum(u32) {
 };
 
 const signature_payload = [_]u8{ 0x0d, 0x0a, 0x87, 0x0a };
+const uuid_exif = [16]u8{ 'J', 'p', 'g', 'T', 'i', 'f', 'f', 'E', 'x', 'i', 'f', '-', '>', 'J', 'P', '2' };
+const uuid_exif_adobe = [16]u8{ 0x05, 0x37, 0xcd, 0xab, 0x9d, 0x0c, 0x44, 0x31, 0xa7, 0x2a, 0xfa, 0x56, 0x1f, 0x2a, 0x11, 0x3e };
+const uuid_xmp = [16]u8{ 0xbe, 0x7a, 0xcf, 0xcb, 0x97, 0xa9, 0x42, 0xe8, 0x9c, 0x71, 0x99, 0x94, 0x91, 0xe3, 0xaf, 0xac };
+const uuid_iptc = [16]u8{ 0x33, 0xc7, 0xa4, 0xd2, 0xb8, 0x1d, 0x47, 0x23, 0xa0, 0xba, 0xf1, 0xa3, 0xe0, 0x97, 0xad, 0x38 };
+const uuid_iptc_alternate = [16]u8{ 0x09, 0xa1, 0x4e, 0x97, 0xc0, 0xb4, 0x42, 0xe0, 0xbe, 0xbf, 0x36, 0xdf, 0x6f, 0x0c, 0xe3, 0x6f };
 const brand_jp2 = fourcc("jp2 ");
 const enum_cs_cmyk: u32 = 12;
 const enum_cs_cielab: u32 = 14;
@@ -714,6 +743,161 @@ pub fn extractCodestream(bytes: []const u8) ![]const u8 {
         }
     }
     return Jp2Error.MissingRequiredBox;
+}
+
+/// Inserts canonical EXIF/XMP/IPTC UUID boxes immediately before `jp2c`.
+/// Existing managed UUIDs are rejected so a caller cannot silently replace or
+/// duplicate metadata. All original JP2 and codestream bytes remain unchanged.
+pub fn attachMetadata(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    metadata: Metadata,
+) ![]u8 {
+    _ = try parseInfo(bytes);
+    try validateMetadata(metadata);
+    if (metadata.exif == null and metadata.xmp == null and metadata.iptc == null) {
+        return allocator.dupe(u8, bytes);
+    }
+
+    var cursor: usize = 0;
+    var codestream_box_offset: ?usize = null;
+    while (cursor < bytes.len) {
+        const box_offset = cursor;
+        const box = try nextBox(bytes, &cursor, true);
+        if (box.kind == @intFromEnum(BoxType.uuid)) {
+            if (managedMetadataKind(box.payload) != null) return Jp2Error.InvalidBox;
+        }
+        if (box.kind == @intFromEnum(BoxType.contiguous_codestream)) {
+            codestream_box_offset = box_offset;
+        }
+    }
+    const insert_offset = codestream_box_offset orelse return Jp2Error.MissingRequiredBox;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..insert_offset]);
+    if (metadata.exif) |payload| try appendUuidMetadataBox(allocator, &out, &uuid_exif, payload);
+    if (metadata.iptc) |payload| try appendUuidMetadataBox(allocator, &out, &uuid_iptc, payload);
+    if (metadata.xmp) |payload| try appendUuidMetadataBox(allocator, &out, &uuid_xmp, payload);
+    try out.appendSlice(allocator, bytes[insert_offset..]);
+    const result = try out.toOwnedSlice(allocator);
+    errdefer allocator.free(result);
+    _ = try parseInfo(result);
+    return result;
+}
+
+/// Extracts the recognized EXIF, XMP, and IPTC UUID payloads byte-for-byte.
+/// Both established EXIF UUIDs and both deployed IPTC UUIDs are accepted, but
+/// multiple boxes for one metadata family are ambiguous and fail closed.
+pub fn extractMetadata(allocator: std.mem.Allocator, bytes: []const u8) !OwnedMetadata {
+    _ = try parseInfo(bytes);
+    var result = OwnedMetadata{ .allocator = allocator };
+    errdefer result.deinit();
+    var cursor: usize = 0;
+    while (cursor < bytes.len) {
+        const box = try nextBox(bytes, &cursor, true);
+        if (box.kind != @intFromEnum(BoxType.uuid)) continue;
+        const kind = managedMetadataKind(box.payload) orelse continue;
+        const payload = box.payload[16..];
+        switch (kind) {
+            .exif => {
+                if (result.exif != null) return Jp2Error.InvalidBox;
+                try validateExif(payload);
+                result.exif = try allocator.dupe(u8, payload);
+            },
+            .xmp => {
+                if (result.xmp != null) return Jp2Error.InvalidBox;
+                try validateXmp(payload);
+                result.xmp = try allocator.dupe(u8, payload);
+            },
+            .iptc => {
+                if (result.iptc != null) return Jp2Error.InvalidBox;
+                try validateIptc(payload);
+                result.iptc = try allocator.dupe(u8, payload);
+            },
+        }
+    }
+    return result;
+}
+
+const MetadataKind = enum { exif, xmp, iptc };
+
+fn managedMetadataKind(payload: []const u8) ?MetadataKind {
+    if (payload.len < 16) return null;
+    const id = payload[0..16];
+    if (std.mem.eql(u8, id, &uuid_exif) or std.mem.eql(u8, id, &uuid_exif_adobe)) return .exif;
+    if (std.mem.eql(u8, id, &uuid_xmp)) return .xmp;
+    if (std.mem.eql(u8, id, &uuid_iptc) or std.mem.eql(u8, id, &uuid_iptc_alternate)) return .iptc;
+    return null;
+}
+
+fn appendUuidMetadataBox(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    id: *const [16]u8,
+    payload: []const u8,
+) !void {
+    const payload_size = std.math.add(usize, 16, payload.len) catch return Jp2Error.CodestreamTooLarge;
+    if (payload_size > std.math.maxInt(u32) - 8) return Jp2Error.CodestreamTooLarge;
+    var value: std.ArrayList(u8) = .empty;
+    defer value.deinit(allocator);
+    try value.ensureTotalCapacity(allocator, payload_size);
+    try value.appendSlice(allocator, id);
+    try value.appendSlice(allocator, payload);
+    try appendBox(allocator, out, .uuid, value.items);
+}
+
+fn validateMetadata(metadata: Metadata) !void {
+    if (metadata.exif) |value| try validateExif(value);
+    if (metadata.xmp) |value| try validateXmp(value);
+    if (metadata.iptc) |value| try validateIptc(value);
+}
+
+fn validateExif(bytes: []const u8) !void {
+    if (bytes.len >= 6 and std.mem.eql(u8, bytes[0..6], "Exif\x00\x00")) return Jp2Error.InvalidBox;
+    _ = tiff_ifd.Document.parse(bytes) catch return Jp2Error.InvalidBox;
+}
+
+fn validateXmp(bytes: []const u8) !void {
+    if (bytes.len == 0 or !std.unicode.utf8ValidateSlice(bytes) or
+        std.mem.indexOfScalar(u8, bytes, 0) != null)
+    {
+        return Jp2Error.InvalidBox;
+    }
+    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
+    if (trimmed.len == 0 or trimmed[0] != '<') return Jp2Error.InvalidBox;
+}
+
+fn validateIptc(bytes: []const u8) !void {
+    if (bytes.len == 0) return Jp2Error.InvalidBox;
+    var cursor: usize = 0;
+    var datasets: usize = 0;
+    while (cursor < bytes.len) {
+        if (bytes.len - cursor < 5 or bytes[cursor] != 0x1c) return Jp2Error.InvalidBox;
+        cursor += 3;
+        const encoded_length = (@as(u16, bytes[cursor]) << 8) | bytes[cursor + 1];
+        cursor += 2;
+        var payload_length: usize = 0;
+        if ((encoded_length & 0x8000) == 0) {
+            payload_length = encoded_length;
+        } else {
+            const length_bytes: usize = encoded_length & 0x7fff;
+            if (length_bytes == 0 or length_bytes > 4 or bytes.len - cursor < length_bytes) {
+                return Jp2Error.InvalidBox;
+            }
+            for (bytes[cursor .. cursor + length_bytes]) |byte| {
+                payload_length = std.math.mul(usize, payload_length, 256) catch
+                    return Jp2Error.InvalidBox;
+                payload_length = std.math.add(usize, payload_length, byte) catch
+                    return Jp2Error.InvalidBox;
+            }
+            cursor += length_bytes;
+        }
+        if (payload_length > bytes.len - cursor) return Jp2Error.InvalidBox;
+        cursor += payload_length;
+        datasets += 1;
+    }
+    if (datasets == 0) return Jp2Error.InvalidBox;
 }
 
 pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
