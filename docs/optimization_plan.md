@@ -11,7 +11,9 @@ Measured results belong in [`benchmarks.md`](benchmarks.md).
 
 Beat Grok and then Kakadu in encode and decode while preserving pixel accuracy,
 codestream semantics, deterministic threading, bounded memory use, and strict
-malformed-input behavior.
+malformed-input behavior. Optimize the common codestream path before
+producer-specific shortcuts, and report lossless and quality-matched lossy
+results separately.
 
 ## Keep Rule
 
@@ -32,6 +34,21 @@ all-thread setting.
 
 ## Current Evidence
 
+- The 2026-07-16 Intel Core i5-14500 checkpoint is the active cross-codec
+  baseline. On the common z2000 lossless stream, z2000 decoded in
+  831.5/135.3 ms at t1/t20 versus Grok 636.8/99.1 ms, OpenJPEG
+  680.9/123.9 ms, and Kakadu 619.6/94.5 ms. The 1.31x t1 gap to Grok proves
+  that serial decode work remains material; the 1.37x t20 gap also leaves a
+  parallel-efficiency problem.
+- Lossless encode is no longer the first target. At t20, z2000 encoded in
+  135.9 ms, 1.15x faster than Grok and only 3.6% behind OpenJPEG; Kakadu
+  remained 1.75x faster. Preserve that result while decode work proceeds.
+- The current lossy checkpoint is useful for implementation timing but is not
+  a rate-distortion ranking: the four command lines did not produce
+  quality-matched files. z2000 and OpenJPEG were closely matched near
+  52.58 dB, while the recorded Grok output was larger and materially less
+  accurate. Any lossy competitive claim needs a size- or quality-normalized
+  sweep first.
 - T1/MQ remains the dominant serial cost. Earlier wholesale packed-column/SWAR
   attempts were correct but slower; a retry needs a materially different data
   layout or branch hypothesis.
@@ -59,40 +76,84 @@ all-thread setting.
 
 ## Candidate Queue
 
-### P1. Decode Pipeline Efficiency
+### P1. Decode Stage Attribution — Next Active
 
-Measure packet catalog, T1 readiness, inverse DWT, colour conversion, and TIFF
-write as separate stages at t1/t8/t16. Prototype overlap only where ownership
-is clear: ready-block queues into the persistent T1 pool, or tile/plane output
-work that cannot race packet state. Keep worker-count and tiny-image thresholds
-explicit.
+Measure the same common lossless z2000 stream at t1 and t20 with container
+parse, packet catalog, Tier-1, inverse DWT, component assembly/transform,
+conversion, and TIFF output reported separately. Add wall-clock worker-busy,
+queue-wait, and peak-ready-block counts where stage totals alone cannot explain
+the critical path.
 
-### P2. Output And I/O Locality
+Run native-plane or checked raw output beside TIFF output so codec time is not
+confused with serialization. Keep instrumentation off by default and verify
+that disabled counters do not change output bytes or materially move the
+baseline.
+
+The first target is repeatable t20 common-stream decode below OpenJPEG's
+123.9 ms without regressing t1. The next gates are below Grok's 99.1 ms and
+then Kakadu's 94.5 ms on this host/profile. These are checkpoint targets, not
+portable performance claims.
+
+### P2. T1/MQ Decode Hot Path
+
+Use pass counters and a native profiler to attribute symbol count, branch
+behavior, context-neighbor updates, and memory traffic by cleanup,
+significance-propagation, and refinement pass. Evaluate lossless and lossy
+blocks separately; include sparse, dense/sign-heavy, and refinement-heavy
+micro-corpora plus the end-to-end common stream.
+
+Candidates must reduce actual per-symbol work or improve its data layout while
+preserving MQ state order. Preserve byte/symbol oracles, corruption behavior,
+and scalar comparisons. Do not reopen the rejected wholesale packed-column or
+SWAR designs without a new measured hypothesis.
+
+### P3. Decode Pipeline Overlap
+
+After P1 identifies idle boundaries, prototype overlap only where ownership is
+clear: packet parsing/catalog production feeding ready-block T1 work, inverse
+DWT beginning for complete tile/component/resolution dependencies, or
+tile/plane output that cannot race packet state. Reuse the normalized packet
+index planned in `next_steps.md`; do not build a performance-only parser.
+
+Measure t1/t8/t20, queue depth, utilization, tiny-image crossover, and memory
+growth. Keep worker counts and thresholds explicit. Overlap must remain
+deterministic and compatible with cancellation, resource limits, selective
+decode, and malformed-stream fail-closed behavior.
+
+### P4. Output And I/O Locality
 
 Profile TIFF row assembly, planar-to-interleaved conversion, file writes, and
-large-image allocations. Prefer row/block writes and reusable scratch over
-additional copies. The sampled nearest-neighbour path already builds one
-horizontal index map per component and selects one source row per output row.
+large-image allocations using the P1 raw-output control. Prefer row/block
+writes, direct native-plane sinks, and reusable scratch over additional copies.
+The sampled nearest-neighbour path already builds one horizontal index map per
+component and selects one source row per output row.
 
-### P3. T1/MQ Research
+Coordinate this work with the roadmap's selective and bounded-memory decode:
+an optimization that requires materializing the complete display raster is not
+acceptable for large-image or region-only requests.
 
-Use pass counters to target the actual worst pass separately for lossless and
-lossy inputs. Candidates must reduce per-symbol context/neighbor work or expose
-independent symbols without changing MQ state order. Preserve byte/symbol
-oracles and benchmark sparse, dense/sign-heavy, and refinement-heavy blocks.
+### P5. Transform And Reconstruction Locality
 
-### P4. Fused Lossy Reconstruction
+Revisit DWT only when P1 shows it has regained a material critical-path share.
+The next lossless hypothesis is cache-blocking row/column work per level so a
+plane streams fewer times. For lossy decode, experiment with
+dequantize-to-inverse-9/7 fusion only behind reference-relative pixel/hash
+gates. Keep either only if cache/allocation savings exceed the added complexity
+and all pinned accuracy bounds remain unchanged.
 
-Experiment with dequantize-to-inverse-9/7 fusion only behind reference-relative
-pixel/hash gates. Keep it only if allocation and cache savings exceed added
-complexity and OpenJPEG/Grok/Kakadu agreement remains within the pinned bounds.
+### P6. Encode-Side Follow-Up
 
-### P5. Encode-Side Locality
+Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode
+gap, unless profiling finds a shared T1/MQ change. Then revisit bitplane
+extraction, scratch clears, catalog materialization, and rate allocation using
+both 5/3 and quality-matched 9/7 profiles. Avoid rebuilding block metadata or
+scanning all blocks per packet. Maintain deterministic packet order
+independently of worker completion order.
 
-Revisit bitplane extraction, scratch clears, and catalog materialization using
-profiles from both 5/3 and 9/7. Avoid rebuilding block metadata or scanning all
-blocks per packet. Maintain deterministic packet order independently of worker
-completion order.
+The encode target sequence on the active host is below OpenJPEG's 131.2 ms,
+then toward Kakadu's 77.6 ms for the pinned lossless profile. Re-measure
+references after tool or host changes rather than treating these numbers as
+permanent thresholds.
 
 ## Benchmark Command
 
@@ -104,5 +165,13 @@ completion order.
 Use explicit `-Threads 1` and `-Threads all` runs for release checkpoints.
 Kakadu, Grok, and OpenJPEG must decode their documented comparison streams;
 never compare one codec's decode of an easier profile to another codec's
-decode of a harder one without labelling that difference.
+decode of a harder one without labelling that difference. For decode
+optimization, always include the common z2000 lossless stream. For lossy
+ranking, add a rate sweep and compare interpolated time/quality or time/size
+points instead of a single unmatched command.
+
+Store raw Hyperfine JSON, exact commands, tool versions, input/output hashes,
+stream sizes, and profiler configuration under the benchmark result directory.
+Only the summarized evidence belongs in version control unless an artifact is
+small, licensed, and intentionally promoted to the fixture corpus.
 

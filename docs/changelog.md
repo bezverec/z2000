@@ -21,6 +21,10 @@ entries are grouped by development milestone rather than semantic version.
   20.3.6, OpenJPEG 2.5.4, and Kakadu 8.4.1 for lossless and lossy profiles.
   Lossless output and cross-decode remained pixel-exact; common-stream decode
   confirms the next optimization target is T1/decode pipeline efficiency.
+- Rebased the active optimization queue on that checkpoint: first attribute
+  codec versus output cost, then target the serial T1/MQ path and measured
+  pipeline idle time. Encode work is deprioritized while z2000 already beats
+  Grok at t20; lossy codec rankings now require rate-distortion matching.
 
 ## 0.2.0-rc.1 — 2026-07-16
 
