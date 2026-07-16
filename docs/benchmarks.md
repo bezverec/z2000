@@ -406,3 +406,99 @@ trends the same way but the host was too noisy on the day to separate the ~2.5
 ms signal from variance, and the t1 pair is the identical single-worker path.
 The maintainability win — one pool design across both DWT drivers — carried the
 borderline decode number.
+
+## 2026-07-16: Intel Core i5-14500, v0.2.0-rc.1 comparative checkpoint
+
+This is a new-host checkpoint, not a direct regression comparison with the
+Ryzen 7 5700X records above. The source was `b96a819a`
+(`0.2.0-dev.457+gb96a819a`); its only change after the tagged release commit
+`7b8c01c` was post-release documentation. The codec code is therefore the same
+as `v0.2.0-rc.1`.
+
+### Provenance And Method
+
+| Item | Value |
+| --- | --- |
+| Host | Intel Core i5-14500, 14 cores / 20 logical processors, 34,028,830,720 B RAM |
+| OS | Windows 11 Pro 10.0.26200, build 26200 |
+| Input | `bench-rgb-2048.tif`, 12,583,052 B, SHA-256 `d8e3038ca752fab381d167783b797ebd64250a3f51c852437771180f3234e139` |
+| z2000 | `b96a819a`, Zig 0.16.0, ReleaseFast native |
+| Grok | 20.3.6 |
+| OpenJPEG | 2.5.4 |
+| Kakadu | 8.4.1 demo applications, J2K1+HTOPT |
+| Measurement | hyperfine 1.20.0, two warmups, eight runs; t1 and t20 |
+
+The lossless profile is the established single 8192x8192 tile, RPCL, six
+resolutions, 256/128 precinct ladder, 64x64 blocks, one layer, reversible
+RCT/5-3, BYPASS, SOP/EPH, resolution tile-parts, PLT/TLM where the producer
+supports them. Every self-decode and Grok/OpenJPEG/Kakadu decode of z2000 output
+was pixel-exact. z2000 t1 and t20 output was byte-identical.
+
+### Lossless Encode
+
+| Codec | t1 mean +/- sd | t20 mean +/- sd | t1 / t20 speedup |
+| --- | ---: | ---: | ---: |
+| z2000 | 912.6 +/- 8.8 ms | 135.9 +/- 2.7 ms | 6.71x |
+| Grok | 825.8 +/- 9.8 ms | 156.7 +/- 2.0 ms | 5.27x |
+| OpenJPEG | 782.6 +/- 10.9 ms | 131.2 +/- 2.5 ms | 5.97x |
+| Kakadu | 537.0 +/- 10.2 ms | 77.6 +/- 10.7 ms | 6.92x |
+
+At t20, z2000 was 1.15x faster than Grok, 3.6% slower than OpenJPEG, and
+1.75x slower than Kakadu. At t1 it remained slower than all three references.
+
+### Lossless Decode: Own Files
+
+| Codec | t1 mean +/- sd | t20 mean +/- sd | t1 / t20 speedup |
+| --- | ---: | ---: | ---: |
+| z2000 | 814.4 +/- 11.2 ms | 138.0 +/- 9.7 ms | 5.90x |
+| Grok | 626.2 +/- 7.9 ms | 98.5 +/- 3.4 ms | 6.36x |
+| OpenJPEG | 684.1 +/- 9.5 ms | 119.5 +/- 5.3 ms | 5.73x |
+| Kakadu | 624.8 +/- 11.4 ms | 95.7 +/- 16.7 ms | 6.53x |
+
+### Lossless Decode: Common z2000 Stream
+
+All decoders in this table read the same 6,636,048-byte z2000 JP2.
+
+| Codec | t1 mean +/- sd | t20 mean +/- sd | t1 / t20 speedup |
+| --- | ---: | ---: | ---: |
+| z2000 | 831.5 +/- 10.1 ms | 135.3 +/- 2.9 ms | 6.15x |
+| Grok | 636.8 +/- 10.4 ms | 99.1 +/- 5.4 ms | 6.43x |
+| OpenJPEG | 680.9 +/- 8.6 ms | 123.9 +/- 7.5 ms | 5.50x |
+| Kakadu | 619.6 +/- 6.0 ms | 94.5 +/- 5.2 ms | 6.56x |
+
+On the common stream, z2000 t20 decode was 1.37x slower than Grok, 9.2% slower
+than OpenJPEG, and 1.43x slower than Kakadu. The t1 gaps were 1.31x, 1.22x, and
+1.34x respectively. This keeps decode T1 cost and parallel pipeline efficiency
+as the clearest performance target.
+
+### Lossless Sizes
+
+| Encoder | JP2 size | Difference from smallest |
+| --- | ---: | ---: |
+| Kakadu | 6,624,994 B | 0 B |
+| Grok | 6,635,206 B | +10,212 B (+0.154%) |
+| z2000 | 6,636,048 B | +11,054 B (+0.167%) |
+| OpenJPEG | 6,636,085 B | +11,091 B (+0.167%) |
+
+### Lossy 9/7 Checkpoint
+
+The harness requests each tool's established irreversible two-layer profile,
+but the outputs are not rate-distortion matched. Treat the timings as own-file
+implementation measurements, not as a quality-normalized codec ranking. In
+particular, Grok produced a larger file with materially lower PSNR on this
+invocation.
+
+| Codec | Encode t1 | Encode t20 | Decode t1 | Decode t20 | Size | PSNR / max diff |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| z2000 | 909.4 ms | 159.6 ms | 806.9 ms | 151.9 ms | 4,798,568 B | 52.58 dB / 3 |
+| Grok | 929.0 ms | 178.5 ms | 659.8 ms | 115.4 ms | 5,326,180 B | 38.75 dB / 17 |
+| OpenJPEG | 749.2 ms | 140.4 ms | 656.3 ms | 132.3 ms | 4,805,522 B | 52.57 dB / 3 |
+| Kakadu | 534.9 ms | 83.9 ms | 622.0 ms | 84.0 ms | 4,826,199 B | 52.03 dB / 3 |
+
+The original z2000 t20 lossy-decode sample contained one 719 ms outlier and
+reported `238.7 +/- 194.5 ms`. A focused rerun with four warmups and twelve
+runs was stable at `151.9 +/- 4.1 ms` (144.9--160.4 ms); that rerun is used in
+the table. z2000 lossy t1 and t20 codestreams were byte-identical.
+
+Raw hyperfine JSON and generated files are under
+`zig-out/bench-compare-2026-07-16-i5-14500/` in the benchmark workspace.

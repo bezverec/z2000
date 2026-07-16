@@ -112,11 +112,68 @@ threaded output, current four-codec interop, documented CLI/API boundaries, and
 reproducible benchmark provenance. The detailed policy is in
 [`versioning.md`](versioning.md).
 
-## Explicitly Outside The Current Baseline
+## Path To A General-Purpose Part 1 Codec
 
-- arbitrary JPX box families and JPX-only composition;
-- arbitrary component counts, signed/floating codestream samples, and general
-  mixed subsampling/precision/MCT combinations;
+The next product target is a general-purpose JPEG 2000 Part 1 codestream and
+JP2 codec, not an attempt to claim the entire JPEG 2000 family at once. Part 1
+defines the core codestream and JP2 file format; JPX/Part 2 and HTJ2K/Part 15
+are separate standards and therefore separate future programs. The target is
+grounded in the [T.800 marker and syntax inventory](https://www.itu.int/dms_pubrec/itu-t/rec/t/T-REC-T.800-201906-S%21%21TOC-HTM-E.htm),
+the [JPEG 2000 standards overview](https://jpeg.org/jpeg2000/index.html), and
+the [Part 4 conformance framework](https://www.iso.org/standard/85636.html).
+
+Decode breadth comes first because accepting independent codestreams exposes
+format assumptions earlier than adding writer switches. Encode support follows
+only after the matching decoder and conformance evidence exist. The current
+bounded scorecards remain frozen evidence for their defined profiles; a new
+broad Part 1 matrix will track each capability independently as parsed,
+decoded, encoded, malformed-tested, and independently reproduced.
+
+| Phase | Deliverable | Promotion evidence |
+| --- | --- | --- |
+| G0 | Capability matrix, licensed corpus manifest, differential runner, and Part 4 test integration | Every claimed row has a pinned input, expected result, malformed cases, and provenance |
+| G1 | Generic integer component/sample model | Part 1-legal signedness, precision, component counts, and mixed sampling decode without an RGB/u16 assumption |
+| G2 | General coding-style and quantization overrides | Divergent `COC`/`QCC` plus main- and tile-header `COD`/`QCD`/`COC`/`QCC` combinations reconstruct independently |
+| G3 | Remaining Part 1 marker, tile-part, packet, and ROI breadth | `RGN` Maxshift, `CRG`, `PLM`, applicable `CAP`/`PRF`, legal `POC`/`PPM`/`PPT`, and non-trivial tile-part schedules pass strict decode and corruption gates |
+| G4 | Scalable, selective, and bounded-memory decode | Layer, resolution, tile, and region selection plus incremental input/output produce the same requested samples as full decode |
+| G5 | General Part 1 encoder | Generic components, per-component styles, ROI, tile-part scheduling, and practical rate/quality control round-trip through independent codecs |
+| G6 | General JP2 tool surface | Raw codestream and JP2 workflows, legal palette/channel/colour/resolution mappings, and checked metadata preservation work without assuming sRGB |
+| G7 | 1.0 conformance and hardening gate | Part 4 evidence, fuzz/corruption campaigns, resource limits, deterministic cross-platform builds, stable API/CLI, and no unresolved claimed-row discrepancy |
+
+G1 must define a lossless internal carrier before adding source adapters above
+16 bits. Part 1 samples are integers; floating-point codestream samples and
+general multiple-component transforms belong to extension work rather than
+being smuggled into this milestone. Diagnostic PGX/PAM/raw planar output is
+needed for combinations that TIFF or a display-oriented conversion cannot
+represent faithfully.
+
+G2 and G3 replace the current byte-redundant/uniform override shortcuts with
+real component- and tile-local semantics. Unknown or profile-inapplicable
+markers must be validated deliberately, not blindly ignored. Packet indexing
+created here becomes the basis for G4 random access instead of a second packet
+parser.
+
+G4 is part of codec completeness, not only an optimization campaign: a large
+image must not require reconstructing every layer, resolution, tile, or pixel
+when the caller requests a bounded subset. Performance work continues in
+parallel, but no throughput result substitutes for the phase evidence above.
+
+G7 is an evidence gate, not a promise of third-party certification. A 1.0
+release may claim only the conformance classes and matrix rows actually run;
+formal certification must remain distinct from internal test success.
+
+## Still Outside The Bounded Baseline Today
+
+- arbitrary component counts, signed samples, and general mixed
+  subsampling/precision combinations, planned under G1;
+- divergent component/tile coding styles, remaining Part 1 ROI/registration
+  markers, broad tile-part schedules, and selective decode, planned under
+  G2-G4;
 - automatic colour conversion beyond bounded sYCC 4:4:4/4:2:2/4:2:0;
 - tiled/compressed TIFF variants and broad camera-RAW workflows;
 - unchecked architecture-specific fast paths.
+
+JPX composition and other Part 2-only box/codestream extensions, arbitrary
+multiple-component transforms, floating-point extensions, HTJ2K/Part 15,
+MJ2, JPM, and JPIP remain outside the Part 1/JP2 1.0 target. Each needs its own
+scope, corpus, interoperability matrix, and release claim after G7.

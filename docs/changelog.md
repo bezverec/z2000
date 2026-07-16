@@ -5,7 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
-No changes yet.
+### General-Purpose Part 1 Planning
+
+- Extended the roadmap and active queue from the completed bounded profiles to
+  a decode-first, evidence-gated general JPEG 2000 Part 1 and JP2 codec plan.
+  The new phases cover a broad capability/corpus matrix, generic native sample
+  semantics, component/tile overrides, remaining Part 1 markers and packet
+  schedules, selective streaming decode, general encode, JP2 breadth, and a
+  Part 4-backed 1.0 hardening gate. JPX/Part 2 and HTJ2K/Part 15 remain
+  explicitly separate programs.
+
+### Comparative Performance Checkpoint
+
+- Recorded a reproducible i5-14500 t1/t20 checkpoint across z2000, Grok
+  20.3.6, OpenJPEG 2.5.4, and Kakadu 8.4.1 for lossless and lossy profiles.
+  Lossless output and cross-decode remained pixel-exact; common-stream decode
+  confirms the next optimization target is T1/decode pipeline efficiency.
 
 ## 0.2.0-rc.1 — 2026-07-16
 
