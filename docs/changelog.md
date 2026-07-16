@@ -25,6 +25,14 @@ entries are grouped by development milestone rather than semantic version.
   codec versus output cost, then target the serial T1/MQ path and measured
   pipeline idle time. Encode work is deprioritized while z2000 already beats
   Grok at t20; lossy codec rankings now require rate-distortion matching.
+- Added portable Kakadu discovery to the POSIX harness and recorded a
+  pixel-exact Kakadu 8.4.1 Linux x86-64 checkpoint against a native z2000 build
+  on Debian/WSL2 tmpfs. The macOS package is confirmed universal arm64+x86_64,
+  but remains explicitly unmeasured until it runs on a real macOS host.
+- Fixed the POSIX lossless benchmark's `z2000 t1` commands to pass
+  `--threads 1` explicitly instead of inheriting the all-thread default.
+  The reference encoders now also request MCT and PLT explicitly, matching the
+  maintained Windows lossless profile.
 
 ## 0.2.0-rc.1 — 2026-07-16
 

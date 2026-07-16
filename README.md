@@ -451,6 +451,15 @@ ICT/9/7 rate-target profile:
 ```
 
 The POSIX harness accepts the same extension through `INCLUDE_LOSSY=1`.
+Locally licensed Kakadu demo applications can be supplied on Linux or macOS
+without copying them into the repository:
+
+```sh
+KDU_HOME=/path/to/kakadu-8.4.1 INCLUDE_LOSSY=1 \
+  sh tools/bench_compare.sh bench-rgb-2048.tif
+```
+
+For the standard macOS package, use `KDU_HOME=/Library/Kakadu/8.4.1`.
 
 Run the bounded BMP adapter gate (z2000 roundtrip, OpenJPEG/Grok decode, and
 batch dispatch) with paths to locally installed reference tools when needed:

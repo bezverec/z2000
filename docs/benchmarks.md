@@ -14,6 +14,26 @@ RUNS=8 Z2000_THREADS=10 \
   sh tools/bench_compare.sh bench-rgb-2048.tif
 ```
 
+Kakadu stays outside the repository because the demo applications are licensed
+for non-commercial use. Point the POSIX harness at a local installation or
+extracted archive:
+
+```sh
+# Linux: KDU_HOME contains kdu_compress, kdu_expand, and libkdu_v84R.so.
+KDU_HOME=/opt/kakadu-8.4.1 RUNS=8 WARMUP=2 \
+  BENCH_RESULTS_DIR=.bench/kakadu-linux \
+  sh tools/bench_compare.sh bench-rgb-2048.tif
+
+# macOS package default: universal arm64+x86_64 command-line applications.
+KDU_HOME=/Library/Kakadu/8.4.1 RUNS=8 WARMUP=2 \
+  BENCH_RESULTS_DIR=.bench/kakadu-macos \
+  sh tools/bench_compare.sh bench-rgb-2048.tif
+```
+
+Set `Z2000_BIN` to use a previously built executable. This is useful for
+read-only checkouts and release-archive checks, but performance records must
+state whether the binary is a native build or a portable release target.
+
 `BENCH_RESULTS_DIR` retains Hyperfine JSON for encode, native round-trip decode,
 and common-stream decode. The `.bench/` artifacts are local evidence and are not
 committed. The summary tables below use wall-clock mean +/- sample standard
@@ -25,6 +45,82 @@ On Windows, the equivalent harness can include the irreversible profile:
 .\tools\bench_compare.ps1 -InputPath .\zig-out\bench-rgb-2048.tif `
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
+
+## 2026-07-16: Kakadu 8.4.1 on Debian/WSL2; macOS package inspection
+
+This checkpoint answers whether the additional Kakadu demo packages can join
+the POSIX benchmark. The Linux applications passed a real lossless encode,
+own-file decode, and common-stream decode. The macOS package was inspected but
+has not yet been executed on macOS, so no macOS Kakadu timing is claimed.
+
+### Provenance And Method
+
+| Item | Value |
+| --- | --- |
+| Host | Intel Core i5-14500, 20 logical processors, Windows 11 host |
+| Linux environment | Debian 12 container, Linux 6.6.87.2-microsoft-standard-WSL2, Docker Desktop engine 29.6.1 |
+| Container image | `debian@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb` |
+| Timed filesystem | 1 GiB container `tmpfs`; bind-mounted NTFS timings were rejected |
+| z2000 source | `815d173`; codec code matches `v0.2.0-rc.1` (`7b8c01c`) |
+| z2000 build | Zig 0.16.0, `ReleaseFast`, `-Dtarget=native`, built inside Linux tmpfs |
+| Kakadu | 8.4.1 Linux x86-64 demo apps, J2K1+HTOPT |
+| Kakadu archive | `KDU841_Demo_Apps_for_Linux-x86-64_231117.zip`, SHA-256 `5a1afd4b24d211798215d90b194b80cc397c221e75919cc145a691026e5c748d` |
+| Measurement | Hyperfine 1.15.0, two warmups, eight runs; t1 and t20 |
+| Input | `bench-rgb-2048.tif`, 12,583,052 B, SHA-256 `d8e3038ca752fab381d167783b797ebd64250a3f51c852437771180f3234e139` |
+
+The lossless profile matches the 2026-07-16 Windows checkpoint: one 8192x8192
+tile, RPCL, six resolutions, 256/128 precinct ladder, 64x64 blocks, one layer,
+reversible RCT/5-3, BYPASS, SOP/EPH, resolution tile-parts, PLT/TLM where the
+producer supports them. These Linux/WSL2 numbers are comparable only within
+this record, not directly with native Windows or macOS records.
+
+### Lossless Encode
+
+| Codec | t1 mean +/- sd | t20 mean +/- sd | t1 / t20 speedup |
+| --- | ---: | ---: | ---: |
+| z2000 | 882.8 +/- 7.6 ms | 136.9 +/- 7.7 ms | 6.45x |
+| Kakadu | 508.5 +/- 6.0 ms | 57.8 +/- 2.2 ms | 8.80x |
+
+Kakadu was 1.74x faster at t1 and 2.37x faster at t20.
+
+### Lossless Decode: Own Files
+
+| Codec | t1 mean +/- sd | t20 mean +/- sd | t1 / t20 speedup |
+| --- | ---: | ---: | ---: |
+| z2000 | 787.7 +/- 19.3 ms | 116.2 +/- 1.0 ms | 6.78x |
+| Kakadu | 540.9 +/- 11.3 ms | 49.7 +/- 3.4 ms | 10.88x |
+
+### Lossless Decode: Common z2000 Stream
+
+Both decoders read the same 6,636,048-byte z2000 JP2.
+
+| Codec | t1 mean +/- sd | t20 mean +/- sd | t1 / t20 speedup |
+| --- | ---: | ---: | ---: |
+| z2000 | 767.7 +/- 13.0 ms | 122.7 +/- 3.6 ms | 6.26x |
+| Kakadu | 523.7 +/- 9.8 ms | 58.6 +/- 2.6 ms | 8.94x |
+
+Kakadu was 1.47x faster at t1 and 2.09x faster at t20 on the common stream.
+This independently reinforces both active optimization targets: serial T1/MQ
+cost and high-thread decode pipeline efficiency.
+
+The z2000 t1/t20 streams were byte-identical (SHA-256
+`5ffe4c5ce5665d32dc2092e4bedc83261cdce723442d62d91568f1bd2bb10cb1`).
+Kakadu output was 6,624,994 B, matching the Windows Kakadu checkpoint exactly.
+`tiffcmp` returned 0 for z2000 own decode, Kakadu own decode, and Kakadu decode
+of the z2000 stream; Kakadu's TIFF writer only added a `SampleFormat` tag.
+Raw Hyperfine JSON remains local under
+`zig-out/kakadu-linux-native-bench-2026-07-16-wsl2-tmpfs/`.
+
+### macOS Package Status
+
+`KDU841_Demo_Apps_for_MacOS_231117.dmg_.zip` has SHA-256
+`512ba55104b75b22c0cd49ad9b5264d4ca2d639701d26da5ba488253aba5069c`.
+The DMG/PKG payload contains universal `arm64` + `x86_64` Mach-O builds of
+`kdu_compress`, `kdu_expand`, and `libkdu_v84R.dylib`, installed by default
+under `/Library/Kakadu/8.4.1`. Architecture inspection passed, but only a real
+macOS run can validate code signing, dynamic loading, correctness, and timing.
+Until that run exists, the earlier Apple M4 record remains unchanged and its
+Kakadu row remains unavailable.
 
 ## 2026-07-13: Ryzen 7 5700X, parallel inverse RCT/ICT
 
