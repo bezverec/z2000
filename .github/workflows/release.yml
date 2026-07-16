@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Version tag to validate, for example v0.1.0-rc.2
+        description: Version tag to validate, for example v0.2.0-rc.1
         required: true
-        default: v0.1.0-rc.2
+        default: v0.2.0-rc.1
         type: string
       ref:
         description: Branch, tag, or commit to build when publish is false

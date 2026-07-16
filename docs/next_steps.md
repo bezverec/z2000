@@ -68,8 +68,8 @@ matches OpenJPEG exactly. The separate conversion API supports bounded ICC v2/v4
 RGB matrix/TRC profiles, with official eciRGB v2 and CC0 Adobe RGB-compatible
 fixtures matching LittleCMS reference vectors. CMYK, default-parameter CIELab,
 e-sRGB, and e-sYCC now have explicit, plane-exact signalling/preservation APIs;
-they remain deliberately unavailable to TIFF/display conversion. The bounded
-colour slice is complete, so the next active implementation item is section 2.
+they remain deliberately unavailable to TIFF/display conversion. This bounded
+colour slice is complete.
 
 No colour conversion belongs inside T1/T2, and no component layout may be
 silently interpreted as RGB or YCC.
@@ -119,21 +119,24 @@ and exactly one Photoshop APP13 IPTC resource without changing the reversible
 JP2 codestream. Extended XMP, ICC APP2, arbitrary Photoshop resources, semantic
 tag interpretation, and JP2-to-TIFF restoration remain explicit later breadth.
 Evaluate depths above 16 bits only after a source format and target JP2 profile
-have checked semantics. The next active implementation item is section 3.
+have checked semantics. This first format/metadata campaign is complete.
 
 ### 3. Release Readiness
 
 Prepare intentional prereleases rather than commit-triggered releases. Keep
-Windows/Linux native builds, RISC-V/RVV compile and functional gates, strict
-corruption tests, deterministic threading, current interop, concise docs, and
-benchmark provenance green. See `versioning.md`.
+Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
+gates, strict corruption tests, deterministic threading, current interop,
+concise docs, and benchmark provenance green. See `versioning.md`.
 
-The `v0.1.0-rc.2` preparation now has current release notes, native Debug plus
-ReleaseFast workflow tests, RISC-V ReleaseFast emulation, exact version checks
-for both CLI names, and archives containing both `z2000` and `z2k`. The next
-release action is an explicit `publish=false` workflow dry-run from clean
-`main`; tagging and publication remain manual only after all four platform
-artifacts and `SHA256SUMS` are reviewed.
+The hosted `v0.1.0-rc.2` dry-run proved metadata validation plus native Linux,
+Windows, and macOS Debug/ReleaseFast builds before its long RISC-V QEMU job was
+cancelled to conserve Actions minutes. The next candidate should be assembled
+and verified locally, including the RISC-V functional gate, both CLI names in
+every archive, and a reviewed `SHA256SUMS`. Based on the documented pre-1.0
+increment policy and the many new formats/profiles since `v0.1.0-rc.1`, the
+next version is `v0.2.0-rc.1`. `VERSION` and release notes now reflect that
+choice. Tagging and publication remain manual until every local artifact plus
+the hosted macOS archive is reviewed.
 
 ## Parallel Performance Track
 

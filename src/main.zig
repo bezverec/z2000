@@ -1732,7 +1732,7 @@ fn usage() void {
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
         \\  z2000 dng-info <input.dng>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL|LRCP|RLCP|PCRL|CPRL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
         \\  z2000 bmp-to-jp2 <input.bmp> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 png-to-jp2 <input.png> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jpeg-to-jp2 <input.jpg> <output.jp2> [tiff-to-jp2 options]
@@ -1747,7 +1747,7 @@ fn usage() void {
         \\  Batch patterns apply only to filenames in one concrete directory; shell-expanded input lists are accepted too.
         \\  Existing targets follow single-file overwrite behavior.
         \\  .z2000 is an educational codestream, not ISO JPEG2000 yet.
-        \\  tiff-to-jp2 writes strict RPCL packet payloads; --debug-temp-sidecar adds the legacy BP8 COM payload for diagnostics.
+        \\  tiff-to-jp2 writes the selected checked progression profile; --debug-temp-sidecar adds the legacy BP8 COM payload for diagnostics.
         \\  --poc uses quoted ISO records: RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;... and supports tile-parts none or compatible R/L/C/P; --poc-location defaults to main.
         \\
     , .{});

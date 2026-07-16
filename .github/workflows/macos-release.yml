@@ -1,0 +1,126 @@
+name: macOS Release Artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag to validate, for example v0.2.0-rc.1
+        required: true
+        default: v0.2.0-rc.1
+        type: string
+      ref:
+        description: Branch, tag, or commit to build
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Check out requested revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Validate release metadata
+        id: meta
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-(rc\.[1-9][0-9]*)$ ]]; then
+            echo "expected an rc.N release tag, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          base_version="${BASH_REMATCH[1]}"
+          prerelease="${BASH_REMATCH[2]}"
+          if [[ "$(tr -d '[:space:]' < VERSION)" != "$base_version" ]]; then
+            echo "VERSION does not match $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [[ ! -f "docs/releases/${RELEASE_TAG}.md" ]]; then
+            echo "missing docs/releases/${RELEASE_TAG}.md" >&2
+            exit 1
+          fi
+          build_number="$(git rev-list --count HEAD)"
+          git_sha="$(git rev-parse --short=8 HEAD)"
+          expected="z2000 ${RELEASE_TAG#v}+build.${build_number}.g${git_sha}"
+          echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
+          echo "git_sha=$git_sha" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "expected=$expected" >> "$GITHUB_OUTPUT"
+
+      - name: Install Zig 0.16.0
+        env:
+          ZIG_URL: https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
+          ZIG_SHA: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+          ZIG_DIR: zig-aarch64-macos-0.16.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location "$ZIG_URL" --output zig.tar.xz
+          echo "$ZIG_SHA  zig.tar.xz" | shasum -a 256 --check
+          tar -xf zig.tar.xz
+          echo "$PWD/$ZIG_DIR" >> "$GITHUB_PATH"
+
+      - name: Run Debug tests
+        run: zig build test -Dtarget=native
+
+      - name: Run ReleaseFast tests
+        run: zig build test -Dtarget=native -Doptimize=ReleaseFast
+
+      - name: Build release binaries
+        env:
+          BUILD_NUMBER: ${{ steps.meta.outputs.build_number }}
+          GIT_SHA: ${{ steps.meta.outputs.git_sha }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          zig build \
+            -Drelease=true \
+            "-Dprerelease=$PRERELEASE" \
+            -Doptimize=ReleaseFast \
+            -Dtarget=native \
+            "-Dbuild-number=$BUILD_NUMBER" \
+            "-Dgit-sha=$GIT_SHA" \
+            -Dgit-dirty=false
+
+      - name: Verify aliases and package
+        env:
+          EXPECTED: ${{ steps.meta.outputs.expected }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(./zig-out/bin/z2000 --version 2>&1)" = "$EXPECTED"
+          test "$(./zig-out/bin/z2k --version 2>&1)" = "$EXPECTED"
+          cmp zig-out/bin/z2000 zig-out/bin/z2k
+          package="z2000-${RELEASE_TAG}-macos-aarch64"
+          mkdir -p "dist/$package"
+          install -m 755 zig-out/bin/z2000 "dist/$package/z2000"
+          install -m 755 zig-out/bin/z2k "dist/$package/z2k"
+          cp README.md LICENSE VERSION "dist/$package/"
+          cp "docs/releases/${RELEASE_TAG}.md" "dist/$package/RELEASE_NOTES.md"
+          tar -czf "dist/${package}.tar.gz" -C dist "$package"
+          shasum -a 256 "dist/${package}.tar.gz" > "dist/${package}.sha256"
+
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: z2000-${{ inputs.tag }}-macos-aarch64
+          path: |
+            dist/z2000-${{ inputs.tag }}-macos-aarch64.tar.gz
+            dist/z2000-${{ inputs.tag }}-macos-aarch64.sha256
+          if-no-files-found: error
+          compression-level: 0

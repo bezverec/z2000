@@ -45,7 +45,7 @@ zig build run -- *.png .jp2 [tiff-to-jp2 options]
 zig build run -- *.jpg .jp2 [tiff-to-jp2 options]
 zig build run -- *.dng .jp2 [tiff-to-jp2 options]
 zig build run -- *.exr .jp2 [tiff-to-jp2 options]
-zig build run -- *.jp2 .tif [jp2-to-tiff options]
+zig build run -- *.jp2 .tif [decode-temp-jp2 options]
 ```
 
 `--version` (or `-V`) prints the generated SemVer application version including

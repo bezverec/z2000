@@ -104,23 +104,29 @@ release, advance it to the next planned pre-1.0 line in a normal commit.
 1. Work from a clean, full-history checkout of `main`.
 2. Set `VERSION` to the intended base release and commit that change.
 3. Run the full test and interoperability gates.
-4. For a release candidate, first run the `Release` GitHub Actions workflow
-   with `publish=false`. This is an explicit manual action; ordinary commits
-   and tag pushes never publish a release.
-5. Confirm every archive passes its native tests and reports the intended
-   version without a `.dirty` suffix.
-6. Create and push the matching annotated tag, for example `v0.1.0-rc.1`.
-7. Run the same workflow with `publish=true`, the tag as both `tag` and the
-   effective build ref, and review the resulting GitHub pre-release.
+4. Build and test the release locally. Run native Debug and ReleaseFast gates,
+   relevant interoperability scripts, and the portable RISC-V suite under a
+   local QEMU/VM/container. Obtain native macOS evidence from a trusted Mac when
+   the release includes a macOS archive.
+5. Package Windows x86-64, Linux x86-64 musl, Linux RISC-V 64 musl, and macOS
+   arm64 as applicable. Every archive must contain the identical application
+   under both `z2000` and `z2k` names and report the intended version without a
+   `.dirty` suffix. Generate and review `SHA256SUMS` locally.
+6. Create and push the matching annotated tag, for example `v0.2.0-rc.1`.
+7. Create a draft from the already-tested assets with `gh release create TAG
+   ASSETS --verify-tag --draft --prerelease --notes-file FILE`. Review the
+   uploaded checksums and archives before publishing the draft. Final releases
+   omit `--prerelease`. Uploading local assets does not require a hosted build
+   workflow.
 
-The workflow runs native Debug and ReleaseFast suites, then builds Windows
-x86-64, Linux x86-64 musl, Linux RISC-V 64 musl, and macOS arm64 archives and
-emits `SHA256SUMS`. Each archive contains the identical application under both
-`z2000` and `z2k` names. The portable RISC-V build does not require RVV and its
-complete ReleaseFast test suite runs under `qemu-riscv64` before packaging.
-Release publication requires an existing tag that resolves to the exact tested
-checkout. Release candidates are marked as GitHub pre-releases; final tags omit
-that marker.
+The `Release` GitHub Actions workflow remains an optional reproducibility
+fallback, not the default publication path. A separate `macOS Release Artifact`
+workflow builds only the native macOS arm64 archive when no trusted local Mac
+is available. Ordinary commits and tag pushes do not publish a release. The
+portable RISC-V build does not require RVV; its ReleaseFast functional suite
+must complete locally before packaging. Release publication requires an
+existing tag that resolves to the exact tested checkout. GitHub CLI can attach
+local archives directly to the release.
 
 ## Gate For 1.0.0
 

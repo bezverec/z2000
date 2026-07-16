@@ -46,13 +46,13 @@ data.
 
 ## Strategic Sequence
 
-### 1. Finish F3 Component Layout Breadth
+### 1. Maintain F3 Component Layout Breadth
 
-Distinct tile-partition origins now have an independent Kakadu fixture and
-bidirectional exact interop. Keep sampled MCT and irreversible combinations
-closed until their transform and registration semantics are explicit.
-Reordered sampled POC and the multi-tile diagnostic packet catalog share
-production decode's component-local topology.
+The bounded F3 campaign is complete. Distinct tile-partition origins have an
+independent Kakadu fixture and bidirectional exact interop; reordered sampled
+POC and the multi-tile diagnostic packet catalog share production decode's
+component-local topology. Keep sampled MCT and irreversible combinations closed
+until their transform and registration semantics are explicit.
 
 ### 2. Colour And ICC
 
@@ -86,11 +86,13 @@ OpenJPEG/Grok interop. The bounded OpenEXR adapter now covers normalized
 finite `[0,1]` HALF RGB in one uncompressed scanline part, explicit
 chromaticities, CLI/batch, mutation gates, and independent interop. HDR,
 negative, compressed, tiled, multipart/deep, alpha/arbitrary-channel, and
-metadata-bearing EXR remain future boundaries. Continue with explicit metadata
-mappings; CFA/demosaicing and broader RAW profiles stay separate.
-Preserve EXIF, XMP, and IPTC through explicit JP2 box or
-side metadata mappings. Evaluate depths above 16 bits only after the internal
-sample carrier and each source format have checked semantics.
+metadata-bearing EXR remain future boundaries. The first explicit metadata
+mapping is complete: bounded JPEG Exif/XMP APP1 and Photoshop APP13 IPTC-IIM
+payloads map byte-for-byte into checked JP2 UUID boxes. Continue with extended
+XMP, broader source ingestion, semantic mapping, and JP2-to-output restoration;
+CFA/demosaicing and broader RAW profiles stay separate. Evaluate depths above
+16 bits only after the internal sample carrier and each source format have
+checked semantics.
 
 ### 4. Performance And Scale
 
@@ -102,11 +104,13 @@ is to exceed Grok and then Kakadu without relaxing correctness or safety.
 
 ### 5. Release Readiness
 
-Keep prereleases intentional rather than commit-triggered. A release candidate
-requires native Windows and Linux builds, the RISC-V compile/functional gate,
-the full corruption suite, deterministic threaded output, current four-codec
-interop, documented CLI/API boundaries, and reproducible benchmark provenance.
-The detailed policy is in [`versioning.md`](versioning.md).
+Keep prereleases intentional rather than commit-triggered. Prefer locally
+assembled and verified release archives so the RISC-V functional gate does not
+consume hosted Actions minutes. A release candidate still requires Windows,
+Linux, macOS, and RISC-V evidence, the full corruption suite, deterministic
+threaded output, current four-codec interop, documented CLI/API boundaries, and
+reproducible benchmark provenance. The detailed policy is in
+[`versioning.md`](versioning.md).
 
 ## Explicitly Outside The Current Baseline
 

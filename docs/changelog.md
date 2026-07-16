@@ -5,13 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Documentation And Release Reconciliation
+
+- Reconciled README, roadmap, active queue, API, ISO coverage, and CLI help
+  with the completed sampled-layout and bounded JPEG metadata work.
+- Moved the preferred prerelease procedure from hosted Actions to locally
+  tested archives and selected `v0.2.0-rc.1` for the new formats and public
+  CLI/API breadth since rc.1.
+
 ### Release Readiness
 
-- Prepared the manual release workflow for `v0.1.0-rc.2`, added native
+- Prepared the manual release workflow for the next candidate, added native
   ReleaseFast test gates alongside Debug, and verify both installed CLI names
   report the exact provenance-bearing release version.
-- Release archives now contain both `z2000` and the documented short `z2k`
-  alias on every platform.
+- Workflow-produced release archives now contain both `z2000` and the
+  documented short `z2k` alias on every platform.
 
 ### Bounded EXIF, XMP, And IPTC Preservation
 

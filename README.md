@@ -8,7 +8,7 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-15, both the narrow RGB lossless JP2 target and the broader
+of 2026-07-16, both the narrow RGB lossless JP2 target and the broader
 JPEG2000 Part 1 engineering scorecard are estimated at **100/100**, and the
 first release candidate (`v0.1.0-rc.1`) is published on the GitHub releases
 page. This is a project-readiness estimate, not a formal ISO conformance
@@ -69,7 +69,8 @@ certification.
   origins exactly, with or without PLT. Checked POC schedules may use LRCP, RLCP, RPCL, PCRL,
   or CPRL from the main or first tile-part header. A reference-grid
   nearest-neighbour API expands native
-  planes without colour conversion, and `jp2-to-tiff` uses it for bounded
+  planes without colour conversion, and the extension-inferred JP2-to-TIFF
+  path uses it for bounded
   three-component sRGB output. Inline, PPT, and PPM headers plus SOP/EPH are
   covered. The sampled reversible API emits single- and multi-tile RPCL with
   inline PLT/PLT-less, PPT, or PPM packet headers; all layouts carry one or
@@ -266,8 +267,8 @@ windows, square pixels, explicit chromaticities, and no unmapped attributes.
 Only finite linear samples in `[0,1]` are accepted; they are scaled to the
 unsigned 16-bit carrier and retain their primaries through a generated linear
 ICC profile. Negative/HDR values, alpha/arbitrary channels, compression,
-tiles, multipart/deep files, and metadata fail closed until the internal
-carrier and JP2 mappings can represent them without implicit tonemapping.
+tiles, multipart/deep files, and metadata fail closed until their OpenEXR
+source semantics have an explicit mapping into the existing JP2 carriers.
 
 For normal lossless conversion, the defaults are usually sufficient. The most
 useful options are grouped below. Unsupported combinations fail closed rather
@@ -328,7 +329,7 @@ Boolean marker and style options also accept a **--no-...** form.
 
 - **--threads N**: Worker count. The default already uses all logical CPU
   threads; pass an explicit N to limit the workers (0 also means all).
-- **--timings**: Print encode/decode phase timings and available T1 profiles.
+- **--timings**: Print encode/decode phase timings and T1 work profiles.
 - **--debug-temp-sidecar**: Emit the private BP8 COM sidecar for diagnostics.
   Normal files omit it.
 
@@ -480,16 +481,18 @@ restart markers, and lossless JP2 decode through OpenJPEG/Grok:
 
 ## Project Direction
 
-Near term: keep both engineering scorecards at 100/100 while completing sampled
-component layouts, hardening release gates and interoperability, and improving
-performance inside the documented profile envelope. The score is for that
-bounded envelope, not a claim that every Part 1 or JPX profile is implemented.
+Near term: keep both engineering scorecards at 100/100 while maintaining the
+completed sampled-component profiles, hardening release gates and
+interoperability, and improving performance inside the documented profile
+envelope. The score is for that bounded envelope, not a claim that every Part 1
+or JPX profile is implemented.
 
 Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
 profiles, quantization, code-block styles, and foreign decode surfaces.
 
 Later conversion-tool target: broaden the bounded DNG/OpenEXR front ends,
 add display conversion for the preserved extended YCC,
-CIELab, and CMYK spaces; preserve EXIF/IPTC/XMP; and evaluate component
-depths above 16 bits where the source format and JPEG2000 profile support them
-cleanly.
+CIELab, and CMYK spaces; extend EXIF/IPTC/XMP ingestion beyond the bounded JPEG
+profile and restore mapped metadata on JP2 output conversion; and evaluate
+component depths above 16 bits where the source format and JPEG2000 profile
+support them cleanly.
