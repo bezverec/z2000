@@ -50,6 +50,11 @@ unchanged. `color.syccToSrgb` converts 8/16-bit 4:4:4, 4:2:2, or 4:2:0 native
 planes directly at the JP2-to-TIFF boundary without materializing three
 upsampled planes. Sampled conversion requires a chroma-grid-aligned image
 origin; unaligned edge semantics remain fail-closed.
+`src/icc.zig` owns the separate ICC conversion boundary. It parses only bounded
+ICC v2/v4 RGB matrix/TRC profiles with PCSXYZ and converts an already-decoded,
+full-resolution 8/16-bit `RgbImage` to sRGB. The codestream and native component
+planes remain unchanged; conversion is opt-in through
+`decode-temp-jp2 --convert-to-srgb`.
 
 ## Encode Pipeline
 
@@ -180,11 +185,12 @@ view, so it does not maintain a second geometry or T2 parser.
 exactly one contiguous codestream. Required ordering, duplicate boxes, lengths,
 component precision, sampling, and SIZ agreement are checked.
 
-Restricted ICC profiles are preserved byte-for-byte. Preservation is not colour
-conversion. Enumerated sYCC (18) is recognized for three unsigned uniform
-8/16-bit components; the CLI converts aligned 4:4:4, 4:2:2, and 4:2:0 input to
-sRGB. Unsupported JPX composition, unaligned sampled sYCC conversion, arbitrary
-ICC interpretation, and unknown component mappings fail closed.
+Restricted ICC profiles are preserved byte-for-byte by default. Preservation is
+not colour conversion. Enumerated sYCC (18) is recognized for three unsigned
+uniform 8/16-bit components; the CLI converts aligned 4:4:4, 4:2:2, and 4:2:0
+input to sRGB. Opt-in ICC conversion accepts only full-resolution RGB matrix/TRC
+profiles with PCSXYZ. Unsupported JPX composition, unaligned sampled sYCC,
+LUT/general ICC interpretation, and unknown component mappings fail closed.
 
 ## Parallelism And Memory
 

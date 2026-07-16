@@ -34,7 +34,9 @@ certification.
 - Explicit JP2 colour metadata with sRGB, grayscale, restricted ICC, and sYCC
   recognition. The JP2-to-TIFF path converts unsigned 8/16-bit sYCC 4:4:4,
   4:2:2, and 4:2:0 to sRGB when the image origin is chroma-grid aligned;
-  unaligned sampled sYCC and general ICC transforms remain fail-closed.
+  `--convert-to-srgb` separately converts bounded ICC v2/v4 RGB matrix/TRC
+  PCSXYZ profiles. Unaligned sampled sYCC and general/LUT ICC transforms remain
+  fail-closed.
 - Bounded planar encode/decode for mixed unsigned 8/16-bit component
   precision, including JP2 `BPCC`/codestream `SIZ` agreement and
   per-component QCD/QCC on the single-tile RPCL 5/3 path. z2000 output is
@@ -121,6 +123,20 @@ RCT + reversible 5/3 profile):
 ```sh
 z2k input.tif output.jp2
 ```
+
+Convert every matching TIFF in one directory, keeping each basename:
+
+```sh
+z2k "*.tif" .jp2
+z2k "incoming/*.tiff" .jp2 --threads 8
+```
+
+Batch patterns support `*` and `?`, are non-recursive and case-insensitive,
+and must have a concrete parent directory. The target is a bare extension.
+Quote the pattern in shells that expand wildcards; PowerShell also accepts the
+unquoted `z2k *.tif .jp2` form. All normal conversion options apply to every
+match. Output-name collisions are rejected before conversion; existing target
+files retain the single-file overwrite behavior.
 
 Convert TIFF to a rate-layered JP2 (the `--rates` list sets the layer count;
 the final layer always carries the complete stream, so a trailing `1` makes
@@ -233,7 +249,8 @@ Other commands:
 - **jp2-stats INPUT**: Audit packet headers, block catalogs, and payload sizes.
 - **decode-temp-jp2 INPUT OUTPUT**: Strict-decode JP2 into TIFF. The command
   keeps its historical name for compatibility and accepts --threads,
-  --t1-backend, and --timings.
+  --t1-backend, --convert-to-srgb, and --timings. ICC conversion is opt-in;
+  without the flag, profile bytes and samples are preserved unchanged.
 
 The full profile matrix and internal API surface are documented in
 [API notes](docs/api.md).

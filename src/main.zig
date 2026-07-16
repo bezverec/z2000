@@ -1,10 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const batch = @import("batch.zig");
 const codec = @import("codec.zig");
 const color = @import("color.zig");
 const codestream = @import("codestream.zig");
 const dng = @import("formats/dng.zig");
 const image = @import("image.zig");
+const icc_color = @import("icc.zig");
 const jp2 = @import("jp2.zig");
 const tiff = @import("tiff.zig");
 const app_version = @import("version.zig");
@@ -54,6 +56,8 @@ pub fn main(init: std.process.Init) !void {
         try jp2StatsCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "decode-temp-jp2")) {
         try decodeTempJp2Command(io, allocator, args[2..]);
+    } else if (batch.hasWildcards(std.fs.path.basename(args[1]))) {
+        try batchConversionCommand(io, allocator, args[1..]);
     } else if (inferConversion(args[1..])) |conversion| {
         switch (conversion) {
             .tiff_to_jp2 => try tiffToJp2Command(io, allocator, args[1..]),
@@ -74,8 +78,13 @@ const InferredConversion = enum { tiff_to_jp2, jp2_to_tiff };
 fn inferConversion(args: []const []const u8) ?InferredConversion {
     if (args.len < 2) return null;
     if (std.mem.startsWith(u8, args[0], "-") or std.mem.startsWith(u8, args[1], "-")) return null;
-    const input_ext = std.fs.path.extension(args[0]);
-    const output_ext = std.fs.path.extension(args[1]);
+    return inferConversionExtensions(
+        std.fs.path.extension(args[0]),
+        std.fs.path.extension(args[1]),
+    );
+}
+
+fn inferConversionExtensions(input_ext: []const u8, output_ext: []const u8) ?InferredConversion {
     const input_is_tiff = std.ascii.eqlIgnoreCase(input_ext, ".tif") or std.ascii.eqlIgnoreCase(input_ext, ".tiff");
     const output_is_tiff = std.ascii.eqlIgnoreCase(output_ext, ".tif") or std.ascii.eqlIgnoreCase(output_ext, ".tiff");
     const input_is_jp2 = std.ascii.eqlIgnoreCase(input_ext, ".jp2");
@@ -83,6 +92,50 @@ fn inferConversion(args: []const []const u8) ?InferredConversion {
     if (input_is_tiff and output_is_jp2) return .tiff_to_jp2;
     if (input_is_jp2 and output_is_tiff) return .jp2_to_tiff;
     return null;
+}
+
+/// Non-recursive shorthand batch dispatch: `z2000 *.tif .jp2 [options]`.
+/// The shell passes the wildcard through unchanged on Windows; z2000 expands
+/// it in the concrete parent directory and derives one target path per file.
+fn batchConversionCommand(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+) !void {
+    if (args.len < 2 or !batch.isTargetExtension(args[1])) {
+        usage();
+        return batch.BatchError.InvalidTargetExtension;
+    }
+    const conversion = inferConversionExtensions(std.fs.path.extension(args[0]), args[1]) orelse {
+        usage();
+        return error.InvalidCommand;
+    };
+    var plan = batch.buildPlan(io, allocator, args[0], args[1]) catch |err| {
+        switch (err) {
+            batch.BatchError.NoMatchingFiles => std.debug.print("batch: no files matched '{s}'\n", .{args[0]}),
+            batch.BatchError.OutputCollision => std.debug.print("batch: multiple inputs map to the same target extension '{s}'\n", .{args[1]}),
+            else => {},
+        }
+        return err;
+    };
+    defer plan.deinit();
+
+    var file_args: std.ArrayList([]const u8) = .empty;
+    defer file_args.deinit(allocator);
+    try file_args.ensureTotalCapacity(allocator, args.len);
+    for (plan.items) |item| {
+        file_args.clearRetainingCapacity();
+        try file_args.appendSlice(allocator, &.{ item.input_path, item.output_path });
+        try file_args.appendSlice(allocator, args[2..]);
+        switch (conversion) {
+            .tiff_to_jp2 => try tiffToJp2Command(io, allocator, file_args.items),
+            .jp2_to_tiff => try decodeTempJp2Command(io, allocator, file_args.items),
+        }
+    }
+    std.debug.print("batch converted {} file{s}\n", .{
+        plan.items.len,
+        if (plan.items.len == 1) "" else "s",
+    });
 }
 
 fn encodeCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -679,6 +732,7 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     var options = codestream.DecodeOptions{};
     options.threads = defaultThreadCount();
     var show_timings = false;
+    var convert_to_srgb = false;
     var index: usize = 2;
     while (index < args.len) {
         if (std.mem.eql(u8, args[index], "--threads")) {
@@ -691,6 +745,8 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             options.t1_backend = try parseT1Backend(args[index]);
         } else if (std.mem.eql(u8, args[index], "--timings")) {
             show_timings = true;
+        } else if (std.mem.eql(u8, args[index], "--convert-to-srgb")) {
+            convert_to_srgb = true;
         } else {
             return error.UnknownOption;
         }
@@ -713,6 +769,18 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     const info = try jp2.parseInfo(bytes);
     const j2k = try jp2.extractCodestream(bytes);
     command_timings.codestream_extract_ns = elapsedNs(extract_start);
+    if (convert_to_srgb) {
+        if (info.color_space != .restricted_icc or info.components != 3 or info.has_palette) {
+            return icc_color.IccError.UnsupportedProfile;
+        }
+        for (0..info.components) |component| {
+            const sampling = info.componentSampling(component) orelse
+                return icc_color.IccError.UnsupportedProfile;
+            if (sampling[0] != 1 or sampling[1] != 1) {
+                return icc_color.IccError.UnsupportedProfile;
+            }
+        }
+    }
 
     var decode_timings = codestream.DecodeTimings{};
     const decode_start = monotonicNs();
@@ -792,7 +860,17 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
 
     const icc_start = monotonicNs();
     if (try jp2.extractIccProfile(allocator, bytes)) |profile| {
-        switch (decoded) {
+        if (convert_to_srgb) {
+            defer allocator.free(profile);
+            switch (decoded) {
+                .rgb => |*rgb| {
+                    const converted = try icc_color.convertRgbToSrgb(allocator, rgb.*, profile);
+                    rgb.deinit();
+                    rgb.* = converted;
+                },
+                else => return icc_color.IccError.UnsupportedProfile,
+            }
+        } else switch (decoded) {
             .rgb => |*rgb| {
                 if (rgb.icc_profile) |existing| allocator.free(existing);
                 rgb.icc_profile = profile;
@@ -806,6 +884,8 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
                 alpha.icc_profile = profile;
             },
         }
+    } else if (convert_to_srgb) {
+        return icc_color.IccError.UnsupportedProfile;
     }
     command_timings.icc_extract_ns = elapsedNs(icc_start);
 
@@ -1448,6 +1528,8 @@ fn usage() void {
         \\  z2000 --version
         \\  z2000 <input.tif> <output.jp2> [options]   (shorthand for tiff-to-jp2)
         \\  z2000 <input.jp2> <output.tif> [options]   (shorthand for decode-temp-jp2)
+        \\  z2000 <pattern.tif> .jp2 [options]          (non-recursive batch; supports * and ?)
+        \\  z2000 <pattern.jp2> .tif [options]          (non-recursive reverse batch)
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
@@ -1455,10 +1537,11 @@ fn usage() void {
         \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
-        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq] [--timings]
+        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.
+        \\  Batch patterns apply only to filenames in one concrete directory; existing targets follow single-file overwrite behavior.
         \\  .z2000 is an educational codestream, not ISO JPEG2000 yet.
         \\  tiff-to-jp2 writes strict RPCL packet payloads; --debug-temp-sidecar adds the legacy BP8 COM payload for diagnostics.
         \\  --poc uses quoted ISO records: RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;... and supports tile-parts none or compatible R/L/C/P; --poc-location defaults to main.

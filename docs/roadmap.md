@@ -59,11 +59,13 @@ production decode's component-local topology.
 Preserve ICC profiles byte-for-byte as today and keep optional colour
 conversion as a separate tool-layer operation. The first bounded slice now
 recognizes sYCC and converts unsigned 8/16-bit 4:4:4 plus aligned 4:2:2/4:2:0
-input to sRGB. Kakadu fixtures match OpenJPEG and Grok rasters. Next cover
-common RGB profiles such as eciRGB v2 and Adobe RGB while retaining unaligned
-sampled sYCC as an explicit edge-semantics task; follow with CMYK, extended YCC,
-CIELab, monochrome refinements, and palette breadth. Never silently reinterpret
-component samples from codestream metadata alone.
+input to sRGB. Kakadu fixtures match OpenJPEG and Grok rasters. A separate,
+opt-in tool-layer path now converts bounded ICC v2/v4 RGB matrix/TRC profiles;
+official eciRGB v2 and CC0 Adobe RGB-compatible fixtures match LittleCMS
+reference vectors. Retain unaligned sampled sYCC as the next explicit
+edge-semantics task; follow with CMYK, extended YCC, CIELab, monochrome
+refinements, and palette breadth. Never silently reinterpret component samples
+from codestream metadata alone.
 
 ### 3. Format Front Ends And Metadata
 

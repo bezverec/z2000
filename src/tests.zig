@@ -1,4 +1,5 @@
 const std = @import("std");
+const batch = @import("batch.zig");
 const bitplane = @import("bitplane.zig");
 const color = @import("color.zig");
 const codec = @import("codec.zig");
@@ -7,6 +8,7 @@ const dng = @import("formats/dng.zig");
 const ebcot = @import("ebcot.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
+const icc_color = @import("icc.zig");
 const jp2 = @import("jp2.zig");
 const mq = @import("mq.zig");
 const mq_iso = @import("mq_iso.zig");
@@ -52,6 +54,62 @@ test "application version carries deterministic build provenance" {
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, version.string);
     if (!version.is_release) try std.testing.expectEqual(@as(usize, 0), version.prerelease.len);
+}
+
+test "batch filename globs are bounded case-insensitive and non-recursive" {
+    try std.testing.expect(batch.matches("*.tif", "scan.tif"));
+    try std.testing.expect(batch.matches("*.tif", "SCAN.TIF"));
+    try std.testing.expect(batch.matches("page-??.tif", "page-01.tif"));
+    try std.testing.expect(batch.matches("a*b*c.tif", "axybzzc.tif"));
+    try std.testing.expect(!batch.matches("*.tif", "scan.tiff"));
+    try std.testing.expect(!batch.matches("page-??.tif", "page-1.tif"));
+    try std.testing.expect(!batch.matches("*.tif", "nested/scan.tif"));
+    try std.testing.expect(batch.hasWildcards("*.jp2"));
+    try std.testing.expect(!batch.hasWildcards("scan.jp2"));
+}
+
+test "batch plan sorts matches derives targets and rejects collisions" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffers: [5][160]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const lower = try std.fmt.bufPrint(&path_buffers[1], "{s}/a.tif", .{directory});
+    const upper = try std.fmt.bufPrint(&path_buffers[2], "{s}/B.TIF", .{directory});
+    const longer = try std.fmt.bufPrint(&path_buffers[3], "{s}/a.tiff", .{directory});
+    const unrelated = try std.fmt.bufPrint(&path_buffers[4], "{s}/keep.jp2", .{directory});
+    for ([_][]const u8{ lower, upper, longer, unrelated }) |path| {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "fixture" });
+    }
+
+    const tif_pattern = try std.fmt.allocPrint(allocator, "{s}/*.tif", .{directory});
+    defer allocator.free(tif_pattern);
+    var plan = try batch.buildPlan(io, allocator, tif_pattern, ".jp2");
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), plan.items.len);
+    try std.testing.expectEqualStrings("B.TIF", std.fs.path.basename(plan.items[0].input_path));
+    try std.testing.expectEqualStrings("B.jp2", std.fs.path.basename(plan.items[0].output_path));
+    try std.testing.expectEqualStrings("a.tif", std.fs.path.basename(plan.items[1].input_path));
+    try std.testing.expectEqualStrings("a.jp2", std.fs.path.basename(plan.items[1].output_path));
+
+    const collision_pattern = try std.fmt.allocPrint(allocator, "{s}/a.tif*", .{directory});
+    defer allocator.free(collision_pattern);
+    try std.testing.expectError(
+        batch.BatchError.OutputCollision,
+        batch.buildPlan(io, allocator, collision_pattern, ".jp2"),
+    );
+    try std.testing.expectError(
+        batch.BatchError.InvalidTargetExtension,
+        batch.buildPlan(io, allocator, tif_pattern, "jp2"),
+    );
+    const missing_pattern = try std.fmt.allocPrint(allocator, "{s}/*.png", .{directory});
+    defer allocator.free(missing_pattern);
+    try std.testing.expectError(
+        batch.BatchError.NoMatchingFiles,
+        batch.buildPlan(io, allocator, missing_pattern, ".jp2"),
+    );
 }
 
 const minimal_jp2_codestream = [_]u8{
@@ -3868,6 +3926,168 @@ test "TIFF parser rejects malformed ICC profile tag" {
     const truncated_offset = try makeRgbTiffWithIccEntryForTest(allocator, 7, 8, 4096, "");
     defer allocator.free(truncated_offset);
     try std.testing.expectError(tiff.TiffError.TruncatedData, tiff.parseRgb(allocator, truncated_offset));
+}
+
+test "ICC matrix TRC fixtures convert eciRGB v2 and Adobe-compatible RGB to sRGB" {
+    const allocator = std.testing.allocator;
+    const source8 = [_]u16{
+        0,   0,   0,
+        255, 255, 255,
+        255, 0,   0,
+        0,   255, 0,
+        0,   0,   255,
+        128, 128, 128,
+        64,  128, 192,
+        200, 100, 50,
+    };
+    const eci_expected8 = [_]u16{
+        0,   0,   0,
+        255, 255, 255,
+        255, 0,   0,
+        0,   253, 0,
+        0,   57,  255,
+        119, 119, 119,
+        0,   124, 189,
+        227, 87,  30,
+    };
+    const adobe_expected8 = [_]u16{
+        0,   0,   0,
+        255, 255, 255,
+        255, 0,   0,
+        0,   255, 0,
+        0,   0,   255,
+        129, 129, 129,
+        0,   129, 196,
+        227, 100, 42,
+    };
+    const Fixture = struct {
+        profile: []const u8,
+        expected: []const u16,
+    };
+    const fixtures = [_]Fixture{
+        .{ .profile = @embedFile("testdata/eciRGB_v2.icc"), .expected = &eci_expected8 },
+        .{ .profile = @embedFile("testdata/eciRGB_v2_ICCv4.icc"), .expected = &eci_expected8 },
+        .{ .profile = @embedFile("testdata/AdobeCompat-v2.icc"), .expected = &adobe_expected8 },
+        .{ .profile = @embedFile("testdata/AdobeCompat-v4.icc"), .expected = &adobe_expected8 },
+    };
+
+    for (fixtures) |fixture| {
+        const owned_source = try allocator.dupe(u16, &source8);
+        var source = image.RgbImage{
+            .allocator = allocator,
+            .width = 8,
+            .height = 1,
+            .bit_depth = 8,
+            .samples = owned_source,
+            .icc_profile = try allocator.dupe(u8, fixture.profile),
+        };
+        defer source.deinit();
+        var converted = try icc_color.convertRgbToSrgb(allocator, source, fixture.profile);
+        defer converted.deinit();
+        try std.testing.expect(converted.icc_profile == null);
+        try expectSamplesNear(fixture.expected, converted.samples, 2);
+        try std.testing.expectEqualSlices(u16, &source8, source.samples);
+        try std.testing.expectEqualSlices(u8, fixture.profile, source.icc_profile.?);
+    }
+}
+
+test "ICC matrix TRC 16-bit conversion matches LittleCMS reference rasters" {
+    const allocator = std.testing.allocator;
+    const source = [_]u16{
+        0,     0,     0,
+        65535, 65535, 65535,
+        65535, 0,     0,
+        0,     65535, 0,
+        0,     0,     65535,
+        32896, 32896, 32896,
+        16448, 32896, 49344,
+        51400, 25700, 12850,
+    };
+    const eci_expected = [_]u16{
+        0,     0,     0,
+        65534, 65535, 65535,
+        65535, 0,     0,
+        0,     65000, 0,
+        0,     14688, 65535,
+        30688, 30689, 30688,
+        0,     31860, 48544,
+        58386, 22304, 7727,
+    };
+    const adobe_expected = [_]u16{
+        0,     0,     0,
+        65535, 65535, 65535,
+        65535, 87,    27,
+        0,     65532, 0,
+        0,     5,     65535,
+        33161, 33161, 33161,
+        0,     33160, 50262,
+        58357, 25722, 10889,
+    };
+    const fixtures = [_]struct { profile: []const u8, expected: []const u16 }{
+        .{ .profile = @embedFile("testdata/eciRGB_v2.icc"), .expected = &eci_expected },
+        .{ .profile = @embedFile("testdata/eciRGB_v2_ICCv4.icc"), .expected = &eci_expected },
+        .{ .profile = @embedFile("testdata/AdobeCompat-v2.icc"), .expected = &adobe_expected },
+        .{ .profile = @embedFile("testdata/AdobeCompat-v4.icc"), .expected = &adobe_expected },
+    };
+    for (fixtures) |fixture| {
+        var converted = try icc_color.convertRgbToSrgb(allocator, .{
+            .allocator = allocator,
+            .width = 8,
+            .height = 1,
+            .bit_depth = 16,
+            .samples = @constCast(&source),
+        }, fixture.profile);
+        defer converted.deinit();
+        try expectSamplesNear(fixture.expected, converted.samples, 128);
+    }
+}
+
+test "ICC RGB conversion rejects malformed unsupported and invalid inputs" {
+    const allocator = std.testing.allocator;
+    const profile = @embedFile("testdata/AdobeCompat-v2.icc");
+    var samples = [_]u16{ 0, 0, 0 };
+    const source = image.RgbImage{
+        .allocator = allocator,
+        .width = 1,
+        .height = 1,
+        .bit_depth = 8,
+        .samples = &samples,
+    };
+    try std.testing.expectError(
+        icc_color.IccError.InvalidProfile,
+        icc_color.convertRgbToSrgb(allocator, source, profile[0 .. profile.len - 1]),
+    );
+
+    const non_rgb = try allocator.dupe(u8, profile);
+    defer allocator.free(non_rgb);
+    @memcpy(non_rgb[16..20], "CMYK");
+    try std.testing.expectError(
+        icc_color.IccError.UnsupportedProfile,
+        icc_color.convertRgbToSrgb(allocator, source, non_rgb),
+    );
+
+    const missing_trc = try allocator.dupe(u8, profile);
+    defer allocator.free(missing_trc);
+    // The compact fixture's seventh tag-table record is rTRC.
+    @memcpy(missing_trc[204..208], "xxxx");
+    try std.testing.expectError(
+        icc_color.IccError.UnsupportedProfile,
+        icc_color.convertRgbToSrgb(allocator, source, missing_trc),
+    );
+
+    samples[0] = 256;
+    try std.testing.expectError(
+        icc_color.IccError.SampleOutOfRange,
+        icc_color.convertRgbToSrgb(allocator, source, profile),
+    );
+}
+
+fn expectSamplesNear(expected: []const u16, actual: []const u16, tolerance: u16) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |wanted, found| {
+        const difference = if (wanted > found) wanted - found else found - wanted;
+        try std.testing.expect(difference <= tolerance);
+    }
 }
 
 test "DNG info parser reads primary IFD metadata and SubIFD summaries" {

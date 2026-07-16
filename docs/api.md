@@ -30,7 +30,9 @@ zig build run -- dng-info input.dng
 zig build run -- tiff-to-jp2 input.tif output.jp2 [options]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
-zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N]
+zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--convert-to-srgb]
+zig build run -- "*.tif" .jp2 [tiff-to-jp2 options]
+zig build run -- "*.jp2" .tif [jp2-to-tiff options]
 ```
 
 `--version` (or `-V`) prints the generated SemVer application version including
@@ -52,6 +54,16 @@ DC level shift. Explicit `--mct none` keeps all four components independent.
 `decode-temp-jp2` dispatches one- through four-component bounded JP2 output to
 the matching TIFF writer; a supported one-component `pclr`/`cmap` stream is
 expanded to RGB first.
+
+The shorthand also has a non-recursive batch form. A first argument whose
+filename contains `*` or `?` is expanded internally within its concrete parent
+directory, and the second argument must be a bare target extension such as
+`.jp2` or `.tif`. Matching is ASCII case-insensitive, results are sorted before
+conversion, and all remaining options are applied to every file. Quote the
+pattern in shells that expand globs themselves. Empty matches, wildcard parent
+directories, and two inputs mapping to one output fail before any conversion;
+ordinary per-file errors stop the batch. Existing targets follow the same
+overwrite behavior as single-file conversion.
 
 Important `tiff-to-jp2` options:
 
@@ -220,6 +232,10 @@ Primary public functions:
   requires an aligned image origin
 - `color.sycc444ToSrgb(allocator, planes)` — full-resolution convenience
   entry point delegating to `syccToSrgb`
+- `icc.convertRgbToSrgb(allocator, input, profile_bytes)` — converts an
+  unsigned 8/16-bit full-resolution RGB image through a bounded ICC v2/v4
+  matrix/TRC PCSXYZ profile to an owned sRGB raster; source pixels/profile stay
+  untouched and malformed, LUT, non-RGB, or non-PCSXYZ profiles fail closed
 - `decodeLosslessTemporary(allocator, bytes)`
 - `decodeLosslessTemporaryWithOptions(allocator, bytes, options)`
 - `analyzeLosslessTemporary(bytes)`
@@ -374,13 +390,17 @@ must use no MCT; RGBA accepts either no MCT or reversible MCT=1, interpreted as
 RCT over RGB only with alpha independent. TIFF ExtraSamples input/output is
 connected to both profiles.
 
-ICC support is staged as metadata preservation before color conversion. TIFF
-tag 34675 is stored as owned RGB, grayscale, or alpha image metadata; wrappers
-write a JP2 restricted ICC `colr` box when present, `parseInfo` reports ICC
-presence and profile byte count, and `extractIccProfile` returns an owned copy
-of the profile payload. Profiles are treated as opaque payloads and preserved
-without transforming samples. Profile conversion remains a later optional
-LittleCMS-backed path.
+TIFF tag 34675 is stored as owned RGB, grayscale, or alpha image metadata;
+wrappers write a JP2 restricted ICC `colr` box when present, `parseInfo`
+reports ICC presence and profile byte count, and `extractIccProfile` returns an
+owned copy of the profile payload. Default decode treats profiles as opaque and
+preserves them without transforming samples. `decode-temp-jp2
+--convert-to-srgb` opts into the separate `src/icc.zig` matrix/TRC converter
+for full-resolution three-component restricted-ICC JP2 input. It supports ICC
+v2/v4 RGB input, display, or colour-space profiles with PCSXYZ matrix columns
+and curve/parametric TRCs; LUT profiles and broader colour management remain
+fail-closed. Successful conversion emits sRGB samples and does not attach the
+source profile to the output TIFF.
 
 ## `src/t2.zig`
 

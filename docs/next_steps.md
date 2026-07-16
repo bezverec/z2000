@@ -59,11 +59,12 @@ Keep native component decode and byte-preserving ICC storage unchanged. The
 current boundary recognizes EnumCS 18 and converts unsigned 8/16-bit sYCC
 4:4:4 plus chroma-aligned 4:2:2/4:2:0 directly from native planes at the
 JP2-to-TIFF boundary. Embedded Kakadu fixtures match the complete OpenJPEG and
-Grok sRGB rasters. Continue the separate conversion API in this order:
+Grok sRGB rasters. The separate conversion API now supports bounded ICC v2/v4
+RGB matrix/TRC profiles, with official eciRGB v2 and CC0 Adobe RGB-compatible
+fixtures matching LittleCMS reference vectors. Continue in this order:
 
-1. ICC-backed RGB conversion with eciRGB v2 and Adobe RGB fixtures;
-2. unaligned-origin sampled sYCC edge semantics;
-3. CMYK, extended YCC, and CIELab signalling/preservation before conversion.
+1. unaligned-origin sampled sYCC edge semantics;
+2. CMYK, extended YCC, and CIELab signalling/preservation before conversion.
 
 No colour conversion belongs inside T1/T2, and no component layout may be
 silently interpreted as RGB or YCC.

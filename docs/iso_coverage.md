@@ -19,14 +19,14 @@ Both bounded scorecards are complete. The narrow target measures one practical
 archival profile; the full-family target measures the broader Part 1 features
 listed below. Neither score claims formal certification or arbitrary-profile
 support. Remaining work expands component layouts and colour conversion beyond
-the bounded aligned sYCC 4:4:4/4:2:2/4:2:0 slice,
+the bounded aligned sYCC and RGB matrix/TRC ICC slices,
 containers, producer diversity, and performance outside those scored bounds.
 
 ## Narrow RGB Lossless Target
 
 | Area | Weight | Current | Evidence | Next gate |
 | --- | ---: | ---: | --- | --- |
-| JP2 boxes and RGB metadata | 8 | 8 | Signature, `ftyp`, `jp2h`, `ihdr`, `colr`, contiguous `jp2c`, sRGB and restricted ICC preservation, plus `LBox == 0` and `XLBox` codestream box lengths. | Build a JP2/ICC interop fixture matrix and continue hardening malformed box diagnostics. |
+| JP2 boxes and RGB metadata | 8 | 8 | Signature, `ftyp`, `jp2h`, `ihdr`, `colr`, contiguous `jp2c`, sRGB and restricted ICC preservation, plus `LBox == 0` and `XLBox` codestream box lengths. A separate opt-in boundary converts bounded ICC v2/v4 RGB matrix/TRC PCSXYZ profiles, covered by official eciRGB v2 and CC0 Adobe-compatible v2/v4 fixtures against LittleCMS reference vectors. | Extend ICC interpretation only with explicit profile-shape and interoperability gates; LUT/general colour management remains closed. |
 | TIFF 6.0 RGB input/output | 7 | 7 | Uncompressed chunky RGB and grayscale strips, 8/16-bit samples (16-bit RGB has a full-pipeline archival encode->strict-decode roundtrip plus confirmed OpenJPEG 2.5.4 / Grok 20.3.6 lossless interop and jpylyzer-valid output), ICC tag preservation, and multi-strip metadata validation. The F2 TIFF boundary also reads/writes gray+alpha and RGBA with exactly one final ExtraSamples value 1/2, preserving associated/unassociated semantics, pixels, WhiteIsZero normalization, and ICC bytes through a local TIFF->JP2->strict-decode->TIFF gate. RGBA defaults to reversible RCT over RGB only while alpha remains independent; explicit no-MCT RGBA is retained. Live no-MCT and RCT+alpha JP2s are accepted by OpenJPEG/Grok/Kakadu and pixel-exact through Grok/Kakadu; OpenJPEG's TIFF writer omits tag 338, so its legs prove codestream acceptance only. Compressed, palette/unsupported photometric, planar RGB, unspecified/multiple auxiliary samples, mixed-bit-depth, signed-sample-format, and tile-only TIFF variants fail closed. | Consider tiled TIFF and sampled multi-tile or packed-output encode as later conversion breadth; current F3b priority is sampled multi-tile packed-header breadth. |
 | Core main markers | 10 | 10 | `SIZ`, `COD` including layer-count and explicit precinct-byte policy, reversible `QCD` style/count/exponent validation, irreversible scalar-expounded `QCD` step-size validation for the public 9/7 path, and single-tile profile validation. Checked `POC` records are written and decoded from the main header or `TPsot=0` on bounded single- and multi-tile grids with one part per tile or compatible `R`/`L`/`C`/`P` parts; tile-local records append after inherited main records and later-part POC fails closed. Unsupported CAP/PLM/RGN/CRG and override markers remain fail-closed. Duplicate `SIZ`/`COD`/`QCD`/`TLM` markers are rejected, and TLM ordering requires COD+QCD context before TLM in both the raw strict reader and JP2 wrapper. PPM and PPT are public on bounded single- and multi-tile RPCL layouts with optional SOP/EPH. | Keep POC plus `Psot`/TLM accounting in the marker corruption matrix. |
 | Tile-part markers | 10 | 10 | `SOT`, `SOD`, `EOC`, `TLM`, `PLT`, optional `SOP`/`EPH`, resolution tile-parts, JP2-boundary sequential `SOT` audit through `EOC`, `TLM/Psot` length matching, `PLT` packet-span matching against `SOD` payload bytes, packet-marker policy checks from `COD/Scod`, deterministic rejection when a tile-part header marker is moved into packet payload, and independent no-sidecar smoke acceptance by OpenJPEG/Grok/Kakadu plus jpylyzer. | Keep a non-authoritative validator gate and investigate any future PLT/TLM warnings against independent decoders and the strict reader. |
@@ -53,9 +53,11 @@ containers, producer diversity, and performance outside those scored bounds.
 
 The container score now also includes explicit enumerated sYCC (18) metadata
 and unsigned 8/16-bit 4:4:4 plus aligned 4:2:2/4:2:0 conversion. Embedded Kakadu
-fixtures match the complete OpenJPEG and Grok RGB rasters. Remaining non-sRGB
-conversion breadth means unaligned sampled sYCC and colour spaces beyond that
-bounded slice; the score itself is unchanged.
+fixtures match the complete OpenJPEG and Grok RGB rasters. The conversion
+boundary additionally includes opt-in ICC v2/v4 RGB matrix/TRC PCSXYZ input,
+with eciRGB v2 and Adobe-compatible fixtures checked against LittleCMS.
+Remaining breadth means unaligned sampled sYCC, LUT/general ICC profiles, and
+other colour spaces; the score itself is unchanged.
 
 This full-codec score is intentionally strict. z2000 has useful pieces of a
 Part 1 encoder already, but a general-purpose codec must handle many more

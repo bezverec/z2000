@@ -5,6 +5,36 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Non-Recursive Batch Conversion
+
+- Added native shorthand batch dispatch for `z2k "*.tif" .jp2 [options]` and
+  the reverse `z2k "*.jp2" .tif [options]`. `*`/`?` matching is performed by
+  z2000 rather than the shell, is ASCII case-insensitive, and is limited to
+  filenames in one concrete directory.
+- Batch planning is deterministic and happens before conversion. It rejects an
+  empty match, wildcard directory segments, invalid target extensions, and
+  output-name collisions. Per-file conversion reuses the ordinary command
+  path and options; existing targets retain single-file overwrite behavior.
+- Added focused matcher/planner tests plus a live multi-file TIFF-to-JP2 smoke.
+
+### ICC Matrix/TRC RGB Conversion Boundary
+
+- Added `src/icc.zig`, a bounded ICC v2/v4 RGB matrix/TRC parser and converter
+  for unsigned 8/16-bit `RgbImage` samples. It accepts PCSXYZ input, display,
+  and colour-space profiles with `rXYZ`/`gXYZ`/`bXYZ` plus `curveType` or
+  `parametricCurveType` TRCs, converts through D50 PCSXYZ to sRGB, clips at the
+  explicit tool boundary, and rejects malformed, LUT, non-RGB, and non-PCSXYZ
+  profiles.
+- Added opt-in `decode-temp-jp2 --convert-to-srgb`. Default JP2-to-TIFF
+  behavior still preserves restricted ICC bytes and samples unchanged; the new
+  flag requires a full-resolution three-component restricted-ICC JP2 and emits
+  converted sRGB samples without copying the source profile to the TIFF.
+- Embedded official eciRGB v2 ICC v2/v4 and CC0 Adobe RGB (1998)-compatible
+  ICC v2/v4 fixtures. Their 8/16-bit conversion vectors match independent
+  ImageMagick 7.1.2 / LittleCMS relative-colorimetric reference rasters within
+  the documented quantization tolerance; fixture licenses and hashes are kept
+  beside the profiles.
+
 ### Sampled sYCC Conversion Boundary
 
 - Added direct unsigned 8/16-bit sYCC 4:2:2 and 4:2:0 native-plane conversion
