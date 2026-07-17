@@ -278,10 +278,12 @@ Primary public functions:
   variable plane shapes through `component_widths`, `component_heights`, and
   `componentDimensions(component)`. `DecodeOptions.resolution_reduction`
   reconstructs a requested lower DWT resolution directly for bounded
-  single-tile reversible 5/3 no-MCT streams; the value must not exceed COD/NL.
-  Reduced samples are saturated to their declared unsigned precision. Packet
-  headers remain fully validated, while T1 entropy decode skips detail
-  subbands discarded by the selected resolution. Profiled calls expose the
+  single-tile reversible 5/3 no-MCT streams, including component-sampled
+  layouts. Each sampled plane preserves its own reduced dimensions and
+  absolute registered origin; the value must not exceed COD/NL. Reduced
+  samples are saturated to their declared unsigned precision. Packet headers
+  remain fully validated, while T1 entropy decode skips detail subbands
+  discarded by the selected resolution. Profiled calls expose the
   saved work through `DecodeTimings.t1_skipped_blocks` and
   `t1_skipped_payload_bytes`. After complete packet-header and payload-length
   validation, the working block catalog is compacted to retain only selected
@@ -341,7 +343,9 @@ Primary public functions:
   for reversible no-MCT/RCT 5/3 and irreversible no-MCT/ICT 9/7. The latter
   dequantizes only selected bands and performs partial float synthesis. Inverse
   RCT/ICT is applied to the compact planes before RGB samples are rounded where
-  applicable and saturated to the declared unsigned precision
+  applicable and saturated to the declared unsigned precision. Common-grid
+  multi-tile RCT/5/3 and ICT/9/7 are reconstructed independently per tile and
+  copied directly into their reduced absolute grid bounds
 - `analyzeLosslessTemporary(bytes)`
 - `hasMarker(bytes, marker)`
 - `markerValue(name)`

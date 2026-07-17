@@ -3224,6 +3224,12 @@ fn reducedGridLength(origin: u32, length: usize, reduction: u8) !usize {
     return reduced_end - reduced_start;
 }
 
+fn reducedGridCoordinate(value: u32, reduction: u8) u32 {
+    var reduced = value;
+    for (0..reduction) |_| reduced = ceilDivU32(reduced, 2);
+    return reduced;
+}
+
 fn compactTopLeftCoefficientPlane(
     allocator: std.mem.Allocator,
     source: []const i32,
@@ -3467,7 +3473,6 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     // Multi-tile headers carry the real SIZ tile dimensions (single-tile
     // metadata leaves them zero); route them through the per-tile decode.
     if (header.tile_width != 0 or header.tile_height != 0) {
-        if (options.resolution_reduction != 0) return CodestreamError.UnsupportedPayload;
         return decodeStrictMultiTileImageMeasured(allocator, bytes, header, options, timings);
     }
 
@@ -7127,6 +7132,8 @@ const StrictMultiTileContext = struct {
         var tile_header = header;
         tile_header.width = tile_width;
         tile_header.height = tile_height;
+        tile_header.reference_x0 = tile.rect.x0;
+        tile_header.reference_y0 = tile.rect.y0;
         tile_header.tile_width = 0;
         tile_header.tile_height = 0;
         tile_header.tile_part_divisions = null;
@@ -7355,8 +7362,9 @@ fn decodeStrictMultiTilePlanarMeasured(
 /// its own single-tile image. A per-tile header (tile dims + the tile's own
 /// packet plan) drives the unchanged strict chain — packet catalog → T2 header
 /// assembly → block catalog → T1 → inverse DWT → inverse MCT — and the tile
-/// image is blitted into the assembled output at the tile's grid rect. Tiles
-/// decode serially; the existing per-block threading applies within each tile.
+/// image is blitted into the assembled output at the tile's full or
+/// ceil-div-reduced absolute grid rect. Tiles decode serially; the existing
+/// per-block threading applies within each tile.
 fn decodeStrictMultiTileImageMeasured(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -7367,13 +7375,15 @@ fn decodeStrictMultiTileImageMeasured(
     var context = try readStrictMultiTileContext(allocator, bytes, header);
     defer context.deinit();
 
-    const pixels = try std.math.mul(usize, header.width, header.height);
+    const decoded_width = try reducedGridLength(header.reference_x0, header.width, options.resolution_reduction);
+    const decoded_height = try reducedGridLength(header.reference_y0, header.height, options.resolution_reduction);
+    const pixels = try std.math.mul(usize, decoded_width, decoded_height);
     const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
     errdefer allocator.free(samples);
     const assembled = image.RgbImage{
         .allocator = allocator,
-        .width = header.width,
-        .height = header.height,
+        .width = decoded_width,
+        .height = decoded_height,
         .bit_depth = header.bit_depth,
         .samples = samples,
     };
@@ -7408,7 +7418,13 @@ fn decodeStrictMultiTileImageMeasured(
         defer catalog.deinit();
 
         var audit = StrictPacketHeaderAudit{};
-        var assemblies = try assembleStrictPacketCatalogHeaders(allocator, tile_header, catalog, 0, &audit);
+        var assemblies = try assembleStrictPacketCatalogHeaders(
+            allocator,
+            tile_header,
+            catalog,
+            options.resolution_reduction,
+            &audit,
+        );
         defer assemblies.deinit();
         const build = try strictPacketBlockCatalogFromAssembliesChecked(
             allocator,
@@ -7417,6 +7433,13 @@ fn decodeStrictMultiTileImageMeasured(
         var block_catalog = build.catalog;
         defer block_catalog.deinit();
         if (build.stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
+        if (timings) |t| t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
+        try compactStrictPacketBlockCatalogForReduction(
+            &block_catalog,
+            tile_header.levels,
+            options.resolution_reduction,
+            timings,
+        );
         if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
 
         var tile_image = try decodeStrictRpclImageFromBlockCatalogMeasured(allocator, tile_header, block_catalog, options, timings);
@@ -7424,11 +7447,20 @@ fn decodeStrictMultiTileImageMeasured(
         if (tile.rect.x0 < header.reference_x0 or tile.rect.y0 < header.reference_y0) {
             return CodestreamError.InvalidCodestream;
         }
+        const reduced_image_x0 = reducedGridCoordinate(header.reference_x0, options.resolution_reduction);
+        const reduced_image_y0 = reducedGridCoordinate(header.reference_y0, options.resolution_reduction);
+        const reduced_tile_x0 = reducedGridCoordinate(tile.rect.x0, options.resolution_reduction);
+        const reduced_tile_y0 = reducedGridCoordinate(tile.rect.y0, options.resolution_reduction);
+        const reduced_tile_x1 = reducedGridCoordinate(tile.rect.x1, options.resolution_reduction);
+        const reduced_tile_y1 = reducedGridCoordinate(tile.rect.y1, options.resolution_reduction);
+        if (reduced_tile_x0 < reduced_image_x0 or reduced_tile_y0 < reduced_image_y0) {
+            return CodestreamError.InvalidCodestream;
+        }
         const local_rect = tile_grid.Rect{
-            .x0 = tile.rect.x0 - header.reference_x0,
-            .y0 = tile.rect.y0 - header.reference_y0,
-            .x1 = tile.rect.x1 - header.reference_x0,
-            .y1 = tile.rect.y1 - header.reference_y0,
+            .x0 = reduced_tile_x0 - reduced_image_x0,
+            .y0 = reduced_tile_y0 - reduced_image_y0,
+            .x1 = reduced_tile_x1 - reduced_image_x0,
+            .y1 = reduced_tile_y1 - reduced_image_y0,
         };
         tile_grid.copyRgbTileInto(assembled, local_rect, tile_image) catch return CodestreamError.InvalidCodestream;
     }

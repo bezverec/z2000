@@ -96,6 +96,22 @@ entries are grouped by development milestone rather than semantic version.
   parallel results are exact, and cross-path no-MCT comparisons carry bounded
   difference gates. Sampled, multi-tile, and native-planar 9/7 reduction remain
   fail-closed.
+- Promoted the already component-local reversible machinery into an explicit
+  sampled reduced-resolution profile. Single-tile no-MCT 5/3 now has an exact
+  independent partial-synthesis oracle for unequal native plane dimensions,
+  4:2:0 sampling, odd image bounds, and nonzero image/tile-partition origins.
+  Inline, PPT, and PPM streams retain the same reduced samples; all headers are
+  validated while discarded subbands remain absent from T1 reconstruction and
+  component-owned payload buffers. Sampled colour transforms and multi-tile
+  reduction remain closed.
+- Added direct common-grid multi-tile reduced reconstruction for interleaved
+  RGB. Resolution selection now enters each tile's packet assembly and block
+  catalog; retained tile coefficients undergo only the requested inverse DWT
+  levels, then reduced tiles are copied by ceil-dividing their absolute SIZ
+  boundaries. A 17x17-partitioned 3x3 RCT/5-3 grid matches a manual per-tile
+  oracle exactly, while multi-tile ICT/9-7 scalar-expounded and scalar-derived
+  streams pin dimensions, skipped T1 work, and cross-thread determinism.
+  Sampled multi-tile reduction remains closed.
 
 ### General-Purpose Part 1 Planning
 

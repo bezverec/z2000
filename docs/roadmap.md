@@ -155,10 +155,11 @@ fixtures covering the remaining rows. G4 has started with a bounded
 `DecodeOptions.resolution_reduction` slice: single-tile reversible 5/3 and
 irreversible 9/7 decode stop synthesis at the requested DWT level and compact
 the reduced grid. Interleaved RGB supports no MCT plus the transform-appropriate
-RCT or ICT; 5/3 no-MCT also supports native planar/grayscale output. The 9/7
-path dequantizes only retained bands and uses checked nearest-integer rounding
-plus precision saturation. Reduced RCT and ICT are applied to the compact
-planes before output saturation. Packet headers remain fully validated,
+RCT or ICT; 5/3 no-MCT also supports native planar/grayscale output, including
+component-sampled planes with independent dimensions and nonzero registered
+origins. The 9/7 path dequantizes only retained bands and uses checked
+nearest-integer rounding plus precision saturation. Reduced RCT and ICT are
+applied to the compact planes before output saturation. Packet headers remain fully validated,
 but discarded detail subbands are now skipped before T1 entropy decode in both
 sequential and parallel paths, with explicit skipped-block/byte timings. The
 post-validation working catalog retains only selected subband payloads and
@@ -168,9 +169,11 @@ the common single-tile inline path also borrows checked spans from the input
 instead of owning a normalized packet-stream copy. SOP is validated and skipped
 by span offset; EPH uses independently checked header/body spans. PPT/PPM retain
 only decoded T2 headers in an auxiliary owned buffer and borrow their SOD
-bodies. Sampling, multi-tile assembly, and native-planar 9/7 output remain
-subsequent G4 gates. Class-1 all-component evaluation advances with G1/G2
-decode breadth.
+bodies. Common-grid multi-tile RCT/5/3 and ICT/9/7 now select and reconstruct
+per tile, then assemble by reduced absolute tile boundaries; the odd-grid RCT
+path has an exact manual oracle. Sampled multi-tile reduction, sampled colour
+transforms, and native-planar 9/7 output remain subsequent G4 gates. Class-1
+all-component evaluation advances with G1/G2 decode breadth.
 
 G1 must define a lossless internal carrier before adding source adapters above
 16 bits. Part 1 samples are integers; floating-point codestream samples and
@@ -193,8 +196,10 @@ span-backed, including SOP/EPH framing; PPT/PPM use auxiliary header storage and
 borrowed bodies rather than a full normalized stream. Reduced single-tile 5/3
 and 9/7 now share the same selection and partial-synthesis path, including
 no-MCT, RCT, and ICT output; 9/7 additionally performs selective
-dequantization. Sampling, multi-tile selection, and native-planar 9/7 are the
-next functional gates. A large image
+dequantization. Single-tile sampled no-MCT 5/3 now reconstructs each native
+component grid directly across inline, PPT, and PPM headers. Sampled colour
+transforms, sampled multi-tile selection, and native-planar 9/7 are the next
+functional gates; common-grid multi-tile RCT/ICT selection has landed. A large image
 still must not require retaining every discarded layer, tile, or pixel when the
 caller requests a bounded subset.
 Performance work continues in parallel, but no throughput result substitutes

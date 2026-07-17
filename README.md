@@ -42,6 +42,10 @@ certification.
   decode can reconstruct a selected lower DWT resolution directly.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
+- Direct lower-resolution reconstruction for bounded single-tile 5/3 and 9/7
+  profiles, including no-MCT/RCT/ICT RGB and native sampled no-MCT 5/3 planes.
+  Common-grid multi-tile RCT/5/3 and ICT/9/7 are assembled directly at the
+  requested reduced resolution.
 - ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
   PPM, and PPT packet headers on their documented profiles.
 - Bounded grayscale and palette JP2 profiles, plus bounded 1..4-component

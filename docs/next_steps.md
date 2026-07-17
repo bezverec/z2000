@@ -175,12 +175,19 @@ The foundation landed on 2026-07-17:
   when its input is an expected fail-closed profile.
 - `DecodeOptions.resolution_reduction` now drives direct partial synthesis for
   bounded single-tile decode: reversible 5/3 no-MCT through planar, grayscale,
-  and interleaved output, reversible RCT/5/3 through interleaved RGB, and
-  irreversible 9/7 with either no MCT or ICT through interleaved RGB. It
-  preserves odd dimensions, dequantizes only retained 9/7 bands, applies the
-  inverse component transform before checked output saturation, rejects
-  reductions above COD/NL, and is wired into each corpus reference. It does
-  not synthesize a full raster and downsample it.
+  sampled native-component, and interleaved output, reversible RCT/5/3 through
+  interleaved RGB, and irreversible 9/7 with either no MCT or ICT through
+  interleaved RGB. Component-local sampling factors and nonzero image/tile
+  origins drive each reduced native plane independently. It preserves odd
+  dimensions, dequantizes only retained 9/7 bands, applies the inverse
+  component transform before checked output saturation, rejects reductions
+  above COD/NL, and is wired into each corpus reference. It does not synthesize
+  a full raster and downsample it.
+- Common-grid multi-tile interleaved RGB now applies the same selection inside
+  every tile catalog and assembles reduced tiles by their absolute ceil-div
+  boundaries. An odd 3x3 RCT/5-3 grid is exact against a manually assembled
+  per-tile oracle; ICT/9-7 reduced output is deterministic across worker counts
+  and reports discarded T1 blocks/bytes.
 - Reduced decode now validates the complete packet-header catalog but skips T1
   entropy reconstruction for detail subbands at or below the discarded DWT
   levels. Both sequential and parallel paths report skipped blocks and payload
@@ -206,9 +213,11 @@ The foundation landed on 2026-07-17:
 
 The active G0/G4 corpus expansion is:
 
-1. Carry the landed single-tile no-MCT/RCT/ICT reduction through sampled
-   components and multi-tile assembly, and add native-planar 9/7 output, so the
-   applicable non-zero-reduction T.803 references can become decode passes.
+1. Carry the landed single-tile no-MCT/RCT/ICT, sampled no-MCT, and common-grid
+   multi-tile RCT/ICT reduction through sampled multi-tile assembly, extend
+   sampling through applicable colour transforms, and add native-planar 9/7
+   output, so the applicable non-zero-reduction T.803 references can become
+   decode passes.
    The 9/7 slice already pins reduced support extents, selective
    dequantization, floating-point workspace bounds, inverse ICT,
    nearest-integer reconstruction, and precision saturation; reduced RCT pins
