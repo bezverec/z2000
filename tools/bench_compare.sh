@@ -131,8 +131,8 @@ set -- --warmup "$WARMUP" --runs "$RUNS" \
   --command-name "openjpeg t1"       "opj_compress -i $INPUT -o bench-compare-openjpeg-t1.jp2 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -mct 1 -TLM -PLT -M 1 -SOP -EPH -TP R -threads 1" \
   --command-name "openjpeg t$THREADS" "opj_compress -i $INPUT -o bench-compare-openjpeg-tN.jp2 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -mct 1 -TLM -PLT -M 1 -SOP -EPH -TP R -threads $THREADS"
 [ "$HAS_KDU" = 1 ] && set -- "$@" \
-  --command-name "kdu t1"            "\"$KDU_COMPRESS\" -i $INPUT -o bench-compare-kakadu-t1.jp2 Creversible=yes Cycc=yes Clevels=5 Cblk={64,64} Cprecincts=$KDU_PRECINCTS Corder=RPCL Cuse_sop=yes Cuse_eph=yes Cmodes=BYPASS ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -num_threads 0 -quiet" \
-  --command-name "kdu t$THREADS"     "\"$KDU_COMPRESS\" -i $INPUT -o bench-compare-kakadu-tN.jp2 Creversible=yes Cycc=yes Clevels=5 Cblk={64,64} Cprecincts=$KDU_PRECINCTS Corder=RPCL Cuse_sop=yes Cuse_eph=yes Cmodes=BYPASS ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -num_threads $THREADS -quiet"
+  --command-name "kdu t1"            "\"$KDU_COMPRESS\" -i $INPUT -o bench-compare-kakadu-t1.jp2 Creversible=yes Cycc=yes Clevels=5 Cblk='{64,64}' Cprecincts='$KDU_PRECINCTS' Corder=RPCL Cuse_sop=yes Cuse_eph=yes Cmodes=BYPASS ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -num_threads 0 -quiet" \
+  --command-name "kdu t$THREADS"     "\"$KDU_COMPRESS\" -i $INPUT -o bench-compare-kakadu-tN.jp2 Creversible=yes Cycc=yes Clevels=5 Cblk='{64,64}' Cprecincts='$KDU_PRECINCTS' Corder=RPCL Cuse_sop=yes Cuse_eph=yes Cmodes=BYPASS ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -num_threads $THREADS -quiet"
 [ -n "$BENCH_RESULTS_DIR" ] && set -- "$@" --export-json "$BENCH_RESULTS_DIR/encode.json"
 hyperfine "$@"
 
@@ -220,8 +220,8 @@ if [ "$INCLUDE_LOSSY" = 1 ]; then
     --command-name "openjpeg t1"        "opj_compress -i $INPUT -o bench-lossy-openjpeg-t1.jp2 -I -r 8,1 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -TLM -SOP -EPH -TP R -threads 1" \
     --command-name "openjpeg t$THREADS" "opj_compress -i $INPUT -o bench-lossy-openjpeg-tN.jp2 -I -r 8,1 -t 4096,4096 -p RPCL -n 6 -c \"$PRECINCTS\" -b 64,64 -TLM -SOP -EPH -TP R -threads $THREADS"
   [ "$HAS_KDU" = 1 ] && set -- "$@" \
-    --command-name "kdu t1"          "\"$KDU_COMPRESS\" -i $INPUT -o bench-lossy-kakadu-t1.jp2 Creversible=no Clevels=5 Clayers=2 Cblk={64,64} Cprecincts=$KDU_PRECINCTS Corder=RPCL Cuse_sop=yes Cuse_eph=yes ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -rate -,3 -num_threads 0 -quiet" \
-    --command-name "kdu t$THREADS"   "\"$KDU_COMPRESS\" -i $INPUT -o bench-lossy-kakadu-tN.jp2 Creversible=no Clevels=5 Clayers=2 Cblk={64,64} Cprecincts=$KDU_PRECINCTS Corder=RPCL Cuse_sop=yes Cuse_eph=yes ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -rate -,3 -num_threads $THREADS -quiet"
+    --command-name "kdu t1"          "\"$KDU_COMPRESS\" -i $INPUT -o bench-lossy-kakadu-t1.jp2 Creversible=no Clevels=5 Clayers=2 Cblk='{64,64}' Cprecincts='$KDU_PRECINCTS' Corder=RPCL Cuse_sop=yes Cuse_eph=yes ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -rate -,3 -num_threads 0 -quiet" \
+    --command-name "kdu t$THREADS"   "\"$KDU_COMPRESS\" -i $INPUT -o bench-lossy-kakadu-tN.jp2 Creversible=no Clevels=5 Clayers=2 Cblk='{64,64}' Cprecincts='$KDU_PRECINCTS' Corder=RPCL Cuse_sop=yes Cuse_eph=yes ORGtparts=R ORGgen_plt=yes ORGgen_tlm=6 -rate -,3 -num_threads $THREADS -quiet"
   [ -n "$BENCH_RESULTS_DIR" ] && set -- "$@" --export-json "$BENCH_RESULTS_DIR/encode-lossy.json"
   hyperfine "$@"
 

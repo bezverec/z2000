@@ -46,6 +46,72 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-07-17: Apple M4, first native four-codec run (Kakadu on macOS)
+
+### Provenance
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-07-17, 08:35-08:47 CEST |
+| z2000 source | `64fe0f59` (main), clean worktree |
+| z2000 version | `0.2.0-dev.460+g64fe0f59` |
+| Build | Zig 0.16.0, `ReleaseFast`, native `aarch64-macos` |
+| Host | MacBook Air `Mac16,12`, Apple M4, 4P+6E cores, 16 GB RAM |
+| OS | macOS 26.5.2 (25F84), Darwin 25.5.0 |
+| Power | **Battery power, 98% (not AC)** — treat as trend, not a gating run |
+| Harness | Hyperfine 1.20.0, warmup 2 + 8 measured runs, `Z2000_THREADS=10` |
+| References | Kakadu **8.4.1** (native macOS install, `/usr/local/bin`), Grok 20.3.6, OpenJPEG 2.5.4 |
+| Input | `bench-rgb-2048.tif`, 12,583,052 B, SHA-256 `d8e3038c...3234e139` (pinned generator) |
+
+The harness needed one fix before Kakadu would run at all: hyperfine executes
+command strings through a brace-expanding shell on macOS, which rewrote
+`Cblk={64,64}` into `Cblk=64 Cblk=64`. The Kakadu parameter values are now
+single-quoted inside the command strings (this commit).
+
+### Lossless archival profile (RPCL, 6 res, precincts, 64x64, SOP+EPH+TLM, BYPASS)
+
+| Codec | Enc t1 | Enc t10 | Dec t1 | Dec t10 |
+| --- | ---: | ---: | ---: | ---: |
+| z2000 | 533.0 +/- 7.2 ms | 134.8 +/- 8.5 ms | 451.3 +/- 4.0 ms | 108.3 +/- 2.3 ms |
+| Grok | 415.5 +/- 5.5 ms | 107.3 +/- 7.0 ms | 358.9 +/- 0.7 ms | 79.5 +/- 8.1 ms |
+| OpenJPEG | 426.9 +/- 1.6 ms | 106.3 +/- 4.0 ms | 451.9 +/- 6.1 ms | 116.0 +/- 2.6 ms |
+| Kakadu | 277.3 +/- 1.1 ms | 57.1 +/- 1.5 ms | 329.5 +/- 6.6 ms | 64.9 +/- 2.8 ms |
+
+Cross-decode of the common z2000 stream: Grok 364.8/75.6 ms, OpenJPEG
+453.4/115.5 ms, Kakadu 330.2/64.8 ms, z2000 455.5/111.2 ms (t1/t10).
+
+Output sizes within 0.17%: z2000 6,636,048 B, OpenJPEG 6,636,085 B, Grok
+6,635,206 B, Kakadu 6,624,994 B. z2000 t1==t10 deterministic; z2000
+self-decode and Grok/OpenJPEG/Kakadu decode of the z2000 stream all lossless
+— the first full four-codec verification chain on this machine.
+
+### Lossy 9/7 (ICT, scalar quantization, 2 layers, complete final layer)
+
+| Codec | Enc t1 | Enc t10 | Dec t1 | Dec t10 |
+| --- | ---: | ---: | ---: | ---: |
+| z2000 | 520.7 +/- 6.1 ms | 140.3 +/- 9.4 ms | 458.3 +/- 7.0 ms | 117.0 +/- 2.6 ms |
+| Grok | 472.9 +/- 5.2 ms | 121.8 +/- 8.1 ms | 392.5 +/- 5.4 ms | 80.9 +/- 7.8 ms |
+| OpenJPEG | 421.1 +/- 5.6 ms | 109.6 +/- 6.9 ms | 414.8 +/- 5.0 ms | 107.4 +/- 2.7 ms |
+| Kakadu | 380.5 +/- 4.6 ms | 65.0 +/- 4.2 ms | 434.2 +/- 6.5 ms | 72.7 +/- 8.2 ms |
+
+Lossy sizes: z2000 4,798,568 B (smallest), OpenJPEG 4,804,266 B, Kakadu
+4,826,200 B, Grok 5,326,180 B. z2000 lossy t1==t10 deterministic.
+
+### Reading
+
+- **vs Kakadu (the new column)**: encode t10 2.36x, decode t10 1.67x, encode
+  t1 1.92x, decode t1 1.37x. Kakadu's native NEON Part 1 path on the M4 is
+  markedly faster than either open-source reference; this baseline is the
+  target for the next optimization campaign iteration.
+- **vs OpenJPEG**: lossless decode is now at parity at t1 (451.3 vs 451.9 ms)
+  and ahead at t10 (108.3 vs 116.0 ms); encode trails by ~1.25x.
+- **vs Grok**: encode t10 1.26x, decode t10 1.36x — consistent with the
+  campaign-checkpoint floor recorded in `optimization_plan.md`.
+- Battery-power caveat: absolute numbers may sit slightly off the AC-powered
+  2026-07-13 baseline (e.g. z2000 t1 encode 533 vs 620 ms there is dominated
+  by codec improvements since, not power state, but do not gate keep-rule
+  decisions on this record).
+
 ## 2026-07-16: Kakadu 8.4.1 on Debian/WSL2; macOS package inspection
 
 This checkpoint answers whether the additional Kakadu demo packages can join
