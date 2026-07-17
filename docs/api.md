@@ -158,9 +158,10 @@ Important `tiff-to-jp2` options:
 Supported public JP2 profiles are still narrow:
 
 - lossless RGB: `--mct rct --transform 5-3 --qstyle none`
-- irreversible RGB: `--mct ict --transform 9-7` with scalar-expounded or
-  scalar-derived quantization; bounded multi-tile irreversible RGB uses
-  origin-aware 9/7 lifting, including odd tile origins, and global rate targets
+- irreversible RGB: `--transform 9-7` with scalar-expounded or scalar-derived
+  quantization and either `--mct ict` or bounded single-tile `--mct none`;
+  bounded multi-tile irreversible RGB remains ICT-only and uses origin-aware
+  9/7 lifting, including odd tile origins, and global rate targets
 - reversible component-independent RGB: `--mct none --transform 5-3 --qstyle none`
 - reversible grayscale: one component, single tile, `--mct none --transform
   5-3 --qstyle none --progression RPCL`, in-band headers, PLT, and optional
@@ -275,7 +276,27 @@ Primary public functions:
   exposes each precision through `component_bit_depths`/
   `componentBitDepth(component)`. Bounded subsampled no-MCT streams expose
   variable plane shapes through `component_widths`, `component_heights`, and
-  `componentDimensions(component)`
+  `componentDimensions(component)`. `DecodeOptions.resolution_reduction`
+  reconstructs a requested lower DWT resolution directly for bounded
+  single-tile reversible 5/3 no-MCT streams; the value must not exceed COD/NL.
+  Reduced samples are saturated to their declared unsigned precision. Packet
+  headers remain fully validated, while T1 entropy decode skips detail
+  subbands discarded by the selected resolution. Profiled calls expose the
+  saved work through `DecodeTimings.t1_skipped_blocks` and
+  `t1_skipped_payload_bytes`. After complete packet-header and payload-length
+  validation, the working block catalog is compacted to retain only selected
+  subband payloads. `packet_catalog_payload_bytes_retained` and
+  `packet_catalog_payload_bytes_discarded` expose that split. Resolution
+  selection is passed into packet assembly, so discarded payload is validated
+  and consumed but never appended to the component-owned buffer;
+  `packet_catalog_payload_bytes_materialized` proves the assembly allocation
+  equals the retained split. The internal single-tile inline path stores
+  checked packet spans into the caller-owned codestream instead of
+  materializing a normalized packet-byte copy. SOP is excluded by advancing
+  the borrowed start; EPH uses separate header/body spans. PPT/PPM packed-header
+  paths retain only decoded T2 headers in a small auxiliary owned buffer while
+  borrowing SOD bodies. Public `readStrictPacketCatalog` always returns a fully
+  normalized owned catalog
 - `encodeLosslessSampledPlanarWithOptions(allocator, planes, sampling, options)`
   — sampled reversible encode: per-component dimensions + `ComponentSampling`
   (XRsiz/YRsiz), RPCL, one or more untargeted quality layers, and reversible
@@ -292,7 +313,8 @@ Primary public functions:
   `decodeLosslessPlanarUpsampledWithOptionsProfiled(...)` — decodes the same
   bounded planar profile and expands every component to the full SIZ reference
   grid by nearest-neighbour replication anchored to absolute image origin;
-  no colour transform is implied
+  no colour transform is implied. This full-grid helper currently requires
+  `resolution_reduction == 0`
 - `decodeLosslessPlanarWithOptionsProfiled(allocator, bytes, options, timings)`
   — native-size planar decode with the same timing breakdown as the upsampled
   entry point
@@ -314,7 +336,12 @@ Primary public functions:
   matrix/TRC PCSXYZ profile to an owned sRGB raster; source pixels/profile stay
   untouched and malformed, LUT, non-RGB, or non-PCSXYZ profiles fail closed
 - `decodeLosslessTemporary(allocator, bytes)`
-- `decodeLosslessTemporaryWithOptions(allocator, bytes, options)`
+- `decodeLosslessTemporaryWithOptions(allocator, bytes, options)` — the
+  interleaved RGB boundary accepts bounded single-tile `resolution_reduction`
+  for reversible no-MCT/RCT 5/3 and irreversible no-MCT/ICT 9/7. The latter
+  dequantizes only selected bands and performs partial float synthesis. Inverse
+  RCT/ICT is applied to the compact planes before RGB samples are rounded where
+  applicable and saturated to the declared unsigned precision
 - `analyzeLosslessTemporary(bytes)`
 - `hasMarker(bytes, marker)`
 - `markerValue(name)`
@@ -334,8 +361,9 @@ Notes:
 - `encodeLosslessWithOptions` writes JPEG2000 markers with strict packet
   payloads in `SOD`. Despite the historical name, it now covers the reversible
   RCT/5-3 path, reversible `mct none`, the irreversible ICT/9-7 scalar
-  quantization path, all five progression orders on the documented single-tile
-  path, and the v1 bounded multi-tile lossless envelope.
+  quantization path, and bounded single-tile irreversible 9/7 with `mct none`,
+  all five progression orders on the documented single-tile path, and the v1
+  bounded multi-tile lossless envelope.
 - The latest private payload is BP8 and is emitted only when
   `emit_temporary_payload_sidecar` / `--debug-temp-sidecar` is enabled.
 - `decodeLosslessTemporary*` decodes normal no-sidecar codestreams by
@@ -366,10 +394,15 @@ Notes:
 - `DecodeTimings` reports the strict decode split for metadata, packet catalog,
   T1 block payload, inverse DWT, and inverse MCT. The packet catalog timing is
   further split into SOD/PLT scan, packet-header assembly, and final block
-  catalog materialization; strict block-payload timing also includes worker
-  balance counters for max/average job wall time, decoded block count, and
-  payload bytes. T1/MQ pass and branch counters are collected only for timed
-  decodes, keeping the normal strict decode hot path free of profiling writes.
+  catalog materialization; reduced-resolution calls additionally report bytes
+  materialized during assembly plus bytes retained and discarded by selection.
+  `packet_catalog_input_bytes_borrowed` and
+  `packet_catalog_input_bytes_materialized` distinguish the internal zero-copy
+  packet/body view from inline or packed-header bytes that must be owned.
+  Strict block-payload timing also includes worker balance counters for
+  max/average job wall time, decoded block count, and payload bytes. T1/MQ pass
+  and branch counters are collected only for timed decodes, keeping the normal
+  strict decode hot path free of profiling writes.
 - Encode-side RPCL catalog construction uses a deterministic cost-ordered
   queue across Y/Cb/Cr code-blocks when `threads > 3`; worker-local bitplane
   and EBCOT scratch buffers are reused while packet emission still reads stable

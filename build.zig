@@ -101,6 +101,20 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+
+    const corpus_module = b.createModule(.{
+        .root_source_file = b.path("src/part1_corpus.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const corpus_exe = b.addExecutable(.{
+        .name = "z2000-part1-corpus",
+        .root_module = corpus_module,
+    });
+    const corpus_run = b.addRunArtifact(corpus_exe);
+    if (b.args) |args| corpus_run.addArgs(args);
+    const corpus_step = b.step("part1-corpus", "Run the strict JPEG 2000 Part 1 corpus manifest");
+    corpus_step.dependOn(&corpus_run.step);
 }
 
 fn readBaseVersion(b: *std.Build) []const u8 {

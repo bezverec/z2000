@@ -18,12 +18,14 @@ pub const TransformError = error{
     TooManyLevels,
 };
 
-const LevelShape = struct {
+pub const ResolutionShape = struct {
     width: usize,
     height: usize,
     x0: u32 = 0,
     y0: u32 = 0,
 };
+
+const LevelShape = ResolutionShape;
 
 const dwt97_alpha: f32 = -1.586134342059924;
 const dwt97_beta: f32 = -0.052980118572961;
@@ -130,28 +132,50 @@ pub fn inverse2DOrigin(
     x0: u32,
     y0: u32,
 ) !void {
+    _ = try inverse2DReducedOrigin(allocator, data, width, height, levels, 0, wavelet, x0, y0);
+}
+
+pub fn inverse2DReducedOrigin(
+    allocator: std.mem.Allocator,
+    data: []f32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+    wavelet: Wavelet,
+    x0: u32,
+    y0: u32,
+) !ResolutionShape {
     if (width == 0 or height == 0 or data.len != width * height) {
         return TransformError.InvalidDimensions;
     }
+    if (reduction > levels) return TransformError.InvalidDimensions;
 
     var shapes: [32]LevelShape = undefined;
+    var resolutions: [33]ResolutionShape = undefined;
     if (levels > shapes.len) return TransformError.TooManyLevels;
 
     var cur_width = width;
     var cur_height = height;
     var cur_x0 = x0;
     var cur_y0 = y0;
+    resolutions[0] = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 };
     var actual_levels: u8 = 0;
     while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
-        const next_width = lowCountOrigin(cur_width, cur_x0);
-        const next_height = lowCountOrigin(cur_height, cur_y0);
-        if (next_width == 0 or next_height == 0) break;
         shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
-        cur_width = next_width;
-        cur_height = next_height;
+        cur_width = lowCountOrigin(cur_width, cur_x0);
+        cur_height = lowCountOrigin(cur_height, cur_y0);
+        if (cur_width == 0 or cur_height == 0) return TransformError.InvalidDimensions;
         cur_x0 = ceilDiv2(cur_x0);
         cur_y0 = ceilDiv2(cur_y0);
+        resolutions[@as(usize, actual_levels) + 1] = .{
+            .width = cur_width,
+            .height = cur_height,
+            .x0 = cur_x0,
+            .y0 = cur_y0,
+        };
     }
+    if (reduction > actual_levels) return TransformError.InvalidDimensions;
 
     const max_dim = @max(width, height);
     var line = try allocator.alloc(f32, max_dim);
@@ -166,7 +190,7 @@ pub fn inverse2DOrigin(
     defer allocator.free(vertical_scratch);
 
     var level = actual_levels;
-    while (level > 0) {
+    while (level > reduction) {
         level -= 1;
         const shape = shapes[level];
 
@@ -187,6 +211,7 @@ pub fn inverse2DOrigin(
             for (0..shape.height) |row| data[row * width + col] = line[row];
         }
     }
+    return resolutions[reduction];
 }
 
 fn lowCount(n: usize) usize {

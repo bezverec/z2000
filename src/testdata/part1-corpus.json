@@ -1,0 +1,844 @@
+{
+  "schema_version": 1,
+  "capabilities": [
+    {
+      "id": "siz-bounded-unsigned-components",
+      "title": "Bounded unsigned component model",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "complete",
+      "evidence": ["iso_coverage.md: component model", "src/tests.zig: variable-BPC and sampled planar matrices"],
+      "note": "Public coverage remains 1..4 unsigned 8/16-bit components; broader Part 1 integer layouts remain fail-closed."
+    },
+    {
+      "id": "siz-subsampled-components",
+      "title": "Component-local sampling and origins",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "complete",
+      "evidence": ["Kakadu 4:2:0 fixture matrix", "distinct image/tile-origin tests"],
+      "note": "Reversible 5/3 no-MCT sampled layouts are public within the documented 1..4-component envelope."
+    },
+    {
+      "id": "cod-qcd-component-overrides",
+      "title": "COD/QCD plus COC/QCC overrides",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "bounded",
+      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures"],
+      "note": "Uniform or byte-redundant overrides are accepted; genuinely divergent component/tile semantics remain fail-closed."
+    },
+    {
+      "id": "progression-poc",
+      "title": "Progression orders and POC schedules",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "bounded",
+      "evidence": ["all-five-order encode matrix", "Kakadu sampled POC fixtures"],
+      "note": "Complete bounded schedules are supported; sampled PPM+POC and broader combinations remain closed."
+    },
+    {
+      "id": "packet-header-placement",
+      "title": "Inline, PLT/PLM, PPT and PPM packet metadata",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "complete",
+      "evidence": ["inline/PPT/PPM sampled matrix", "PLT and PLT-less packet catalog tests"],
+      "note": "PLT, inline, PPT and PPM are covered in bounded layouts; PLM is not implemented."
+    },
+    {
+      "id": "tiles-and-tile-parts",
+      "title": "Tiles and tile-part schedules",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "complete",
+      "evidence": ["multi-tile matrices", "Kakadu multipart TNsot/TLM fixtures"],
+      "note": "Many practical schedules are covered; general PLT-less non-empty multipart streams remain open."
+    },
+    {
+      "id": "t1-code-block-styles",
+      "title": "Tier-1 code-block styles",
+      "parser": "complete",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "complete",
+      "evidence": ["Kakadu style matrix", "ISO MQ corruption matrix"],
+      "note": "The public style matrix is broad but still tied to the bounded sample/coding-style model."
+    },
+    {
+      "id": "reversible-53",
+      "title": "Reversible 5/3 transform",
+      "parser": "complete",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "complete",
+      "evidence": ["lossless four-codec matrix", "odd-origin and multi-tile tests"],
+      "note": "Pixel-exact within all currently public component and packet profiles."
+    },
+    {
+      "id": "irreversible-97",
+      "title": "Irreversible 9/7 and scalar quantization",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "complete",
+      "evidence": ["OpenJPEG/Grok/Kakadu reference-relative ladders", "multi-tile 9/7 matrix"],
+      "note": "Broad practical coverage exists, but not arbitrary component-local quantization/coding-style combinations."
+    },
+    {
+      "id": "roi-rgn-maxshift",
+      "title": "RGN Maxshift ROI",
+      "parser": "fail_closed",
+      "strict_decode": "not_implemented",
+      "encode": "not_implemented",
+      "malformed": "not_implemented",
+      "interop": "not_applicable",
+      "evidence": ["next_steps.md item 5.1"],
+      "note": "Planned after the generic component/coding-style foundation."
+    },
+    {
+      "id": "component-registration-crg",
+      "title": "CRG component registration",
+      "parser": "fail_closed",
+      "strict_decode": "not_implemented",
+      "encode": "not_implemented",
+      "malformed": "not_implemented",
+      "interop": "not_applicable",
+      "evidence": ["next_steps.md item 5.1"],
+      "note": "Current sampled placement uses SIZ origins and sampling only."
+    },
+    {
+      "id": "plm-cap-prf",
+      "title": "PLM and CAP/PRF signalling",
+      "parser": "fail_closed",
+      "strict_decode": "not_implemented",
+      "encode": "not_implemented",
+      "malformed": "not_implemented",
+      "interop": "not_applicable",
+      "evidence": ["next_steps.md item 5.2"],
+      "note": "Profile signalling and main-header packet length support remain explicit future work."
+    },
+    {
+      "id": "jp2-core-container",
+      "title": "JP2 core container and channel mappings",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "bounded",
+      "malformed": "complete",
+      "interop": "complete",
+      "evidence": ["JP2 box scorecard", "palette/alpha/colour fixture matrices"],
+      "note": "Core JP2 plus bounded palette, alpha, colour and metadata mappings are public; JPX is excluded."
+    },
+    {
+      "id": "selective-streaming-decode",
+      "title": "Layer/resolution/tile/region selective streaming decode",
+      "parser": "not_applicable",
+      "strict_decode": "not_implemented",
+      "encode": "not_applicable",
+      "malformed": "not_implemented",
+      "interop": "not_applicable",
+      "evidence": ["next_steps.md item 6"],
+      "note": "The current strict path reconstructs the complete image."
+    }
+  ],
+  "entries": [
+    {
+      "id": "kakadu-420-multi-precinct-plt",
+      "path": "src/testdata/kakadu-rpcl-420-multi-precinct.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "926f267d3b1140824f72a118ea19dbfddd14d832b094eac6d5cc2913c79e4c16",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "locally generated independent 32x32/16x16/16x16 RPCL 4:2:0 fixture",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "existing committed codestream; Kakadu application not redistributed"
+      },
+      "oracle": "src/tests.zig verifies exact 32x32,16x16,16x16 synthetic source-plane formulas",
+      "features": ["siz-bounded-unsigned-components", "siz-subsampled-components", "packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "b3bfecaaaeae05e4775618554ad535a14634e12138e8e630576c9385de4eafd2"
+    },
+    {
+      "id": "kakadu-420-origin-multitile-poc",
+      "path": "src/testdata/kakadu-rpcl-420-origin-multitile-poc.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "69380140dd85fb9d6141e900572bbeae666335855afb14a110cdddf24b1df52b",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "locally generated shifted-origin multi-tile RPCL/POC 4:2:0 fixture",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "existing committed codestream; Kakadu application not redistributed"
+      },
+      "oracle": "src/tests.zig verifies exact synthetic native planes across shifted origins, four tiles, and POC reordering",
+      "features": ["siz-subsampled-components", "progression-poc", "packet-header-placement", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "b3bfecaaaeae05e4775618554ad535a14634e12138e8e630576c9385de4eafd2"
+    },
+    {
+      "id": "kakadu-420-distinct-tile-origin",
+      "path": "src/testdata/kakadu-rpcl-420-distinct-tile-origin.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "2f275d55f6d8b1dc7119e959c4f2f2e762040177f8510e3b340c3ff0fdecb2b3",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "locally generated 63x55 sampled fixture with distinct image and tile-partition origins",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "existing committed codestream; Kakadu application not redistributed"
+      },
+      "oracle": "src/tests.zig verifies exact 63x55,31x27,31x27 synthetic source-plane formulas",
+      "features": ["siz-subsampled-components", "tiles-and-tile-parts", "packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "9b139664709a5c95867def13b4884c5a9695e8add0471a22bbb9a300bf723e5b"
+    },
+    {
+      "id": "grok-cmyk-four-component-rct",
+      "path": "src/testdata/grok-cmyk-8x8.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "6f73981dd6855e10ec50d9a17dde296c1e825aec0c800917d6e8476e70c6db05",
+      "source": {
+        "producer": "Grok",
+        "version": "20.3.6",
+        "origin": "independent lossless 8x8 four-component CMYK fixture generated from ImageMagick synthetic samples",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "existing committed codestream; Grok executable not redistributed"
+      },
+      "oracle": "src/tests.zig compares all four decoded native planes sample-for-sample with imagemagick-cmyk-8x8.raw",
+      "features": ["siz-bounded-unsigned-components", "reversible-53", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "29a3f7b8253af13a2b598c9e3954a285263f1714cd7b33d46e954f1c0f1473f4"
+    },
+    {
+      "id": "kakadu-all-six-t1-style-bits",
+      "path": "src/testdata/kakadu-all-six-style-bits.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "75f288ef0d96764382f582e2355e01feec996801cf595e379428f6ab13c7ff42",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "lossless 32x32 RGB fixture with COC style 0x3f on all components, SOP, EPH, and PLT",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-all-six-style-bits.jp2 Creversible=yes Cycc=yes Clevels=2 Corder=RPCL Cprecincts={32,32},{16,16},{8,8} Cblk={8,8} 'Cmodes:C0=BYPASS|RESET|RESTART|ERTERM|CAUSAL|SEGMARK' 'Cmodes:C1=BYPASS|RESET|RESTART|ERTERM|CAUSAL|SEGMARK' 'Cmodes:C2=BYPASS|RESET|RESTART|ERTERM|CAUSAL|SEGMARK' Qguard:C0=2 Qguard:C1=2 Qguard:C2=2 ORGgen_plt=yes Cuse_sop=yes Cuse_eph=yes -quiet"
+      },
+      "oracle": "z2000 strict decode compared AE=0 with the committed source TIFF; marker audit pins three COC style bytes to 0x3f",
+      "features": ["cod-qcd-component-overrides", "packet-header-placement", "t1-code-block-styles", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "synthetic-invalid-coc-style-bit",
+      "path": "src/testdata/kakadu-all-six-style-bits.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "75f288ef0d96764382f582e2355e01feec996801cf595e379428f6ab13c7ff42",
+      "source": {
+        "producer": "z2000 boundary mutation over Kakadu 8.4.1 fixture",
+        "version": "schema 1",
+        "origin": "first COC code-block style byte changed from legal 0x3f to reserved-bit value 0x7f after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "Part 1 reserves code-block style bits above 0x3f; strict decode must reject before reconstruction",
+      "features": ["cod-qcd-component-overrides", "t1-code-block-styles"],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream",
+      "patches": [
+        { "marker": "coc", "marker_offset": 9, "value": 127 }
+      ]
+    },
+    {
+      "id": "kakadu-uniform-coc-qcc-overrides",
+      "path": "src/testdata/kakadu-uniform-coc-qcc.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "10b0f1baeaa3b8f1f38839ab8f99d0b73a54014f4a71bcb455c747f4b3f25103",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "lossless 32x32 RGB fixture with uniform component-local RESET COC and guard-2 QCC markers",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-uniform-coc-qcc.jp2 Creversible=yes Cycc=yes Clevels=2 Corder=RPCL Cprecincts={32,32},{16,16},{8,8} Cblk={8,8} Cmodes:C0=RESET Cmodes:C1=RESET Cmodes:C2=RESET Qguard:C0=2 Qguard:C1=2 Qguard:C2=2 ORGgen_plt=yes Cuse_sop=no Cuse_eph=no -quiet"
+      },
+      "oracle": "z2000 strict decode compared AE=0 with the committed source TIFF; marker audit pins three COC and three QCC markers",
+      "features": ["cod-qcd-component-overrides", "t1-code-block-styles", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "synthetic-invalid-qcc-style",
+      "path": "src/testdata/kakadu-uniform-coc-qcc.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "10b0f1baeaa3b8f1f38839ab8f99d0b73a54014f4a71bcb455c747f4b3f25103",
+      "source": {
+        "producer": "z2000 boundary mutation over Kakadu 8.4.1 fixture",
+        "version": "schema 1",
+        "origin": "first QCC Sqcc byte changed from no-quantization style 0x40 to reserved style 0x43 after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "Part 1 defines QCC quantization styles 0, 1, and 2; strict decode must reject reserved style 3",
+      "features": ["cod-qcd-component-overrides"],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream",
+      "patches": [
+        { "marker": "qcc", "marker_offset": 5, "value": 67 }
+      ]
+    },
+    {
+      "id": "kakadu-multipart-tlm-padding",
+      "path": "src/testdata/kakadu-multipart-tlm.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "9a285cc66a4e5c649732a4a3443c42b310d8118ae455915fe8c3af83056f5af0",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "lossless 32x32 RGB, four 16x16 tiles, three LRCP layers, six tile-parts per tile with empty padding, one 24-entry TLM, and PLT on 12 data parts",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-multipart-tlm.jp2 Creversible=yes Cycc=yes Clevels=2 Clayers=3 Corder=LRCP Cprecincts={16,16},{8,8},{4,4} Cblk={4,4} Stiles={16,16} ORGtparts=L ORGgen_plt=yes ORGgen_tlm=6 -quiet"
+      },
+      "oracle": "z2000 strict decode compared AE=0 with the committed source TIFF; marker audit verifies 24 SOT parts, 12 PLT segments, and one 24-entry TLM",
+      "features": ["progression-poc", "packet-header-placement", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "synthetic-tlm-length-mismatch",
+      "path": "src/testdata/kakadu-multipart-tlm.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "9a285cc66a4e5c649732a4a3443c42b310d8118ae455915fe8c3af83056f5af0",
+      "source": {
+        "producer": "z2000 boundary mutation over Kakadu 8.4.1 fixture",
+        "version": "schema 1",
+        "origin": "low byte of the first TLM Ptlm entry changed from 0x53 to 0x54 after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "strict TLM and SOT Psot accounting requires the declared tile-part length to match the actual part",
+      "features": ["tiles-and-tile-parts"],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream",
+      "patches": [
+        { "marker": "tlm", "marker_offset": 11, "value": 84 }
+      ]
+    },
+    {
+      "id": "synthetic-unsupported-signed-component",
+      "path": "src/testdata/kakadu-rpcl-420-multi-precinct.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "926f267d3b1140824f72a118ea19dbfddd14d832b094eac6d5cc2913c79e4c16",
+      "source": {
+        "producer": "z2000 boundary mutation over Kakadu 8.4.1 fixture",
+        "version": "schema 1",
+        "origin": "first SIZ component changed from unsigned 8-bit to signed 8-bit after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "public strict-decode contract rejects Part 1 signed samples until G1 introduces an unbiased signed carrier",
+      "features": ["siz-bounded-unsigned-components", "siz-subsampled-components"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "patches": [
+        { "marker": "siz", "marker_offset": 40, "value": 135 }
+      ]
+    },
+    {
+      "id": "t803-profile0-01-basic-lossless",
+      "path": "codestreams_profile0/p0_01.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "a61ea8d21ad0f7f9b76796e0f841c3e125240f83e308e3b8d626f4356b9a1113",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_01, basic reversible 5/3 lossless codestream",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_01.pgx at reduction 0, peak error 0, MSE 0",
+      "features": ["siz-bounded-unsigned-components", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_01.pgx",
+        "sha256": "268a50614b74bb375092d11aa21594069666568a73fe0b83f3ca9cfbda389139",
+        "format": "pgx",
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "t803-profile0-02-subsampled-lossless",
+      "path": "codestreams_profile0/p0_02.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "150c8554b827c25b48029f3455b43ce3c029a26bea06eea2c60076c868bb07be",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_02, subsampling, layers, coding-style flags, SOP/EPH, and packet signalling",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_02.pgx at reduction 0, peak error 0, MSE 0",
+      "features": ["siz-subsampled-components", "packet-header-placement", "t1-code-block-styles", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_02.pgx",
+        "sha256": "7d7924248477c4368eadd508234545acca9f790e5cd2f888651de44b0ae9e9f9",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "t803-profile0-11-single-row",
+      "path": "codestreams_profile0/p0_11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "d20d8a13b570ef4adb0c8d4166568b043d00124c2db652ce7f78d85ac1d77b62",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_11, 128x1 image, zero decomposition levels, and segmentation symbols",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_11.pgx at reduction 0, peak error 0, MSE 0",
+      "features": ["t1-code-block-styles", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_11.pgx",
+        "sha256": "4a4457e31466d9a78d332fea16237da57cd4b2f3d4fa6dee0074fa568b282765",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "t803-profile0-12-wavelet-edge-cases",
+      "path": "codestreams_profile0/p0_12.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "741885b801b7b8a901b61792f52e0d67d05b7a87a7fc2a718c92cb6c969416fc",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_12, 3x5 reversible wavelet boundary special cases",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_12.pgx at reduction 0, peak error 0, MSE 0",
+      "features": ["reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_12.pgx",
+        "sha256": "1e4d1b5de30bba4e7360f755c4d4ea395e2be446901ae2d3005f8f8fd4cf1817",
+        "format": "pgx",
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "t803-profile0-16-empty-packet-header",
+      "path": "codestreams_profile0/p0_16.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "853d78ff805eff1aa9d6b97cea42ea4975d334b0d4d6b36f217baa0bc1314d27",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_16, empty packet-header bit handling",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_16.pgx at reduction 0, peak error 0, MSE 0",
+      "features": ["packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_16.pgx",
+        "sha256": "48876e9905a149b70299072d8f148bf697589c6c5aa15b328af8566bb4daecf5",
+        "format": "pgx",
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "t803-profile0-03-signed-rgn-poc-crg",
+      "path": "codestreams_profile0/p0_03.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "0aa26db75e8414d554e1fa93a0c7e101f16bb203f1fe06983fdd0c01fa61ddee",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_03, signed 4-bit samples with tiles, QCC, POC, CRG, TLM, and RGN",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "legal T.803 profile-0 codestream; signed sample transport remains outside the current strict decoder contract",
+      "features": ["siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "tiles-and-tile-parts", "roi-rgn-maxshift", "component-registration-crg"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [
+        {
+          "path": "reference_class0_profile0/c0p0_03r0.pgx",
+          "sha256": "29aa1042c71b3868bf607e4e3b29436604f512c392131925523a060554aea9f5",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class0_profile0/c0p0_03r1.pgx",
+          "sha256": "3e3e2055b0b7783d16a339447a0dcc50d6ddb2381ac5d2769d3bd4206f30a68d",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
+    },
+    {
+      "id": "t803-profile0-06-12bit-rgn",
+      "path": "codestreams_profile0/p0_06.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "8a98292f29c4f04ef57c9a2974a1c254cca8297ce270c8baeb911bfe975c013d",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_06, 12-bit components with varied subsampling and RGN",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "legal T.803 profile-0 codestream; 12-bit public sample transport and RGN remain unsupported",
+      "features": ["siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_06.pgx",
+        "sha256": "2a2c37396620bc14f37c578c74b2894ecfeb5e20bd30dc67fc0e8db4bbfb592b",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 3,
+        "max_peak_error": 109,
+        "max_mse": 743
+      }]
+    },
+    {
+      "id": "t803-profile0-13-many-components",
+      "path": "codestreams_profile0/p0_13.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "12463d0c67e803fac6637d384263abbb6b546826419ecb725aed18fd45bcabb0",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_13, one-pixel image with 257 components",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "legal T.803 profile-0 codestream; component counts above the current four-component public envelope fail closed",
+      "features": ["siz-bounded-unsigned-components"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_13.pgx",
+        "sha256": "7f2bc12d19df4b2dd7b651c48d87c419ba8caa0cb7ec76424f672ba0ab53261c",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "t803-profile0-15-signed-rgn-poc",
+      "path": "codestreams_profile0/p0_15.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "0aa26db75e8414d554e1fa93a0c7e101f16bb203f1fe06983fdd0c01fa61ddee",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_15, signed 4-bit samples with QCC, POC, COM, and RGN",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "legal T.803 profile-0 codestream; signed sample transport and RGN remain unsupported",
+      "features": ["siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [
+        {
+          "path": "reference_class0_profile0/c0p0_15r0.pgx",
+          "sha256": "12e00c98f9ad94527542d99c0763955614352ece12f22afa8e418c77fdcb9d35",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class0_profile0/c0p0_15r1.pgx",
+          "sha256": "b95be5fbc4272595678af5955805ea073decb7bbb4e60708eaf41853c5c1311a",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
+    },
+    {
+      "id": "t803-profile0-04-irreversible-mct",
+      "path": "codestreams_profile0/p0_04.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "3d35a4eeffb00e150bb69611afec80fba9570d5fca18a04c4e644badfd052c6f",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_04, 20-layer ICT/9-7 stream with component quantization overrides",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_04.pgx at reduction 3, peak error <= 33, MSE <= 55.8",
+      "features": ["cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_04.pgx",
+        "sha256": "3bd0ba5ab481a5415e7272fd03a5c8463ffc223c09b3954ead086c7556502cea",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 3,
+        "max_peak_error": 33,
+        "max_mse": 55.8
+      }]
+    },
+    {
+      "id": "t803-profile0-05-divergent-components",
+      "path": "codestreams_profile0/p0_05.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "35f3840030802898d5ff2fc6ff39eea3b8080cad65db859830b869d48579cf9f",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_05, four differently sampled components with divergent COC/QCC and TLM",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_05.pgx at reduction 3, peak error <= 54, MSE <= 68",
+      "features": ["siz-subsampled-components", "cod-qcd-component-overrides", "tiles-and-tile-parts", "irreversible-97"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_05.pgx",
+        "sha256": "008e9c31c4409706048d59d3dd9f79c87db0ea8c45eb49d53449c56c8919a2df",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 3,
+        "max_peak_error": 54,
+        "max_mse": 68
+      }]
+    },
+    {
+      "id": "t803-profile0-07-signed-multitile-poc",
+      "path": "codestreams_profile0/p0_07.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "46c4f5d64880a2df20d3faa22f6697384a6599dedb1b283e41a2efb1009cd9d1",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_07, three signed 12-bit components across many tiles with POC",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_07.pgx at reduction 0, signed 8-bit formatted output, peak error <= 10, MSE <= 0.34",
+      "features": ["siz-bounded-unsigned-components", "progression-poc", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_07.pgx",
+        "sha256": "55ee08494d259e5879aa4695d8c9d1afca4f4bb0be65bde61b55c7120d425d38",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "max_peak_error": 10,
+        "max_mse": 0.34
+      }]
+    },
+    {
+      "id": "t803-profile0-08-signed-divergent-coc",
+      "path": "codestreams_profile0/p0_08.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "4eb4eb2b356e16640ee94a24327fb66385c387657863072d774d633cf4379ef8",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_08, signed components with divergent decomposition counts and QCC",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_08.pgx at reduction 5, signed 8-bit formatted output, peak error <= 7, MSE <= 6.72",
+      "features": ["siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_08.pgx",
+        "sha256": "ad58ffadc846fc3ce72d1280ef3f2300c3697bfa754c6eb292167f9f835716a6",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 5,
+        "max_peak_error": 7,
+        "max_mse": 6.72
+      }]
+    },
+    {
+      "id": "t803-profile0-09-irreversible-overflow",
+      "path": "codestreams_profile0/p0_09.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "409c62a227497e7f2fc7e49055c02530cce742b6b385800b8a5aa4ae5bfab1a4",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_09, small irreversible 9/7 overflow-stress codestream",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_09.pgx at reduction 2, peak error <= 4, MSE <= 1.47",
+      "features": ["irreversible-97"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_09.pgx",
+        "sha256": "ce4dcf09fbd8076527f8d3ea83d9a6c23e24c8aa50f74ac7cd943695f59c875a",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 2,
+        "max_peak_error": 4,
+        "max_mse": 1.47
+      }]
+    },
+    {
+      "id": "t803-profile0-10-subsampled-mct",
+      "path": "codestreams_profile0/p0_10.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "0146480434740e7580ec5a413fd19654a2f1273dd7db25dc5d0b75ab98a9d706",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_10, three 4x4-subsampled components with reversible MCT and tile parts",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_10.pgx at reduction 0, peak error <= 10, MSE <= 2.84",
+      "features": ["siz-subsampled-components", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_10.pgx",
+        "sha256": "c58b9eb2901a78519af6eec0946a38a9ebb01bc9bb429fb3ea7cc4fc7e9a0bfb",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "max_peak_error": 10,
+        "max_mse": 2.84
+      }]
+    },
+    {
+      "id": "t803-profile0-14-reversible-saturation",
+      "path": "codestreams_profile0/p0_14.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "3e8df4a1dc7e5edcd9478d2e5d350e16f802ef8da3161d63a979f94906440e54",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-0 test p0_14, reversible 5/3 saturation edge case with RCT",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-0 c0p0_14.pgx at reduction 2, peak error 0, MSE 0",
+      "features": ["reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_14.pgx",
+        "sha256": "c556ab741f9b7d0a519830d9d609fd68366d7af200a9c2dd740e18218ced8fba",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 2,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    }
+  ]
+}

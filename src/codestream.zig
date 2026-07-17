@@ -237,7 +237,7 @@ pub const T1Backend = enum {
 };
 
 /// Default QCD guard bit count for z2000-written streams. Strict decode follows
-/// the signalled value when a codestream carries legal guard bits in 1..7.
+/// the signalled value when a codestream carries legal guard bits in 0..7.
 const strict_guard_bits: u8 = 2;
 
 pub const LosslessOptions = struct {
@@ -321,6 +321,9 @@ fn normalizedEncodePrecinctOptions(options: LosslessOptions, levels: u8) Lossles
 pub const DecodeOptions = struct {
     threads: u8 = 1,
     t1_backend: T1Backend = .iso_mq,
+    /// Discard this many finest DWT resolution levels during synthesis.
+    /// Zero reconstructs the full image; the value must not exceed COD/NL.
+    resolution_reduction: u8 = 0,
 };
 
 pub const DecodeTimings = struct {
@@ -331,6 +334,8 @@ pub const DecodeTimings = struct {
     packet_catalog_scan_ns: u64 = 0,
     packet_catalog_header_ns: u64 = 0,
     packet_catalog_finalize_ns: u64 = 0,
+    packet_catalog_input_bytes_materialized: u64 = 0,
+    packet_catalog_input_bytes_borrowed: u64 = 0,
     block_payload_ns: u64 = 0,
     block_worker_jobs: u64 = 0,
     block_worker_ns_sum: u64 = 0,
@@ -339,6 +344,11 @@ pub const DecodeTimings = struct {
     block_worker_blocks_max: u64 = 0,
     block_worker_payload_sum: u64 = 0,
     block_worker_payload_max: u64 = 0,
+    packet_catalog_payload_bytes_materialized: u64 = 0,
+    packet_catalog_payload_bytes_retained: u64 = 0,
+    packet_catalog_payload_bytes_discarded: u64 = 0,
+    t1_skipped_blocks: u64 = 0,
+    t1_skipped_payload_bytes: u64 = 0,
     wavelet_ns: u64 = 0,
     color_transform_ns: u64 = 0,
     t1_pass_stats: ebcot.DecodePassStats = .{},
@@ -351,6 +361,8 @@ pub const DecodeTimings = struct {
         self.block_worker_blocks_max = @max(self.block_worker_blocks_max, stats.blocks);
         self.block_worker_payload_sum += stats.payload_bytes;
         self.block_worker_payload_max = @max(self.block_worker_payload_max, stats.payload_bytes);
+        self.t1_skipped_blocks += stats.skipped_blocks;
+        self.t1_skipped_payload_bytes += stats.skipped_payload_bytes;
     }
 };
 
@@ -358,6 +370,8 @@ const StrictBlockWorkerStats = struct {
     ns: u64 = 0,
     blocks: u64 = 0,
     payload_bytes: u64 = 0,
+    skipped_blocks: u64 = 0,
+    skipped_payload_bytes: u64 = 0,
 };
 
 pub fn encodeLosslessSkeleton(
@@ -1256,9 +1270,9 @@ fn forwardComponents53(
     return levels;
 }
 
-/// Irreversible path front end: ICT, float 9/7 DWT, then deadzone scalar
-/// quantization into the i32 coefficient planes shared with the reversible
-/// pipeline.
+/// Irreversible path front end: optional ICT (or independent DC level shifts),
+/// float 9/7 DWT, then deadzone scalar quantization into the i32 coefficient
+/// planes shared with the reversible pipeline.
 fn forwardIrreversibleQuantizedPlanes(
     allocator: std.mem.Allocator,
     rgb: image.RgbImage,
@@ -1271,6 +1285,7 @@ fn forwardIrreversibleQuantizedPlanes(
         rgb,
         levels,
         options.quantization,
+        options.mct,
         0,
         0,
         options.threads,
@@ -1334,15 +1349,16 @@ fn forwardIrreversibleQuantizedPlanesForRegion(
     rgb: image.RgbImage,
     levels: u8,
     quantization: QuantizationStyle,
+    mct: MultipleComponentTransform,
     x0: u32,
     y0: u32,
     thread_count: u8,
 ) !color.RctPlanes {
-    return forwardIrreversibleQuantizedPlanesForRegionMeasured(allocator, rgb, levels, quantization, x0, y0, thread_count, null);
+    return forwardIrreversibleQuantizedPlanesForRegionMeasured(allocator, rgb, levels, quantization, mct, x0, y0, thread_count, null);
 }
 
-/// Measured variant of the irreversible front end: the ICT stage accounts to
-/// `color_transform_ns` and the fused per-plane 9/7 DWT + deadzone
+/// Measured variant of the irreversible front end: the colour/level-shift stage
+/// accounts to `color_transform_ns` and the fused per-plane 9/7 DWT + deadzone
 /// quantization jobs account to `wavelet_ns`, so `--timings` no longer
 /// reports the whole front end as MCT with an empty DWT row.
 fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
@@ -1350,13 +1366,17 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
     rgb: image.RgbImage,
     levels: u8,
     quantization: QuantizationStyle,
+    mct: MultipleComponentTransform,
     x0: u32,
     y0: u32,
     thread_count: u8,
     timings: ?*EncodeTimings,
 ) !color.RctPlanes {
     const color_start = monotonicNs();
-    var ict = try color.forwardIct(allocator, rgb);
+    var ict = if (mct == .none)
+        try color.forwardNoTransformFloat(allocator, rgb)
+    else
+        try color.forwardIct(allocator, rgb);
     defer ict.deinit();
     if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
 
@@ -1424,10 +1444,11 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
 }
 
 /// Tile front end for the irreversible multi-tile path: extracts the tile
-/// region, then runs the same ICT + 9/7 + deadzone quantization the
+/// region, then runs the same colour front end + 9/7 + deadzone quantization the
 /// single-tile path uses, retaining the tile's reference-grid lifting parity.
 const IrreversibleTileFrontEndContext = struct {
     quantization: QuantizationStyle,
+    mct: MultipleComponentTransform,
 };
 
 fn buildIrreversibleQuantizedTile(
@@ -1447,6 +1468,7 @@ fn buildIrreversibleQuantizedTile(
         rgb_tile,
         levels,
         ctx.quantization,
+        ctx.mct,
         tile.rect.x0,
         tile.rect.y0,
         1,
@@ -1814,22 +1836,63 @@ pub const StrictPacketEntry = struct {
     tile_part_index: u8,
     byte_offset: usize,
     byte_length: u32,
+    split_header_body: bool = false,
+    header_from_aux: bool = false,
+    header_length: u32 = 0,
+    body_offset: usize = 0,
+    body_length: u32 = 0,
+};
+
+const StrictPacketView = struct {
+    header_and_body: []const u8,
+    header: []const u8 = &.{},
+    body: []const u8 = &.{},
+    split_header_body: bool = false,
 };
 
 pub const StrictPacketCatalog = struct {
     allocator: std.mem.Allocator = undefined,
     entries: []StrictPacketEntry = &.{},
     packet_bytes: []u8 = &.{},
+    auxiliary_packet_headers: []u8 = &.{},
+    /// Public readers return owned bytes. Internal synchronous decode/audit may
+    /// borrow the caller's codestream for contiguous inline packet views.
+    owns_packet_bytes: bool = true,
 
     pub fn deinit(self: *StrictPacketCatalog) void {
         if (self.entries.len > 0) self.allocator.free(self.entries);
-        if (self.packet_bytes.len > 0) self.allocator.free(self.packet_bytes);
+        if (self.owns_packet_bytes and self.packet_bytes.len > 0) self.allocator.free(self.packet_bytes);
+        if (self.auxiliary_packet_headers.len > 0) self.allocator.free(self.auxiliary_packet_headers);
         self.* = .{};
     }
 
     pub fn packetBytes(self: StrictPacketCatalog, entry: StrictPacketEntry) []const u8 {
+        std.debug.assert(!entry.split_header_body);
         const byte_length: usize = @intCast(entry.byte_length);
         return self.packet_bytes[entry.byte_offset..][0..byte_length];
+    }
+
+    fn packetView(self: StrictPacketCatalog, entry: StrictPacketEntry) !StrictPacketView {
+        if (!entry.split_header_body) {
+            return .{ .header_and_body = self.packetBytes(entry) };
+        }
+        if (@as(u64, entry.header_length) + entry.body_length != entry.byte_length) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const header_source = if (entry.header_from_aux) self.auxiliary_packet_headers else self.packet_bytes;
+        const header_end = std.math.add(usize, entry.byte_offset, entry.header_length) catch
+            return CodestreamError.InvalidCodestream;
+        const body_end = std.math.add(usize, entry.body_offset, entry.body_length) catch
+            return CodestreamError.InvalidCodestream;
+        if (header_end > header_source.len or body_end > self.packet_bytes.len) {
+            return CodestreamError.InvalidCodestream;
+        }
+        return .{
+            .header_and_body = &.{},
+            .header = header_source[entry.byte_offset..header_end],
+            .body = self.packet_bytes[entry.body_offset..body_end],
+            .split_header_body = true,
+        };
     }
 };
 
@@ -1859,6 +1922,7 @@ pub const StrictPacketBlock = struct {
     cumulative_bytes: u64,
     payload_offset: usize,
     payload_length: usize,
+    payload_retained: bool = true,
     segment_count: u8 = 0,
     segment_lengths: [ebcot.max_block_segments]u64 = [_]u64{0} ** ebcot.max_block_segments,
 };
@@ -1883,6 +1947,7 @@ pub const StrictPacketBlockCatalog = struct {
 
     pub fn blockPayload(self: StrictPacketBlockCatalog, component: usize, block_index: usize) []const u8 {
         const block = self.components[component][block_index];
+        if (!block.payload_retained) return &.{};
         return self.payloads[component][block.payload_offset..][0..block.payload_length];
     }
 };
@@ -2051,6 +2116,7 @@ const StrictRpclBlockAssembly = struct {
     payload: std.ArrayList(u8) = .empty,
     payload_offset: usize = 0,
     payload_length: usize = 0,
+    payload_retained: bool = true,
     cumulative_passes: u16 = 0,
     cumulative_bytes: u64 = 0,
     metadata_ready: bool = false,
@@ -3048,6 +3114,7 @@ fn decodeLosslessPlanarUpsampledWithOptionsMeasured(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !color.SamplePlanes {
+    if (options.resolution_reduction != 0) return CodestreamError.UnsupportedPayload;
     const total_start = monotonicNs();
     defer {
         if (timings) |value| value.total_ns = elapsedNs(total_start);
@@ -3145,6 +3212,44 @@ fn upsamplePlanarNearestToReferenceGrid(
     return output;
 }
 
+fn reducedGridLength(origin: u32, length: usize, reduction: u8) !usize {
+    const length_u32 = std.math.cast(u32, length) orelse return CodestreamError.InvalidCodestream;
+    var reduced_start = origin;
+    var reduced_end = std.math.add(u32, origin, length_u32) catch return CodestreamError.InvalidCodestream;
+    for (0..reduction) |_| {
+        reduced_start = ceilDivU32(reduced_start, 2);
+        reduced_end = ceilDivU32(reduced_end, 2);
+    }
+    if (reduced_end <= reduced_start) return CodestreamError.InvalidCodestream;
+    return reduced_end - reduced_start;
+}
+
+fn compactTopLeftCoefficientPlane(
+    allocator: std.mem.Allocator,
+    source: []const i32,
+    source_width: usize,
+    source_height: usize,
+    output_width: usize,
+    output_height: usize,
+) ![]i32 {
+    if (source_width == 0 or source_height == 0 or
+        source.len != try std.math.mul(usize, source_width, source_height) or
+        output_width == 0 or output_height == 0 or
+        output_width > source_width or output_height > source_height)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    const compact = try allocator.alloc(i32, try std.math.mul(usize, output_width, output_height));
+    errdefer allocator.free(compact);
+    for (0..output_height) |row| {
+        @memcpy(
+            compact[row * output_width ..][0..output_width],
+            source[row * source_width ..][0..output_width],
+        );
+    }
+    return compact;
+}
+
 fn decodeLosslessPlanarWithOptionsMeasured(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -3160,6 +3265,7 @@ fn decodeLosslessPlanarWithOptionsMeasured(
     const metadata_start = monotonicNs();
     const header = try readStrictCodestreamMetadata(allocator, bytes);
     if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+    if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     const rct_alpha = header.component_count == 4 and header.mct == .rct;
     if (header.component_count < 1 or header.component_count > max_codestream_components or
         (header.mct != .none and !rct_alpha) or
@@ -3167,14 +3273,25 @@ fn decodeLosslessPlanarWithOptionsMeasured(
     {
         return CodestreamError.UnsupportedPayload;
     }
+    if (options.resolution_reduction != 0 and header.mct != .none) {
+        return CodestreamError.UnsupportedPayload;
+    }
     if (header.tile_width != 0 or header.tile_height != 0) {
+        if (options.resolution_reduction != 0) return CodestreamError.UnsupportedPayload;
         if (!headerHasComponentSubsampling(header)) return CodestreamError.UnsupportedPayload;
         return decodeStrictMultiTilePlanarMeasured(allocator, bytes, header, options, timings);
     }
 
     const catalog_start = monotonicNs();
-    var catalog = try readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, timings);
+    var catalog = try readStrictPacketBlockCatalogWithHeaderProfiled(
+        allocator,
+        bytes,
+        header,
+        options.resolution_reduction,
+        timings,
+    );
     defer catalog.deinit();
+    try compactStrictPacketBlockCatalogForReduction(&catalog, header.levels, options.resolution_reduction, timings);
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
     return decodeStrictPlanarFromBlockCatalogMeasured(allocator, header, catalog, options, timings);
 }
@@ -3198,6 +3315,8 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
     var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
     defer workspace.deinit();
     const coefficient_planes = try allocator.alloc([]i32, header.component_count);
+    var decoded_component_widths = catalog.component_widths;
+    var decoded_component_heights = catalog.component_heights;
     var initialized: usize = 0;
     errdefer {
         for (coefficient_planes[0..initialized]) |plane| allocator.free(plane);
@@ -3210,6 +3329,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
             allocator,
             catalog.component_widths[component],
             catalog.component_heights[component],
+            header.levels,
             catalog,
             component,
             options,
@@ -3219,23 +3339,53 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
         if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
 
         const wavelet_start = monotonicNs();
-        try wavelet_int.inverse53WithWorkspaceOrigin(
-            &workspace,
-            coefficient_planes[component],
-            catalog.component_widths[component],
-            catalog.component_heights[component],
-            header.levels,
-            catalog.component_x0[component],
-            catalog.component_y0[component],
-        );
+        if (options.resolution_reduction == 0) {
+            try wavelet_int.inverse53WithWorkspaceOrigin(
+                &workspace,
+                coefficient_planes[component],
+                catalog.component_widths[component],
+                catalog.component_heights[component],
+                header.levels,
+                catalog.component_x0[component],
+                catalog.component_y0[component],
+            );
+        } else {
+            const reduced = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+                &workspace,
+                coefficient_planes[component],
+                catalog.component_widths[component],
+                catalog.component_heights[component],
+                header.levels,
+                options.resolution_reduction,
+                catalog.component_x0[component],
+                catalog.component_y0[component],
+            );
+            const compact = try compactTopLeftCoefficientPlane(
+                allocator,
+                coefficient_planes[component],
+                catalog.component_widths[component],
+                catalog.component_heights[component],
+                reduced.width,
+                reduced.height,
+            );
+            allocator.free(coefficient_planes[component]);
+            coefficient_planes[component] = compact;
+            decoded_component_widths[component] = reduced.width;
+            decoded_component_heights[component] = reduced.height;
+        }
         if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
     }
 
+    const decoded_width = try reducedGridLength(header.reference_x0, header.width, options.resolution_reduction);
+    const decoded_height = try reducedGridLength(header.reference_y0, header.height, options.resolution_reduction);
+
     var transformed = color.RctPlanes{
         .allocator = allocator,
-        .width = header.width,
-        .height = header.height,
+        .width = decoded_width,
+        .height = decoded_height,
         .bit_depth = header.bit_depth,
+        .component_widths = decoded_component_widths,
+        .component_heights = decoded_component_heights,
         .planes = coefficient_planes,
     };
     defer transformed.deinit();
@@ -3251,13 +3401,13 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
     var output_heights = [_]usize{0} ** max_codestream_components;
     for (output_bit_depths[0..header.component_count], 0..) |*component_depth, component| {
         component_depth.* = componentBitDepthForHeader(header, component);
-        output_widths[component] = catalog.component_widths[component];
-        output_heights[component] = catalog.component_heights[component];
+        output_widths[component] = decoded_component_widths[component];
+        output_heights[component] = decoded_component_heights[component];
     }
     var out = try color.SamplePlanes.initWithComponentLayouts(
         allocator,
-        header.width,
-        header.height,
+        decoded_width,
+        decoded_height,
         output_bit_depths[0..header.component_count],
         output_widths[0..header.component_count],
         output_heights[0..header.component_count],
@@ -3270,8 +3420,12 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
         const level_shift = @as(i32, 1) << @as(u5, @intCast(component_depth - 1));
         for (coefficients, samples) |coefficient, *sample| {
             const value = coefficient + level_shift;
-            if (value < 0 or value > max_sample) return CodestreamError.InvalidCodestream;
-            sample.* = @intCast(value);
+            if (options.resolution_reduction == 0) {
+                if (value < 0 or value > max_sample) return CodestreamError.InvalidCodestream;
+                sample.* = @intCast(value);
+            } else {
+                sample.* = @intCast(std.math.clamp(value, 0, max_sample));
+            }
         }
     }
     return out;
@@ -3289,34 +3443,44 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     }
 
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
-    if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
-        defer allocator.free(payload);
-        const sidecar_start = monotonicNs();
-        if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
+    if (options.resolution_reduction == 0) {
+        if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
+            defer allocator.free(payload);
+            const sidecar_start = monotonicNs();
+            if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
+                if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
+                return strict;
+            }
+            _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload, options);
             if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
-            return strict;
+            return decodeTemporaryPayloadWithOptionsMeasured(allocator, payload, options, timings);
         }
-        _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload, options);
-        if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
-        return decodeTemporaryPayloadWithOptionsMeasured(allocator, payload, options, timings);
     }
 
     const metadata_start = monotonicNs();
     const header = try readStrictCodestreamMetadata(allocator, bytes);
     if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+    if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     if (header.component_count != 3) return CodestreamError.UnsupportedPayload;
     if (headerHasMixedComponentPrecision(header)) return CodestreamError.UnsupportedPayload;
     if (headerHasComponentSubsampling(header)) return CodestreamError.UnsupportedPayload;
-
     // Multi-tile headers carry the real SIZ tile dimensions (single-tile
     // metadata leaves them zero); route them through the per-tile decode.
     if (header.tile_width != 0 or header.tile_height != 0) {
+        if (options.resolution_reduction != 0) return CodestreamError.UnsupportedPayload;
         return decodeStrictMultiTileImageMeasured(allocator, bytes, header, options, timings);
     }
 
     const catalog_start = monotonicNs();
-    var strict_catalog = try readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, timings);
+    var strict_catalog = try readStrictPacketBlockCatalogWithHeaderProfiled(
+        allocator,
+        bytes,
+        header,
+        options.resolution_reduction,
+        timings,
+    );
     defer strict_catalog.deinit();
+    try compactStrictPacketBlockCatalogForReduction(&strict_catalog, header.levels, options.resolution_reduction, timings);
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
 
     return decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, strict_catalog, options, timings);
@@ -3559,8 +3723,25 @@ fn readStrictPacketCatalogWithHeader(
     bytes: []const u8,
     header: TemporaryHeader,
 ) !StrictPacketCatalog {
+    return readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, false);
+}
+
+fn readStrictPacketCatalogWithHeaderStorage(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    prefer_borrowed_packet_bytes: bool,
+) !StrictPacketCatalog {
     const plan = temporaryPacketPlan(header);
-    return readStrictSodPacketCatalog(allocator, bytes, header, plan, header.layers, header.progression);
+    return readStrictSodPacketCatalog(
+        allocator,
+        bytes,
+        header,
+        plan,
+        header.layers,
+        header.progression,
+        prefer_borrowed_packet_bytes,
+    );
 }
 
 pub fn auditStrictPacketHeaders(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketHeaderAudit {
@@ -3568,7 +3749,7 @@ pub fn auditStrictPacketHeaders(allocator: std.mem.Allocator, bytes: []const u8)
     if (header.tile_width != 0 or header.tile_height != 0) {
         return auditStrictMultiTilePacketHeaders(allocator, bytes, header, null, null);
     }
-    var catalog = try readStrictPacketCatalogWithHeader(allocator, bytes, header);
+    var catalog = try readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, true);
     defer catalog.deinit();
     return auditStrictPacketCatalogHeaders(allocator, header, catalog);
 }
@@ -3583,23 +3764,43 @@ fn readStrictPacketBlockCatalogWithHeader(
     bytes: []const u8,
     header: TemporaryHeader,
 ) !StrictPacketBlockCatalog {
-    return readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, null);
+    return readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, 0, null);
 }
 
 fn readStrictPacketBlockCatalogWithHeaderProfiled(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     header: TemporaryHeader,
+    resolution_reduction: u8,
     timings: ?*DecodeTimings,
 ) !StrictPacketBlockCatalog {
     const scan_start = monotonicNs();
-    var catalog = try readStrictPacketCatalogWithHeader(allocator, bytes, header);
+    var catalog = try readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, true);
     defer catalog.deinit();
+    if (timings) |t| {
+        if (catalog.owns_packet_bytes) {
+            t.packet_catalog_input_bytes_materialized += @intCast(catalog.packet_bytes.len);
+        } else {
+            t.packet_catalog_input_bytes_materialized += @intCast(catalog.auxiliary_packet_headers.len);
+            for (catalog.entries) |entry| {
+                t.packet_catalog_input_bytes_borrowed += if (entry.header_from_aux)
+                    entry.body_length
+                else
+                    entry.byte_length;
+            }
+        }
+    }
     if (timings) |t| t.packet_catalog_scan_ns += elapsedNs(scan_start);
 
     const header_start = monotonicNs();
     var audit = StrictPacketHeaderAudit{};
-    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, &audit);
+    var assemblies = try assembleStrictPacketCatalogHeaders(
+        allocator,
+        header,
+        catalog,
+        resolution_reduction,
+        &audit,
+    );
     defer assemblies.deinit();
     if (timings) |t| t.packet_catalog_header_ns += elapsedNs(header_start);
 
@@ -3610,6 +3811,7 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
     );
     errdefer build.catalog.deinit();
     if (build.stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
+    if (timings) |t| t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
     if (timings) |t| t.packet_catalog_finalize_ns += elapsedNs(finalize_start);
     return build.catalog;
 }
@@ -3804,19 +4006,36 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             cod_scod = scod;
             cod_coding = segment[5..];
             saw_cod = true;
+            // Part 1 permits QCD before COD in the main header (the T.803
+            // profile-0 p0_01 stream uses that order). Keep the QCD payload
+            // until COD supplies the transform and decomposition count, then
+            // validate it with the same strict rules as the usual order.
+            if (saw_qcd) {
+                const qcd_info = try validateStrictQcdSegment(qcd_payload, bit_depth, levels, parsed_transform);
+                qcd_band_count = qcd_info.bands;
+                parsed_quantization = qcd_info.quantization;
+                parsed_guard_bits = qcd_info.guard_bits;
+                parsed_qcd_exponents = qcd_info.exponents;
+                parsed_qcd_exponent_count = qcd_info.exponent_count;
+                parsed_qcd_steps = qcd_info.steps;
+                parsed_qcd_step_count = qcd_info.step_count;
+                for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
+            }
         } else if (marker == @intFromEnum(Marker.qcd)) {
-            if (!saw_cod or saw_qcd) return CodestreamError.InvalidCodestream;
-            const qcd_info = try validateStrictQcdSegment(segment, bit_depth, levels, parsed_transform);
-            qcd_band_count = qcd_info.bands;
-            parsed_quantization = qcd_info.quantization;
-            parsed_guard_bits = qcd_info.guard_bits;
-            parsed_qcd_exponents = qcd_info.exponents;
-            parsed_qcd_exponent_count = qcd_info.exponent_count;
-            parsed_qcd_steps = qcd_info.steps;
-            parsed_qcd_step_count = qcd_info.step_count;
-            for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
+            if (saw_qcd) return CodestreamError.InvalidCodestream;
             qcd_payload = segment;
             saw_qcd = true;
+            if (saw_cod) {
+                const qcd_info = try validateStrictQcdSegment(segment, bit_depth, levels, parsed_transform);
+                qcd_band_count = qcd_info.bands;
+                parsed_quantization = qcd_info.quantization;
+                parsed_guard_bits = qcd_info.guard_bits;
+                parsed_qcd_exponents = qcd_info.exponents;
+                parsed_qcd_exponent_count = qcd_info.exponent_count;
+                parsed_qcd_steps = qcd_info.steps;
+                parsed_qcd_step_count = qcd_info.step_count;
+                for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
+            }
         } else if (marker == @intFromEnum(Marker.coc)) {
             // ISO 15444-1 A.6.2: component-specific coding style. z2000 has no
             // per-component coding path, so a COC is accepted only when it
@@ -3848,7 +4067,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             // where all components carry identical QCC data — Kakadu writes
             // per-component Qguard this way, leaving the QCD at its default
             // (the signalled-Mb decode path consumes whichever values win).
-            if (!saw_qcd) return CodestreamError.InvalidCodestream;
+            if (!saw_cod or !saw_qcd) return CodestreamError.InvalidCodestream;
             if (segment.len < 1) return CodestreamError.InvalidCodestream;
             if (segment[0] >= component_count) return CodestreamError.UnsupportedPayload;
             const qcc_component = segment[0];
@@ -4330,7 +4549,9 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
         // Irreversible streams may carry foreign but legal step mantissas;
         // follow the signalled guard bits and (epsilon_b, mu_b) pairs for Mb
         // sizing and dequantization.
-        if (guard_bits == 0 or guard_bits > 7) return CodestreamError.InvalidCodestream;
+        // Sqcd carries G as an unsigned three-bit value; zero guard bits are
+        // legal (T.803 profile-0 p10 exercises that representation).
+        if (guard_bits > 7) return CodestreamError.InvalidCodestream;
         var info = StrictQcdInfo{
             .bands = bands,
             .quantization = quantization,
@@ -4375,7 +4596,7 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
     // choose different legal values (Kakadu: 1 guard bit, RCT-widened
     // exponents), and E-2 obliges the decoder to derive Mb from what the
     // stream says. Bounds keep Mb in 1..31.
-    if (guard_bits == 0 or guard_bits > 7) return CodestreamError.InvalidCodestream;
+    if (guard_bits > 7) return CodestreamError.InvalidCodestream;
 
     var info = StrictQcdInfo{
         .bands = bands,
@@ -4503,8 +4724,9 @@ fn bandNominalBitplanesForHeader(
             kind,
             band_level,
         ) orelse return CodestreamError.InvalidCodestream;
-        if (component_info.guard_bits == 0) return CodestreamError.InvalidCodestream;
-        const total = @as(u16, epsilon) + component_info.guard_bits - 1;
+        const sum = @as(u16, epsilon) + component_info.guard_bits;
+        if (sum == 0) return CodestreamError.InvalidCodestream;
+        const total = sum - 1;
         if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
         return @intCast(total);
     }
@@ -4514,8 +4736,9 @@ fn bandNominalBitplanesForHeader(
         // skipped by the band builder, so the mapping must use the NL.
         const epsilon = signalledHeaderBandEpsilon(header, kind, band_level) orelse
             return CodestreamError.InvalidCodestream;
-        if (header.guard_bits == 0) return CodestreamError.InvalidCodestream;
-        const total = @as(u16, epsilon) + header.guard_bits - 1;
+        const sum = @as(u16, epsilon) + header.guard_bits;
+        if (sum == 0) return CodestreamError.InvalidCodestream;
+        const total = sum - 1;
         if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
         return @intCast(total);
     }
@@ -5364,7 +5587,7 @@ fn auditStrictPacketCatalogHeaders(
     catalog: StrictPacketCatalog,
 ) !StrictPacketHeaderAudit {
     var audit = StrictPacketHeaderAudit{};
-    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, &audit);
+    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, 0, &audit);
     defer assemblies.deinit();
 
     const assembly_stats = try strictAssemblyStats(assemblies.assemblies[0..assemblies.initialized]);
@@ -5380,8 +5603,10 @@ fn assembleStrictPacketCatalogHeaders(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     catalog: StrictPacketCatalog,
+    resolution_reduction: u8,
     audit: *StrictPacketHeaderAudit,
 ) !StrictComponentAssemblySet {
+    if (resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     var geometries = try StrictComponentGeometrySet.init(allocator, header);
     defer geometries.deinit();
 
@@ -5410,6 +5635,7 @@ fn assembleStrictPacketCatalogHeaders(
             geometry.y0,
             header,
             component,
+            resolution_reduction,
         );
     }
 
@@ -5436,7 +5662,7 @@ fn assembleStrictPacketCatalogHeaders(
         const geometry = try geometries.geometryFor(entry.packet.component);
         const local_packet = try geometry.localPacket(entry.packet);
         const selected = try geometry.rpcl_index.indexesFor(local_packet.resolution, local_packet.precinct_index, 0);
-        const packet_bytes = catalog.packetBytes(entry);
+        const packet_view = try catalog.packetView(entry);
         audit.packets += 1;
         const active_groups = if (persistent_precinct_state)
             try stateful_groups.?.groupsFor(entry.packet)
@@ -5464,7 +5690,7 @@ fn assembleStrictPacketCatalogHeaders(
         } else active_group_storage[0..active_group_count];
 
         if (selected.len == 0) {
-            const read = try readStrictPacketHeaderForAudit(packet_bytes, entry.packet, &.{}, null, &.{});
+            const read = try readStrictPacketHeaderForAudit(packet_view, entry.packet, &.{}, null, &.{});
             if (read.included_blocks != 0 or read.payload_length != 0) {
                 return CodestreamError.InvalidCodestream;
             }
@@ -5480,7 +5706,7 @@ fn assembleStrictPacketCatalogHeaders(
         }
 
         const read = try readStrictPacketHeaderForAudit(
-            packet_bytes,
+            packet_view,
             entry.packet,
             active_groups,
             &assemblies.assemblies[entry.packet.component],
@@ -5526,13 +5752,15 @@ const StrictPacketHeaderRead = struct {
 };
 
 fn readStrictPacketHeaderForAudit(
-    bytes: []const u8,
+    view: StrictPacketView,
     packet: packet_plan.Packet,
     groups: []StrictPacketAuditBandGroup,
     assembly: ?*StrictComponentAssembly,
     source_blocks: []const subband.CodeBlock,
 ) !StrictPacketHeaderRead {
-    var reader = t2.PacketHeaderReader.init(bytes);
+    const header_bytes = if (view.split_header_body) view.header else view.header_and_body;
+    const payload_bytes = if (view.split_header_body) view.body else view.header_and_body;
+    var reader = t2.PacketHeaderReader.init(header_bytes);
     const packet_included = reader.readBit() catch return CodestreamError.InvalidCodestream;
     if (packet_included) {
         for (groups) |*group| {
@@ -5554,7 +5782,9 @@ fn readStrictPacketHeaderForAudit(
 
     const header_length = reader.bytesConsumed();
     if (!packet_included) {
-        if (header_length != bytes.len) return CodestreamError.InvalidCodestream;
+        if (view.split_header_body) {
+            if (header_length != view.header.len or view.body.len != 0) return CodestreamError.InvalidCodestream;
+        } else if (header_length != view.header_and_body.len) return CodestreamError.InvalidCodestream;
         return .{
             .present = false,
             .header_length = @intCast(header_length),
@@ -5565,15 +5795,16 @@ fn readStrictPacketHeaderForAudit(
 
     var payload_length: u64 = 0;
     var included_blocks: u64 = 0;
-    var cursor = header_length;
+    if (view.split_header_body and header_length != view.header.len) return CodestreamError.InvalidCodestream;
+    var cursor: usize = if (view.split_header_body) 0 else header_length;
     for (groups) |group| {
         if (group.source_indexes.len != group.decoded.len) return CodestreamError.InvalidCodestream;
         for (group.source_indexes, group.decoded) |block_index, decoded| {
             if (!decoded.included) continue;
             const byte_length = std.math.cast(usize, decoded.byte_length) orelse return CodestreamError.InvalidCodestream;
             const end = try std.math.add(usize, cursor, byte_length);
-            if (end > bytes.len) return CodestreamError.TruncatedData;
-            const payload = bytes[cursor..end];
+            if (end > payload_bytes.len) return CodestreamError.TruncatedData;
+            const payload = payload_bytes[cursor..end];
             if (assembly) |target| {
                 try appendStrictPacketAuditBlock(target, source_blocks, block_index, decoded, payload);
             }
@@ -5582,7 +5813,7 @@ fn readStrictPacketHeaderForAudit(
             included_blocks += 1;
         }
     }
-    if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+    if (cursor != payload_bytes.len) return CodestreamError.InvalidCodestream;
 
     return .{
         .present = packet_included,
@@ -5618,21 +5849,28 @@ fn appendStrictPacketAuditBlock(
     }
     block.cumulative_passes = std.math.add(u16, block.cumulative_passes, decoded.pass_count) catch return CodestreamError.InvalidCodestream;
     block.cumulative_bytes = try std.math.add(u64, block.cumulative_bytes, decoded.byte_length);
+    const previous_payload_length = block.payload_length;
+    block.payload_length = std.math.add(usize, block.payload_length, payload.len) catch
+        return CodestreamError.InvalidCodestream;
+    if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
     const inferred_bitplanes = inferredBitplanesForCodingPassPrefix(block.cumulative_passes);
     if (inferred_bitplanes > block.encoded_bitplanes) {
         block.encoded_bitplanes = inferred_bitplanes;
         block.nominal_bitplanes = @max(block.nominal_bitplanes, block.encoded_bitplanes);
     }
     try block.appendSegmentLengths(decoded);
-    if (assembly.use_component_payloads) {
-        if (block.payload_length != 0) return CodestreamError.InvalidCodestream;
-        block.payload_offset = assembly.payloads.items.len;
-        try assembly.payloads.appendSlice(assembly.allocator, payload);
-        block.payload_length = payload.len;
-        if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+    if (block.payload_retained) {
+        if (assembly.use_component_payloads) {
+            if (previous_payload_length != 0) return CodestreamError.InvalidCodestream;
+            block.payload_offset = assembly.payloads.items.len;
+            try assembly.payloads.appendSlice(assembly.allocator, payload);
+        } else {
+            try block.payload.appendSlice(assembly.allocator, payload);
+            if (block.payload.items.len != block.payload_length) return CodestreamError.InvalidCodestream;
+        }
     } else {
-        try block.payload.appendSlice(assembly.allocator, payload);
-        if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+        block.payload_offset = 0;
+        if (block.payload.items.len != 0) return CodestreamError.InvalidCodestream;
     }
 }
 
@@ -5646,6 +5884,7 @@ fn initializeStrictAssemblyGeometry(
     y0: u32,
     header: TemporaryHeader,
     component: usize,
+    resolution_reduction: u8,
 ) !void {
     if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
     if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
@@ -5657,6 +5896,10 @@ fn initializeStrictAssemblyGeometry(
         if (source.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         block.band_index = source.band_index;
         block.rect = source.rect;
+        block.payload_retained = strictBandRequiredForReduction(
+            bands[source.band_index],
+            resolution_reduction,
+        );
         block.nominal_bitplanes = try bandNominalBitplanesForHeader(
             header,
             component,
@@ -5672,6 +5915,7 @@ fn initializeStrictAssemblyGeometry(
 const StrictAssemblyStats = struct {
     blocks: u64 = 0,
     bytes: u64 = 0,
+    retained_bytes: u64 = 0,
     passes: u64 = 0,
     t1_ready_blocks: u64 = 0,
 };
@@ -5694,6 +5938,11 @@ fn strictAssemblyStats(assemblies: []const StrictComponentAssembly) !StrictAssem
             if (block.encoded_bitplanes > block.nominal_bitplanes) return CodestreamError.InvalidCodestream;
             stats.blocks += 1;
             stats.bytes = try std.math.add(u64, stats.bytes, block.cumulative_bytes);
+            stats.retained_bytes = try std.math.add(
+                u64,
+                stats.retained_bytes,
+                strictAssemblyBlockRetainedPayloadLength(assembly, block),
+            );
             stats.passes = try std.math.add(u64, stats.passes, block.cumulative_passes);
             stats.t1_ready_blocks += 1;
         }
@@ -5702,6 +5951,15 @@ fn strictAssemblyStats(assemblies: []const StrictComponentAssembly) !StrictAssem
 }
 
 fn strictAssemblyBlockPayloadLength(assembly: StrictComponentAssembly, block: StrictRpclBlockAssembly) usize {
+    _ = assembly;
+    return block.payload_length;
+}
+
+fn strictAssemblyBlockRetainedPayloadLength(
+    assembly: StrictComponentAssembly,
+    block: StrictRpclBlockAssembly,
+) usize {
+    if (!block.payload_retained) return 0;
     return if (assembly.use_component_payloads) block.payload_length else block.payload.items.len;
 }
 
@@ -5746,7 +6004,13 @@ fn strictPacketBlockCatalogFromAssembliesChecked(
         var payload_total: usize = 0;
         for (assembly.blocks) |block| {
             const payload_length = strictAssemblyBlockPayloadLength(assembly.*, block);
-            payload_total = try std.math.add(usize, payload_total, payload_length);
+            const retained_payload_length = strictAssemblyBlockRetainedPayloadLength(assembly.*, block);
+            if (block.payload_retained) {
+                if (retained_payload_length != payload_length) return CodestreamError.InvalidCodestream;
+                payload_total = try std.math.add(usize, payload_total, payload_length);
+            } else if (retained_payload_length != 0) {
+                return CodestreamError.InvalidCodestream;
+            }
             if (block.cumulative_bytes == 0 and block.cumulative_passes == 0) continue;
             if (payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
             if (!block.metadata_ready or block.rect.width == 0 or block.rect.height == 0) {
@@ -5755,6 +6019,9 @@ fn strictPacketBlockCatalogFromAssembliesChecked(
             if (block.encoded_bitplanes > block.nominal_bitplanes) return CodestreamError.InvalidCodestream;
             stats.blocks += 1;
             stats.bytes = try std.math.add(u64, stats.bytes, block.cumulative_bytes);
+            if (block.payload_retained) {
+                stats.retained_bytes = try std.math.add(u64, stats.retained_bytes, block.cumulative_bytes);
+            }
             stats.passes = try std.math.add(u64, stats.passes, block.cumulative_passes);
             stats.t1_ready_blocks += 1;
         }
@@ -5773,12 +6040,17 @@ fn strictPacketBlockCatalogFromAssembliesChecked(
         }
         for (assembly.blocks, catalog.components[component]) |source, *dest| {
             const payload_length = strictAssemblyBlockPayloadLength(assembly.*, source);
-            const source_payload_offset = if (assembly.use_component_payloads) source.payload_offset else payload_offset;
-            if (assembly.use_component_payloads) {
+            const source_payload_offset = if (!source.payload_retained)
+                0
+            else if (assembly.use_component_payloads)
+                source.payload_offset
+            else
+                payload_offset;
+            if (assembly.use_component_payloads and source.payload_retained) {
                 const source_payload_end = try std.math.add(usize, source_payload_offset, payload_length);
                 if (source_payload_end > catalog.payloads[component].len) return CodestreamError.InvalidCodestream;
             }
-            if (!assembly.use_component_payloads and payload_length > 0) {
+            if (!assembly.use_component_payloads and source.payload_retained and payload_length > 0) {
                 @memcpy(catalog.payloads[component][payload_offset..][0..payload_length], source.payload.items);
             }
             dest.* = .{
@@ -5792,10 +6064,11 @@ fn strictPacketBlockCatalogFromAssembliesChecked(
                 .cumulative_bytes = source.cumulative_bytes,
                 .payload_offset = source_payload_offset,
                 .payload_length = payload_length,
+                .payload_retained = source.payload_retained,
                 .segment_count = source.segment_count,
                 .segment_lengths = source.segment_lengths,
             };
-            if (!assembly.use_component_payloads) payload_offset += payload_length;
+            if (!assembly.use_component_payloads and source.payload_retained) payload_offset += payload_length;
         }
         if (!assembly.use_component_payloads and payload_offset != payload_total) return CodestreamError.InvalidCodestream;
     }
@@ -6194,9 +6467,14 @@ fn collectStrictRpclPacketBlocks(
             var block = &assembly.blocks[block_index];
             block.cumulative_passes = std.math.add(u16, block.cumulative_passes, decoded.pass_count) catch return CodestreamError.InvalidCodestream;
             block.cumulative_bytes = try std.math.add(u64, block.cumulative_bytes, decoded.byte_length);
+            block.payload_length = std.math.add(usize, block.payload_length, payload.len) catch
+                return CodestreamError.InvalidCodestream;
             try block.appendSegmentLengths(decoded);
-            try block.payload.appendSlice(assembly.allocator, payload);
-            if (block.payload.items.len != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+            if (block.payload_retained) try block.payload.appendSlice(assembly.allocator, payload);
+            if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+            if (block.payload_retained and block.payload.items.len != block.payload_length) {
+                return CodestreamError.InvalidCodestream;
+            }
         }
     }
 }
@@ -6323,6 +6601,62 @@ fn decodeStrictRpclImageFromBlockCatalog(
     return decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, catalog, options, null);
 }
 
+fn inverseAndCompactStrictCommonPlanes53(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    planes: *color.RctPlanes,
+    reduction: u8,
+) !void {
+    if (reduction == 0 or reduction > header.levels or
+        planes.planes.len != header.component_count or
+        catalog.component_count != header.component_count)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    const decoded_width = try reducedGridLength(header.reference_x0, header.width, reduction);
+    const decoded_height = try reducedGridLength(header.reference_y0, header.height, reduction);
+    var max_component_dimension: usize = 0;
+    for (0..header.component_count) |component| {
+        max_component_dimension = @max(max_component_dimension, catalog.component_widths[component]);
+        max_component_dimension = @max(max_component_dimension, catalog.component_heights[component]);
+    }
+    var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
+    defer workspace.deinit();
+
+    for (0..header.component_count) |component| {
+        const source_width = catalog.component_widths[component];
+        const source_height = catalog.component_heights[component];
+        const reduced = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+            &workspace,
+            planes.planes[component],
+            source_width,
+            source_height,
+            header.levels,
+            reduction,
+            catalog.component_x0[component],
+            catalog.component_y0[component],
+        );
+        if (reduced.width != decoded_width or reduced.height != decoded_height) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const compact = try compactTopLeftCoefficientPlane(
+            allocator,
+            planes.planes[component],
+            source_width,
+            source_height,
+            reduced.width,
+            reduced.height,
+        );
+        allocator.free(planes.planes[component]);
+        planes.planes[component] = compact;
+        planes.component_widths[component] = reduced.width;
+        planes.component_heights[component] = reduced.height;
+    }
+    planes.width = decoded_width;
+    planes.height = decoded_height;
+}
+
 fn decodeStrictRpclImageFromBlockCatalogMeasured(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
@@ -6341,32 +6675,54 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
             header,
             strict_planes,
             options.threads,
+            options.resolution_reduction,
             timings,
         );
     }
 
     const wavelet_start = monotonicNs();
-    const plan = temporaryPacketPlan(header);
-    if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
-    const full_resolution = plan.resolutions[plan.resolution_count - 1];
-    try inverseComponents53(
-        allocator,
-        .{ .slices = .{ strict_planes.planes[0], strict_planes.planes[1], strict_planes.planes[2] } },
-        header.width,
-        header.height,
-        header.levels,
-        full_resolution.x0,
-        full_resolution.y0,
-        options,
-    );
+    if (options.resolution_reduction == 0) {
+        const plan = temporaryPacketPlan(header);
+        if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
+        const full_resolution = plan.resolutions[plan.resolution_count - 1];
+        try inverseComponents53(
+            allocator,
+            .{ .slices = .{ strict_planes.planes[0], strict_planes.planes[1], strict_planes.planes[2] } },
+            header.width,
+            header.height,
+            header.levels,
+            full_resolution.x0,
+            full_resolution.y0,
+            options,
+        );
+    } else {
+        try inverseAndCompactStrictCommonPlanes53(
+            allocator,
+            header,
+            catalog,
+            &strict_planes,
+            options.resolution_reduction,
+        );
+    }
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     const color_start = monotonicNs();
     defer {
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
+    if (options.resolution_reduction != 0 and header.mct == .none) {
+        const max_sample = (@as(i32, 1) << @as(u5, @intCast(header.bit_depth))) - 1;
+        const level_shift = @as(i32, 1) << @as(u5, @intCast(header.bit_depth - 1));
+        for (strict_planes.planes) |plane| {
+            for (plane) |*coefficient| {
+                coefficient.* = std.math.clamp(coefficient.*, -level_shift, max_sample - level_shift);
+            }
+        }
+    }
     return if (header.mct == .none)
         color.inverseNoTransform(allocator, strict_planes)
+    else if (options.resolution_reduction != 0)
+        color.inverseRctSaturatedThreaded(allocator, strict_planes, options.threads)
     else
         color.inverseRctThreaded(allocator, strict_planes, options.threads);
 }
@@ -6455,9 +6811,10 @@ fn readStrictMultiTileTilePartPacketCatalog(
             for (sequence) |packet| {
                 const groups = try stateful.groupsFor(packet);
                 const byte_offset = packet_bytes.items.len;
-                const byte_length = try appendStrictPackedPacketPayload(
+                const packed_span = try appendStrictPackedPacketPayload(
                     allocator,
                     &packet_bytes,
+                    null,
                     bytes,
                     &cursor,
                     span.end,
@@ -6474,7 +6831,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
                     .tile_index = span.tile_index,
                     .tile_part_index = span.tile_part_index,
                     .byte_offset = byte_offset,
-                    .byte_length = byte_length,
+                    .byte_length = packed_span.byte_length,
                 });
             }
             if (packed_header_cursor != packed_headers.items.len) return CodestreamError.InvalidCodestream;
@@ -6522,9 +6879,10 @@ fn readStrictMultiTileTilePartPacketCatalog(
             const byte_offset = packet_bytes.items.len;
             const byte_length = if (packed_headers.items.len != 0) blk: {
                 const groups = try stateful.groupsFor(packet);
-                break :blk try appendStrictPackedPacketPayload(
+                break :blk (try appendStrictPackedPacketPayload(
                     allocator,
                     &packet_bytes,
+                    null,
                     bytes,
                     &cursor,
                     span.end,
@@ -6535,8 +6893,8 @@ fn readStrictMultiTileTilePartPacketCatalog(
                     groups,
                     marker_policy,
                     &packet_sequence,
-                );
-            } else try appendStrictSodPacketPayload(
+                )).byte_length;
+            } else (try appendStrictSodPacketPayload(
                 allocator,
                 &packet_bytes,
                 bytes,
@@ -6545,7 +6903,8 @@ fn readStrictMultiTileTilePartPacketCatalog(
                 packet_length,
                 marker_policy,
                 &packet_sequence,
-            );
+                true,
+            )).byte_length;
             try entries.append(allocator, .{
                 .packet = packet,
                 .tile_index = span.tile_index,
@@ -6930,7 +7289,7 @@ fn decodeStrictMultiTilePlanarMeasured(
         defer catalog.deinit();
 
         var audit = StrictPacketHeaderAudit{};
-        var assemblies = try assembleStrictPacketCatalogHeaders(allocator, tile_header, catalog, &audit);
+        var assemblies = try assembleStrictPacketCatalogHeaders(allocator, tile_header, catalog, 0, &audit);
         defer assemblies.deinit();
         const build = try strictPacketBlockCatalogFromAssembliesChecked(
             allocator,
@@ -7049,7 +7408,7 @@ fn decodeStrictMultiTileImageMeasured(
         defer catalog.deinit();
 
         var audit = StrictPacketHeaderAudit{};
-        var assemblies = try assembleStrictPacketCatalogHeaders(allocator, tile_header, catalog, &audit);
+        var assemblies = try assembleStrictPacketCatalogHeaders(allocator, tile_header, catalog, 0, &audit);
         defer assemblies.deinit();
         const build = try strictPacketBlockCatalogFromAssembliesChecked(
             allocator,
@@ -7136,14 +7495,15 @@ fn auditStrictMultiTilePacketHeaders(
     return total;
 }
 
-/// Irreversible path back end: dequantize the assembled i32 coefficient
-/// planes, run the float 9/7 inverse DWT, and undo the ICT.
+/// Irreversible path back end: selectively dequantize the assembled i32
+/// coefficient planes, run the requested float 9/7 inverse DWT levels, and
+/// undo ICT or the independent component level shift.
 fn decodeIrreversibleImageFromQuantizedPlanes(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     quantized: color.RctPlanes,
 ) !image.RgbImage {
-    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, 1, null);
+    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, 1, 0, null);
 }
 
 const IrreversibleInversePlaneJob = struct {
@@ -7156,6 +7516,8 @@ const IrreversibleInversePlaneJob = struct {
     y0: u32,
     bands: []const subband.Band,
     deltas: []const f64,
+    reduction: u8,
+    shape: wavelet.ResolutionShape = undefined,
     result: anyerror!void = {},
 };
 
@@ -7164,15 +7526,18 @@ fn irreversibleInversePlaneWorker(job: *IrreversibleInversePlaneJob) void {
 }
 
 fn irreversibleInversePlane(job: *IrreversibleInversePlaneJob) anyerror!void {
+    @memset(job.plane, 0);
     for (job.bands, job.deltas) |band, delta| {
+        if (!strictBandRequiredForReduction(band, job.reduction)) continue;
         dequantizeBandRegion(job.quantized, job.plane, job.width, band.rect, delta);
     }
-    try wavelet.inverse2DOrigin(
+    job.shape = try wavelet.inverse2DReducedOrigin(
         std.heap.smp_allocator,
         job.plane,
         job.width,
         job.height,
         job.levels,
+        job.reduction,
         .irreversible_9_7,
         job.x0,
         job.y0,
@@ -7184,8 +7549,10 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     header: TemporaryHeader,
     quantized: color.RctPlanes,
     thread_count: u8,
+    resolution_reduction: u8,
     timings: ?*DecodeTimings,
 ) !image.RgbImage {
+    if (resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, header.width, header.height);
     if (quantized.planes.len != 3) return CodestreamError.InvalidCodestream;
     for (quantized.planes) |plane_slice| {
@@ -7209,12 +7576,8 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     );
     defer allocator.free(bands);
 
-    const y_f = try allocator.alloc(f32, pixels);
-    defer allocator.free(y_f);
-    const cb_f = try allocator.alloc(f32, pixels);
-    defer allocator.free(cb_f);
-    const cr_f = try allocator.alloc(f32, pixels);
-    defer allocator.free(cr_f);
+    var reconstructed = try color.IctPlanes.init(allocator, header.width, header.height, header.bit_depth, 3);
+    defer reconstructed.deinit();
 
     const deltas = try allocator.alloc(f64, bands.len);
     defer allocator.free(deltas);
@@ -7233,28 +7596,46 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     // so three fused plane jobs avoid extra full-plane traffic. A wider
     // intra-plane inverse was bit-exact but regressed the maintained t16 gate.
     var jobs = [3]IrreversibleInversePlaneJob{
-        .{ .quantized = quantized.planes[0], .plane = y_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
-        .{ .quantized = quantized.planes[1], .plane = cb_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
-        .{ .quantized = quantized.planes[2], .plane = cr_f, .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas },
+        .{ .quantized = quantized.planes[0], .plane = reconstructed.planes[0], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas, .reduction = resolution_reduction },
+        .{ .quantized = quantized.planes[1], .plane = reconstructed.planes[1], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas, .reduction = resolution_reduction },
+        .{ .quantized = quantized.planes[2], .plane = reconstructed.planes[2], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas, .reduction = resolution_reduction },
     };
     try runComponentJobs(IrreversibleInversePlaneJob, &jobs, componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
-    // Borrowed carrier: the planes stay owned by the y_f/cb_f/cr_f defers
-    // above, so no deinit is called on this instance.
-    var ict_plane_slices = [3][]f32{ y_f, cb_f, cr_f };
-    const ict = color.IctPlanes{
-        .allocator = allocator,
-        .width = header.width,
-        .height = header.height,
-        .bit_depth = header.bit_depth,
-        .planes = &ict_plane_slices,
-    };
+    const decoded_width = try reducedGridLength(header.reference_x0, header.width, resolution_reduction);
+    const decoded_height = try reducedGridLength(header.reference_y0, header.height, resolution_reduction);
+    for (jobs) |job| {
+        if (job.shape.width != decoded_width or job.shape.height != decoded_height) {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
+
     const color_start = monotonicNs();
     defer {
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
-    return color.inverseIctThreaded(allocator, ict, thread_count);
+    if (resolution_reduction == 0) {
+        return if (header.mct == .none)
+            color.inverseNoTransformFloatThreaded(allocator, reconstructed, thread_count)
+        else
+            color.inverseIctThreaded(allocator, reconstructed, thread_count);
+    }
+
+    var compact = try color.IctPlanes.init(allocator, decoded_width, decoded_height, header.bit_depth, 3);
+    defer compact.deinit();
+    for (0..3) |component| {
+        for (0..decoded_height) |row| {
+            @memcpy(
+                compact.planes[component][row * decoded_width ..][0..decoded_width],
+                reconstructed.planes[component][row * header.width ..][0..decoded_width],
+            );
+        }
+    }
+    return if (header.mct == .none)
+        color.inverseNoTransformFloatThreaded(allocator, compact, thread_count)
+    else
+        color.inverseIctThreaded(allocator, compact, thread_count);
 }
 
 const StrictBlockDecodeJob = struct {
@@ -7264,6 +7645,7 @@ const StrictBlockDecodeJob = struct {
     component: usize,
     next_block: *std.atomic.Value(usize),
     blocks: []const StrictPacketBlock,
+    bands: []const subband.Band,
     block_order: []const usize,
     options: DecodeOptions,
     plane: []i32,
@@ -7287,7 +7669,22 @@ fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
         if (order_index >= job.block_order.len) break;
         const block_index = job.block_order[order_index];
         const block = job.blocks[block_index];
-        if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) continue;
+        if (block.rect.width == 0 or block.rect.height == 0) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+        const required = strictBlockRequiredForReduction(
+            block,
+            job.bands,
+            job.options.resolution_reduction,
+        ) catch |err| {
+            job.result = err;
+            return;
+        };
+        if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) {
+            if (!required and job.profile_worker) job.worker_stats.skipped_blocks += 1;
+            continue;
+        }
         if (!block.metadata_ready) {
             job.result = CodestreamError.InvalidCodestream;
             return;
@@ -7296,8 +7693,23 @@ fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
             job.result = CodestreamError.InvalidCodestream;
             return;
         }
+        if (block.payload_length != block.cumulative_bytes) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
+        if (!required) {
+            if (job.profile_worker) {
+                job.worker_stats.skipped_blocks += 1;
+                job.worker_stats.skipped_payload_bytes += @intCast(block.payload_length);
+            }
+            continue;
+        }
+        if (!block.payload_retained) {
+            job.result = CodestreamError.InvalidCodestream;
+            return;
+        }
         const payload = job.catalog.blockPayload(job.component, block_index);
-        if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
+        if (payload.len != block.payload_length) {
             job.result = CodestreamError.InvalidCodestream;
             return;
         }
@@ -7425,6 +7837,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
             allocator,
             header.width,
             header.height,
+            header.levels,
             catalog,
             reconstructed,
             options,
@@ -7445,6 +7858,7 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
     allocator: std.mem.Allocator,
     width: usize,
     height: usize,
+    levels: u8,
     catalog: StrictPacketBlockCatalog,
     component: usize,
     options: DecodeOptions,
@@ -7458,6 +7872,7 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
         allocator,
         width,
         height,
+        levels,
         catalog,
         component,
         options,
@@ -7472,6 +7887,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     allocator: std.mem.Allocator,
     width: usize,
     height: usize,
+    levels: u8,
     catalog: StrictPacketBlockCatalog,
     component: usize,
     options: DecodeOptions,
@@ -7483,13 +7899,40 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     const pixels = try std.math.mul(usize, width, height);
     if (plane.len != pixels) return CodestreamError.InvalidCodestream;
 
+    const width_u32 = std.math.cast(u32, width) orelse return CodestreamError.InvalidCodestream;
+    const height_u32 = std.math.cast(u32, height) orelse return CodestreamError.InvalidCodestream;
+    const component_x1 = std.math.add(u32, catalog.component_x0[component], width_u32) catch
+        return CodestreamError.InvalidCodestream;
+    const component_y1 = std.math.add(u32, catalog.component_y0[component], height_u32) catch
+        return CodestreamError.InvalidCodestream;
+    const bands = try subband.makeBandsForRegion(
+        allocator,
+        catalog.component_x0[component],
+        catalog.component_y0[component],
+        component_x1,
+        component_y1,
+        levels,
+    );
+    defer allocator.free(bands);
+    const required_width = try reducedGridLength(catalog.component_x0[component], width, options.resolution_reduction);
+    const required_height = try reducedGridLength(catalog.component_y0[component], height, options.resolution_reduction);
+
     const blocks = catalog.components[component];
-    if (strictBlocksRequireZeroInitializedPlane(blocks)) {
+    if (options.resolution_reduction != 0 or strictBlocksRequireZeroInitializedPlane(blocks)) {
         @memset(plane, 0);
     }
     const worker_count = strictDecodeBlockThreadCount(options, blocks.len);
     if (worker_count > 1) {
-        try validateStrictBlockCatalogCoverageBits(allocator, width, height, blocks);
+        try validateStrictBlockCatalogCoverageBits(
+            allocator,
+            width,
+            height,
+            required_width,
+            required_height,
+            blocks,
+            bands,
+            options.resolution_reduction,
+        );
         try reconstructStrictComponentBlocksParallel(
             allocator,
             width,
@@ -7497,6 +7940,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
             catalog,
             component,
             blocks,
+            bands,
             options,
             plane,
             worker_count,
@@ -7517,16 +7961,28 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
 
     for (blocks, 0..) |block, block_index| {
         if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
+        const required = try strictBlockRequiredForReduction(block, bands, options.resolution_reduction);
         if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) {
-            try markStrictZeroBlockCovered(covered, width, height, block.rect);
+            if (required) {
+                try markStrictZeroBlockCovered(covered, width, height, block.rect);
+            } else if (timings) |t| {
+                t.t1_skipped_blocks += 1;
+            }
             continue;
         }
         if (!block.metadata_ready) return CodestreamError.InvalidCodestream;
         if (block.encoded_bitplanes > block.nominal_bitplanes) return CodestreamError.InvalidCodestream;
-        const payload = catalog.blockPayload(component, block_index);
-        if (payload.len != block.payload_length or payload.len != block.cumulative_bytes) {
-            return CodestreamError.InvalidCodestream;
+        if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+        if (!required) {
+            if (timings) |t| {
+                t.t1_skipped_blocks += 1;
+                t.t1_skipped_payload_bytes += @intCast(block.payload_length);
+            }
+            continue;
         }
+        if (!block.payload_retained) return CodestreamError.InvalidCodestream;
+        const payload = catalog.blockPayload(component, block_index);
+        if (payload.len != block.payload_length) return CodestreamError.InvalidCodestream;
         if (block.code_block_style.bypass) {
             if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
             const decoded = try ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
@@ -7592,9 +8048,151 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
             },
         }
     }
-    for (covered) |is_covered| {
-        if (!is_covered) return CodestreamError.InvalidCodestream;
+    for (0..required_height) |row| {
+        for (covered[row * width ..][0..required_width]) |is_covered| {
+            if (!is_covered) return CodestreamError.InvalidCodestream;
+        }
     }
+}
+
+fn compactStrictPacketBlockCatalogForReduction(
+    catalog: *StrictPacketBlockCatalog,
+    levels: u8,
+    reduction: u8,
+    timings: ?*DecodeTimings,
+) !void {
+    if (reduction > levels) return CodestreamError.InvalidCodestream;
+    if (catalog.component_count < 1 or catalog.component_count > max_codestream_components) {
+        return CodestreamError.InvalidCodestream;
+    }
+
+    var retained_total: u64 = 0;
+    var discarded_total: u64 = 0;
+    for (0..catalog.component_count) |component| {
+        const blocks = catalog.components[component];
+        const payload = catalog.payloads[component];
+        var payload_total: usize = 0;
+
+        if (reduction == 0) {
+            for (blocks) |*block| {
+                if (!block.payload_retained or block.payload_length != block.cumulative_bytes) {
+                    return CodestreamError.InvalidCodestream;
+                }
+                const payload_end = std.math.add(usize, block.payload_offset, block.payload_length) catch
+                    return CodestreamError.InvalidCodestream;
+                if (payload_end > payload.len) return CodestreamError.InvalidCodestream;
+                payload_total = std.math.add(usize, payload_total, block.payload_length) catch
+                    return CodestreamError.InvalidCodestream;
+            }
+            if (payload_total != payload.len) return CodestreamError.InvalidCodestream;
+            retained_total = std.math.add(u64, retained_total, @intCast(payload.len)) catch
+                return CodestreamError.InvalidCodestream;
+            continue;
+        }
+
+        const width_u32 = std.math.cast(u32, catalog.component_widths[component]) orelse
+            return CodestreamError.InvalidCodestream;
+        const height_u32 = std.math.cast(u32, catalog.component_heights[component]) orelse
+            return CodestreamError.InvalidCodestream;
+        const component_x1 = std.math.add(u32, catalog.component_x0[component], width_u32) catch
+            return CodestreamError.InvalidCodestream;
+        const component_y1 = std.math.add(u32, catalog.component_y0[component], height_u32) catch
+            return CodestreamError.InvalidCodestream;
+        const bands = try subband.makeBandsForRegion(
+            catalog.allocator,
+            catalog.component_x0[component],
+            catalog.component_y0[component],
+            component_x1,
+            component_y1,
+            levels,
+        );
+        defer catalog.allocator.free(bands);
+
+        var retained_len: usize = 0;
+        var discarded_len: usize = 0;
+        var needs_compaction = false;
+        for (blocks) |block| {
+            if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
+            const required = try strictBlockRequiredForReduction(block, bands, reduction);
+            if (required and !block.payload_retained) return CodestreamError.InvalidCodestream;
+            if (block.payload_retained) {
+                const payload_end = std.math.add(usize, block.payload_offset, block.payload_length) catch
+                    return CodestreamError.InvalidCodestream;
+                if (payload_end > payload.len) return CodestreamError.InvalidCodestream;
+                payload_total = std.math.add(usize, payload_total, block.payload_length) catch
+                    return CodestreamError.InvalidCodestream;
+            } else if (block.payload_offset != 0) {
+                return CodestreamError.InvalidCodestream;
+            }
+            if (required) {
+                retained_len = std.math.add(usize, retained_len, block.payload_length) catch
+                    return CodestreamError.InvalidCodestream;
+            } else {
+                discarded_len = std.math.add(usize, discarded_len, block.payload_length) catch
+                    return CodestreamError.InvalidCodestream;
+                needs_compaction = needs_compaction or block.payload_retained;
+            }
+        }
+        if (payload_total != payload.len) return CodestreamError.InvalidCodestream;
+
+        if (!needs_compaction) {
+            if (payload.len != retained_len) return CodestreamError.InvalidCodestream;
+            retained_total = std.math.add(u64, retained_total, @intCast(retained_len)) catch
+                return CodestreamError.InvalidCodestream;
+            discarded_total = std.math.add(u64, discarded_total, @intCast(discarded_len)) catch
+                return CodestreamError.InvalidCodestream;
+            continue;
+        }
+
+        const compact_payload: []u8 = if (retained_len > 0)
+            try catalog.allocator.alloc(u8, retained_len)
+        else
+            &.{};
+        var write_offset: usize = 0;
+        for (blocks) |*block| {
+            const required = strictBlockRequiredForReduction(block.*, bands, reduction) catch unreachable;
+            if (!required) {
+                block.payload_offset = 0;
+                block.payload_retained = false;
+                continue;
+            }
+            if (block.payload_length > 0) {
+                @memcpy(
+                    compact_payload[write_offset..][0..block.payload_length],
+                    payload[block.payload_offset..][0..block.payload_length],
+                );
+            }
+            block.payload_offset = write_offset;
+            block.payload_retained = true;
+            write_offset += block.payload_length;
+        }
+        std.debug.assert(write_offset == retained_len);
+        if (payload.len > 0) catalog.allocator.free(payload);
+        catalog.payloads[component] = compact_payload;
+
+        retained_total = std.math.add(u64, retained_total, @intCast(retained_len)) catch
+            return CodestreamError.InvalidCodestream;
+        discarded_total = std.math.add(u64, discarded_total, @intCast(discarded_len)) catch
+            return CodestreamError.InvalidCodestream;
+    }
+
+    if (timings) |t| {
+        t.packet_catalog_payload_bytes_retained += retained_total;
+        t.packet_catalog_payload_bytes_discarded += discarded_total;
+    }
+}
+
+fn strictBlockRequiredForReduction(
+    block: StrictPacketBlock,
+    bands: []const subband.Band,
+    reduction: u8,
+) !bool {
+    if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
+    return strictBandRequiredForReduction(bands[block.band_index], reduction);
+}
+
+fn strictBandRequiredForReduction(band: subband.Band, reduction: u8) bool {
+    return band.kind == .ll or band.level > reduction;
 }
 
 fn strictBlocksRequireZeroInitializedPlane(blocks: []const StrictPacketBlock) bool {
@@ -7613,9 +8211,17 @@ fn validateStrictBlockCatalogCoverageBits(
     allocator: std.mem.Allocator,
     width: usize,
     height: usize,
+    required_width: usize,
+    required_height: usize,
     blocks: []const StrictPacketBlock,
+    bands: []const subband.Band,
+    reduction: u8,
 ) !void {
-    if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
+    if (width == 0 or height == 0 or required_width == 0 or required_height == 0 or
+        required_width > width or required_height > height)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
     const row_words = strictCoverageRowWords(width);
     const word_count = try std.math.mul(usize, row_words, height);
     const covered = try allocator.alloc(u64, word_count);
@@ -7624,17 +8230,19 @@ fn validateStrictBlockCatalogCoverageBits(
 
     for (blocks) |block| {
         if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
+        if (!try strictBlockRequiredForReduction(block, bands, reduction)) continue;
         try markStrictRectCoveredBits(covered, row_words, width, height, block.rect);
     }
 
     const full_word = std.math.maxInt(u64);
-    const last_word_mask = strictCoverageBitRangeMask(0, (width - 1) & 63);
+    const required_row_words = strictCoverageRowWords(required_width);
+    const last_word_mask = strictCoverageBitRangeMask(0, (required_width - 1) & 63);
     var y: usize = 0;
-    while (y < height) : (y += 1) {
+    while (y < required_height) : (y += 1) {
         const row_start = try std.math.mul(usize, y, row_words);
         var word: usize = 0;
-        while (word < row_words) : (word += 1) {
-            const expected = if (word + 1 == row_words) last_word_mask else full_word;
+        while (word < required_row_words) : (word += 1) {
+            const expected = if (word + 1 == required_row_words) last_word_mask else full_word;
             if (covered[row_start + word] != expected) return CodestreamError.InvalidCodestream;
         }
     }
@@ -7690,6 +8298,7 @@ fn reconstructStrictComponentBlocksParallel(
     catalog: StrictPacketBlockCatalog,
     component: usize,
     blocks: []const StrictPacketBlock,
+    bands: []const subband.Band,
     options: DecodeOptions,
     plane: []i32,
     worker_count: usize,
@@ -7712,6 +8321,7 @@ fn reconstructStrictComponentBlocksParallel(
             .component = component,
             .next_block = &next_block,
             .blocks = blocks,
+            .bands = bands,
             .block_order = block_order,
             .options = options,
             .plane = plane,
@@ -8795,6 +9405,7 @@ fn readStrictSodPacketCatalog(
     plan: packet_plan.Plan,
     layers: u16,
     progression: ProgressionOrder,
+    prefer_borrowed_packet_bytes: bool,
 ) !StrictPacketCatalog {
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
@@ -8806,9 +9417,12 @@ fn readStrictSodPacketCatalog(
     try entries.ensureTotalCapacity(allocator, packet_capacity);
     var packet_bytes: std.ArrayList(u8) = .empty;
     errdefer packet_bytes.deinit(allocator);
+    var auxiliary_packet_headers: std.ArrayList(u8) = .empty;
+    errdefer auxiliary_packet_headers.deinit(allocator);
 
     var main_header = try readStrictMainHeaderIndex(allocator, bytes, header.component_count);
     defer main_header.deinit();
+    const borrowing_packet_bytes = prefer_borrowed_packet_bytes;
     const poc_limits = TilePartPocLimits{
         .component_count = header.component_count,
         .resolution_count = header.levels + 1,
@@ -8874,11 +9488,19 @@ fn readStrictSodPacketCatalog(
             if (!subsampled and (progression != .rpcl or main_header.poc_records != null or tile_poc_records.items.len != 0)) {
                 try reorderStrictEntriesToRpcl(allocator, owned_entries, plan, header.component_count, layers);
             }
-            const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
+            const owned_packet_bytes = if (borrowing_packet_bytes) blk: {
+                if (packet_bytes.items.len != 0) return CodestreamError.InvalidCodestream;
+                break :blk @constCast(bytes);
+            } else try packet_bytes.toOwnedSlice(allocator);
+            errdefer if (!borrowing_packet_bytes and owned_packet_bytes.len > 0) allocator.free(owned_packet_bytes);
+            const owned_auxiliary_headers = try auxiliary_packet_headers.toOwnedSlice(allocator);
+            errdefer if (owned_auxiliary_headers.len > 0) allocator.free(owned_auxiliary_headers);
             return .{
                 .allocator = allocator,
                 .entries = owned_entries,
                 .packet_bytes = owned_packet_bytes,
+                .auxiliary_packet_headers = owned_auxiliary_headers,
+                .owns_packet_bytes = !borrowing_packet_bytes,
             };
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
@@ -8901,10 +9523,10 @@ fn readStrictSodPacketCatalog(
                         const packet = sequence[sequence_index];
                         sequence_index += 1;
                         const groups = try stateful.?.groupsFor(packet);
-                        const byte_offset = packet_bytes.items.len;
-                        const byte_length = try appendStrictPackedPacketPayload(
+                        const packed_span = try appendStrictPackedPacketPayload(
                             allocator,
                             &packet_bytes,
+                            if (borrowing_packet_bytes) &auxiliary_packet_headers else null,
                             bytes,
                             &cursor,
                             tile_part.end,
@@ -8920,8 +9542,13 @@ fn readStrictSodPacketCatalog(
                             .packet = packet,
                             .tile_index = tile_part.sot.tile_index,
                             .tile_part_index = @intCast(tile_part_index),
-                            .byte_offset = byte_offset,
-                            .byte_length = byte_length,
+                            .byte_offset = packed_span.header_offset,
+                            .byte_length = packed_span.byte_length,
+                            .split_header_body = borrowing_packet_bytes,
+                            .header_from_aux = borrowing_packet_bytes,
+                            .header_length = if (borrowing_packet_bytes) packed_span.header_length else 0,
+                            .body_offset = if (borrowing_packet_bytes) packed_span.body_offset else 0,
+                            .body_length = if (borrowing_packet_bytes) packed_span.body_length else 0,
                         });
                     }
                     if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
@@ -8961,9 +9588,11 @@ fn readStrictSodPacketCatalog(
                         const packet_end = try std.math.add(usize, body_start, span.payload_length);
                         if (packet_end > tile_part.end) return CodestreamError.TruncatedData;
 
-                        const byte_offset = packet_bytes.items.len;
-                        try packet_bytes.appendSlice(allocator, bytes[packet_start..header_end]);
-                        try packet_bytes.appendSlice(allocator, bytes[body_start..packet_end]);
+                        const byte_offset = if (borrowing_packet_bytes) packet_start else packet_bytes.items.len;
+                        if (!borrowing_packet_bytes) {
+                            try packet_bytes.appendSlice(allocator, bytes[packet_start..header_end]);
+                            try packet_bytes.appendSlice(allocator, bytes[body_start..packet_end]);
+                        }
                         const byte_length = std.math.cast(u32, span.header_length + span.payload_length) orelse return CodestreamError.InvalidCodestream;
                         try entries.append(allocator, .{
                             .packet = packet,
@@ -8971,13 +9600,31 @@ fn readStrictSodPacketCatalog(
                             .tile_part_index = @intCast(tile_part_index),
                             .byte_offset = byte_offset,
                             .byte_length = byte_length,
+                            .split_header_body = borrowing_packet_bytes and main_header.packet_markers.eph,
+                            .header_length = if (borrowing_packet_bytes and main_header.packet_markers.eph)
+                                @intCast(span.header_length)
+                            else
+                                0,
+                            .body_offset = if (borrowing_packet_bytes and main_header.packet_markers.eph)
+                                body_start
+                            else
+                                0,
+                            .body_length = if (borrowing_packet_bytes and main_header.packet_markers.eph)
+                                @intCast(span.payload_length)
+                            else
+                                0,
                         });
                         cursor = packet_end;
                     }
                     if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
                 }
             } else {
-                try packet_bytes.ensureTotalCapacity(allocator, try std.math.add(usize, packet_bytes.items.len, tile_part.packet_payload_bytes));
+                if (!borrowing_packet_bytes) {
+                    try packet_bytes.ensureTotalCapacity(
+                        allocator,
+                        try std.math.add(usize, packet_bytes.items.len, tile_part.packet_payload_bytes),
+                    );
+                }
                 var packed_header_cursor: usize = 0;
                 if (tile_part.packed_headers.items.len != 0) {
                     if (stateful == null) stateful = try StrictStatefulPrecinctGroups.init(allocator, header);
@@ -8986,12 +9633,15 @@ fn readStrictSodPacketCatalog(
                     if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
                     const packet = sequence[sequence_index];
                     sequence_index += 1;
-                    const byte_offset = packet_bytes.items.len;
+                    const owned_byte_offset = packet_bytes.items.len;
+                    var borrowed_span: ?StrictSodPacketPayloadSpan = null;
+                    var packed_span: ?StrictPackedPacketPayloadSpan = null;
                     const byte_length = if (tile_part.packed_headers.items.len != 0) blk: {
                         const groups = try stateful.?.groupsFor(packet);
-                        break :blk try appendStrictPackedPacketPayload(
+                        const payload_span = try appendStrictPackedPacketPayload(
                             allocator,
                             &packet_bytes,
+                            if (borrowing_packet_bytes) &auxiliary_packet_headers else null,
                             bytes,
                             &cursor,
                             tile_part.end,
@@ -9003,22 +9653,56 @@ fn readStrictSodPacketCatalog(
                             main_header.packet_markers,
                             &packet_sequence,
                         );
-                    } else try appendStrictSodPacketPayload(
-                        allocator,
-                        &packet_bytes,
-                        bytes,
-                        &cursor,
-                        tile_part.end,
-                        packet_length,
-                        main_header.packet_markers,
-                        &packet_sequence,
-                    );
+                        if (borrowing_packet_bytes) packed_span = payload_span;
+                        break :blk payload_span.byte_length;
+                    } else blk: {
+                        const payload_span = try appendStrictSodPacketPayload(
+                            allocator,
+                            &packet_bytes,
+                            bytes,
+                            &cursor,
+                            tile_part.end,
+                            packet_length,
+                            main_header.packet_markers,
+                            &packet_sequence,
+                            !borrowing_packet_bytes,
+                        );
+                        if (borrowing_packet_bytes) borrowed_span = payload_span;
+                        break :blk payload_span.byte_length;
+                    };
+                    const byte_offset = if (packed_span) |payload_span|
+                        payload_span.header_offset
+                    else if (borrowed_span) |payload_span|
+                        payload_span.packet_offset
+                    else
+                        owned_byte_offset;
                     try entries.append(allocator, .{
                         .packet = packet,
                         .tile_index = tile_part.sot.tile_index,
                         .tile_part_index = @intCast(tile_part_index),
                         .byte_offset = byte_offset,
                         .byte_length = byte_length,
+                        .split_header_body = packed_span != null or
+                            (if (borrowed_span) |payload_span| payload_span.split_header_body else false),
+                        .header_from_aux = packed_span != null,
+                        .header_length = if (packed_span) |payload_span|
+                            payload_span.header_length
+                        else if (borrowed_span) |payload_span|
+                            payload_span.header_length
+                        else
+                            0,
+                        .body_offset = if (packed_span) |payload_span|
+                            payload_span.body_offset
+                        else if (borrowed_span) |payload_span|
+                            payload_span.body_offset
+                        else
+                            0,
+                        .body_length = if (packed_span) |payload_span|
+                            payload_span.body_length
+                        else if (borrowed_span) |payload_span|
+                            payload_span.body_length
+                        else
+                            0,
                     });
                 }
                 if (packed_header_cursor != tile_part.packed_headers.items.len) return CodestreamError.InvalidCodestream;
@@ -9655,7 +10339,7 @@ fn appendStrictSodPackets(
 ) !void {
     var cursor = start;
     for (packet_lengths) |packet_length| {
-        const payload_len_u32 = try appendStrictSodPacketPayload(
+        const payload_span = try appendStrictSodPacketPayload(
             allocator,
             packet_bytes,
             bytes,
@@ -9664,11 +10348,21 @@ fn appendStrictSodPackets(
             packet_length,
             marker_policy,
             packet_sequence,
+            true,
         );
-        try lengths.append(allocator, payload_len_u32);
+        try lengths.append(allocator, payload_span.byte_length);
     }
     if (cursor != end) return CodestreamError.InvalidCodestream;
 }
+
+const StrictSodPacketPayloadSpan = struct {
+    byte_length: u32,
+    packet_offset: usize,
+    split_header_body: bool,
+    header_length: u32,
+    body_offset: usize,
+    body_length: u32,
+};
 
 fn appendStrictSodPacketPayload(
     allocator: std.mem.Allocator,
@@ -9679,7 +10373,8 @@ fn appendStrictSodPacketPayload(
     framed_packet_length: usize,
     marker_policy: MainHeaderPacketMarkers,
     packet_sequence: *u16,
-) !u32 {
+    copy_payload: bool,
+) !StrictSodPacketPayloadSpan {
     const frame_start = cursor.*;
     if (frame_start > end) return CodestreamError.TruncatedData;
     const packet_end = try std.math.add(usize, frame_start, framed_packet_length);
@@ -9702,19 +10397,40 @@ fn appendStrictSodPacketPayload(
 
     const payload_len = packet_end - packet_start - (if (eph_offset != null) @as(usize, 2) else 0);
     const payload_len_u32 = std.math.cast(u32, payload_len) orelse return CodestreamError.InvalidCodestream;
-    if (eph_offset) |offset| {
-        try packet_bytes.appendSlice(allocator, bytes[packet_start..offset]);
-        try packet_bytes.appendSlice(allocator, bytes[offset + 2 .. packet_end]);
-    } else {
-        try packet_bytes.appendSlice(allocator, bytes[packet_start..packet_end]);
+    if (copy_payload) {
+        if (eph_offset) |offset| {
+            try packet_bytes.appendSlice(allocator, bytes[packet_start..offset]);
+            try packet_bytes.appendSlice(allocator, bytes[offset + 2 .. packet_end]);
+        } else {
+            try packet_bytes.appendSlice(allocator, bytes[packet_start..packet_end]);
+        }
     }
     cursor.* = packet_end;
-    return payload_len_u32;
+    const header_length = if (eph_offset) |offset| offset - packet_start else 0;
+    const body_offset = if (eph_offset) |offset| offset + 2 else 0;
+    const body_length = if (eph_offset) |offset| packet_end - (offset + 2) else 0;
+    return .{
+        .byte_length = payload_len_u32,
+        .packet_offset = packet_start,
+        .split_header_body = eph_offset != null,
+        .header_length = std.math.cast(u32, header_length) orelse return CodestreamError.InvalidCodestream,
+        .body_offset = body_offset,
+        .body_length = std.math.cast(u32, body_length) orelse return CodestreamError.InvalidCodestream,
+    };
 }
+
+const StrictPackedPacketPayloadSpan = struct {
+    byte_length: u32,
+    header_offset: usize,
+    header_length: u32,
+    body_offset: usize,
+    body_length: u32,
+};
 
 fn appendStrictPackedPacketPayload(
     allocator: std.mem.Allocator,
     packet_bytes: *std.ArrayList(u8),
+    auxiliary_headers: ?*std.ArrayList(u8),
     bytes: []const u8,
     body_cursor: *usize,
     body_end: usize,
@@ -9725,7 +10441,7 @@ fn appendStrictPackedPacketPayload(
     groups: []StrictPacketAuditBandGroup,
     marker_policy: MainHeaderPacketMarkers,
     packet_sequence: *u16,
-) !u32 {
+) !StrictPackedPacketPayloadSpan {
     if (header_cursor.* >= packed_headers.len) return CodestreamError.TruncatedData;
     const span = try readStrictPacketHeaderSpan(packed_headers[header_cursor.*..], packet, groups);
     const header_end = try std.math.add(usize, header_cursor.*, span.header_length);
@@ -9766,11 +10482,26 @@ fn appendStrictPackedPacketPayload(
     const packet_end = try std.math.add(usize, body_start, span.payload_length);
     if (packet_end > body_end) return CodestreamError.TruncatedData;
 
-    try packet_bytes.appendSlice(allocator, packed_headers[header_cursor.*..header_end]);
-    try packet_bytes.appendSlice(allocator, bytes[body_start..packet_end]);
+    const header_offset = if (auxiliary_headers) |target| blk: {
+        const offset = target.items.len;
+        try target.appendSlice(allocator, packed_headers[header_cursor.*..header_end]);
+        break :blk offset;
+    } else blk: {
+        const offset = packet_bytes.items.len;
+        try packet_bytes.appendSlice(allocator, packed_headers[header_cursor.*..header_end]);
+        try packet_bytes.appendSlice(allocator, bytes[body_start..packet_end]);
+        break :blk offset;
+    };
     header_cursor.* = next_header;
     body_cursor.* = packet_end;
-    return std.math.cast(u32, span.header_length + span.payload_length) orelse return CodestreamError.InvalidCodestream;
+    return .{
+        .byte_length = std.math.cast(u32, span.header_length + span.payload_length) orelse
+            return CodestreamError.InvalidCodestream,
+        .header_offset = header_offset,
+        .header_length = std.math.cast(u32, span.header_length) orelse return CodestreamError.InvalidCodestream,
+        .body_offset = body_start,
+        .body_length = std.math.cast(u32, span.payload_length) orelse return CodestreamError.InvalidCodestream,
+    };
 }
 
 fn readComponentPayload(cursor: *Cursor, plane: []i32, stride: usize, expected_component: u8, payload_version: u8, layer_count: u16) !void {
@@ -13972,6 +14703,7 @@ fn encodeLosslessMultiTileMeasured(
     };
     var irreversible_context = IrreversibleTileFrontEndContext{
         .quantization = encode_options.quantization,
+        .mct = encode_options.mct,
     };
     const front_end: ?tile_pipeline.TileFrontEnd = if (encode_options.transform == .irreversible_9_7) .{
         .context = @ptrCast(&irreversible_context),
@@ -14184,7 +14916,7 @@ fn validateCodingPath(options: LosslessOptions) !void {
             if (options.mct == .none and options.emit_temporary_payload_sidecar) return CodestreamError.UnsupportedPayload;
         },
         .irreversible_9_7 => {
-            if (options.mct != .ict) return CodestreamError.UnsupportedPayload;
+            if (options.mct != .ict and options.mct != .none) return CodestreamError.UnsupportedPayload;
             // Scalar-expounded signals every band step; scalar-derived
             // signals only the NL LL step and derives the rest (A.6.4/E-5).
             if (options.quantization != .scalar_expounded and
@@ -14323,9 +15055,10 @@ fn subbandExponent(bit_depth: u8, kind: subband.Kind) !u8 {
 /// relative to this Mb, or independent decoders reconstruct shifted
 /// magnitudes.
 fn subbandNominalBitplanes(bit_depth: u8, kind: subband.Kind, guard_bits: u8) !u8 {
-    if (guard_bits == 0) return CodestreamError.InvalidCodestream;
-    const total = @as(u16, try subbandExponent(bit_depth, kind)) + guard_bits - 1;
-    if (total > 31) return CodestreamError.InvalidCodestream;
+    const sum = @as(u16, try subbandExponent(bit_depth, kind)) + guard_bits;
+    if (sum == 0) return CodestreamError.InvalidCodestream;
+    const total = sum - 1;
+    if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
     return @intCast(total);
 }
 
@@ -14490,7 +15223,6 @@ fn bandNominalBitplanesForTransform(
     quantization: QuantizationStyle,
     levels: u8,
 ) !u8 {
-    if (guard_bits == 0) return CodestreamError.InvalidCodestream;
     // Mb derives from the *signalled* epsilon_b (E-2): under scalar-derived
     // quantization every decoder reconstructs epsilon_b from the single QCD
     // value via E-5, so the encoder must size bitplanes from the same table.
@@ -14498,7 +15230,9 @@ fn bandNominalBitplanesForTransform(
         .reversible_5_3 => try subbandExponent(bit_depth, kind),
         .irreversible_9_7 => (try irreversibleBandStepSizeFor(quantization, bit_depth, kind, band_level, levels)).exponent,
     };
-    const total = epsilon + @as(u16, guard_bits) - 1;
+    const sum = epsilon + @as(u16, guard_bits);
+    if (sum == 0) return CodestreamError.InvalidCodestream;
+    const total = sum - 1;
     if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
     return @intCast(total);
 }

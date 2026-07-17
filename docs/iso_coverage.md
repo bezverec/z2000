@@ -8,7 +8,7 @@ interop or strict-reader check when the feature is externally visible.
 
 ## Current Snapshot
 
-Last updated: 2026-07-16.
+Last updated: 2026-07-17.
 
 | Target | Score | Meaning |
 | --- | ---: | --- |
@@ -22,13 +22,60 @@ support. Remaining work expands component layouts and colour conversion beyond
 the bounded sYCC and RGB matrix/TRC ICC slices,
 containers, producer diversity, and performance outside those scored bounds.
 
+## Broad Part 1 Readiness Matrix
+
+This unscored matrix tracks the route from the bounded profiles above to a
+general-purpose Part 1 codec. It is intentionally stricter than the 100/100
+engineering scorecards. `Bounded` means only the documented subset is public;
+`fail-closed` means syntax is recognized only far enough to reject it safely.
+The machine-readable source and runnable evidence are documented in
+[`part1_corpus.md`](part1_corpus.md).
+
+| Capability | Parser | Strict decode | Encode | Malformed | Independent interop | Current boundary |
+| --- | --- | --- | --- | --- | --- | --- |
+| Integer components and precision | Bounded | Bounded | Bounded | Bounded | Bounded | 1..4 unsigned 8/16-bit components; signed, sub-byte, >16-bit, and larger component sets remain G1. |
+| Component sampling and origins | Bounded | Bounded | Bounded | Bounded | Bounded | Component-local sampling plus distinct image/tile origins in reversible no-MCT profiles. |
+| `COD`/`QCD` and `COC`/`QCC` overrides | Bounded | Bounded | Bounded | Bounded | Bounded | Uniform or byte-redundant overrides and the explicit mixed-precision slice only; divergent semantics remain G2. |
+| Progression and `POC` | Bounded | Bounded | Bounded | Bounded | Bounded | All five orders in checked schedules; sampled PPM+POC remains closed. |
+| Packet headers and lengths | Bounded | Bounded | Bounded | Bounded | Bounded | Inline/PLT, PPT and PPM profiles are public; `PLM` is not implemented. |
+| Tiles and tile parts | Bounded | Bounded | Bounded | Bounded | Bounded | Practical single/multipart schedules are covered; general non-empty PLT-less multipart breadth remains G3. |
+| Tier-1 code-block styles | Complete syntax | Bounded | Bounded | Bounded | Bounded | All six Part 1 style bits are covered inside the bounded component/coding-style model. |
+| Reversible 5/3 | Complete syntax | Bounded | Bounded | Bounded | Bounded | Pixel-exact inside public component, packet, and tile profiles. |
+| Irreversible 9/7 and quantization | Bounded | Bounded | Bounded | Bounded | Bounded | Scalar expounded/derived practical profiles; arbitrary component-local combinations remain G2. |
+| `RGN` Maxshift ROI | Fail-closed | Not implemented | Not implemented | Not implemented | Not applicable | G3. |
+| `CRG` registration | Fail-closed | Not implemented | Not implemented | Not implemented | Not applicable | G3. |
+| `PLM`, `CAP`, and `PRF` | Fail-closed | Not implemented | Not implemented | Not implemented | Not applicable | G3, where applicable to the declared Part 1 profile. |
+| JP2 core container/mappings | Bounded | Bounded | Bounded | Bounded | Bounded | Core JP2 plus documented palette/alpha/colour/metadata slices; JPX excluded. |
+| Selective and streaming decode | Not applicable | Bounded | Not applicable | Bounded | Not applicable | `DecodeOptions.resolution_reduction` performs partial 5/3 synthesis for single-tile reversible no-MCT planar/gray/RGB and no-MCT/RCT interleaved RGB, plus partial 9/7 synthesis for single-tile irreversible no-MCT/ICT interleaved RGB. The 9/7 path dequantizes only retained bands and uses checked nearest-integer reconstruction; inverse RCT/ICT runs on compact planes before output saturation. Reductions above COD/NL fail closed. All packet headers and payload lengths remain validated, while discarded detail subbands skip T1 entropy decode in sequential and parallel paths with measured skipped blocks/bytes. Packet assembly validates but never appends discarded bodies to component-owned buffers. The single-tile production catalog borrows checked packet/body spans from the caller-owned codestream; SOP is removed by offset, EPH uses separate header/body spans, and PPT/PPM own only decoded T2 headers while borrowing SOD bodies. Sampled, multi-tile, layer/tile/region, native-planar 9/7, and general incremental bounded-memory selection remain G4. |
+
+The committed corpus now pins seven independently encoded streams: three
+sampled Kakadu profiles, Grok four-component CMYK, Kakadu all-six-bit T1,
+uniform `COC/QCC`, and a 24-part Kakadu `TLM` layout with empty padding parts.
+Their exact native hashes share one canonical planar/interleaved representation.
+Four mutations separately pin reserved COC style, reserved QCC style, TLM
+length mismatch, and the currently unsupported signed-component profile as
+fail-closed. All 16 optional streams and 18 class-0 PGX references from the
+official WG1 T.803 profile-0 corpus are pinned by checksum and revision.
+`p0_01`, `p0_12`, and `p0_16` reconstruct their reduction-0 references
+exactly; the other 13 return their declared `UnsupportedPayload` boundaries.
+The first exact pass verifies legal QCD-before-COD main-header ordering, while
+`p0_10` verifies that legal zero QCD guard bits reach the deliberate
+subsampled-MCT boundary instead of being classified as malformed. The PGX
+oracle represents component lists, signed/unsigned 1..16-bit samples,
+resolution reduction, peak error, and MSE, and passes each selector into the
+production decoder. Non-zero-reduction references are checksum-verified while
+their inputs remain fail-closed for other unsupported features. The
+complete optional run reports 10 decode passes, 17 expected fail-closed
+results, no mismatch, and no skip. G0 remains open for independent streams
+covering the remaining matrix rows.
+
 ## Narrow RGB Lossless Target
 
 | Area | Weight | Current | Evidence | Next gate |
 | --- | ---: | ---: | --- | --- |
 | JP2 boxes and RGB metadata | 8 | 8 | Signature, `ftyp`, `jp2h`, `ihdr`, `colr`, contiguous `jp2c`, sRGB and restricted ICC preservation, plus `LBox == 0` and `XLBox` codestream box lengths. A separate opt-in boundary converts bounded ICC v2/v4 RGB matrix/TRC PCSXYZ profiles, covered by official eciRGB v2 and CC0 Adobe-compatible v2/v4 fixtures against LittleCMS reference vectors. Canonical UUID boxes carry byte-exact standalone-TIFF EXIF, UTF-8 XML XMP, and IPTC-IIM; alternate deployed identifiers parse fail-closed. | Extend ICC or general metadata interpretation only with explicit profile-shape and interoperability gates; LUT colour management and semantic metadata transforms remain closed. |
 | TIFF 6.0 RGB input/output | 7 | 7 | Uncompressed chunky RGB and grayscale strips, 8/16-bit samples (16-bit RGB has a full-pipeline archival encode->strict-decode roundtrip plus confirmed OpenJPEG 2.5.4 / Grok 20.3.6 lossless interop and jpylyzer-valid output), ICC tag preservation, and multi-strip metadata validation. The F2 TIFF boundary also reads/writes gray+alpha and RGBA with exactly one final ExtraSamples value 1/2, preserving associated/unassociated semantics, pixels, WhiteIsZero normalization, and ICC bytes through a local TIFF->JP2->strict-decode->TIFF gate. RGBA defaults to reversible RCT over RGB only while alpha remains independent; explicit no-MCT RGBA is retained. Live no-MCT and RCT+alpha JP2s are accepted by OpenJPEG/Grok/Kakadu and pixel-exact through Grok/Kakadu; OpenJPEG's TIFF writer omits tag 338, so its legs prove codestream acceptance only. Compressed, palette/unsupported photometric, planar RGB, unspecified/multiple auxiliary samples, mixed-bit-depth, signed-sample-format, and tile-only TIFF variants fail closed. | Consider tiled TIFF, broader source metadata restoration, and additional conversion breadth; the sampled multi-tile packed-header campaign is complete. |
-| Core main markers | 10 | 10 | `SIZ`, `COD` including layer-count and explicit precinct-byte policy, reversible `QCD` style/count/exponent validation, irreversible scalar-expounded `QCD` step-size validation for the public 9/7 path, and single-tile profile validation. Checked `POC` records are written and decoded from the main header or `TPsot=0` on bounded single- and multi-tile grids with one part per tile or compatible `R`/`L`/`C`/`P` parts; tile-local records append after inherited main records and later-part POC fails closed. Unsupported CAP/PLM/RGN/CRG and override markers remain fail-closed. Duplicate `SIZ`/`COD`/`QCD`/`TLM` markers are rejected, and TLM ordering requires COD+QCD context before TLM in both the raw strict reader and JP2 wrapper. PPM and PPT are public on bounded single- and multi-tile RPCL layouts with optional SOP/EPH. | Keep POC plus `Psot`/TLM accounting in the marker corruption matrix. |
+| Core main markers | 10 | 10 | `SIZ`, `COD` including layer-count and explicit precinct-byte policy, reversible `QCD` style/count/exponent validation, irreversible scalar-expounded `QCD` step-size validation for the public 9/7 path, and single-tile profile validation. QCD may legally precede COD; the payload is retained until COD supplies its transform/level context, pinned by exact T.803 `p0_01` output. Checked `POC` records are written and decoded from the main header or `TPsot=0` on bounded single- and multi-tile grids with one part per tile or compatible `R`/`L`/`C`/`P` parts; tile-local records append after inherited main records and later-part POC fails closed. Unsupported CAP/PLM/RGN/CRG and override markers remain fail-closed. Duplicate `SIZ`/`COD`/`QCD`/`TLM` markers are rejected, and TLM ordering requires COD+QCD context before TLM in both the raw strict reader and JP2 wrapper. PPM and PPT are public on bounded single- and multi-tile RPCL layouts with optional SOP/EPH. | Keep POC plus `Psot`/TLM accounting in the marker corruption matrix. |
 | Tile-part markers | 10 | 10 | `SOT`, `SOD`, `EOC`, `TLM`, `PLT`, optional `SOP`/`EPH`, resolution tile-parts, JP2-boundary sequential `SOT` audit through `EOC`, `TLM/Psot` length matching, `PLT` packet-span matching against `SOD` payload bytes, packet-marker policy checks from `COD/Scod`, deterministic rejection when a tile-part header marker is moved into packet payload, and independent no-sidecar smoke acceptance by OpenJPEG/Grok/Kakadu plus jpylyzer. | Keep a non-authoritative validator gate and investigate any future PLT/TLM warnings against independent decoders and the strict reader. |
 | RCT and reversible 5/3 DWT | 10 | 10 | Lossless RCT and integer 5/3 encode/decode paths with strict roundtrip checks, including an odd/thin/minimal-dimension matrix (1x1, 5x5, 17x13, 3x100, 100x3, 255x1, 33x31, 63x65, 127x129, 2x2) that stresses the odd 5/3 DWT edge lifting, sub-band/precinct/code-block edge derivation, and the resolution clamp — each byte-exact through z2000 strict decode and confirmed lossless through OpenJPEG 2.5.4 and Grok 20.3.6. | Expand edge-tile coverage as multi-tile v2 lands. |
 | T1/EBCOT/MQ for this profile | 20 | 20 | Continuous MQ-backed code-block payloads, ISO MQ default backend, direct MQ hot path, cleanup run mode, sign/refinement contexts, partial-prefix decode helpers, and BYPASS raw/MQ segments. Vertical-causal, segmentation-symbols, terminate-all, BYPASS+TERMALL, standalone and TERMALL-scoped reset-context, and TERMALL-scoped predictable termination are public opt-in profiles with focused local coverage; standalone RESET has bidirectional OpenJPEG/Grok `-M 2` lossless interop. The Kakadu style matrix now decodes z2000 RESET, TERMALL, RESET+TERMALL, ERTERM+TERMALL, BYPASS+TERMALL, and CAUSAL+SEGMARK files pixel-exactly, and z2000 decodes Kakadu RESTART, RESET+RESTART, ERTERM+RESTART, BYPASS+RESTART, CAUSAL+SEGMARK, and uniform QCD/COC override files pixel-exactly. Standalone ERTERM (COD `0x10`, ER-TERM final flush of the continuous MQ stream) is public opt-in with bidirectional Kakadu interop: kdu_expand decodes z2000 `--predictable-termination` output and z2000 decodes kdu `Cmodes=ERTERM`, `{ERTERM|RESET}`, and `{ERTERM|CAUSAL|SEGMARK}` files pixel-exactly. TERMALL/RESET+TERMALL/ERTERM/BYPASS+TERMALL also have a fail-closed corruption matrix (PLT segment-length flip, truncation, payload byte-flip walk, and an explicit over-capacity packet-header segment-count check). The aligned multi-tile path now covers CAUSAL+SEGMARK, RESET+TERMALL, ERTERM+TERMALL, and BYPASS+TERMALL with strict roundtrip, malformed-input/PLT corruption gates, and pixel-exact OpenJPEG/Grok/Kakadu decode, plus standalone RESET/ERTERM/ERTERM+RESET with strict multi-tile roundtrips and pixel-exact kdu_expand decode of genuine multi-tile output. The final narrow corpus gate encodes sparse, dense/sign-heavy, and refinement-heavy RGB inputs without BP8 sidecars, verifies strict block catalogs contain real multi-pass/multi-bitplane T1 payloads, and strict-decodes byte-exactly. | Keep the full ISO-MQ style matrix and legacy-backend fail-closed boundary pinned while reducing decode hot-path cost. |

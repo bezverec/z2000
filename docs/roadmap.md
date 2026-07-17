@@ -140,6 +140,38 @@ decoded, encoded, malformed-tested, and independently reproduced.
 | G6 | General JP2 tool surface | Raw codestream and JP2 workflows, legal palette/channel/colour/resolution mappings, and checked metadata preservation work without assuming sRGB |
 | G7 | 1.0 conformance and hardening gate | Part 4 evidence, fuzz/corruption campaigns, resource limits, deterministic cross-platform builds, stable API/CLI, and no unresolved claimed-row discrepancy |
 
+G0 is active. Its 2026-07-17 foundation includes an unscored broad capability
+matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
+Seven committed foreign-encoded streams cover sampled origins/POC,
+four-component CMYK, all T1 style bits, uniform COC/QCC, and padded multipart
+TLM; four mutations pin malformed and unsupported fail-closed behavior. The
+official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
+16 profile-0 streams and 18 class-0 PGX references are checksummed. Three
+streams produce exact reduction-0 passes and 13 pin expected fail-closed
+boundaries, for a complete 27-entry result of ten decode passes and 17 expected
+fail-closed cases. The oracle already represents component/reduction selectors,
+signed 1..16-bit PGX data, peak error, and MSE. G0 remains open for independent
+fixtures covering the remaining rows. G4 has started with a bounded
+`DecodeOptions.resolution_reduction` slice: single-tile reversible 5/3 and
+irreversible 9/7 decode stop synthesis at the requested DWT level and compact
+the reduced grid. Interleaved RGB supports no MCT plus the transform-appropriate
+RCT or ICT; 5/3 no-MCT also supports native planar/grayscale output. The 9/7
+path dequantizes only retained bands and uses checked nearest-integer rounding
+plus precision saturation. Reduced RCT and ICT are applied to the compact
+planes before output saturation. Packet headers remain fully validated,
+but discarded detail subbands are now skipped before T1 entropy decode in both
+sequential and parallel paths, with explicit skipped-block/byte timings. The
+post-validation working catalog retains only selected subband payloads and
+reports the retained/discarded byte split. Packet assembly receives the same
+selection and never appends discarded bodies to its component-owned buffers;
+the common single-tile inline path also borrows checked spans from the input
+instead of owning a normalized packet-stream copy. SOP is validated and skipped
+by span offset; EPH uses independently checked header/body spans. PPT/PPM retain
+only decoded T2 headers in an auxiliary owned buffer and borrow their SOD
+bodies. Sampling, multi-tile assembly, and native-planar 9/7 output remain
+subsequent G4 gates. Class-1 all-component evaluation advances with G1/G2
+decode breadth.
+
 G1 must define a lossless internal carrier before adding source adapters above
 16 bits. Part 1 samples are integers; floating-point codestream samples and
 general multiple-component transforms belong to extension work rather than
@@ -153,10 +185,20 @@ markers must be validated deliberately, not blindly ignored. Packet indexing
 created here becomes the basis for G4 random access instead of a second packet
 parser.
 
-G4 is part of codec completeness, not only an optimization campaign: a large
-image must not require reconstructing every layer, resolution, tile, or pixel
-when the caller requests a bounded subset. Performance work continues in
-parallel, but no throughput result substitutes for the phase evidence above.
+G4 is part of codec completeness, not only an optimization campaign. Its first
+bounded reduced-resolution synthesis, T1-selection, and post-validation
+catalog-compaction slice has landed, and component assembly no longer creates
+a complete-payload duplicate. The common unframed inline packet catalog is now
+span-backed, including SOP/EPH framing; PPT/PPM use auxiliary header storage and
+borrowed bodies rather than a full normalized stream. Reduced single-tile 5/3
+and 9/7 now share the same selection and partial-synthesis path, including
+no-MCT, RCT, and ICT output; 9/7 additionally performs selective
+dequantization. Sampling, multi-tile selection, and native-planar 9/7 are the
+next functional gates. A large image
+still must not require retaining every discarded layer, tile, or pixel when the
+caller requests a bounded subset.
+Performance work continues in parallel, but no throughput result substitutes
+for the phase evidence above.
 
 G7 is an evidence gate, not a promise of third-party certification. A 1.0
 release may claim only the conformance classes and matrix rows actually run;

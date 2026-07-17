@@ -17,6 +17,7 @@ const jp2 = @import("jp2.zig");
 const mq = @import("mq.zig");
 const mq_iso = @import("mq_iso.zig");
 const packet_plan = @import("packet_plan.zig");
+const part1_corpus = @import("part1_corpus.zig");
 const poc = @import("poc.zig");
 const ppm = @import("ppm.zig");
 const rate_alloc = @import("rate_alloc.zig");
@@ -29,6 +30,10 @@ const tiff = @import("tiff.zig");
 const version = @import("version.zig");
 const wavelet = @import("wavelet.zig");
 const wavelet_int = @import("wavelet_int.zig");
+
+test "Part 1 corpus runner unit tests are linked into the main test binary" {
+    _ = part1_corpus;
+}
 
 fn putBmpU16(bytes: []u8, offset: usize, value: u16) void {
     bytes[offset] = @truncate(value);
@@ -6497,15 +6502,30 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
     }
 
     {
+        // G=0 is legal. Widening every reversible epsilon by two keeps
+        // Mb = G + epsilon_b - 1 unchanged from z2000's emitted G=2 stream,
+        // so both the raw codestream audit and JP2 boundary must accept it.
+        const accepted_qcd_offset = findMarker(codestream_bytes, codestream.markerValue("qcd")) orelse return error.MissingMarker;
+        const zero_guard = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(zero_guard);
+        const lqcd = readU16BeTest(zero_guard, accepted_qcd_offset + 2);
+        const exponent_count = @as(usize, lqcd) - 3;
+        zero_guard[accepted_qcd_offset + 4] = 0x00;
+        for (0..exponent_count) |index| zero_guard[accepted_qcd_offset + 5 + index] += 16;
+        const zero_guard_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, zero_guard);
+        defer allocator.free(zero_guard_wrapped);
+        _ = try jp2.parseInfo(zero_guard_wrapped);
+
         const QcdProfileCase = struct {
             label: []const u8,
             mutate: *const fn ([]u8, usize) void,
             expected: anyerror,
         };
         const qcd_profile_cases = [_]QcdProfileCase{
-            .{ .label = "zero guard bits", .mutate = struct {
+            .{ .label = "zero nominal bitplanes", .mutate = struct {
                 fn mutate(bytes: []u8, qcd: usize) void {
                     bytes[qcd + 4] = 0x00;
+                    bytes[qcd + 5] = 0x08;
                 }
             }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "scalar-derived qstyle", .mutate = struct {
@@ -7630,15 +7650,15 @@ test "JP2 wrapper accepts 9-7 ICT scalar-expounded codestream metadata" {
     const zero_guard_codestream = try allocator.dupe(u8, codestream_bytes);
     defer allocator.free(zero_guard_codestream);
     zero_guard_codestream[qcd_offset + 4] = 2;
-    try std.testing.expectError(
-        jp2.Jp2Error.InvalidCodestream,
-        jp2.wrapRgbCodestream(allocator, rgb, zero_guard_codestream),
-    );
+    const zero_guard_output = try jp2.wrapRgbCodestream(allocator, rgb, zero_guard_codestream);
+    defer allocator.free(zero_guard_output);
+    _ = try jp2.parseInfo(zero_guard_output);
 
     const zero_guard_wrapped = try allocator.dupe(u8, wrapped);
     defer allocator.free(zero_guard_wrapped);
     zero_guard_wrapped[jp2c_payload.start + qcd_offset + 4] = 2;
-    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(zero_guard_wrapped));
+    _ = try jp2.parseInfo(zero_guard_wrapped);
+    try std.testing.expectEqualSlices(u8, zero_guard_codestream, try jp2.extractCodestream(zero_guard_wrapped));
 
     const none_style_codestream = try allocator.dupe(u8, codestream_bytes);
     defer allocator.free(none_style_codestream);
@@ -9242,6 +9262,593 @@ test "integer 5/3 origin-aware workspace roundtrips odd tile origins" {
         );
         try std.testing.expectEqualSlices(i32, original, data);
     }
+}
+
+test "integer 5/3 reduced synthesis stops before discarded resolutions" {
+    const allocator = std.testing.allocator;
+    const width = 9;
+    const height = 7;
+    const x0: u32 = 3;
+    const y0: u32 = 2;
+    const reduction: u8 = 1;
+    const transformed = try allocator.alloc(i32, width * height);
+    defer allocator.free(transformed);
+    for (transformed, 0..) |*sample, index| {
+        sample.* = @as(i32, @intCast((index * 47 + 19) % 401)) - 200;
+    }
+
+    var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+    defer workspace.deinit();
+    const levels = try wavelet_int.forward53WithWorkspaceOrigin(
+        &workspace,
+        transformed,
+        width,
+        height,
+        3,
+        x0,
+        y0,
+    );
+    try std.testing.expectEqual(@as(u8, 3), levels);
+
+    const target_x0 = (x0 + 1) / 2;
+    const target_y0 = (y0 + 1) / 2;
+    const target_width: usize = (x0 + width + 1) / 2 - target_x0;
+    const target_height: usize = (y0 + height + 1) / 2 - target_y0;
+    const expected = try allocator.alloc(i32, target_width * target_height);
+    defer allocator.free(expected);
+    for (0..target_height) |row| {
+        @memcpy(
+            expected[row * target_width ..][0..target_width],
+            transformed[row * width ..][0..target_width],
+        );
+    }
+    try wavelet_int.inverse53WithWorkspaceOrigin(
+        &workspace,
+        expected,
+        target_width,
+        target_height,
+        levels - reduction,
+        target_x0,
+        target_y0,
+    );
+
+    const reduced = try allocator.dupe(i32, transformed);
+    defer allocator.free(reduced);
+    const shape = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+        &workspace,
+        reduced,
+        width,
+        height,
+        levels,
+        reduction,
+        x0,
+        y0,
+    );
+    try std.testing.expectEqual(target_width, shape.width);
+    try std.testing.expectEqual(target_height, shape.height);
+    try std.testing.expectEqual(target_x0, shape.x0);
+    try std.testing.expectEqual(target_y0, shape.y0);
+    for (0..target_height) |row| {
+        try std.testing.expectEqualSlices(
+            i32,
+            expected[row * target_width ..][0..target_width],
+            reduced[row * width ..][0..target_width],
+        );
+    }
+    try std.testing.expectError(
+        wavelet_int.TransformError.InvalidDimensions,
+        wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+            &workspace,
+            reduced,
+            width,
+            height,
+            levels,
+            levels + 1,
+            x0,
+            y0,
+        ),
+    );
+}
+
+test "float 9/7 reduced inverse matches compact partial synthesis" {
+    const allocator = std.testing.allocator;
+    const width = 19;
+    const height = 15;
+    const levels: u8 = 3;
+    const reduction: u8 = 2;
+    const x0: u32 = 3;
+    const y0: u32 = 5;
+
+    const original = try allocator.alloc(f32, width * height);
+    defer allocator.free(original);
+    for (original, 0..) |*sample, index| {
+        const signed: i32 = @intCast(index % 97);
+        sample.* = @as(f32, @floatFromInt(signed - 48)) * 0.375 +
+            @as(f32, @floatFromInt(index / width)) * 0.0625;
+    }
+    const transformed = try allocator.dupe(f32, original);
+    defer allocator.free(transformed);
+    const actual_levels = try wavelet.forward2DOrigin(
+        allocator,
+        transformed,
+        width,
+        height,
+        levels,
+        .irreversible_9_7,
+        x0,
+        y0,
+    );
+    try std.testing.expectEqual(levels, actual_levels);
+
+    var target_x0 = x0;
+    var target_y0 = y0;
+    var target_x1 = x0 + width;
+    var target_y1 = y0 + height;
+    for (0..reduction) |_| {
+        target_x0 = (target_x0 + 1) / 2;
+        target_y0 = (target_y0 + 1) / 2;
+        target_x1 = (target_x1 + 1) / 2;
+        target_y1 = (target_y1 + 1) / 2;
+    }
+    const target_width: usize = target_x1 - target_x0;
+    const target_height: usize = target_y1 - target_y0;
+    const expected = try allocator.alloc(f32, target_width * target_height);
+    defer allocator.free(expected);
+    for (0..target_height) |row| {
+        @memcpy(
+            expected[row * target_width ..][0..target_width],
+            transformed[row * width ..][0..target_width],
+        );
+    }
+    try wavelet.inverse2DOrigin(
+        allocator,
+        expected,
+        target_width,
+        target_height,
+        levels - reduction,
+        .irreversible_9_7,
+        target_x0,
+        target_y0,
+    );
+
+    const reduced = try allocator.dupe(f32, transformed);
+    defer allocator.free(reduced);
+    const shape = try wavelet.inverse2DReducedOrigin(
+        allocator,
+        reduced,
+        width,
+        height,
+        levels,
+        reduction,
+        .irreversible_9_7,
+        x0,
+        y0,
+    );
+    try std.testing.expectEqual(target_width, shape.width);
+    try std.testing.expectEqual(target_height, shape.height);
+    try std.testing.expectEqual(target_x0, shape.x0);
+    try std.testing.expectEqual(target_y0, shape.y0);
+    for (0..target_height) |row| {
+        for (expected[row * target_width ..][0..target_width], reduced[row * width ..][0..target_width]) |want, got| {
+            try std.testing.expectApproxEqAbs(want, got, 0.00001);
+        }
+    }
+    try std.testing.expectError(
+        wavelet.TransformError.InvalidDimensions,
+        wavelet.inverse2DReducedOrigin(
+            allocator,
+            reduced,
+            width,
+            height,
+            levels,
+            levels + 1,
+            .irreversible_9_7,
+            x0,
+            y0,
+        ),
+    );
+}
+
+test "strict reversible decode reconstructs a requested lower resolution" {
+    const allocator = std.testing.allocator;
+    const width = 17;
+    const height = 13;
+    const levels: u8 = 3;
+    const reduction: u8 = 2;
+    const pixels = width * height;
+    const samples = try allocator.alloc(u16, pixels * 3);
+    defer allocator.free(samples);
+    for (0..pixels) |pixel| {
+        samples[pixel * 3] = @intCast((pixel * 29 + 7) % 256);
+        samples[pixel * 3 + 1] = @intCast((pixel * 43 + 31) % 256);
+        samples[pixel * 3 + 2] = @intCast((pixel * 71 + 13) % 256);
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = levels,
+        .mct = .none,
+        .sop = false,
+    });
+    defer allocator.free(bytes);
+
+    var owned_packet_catalog = try codestream.readStrictPacketCatalog(allocator, bytes);
+    defer owned_packet_catalog.deinit();
+    try std.testing.expect(owned_packet_catalog.owns_packet_bytes);
+
+    const reduced_width = (width + 3) / 4;
+    const reduced_height = (height + 3) / 4;
+    const reduced_pixels = reduced_width * reduced_height;
+    const expected = try allocator.alloc(u16, reduced_pixels * 3);
+    defer allocator.free(expected);
+    for (0..3) |component| {
+        const coefficients = try allocator.alloc(i32, pixels);
+        defer allocator.free(coefficients);
+        for (coefficients, 0..) |*coefficient, pixel| {
+            coefficient.* = @as(i32, samples[pixel * 3 + component]) - 128;
+        }
+        const actual_levels = try wavelet_int.forward53(allocator, coefficients, width, height, levels);
+        try std.testing.expectEqual(levels, actual_levels);
+        const compact = try allocator.alloc(i32, reduced_pixels);
+        defer allocator.free(compact);
+        for (0..reduced_height) |row| {
+            @memcpy(
+                compact[row * reduced_width ..][0..reduced_width],
+                coefficients[row * width ..][0..reduced_width],
+            );
+        }
+        try wavelet_int.inverse53(
+            allocator,
+            compact,
+            reduced_width,
+            reduced_height,
+            levels - reduction,
+        );
+        for (compact, 0..) |coefficient, pixel| {
+            expected[pixel * 3 + component] = @intCast(std.math.clamp(coefficient + 128, 0, 255));
+        }
+    }
+
+    var reduced_timings = codestream.DecodeTimings{};
+    var planar = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{
+            .threads = 2,
+            .resolution_reduction = reduction,
+        },
+        &reduced_timings,
+    );
+    defer planar.deinit();
+    try std.testing.expect(reduced_timings.t1_skipped_blocks > 0);
+    try std.testing.expect(reduced_timings.t1_skipped_payload_bytes > 0);
+    try std.testing.expect(reduced_timings.packet_catalog_payload_bytes_retained > 0);
+    try std.testing.expect(reduced_timings.packet_catalog_payload_bytes_discarded > 0);
+    try std.testing.expectEqual(@as(u64, 0), reduced_timings.packet_catalog_input_bytes_materialized);
+    try std.testing.expect(reduced_timings.packet_catalog_input_bytes_borrowed > 0);
+    try std.testing.expectEqual(
+        reduced_timings.packet_catalog_payload_bytes_retained,
+        reduced_timings.packet_catalog_payload_bytes_materialized,
+    );
+    try std.testing.expectEqual(
+        reduced_timings.packet_catalog_payload_bytes_discarded,
+        reduced_timings.t1_skipped_payload_bytes,
+    );
+    try std.testing.expectEqual(reduced_width, planar.width);
+    try std.testing.expectEqual(reduced_height, planar.height);
+    for (0..3) |component| {
+        const dimensions = planar.componentDimensions(component) orelse return error.MissingComponent;
+        try std.testing.expectEqual([2]usize{ reduced_width, reduced_height }, dimensions);
+        for (planar.planes[component], 0..) |sample, pixel| {
+            try std.testing.expectEqual(expected[pixel * 3 + component], sample);
+        }
+    }
+
+    var sequential_timings = codestream.DecodeTimings{};
+    var interleaved = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{
+            .threads = 1,
+            .resolution_reduction = reduction,
+        },
+        &sequential_timings,
+    );
+    defer interleaved.deinit();
+    try std.testing.expect(sequential_timings.t1_skipped_blocks > 0);
+    try std.testing.expect(sequential_timings.t1_skipped_payload_bytes > 0);
+    try std.testing.expectEqual(
+        reduced_timings.packet_catalog_payload_bytes_retained,
+        sequential_timings.packet_catalog_payload_bytes_retained,
+    );
+    try std.testing.expectEqual(
+        reduced_timings.packet_catalog_payload_bytes_discarded,
+        sequential_timings.packet_catalog_payload_bytes_discarded,
+    );
+    try std.testing.expectEqual(
+        sequential_timings.packet_catalog_payload_bytes_retained,
+        sequential_timings.packet_catalog_payload_bytes_materialized,
+    );
+    try std.testing.expectEqual(@as(u64, 0), sequential_timings.packet_catalog_input_bytes_materialized);
+    try std.testing.expectEqual(
+        reduced_timings.packet_catalog_input_bytes_borrowed,
+        sequential_timings.packet_catalog_input_bytes_borrowed,
+    );
+    try std.testing.expectEqual(reduced_width, interleaved.width);
+    try std.testing.expectEqual(reduced_height, interleaved.height);
+    try std.testing.expectEqualSlices(u16, expected, interleaved.samples);
+
+    const layered_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = levels,
+        .layers = 3,
+        .mct = .none,
+        .sop = false,
+    });
+    defer allocator.free(layered_bytes);
+    var layered_timings = codestream.DecodeTimings{};
+    var layered = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        layered_bytes,
+        .{
+            .threads = 2,
+            .resolution_reduction = reduction,
+        },
+        &layered_timings,
+    );
+    defer layered.deinit();
+    try std.testing.expect(layered_timings.packet_catalog_payload_bytes_discarded > 0);
+    try std.testing.expectEqual(
+        layered_timings.packet_catalog_payload_bytes_retained,
+        layered_timings.packet_catalog_payload_bytes_materialized,
+    );
+    try std.testing.expectEqual(@as(u64, 0), layered_timings.packet_catalog_input_bytes_materialized);
+    try std.testing.expect(layered_timings.packet_catalog_input_bytes_borrowed > 0);
+    try std.testing.expectEqual(reduced_width, layered.width);
+    try std.testing.expectEqual(reduced_height, layered.height);
+    for (0..3) |component| {
+        for (layered.planes[component], 0..) |sample, pixel| {
+            try std.testing.expectEqual(expected[pixel * 3 + component], sample);
+        }
+    }
+
+    var full_timings = codestream.DecodeTimings{};
+    var full = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 2 },
+        &full_timings,
+    );
+    defer full.deinit();
+    try std.testing.expectEqual(@as(u64, 0), full_timings.t1_skipped_blocks);
+    try std.testing.expectEqual(@as(u64, 0), full_timings.t1_skipped_payload_bytes);
+    try std.testing.expect(full_timings.packet_catalog_payload_bytes_retained > 0);
+    try std.testing.expectEqual(@as(u64, 0), full_timings.packet_catalog_payload_bytes_discarded);
+    try std.testing.expectEqual(@as(u64, 0), full_timings.packet_catalog_input_bytes_materialized);
+    try std.testing.expectEqual(
+        reduced_timings.packet_catalog_input_bytes_borrowed,
+        full_timings.packet_catalog_input_bytes_borrowed,
+    );
+    try std.testing.expectEqual(
+        full_timings.packet_catalog_payload_bytes_retained,
+        full_timings.packet_catalog_payload_bytes_materialized,
+    );
+    try std.testing.expectEqual(
+        full_timings.packet_catalog_payload_bytes_retained,
+        reduced_timings.packet_catalog_payload_bytes_retained +
+            reduced_timings.packet_catalog_payload_bytes_discarded,
+    );
+
+    const framed_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = levels,
+        .mct = .none,
+        .sop = true,
+        .eph = true,
+    });
+    defer allocator.free(framed_bytes);
+    var framed_timings = codestream.DecodeTimings{};
+    var framed = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        framed_bytes,
+        .{ .resolution_reduction = reduction },
+        &framed_timings,
+    );
+    defer framed.deinit();
+    try std.testing.expectEqual(@as(u64, 0), framed_timings.packet_catalog_input_bytes_materialized);
+    try std.testing.expect(framed_timings.packet_catalog_input_bytes_borrowed > 0);
+    try std.testing.expectEqualSlices(u16, expected, framed.samples);
+
+    const packed_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = levels,
+        .mct = .none,
+        .sop = true,
+        .eph = true,
+        .ppt = true,
+    });
+    defer allocator.free(packed_bytes);
+    var packed_timings = codestream.DecodeTimings{};
+    var packed_image = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        packed_bytes,
+        .{ .resolution_reduction = reduction },
+        &packed_timings,
+    );
+    defer packed_image.deinit();
+    try std.testing.expect(packed_timings.packet_catalog_input_bytes_materialized > 0);
+    try std.testing.expect(packed_timings.packet_catalog_input_bytes_borrowed > 0);
+    try std.testing.expectEqualSlices(u16, expected, packed_image.samples);
+
+    const ppm_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = levels,
+        .mct = .none,
+        .sop = true,
+        .eph = true,
+        .ppm = true,
+    });
+    defer allocator.free(ppm_bytes);
+    var ppm_timings = codestream.DecodeTimings{};
+    var ppm_image = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        ppm_bytes,
+        .{ .resolution_reduction = reduction },
+        &ppm_timings,
+    );
+    defer ppm_image.deinit();
+    try std.testing.expect(ppm_timings.packet_catalog_input_bytes_materialized > 0);
+    try std.testing.expect(ppm_timings.packet_catalog_input_bytes_borrowed > 0);
+    try std.testing.expectEqualSlices(u16, expected, ppm_image.samples);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarWithOptions(allocator, bytes, .{ .resolution_reduction = levels + 1 }),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .resolution_reduction = levels + 1 }),
+    );
+
+    const rct_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = levels,
+        .mct = .rct,
+    });
+    defer allocator.free(rct_bytes);
+    var rct_timings = codestream.DecodeTimings{};
+    var rct_reduced = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        rct_bytes,
+        .{
+            .threads = 1,
+            .resolution_reduction = reduction,
+        },
+        &rct_timings,
+    );
+    defer rct_reduced.deinit();
+    try std.testing.expectEqual(reduced_width, rct_reduced.width);
+    try std.testing.expectEqual(reduced_height, rct_reduced.height);
+    try std.testing.expect(rct_timings.t1_skipped_blocks > 0);
+    try std.testing.expect(rct_timings.t1_skipped_payload_bytes > 0);
+    var rct_path_max_diff: u16 = 0;
+    for (expected, rct_reduced.samples) |none_sample, rct_sample| {
+        rct_path_max_diff = @max(
+            rct_path_max_diff,
+            if (none_sample > rct_sample) none_sample - rct_sample else rct_sample - none_sample,
+        );
+    }
+    try std.testing.expect(rct_path_max_diff <= 4);
+    var rct_parallel = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        rct_bytes,
+        .{
+            .threads = 3,
+            .resolution_reduction = reduction,
+        },
+    );
+    defer rct_parallel.deinit();
+    try std.testing.expectEqualSlices(u16, rct_reduced.samples, rct_parallel.samples);
+
+    const irreversible_none_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = levels,
+        .mct = .none,
+        .transform = .irreversible_9_7,
+        .quantization = .scalar_expounded,
+    });
+    defer allocator.free(irreversible_none_bytes);
+    var irreversible_full = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        irreversible_none_bytes,
+        .{ .threads = 2 },
+    );
+    defer irreversible_full.deinit();
+    var irreversible_max_diff: u16 = 0;
+    for (samples, irreversible_full.samples) |want, got| {
+        irreversible_max_diff = @max(irreversible_max_diff, if (want > got) want - got else got - want);
+    }
+    try std.testing.expect(irreversible_max_diff <= 8);
+
+    var irreversible_reduced_timings = codestream.DecodeTimings{};
+    var irreversible_reduced = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        irreversible_none_bytes,
+        .{
+            .threads = 1,
+            .resolution_reduction = reduction,
+        },
+        &irreversible_reduced_timings,
+    );
+    defer irreversible_reduced.deinit();
+    try std.testing.expectEqual(reduced_width, irreversible_reduced.width);
+    try std.testing.expectEqual(reduced_height, irreversible_reduced.height);
+    try std.testing.expect(irreversible_reduced_timings.t1_skipped_blocks > 0);
+    try std.testing.expect(irreversible_reduced_timings.t1_skipped_payload_bytes > 0);
+    try std.testing.expect(irreversible_reduced_timings.packet_catalog_payload_bytes_discarded > 0);
+    try std.testing.expectEqual(
+        irreversible_reduced_timings.packet_catalog_payload_bytes_discarded,
+        irreversible_reduced_timings.t1_skipped_payload_bytes,
+    );
+    var irreversible_parallel = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        irreversible_none_bytes,
+        .{
+            .threads = 3,
+            .resolution_reduction = reduction,
+        },
+    );
+    defer irreversible_parallel.deinit();
+    try std.testing.expectEqualSlices(u16, irreversible_reduced.samples, irreversible_parallel.samples);
+    var reduced_varies = false;
+    for (irreversible_reduced.samples[1..]) |sample| {
+        if (sample != irreversible_reduced.samples[0]) {
+            reduced_varies = true;
+            break;
+        }
+    }
+    try std.testing.expect(reduced_varies);
+
+    const irreversible_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = levels,
+        .mct = .ict,
+        .transform = .irreversible_9_7,
+        .quantization = .scalar_expounded,
+    });
+    defer allocator.free(irreversible_bytes);
+    var irreversible_ict_timings = codestream.DecodeTimings{};
+    var irreversible_ict_reduced = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        irreversible_bytes,
+        .{
+            .threads = 1,
+            .resolution_reduction = reduction,
+        },
+        &irreversible_ict_timings,
+    );
+    defer irreversible_ict_reduced.deinit();
+    try std.testing.expectEqual(reduced_width, irreversible_ict_reduced.width);
+    try std.testing.expectEqual(reduced_height, irreversible_ict_reduced.height);
+    try std.testing.expect(irreversible_ict_timings.t1_skipped_blocks > 0);
+    try std.testing.expect(irreversible_ict_timings.t1_skipped_payload_bytes > 0);
+    try std.testing.expect(irreversible_ict_timings.packet_catalog_payload_bytes_discarded > 0);
+    var irreversible_ict_parallel = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        irreversible_bytes,
+        .{
+            .threads = 3,
+            .resolution_reduction = reduction,
+        },
+    );
+    defer irreversible_ict_parallel.deinit();
+    try std.testing.expectEqualSlices(u16, irreversible_ict_reduced.samples, irreversible_ict_parallel.samples);
+    var transform_path_max_diff: u16 = 0;
+    for (irreversible_reduced.samples, irreversible_ict_reduced.samples) |none_sample, ict_sample| {
+        transform_path_max_diff = @max(
+            transform_path_max_diff,
+            if (none_sample > ict_sample) none_sample - ict_sample else ict_sample - none_sample,
+        );
+    }
+    try std.testing.expect(transform_path_max_diff <= 16);
 }
 
 test "integer 5/3 DWT roundtrips small odd and even dimensions" {
@@ -15642,6 +16249,7 @@ test "foreign reversible QCD profiles decode via the signalled Mb" {
     // (Kakadu: G=1 with widened exponents) rely on this.
     const GuardShift = struct { guard: u8, exponent_delta: i16 };
     const rewrites = [_]GuardShift{
+        .{ .guard = 0, .exponent_delta = 16 },
         .{ .guard = 1, .exponent_delta = 8 },
         .{ .guard = 3, .exponent_delta = -8 },
     };
@@ -18365,7 +18973,7 @@ test "strict QCD marker reader rejects unsupported quantization profile bytes" {
     };
     const cases = [_]QcdCase{
         .{ .label = "unsupported scalar quantization", .offset = 4, .value = 0x41, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "zero guard bits", .offset = 4, .value = 0x00, .expected = codestream.CodestreamError.InvalidCodestream },
+        .{ .label = "zero exponent", .offset = 5, .value = 0x00, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported reversible exponent", .offset = 5, .value = 0x41, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "invalid quantization style", .offset = 4, .value = 0x5f, .expected = codestream.CodestreamError.InvalidCodestream },
     };
@@ -18417,9 +19025,11 @@ test "strict irreversible QCD marker reader rejects malformed quantization bytes
                 corrupted[qcd + 4] = 0x40;
             }
         }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
-        .{ .label = "zero guard bits", .mutate = struct {
+        .{ .label = "zero nominal bitplanes", .mutate = struct {
             fn mutate(corrupted: []u8, qcd: usize) void {
                 corrupted[qcd + 4] = 0x02;
+                corrupted[qcd + 5] = 0x08;
+                corrupted[qcd + 6] = 0x00;
             }
         }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "scalar-derived style with expounded length", .mutate = struct {
@@ -18515,7 +19125,47 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
     }
 }
 
-test "strict marker reader rejects duplicate and misordered supported main marker segments" {
+test "strict decoder accepts QCD before COD in a Part 1 main header" {
+    const allocator = std.testing.allocator;
+    const width = 8;
+    const height = 8;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |pixel| {
+        samples[pixel * 3 + 0] = @intCast((pixel * 3) & 0xff);
+        samples[pixel * 3 + 1] = @intCast((pixel * 5 + 7) & 0xff);
+        samples[pixel * 3 + 2] = @intCast((pixel * 11 + 13) & 0xff);
+    }
+
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+    });
+    defer allocator.free(bytes);
+    const reordered = try moveMarkerSegmentBeforeForTest(
+        allocator,
+        bytes,
+        codestream.markerValue("qcd"),
+        codestream.markerValue("cod"),
+    );
+    defer allocator.free(reordered);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, reordered);
+    defer decoded.deinit();
+    try std.testing.expectEqual(width, decoded.width);
+    try std.testing.expectEqual(height, decoded.height);
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
+test "strict marker reader rejects duplicate and dependency-misordered main marker segments" {
     const allocator = std.testing.allocator;
     const width = 8;
     const height = 8;

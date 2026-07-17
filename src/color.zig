@@ -767,6 +767,72 @@ pub fn inverseRctThreaded(
     };
 }
 
+fn inverseRctSaturatedRange(samples: []u16, planes: RctPlanes, begin: usize, end: usize, max_sample: i32, level_shift: i32) void {
+    const y_plane = planes.planes[0];
+    const cb_plane = planes.planes[1];
+    const cr_plane = planes.planes[2];
+    for (begin..end) |pixel| {
+        const g = y_plane[pixel] + level_shift - floorQuarter(cb_plane[pixel] + cr_plane[pixel]);
+        const r = cr_plane[pixel] + g;
+        const b = cb_plane[pixel] + g;
+        samples[pixel * 3] = @intCast(std.math.clamp(r, 0, max_sample));
+        samples[pixel * 3 + 1] = @intCast(std.math.clamp(g, 0, max_sample));
+        samples[pixel * 3 + 2] = @intCast(std.math.clamp(b, 0, max_sample));
+    }
+}
+
+const SaturatedRctInverseJob = struct {
+    samples: []u16,
+    planes: RctPlanes,
+    begin: usize,
+    end: usize,
+    max_sample: i32,
+    level_shift: i32,
+};
+
+fn saturatedRctInverseWorker(job: *SaturatedRctInverseJob) void {
+    inverseRctSaturatedRange(job.samples, job.planes, job.begin, job.end, job.max_sample, job.level_shift);
+}
+
+/// Reduced-resolution RCT output may overshoot the unsigned component range
+/// because omitted detail bands no longer cancel exactly. Apply the inverse
+/// transform first, then saturate reconstructed RGB samples.
+pub fn inverseRctSaturatedThreaded(
+    allocator: std.mem.Allocator,
+    planes: RctPlanes,
+    requested_threads: usize,
+) !image.RgbImage {
+    const pixels = try validatePixelPlanes(i32, planes, 3);
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    const max_sample = try maxSample(planes.bit_depth);
+    const level_shift = try dcLevelShift(planes.bit_depth);
+    const samples = try allocator.alloc(u16, sample_count);
+    errdefer allocator.free(samples);
+
+    var ranges: [max_rct_workers][2]usize = undefined;
+    const band_count = colorBands(pixels, 1, inverseColorThreadCount(pixels, requested_threads), &ranges);
+    var jobs: [max_inverse_color_workers]SaturatedRctInverseJob = undefined;
+    for (0..band_count) |band| {
+        jobs[band] = .{
+            .samples = samples,
+            .planes = planes,
+            .begin = ranges[band][0],
+            .end = ranges[band][1],
+            .max_sample = max_sample,
+            .level_shift = level_shift,
+        };
+    }
+    runColorJobs(SaturatedRctInverseJob, jobs[0..band_count], saturatedRctInverseWorker);
+
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = planes.bit_depth,
+        .samples = samples,
+    };
+}
+
 pub fn forwardRctThreaded(allocator: std.mem.Allocator, rgb: image.RgbImage, thread_count: usize) !RctPlanes {
     if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
     const pixels = try std.math.mul(usize, rgb.width, rgb.height);
@@ -841,6 +907,25 @@ pub fn forwardIct(allocator: std.mem.Allocator, rgb: image.RgbImage) !IctPlanes 
     var out = try IctPlanes.init(allocator, rgb.width, rgb.height, rgb.bit_depth, 3);
     errdefer out.deinit();
     forwardIctVector(rgb.samples, out.planes[0], out.planes[1], out.planes[2], pixels, shift);
+    return out;
+}
+
+/// MCT=0 irreversible front end: convert each unsigned RGB component to the
+/// floating-point, DC-level-shifted domain without inter-component mixing.
+pub fn forwardNoTransformFloat(allocator: std.mem.Allocator, rgb: image.RgbImage) !IctPlanes {
+    if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
+    const pixels = try std.math.mul(usize, rgb.width, rgb.height);
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
+    const shift: f32 = @floatFromInt(try dcLevelShift(rgb.bit_depth));
+
+    var out = try IctPlanes.init(allocator, rgb.width, rgb.height, rgb.bit_depth, 3);
+    errdefer out.deinit();
+    for (0..pixels) |pixel| {
+        out.planes[0][pixel] = @as(f32, @floatFromInt(rgb.samples[pixel * 3])) - shift;
+        out.planes[1][pixel] = @as(f32, @floatFromInt(rgb.samples[pixel * 3 + 1])) - shift;
+        out.planes[2][pixel] = @as(f32, @floatFromInt(rgb.samples[pixel * 3 + 2])) - shift;
+    }
     return out;
 }
 
@@ -970,6 +1055,65 @@ pub fn inverseIctThreaded(
         };
     }
     runColorJobs(IctInverseJob, jobs[0..band_count], ictInverseWorker);
+
+    return .{
+        .allocator = allocator,
+        .width = planes.width,
+        .height = planes.height,
+        .bit_depth = planes.bit_depth,
+        .samples = samples,
+    };
+}
+
+fn inverseNoTransformFloatRange(samples: []u16, planes: IctPlanes, begin: usize, end: usize, shift: f32, max_sample: i32) void {
+    for (begin..end) |pixel| {
+        samples[pixel * 3] = clampToSample(planes.planes[0][pixel] + shift, max_sample);
+        samples[pixel * 3 + 1] = clampToSample(planes.planes[1][pixel] + shift, max_sample);
+        samples[pixel * 3 + 2] = clampToSample(planes.planes[2][pixel] + shift, max_sample);
+    }
+}
+
+const NoTransformFloatInverseJob = struct {
+    samples: []u16,
+    planes: IctPlanes,
+    begin: usize,
+    end: usize,
+    shift: f32,
+    max_sample: i32,
+};
+
+fn noTransformFloatInverseWorker(job: *NoTransformFloatInverseJob) void {
+    inverseNoTransformFloatRange(job.samples, job.planes, job.begin, job.end, job.shift, job.max_sample);
+}
+
+/// MCT=0 irreversible back end. The reconstruction rule is the same checked
+/// nearest-integer rounding and precision saturation used by inverse ICT.
+pub fn inverseNoTransformFloatThreaded(
+    allocator: std.mem.Allocator,
+    planes: IctPlanes,
+    requested_threads: usize,
+) !image.RgbImage {
+    const pixels = try validatePixelPlanes(f32, planes, 3);
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    const max_sample = try maxSample(planes.bit_depth);
+    const shift: f32 = @floatFromInt(try dcLevelShift(planes.bit_depth));
+    const samples = try allocator.alloc(u16, sample_count);
+    errdefer allocator.free(samples);
+
+    var ranges: [max_rct_workers][2]usize = undefined;
+    const band_count = colorBands(pixels, 1, inverseColorThreadCount(pixels, requested_threads), &ranges);
+    var jobs: [max_inverse_color_workers]NoTransformFloatInverseJob = undefined;
+    for (0..band_count) |band| {
+        jobs[band] = .{
+            .samples = samples,
+            .planes = planes,
+            .begin = ranges[band][0],
+            .end = ranges[band][1],
+            .shift = shift,
+            .max_sample = max_sample,
+        };
+    }
+    runColorJobs(NoTransformFloatInverseJob, jobs[0..band_count], noTransformFloatInverseWorker);
 
     return .{
         .allocator = allocator,

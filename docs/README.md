@@ -9,6 +9,8 @@ The active documentation is intentionally split by purpose. Only
   promotion rules.
 - [`next_steps.md`](next_steps.md) — the current ordered work queue and gates.
 - [`iso_coverage.md`](iso_coverage.md) — evidence-based coverage scorecard.
+- [`part1_corpus.md`](part1_corpus.md) — broad Part 1 capability manifest and
+  reproducible corpus gate.
 - [`architecture.md`](architecture.md) — current design and data flow.
 - [`api.md`](api.md) — CLI and library surfaces.
 

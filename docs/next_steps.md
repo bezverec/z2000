@@ -144,24 +144,91 @@ scorecards. This item is intentionally decode-first.
 
 #### 4.1 Capability And Corpus Matrix
 
-1. Extend `iso_coverage.md` with a broad matrix whose rows distinguish parser,
-   strict decode, encode, malformed-input, and independent-interop status.
-2. Add a machine-readable corpus manifest containing source, version, licence,
-   checksum, exercised feature rows, expected output, and permitted local-only
-   paths. Do not commit redistributability-unclear conformance assets.
-3. Add one runner for the manifest and optional Part 4 corpus. It must report
-   pass, expected fail-closed, unexpected acceptance, and raster mismatch
-   separately.
-4. Seed independent streams for multiple tiles, signed and low-bit-depth
-   components, divergent `QCC`/`COC`, `POC`, `CRG`, `TLM`, and `RGN`. Add
-   `PLM`, `CAP`, and `PRF` cases as applicable to the declared Part 1 profile.
-5. Record OpenJPEG, Grok, and Kakadu disagreement instead of selecting a
+The foundation landed on 2026-07-17:
+
+- `iso_coverage.md` now has an unscored broad matrix separating parser, strict
+  decode, encode, malformed-input, and independent-interop status.
+- `src/testdata/part1-corpus.json` records capability rows, provenance,
+  licence/redistribution status, input hashes, expected native hashes/errors,
+  optional environment-rooted local paths, and exact checksummed PGX
+  references.
+- `zig build part1-corpus` verifies inputs and reports decode pass, expected
+  fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
+- Seven foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+  Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, and a
+  24-part `TLM` layout. Four mutations pin reserved COC/QCC values, TLM length
+  accounting, and signed-component fail-closed behavior.
+- Each entry selects the real planar or interleaved RGB strict path. Both are
+  normalized to one component-major hash, and JP2 entries validate their
+  container metadata before codestream extraction.
+- The official WG1 T.803 corpus is pinned at commit `f6b9ede0` through
+  `tools/setup_part1_corpus.ps1` and remains local under its conformance-use
+  terms. All 16 profile-0 inputs and 18 class-0 PGX references now run with
+  `Z2000_PART4_ROOT`: `p0_01`, `p0_12`, and `p0_16` match reduction-0 samples
+  exactly; 13 broader legal profiles pin the current `UnsupportedPayload`
+  boundary. Supporting QCD-before-COD ordering moved `p0_01` from a
+  discrepancy to an exact pass, and legal zero QCD guard bits move `p0_10` to
+  the deliberate subsampled-MCT boundary.
+- The PGX oracle now accepts reference lists, component selectors, signed or
+  unsigned 1..16-bit ML/LM samples, reduction metadata, peak-error limits, and
+  independent MSE limits. Every declared reference is checksum-verified even
+  when its input is an expected fail-closed profile.
+- `DecodeOptions.resolution_reduction` now drives direct partial synthesis for
+  bounded single-tile decode: reversible 5/3 no-MCT through planar, grayscale,
+  and interleaved output, reversible RCT/5/3 through interleaved RGB, and
+  irreversible 9/7 with either no MCT or ICT through interleaved RGB. It
+  preserves odd dimensions, dequantizes only retained 9/7 bands, applies the
+  inverse component transform before checked output saturation, rejects
+  reductions above COD/NL, and is wired into each corpus reference. It does
+  not synthesize a full raster and downsample it.
+- Reduced decode now validates the complete packet-header catalog but skips T1
+  entropy reconstruction for detail subbands at or below the discarded DWT
+  levels. Both sequential and parallel paths report skipped blocks and payload
+  bytes through `DecodeTimings`; full-resolution decode reports zero.
+- After that complete validation, reduced decode compacts each component's
+  working block catalog to retain payload only for the selected subbands.
+  Discarded blocks keep their lengths, segmentation, and geometry for audit;
+  `DecodeTimings` reports retained and discarded catalog bytes.
+- Resolution selection now reaches packet assembly itself. Discarded payload
+  spans are range-checked and consumed according to the fully decoded headers,
+  but are not appended to component-owned buffers. The materialized-byte
+  counter equals the final retained-byte count in sequential and parallel
+  regression paths.
+- The production single-tile inline reader now uses absolute checked spans into
+  the caller-owned codestream and allocates packet entries but no normalized
+  packet-byte copy. SOP advances the borrowed packet start after validating its
+  marker/sequence; EPH is represented by separate header/body spans whose
+  consumption is checked independently. The public catalog remains owned, and
+  PPT/PPM store only their decoded T2 headers in an auxiliary owned buffer while
+  borrowing SOD body spans. Timings report borrowed versus materialized input
+  bytes; the internal single-tile production path no longer normalizes a full
+  packet-byte stream for inline, PPT, or PPM headers.
+
+The active G0/G4 corpus expansion is:
+
+1. Carry the landed single-tile no-MCT/RCT/ICT reduction through sampled
+   components and multi-tile assembly, and add native-planar 9/7 output, so the
+   applicable non-zero-reduction T.803 references can become decode passes.
+   The 9/7 slice already pins reduced support extents, selective
+   dequantization, floating-point workspace bounds, inverse ICT,
+   nearest-integer reconstruction, and precision saturation; reduced RCT pins
+   post-transform rather than chroma-plane saturation. Keep the public packet
+   catalog owned and the production scatter/gather validation pinned
+   throughout.
+2. Add class-1 all-component reference lists as G1/G2 make those profiles
+   decodable, retaining the published peak and MSE bounds per component.
+3. Add licensed or local-only independent streams for >16-bit layouts and
+   explicit `PLM`, `CAP`, and `PRF` handling where applicable. Broaden the
+   seeded `TLM` case as G3 requires.
+4. Record OpenJPEG, Grok, and Kakadu disagreement instead of selecting a
    convenient oracle. Part 4 expected results and exact samples take priority
    when available.
+5. Map the remaining public profiles to manifested decode and malformed cases,
+   then run optional assets with `--require-optional` in release evidence.
 
 Exit when every existing public profile maps to the new matrix and the runner
-can demonstrate at least one expected unsupported row without inflating the
-current 100/100 bounded scores.
+can evaluate the relevant T.803 references and tolerances without inflating
+the current 100/100 bounded scores.
 
 #### 4.2 Generic Native Sample Carrier
 

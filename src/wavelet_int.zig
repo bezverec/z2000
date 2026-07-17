@@ -6,12 +6,14 @@ pub const TransformError = error{
     TooManyLevels,
 };
 
-const LevelShape = struct {
+pub const ResolutionShape = struct {
     width: usize,
     height: usize,
     x0: u32 = 0,
     y0: u32 = 0,
 };
+
+const LevelShape = ResolutionShape;
 
 const vertical_lanes = simd.i32_lanes;
 const VerticalVector = @Vector(vertical_lanes, i32);
@@ -181,17 +183,37 @@ pub fn inverse53WithWorkspaceOrigin(
     x0: u32,
     y0: u32,
 ) !void {
+    _ = try inverse53ReducedWithWorkspaceOrigin(workspace, data, width, height, levels, 0, x0, y0);
+}
+
+/// Reconstructs the resolution obtained after discarding `reduction` finest
+/// DWT levels. The returned samples occupy the top-left `width` x `height`
+/// rectangle of `data` with the original full-resolution row stride; callers
+/// may compact that rectangle without ever synthesizing the discarded levels.
+pub fn inverse53ReducedWithWorkspaceOrigin(
+    workspace: *Workspace,
+    data: []i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+    x0: u32,
+    y0: u32,
+) !ResolutionShape {
     if (width == 0 or height == 0 or data.len != width * height) {
         return TransformError.InvalidDimensions;
     }
+    if (reduction > levels) return TransformError.InvalidDimensions;
 
     var shapes: [32]LevelShape = undefined;
+    var resolutions: [33]ResolutionShape = undefined;
     if (levels > shapes.len) return TransformError.TooManyLevels;
 
     var cur_width = width;
     var cur_height = height;
     var cur_x0 = x0;
     var cur_y0 = y0;
+    resolutions[0] = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 };
     var actual_levels: u8 = 0;
     while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
         shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
@@ -200,14 +222,21 @@ pub fn inverse53WithWorkspaceOrigin(
         if (cur_width == 0 or cur_height == 0) return TransformError.InvalidDimensions;
         cur_x0 = ceilDiv2(cur_x0);
         cur_y0 = ceilDiv2(cur_y0);
+        resolutions[@as(usize, actual_levels) + 1] = .{
+            .width = cur_width,
+            .height = cur_height,
+            .x0 = cur_x0,
+            .y0 = cur_y0,
+        };
     }
+    if (reduction > actual_levels) return TransformError.InvalidDimensions;
 
     const max_dim = @max(width, height);
     try workspace.require(max_dim);
     const scratch = workspace.scratch;
 
     var level = actual_levels;
-    while (level > 0) {
+    while (level > reduction) {
         level -= 1;
         const shape = shapes[level];
 
@@ -219,6 +248,7 @@ pub fn inverse53WithWorkspaceOrigin(
 
         inverse53ColumnsOrigin(data, width, shape.width, shape.height, scratch, shape.y0);
     }
+    return resolutions[reduction];
 }
 
 fn rowSlice(data: []i32, stride: usize, row: usize, len: usize) []i32 {

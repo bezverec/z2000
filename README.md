@@ -8,7 +8,7 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-16, both the narrow RGB lossless JP2 target and the broader
+of 2026-07-17, both the narrow RGB lossless JP2 target and the broader
 JPEG2000 Part 1 engineering scorecard are estimated at **100/100**. The current
 prerelease is [`v0.2.0-rc.1`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.1).
 This is a project-readiness estimate, not a formal ISO conformance
@@ -36,8 +36,10 @@ certification.
   XMP, ICC APP2, and arbitrary Photoshop resources fail closed.
 - Lossless JP2 encoding with RCT, reversible 5/3 DWT, quality layers, all five
   progression orders, PLT/TLM, and strict no-sidecar decode.
-- Lossy JP2 encoding with ICT, irreversible 9/7 DWT, scalar-derived or
-  scalar-expounded quantization, and rate allocation.
+- Lossy JP2 encoding with irreversible 9/7 DWT, ICT or bounded single-tile
+  no-MCT component coding, scalar-derived or scalar-expounded quantization,
+  and rate allocation. Single-tile no-MCT or transform-appropriate RCT/ICT
+  decode can reconstruct a selected lower DWT resolution directly.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
@@ -98,6 +100,17 @@ git clone https://github.com/bezverec/z2000.git
 cd z2000
 zig build
 zig build test
+zig build part1-corpus
+```
+
+The official T.803 profile-0 files are optional and stay outside the
+repository. On PowerShell, pin the maintained WG1 checkout and require every
+local corpus entry with:
+
+```powershell
+.\tools\setup_part1_corpus.ps1
+$env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
+zig build part1-corpus -- --require-optional
 ```
 
 Build an optimized native binary:
@@ -117,13 +130,13 @@ Inspect the application version and exact source provenance:
 
 ```sh
 zig build run -- --version
-# z2000 0.1.0-dev.382+ge93a31e0
+# z2000 0.2.0-dev.BUILD+gCOMMIT
 ```
 
-z2000 starts conservatively on the `0.1.x` line. Development builds use the
-SemVer form `0.1.0-dev.BUILD+gCOMMIT`; release builds use
-`0.1.0+build.BUILD.gCOMMIT`, and release candidates use
-`0.1.0-rc.N+build.BUILD.gCOMMIT`. `BUILD` is the reachable Git commit count
+The active development line is `0.2.x`. Development builds use the SemVer
+form `0.2.0-dev.BUILD+gCOMMIT`; release builds use
+`0.2.0+build.BUILD.gCOMMIT`, and release candidates use
+`0.2.0-rc.N+build.BUILD.gCOMMIT`. `BUILD` is the reachable Git commit count
 and `COMMIT` is the eight-character revision. See
 [Versioning](docs/versioning.md) for release and source-archive rules.
 
@@ -434,6 +447,7 @@ Detailed notes live in `docs/`:
 - [Architecture](docs/architecture.md)
 - [API notes](docs/api.md)
 - [ISO coverage scorecard](docs/iso_coverage.md)
+- [Part 1 corpus gate](docs/part1_corpus.md)
 - [Roadmap](docs/roadmap.md)
 - [Next steps](docs/next_steps.md)
 - [Optimization plan](docs/optimization_plan.md)

@@ -1,7 +1,8 @@
 # Versioning
 
 z2000 uses Semantic Versioning for the application, CLI, and future public
-library API. It begins conservatively at **0.1.0**. The project reaching its
+library API. It began conservatively at **0.1.0** and the active development
+line is **0.2.0**. The project reaching its
 internal ISO engineering scorecard does not by itself make the external API,
 CLI, supported-profile envelope, or compatibility policy stable enough for
 1.0.0.
@@ -15,18 +16,18 @@ Application versions are independent of:
 ## Version Forms
 
 The root `VERSION` file contains the manually selected base release line, now
-`0.1.0`.
+`0.2.0`.
 
 A normal build reports:
 
 ```text
-0.1.0-dev.BUILD+gCOMMIT
+0.2.0-dev.BUILD+gCOMMIT
 ```
 
 A release-mode build (`-Drelease=true`) reports:
 
 ```text
-0.1.0+build.BUILD.gCOMMIT
+0.2.0+build.BUILD.gCOMMIT
 ```
 
 A release candidate adds an explicit prerelease label:
@@ -38,7 +39,7 @@ zig build -Drelease=true -Dprerelease=rc.1 -Doptimize=ReleaseFast
 and reports:
 
 ```text
-0.1.0-rc.1+build.BUILD.gCOMMIT
+0.2.0-rc.1+build.BUILD.gCOMMIT
 ```
 
 `-Dprerelease` is accepted only with `-Drelease=true`. The complete generated
@@ -55,8 +56,8 @@ Where:
 For example:
 
 ```text
-z2000 0.1.0-dev.382+ge93a31e0.dirty
-z2000 0.1.0+build.382.ge93a31e0
+z2000 0.2.0-dev.410+g01234567.dirty
+z2000 0.2.0+build.410.g01234567
 ```
 
 The numeric build identifier participates in development-version ordering.
@@ -70,15 +71,15 @@ history.
 An exported source tree without `.git` builds as:
 
 ```text
-0.1.0-dev.0+gunknown
+0.2.0-dev.0+gunknown
 ```
 
 Package and CI systems should inject known provenance explicitly:
 
 ```sh
 zig build \
-  -Dbuild-number=382 \
-  -Dgit-sha=e93a31e0 \
+  -Dbuild-number=410 \
+  -Dgit-sha=01234567 \
   -Dgit-dirty=false
 ```
 
@@ -91,9 +92,10 @@ should prefer a full clone so the default commit count remains meaningful.
   work that does not intentionally broaden or break the public surface.
 - Increment `MINOR` for meaningful new codec profiles, formats, CLI/API
   capability, or intentional pre-1.0 compatibility changes.
-- Keep release tags in the form `vMAJOR.MINOR.PATCH`, beginning with `v0.1.0`.
-- Keep prerelease tags in the form `vMAJOR.MINOR.PATCH-rc.N`, beginning with
-  `v0.1.0-rc.1`.
+- Keep release tags in the form `vMAJOR.MINOR.PATCH`; the current line is
+  `v0.2.0`.
+- Keep prerelease tags in the form `vMAJOR.MINOR.PATCH-rc.N`; the current
+  candidate line began with `v0.2.0-rc.1`.
 - Do not reset or hand-edit `BUILD`; it is derived from repository history.
 
 The `VERSION` file names the next release line during development. After a

@@ -5,6 +5,98 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Part 1 Corpus Gate
+
+- Added an unscored broad Part 1 readiness matrix, separate from the completed
+  bounded 100/100 scorecards, with explicit parser/decode/encode/malformed/
+  independent-interop status.
+- Added a machine-readable provenance, licence, input-checksum, capability,
+  and expected-result manifest plus `zig build part1-corpus`. The runner uses
+  the selected production planar or interleaved RGB strict decoder, validates
+  JP2 metadata before extraction, canonicalizes both paths to one native hash,
+  and distinguishes decode pass, expected
+  fail-closed, unexpected acceptance, native-raster mismatch, and skipped
+  optional local assets.
+- Expanded the seed to seven foreign-encoded fixtures: sampled Kakadu
+  multi-tile/POC/origin, Grok CMYK, Kakadu all-six-bit T1, uniform COC/QCC,
+  and padded multipart TLM. Four input-hash-verified mutations pin invalid COC,
+  QCC and TLM plus unsupported signed-SIZ fail-closed behavior.
+- Added PGX reference-list comparison and a reproducible local setup for the
+  official WG1 T.803 corpus pinned at commit `f6b9ede0`. The oracle supports
+  component/reduction selectors, signed or unsigned 1..16-bit ML/LM samples,
+  exact peak limits, and independent MSE limits. All 16 optional profile-0
+  inputs and 18 class-0 references are checksummed; three reduction-0 cases
+  decode exactly and 13 return expected `UnsupportedPayload`. The full
+  27-entry gate reports 10 decode passes, 17 expected fail-closed cases, no
+  mismatch, and no skip when optional assets are required.
+- Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
+  until COD supplies the transform and decomposition context. Official T.803
+  `p0_01` moved from `InvalidCodestream` to an exact PGX pass, with a committed
+  marker-order regression test.
+- Accepted the Part 1-legal zero value for QCD guard bits and derived band
+  bitplane counts without unsigned underflow. A pixel-exact rewrite test covers
+  `G=0`; official T.803 `p0_10` now reaches the deliberate subsampled-MCT
+  `UnsupportedPayload` boundary instead of being misclassified as malformed.
+- Added the first production reduced-resolution decode slice through
+  `DecodeOptions.resolution_reduction`. Bounded single-tile reversible 5/3
+  no-MCT planar, grayscale, and interleaved decoders now stop inverse synthesis
+  before discarded detail levels, compact the correct odd-sized grid, and
+  saturate reduced samples to component precision. The corpus runner applies
+  each PGX reference's reduction selector directly. Invalid reductions and,
+  at this first checkpoint, reduced MCT/9-7/multi-tile profiles remained
+  fail-closed; the no-MCT 9/7 extension is recorded below.
+- Made reduced decode selective before T1 entropy reconstruction. The complete
+  packet-header catalog is still validated, but code-blocks belonging only to
+  discarded detail levels are skipped in sequential and parallel workers.
+  `DecodeTimings` reports skipped blocks and payload bytes; full-resolution
+  decode must report zero.
+- Compacted the reduced-resolution working packet-block catalog after complete
+  packet-header and payload-length validation. Discarded blocks retain their
+  geometry, segment lengths, and cumulative byte counts for audit, while only
+  selected subband payloads remain resident for T1 reconstruction.
+  `DecodeTimings` reports retained and discarded catalog bytes, and regression
+  coverage proves their sum equals the full-resolution payload. Packet
+  assembly now receives the resolution selection directly: discarded payload
+  spans are still length/range validated and consumed, but are never appended
+  to component-owned buffers. A materialized-byte counter is pinned equal to
+  retained bytes for reduced decode. The normalized input packet catalog still
+  owned a full packet-stream copy at that checkpoint.
+- Added an internal zero-copy packet catalog for the common single-tile inline
+  profile. Entries carry absolute validated spans into the caller-owned
+  codestream, while the public catalog stays owned. If packed
+  headers appear after borrowed entries, those entries are materialized and
+  remapped before parsing continues. Decode timings report borrowed and
+  materialized input bytes; regressions pin zero materialization for one- and
+  three-layer inline reduced decode.
+- Extended that zero-copy view through SOP/EPH framing. SOP length and sequence
+  are validated before the borrowed start advances past the marker; EPH entries
+  carry distinct header/body spans, and T2 must consume both exactly. A
+  pixel-exact reduced regression pins zero packet-byte materialization for
+  SOP+EPH.
+- Extended the scatter/gather view through PPT and PPM. Packed T2 headers are
+  copied into a compact auxiliary header buffer because their marker segments
+  are temporary/fragmented, but SOD bodies remain absolute borrowed spans and
+  no full normalized packet stream is built. Reduced SOP+EPH regressions for
+  both PPT and PPM require nonzero header materialization, nonzero borrowed
+  bodies, exact header/body consumption, and pixel-identical output.
+- Extended reduced-resolution synthesis to bounded single-tile irreversible
+  9/7 with MCT disabled. Discarded detail bands are neither T1-decoded nor
+  dequantized; the float inverse DWT stops at the requested level, compacts the
+  odd-origin-aware grid, then applies nearest-integer rounding and declared-
+  precision saturation. Sequential and parallel output is deterministic.
+- Corrected the single-tile irreversible `mct=none` encode/decode semantics:
+  components now receive only the DC level shift instead of silently applying
+  ICT while signalling no transform. A full-resolution quality bound and a
+  selective-decode regression pin the corrected stream behavior.
+- Extended single-tile reduced reconstruction through both Part 1 RGB
+  component transforms: reversible RCT/5/3 and irreversible ICT/9/7 now run on
+  the compact reconstructed planes. RCT output saturates only after inverse
+  colour transformation so legal chroma differences are not clipped early;
+  ICT shares the float path's nearest-integer reconstruction. Sequential and
+  parallel results are exact, and cross-path no-MCT comparisons carry bounded
+  difference gates. Sampled, multi-tile, and native-planar 9/7 reduction remain
+  fail-closed.
+
 ### General-Purpose Part 1 Planning
 
 - Extended the roadmap and active queue from the completed bounded profiles to

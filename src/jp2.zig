@@ -2147,11 +2147,9 @@ fn validateQcdPayloadBytes(segment: []const u8, cod: CodSegmentInfo) !void {
     // The JP2 boundary validates the QCD shape and bounds. Strict codestream
     // decode consumes the signalled irreversible step sizes for Mb sizing and
     // dequantization; the wrapper must not require z2000's local norm table.
-    if (cod.transform != 1) {
-        if (guard_bits == 0 or guard_bits > 7) return Jp2Error.InvalidCodestream;
-    } else if (guard_bits == 0 or guard_bits > 7) {
-        return Jp2Error.InvalidCodestream;
-    }
+    // G is the unsigned three-bit field in Sqcd, so zero is legal. The step
+    // validators below still reject an unusable Mb outside 1..31.
+    if (guard_bits > 7) return Jp2Error.InvalidCodestream;
     const bands: u16 = 1 + 3 * @as(u16, cod.levels);
     if (cod.transform == 0) {
         if (quantization_style == 1) {
@@ -2185,7 +2183,9 @@ fn validateScalarQcdStep(payload: []const u8, cursor: *usize, guard_bits: u8) !v
     cursor.* += 2;
     const epsilon: u8 = @intCast(value >> 11);
     if (epsilon == 0) return Jp2Error.InvalidCodestream;
-    const nominal = @as(u16, epsilon) + guard_bits - 1;
+    const sum = @as(u16, epsilon) + guard_bits;
+    if (sum == 0) return Jp2Error.InvalidCodestream;
+    const nominal = sum - 1;
     if (nominal == 0 or nominal > 31) return Jp2Error.InvalidCodestream;
 }
 
@@ -2201,7 +2201,9 @@ fn validateReversibleQcdExponents(payload: []const u8, start: usize, bands: u16,
         if ((value & 0x07) != 0) return Jp2Error.UnsupportedProfile;
         const epsilon = value >> 3;
         if (epsilon == 0) return Jp2Error.InvalidCodestream;
-        const nominal = @as(u16, epsilon) + guard_bits - 1;
+        const sum = @as(u16, epsilon) + guard_bits;
+        if (sum == 0) return Jp2Error.InvalidCodestream;
+        const nominal = sum - 1;
         if (nominal == 0 or nominal > 31) return Jp2Error.InvalidCodestream;
         cursor += 1;
     }
