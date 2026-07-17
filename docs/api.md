@@ -211,8 +211,9 @@ Supported public JP2 profiles are still narrow:
 Unsupported combinations still fail closed. Examples include tile-part
 division/progression mismatches, JPX features, unsupported component layouts,
 and profile mixes outside the bounded envelope. In
-multi-tile mode, BYPASS without TERMALL and non-empty PLT-less multipart tiles
-without PPM-backed RPCL/`R` derivation also remain unsupported. PPM/PPT are
+multi-tile mode, BYPASS without TERMALL and broader sampled PPM/PPT plus POC
+combinations remain unsupported. Inline PLT-less multipart streams derive
+packet counts from stateful T2 headers at each checked `Psot` boundary. PPM/PPT are
 mutually exclusive and multi-tile PPT
 additionally rejects non-`R` layouts.
 SOP is enabled by default for the current narrow profile. EPH is available via `--eph`; current OpenJPEG/Grok
@@ -276,7 +277,9 @@ Primary public functions:
   exposes each precision through `component_bit_depths`/
   `componentBitDepth(component)`. Bounded subsampled no-MCT streams expose
   variable plane shapes through `component_widths`, `component_heights`, and
-  `componentDimensions(component)`. `DecodeOptions.resolution_reduction`
+  `componentDimensions(component)`. Uniform sampled RCT decode is additionally
+  supported when all three transformed components share sampling and precision.
+  `DecodeOptions.resolution_reduction`
   reconstructs a requested lower DWT resolution directly for bounded
   single-tile reversible 5/3 no-MCT streams, including component-sampled
   layouts. Each sampled plane preserves its own reduced dimensions and
@@ -299,6 +302,13 @@ Primary public functions:
   paths retain only decoded T2 headers in a small auxiliary owned buffer while
   borrowing SOD bodies. Public `readStrictPacketCatalog` always returns a fully
   normalized owned catalog
+- `decodeLosslessCodestreamComponentsWithOptions(allocator, bytes, options)` —
+  conformance/diagnostic variant that returns unsigned formatted codestream
+  components after inverse DWT but before inverse RCT in the current bounded
+  profile. This is distinct
+  from normal output-component decode and is used for T.803 class-0 PGX
+  references; transformed chroma components saturate to their declared output
+  precision
 - `encodeLosslessSampledPlanarWithOptions(allocator, planes, sampling, options)`
   — sampled reversible encode: per-component dimensions + `ComponentSampling`
   (XRsiz/YRsiz), RPCL, one or more untargeted quality layers, and reversible
@@ -432,9 +442,14 @@ is zero for mixed `BPCC` layouts. In the latter case
 `Info.component_bit_depths[0..Info.components]` carries the unsigned 8/16-bit
 precision of every codestream component; `componentBitDepth(index)` provides a
 checked lookup. The strict planar decoder reconstructs matching single-tile
-RPCL, reversible 5/3, no-MCT codestreams with per-component QCD/QCC state.
-The legacy RGB/TIFF API remains uniform-depth; mixed multi-tile, MCT, 9/7, and
-quantized profiles remain fail-closed.
+RPCL, reversible 5/3, no-MCT codestreams with per-component QCD/QCC state. It
+also returns native planes for the bounded uniform unsigned no-MCT 9/7 profile,
+using scalar-derived or scalar-expounded quantization at full or reduced
+resolution. `decodeLosslessCodestreamComponentsWithOptions` additionally
+returns reduced pre-ICT planes for bounded three-component ICT/9/7 streams with
+component-specific scalar-expounded QCC steps. The legacy RGB/TIFF API remains
+uniform-depth; mixed multi-tile and broader quantized planar profiles remain
+fail-closed.
 
 `Info.component_xrsiz` and `Info.component_yrsiz` expose each codestream
 component's SIZ sampling factors; `componentSampling(index)` returns the pair.
@@ -450,6 +465,11 @@ inverse DWT. Image and tile-partition origins are retained independently in
 single- and multi-tile component plans; absolute tile rectangles are translated
 into native-size image-local output planes per component. PPM combined with sampled
 POC and MCT over subsampled planes remain fail-closed. The explicit
+`DecodeOptions.resolution_reduction` applies to sampled no-MCT reversible 5/3
+on single- and multi-tile streams. It returns each component at its independently
+reduced native dimensions while retaining complete packet-header validation
+and skipping discarded T1 detail payloads. Inline, PPT, and PPM headers are
+supported in this bounded profile. The explicit
 `decodeLosslessPlanarUpsampled` boundary expands native planes using absolute
 reference-grid registration; `decode-temp-jp2` interleaves them only for a
 bounded three-component sRGB JP2 wrapper. `Info.color_space` preserves the

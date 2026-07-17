@@ -164,11 +164,19 @@ The foundation landed on 2026-07-17:
 - The official WG1 T.803 corpus is pinned at commit `f6b9ede0` through
   `tools/setup_part1_corpus.ps1` and remains local under its conformance-use
   terms. All 16 profile-0 inputs and 18 class-0 PGX references now run with
-  `Z2000_PART4_ROOT`: `p0_01`, `p0_12`, and `p0_16` match reduction-0 samples
-  exactly; 13 broader legal profiles pin the current `UnsupportedPayload`
-  boundary. Supporting QCD-before-COD ordering moved `p0_01` from a
-  discrepancy to an exact pass, and legal zero QCD guard bits move `p0_10` to
-  the deliberate subsampled-MCT boundary.
+  `Z2000_PART4_ROOT`: `p0_01`, `p0_02`, `p0_11`, `p0_12`, `p0_16`, `p0_04`,
+  `p0_09`, `p0_10`, and `p0_14` pass their class-0 references; seven broader legal
+  profiles pin the current fail-closed boundary. QCD-before-COD moved `p0_01`
+  to an exact pass;
+  uniform full COC, LRCP layers, SOP/EPH, T1 termination styles, and reserved
+  segment-less marker handling move `p0_02` to an exact pass;
+  bounded single-span edge clipping plus NL=0/EPH/SEGMARK move `p0_11` to an
+  exact 128x1 pass while general B.7 clamping stays fail-closed;
+  component-specific irreversible QCC plus reduced ICT/9-7 codestream-component
+  output covers `p0_04`; reduced no-MCT 9/7 and reversible saturation cover
+  `p0_09`/`p0_14`; and legal zero
+  guard bits plus sampled RCT and inline PLT-less multipart state cover
+  `p0_10`.
 - The PGX oracle now accepts reference lists, component selectors, signed or
   unsigned 1..16-bit ML/LM samples, reduction metadata, peak-error limits, and
   independent MSE limits. Every declared reference is checksum-verified even
@@ -213,22 +221,27 @@ The foundation landed on 2026-07-17:
 
 The active G0/G4 corpus expansion is:
 
-1. Carry the landed single-tile no-MCT/RCT/ICT, sampled no-MCT, and common-grid
-   multi-tile RCT/ICT reduction through sampled multi-tile assembly, extend
-   sampling through applicable colour transforms, and add native-planar 9/7
-   output, so the applicable non-zero-reduction T.803 references can become
-   decode passes.
+1. Extend sampling through the remaining applicable colour transforms and
+   component layouts. Uniform sampled RCT now decodes in output-component and
+   codestream-component space and passes multipart T.803 `p0_10`. Native-planar
+   no-MCT 9/7 output now covers bounded single-tile scalar-derived and scalar-
+   expounded streams at full and reduced resolution. Sampled no-MCT 5/3
+   selection now covers single- and multi-tile streams: tile-component packet
+   selection, T1 skipping, partial
+   synthesis, and assembly all use the independent sampled/reduced grid.
    The 9/7 slice already pins reduced support extents, selective
    dequantization, floating-point workspace bounds, inverse ICT,
    nearest-integer reconstruction, and precision saturation; reduced RCT pins
-   post-transform rather than chroma-plane saturation. Keep the public packet
-   catalog owned and the production scatter/gather validation pinned
-   throughout.
+   post-transform rather than chroma-plane saturation. The sampled multi-tile
+   oracle covers odd image/tile bounds and inline, PPT, and PPM headers. Keep
+   the public packet catalog owned and the production scatter/gather
+   validation pinned throughout.
 2. Add class-1 all-component reference lists as G1/G2 make those profiles
    decodable, retaining the published peak and MSE bounds per component.
 3. Add licensed or local-only independent streams for >16-bit layouts and
    explicit `PLM`, `CAP`, and `PRF` handling where applicable. Broaden the
-   seeded `TLM` case as G3 requires.
+   seeded `TLM` case as G3 requires. Inline PLT-less multipart packet-count
+   derivation is complete; packed-header/POC combinations remain.
 4. Record OpenJPEG, Grok, and Kakadu disagreement instead of selecting a
    convenient oracle. Part 4 expected results and exact samples take priority
    when available.
@@ -279,8 +292,9 @@ Implement in small marker-to-raster slices:
    on sample reconstruction rather than parser-only acceptance.
 2. `PLM` packet lengths and applicable `CAP`/`PRF` profile signalling with
    checked consistency against `Rsiz` and actual payload behavior.
-3. General legal tile-part ordering and repetition, including non-empty
-   PLT-less multipart streams and checked `TLM` variations.
+3. General legal tile-part ordering and repetition beyond the landed inline
+   PLT-less multipart state machine, including packed-header combinations and
+   checked `TLM` variations.
 4. Legal `POC` schedules across inline, `PPT`, and `PPM` headers, removing the
    current sampled `PPM` + `POC` fail-closed boundary only after packet identity
    is unambiguous.

@@ -417,9 +417,8 @@
         "redistribution": "optional local asset; not redistributed by z2000"
       },
       "oracle": "T.803 class-0 c0p0_02.pgx at reduction 0, peak error 0, MSE 0",
-      "features": ["siz-subsampled-components", "packet-header-placement", "t1-code-block-styles", "reversible-53"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "features": ["siz-subsampled-components", "cod-qcd-component-overrides", "progression-poc", "packet-header-placement", "t1-code-block-styles", "reversible-53"],
+      "expectation": "decode_pass",
       "references": [{
         "path": "reference_class0_profile0/c0p0_02.pgx",
         "sha256": "7d7924248477c4368eadd508234545acca9f790e5cd2f888651de44b0ae9e9f9",
@@ -445,9 +444,8 @@
         "redistribution": "optional local asset; not redistributed by z2000"
       },
       "oracle": "T.803 class-0 c0p0_11.pgx at reduction 0, peak error 0, MSE 0",
-      "features": ["t1-code-block-styles", "reversible-53"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "features": ["packet-header-placement", "t1-code-block-styles", "reversible-53"],
+      "expectation": "decode_pass",
       "references": [{
         "path": "reference_class0_profile0/c0p0_11.pgx",
         "sha256": "4a4457e31466d9a78d332fea16237da57cd4b2f3d4fa6dee0074fa568b282765",
@@ -660,14 +658,14 @@
       },
       "oracle": "T.803 class-0 c0p0_04.pgx at reduction 3, peak error <= 33, MSE <= 55.8",
       "features": ["cod-qcd-component-overrides", "irreversible-97"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "expectation": "decode_pass",
       "references": [{
         "path": "reference_class0_profile0/c0p0_04.pgx",
         "sha256": "3bd0ba5ab481a5415e7272fd03a5c8463ffc223c09b3954ead086c7556502cea",
         "format": "pgx",
         "component": 0,
         "resolution_reduction": 3,
+        "space": "codestream_components",
         "max_peak_error": 33,
         "max_mse": 55.8
       }]
@@ -772,8 +770,7 @@
       },
       "oracle": "T.803 class-0 c0p0_09.pgx at reduction 2, peak error <= 4, MSE <= 1.47",
       "features": ["irreversible-97"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "expectation": "decode_pass",
       "references": [{
         "path": "reference_class0_profile0/c0p0_09.pgx",
         "sha256": "ce4dcf09fbd8076527f8d3ea83d9a6c23e24c8aa50f74ac7cd943695f59c875a",
@@ -800,14 +797,14 @@
       },
       "oracle": "T.803 class-0 c0p0_10.pgx at reduction 0, peak error <= 10, MSE <= 2.84",
       "features": ["siz-subsampled-components", "tiles-and-tile-parts", "reversible-53"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "expectation": "decode_pass",
       "references": [{
         "path": "reference_class0_profile0/c0p0_10.pgx",
         "sha256": "c58b9eb2901a78519af6eec0946a38a9ebb01bc9bb429fb3ea7cc4fc7e9a0bfb",
         "format": "pgx",
         "component": 0,
         "resolution_reduction": 0,
+        "space": "codestream_components",
         "max_peak_error": 10,
         "max_mse": 2.84
       }]
@@ -828,14 +825,14 @@
       },
       "oracle": "T.803 class-0 c0p0_14.pgx at reduction 2, peak error 0, MSE 0",
       "features": ["reversible-53"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "expectation": "decode_pass",
       "references": [{
         "path": "reference_class0_profile0/c0p0_14.pgx",
         "sha256": "c556ab741f9b7d0a519830d9d609fd68366d7af200a9c2dd740e18218ced8fba",
         "format": "pgx",
         "component": 0,
         "resolution_reduction": 2,
+        "space": "codestream_components",
         "max_peak_error": 0,
         "max_mse": 0
       }]

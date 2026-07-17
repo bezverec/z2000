@@ -192,6 +192,38 @@ The public strict packet diagnostic follows the same per-tile sampled catalogs
 and rebases only their normalized byte storage when returning a whole-stream
 view, so it does not maintain a second geometry or T2 parser.
 
+Inline PLT-less multipart streams carry no packet count at the Stage B frame
+scan. Their spans therefore retain an explicit deferred-count state and exact
+`Psot` boundary. Stage C resumes the tile-local packet sequence and persistent
+inclusion/zero-bitplane tag trees plus `numlenbits` state, decodes headers until
+that boundary, and validates the accumulated count against the full tile plan.
+This also handles interleaved tiles, `TNsot == 0`, and empty padding parts;
+hybrid or inconsistent PLT accounting is malformed.
+
+Conformance decode distinguishes output image components from codestream image
+components. The normal path applies the profile's inverse component transform;
+the currently bounded diagnostic path covers RCT and stops
+after inverse DWT and unsigned component formatting, which lets T.803 class-0
+PGX references compare at their specified pre-MCT boundary without changing
+normal RGB semantics.
+
+Resolution reduction follows that same geometry. For sampled multi-tile 5/3,
+each tile-component selects retained packets, skips discarded T1 blocks, and
+performs partial inverse lifting at its absolute component origin. Assembly
+first maps the clipped reference tile through `XRsiz/YRsiz`, then reduces those
+component coordinates; this preserves odd image, tile, and sampling phases
+without synthesizing or upsampling a full raster.
+
+The single-tile irreversible planar backend reuses the same strict block
+catalog without interleaving through a temporary RGB image. Each component owns
+its quantized coefficient plane, effective QCD/QCC-derived subband steps, float
+9/7 inverse job, reduced shape, and final precision saturation. The normal
+surface covers no-MCT output; the conformance surface also exposes pre-ICT
+codestream components for bounded three-component ICT streams, preserving
+component-specific QCC state. Bounded component jobs share the existing worker
+runner, while nearest-integer output matches the established interleaved
+no-MCT reconstruction exactly.
+
 ## JP2 And Metadata
 
 `src/jp2.zig` validates the JP2 signature, `ftyp`, `jp2h`, `ihdr`, optional

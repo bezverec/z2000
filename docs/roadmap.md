@@ -146,10 +146,11 @@ Seven committed foreign-encoded streams cover sampled origins/POC,
 four-component CMYK, all T1 style bits, uniform COC/QCC, and padded multipart
 TLM; four mutations pin malformed and unsupported fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
-16 profile-0 streams and 18 class-0 PGX references are checksummed. Three
-streams produce exact reduction-0 passes and 13 pin expected fail-closed
-boundaries, for a complete 27-entry result of ten decode passes and 17 expected
-fail-closed cases. The oracle already represents component/reduction selectors,
+16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
+pass their class-0 references and seven pin expected fail-closed boundaries, for
+a complete 27-entry result of 16 decode passes and 11 expected fail-closed
+cases. The oracle represents component/reduction selectors, pre-/post-MCT
+reference space,
 signed 1..16-bit PGX data, peak error, and MSE. G0 remains open for independent
 fixtures covering the remaining rows. G4 has started with a bounded
 `DecodeOptions.resolution_reduction` slice: single-tile reversible 5/3 and
@@ -171,8 +172,11 @@ by span offset; EPH uses independently checked header/body spans. PPT/PPM retain
 only decoded T2 headers in an auxiliary owned buffer and borrow their SOD
 bodies. Common-grid multi-tile RCT/5/3 and ICT/9/7 now select and reconstruct
 per tile, then assemble by reduced absolute tile boundaries; the odd-grid RCT
-path has an exact manual oracle. Sampled multi-tile reduction, sampled colour
-transforms, and native-planar 9/7 output remain subsequent G4 gates. Class-1
+path has an exact manual oracle. Sampled multi-tile no-MCT 5/3 reduction now
+uses component-local partial synthesis and reduced absolute assembly across
+odd image/tile origins. Native-planar no-MCT 9/7 now reconstructs bounded
+single-tile scalar-derived/expounded streams directly. Sampled colour
+transforms remain the next G4 gate. Class-1
 all-component evaluation advances with G1/G2 decode breadth.
 
 G1 must define a lossless internal carrier before adding source adapters above
@@ -196,10 +200,12 @@ span-backed, including SOP/EPH framing; PPT/PPM use auxiliary header storage and
 borrowed bodies rather than a full normalized stream. Reduced single-tile 5/3
 and 9/7 now share the same selection and partial-synthesis path, including
 no-MCT, RCT, and ICT output; 9/7 additionally performs selective
-dequantization. Single-tile sampled no-MCT 5/3 now reconstructs each native
-component grid directly across inline, PPT, and PPM headers. Sampled colour
-transforms, sampled multi-tile selection, and native-planar 9/7 are the next
-functional gates; common-grid multi-tile RCT/ICT selection has landed. A large image
+dequantization. Sampled no-MCT 5/3 now reconstructs each native component grid
+directly across single- and multi-tile inline, PPT, and PPM headers. Multi-tile
+assembly reduces each tile-component's absolute sampled bounds independently.
+Native-planar no-MCT 9/7 has landed for bounded single-tile decode. Sampled
+colour transforms are the next functional gate; common-grid multi-tile RCT/ICT
+selection has landed. A large image
 still must not require retaining every discarded layer, tile, or pixel when the
 caller requests a bounded subset.
 Performance work continues in parallel, but no throughput result substitutes

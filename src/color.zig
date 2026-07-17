@@ -484,6 +484,45 @@ pub fn inverseRctAlpha(allocator: std.mem.Allocator, planes: RctPlanes) !SampleP
     return out;
 }
 
+pub fn inverseRctPlanar(allocator: std.mem.Allocator, planes: RctPlanes) !SamplePlanes {
+    return inverseRctPlanarImpl(allocator, planes, false);
+}
+
+pub fn inverseRctPlanarSaturated(allocator: std.mem.Allocator, planes: RctPlanes) !SamplePlanes {
+    return inverseRctPlanarImpl(allocator, planes, true);
+}
+
+fn inverseRctPlanarImpl(
+    allocator: std.mem.Allocator,
+    planes: RctPlanes,
+    saturate: bool,
+) !SamplePlanes {
+    const pixels = try validatePixelPlanes(i32, planes, 3);
+    const level_shift = try dcLevelShift(planes.bit_depth);
+    const max_sample = try maxSample(planes.bit_depth);
+
+    var out = try SamplePlanes.init(allocator, planes.width, planes.height, planes.bit_depth, 3);
+    errdefer out.deinit();
+    for (0..pixels) |pixel| {
+        const y = planes.planes[0][pixel] + level_shift;
+        const cb = planes.planes[1][pixel];
+        const cr = planes.planes[2][pixel];
+        const g = y - floorQuarter(cb + cr);
+        const r = cr + g;
+        const b = cb + g;
+        if (!saturate and
+            (r < 0 or g < 0 or b < 0 or
+                r > max_sample or g > max_sample or b > max_sample))
+        {
+            return ColorError.SampleOutOfRange;
+        }
+        out.planes[0][pixel] = @intCast(std.math.clamp(r, 0, max_sample));
+        out.planes[1][pixel] = @intCast(std.math.clamp(g, 0, max_sample));
+        out.planes[2][pixel] = @intCast(std.math.clamp(b, 0, max_sample));
+    }
+    return out;
+}
+
 /// mct = none: no inter-component decorrelation. Each component is coded
 /// independently, so it carries only the ISO B.1.1 DC level shift
 /// (2^(Ssiz-1)); component 0/1/2 land in planes 0/1/2 directly.

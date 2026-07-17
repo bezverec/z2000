@@ -31,6 +31,7 @@ const Availability = enum { committed, optional };
 const InputFormat = enum { jp2, j2k };
 const Decoder = enum { planar, interleaved_rgb };
 const Expectation = enum { decode_pass, fail_closed };
+const ReferenceSpace = enum { output_components, codestream_components };
 const Marker = enum { siz, cod, coc, qcd, qcc, tlm, poc };
 
 const Reference = struct {
@@ -39,6 +40,7 @@ const Reference = struct {
     format: enum { pgx },
     component: u16 = 0,
     resolution_reduction: u8 = 0,
+    space: ReferenceSpace = .output_components,
     max_peak_error: u32 = 0,
     max_mse: f64 = 0,
 };
@@ -435,7 +437,7 @@ fn runDecodePass(
             };
             const metrics = switch (entry.decoder) {
                 .planar => blk: {
-                    var decoded = codestream.decodeLosslessPlanarWithOptions(allocator, stream, options) catch |err| {
+                    var decoded = decodePlanarReference(allocator, stream, options, reference.metadata) catch |err| {
                         std.debug.print("MISMATCH {s}: reference {s} decode error={s}\n", .{
                             entry.id,
                             reference.metadata.path,
@@ -445,6 +447,7 @@ fn runDecodePass(
                     };
                     defer decoded.deinit();
                     break :blk comparePlanarPgx(decoded, reference) catch |err| {
+                        reportPlanarPgxMismatch(decoded, reference);
                         std.debug.print("MISMATCH {s}: reference {s} error={s}\n", .{
                             entry.id,
                             reference.metadata.path,
@@ -464,6 +467,7 @@ fn runDecodePass(
                     };
                     defer decoded.deinit();
                     break :blk compareInterleavedPgx(decoded, reference) catch |err| {
+                        reportInterleavedPgxMismatch(decoded, reference);
                         std.debug.print("MISMATCH {s}: reference {s} error={s}\n", .{
                             entry.id,
                             reference.metadata.path,
@@ -487,6 +491,7 @@ fn runDecodePass(
             defer decoded.deinit();
             for (reference_assets) |reference| {
                 const metrics = comparePlanarPgx(decoded, reference) catch |err| {
+                    reportPlanarPgxMismatch(decoded, reference);
                     std.debug.print("MISMATCH {s}: reference {s} error={s}\n", .{
                         entry.id,
                         reference.metadata.path,
@@ -509,6 +514,7 @@ fn runDecodePass(
             defer decoded.deinit();
             for (reference_assets) |reference| {
                 const metrics = compareInterleavedPgx(decoded, reference) catch |err| {
+                    reportInterleavedPgxMismatch(decoded, reference);
                     std.debug.print("MISMATCH {s}: reference {s} error={s}\n", .{
                         entry.id,
                         reference.metadata.path,
@@ -545,6 +551,22 @@ fn runDecodePass(
     }
     std.debug.print("PASS {s}: decode native-sha256={s}\n", .{ entry.id, native_hash });
     return .decode_pass;
+}
+
+fn decodePlanarReference(
+    allocator: std.mem.Allocator,
+    stream: []const u8,
+    options: codestream.DecodeOptions,
+    reference: Reference,
+) !color.SamplePlanes {
+    return switch (reference.space) {
+        .output_components => codestream.decodeLosslessPlanarWithOptions(allocator, stream, options),
+        .codestream_components => codestream.decodeLosslessCodestreamComponentsWithOptions(
+            allocator,
+            stream,
+            options,
+        ),
+    };
 }
 
 fn reportReferenceMetrics(entry: Entry, asset: ReferenceAsset, metrics: ErrorMetrics) void {
@@ -799,6 +821,14 @@ fn pgxSample(reference: PgxImage, index: usize) !i32 {
 }
 
 fn comparePgxView(view: ComponentView, bytes: []const u8, limits: Reference) !ErrorMetrics {
+    const metrics = try measurePgxView(view, bytes);
+    if (metrics.peak > limits.max_peak_error or metrics.mse > limits.max_mse) {
+        return CorpusError.CorpusMismatch;
+    }
+    return metrics;
+}
+
+fn measurePgxView(view: ComponentView, bytes: []const u8) !ErrorMetrics {
     const reference = try parsePgx(bytes);
     if (view.width != reference.width or view.height != reference.height or
         view.bit_depth != reference.bit_depth or view.signed != reference.signed)
@@ -820,10 +850,53 @@ fn comparePgxView(view: ComponentView, bytes: []const u8, limits: Reference) !Er
     if (peak > std.math.maxInt(u32)) return CorpusError.ImageTooLarge;
     const mse = @as(f64, @floatFromInt(squared_error_sum)) /
         @as(f64, @floatFromInt(sample_count));
-    if (peak > limits.max_peak_error or mse > limits.max_mse) {
-        return CorpusError.CorpusMismatch;
-    }
     return .{ .peak = @intCast(peak), .mse = mse };
+}
+
+fn reportPgxMismatch(view: ComponentView, asset: ReferenceAsset) void {
+    const metrics = measurePgxView(view, asset.bytes) catch return;
+    const reference = parsePgx(asset.bytes) catch return;
+    const sample_count = std.math.mul(usize, view.width, view.height) catch return;
+    var actual_min: i32 = std.math.maxInt(i32);
+    var actual_max: i32 = std.math.minInt(i32);
+    var expected_min: i32 = std.math.maxInt(i32);
+    var expected_max: i32 = std.math.minInt(i32);
+    var first_mismatch: ?struct { index: usize, actual: i32, expected: i32 } = null;
+    for (0..sample_count) |index| {
+        const actual = view.sample(index) catch return;
+        const expected = pgxSample(reference, index) catch return;
+        actual_min = @min(actual_min, actual);
+        actual_max = @max(actual_max, actual);
+        expected_min = @min(expected_min, expected);
+        expected_max = @max(expected_max, expected);
+        if (first_mismatch == null and actual != expected) {
+            first_mismatch = .{ .index = index, .actual = actual, .expected = expected };
+        }
+    }
+    std.debug.print(
+        "OBSERVED_MISMATCH {s}: component={} reduction={} peak={}/{} mse={d:.6}/{d:.6} actual=[{},{}] expected=[{},{}]",
+        .{
+            asset.metadata.path,
+            asset.metadata.component,
+            asset.metadata.resolution_reduction,
+            metrics.peak,
+            asset.metadata.max_peak_error,
+            metrics.mse,
+            asset.metadata.max_mse,
+            actual_min,
+            actual_max,
+            expected_min,
+            expected_max,
+        },
+    );
+    if (first_mismatch) |mismatch| {
+        std.debug.print(
+            " first=({},{}):{}/{}\n",
+            .{ mismatch.index % view.width, mismatch.index / view.width, mismatch.actual, mismatch.expected },
+        );
+    } else {
+        std.debug.print("\n", .{});
+    }
 }
 
 fn comparePlanarPgx(decoded: color.SamplePlanes, asset: ReferenceAsset) !ErrorMetrics {
@@ -837,6 +910,19 @@ fn comparePlanarPgx(decoded: color.SamplePlanes, asset: ReferenceAsset) !ErrorMe
         .signed = false,
         .samples = .{ .unsigned_contiguous = decoded.planes[component] },
     }, asset.bytes, asset.metadata);
+}
+
+fn reportPlanarPgxMismatch(decoded: color.SamplePlanes, asset: ReferenceAsset) void {
+    const component: usize = asset.metadata.component;
+    const dimensions = decoded.componentDimensions(component) orelse return;
+    const bit_depth = decoded.componentBitDepth(component) orelse return;
+    reportPgxMismatch(.{
+        .width = dimensions[0],
+        .height = dimensions[1],
+        .bit_depth = bit_depth,
+        .signed = false,
+        .samples = .{ .unsigned_contiguous = decoded.planes[component] },
+    }, asset);
 }
 
 fn compareInterleavedPgx(decoded: image.RgbImage, asset: ReferenceAsset) !ErrorMetrics {
@@ -854,6 +940,21 @@ fn compareInterleavedPgx(decoded: image.RgbImage, asset: ReferenceAsset) !ErrorM
             .component = asset.metadata.component,
         } },
     }, asset.bytes, asset.metadata);
+}
+
+fn reportInterleavedPgxMismatch(decoded: image.RgbImage, asset: ReferenceAsset) void {
+    if (asset.metadata.component >= 3) return;
+    reportPgxMismatch(.{
+        .width = decoded.width,
+        .height = decoded.height,
+        .bit_depth = decoded.bit_depth,
+        .signed = false,
+        .samples = .{ .unsigned_interleaved = .{
+            .values = decoded.samples,
+            .stride = 3,
+            .component = asset.metadata.component,
+        } },
+    }, asset);
 }
 
 fn hashU32(hasher: *std.crypto.hash.sha2.Sha256, value: usize) !void {

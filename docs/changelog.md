@@ -24,19 +24,42 @@ entries are grouped by development milestone rather than semantic version.
 - Added PGX reference-list comparison and a reproducible local setup for the
   official WG1 T.803 corpus pinned at commit `f6b9ede0`. The oracle supports
   component/reduction selectors, signed or unsigned 1..16-bit ML/LM samples,
-  exact peak limits, and independent MSE limits. All 16 optional profile-0
-  inputs and 18 class-0 references are checksummed; three reduction-0 cases
-  decode exactly and 13 return expected `UnsupportedPayload`. The full
-  27-entry gate reports 10 decode passes, 17 expected fail-closed cases, no
+  exact peak limits, independent MSE limits, and explicit output- versus
+  codestream-component reference space. All 16 optional profile-0 inputs and
+  18 class-0 references are checksummed; nine cases now pass their references
+  and seven retain expected fail-closed boundaries. The full 27-entry gate
+  reports 16 decode passes, 11 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
   `p0_01` moved from `InvalidCodestream` to an exact PGX pass, with a committed
   marker-order regression test.
+- Accepted complete uniform COC overrides for decomposition, code-block
+  geometry/style, transform, and precinct metadata before QCD validation, and
+  accepted reserved segment-less main-header marker codes `FF30..FF3F` across
+  strict, compatibility-COM, and JP2 preflight scans. Official T.803 `p0_02`
+  now matches its class-0 PGX exactly, covering six LRCP layers, no-PLT inline
+  packets, SOP/EPH, TERMALL+ERTERM+SEGMARK, component sampling, and a uniform
+  COC that replaces the default 9/7 COD with the effective reversible 5/3
+  style.
+- Accepted strict-decode edge clipping when a zero-origin image fits wholly
+  inside one precinct band span even though its nominal code-block dimension
+  is larger. General B.7 block-size clamping remains fail-closed. Official
+  T.803 `p0_11` now matches its 128x1 class-0 PGX exactly, covering NL=0,
+  LRCP, inline PLT-less EPH, reversible 5/3, and SEGMARK on a 64x1 clipped
+  block inside a 128x2 precinct.
+- Added bounded component-specific scalar-expounded QCC decode for three
+  unsigned, equally sampled ICT/9-7 components. Effective QCC exponents drive
+  T1 nominal bitplanes and each component's QCC mantissas drive dequantization;
+  reduced pre-ICT codestream-component output is now available through the
+  existing conformance API. Official T.803 `p0_04` passes its reduction-3
+  class-0 oracle at peak 30/33 and MSE 48.57/55.8. Divergent QCC remains
+  fail-closed outside this bounded profile.
 - Accepted the Part 1-legal zero value for QCD guard bits and derived band
   bitplane counts without unsigned underflow. A pixel-exact rewrite test covers
-  `G=0`; official T.803 `p0_10` now reaches the deliberate subsampled-MCT
-  `UnsupportedPayload` boundary instead of being misclassified as malformed.
+  `G=0`; at that checkpoint official T.803 `p0_10` reached the deliberate
+  subsampled-MCT boundary instead of being misclassified as malformed. The
+  later sampled-RCT/multipart slice below promotes it to a reference pass.
 - Added the first production reduced-resolution decode slice through
   `DecodeOptions.resolution_reduction`. Bounded single-tile reversible 5/3
   no-MCT planar, grayscale, and interleaved decoders now stop inverse synthesis
@@ -111,7 +134,33 @@ entries are grouped by development milestone rather than semantic version.
   boundaries. A 17x17-partitioned 3x3 RCT/5-3 grid matches a manual per-tile
   oracle exactly, while multi-tile ICT/9-7 scalar-expounded and scalar-derived
   streams pin dimensions, skipped T1 work, and cross-thread determinism.
-  Sampled multi-tile reduction remains closed.
+  Sampled multi-tile reduction remained closed at that checkpoint.
+- Extended native sampled reversible reduction across multiple tiles. Every
+  tile-component now applies packet selection, T1 skipping, origin-aware
+  partial 5/3 synthesis, and reduced-grid assembly in its own `XRsiz/YRsiz`
+  coordinate system. An odd-origin 12-tile 4:2:0 regression matches an
+  independent per-tile partial-synthesis oracle and pins inline, PPT, PPM,
+  SOP/EPH, and cross-thread equivalence.
+- Added native-planar output for bounded single-tile irreversible 9/7 with MCT
+  disabled. Scalar-expounded and scalar-derived streams now dequantize and
+  synthesize each component directly from the strict block catalog, including
+  resolution reduction and T1 detail skipping. Full and reduced planar samples
+  match the established interleaved no-MCT decoder exactly across thread
+  counts.
+- Added a conformance decode boundary for codestream image components before
+  inverse RCT/ICT, while preserving normal output-component behavior. The PGX
+  runner reports observed peak/MSE on failure and uses the explicit reference
+  space. Official T.803 `p0_09` passes reduced 9/7 within peak 1/MSE 0.02 and
+  `p0_14` passes reduced reversible saturation exactly.
+- Implemented open-ended inline PLT-less multipart packet accounting. Stage B
+  records deferred counts at exact `Psot` spans; Stage C resumes each tile's
+  T2 state across interleaved parts, derives packet boundaries from headers,
+  accepts `TNsot == 0` and empty parts, then checks the complete tile plan.
+  A committed split-stream/corruption regression and official sampled-RCT
+  `p0_10` cover the path; `p0_10` passes its class-0 bound at peak 3 and MSE
+  0.459717.
+- Fixed coefficient-plane error cleanup so ownership transfers once into
+  `RctPlanes`; downstream decode errors no longer double-free the same planes.
 
 ### General-Purpose Part 1 Planning
 

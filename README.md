@@ -40,10 +40,13 @@ certification.
   no-MCT component coding, scalar-derived or scalar-expounded quantization,
   and rate allocation. Single-tile no-MCT or transform-appropriate RCT/ICT
   decode can reconstruct a selected lower DWT resolution directly.
+- Strict foreign ICT/9-7 decode consumes bounded component-specific QCC steps;
+  the conformance API can expose reduced pre-ICT codestream components.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded single-tile 5/3 and 9/7
-  profiles, including no-MCT/RCT/ICT RGB and native sampled no-MCT 5/3 planes.
+  profiles, including no-MCT/RCT/ICT RGB, native no-MCT 9/7 planes, and native
+  sampled no-MCT 5/3 planes.
   Common-grid multi-tile RCT/5/3 and ICT/9/7 are assembled directly at the
   requested reduced resolution.
 - ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
@@ -80,14 +83,15 @@ certification.
   three-component sRGB output. Inline, PPT, and PPM headers plus SOP/EPH are
   covered. The sampled reversible API emits single- and multi-tile RPCL with
   inline PLT/PLT-less, PPT, or PPM packet headers; all layouts carry one or
-  more quality layers.
+  more quality layers. Requested resolution reduction is performed directly
+  per native component for both single- and multi-tile sampled 5/3 streams.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
-non-empty PLT-less multi-part tiles, broad color management, CFA/general RAW
+broader packed-header/POC tile-part combinations, broad color management, CFA/general RAW
 and HDR/general OpenEXR input, broader BMP/PNG/JPEG/DNG/EXR profiles, and metadata handling
 beyond the staged ICC and JPEG UUID-carrier paths. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.

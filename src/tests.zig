@@ -9120,6 +9120,48 @@ test "RCT transform roundtrips a small RGB image" {
     try std.testing.expectEqualSlices(u16, rgb.samples, reconstructed.samples);
 }
 
+test "strict decode distinguishes output and codestream RCT components" {
+    const allocator = std.testing.allocator;
+    const samples = [_]u16{
+        20,  40,  60,  80,  70,  50,  110, 90,  75,
+        140, 120, 100, 160, 150, 140, 200, 180, 170,
+    };
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = 3,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = @constCast(&samples),
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .mct = .rct,
+    });
+    defer allocator.free(bytes);
+
+    var output = try codestream.decodeLosslessPlanar(allocator, bytes);
+    defer output.deinit();
+    for (0..samples.len / 3) |pixel| {
+        try std.testing.expectEqual(samples[pixel * 3], output.planes[0][pixel]);
+        try std.testing.expectEqual(samples[pixel * 3 + 1], output.planes[1][pixel]);
+        try std.testing.expectEqual(samples[pixel * 3 + 2], output.planes[2][pixel]);
+    }
+
+    var transformed = try color.forwardRct(allocator, rgb);
+    defer transformed.deinit();
+    var codestream_components = try codestream.decodeLosslessCodestreamComponentsWithOptions(
+        allocator,
+        bytes,
+        .{},
+    );
+    defer codestream_components.deinit();
+    for (0..3) |component| {
+        for (transformed.planes[component], codestream_components.planes[component]) |coefficient, actual| {
+            try std.testing.expectEqual(@as(u16, @intCast(coefficient + 128)), actual);
+        }
+    }
+}
+
 test "RCT transform roundtrips vector block and tail" {
     const allocator = std.testing.allocator;
     const samples = try allocator.dupe(u16, &.{
@@ -11302,9 +11344,10 @@ test "foreign multi-part tile sequences fail closed on inconsistent accounting" 
         }
     }.find;
 
-    // (a) Stripping the PLT from a non-empty part leaves a non-empty
-    // PLT-less multi-part tile, which has no packet-span source and must
-    // fail closed as unsupported.
+    // (a) Stripping the PLT from only one non-empty part creates a hybrid
+    // whose open-ended T2 count disagrees with the remaining PLT-backed
+    // parts. The now-supported PLT-less multipart path must reject that
+    // inconsistency as malformed rather than merely unsupported.
     {
         const base = try allocator.dupe(u8, cs_view);
         defer allocator.free(base);
@@ -11320,7 +11363,7 @@ test "foreign multi-part tile sequences fail closed on inconsistent accounting" 
         const psot = readU32BeTest(mutated.items, sot + 6);
         writeU32BeTest(mutated.items, sot + 6, @intCast(psot - plt_total));
         try std.testing.expectError(
-            codestream.CodestreamError.UnsupportedPayload,
+            codestream.CodestreamError.InvalidCodestream,
             codestream.decodeLosslessTemporary(allocator, mutated.items),
         );
     }
@@ -15234,6 +15277,94 @@ test "irreversible 9/7 ICT codestream roundtrips within lossy tolerance" {
     try std.testing.expect(mse < 4.0);
 }
 
+test "irreversible 9/7 no-MCT strict decode returns native planar samples" {
+    const allocator = std.testing.allocator;
+    const width = 65;
+    const height = 57;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..height) |row| {
+        for (0..width) |column| {
+            const pixel = row * width + column;
+            samples[pixel * 3] = @intCast((column * 7 + row * 3) % 256);
+            samples[pixel * 3 + 1] = @intCast((column * 5 + row * 11 + 17) % 256);
+            samples[pixel * 3 + 2] = @intCast((column * 13 + row * 9 + 31) % 256);
+        }
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    for ([_]codestream.QuantizationStyle{ .scalar_expounded, .scalar_derived }) |quantization| {
+        const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+            .levels = 3,
+            .transform = .irreversible_9_7,
+            .mct = .none,
+            .quantization = quantization,
+            .block_width = 16,
+            .block_height = 16,
+            .sop = true,
+            .eph = true,
+        });
+        defer allocator.free(encoded);
+
+        var interleaved = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            encoded,
+            .{ .threads = 1 },
+        );
+        defer interleaved.deinit();
+        var planar = try codestream.decodeLosslessPlanarWithOptions(
+            allocator,
+            encoded,
+            .{ .threads = 4 },
+        );
+        defer planar.deinit();
+        try std.testing.expectEqual(interleaved.width, planar.width);
+        try std.testing.expectEqual(interleaved.height, planar.height);
+        try std.testing.expectEqual(@as(usize, 3), planar.componentCount());
+        for (planar.planes, 0..) |plane, component| {
+            try std.testing.expectEqual([2]usize{ width, height }, planar.componentDimensions(component).?);
+            for (plane, 0..) |sample, pixel| {
+                try std.testing.expectEqual(interleaved.samples[pixel * 3 + component], sample);
+            }
+        }
+
+        var timings = codestream.DecodeTimings{};
+        var reduced_planar = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+            allocator,
+            encoded,
+            .{ .threads = 1, .resolution_reduction = 2 },
+            &timings,
+        );
+        defer reduced_planar.deinit();
+        var reduced_interleaved = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            encoded,
+            .{ .threads = 4, .resolution_reduction = 2 },
+        );
+        defer reduced_interleaved.deinit();
+        try std.testing.expectEqual(reduced_interleaved.width, reduced_planar.width);
+        try std.testing.expectEqual(reduced_interleaved.height, reduced_planar.height);
+        try std.testing.expect(timings.t1_skipped_blocks > 0);
+        try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
+        try std.testing.expect(timings.packet_catalog_payload_bytes_discarded > 0);
+        for (reduced_planar.planes, 0..) |plane, component| {
+            try std.testing.expectEqual(
+                [2]usize{ reduced_interleaved.width, reduced_interleaved.height },
+                reduced_planar.componentDimensions(component).?,
+            );
+            for (plane, 0..) |sample, pixel| {
+                try std.testing.expectEqual(reduced_interleaved.samples[pixel * 3 + component], sample);
+            }
+        }
+    }
+}
+
 test "single-tile irreversible 9/7 pipeline is deterministic across thread counts" {
     const allocator = std.testing.allocator;
     const width = 129;
@@ -15559,6 +15690,50 @@ test "direct ISO segment encoder matches the symbol-based encoder byte for byte"
             }
         }
     }
+}
+
+test "strict decode accepts an edge-clipped block inside one precinct span" {
+    const allocator = std.testing.allocator;
+    const width = 128;
+    const height = 1;
+    const samples = try allocator.alloc(u16, width * height);
+    defer allocator.free(samples);
+    for (samples, 0..) |*sample, index| sample.* = @intCast((index * 73 + 19) & 0xff);
+    const gray = image.GrayImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const with_plt = try codestream.encodeLosslessGrayWithOptions(allocator, gray, .{
+        .levels = 0,
+        .mct = .none,
+        .block_width = 64,
+        .block_height = 64,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 128, .height = 128 }} ** 33,
+        .precinct_count = 1,
+        .segmentation_symbols = true,
+        .sop = false,
+        .eph = true,
+        .tlm = false,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(with_plt);
+    const encoded = try stripAllPltForTest(allocator, with_plt);
+    defer allocator.free(encoded);
+    const foreign = try allocator.dupe(u8, encoded);
+    defer allocator.free(foreign);
+    const cod = findMarker(foreign, codestream.markerValue("cod")) orelse return error.MissingCod;
+    foreign[cod + 5] = 0; // LRCP; one packet makes the payload order identical.
+    foreign[cod + 14] = 0x17; // Precinct exponent 7x1 => 128x2.
+
+    var decoded = try codestream.decodeLosslessGray(allocator, foreign);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, width), decoded.width);
+    try std.testing.expectEqual(@as(usize, height), decoded.height);
+    try std.testing.expectEqualSlices(u16, gray.samples, decoded.samples);
 }
 
 test "strict decode rejects COD whose blocks cross precinct spans" {
@@ -16161,6 +16336,211 @@ test "uniform COC/QCC overrides across all components decode via the signalled v
             codestream.decodeLosslessTemporary(allocator, divergent),
         );
         try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, rgb, divergent));
+    }
+}
+
+test "component-specific irreversible QCC drives bounded ICT reconstruction" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 40;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @intCast((i * 37 + 3) % 256);
+        samples[i * 3 + 1] = @intCast((i * 53 + 17) % 256);
+        samples[i * 3 + 2] = @intCast((i * 91 + 5) % 256);
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const base = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+        .progression = .rlcp,
+        .layers = 3,
+    });
+    defer allocator.free(base);
+
+    const qcd = findMarker(base, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const qcd_len = readU16BeTest(base, qcd + 2);
+    const qcd_payload_len = @as(usize, qcd_len) - 2;
+    const modified_qcd = try allocator.dupe(u8, base[qcd + 4 ..][0..qcd_payload_len]);
+    defer allocator.free(modified_qcd);
+    // Preserve every epsilon (and therefore T1 Mb), while changing the
+    // reconstruction mantissa for each chroma subband.
+    var step_low_byte: usize = 2;
+    while (step_low_byte < modified_qcd.len) : (step_low_byte += 2) {
+        modified_qcd[step_low_byte] ^= 0x40;
+    }
+
+    var with_qcc = try allocator.dupe(u8, base);
+    var component: u8 = 1;
+    while (component < 3) : (component += 1) {
+        var qcc_payload: std.ArrayList(u8) = .empty;
+        defer qcc_payload.deinit(allocator);
+        try qcc_payload.append(allocator, component);
+        try qcc_payload.appendSlice(allocator, modified_qcd);
+        const current_qcd = findMarker(with_qcc, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+        const insert_at = try markerSegmentEndForTest(with_qcc, current_qcd);
+        const next = try spliceMarkerSegmentForTest(
+            allocator,
+            with_qcc,
+            insert_at,
+            codestream.markerValue("qcc"),
+            qcc_payload.items,
+        );
+        allocator.free(with_qcc);
+        with_qcc = next;
+    }
+    defer allocator.free(with_qcc);
+
+    const decode_options = codestream.DecodeOptions{ .resolution_reduction = 2 };
+    var base_components = try codestream.decodeLosslessCodestreamComponentsWithOptions(
+        allocator,
+        base,
+        decode_options,
+    );
+    defer base_components.deinit();
+    var qcc_components = try codestream.decodeLosslessCodestreamComponentsWithOptions(
+        allocator,
+        with_qcc,
+        decode_options,
+    );
+    defer qcc_components.deinit();
+    try std.testing.expectEqualSlices(u16, base_components.planes[0], qcc_components.planes[0]);
+    try std.testing.expect(!std.mem.eql(u16, base_components.planes[1], qcc_components.planes[1]));
+    try std.testing.expect(!std.mem.eql(u16, base_components.planes[2], qcc_components.planes[2]));
+
+    var base_rgb = try codestream.decodeLosslessTemporaryWithOptions(allocator, base, decode_options);
+    defer base_rgb.deinit();
+    var qcc_rgb = try codestream.decodeLosslessTemporaryWithOptions(allocator, with_qcc, decode_options);
+    defer qcc_rgb.deinit();
+    try std.testing.expect(!std.mem.eql(u16, base_rgb.samples, qcc_rgb.samples));
+
+    const no_mct = try allocator.dupe(u8, with_qcc);
+    defer allocator.free(no_mct);
+    const cod = findMarker(no_mct, codestream.markerValue("cod")) orelse return error.MissingCod;
+    no_mct[cod + 8] = 0;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessCodestreamComponentsWithOptions(allocator, no_mct, decode_options),
+    );
+}
+
+test "uniform full COC overrides drive coding geometry and transform" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 40;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @intCast((i * 37 + 3) % 256);
+        samples[i * 3 + 1] = @intCast((i * 53 + 17) % 256);
+        samples[i * 3 + 2] = @intCast((i * 91 + 5) % 256);
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const base = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .block_width = 32,
+        .block_height = 32,
+    });
+    defer allocator.free(base);
+    const cod = findMarker(base, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const cod_len = readU16BeTest(base, cod + 2);
+    const cod_coding_len = @as(usize, cod_len) - 2 - 5;
+    const original_coding = try allocator.dupe(u8, base[cod + 9 ..][0..cod_coding_len]);
+    defer allocator.free(original_coding);
+
+    var overridden = try allocator.dupe(u8, base);
+    // Make the main COD a deliberately different 64x64 irreversible default.
+    // The payload remains the original 32x32 reversible stream and is made
+    // effective again by identical COCs for all components below.
+    overridden[cod + 10] = 4;
+    overridden[cod + 11] = 4;
+    overridden[cod + 13] = 0;
+    var component: u8 = 0;
+    while (component < 3) : (component += 1) {
+        var coc_payload: std.ArrayList(u8) = .empty;
+        defer coc_payload.deinit(allocator);
+        try coc_payload.append(allocator, component);
+        try coc_payload.append(allocator, overridden[cod + 4] & 0x01);
+        try coc_payload.appendSlice(allocator, original_coding);
+        const insert_at = cod + 2 + @as(usize, cod_len);
+        const next = try spliceMarkerSegmentForTest(
+            allocator,
+            overridden,
+            insert_at,
+            codestream.markerValue("coc"),
+            coc_payload.items,
+        );
+        allocator.free(overridden);
+        overridden = next;
+    }
+    defer allocator.free(overridden);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, overridden);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, overridden);
+    allocator.free(wrapped);
+}
+
+test "reserved segmentless main-header markers preserve strict decode" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 20;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @intCast((i * 11) % 256);
+        samples[i * 3 + 1] = @intCast((i * 29 + 7) % 256);
+        samples[i * 3 + 2] = @intCast((i * 47 + 13) % 256);
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const base = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(base);
+    const sot = findMarker(base, codestream.markerValue("sot")) orelse return error.MissingSot;
+
+    for ([_]u16{ 0xff30, 0xff3f }) |marker| {
+        var stream: std.ArrayList(u8) = .empty;
+        defer stream.deinit(allocator);
+        try stream.appendSlice(allocator, base[0..sot]);
+        try stream.append(allocator, @intCast(marker >> 8));
+        try stream.append(allocator, @intCast(marker & 0xff));
+        try stream.appendSlice(allocator, base[sot..]);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, stream.items);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+        try std.testing.expectEqual(
+            try codestream.firstSotPsot(base),
+            try codestream.firstSotPsot(stream.items),
+        );
+        try std.testing.expectEqual(
+            try codestream.firstTlmPtlm(base),
+            try codestream.firstTlmPtlm(stream.items),
+        );
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, stream.items);
+        allocator.free(wrapped);
     }
 }
 
@@ -27443,6 +27823,89 @@ const RepackedMarkers = struct {
     eph: bool = false,
 };
 
+fn appendPltlessTestTilePart(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    source: []const u8,
+    tile_part: codestream.StrictInlineTilePartSpan,
+    body_start: usize,
+    body_end: usize,
+    part_index: u8,
+    part_count: u8,
+) !void {
+    if (body_start > body_end or tile_part.sod_offset != tile_part.sot_offset + 12) {
+        return error.TestUnexpectedResult;
+    }
+    const psot = 14 + body_end - body_start;
+    try out.appendSlice(allocator, source[tile_part.sot_offset..][0..6]);
+    var psot_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &psot_bytes, @intCast(psot), .big);
+    try out.appendSlice(allocator, &psot_bytes);
+    try out.append(allocator, part_index);
+    try out.append(allocator, part_count);
+    try out.appendSlice(allocator, &.{ 0xff, 0x93 });
+    try out.appendSlice(allocator, source[body_start..body_end]);
+}
+
+fn splitPltlessSinglePartsForTest(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var report = try codestream.collectStrictInlinePacketSpans(allocator, source);
+    defer report.deinit();
+    const tlm = findMarker(source[0..report.first_sot], codestream.markerValue("tlm")) orelse
+        return error.MissingMarker;
+    const tlm_end = tlm + 2 + readU16BeTest(source, tlm + 2);
+    if (tlm_end > report.first_sot) return error.TestUnexpectedResult;
+
+    const split_offsets = try allocator.alloc(usize, report.tile_parts.len);
+    defer allocator.free(split_offsets);
+    for (report.tile_parts, 0..) |tile_part, part_index| {
+        var packet_count: usize = 0;
+        for (report.spans) |span| {
+            if (span.tile_part_index == part_index) packet_count += 1;
+        }
+        if (packet_count < 2) return error.TestUnexpectedResult;
+        const split_packet = packet_count / 2;
+        var seen: usize = 0;
+        var split: ?usize = null;
+        for (report.spans) |span| {
+            if (span.tile_part_index != part_index) continue;
+            if (seen == split_packet) {
+                split = span.header_offset;
+                break;
+            }
+            seen += 1;
+        }
+        split_offsets[part_index] = split orelse return error.TestUnexpectedResult;
+        if (split_offsets[part_index] <= tile_part.sod_offset + 2 or
+            split_offsets[part_index] >= tile_part.end)
+        {
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, source[0..tlm]);
+    try out.appendSlice(allocator, source[tlm_end..report.first_sot]);
+    for (0..2) |phase| {
+        for (report.tile_parts, 0..) |tile_part, part_index| {
+            const body_start = if (phase == 0) tile_part.sod_offset + 2 else split_offsets[part_index];
+            const body_end = if (phase == 0) split_offsets[part_index] else tile_part.end;
+            try appendPltlessTestTilePart(
+                allocator,
+                &out,
+                source,
+                tile_part,
+                body_start,
+                body_end,
+                @intCast(phase),
+                if (phase == 0) 0 else 2,
+            );
+        }
+    }
+    try out.appendSlice(allocator, &.{ 0xff, 0xd9 });
+    return out.toOwnedSlice(allocator);
+}
+
 /// Repacks a strict inline-header PLT-less codestream into packed-header
 /// form: every tile-part keeps its SOT..SOD frame (with Psot recomputed) and
 /// the SOD body carries only the packet bodies. With .ppt the concatenated
@@ -28131,6 +28594,225 @@ test "sampled reversible single-tile decode reconstructs requested native resolu
     }
 }
 
+test "sampled reversible multi-tile decode reconstructs requested native resolution" {
+    const allocator = std.testing.allocator;
+    const width = 63;
+    const height = 64;
+    const image_origin_x: u32 = 5;
+    const image_origin_y: u32 = 3;
+    const levels: u8 = 2;
+    const reduction: u8 = 2;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+
+    var encode_options = codestream.LosslessOptions{
+        .levels = levels,
+        .layers = 3,
+        .mct = .none,
+        .image_origin_x = image_origin_x,
+        .image_origin_y = image_origin_y,
+        .tile_origin_x = 1,
+        .tile_origin_y = 0,
+        .tile_width = 23,
+        .tile_height = 19,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+        .sop = true,
+        .eph = true,
+    };
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planes,
+        &sampling,
+        encode_options,
+    );
+    defer allocator.free(encoded);
+    try std.testing.expectEqual(@as(usize, 12), countMarker(encoded, codestream.markerValue("sot")));
+
+    var timings = codestream.DecodeTimings{};
+    var reduced = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        encoded,
+        .{ .threads = 1, .resolution_reduction = reduction },
+        &timings,
+    );
+    defer reduced.deinit();
+    try std.testing.expect(timings.t1_skipped_blocks > 0);
+    try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
+    try std.testing.expect(timings.packet_catalog_payload_bytes_discarded > 0);
+    try std.testing.expectEqual(
+        timings.packet_catalog_payload_bytes_discarded,
+        timings.t1_skipped_payload_bytes,
+    );
+
+    const reduceCoordinate = struct {
+        fn call(value: u32, count: u8) u32 {
+            var result = value;
+            for (0..count) |_| result = (result + 1) / 2;
+            return result;
+        }
+    }.call;
+    const ceilDivide = struct {
+        fn call(value: u32, divisor: u32) u32 {
+            return (value + divisor - 1) / divisor;
+        }
+    }.call;
+
+    const image_x1 = image_origin_x + width;
+    const image_y1 = image_origin_y + height;
+    const reduced_image_x0 = reduceCoordinate(image_origin_x, reduction);
+    const reduced_image_y0 = reduceCoordinate(image_origin_y, reduction);
+    const reduced_image_x1 = reduceCoordinate(image_x1, reduction);
+    const reduced_image_y1 = reduceCoordinate(image_y1, reduction);
+    var component_widths: [3]usize = undefined;
+    var component_heights: [3]usize = undefined;
+    for (sampling, 0..) |factor, component| {
+        const component_x0 = ceilDivide(image_origin_x, factor.xrsiz);
+        const component_y0 = ceilDivide(image_origin_y, factor.yrsiz);
+        const component_x1 = ceilDivide(image_x1, factor.xrsiz);
+        const component_y1 = ceilDivide(image_y1, factor.yrsiz);
+        component_widths[component] = reduceCoordinate(component_x1, reduction) -
+            reduceCoordinate(component_x0, reduction);
+        component_heights[component] = reduceCoordinate(component_y1, reduction) -
+            reduceCoordinate(component_y0, reduction);
+    }
+    var expected = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        reduced_image_x1 - reduced_image_x0,
+        reduced_image_y1 - reduced_image_y0,
+        &.{ 8, 8, 8 },
+        &component_widths,
+        &component_heights,
+    );
+    defer expected.deinit();
+
+    const grid = try tile_grid.Grid.init(.{
+        .xsiz = image_x1,
+        .ysiz = image_y1,
+        .xosiz = image_origin_x,
+        .yosiz = image_origin_y,
+        .xtsiz = encode_options.tile_width,
+        .ytsiz = encode_options.tile_height,
+        .xtosiz = encode_options.tile_origin_x,
+        .ytosiz = encode_options.tile_origin_y,
+    });
+    var tile_index: u32 = 0;
+    while (tile_index < grid.tileCount()) : (tile_index += 1) {
+        const tile = try grid.tile(tile_index);
+        for (sampling, 0..) |factor, component| {
+            const image_component_x0 = ceilDivide(image_origin_x, factor.xrsiz);
+            const image_component_y0 = ceilDivide(image_origin_y, factor.yrsiz);
+            const component_x0 = ceilDivide(tile.rect.x0, factor.xrsiz);
+            const component_y0 = ceilDivide(tile.rect.y0, factor.yrsiz);
+            const component_x1 = ceilDivide(tile.rect.x1, factor.xrsiz);
+            const component_y1 = ceilDivide(tile.rect.y1, factor.yrsiz);
+            const tile_width: usize = component_x1 - component_x0;
+            const tile_height: usize = component_y1 - component_y0;
+            const coefficients = try allocator.alloc(i32, tile_width * tile_height);
+            defer allocator.free(coefficients);
+
+            const source_width = planes.component_widths[component];
+            const source_x = @as(usize, component_x0 - image_component_x0);
+            const source_y = @as(usize, component_y0 - image_component_y0);
+            for (0..tile_height) |row| {
+                for (0..tile_width) |column| {
+                    const sample = planes.planes[component][(source_y + row) * source_width + source_x + column];
+                    coefficients[row * tile_width + column] = @as(i32, sample) - 128;
+                }
+            }
+
+            var workspace = try wavelet_int.Workspace.init(allocator, @max(tile_width, tile_height));
+            defer workspace.deinit();
+            const actual_levels = try wavelet_int.forward53WithWorkspaceOrigin(
+                &workspace,
+                coefficients,
+                tile_width,
+                tile_height,
+                levels,
+                component_x0,
+                component_y0,
+            );
+            try std.testing.expectEqual(levels, actual_levels);
+            const shape = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+                &workspace,
+                coefficients,
+                tile_width,
+                tile_height,
+                levels,
+                reduction,
+                component_x0,
+                component_y0,
+            );
+
+            const reduced_component_x0 = reduceCoordinate(component_x0, reduction);
+            const reduced_component_y0 = reduceCoordinate(component_y0, reduction);
+            const reduced_image_component_x0 = reduceCoordinate(image_component_x0, reduction);
+            const reduced_image_component_y0 = reduceCoordinate(image_component_y0, reduction);
+            const destination_x: usize = reduced_component_x0 - reduced_image_component_x0;
+            const destination_y: usize = reduced_component_y0 - reduced_image_component_y0;
+            try std.testing.expectEqual(@as(usize, reduceCoordinate(component_x1, reduction) - reduced_component_x0), shape.width);
+            try std.testing.expectEqual(@as(usize, reduceCoordinate(component_y1, reduction) - reduced_component_y0), shape.height);
+            for (0..shape.height) |row| {
+                for (0..shape.width) |column| {
+                    expected.planes[component][(destination_y + row) * component_widths[component] + destination_x + column] =
+                        @intCast(std.math.clamp(coefficients[row * tile_width + column] + 128, 0, 255));
+                }
+            }
+        }
+    }
+
+    try std.testing.expectEqual(expected.width, reduced.width);
+    try std.testing.expectEqual(expected.height, reduced.height);
+    for (expected.planes, reduced.planes, 0..) |expected_plane, actual_plane, component| {
+        try std.testing.expectEqual(expected.componentDimensions(component).?, reduced.componentDimensions(component).?);
+        try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+    }
+
+    var parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        encoded,
+        .{ .threads = 4, .resolution_reduction = reduction },
+    );
+    defer parallel.deinit();
+    for (reduced.planes, parallel.planes) |serial_plane, parallel_plane| {
+        try std.testing.expectEqualSlices(u16, serial_plane, parallel_plane);
+    }
+
+    for (0..2) |packed_mode| {
+        encode_options.ppt = packed_mode == 0;
+        encode_options.ppm = packed_mode == 1;
+        const packed_bytes = try codestream.encodeLosslessSampledPlanarWithOptions(
+            allocator,
+            planes,
+            &sampling,
+            encode_options,
+        );
+        defer allocator.free(packed_bytes);
+        var packed_reduced = try codestream.decodeLosslessPlanarWithOptions(
+            allocator,
+            packed_bytes,
+            .{ .resolution_reduction = reduction },
+        );
+        defer packed_reduced.deinit();
+        for (reduced.planes, packed_reduced.planes) |inline_plane, packed_plane| {
+            try std.testing.expectEqualSlices(u16, inline_plane, packed_plane);
+        }
+    }
+}
+
 test "sampled reversible encode carries untargeted quality layers" {
     const allocator = std.testing.allocator;
     const sampling = [_]codestream.ComponentSampling{
@@ -28630,6 +29312,60 @@ test "sampled reversible multi-tile encode is deterministic across threads" {
         defer allocator.free(many);
         try std.testing.expectEqualSlices(u8, single, many);
     }
+}
+
+test "PLT-less multi-part tiles derive packet counts across interleaved parts" {
+    const allocator = std.testing.allocator;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanes(allocator, 64, 48, &sampling);
+    defer planes.deinit();
+    const single_parts = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planes,
+        &sampling,
+        .{
+            .levels = 2,
+            .layers = 2,
+            .mct = .none,
+            .tile_width = 32,
+            .tile_height = 24,
+            .block_width = 8,
+            .block_height = 8,
+            .tile_part_divisions = null,
+            .plt = false,
+            .sop = false,
+            .eph = false,
+        },
+    );
+    defer allocator.free(single_parts);
+    const multipart = try splitPltlessSinglePartsForTest(allocator, single_parts);
+    defer allocator.free(multipart);
+
+    try std.testing.expectEqual(@as(usize, 8), countMarker(multipart, codestream.markerValue("sot")));
+    try std.testing.expect(!codestream.hasMarker(multipart, codestream.markerValue("plt")));
+    try std.testing.expect(!codestream.hasMarker(multipart, codestream.markerValue("tlm")));
+    var spans = try codestream.collectStrictInlinePacketSpans(allocator, multipart);
+    defer spans.deinit();
+    try std.testing.expectEqual(@as(usize, 8), spans.tile_parts.len);
+
+    var decoded = try codestream.decodeLosslessPlanar(allocator, multipart);
+    defer decoded.deinit();
+    for (planes.planes, decoded.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+
+    const bad_boundary = try allocator.dupe(u8, multipart);
+    defer allocator.free(bad_boundary);
+    const first_sot = findMarker(bad_boundary, codestream.markerValue("sot")) orelse
+        return error.MissingSot;
+    const first_psot = readU32BeTest(bad_boundary, first_sot + 6);
+    try std.testing.expect(first_psot > 14);
+    writeU32BeTest(bad_boundary, first_sot + 6, first_psot - 1);
+    try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, bad_boundary)));
 }
 
 test "sampled reversible encode is deterministic across thread counts" {

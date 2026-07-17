@@ -47,22 +47,33 @@ zig build part1-corpus -- --require-optional
 
 The 2026-07-17 gate contains 27 entries: 11 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
-PGX references are independently checksummed. `p0_01`, `p0_12`, and `p0_16`
-decode exactly against their reduction-0 samples. The `p0_01` result also pins
-the legal main-header ordering where QCD precedes COD. The other 13 profiles
-return their manifested `UnsupportedPayload` boundary for syntax or sample
-semantics that are not public yet. `p0_10` additionally pins legal zero guard
-bits in QCD: the stream reaches the deliberate subsampled-MCT boundary rather
-than being misclassified as malformed. The complete result is therefore ten
-decode passes, 17 expected fail-closed cases, zero mismatches, and zero skips
+PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
+`p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
+references. The first five are exact reduction-0 cases; `p0_02` additionally
+covers a
+uniform full COC override, six LRCP layers, no-PLT inline SOP/EPH packets,
+TERMALL+ERTERM+SEGMARK, component sampling, and reserved segment-less `FF30`;
+`p0_11` covers a 128x1 NL=0 edge-clipped block, LRCP, PLT-less EPH, and
+SEGMARK;
+`p0_04` covers reduced 20-layer RLCP ICT/9-7 with component-specific
+scalar-expounded QCC steps in pre-ICT codestream-component space,
+`p0_09` covers reduced irreversible 9/7,
+`p0_10` covers uniform 4x4-sampled RCT across interleaved PLT-less tile-parts,
+and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
+also pins legal QCD-before-COD ordering. The other seven optional profiles return
+their manifested fail-closed boundary. The complete result is therefore 16
+decode passes, 11 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT
 level, with precision saturation and checked reduced dimensions. The runner
 passes each reference's reduction selector to the production decoder. The
-non-zero-reduction T.803 inputs remain fail-closed because they also require
-irreversible transform, MCT, signedness, RGN, or divergent coding styles.
+bounded reduction path now also covers sampled reversible 5/3 across
+single- and multi-tile streams plus native-planar no-MCT 9/7 for bounded
+single-tile streams. T.803 `p0_04`, `p0_09`, and `p0_14` exercise those reduced paths;
+the remaining reduced references still require signedness, RGN, or divergent
+component coding styles.
 Class-1 all-component comparison can reuse the reference-list oracle as G1 and
 G2 remove those boundaries.
 
@@ -73,7 +84,8 @@ status, optional reproduction command, expected-result oracle, input checksum,
 capability rows, input format, strict decoder, and expected result. A decode
 pass may pin either the canonical native hash or a list of PGX `references`,
 each with its own checksum, component index, resolution reduction, peak-error
-limit, and MSE limit. The PGX reader accepts big- or little-endian signed and
+limit, MSE limit, and explicit `space`: normal output components after MCT or
+codestream components before inverse MCT. The PGX reader accepts big- or little-endian signed and
 unsigned integer samples from 1 through 16 bits, and evaluates peak error and
 MSE independently. Multiple component and reduction records are represented
 without ambiguity. The runner decodes each reference at its declared
