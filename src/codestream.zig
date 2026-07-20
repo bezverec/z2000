@@ -66,9 +66,10 @@ const Marker = enum(u16) {
     eoc = 0xffd9,
 };
 
-/// Internal bounded strict-pipeline component capacity. The generic native
-/// no-MCT path may use all slots subject to caller resource limits; legacy
-/// colour/JP2/TIFF surfaces retain `color.max_components` (four).
+/// Legacy fixed-buffer encode and irreversible-worker capacity. The generic
+/// reversible native decoder is independently caller-limited through
+/// `max_strict_metadata_components`; colour/JP2/TIFF surfaces retain
+/// `color.max_components` (four).
 pub const max_codestream_components = 16;
 /// Metadata parsing is independently bounded from the remaining legacy
 /// strict-pipeline tables. Part 1 uses one-byte COC/QCC component selectors
@@ -3323,8 +3324,9 @@ pub fn decodeLosslessPlanarWithOptionsProfiled(
 /// no-MCT codestream directly into signed/unsigned i64 component planes.
 /// The strict packet/T1/DWT pipeline is shared with the legacy decoder, while
 /// DC level shifting follows each component's SIZ signedness. Current payload
-/// support remains 1..16 components at 8, 16, or 20 bits, including requested lower
-/// resolutions up to the codestream decomposition count.
+/// support is caller-limited up to 256 components at 8, 16, or 20 bits,
+/// including requested lower resolutions up to the codestream decomposition
+/// count. Independent interop coverage currently reaches 19 components.
 pub fn decodeLosslessNative(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -9293,7 +9295,12 @@ fn compactStrictPacketBlockCatalogForReduction(
     timings: ?*DecodeTimings,
 ) !void {
     if (reduction > levels) return CodestreamError.InvalidCodestream;
-    if (catalog.component_count < 1 or catalog.component_count > max_codestream_components) {
+    const component_count: usize = catalog.component_count;
+    if (component_count < 1 or catalog.components.len != component_count or
+        catalog.payloads.len != component_count or catalog.component_widths.len != component_count or
+        catalog.component_heights.len != component_count or catalog.component_x0.len != component_count or
+        catalog.component_y0.len != component_count)
+    {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -11475,7 +11482,7 @@ fn readStrictMainHeaderIndex(
     bytes: []const u8,
     component_count: u16,
 ) !StrictMainHeaderIndex {
-    if (component_count < 1 or component_count > max_codestream_components) return CodestreamError.UnsupportedPayload;
+    if (component_count < 1 or component_count > max_strict_metadata_components) return CodestreamError.UnsupportedPayload;
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }

@@ -20,8 +20,8 @@
       "encode": "not_implemented",
       "malformed": "bounded",
       "interop": "bounded",
-      "evidence": ["Kakadu signed 8-bit single- and multi-tile, signed 20-bit, and mixed 8/16/20-bit PGX/codestream fixtures", "native carrier signed-range and legacy fail-closed tests"],
-      "note": "The native i64 API decodes bounded 1..16-component single- and multi-tile reversible no-MCT signed 8/16/20-bit payloads, including mixed component precision, at full and lower resolutions; other precisions and component counts above the internal bound remain G1."
+      "evidence": ["Kakadu signed 8-bit single-, five-, and nineteen-component multi-tile fixtures plus signed 20-bit and mixed 8/16/20-bit PGX/codestream fixtures", "native carrier signed-range, caller-limit, and legacy fail-closed tests"],
+      "note": "The native i64 API decodes caller-limited single- and multi-tile reversible no-MCT signed 8/16/20-bit payloads through the 256-component metadata bound, including mixed component precision, at full and lower resolutions; independent interop is pinned at 19 components."
     },
     {
       "id": "siz-subsampled-components",
@@ -401,6 +401,29 @@
         { "path": "src/testdata/kakadu-five-component-signed-r1-c2.pgx", "sha256": "bdf2fd9ba62b2177b751d6ea464515acc0d6c09a0e64e473caf436686c5d0820", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 },
         { "path": "src/testdata/kakadu-five-component-signed-r1-c3.pgx", "sha256": "bdf2fd9ba62b2177b751d6ea464515acc0d6c09a0e64e473caf436686c5d0820", "format": "pgx", "component": 3, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 },
         { "path": "src/testdata/kakadu-five-component-signed-r1-c4.pgx", "sha256": "bdf2fd9ba62b2177b751d6ea464515acc0d6c09a0e64e473caf436686c5d0820", "format": "pgx", "component": 4, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 }
+      ]
+    },
+    {
+      "id": "kakadu-nineteen-component-signed-native-multitile",
+      "path": "src/testdata/kakadu-nineteen-component-signed-multitile.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "c4abc27a00af18348f383906f44ce92ec350217f15a1008786c7f914b4ea4d45",
+      "source": {
+        "producer": "Kakadu demo applications from nineteen copies of the committed synthetic signed PGX ramp",
+        "version": "Kakadu 8.4.1; Zig 0.16.0 fixture generator",
+        "origin": "nineteen signed 8-bit 16x16 components, four 8x8 tiles, RPCL, reversible 5/3, no MCT, inline PLT",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "source/reference PGX and codestream committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i source.pgx repeated nineteen times -o kakadu-nineteen-component-signed-multitile.j2c Creversible=yes Cycc=no Stiles={8,8} Clevels=1 Corder=RPCL Cprecincts={8,8} Cblk={4,4} Clayers=1 ORGgen_plt=yes -rate - -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 lossless signed PGX at full and reduced resolution; all nineteen source components are identical and the unit test compares every decoded plane",
+      "features": ["siz-native-signed-components", "tiles-and-tile-parts", "reversible-53", "packet-header-placement"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-signed-8bit-multitile-reference.pgx", "sha256": "4ad7fd7b1a4a61e4e0e36248e23acc2fcce971e8ea7b571a1439683298a3d917", "format": "pgx", "component": 0, "max_peak_error": 0, "max_mse": 0 },
+        { "path": "src/testdata/kakadu-signed-8bit-multitile-r1-reference.pgx", "sha256": "bdf2fd9ba62b2177b751d6ea464515acc0d6c09a0e64e473caf436686c5d0820", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 }
       ]
     },
     {

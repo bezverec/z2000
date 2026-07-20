@@ -287,21 +287,23 @@ and matches Kakadu at full and reduction-1 resolution; a 21-bit SIZ mutation
 pins the current fail-closed edge. A fifth Kakadu stream combines signed
 8/16/20-bit components and matches all six full/reduction-1 PGX references,
 proving that T2/T1/DWT reconstruction retains component-local precision. The
-bounded native payload path is reversible 5/3, no-MCT, 1..16 components at
-8/16/20 bits, including mixed precision, with exact 1/8-thread output and
-caller-controlled lower limits.
+bounded native payload path is reversible 5/3, no-MCT, caller-limited up to
+256 components at 8/16/20 bits, including mixed precision, with exact
+1/8-thread output and caller-controlled lower limits. A 19-component,
+four-tile Kakadu fixture pins full and reduction-1 assembly beyond the former
+strict ceiling.
 Packet pruning and per-tile partial synthesis retain reduced absolute
 component origins and dimensions; reductions above COD/NL fail closed. Signed
 components skip the unsigned DC shift; the same codestreams remain fail-closed
 in legacy planar/gray APIs.
-The first four strict-storage migrations are complete: component assembly,
+The first five strict-storage migrations are complete: component assembly,
 public block catalog, component packet plans, deduplicated geometry storage,
 RPCL indexes, the strict metadata header/parser state, persistent precinct
 groups, and assembly block-count scratch now allocate exact-length component
 slices rather than reserving 16 slots. Direct 19-component storage, planning,
-SIZ-parser, and active precinct-state tests pin this foundation; metadata
-parsing is bounded at 256 components while later decode tables retain the
-end-to-end limit.
+SIZ-parser, active precinct-state, and end-to-end 19-component multi-tile tests
+pin this foundation. Metadata and reversible native decode are bounded at 256
+components; legacy colour/encode APIs retain their narrower contracts.
 
 1. Continue the audit of every `u16`, RGB, three/four-component, and common-
    grid assumption through T1/DWT, tile assembly, JP2 validation, and CLI
@@ -309,9 +311,10 @@ end-to-end limit.
 2. Continue replacing the bounded 16-slot strict-pipeline arrays with caller-
    limited dynamic structures. Assembly, final block-catalog storage, component
    packet plans/geometries, RPCL indexes, metadata, and precinct groups are
-   complete; tile output/assembly and parallel job tables remain. Then carry the
-   remaining Part 1 precisions through T1/DWT reconstruction without clipping
-   or bias ambiguity.
+   complete, and reversible native tile output/assembly now passes beyond 16
+   components. Dynamize the remaining parallel irreversible job tables, then
+   carry the remaining Part 1 precisions through T1/DWT reconstruction without
+   clipping or bias ambiguity.
 3. Wire the landed PGX writer into raw-codestream diagnostic decode, then add
    checked PAM/raw-planar output for layouts PGX or TIFF cannot represent exactly. Add
    direct `.j2k`/`.j2c` decode dispatch without requiring a JP2 wrapper.

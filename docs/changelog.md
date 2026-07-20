@@ -56,8 +56,14 @@ entries are grouped by development milestone rather than semantic version.
   block-count scratch table. Nested tag-tree/lblock state is released before
   each exact-length per-component slot slice and its outer table; a direct
   19-component regression materializes state on the last component and pins
-  allocator cleanup. Later tile output/assembly and parallel job tables still
-  retain the public 16-component payload ceiling.
+  allocator cleanup.
+- Removed the obsolete 16-component gates from strict main-header indexing and
+  reduced block-catalog validation. A committed Kakadu 19-component signed
+  8-bit, four-tile reversible codestream now decodes exactly at full and
+  reduction-1 resolution through the caller-limited native API; all nineteen
+  planes match, a caller limit of 18 fails before payload allocation, and the
+  four-component legacy API remains closed. Parallel irreversible job tables
+  retain the remaining 16-slot implementation bound.
 
 ### Part 1 Corpus Gate
 

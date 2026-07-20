@@ -194,21 +194,23 @@ signed/unsigned metadata, while committed Kakadu signed 8-bit single- and
 four-tile streams decode exactly at full and reduction-1 resolution through
 bounded reversible no-MCT T1/DWT reconstruction and absolute native-grid
 assembly. A five-component, four-tile Kakadu stream additionally matches ten
-full/reduction-1 PGX references through the new 16-slot strict/native bound.
+full/reduction-1 PGX references, and a 19-component four-tile stream now pins
+the caller-limited native path beyond the former 16-slot strict bound.
 An independent signed 20-bit Kakadu stream now matches full and reduction-1
 PGX output exactly, including both extrema, while a 21-bit mutation fails
 closed. A mixed signed 8/16/20-bit Kakadu stream additionally matches all six
 component/reduction references exactly, proving component-local precision
 through T2/T1/DWT. Caller limits and the legacy four-component, unsigned 8/16-bit `u16`
 surface remain intact. Remaining dynamic strict structures plus sub-byte, mixed, and
-remaining precision breadth come next. The first four dynamic strict-storage
+remaining precision breadth come next. The first five dynamic strict-storage
 slices have landed: component assembly, the public block catalog, component
 packet plans, geometry/index state, RPCL indexes, strict metadata, and
 persistent precinct groups now own exact-length allocator-backed slices.
 Metadata parsing is independently capped at 256 components, with 19-component
-storage, planning, SIZ, and active precinct-state regressions. Tile
-output/assembly and job structures still define the current 16-component
-payload ceiling and are the next G1 migration.
+storage, planning, SIZ, active precinct-state, and full/reduced multi-tile
+native regressions. Reversible native decode is caller-limited through that
+metadata boundary; parallel irreversible job structures remain the next G1
+migration. Legacy colour and encode carriers remain intentionally narrower.
 Part 1 samples are integers;
 floating-point codestream samples and general multiple-component transforms
 belong to extension work rather than being smuggled into this milestone.

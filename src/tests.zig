@@ -368,6 +368,62 @@ test "Kakadu five-component signed codestream exceeds only the legacy ceiling" {
     }
 }
 
+test "Kakadu nineteen-component signed codestream exceeds the former strict ceiling" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-nineteen-component-signed-multitile.j2c");
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 19), layout.components.len);
+    for (layout.components) |component| {
+        try std.testing.expect(component.signed);
+        try std.testing.expectEqual(@as(u8, 8), component.precision);
+    }
+    try std.testing.expectError(
+        native_samples.NativeSampleError.ResourceLimitExceeded,
+        codestream.decodeLosslessNative(allocator, bytes, .{ .max_components = 18 }),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer full.deinit();
+    try std.testing.expectEqual(@as(usize, 19), full.componentCount());
+    try std.testing.expectEqual(@as(i64, -128), full.planes[0].samples[0]);
+    try std.testing.expectEqual(@as(i64, 127), full.planes[0].samples[255]);
+    for (1..19) |component| {
+        try std.testing.expectEqualSlices(i64, full.planes[0].samples, full.planes[component].samples);
+    }
+    const full_pgx = try full.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(full_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-8bit-multitile-reference.pgx"),
+        full_pgx,
+    );
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    try std.testing.expectEqual(@as(usize, 19), reduced.componentCount());
+    for (1..19) |component| {
+        try std.testing.expectEqualSlices(i64, reduced.planes[0].samples, reduced.planes[component].samples);
+    }
+    const reduced_pgx = try reduced.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(reduced_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-8bit-multitile-r1-reference.pgx"),
+        reduced_pgx,
+    );
+}
+
 test "Kakadu signed 20-bit codestream decodes only through the native payload path" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-signed-20bit.j2c");
