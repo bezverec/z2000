@@ -2358,6 +2358,62 @@ test "strict metadata parser allocates beyond the legacy component slots" {
     );
 }
 
+test "strict stateful precinct groups exceed the legacy component slots" {
+    const component_count = max_codestream_components + 3;
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 8, .height = 8 },
+        .{ .width = 8, .height = 8 },
+    };
+    const reference = try packet_plan.rpclTileRegion(0, 0, 16, 16, 1, 1, 1, &precincts);
+    const component_bit_depths = [_]u8{8} ** component_count;
+    const component_signed = [_]bool{false} ** component_count;
+    const component_sampling = [_]u8{1} ** component_count;
+    const component_qcd = [_]StrictQcdInfo{empty_strict_qcd_info} ** component_count;
+    const tile_parts = emptyTilePartPlan();
+    const header = TemporaryHeader{
+        .version = 8,
+        .width = 16,
+        .height = 16,
+        .bit_depth = 8,
+        .component_bit_depths = &component_bit_depths,
+        .component_signed = &component_signed,
+        .component_xrsiz = &component_sampling,
+        .component_yrsiz = &component_sampling,
+        .component_qcd = &component_qcd,
+        .component_count = component_count,
+        .levels = 1,
+        .layers = 1,
+        .block_width = 4,
+        .block_height = 4,
+        .tile_part_divisions = null,
+        .tile_part_plan_count = tile_parts.count,
+        .tile_part_plan = tile_parts.entries,
+        .packet_plan_count = reference.resolution_count,
+        .packet_plan = reference.resolutions,
+        .packet_count = reference.packets * component_count,
+    };
+
+    var groups = try StrictStatefulPrecinctGroups.init(std.testing.allocator, header);
+    defer groups.deinit();
+    try std.testing.expectEqual(@as(usize, component_count), groups.component_slots.len);
+    try std.testing.expectEqual(@as(usize, component_count), groups.initialized_components);
+    const expected_slots = groups.component_slots[0].len;
+    try std.testing.expect(expected_slots > 0);
+    for (groups.component_slots) |slots| {
+        try std.testing.expectEqual(expected_slots, slots.len);
+    }
+    const active = try groups.groupsFor(.{
+        .sequence = 0,
+        .resolution = 0,
+        .precinct_x = 0,
+        .precinct_y = 0,
+        .precinct_index = 0,
+        .component = component_count - 1,
+        .layer = 0,
+    });
+    try std.testing.expect(active.len > 0);
+}
+
 const StrictRpclImage = struct {
     image: image.RgbImage,
     complete: bool,
@@ -6308,7 +6364,8 @@ fn assembleStrictPacketCatalogHeaders(
     var geometries = try StrictComponentGeometrySet.init(allocator, header);
     defer geometries.deinit();
 
-    var block_counts: [max_codestream_components]usize = [_]usize{0} ** max_codestream_components;
+    const block_counts = try allocator.alloc(usize, header.component_count);
+    defer allocator.free(block_counts);
     for (0..header.component_count) |component| {
         const geometry = try geometries.geometryFor(component);
         block_counts[component] = geometry.blocks.len;
@@ -6317,7 +6374,7 @@ fn assembleStrictPacketCatalogHeaders(
     var assemblies = try StrictComponentAssemblySet.init(
         allocator,
         header.component_count,
-        block_counts[0..header.component_count],
+        block_counts,
         header.layers == 1,
     );
     errdefer assemblies.deinit();
@@ -9944,7 +10001,7 @@ const StrictStatefulPrecinctGroups = struct {
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     geometries: StrictComponentGeometrySet,
-    component_slots: [max_codestream_components][]?Slot = [_][]?Slot{&.{}} ** max_codestream_components,
+    component_slots: [][]?Slot,
     initialized_components: usize = 0,
 
     const Slot = struct {
@@ -9953,11 +10010,17 @@ const StrictStatefulPrecinctGroups = struct {
     };
 
     fn init(allocator: std.mem.Allocator, header: TemporaryHeader) !StrictStatefulPrecinctGroups {
-        const geometries = try StrictComponentGeometrySet.init(allocator, header);
+        var geometries = try StrictComponentGeometrySet.init(allocator, header);
+        const component_slots = allocator.alloc([]?Slot, header.component_count) catch |err| {
+            geometries.deinit();
+            return err;
+        };
+        for (component_slots) |*slots| slots.* = &.{};
         var result = StrictStatefulPrecinctGroups{
             .allocator = allocator,
             .header = header,
             .geometries = geometries,
+            .component_slots = component_slots,
         };
         errdefer result.deinit();
         for (0..header.component_count) |component| {
@@ -9979,6 +10042,7 @@ const StrictStatefulPrecinctGroups = struct {
             }
             self.allocator.free(slots);
         }
+        self.allocator.free(self.component_slots);
         self.geometries.deinit();
         self.* = undefined;
     }

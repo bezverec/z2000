@@ -51,8 +51,13 @@ entries are grouped by development milestone rather than semantic version.
   Metadata parsing is now independently bounded at 256 components, every
   public metadata consumer releases ownership explicitly, and a 19-component
   truncated-header regression pins both acceptance past the legacy boundary
-  and error-path cleanup. Later precinct/tile/job tables still retain the
-  public 16-component payload ceiling.
+  and error-path cleanup.
+- Dynamized persistent precinct-group component slots and the packet-assembly
+  block-count scratch table. Nested tag-tree/lblock state is released before
+  each exact-length per-component slot slice and its outer table; a direct
+  19-component regression materializes state on the last component and pins
+  allocator cleanup. Later tile output/assembly and parallel job tables still
+  retain the public 16-component payload ceiling.
 
 ### Part 1 Corpus Gate
 

@@ -201,13 +201,14 @@ closed. A mixed signed 8/16/20-bit Kakadu stream additionally matches all six
 component/reduction references exactly, proving component-local precision
 through T2/T1/DWT. Caller limits and the legacy four-component, unsigned 8/16-bit `u16`
 surface remain intact. Remaining dynamic strict structures plus sub-byte, mixed, and
-remaining precision breadth come next. The first three dynamic strict-storage
+remaining precision breadth come next. The first four dynamic strict-storage
 slices have landed: component assembly, the public block catalog, component
-packet plans, geometry/index state, RPCL indexes, and strict metadata now own
-exact-length allocator-backed slices. Metadata parsing is independently capped
-at 256 components, with 19-component storage, planning, and SIZ regressions.
-Precinct, tile output/assembly, and job structures still define the current
-16-component payload ceiling and are the next G1 migration.
+packet plans, geometry/index state, RPCL indexes, strict metadata, and
+persistent precinct groups now own exact-length allocator-backed slices.
+Metadata parsing is independently capped at 256 components, with 19-component
+storage, planning, SIZ, and active precinct-state regressions. Tile
+output/assembly and job structures still define the current 16-component
+payload ceiling and are the next G1 migration.
 Part 1 samples are integers;
 floating-point codestream samples and general multiple-component transforms
 belong to extension work rather than being smuggled into this milestone.

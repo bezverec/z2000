@@ -67,19 +67,22 @@ silently truncated; a
 decode surface deliberately still rejects signed input, accepts only 8/16-bit
 precision, and retains `color.max_components` (four).
 
-The first three strict-pipeline dynamization slices replace component-indexed
+The first four strict-pipeline dynamization slices replace component-indexed
 assembly, public block-catalog, packet-plan, geometry-set, and RPCL-index fixed
-arrays plus the strict metadata header and its COC/QCC parser state with
-allocator-owned slices sized to the active component count.
+arrays, the strict metadata header and its COC/QCC parser state, and persistent
+precinct-group slot tables with allocator-owned slices sized to the active
+component count.
 Catalog `deinit` owns both the outer metadata/slice tables and every component's
 block/payload storage; packet plans and geometry sets likewise release their
-outer collections after all nested state. Direct 19-component tests pin
-storage, planning, and SIZ parsing beyond the historical slot count. Metadata
+outer collections after all nested state. Precinct groups release every active
+tag-tree/lblock group before their per-component and outer slot slices. Direct
+19-component tests pin storage, planning, SIZ parsing, and persistent precinct
+state beyond the historical slot count. Metadata
 parsing is bounded at 256 components, matching the default native-sample limit
-and the Part 1 one-byte COC/QCC selector range. Precinct groups, tile
-output/assembly tables, and parallel job tables still enforce the documented
-16-component native payload boundary; removing that boundary requires
-migrating those remaining structures together.
+and the Part 1 one-byte COC/QCC selector range. Tile output/assembly tables and
+parallel job tables still enforce the documented 16-component native payload
+boundary; removing that boundary requires migrating those remaining
+structures together.
 
 Native component geometry is the strict decode boundary. Component upsampling
 is a separate operation: `decodeLosslessPlanarUpsampled` performs

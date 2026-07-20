@@ -294,21 +294,22 @@ Packet pruning and per-tile partial synthesis retain reduced absolute
 component origins and dimensions; reductions above COD/NL fail closed. Signed
 components skip the unsigned DC shift; the same codestreams remain fail-closed
 in legacy planar/gray APIs.
-The first three strict-storage migrations are complete: component assembly,
+The first four strict-storage migrations are complete: component assembly,
 public block catalog, component packet plans, deduplicated geometry storage,
-RPCL indexes, and the strict metadata header/parser state now allocate
-exact-length component slices rather than reserving 16 slots. Direct
-19-component storage, planning, and SIZ-parser tests pin this foundation;
-metadata parsing is bounded at 256 components while later decode tables retain
-the end-to-end limit.
+RPCL indexes, the strict metadata header/parser state, persistent precinct
+groups, and assembly block-count scratch now allocate exact-length component
+slices rather than reserving 16 slots. Direct 19-component storage, planning,
+SIZ-parser, and active precinct-state tests pin this foundation; metadata
+parsing is bounded at 256 components while later decode tables retain the
+end-to-end limit.
 
 1. Continue the audit of every `u16`, RGB, three/four-component, and common-
    grid assumption through T1/DWT, tile assembly, JP2 validation, and CLI
    conversion boundaries. The SIZ/API allocation boundary is complete.
 2. Continue replacing the bounded 16-slot strict-pipeline arrays with caller-
    limited dynamic structures. Assembly, final block-catalog storage, component
-   packet plans/geometries, RPCL indexes, and metadata are complete; precinct
-   groups, tile output/assembly, and parallel job tables remain. Then carry the
+   packet plans/geometries, RPCL indexes, metadata, and precinct groups are
+   complete; tile output/assembly and parallel job tables remain. Then carry the
    remaining Part 1 precisions through T1/DWT reconstruction without clipping
    or bias ambiguity.
 3. Wire the landed PGX writer into raw-codestream diagnostic decode, then add
