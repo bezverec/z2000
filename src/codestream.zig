@@ -1951,20 +1951,61 @@ pub const StrictPacketBlock = struct {
 
 pub const StrictPacketBlockCatalog = struct {
     allocator: std.mem.Allocator = undefined,
-    component_count: u16 = 3,
-    component_widths: [max_codestream_components]usize = [_]usize{0} ** max_codestream_components,
-    component_heights: [max_codestream_components]usize = [_]usize{0} ** max_codestream_components,
-    component_x0: [max_codestream_components]u32 = [_]u32{0} ** max_codestream_components,
-    component_y0: [max_codestream_components]u32 = [_]u32{0} ** max_codestream_components,
-    components: [max_codestream_components][]StrictPacketBlock = [_][]StrictPacketBlock{&.{}} ** max_codestream_components,
-    payloads: [max_codestream_components][]u8 = [_][]u8{&.{}} ** max_codestream_components,
+    component_count: u16 = 0,
+    component_widths: []usize = &.{},
+    component_heights: []usize = &.{},
+    component_x0: []u32 = &.{},
+    component_y0: []u32 = &.{},
+    components: [][]StrictPacketBlock = &.{},
+    payloads: [][]u8 = &.{},
+
+    fn init(allocator: std.mem.Allocator, component_count: u16) !StrictPacketBlockCatalog {
+        if (component_count == 0) return CodestreamError.UnsupportedPayload;
+        const count: usize = component_count;
+        const component_widths = try allocator.alloc(usize, count);
+        errdefer allocator.free(component_widths);
+        const component_heights = try allocator.alloc(usize, count);
+        errdefer allocator.free(component_heights);
+        const component_x0 = try allocator.alloc(u32, count);
+        errdefer allocator.free(component_x0);
+        const component_y0 = try allocator.alloc(u32, count);
+        errdefer allocator.free(component_y0);
+        const components = try allocator.alloc([]StrictPacketBlock, count);
+        errdefer allocator.free(components);
+        const payloads = try allocator.alloc([]u8, count);
+        errdefer allocator.free(payloads);
+        @memset(component_widths, 0);
+        @memset(component_heights, 0);
+        @memset(component_x0, 0);
+        @memset(component_y0, 0);
+        for (components) |*blocks| blocks.* = &.{};
+        for (payloads) |*payload| payload.* = &.{};
+        return .{
+            .allocator = allocator,
+            .component_count = component_count,
+            .component_widths = component_widths,
+            .component_heights = component_heights,
+            .component_x0 = component_x0,
+            .component_y0 = component_y0,
+            .components = components,
+            .payloads = payloads,
+        };
+    }
 
     pub fn deinit(self: *StrictPacketBlockCatalog) void {
-        for (0..self.component_count) |component| {
-            if (self.components[component].len > 0) self.allocator.free(self.components[component]);
-            if (self.payloads[component].len > 0) self.allocator.free(self.payloads[component]);
+        for (self.components) |blocks| {
+            if (blocks.len > 0) self.allocator.free(blocks);
         }
-        self.* = .{};
+        for (self.payloads) |payload| {
+            if (payload.len > 0) self.allocator.free(payload);
+        }
+        if (self.component_widths.len > 0) self.allocator.free(self.component_widths);
+        if (self.component_heights.len > 0) self.allocator.free(self.component_heights);
+        if (self.component_x0.len > 0) self.allocator.free(self.component_x0);
+        if (self.component_y0.len > 0) self.allocator.free(self.component_y0);
+        if (self.components.len > 0) self.allocator.free(self.components);
+        if (self.payloads.len > 0) self.allocator.free(self.payloads);
+        self.* = undefined;
     }
 
     pub fn blockPayload(self: StrictPacketBlockCatalog, component: usize, block_index: usize) []const u8 {
@@ -2194,7 +2235,8 @@ const StrictComponentAssembly = struct {
 };
 
 const StrictComponentAssemblySet = struct {
-    assemblies: [max_codestream_components]StrictComponentAssembly = undefined,
+    allocator: std.mem.Allocator,
+    assemblies: []StrictComponentAssembly,
     initialized: usize = 0,
 
     fn init(
@@ -2203,10 +2245,14 @@ const StrictComponentAssemblySet = struct {
         block_counts: []const usize,
         use_component_payloads: bool,
     ) !StrictComponentAssemblySet {
-        if (component_count < 1 or component_count > max_codestream_components or block_counts.len != component_count) {
+        if (component_count < 1 or block_counts.len != component_count) {
             return CodestreamError.UnsupportedPayload;
         }
-        var set = StrictComponentAssemblySet{};
+        const assemblies = try allocator.alloc(StrictComponentAssembly, component_count);
+        var set = StrictComponentAssemblySet{
+            .allocator = allocator,
+            .assemblies = assemblies,
+        };
         errdefer set.deinit();
         for (0..component_count) |component| {
             set.assemblies[component] = try StrictComponentAssembly.init(allocator, block_counts[component], use_component_payloads);
@@ -2217,9 +2263,32 @@ const StrictComponentAssemblySet = struct {
 
     fn deinit(self: *StrictComponentAssemblySet) void {
         for (self.assemblies[0..self.initialized]) |*assembly| assembly.deinit();
-        self.* = .{};
+        self.allocator.free(self.assemblies);
+        self.* = undefined;
     }
 };
+
+test "strict component assembly and packet catalog storage is dynamically sized" {
+    const component_count = max_codestream_components + 3;
+    const block_counts = [_]usize{0} ** component_count;
+    var assemblies = try StrictComponentAssemblySet.init(
+        std.testing.allocator,
+        component_count,
+        &block_counts,
+        false,
+    );
+    defer assemblies.deinit();
+    try std.testing.expectEqual(@as(usize, component_count), assemblies.assemblies.len);
+
+    var catalog = try StrictPacketBlockCatalog.init(std.testing.allocator, component_count);
+    defer catalog.deinit();
+    try std.testing.expectEqual(@as(usize, component_count), catalog.components.len);
+    try std.testing.expectEqual(@as(usize, component_count), catalog.payloads.len);
+    try std.testing.expectEqual(@as(usize, component_count), catalog.component_widths.len);
+    try std.testing.expectEqual(@as(usize, component_count), catalog.component_heights.len);
+    try std.testing.expectEqual(@as(usize, component_count), catalog.component_x0.len);
+    try std.testing.expectEqual(@as(usize, component_count), catalog.component_y0.len);
+}
 
 const StrictRpclImage = struct {
     image: image.RgbImage,
@@ -6484,11 +6553,8 @@ fn strictPacketBlockCatalogFromAssembliesChecked(
     allocator: std.mem.Allocator,
     assemblies: []StrictComponentAssembly,
 ) !StrictPacketBlockCatalogBuild {
-    if (assemblies.len < 1 or assemblies.len > max_codestream_components) return CodestreamError.UnsupportedPayload;
-    var catalog = StrictPacketBlockCatalog{
-        .allocator = allocator,
-        .component_count = @intCast(assemblies.len),
-    };
+    if (assemblies.len < 1 or assemblies.len > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+    var catalog = try StrictPacketBlockCatalog.init(allocator, @intCast(assemblies.len));
     errdefer catalog.deinit();
     var stats = StrictAssemblyStats{};
 

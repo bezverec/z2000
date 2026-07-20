@@ -200,8 +200,12 @@ PGX output exactly, including both extrema, while a 21-bit mutation fails
 closed. A mixed signed 8/16/20-bit Kakadu stream additionally matches all six
 component/reduction references exactly, proving component-local precision
 through T2/T1/DWT. Caller limits and the legacy four-component, unsigned 8/16-bit `u16`
-surface remain intact. Dynamic strict structures plus sub-byte, mixed, and
-remaining precision breadth come next.
+surface remain intact. Remaining dynamic strict structures plus sub-byte, mixed, and
+remaining precision breadth come next. The first dynamic strict-storage slice
+has landed: component assembly and the public block catalog now own exact-
+length allocator-backed slices, with a 19-component storage regression. Header,
+geometry/packet-plan, precinct, tile-assembly, and job structures still define
+the current 16-component payload ceiling and are the next G1 migration.
 Part 1 samples are integers;
 floating-point codestream samples and general multiple-component transforms
 belong to extension work rather than being smuggled into this milestone.

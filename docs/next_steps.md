@@ -294,13 +294,20 @@ Packet pruning and per-tile partial synthesis retain reduced absolute
 component origins and dimensions; reductions above COD/NL fail closed. Signed
 components skip the unsigned DC shift; the same codestreams remain fail-closed
 in legacy planar/gray APIs.
+The first strict-storage migration is complete: component assembly and the
+public block catalog now allocate exact-length component slices, including
+outer ownership, rather than reserving 16 slots. A 19-component direct storage
+test pins this foundation while parser and geometry limits remain unchanged.
 
 1. Continue the audit of every `u16`, RGB, three/four-component, and common-
    grid assumption through T1/DWT, tile assembly, JP2 validation, and CLI
    conversion boundaries. The SIZ/API allocation boundary is complete.
-2. Replace the bounded 16-slot strict-pipeline arrays with caller-limited
-   dynamic structures, then carry the remaining Part 1 precisions through
-   T1/DWT reconstruction without clipping or bias ambiguity.
+2. Continue replacing the bounded 16-slot strict-pipeline arrays with caller-
+   limited dynamic structures. Assembly and final block-catalog storage are
+   complete; metadata, component packet plans/geometries, precinct groups,
+   tile assembly, and parallel job tables remain. Then carry the remaining
+   Part 1 precisions through T1/DWT reconstruction without clipping or bias
+   ambiguity.
 3. Wire the landed PGX writer into raw-codestream diagnostic decode, then add
    checked PAM/raw-planar output for layouts PGX or TIFF cannot represent exactly. Add
    direct `.j2k`/`.j2c` decode dispatch without requiring a JP2 wrapper.

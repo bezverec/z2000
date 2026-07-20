@@ -424,7 +424,9 @@ Notes:
   reversible profile.
 - `readStrictPacketBlockCatalog` reconstructs per-component code-block packet
   metadata and owned payload views from strict `SOD`/PLT/T2 state without
-  requiring private BP8 `COM` payloads.
+  requiring private BP8 `COM` payloads. Its public component metadata, block,
+  and payload collections are allocator-owned slices whose length equals
+  `component_count`; callers must not rely on inactive padding slots.
 - `readStrictPacketCatalog` also covers sampled multi-tile streams by joining
   the independently validated tile-local catalogs used by production decode;
   returned byte offsets address one normalized owned packet buffer.

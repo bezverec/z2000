@@ -6415,8 +6415,11 @@ test "codestream encodes one-component grayscale ISO MQ profile" {
     var catalog = try codestream.readStrictPacketBlockCatalog(allocator, encoded);
     defer catalog.deinit();
     try std.testing.expectEqual(@as(u16, 1), catalog.component_count);
+    try std.testing.expectEqual(@as(usize, 1), catalog.components.len);
+    try std.testing.expectEqual(@as(usize, 1), catalog.payloads.len);
+    try std.testing.expectEqual(@as(usize, 1), catalog.component_widths.len);
+    try std.testing.expectEqual(@as(usize, 1), catalog.component_heights.len);
     try std.testing.expect(catalog.components[0].len > 0);
-    try std.testing.expectEqual(@as(usize, 0), catalog.components[1].len);
 
     var decoded = try codestream.decodeLosslessGrayWithOptions(
         allocator,

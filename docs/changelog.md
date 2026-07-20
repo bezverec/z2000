@@ -36,6 +36,12 @@ entries are grouped by development milestone rather than semantic version.
   16 while preserving the legacy colour/JP2/TIFF ceiling. A five-component,
   four-tile Kakadu signed stream matches ten full/reduction-1 PGX references
   exactly; caller limits below five and legacy planar decode fail closed.
+- Replaced the strict component assembly set and public packet block catalog's
+  fixed component arrays with allocator-owned, exact-length slices. A direct
+  19-component storage/ownership regression and the existing one-/five-
+  component decode gates pin allocation, deallocation, and the removal of
+  inactive catalog padding slots; parser/geometry breadth remains bounded at
+  16 until the next migration slice.
 
 ### Part 1 Corpus Gate
 

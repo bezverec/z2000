@@ -66,6 +66,14 @@ counts above 16 remain fail-closed rather than being silently truncated; a
 decode surface deliberately still rejects signed input, accepts only 8/16-bit
 precision, and retains `color.max_components` (four).
 
+The first strict-pipeline dynamization slice replaces the component-indexed
+assembly set and public packet block catalog's fixed arrays with allocator-
+owned slices sized exactly to the active component count. Catalog `deinit`
+owns both the outer metadata/slice tables and every component's block/payload
+storage. The parser, geometry/planning state, precinct groups, and parallel
+job tables still enforce the documented 16-component native payload boundary;
+removing that boundary requires migrating those remaining structures together.
+
 Native component geometry is the strict decode boundary. Component upsampling
 is a separate operation: `decodeLosslessPlanarUpsampled` performs
 nearest-neighbour expansion anchored to absolute SIZ `XOsiz/YOsiz` and
