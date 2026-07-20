@@ -40,8 +40,19 @@ entries are grouped by development milestone rather than semantic version.
   fixed component arrays with allocator-owned, exact-length slices. A direct
   19-component storage/ownership regression and the existing one-/five-
   component decode gates pin allocation, deallocation, and the removal of
-  inactive catalog padding slots; parser/geometry breadth remains bounded at
-  16 until the next migration slice.
+  inactive catalog padding slots; end-to-end decode breadth remains bounded at
+  16 until the remaining migration slices land.
+- Dynamized component packet plans, the deduplicated geometry set and its
+  component-index map, plus `RpclBlockIndex` cells. Per-call ownership now uses
+  the caller allocator across single- and multi-tile planning; a second direct
+  19-component regression pins aggregate packet counts and index capacity.
+- Replaced the strict metadata header's five fixed component tables and the
+  parser's COC/QCC seen-state arrays with exact-length allocator-owned slices.
+  Metadata parsing is now independently bounded at 256 components, every
+  public metadata consumer releases ownership explicitly, and a 19-component
+  truncated-header regression pins both acceptance past the legacy boundary
+  and error-path cleanup. Later precinct/tile/job tables still retain the
+  public 16-component payload ceiling.
 
 ### Part 1 Corpus Gate
 

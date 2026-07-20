@@ -59,20 +59,27 @@ absolute component grid during independent synthesis and checked assembly.
 Full and requested lower DWT resolutions preserve reduced reference/component
 origins and dimensions while pruning discarded packet bodies before partial
 synthesis. Signed output receives no DC level shift; unsigned output receives
-`2^(precision-1)`. The strict pipeline currently has 16 component slots and
-the caller may impose a lower allocation limit. Other precisions and component
-counts above 16 remain fail-closed rather than being silently truncated; a
+`2^(precision-1)`. The remaining strict decode tables currently have 16
+component slots and the caller may impose a lower allocation limit. Other
+precisions and component counts above 16 remain fail-closed rather than being
+silently truncated; a
 21-bit mutation pins the current upper payload boundary. The legacy `u16`
 decode surface deliberately still rejects signed input, accepts only 8/16-bit
 precision, and retains `color.max_components` (four).
 
-The first strict-pipeline dynamization slice replaces the component-indexed
-assembly set and public packet block catalog's fixed arrays with allocator-
-owned slices sized exactly to the active component count. Catalog `deinit`
-owns both the outer metadata/slice tables and every component's block/payload
-storage. The parser, geometry/planning state, precinct groups, and parallel
-job tables still enforce the documented 16-component native payload boundary;
-removing that boundary requires migrating those remaining structures together.
+The first three strict-pipeline dynamization slices replace component-indexed
+assembly, public block-catalog, packet-plan, geometry-set, and RPCL-index fixed
+arrays plus the strict metadata header and its COC/QCC parser state with
+allocator-owned slices sized to the active component count.
+Catalog `deinit` owns both the outer metadata/slice tables and every component's
+block/payload storage; packet plans and geometry sets likewise release their
+outer collections after all nested state. Direct 19-component tests pin
+storage, planning, and SIZ parsing beyond the historical slot count. Metadata
+parsing is bounded at 256 components, matching the default native-sample limit
+and the Part 1 one-byte COC/QCC selector range. Precinct groups, tile
+output/assembly tables, and parallel job tables still enforce the documented
+16-component native payload boundary; removing that boundary requires
+migrating those remaining structures together.
 
 Native component geometry is the strict decode boundary. Component upsampling
 is a separate operation: `decodeLosslessPlanarUpsampled` performs

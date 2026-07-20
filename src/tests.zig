@@ -19747,9 +19747,9 @@ test "strict SIZ marker reader rejects unsupported component layout" {
                 writeU32BeTest(corrupted, siz + 30, 1);
             }
         }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
-        .{ .label = "unsupported component count", .mutate = struct {
+        .{ .label = "component count beyond strict metadata limit", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
-                writeU16BeTest(corrupted, siz + 38, codestream.max_codestream_components + 1);
+                writeU16BeTest(corrupted, siz + 38, 257);
             }
         }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "four-component count with RGB-sized SIZ payload", .mutate = struct {
