@@ -251,6 +251,10 @@ Primary public types:
 - `EbcotSegmentStats`
 - `StrictPacketBlock`
 - `StrictPacketBlockCatalog`
+- `NativeSampleLimits`
+- `NativeCodestreamLayout`
+- `NativeSamplePlanes`
+- `NativePgxByteOrder`
 
 Primary public functions:
 
@@ -269,9 +273,35 @@ Primary public functions:
   `jp2.wrapPlanarAlphaCodestream(allocator, planes, alpha_mode, icc, bytes)` —
   bounded gray+alpha/RGBA JP2 wrapping for 2/4-component reversible streams;
   alpha is the final plane and is signalled explicitly through `cdef`
+- `inspectNativeCodestreamLayout(allocator, bytes, limits)` — reads the
+  mandatory raw-codestream SIZ marker without applying the legacy 1..4,
+  unsigned 8/16-bit decode envelope. It preserves 1..38-bit precision,
+  signedness, component origin, sampling step, native dimensions, tile grid,
+  and `Rsiz`; caller limits bound component count, reference pixels, and total
+  component samples before allocation. `NativeSamplePlanes.initFromLayout`
+  allocates dynamic `i64` planes, validates every sample against its declared
+  signed range, and exports checked PGX for precisions with 8/16/32-bit PGX
+  storage
+- `decodeLosslessNative(allocator, bytes, limits)` /
+  `decodeLosslessNativeWithOptions(allocator, bytes, options, limits)` — first
+  native payload profile: strict single- and multi-tile reversible 5/3, no MCT,
+  and 1..16 signed or unsigned 8/16/20-bit components, including mixed
+  component precision, additionally bounded by
+  `limits.max_components`. Multi-tile T2/T1/DWT runs
+  independently per tile and assembles by absolute component coordinates.
+  `options.resolution_reduction`
+  selects full or lower DWT resolutions through the production packet-pruning
+  and partial-synthesis path; values above COD/NL fail as invalid. Signed
+  components receive no DC shift, while unsigned components receive the
+  declared half-range shift.
+  Output samples and allocation limits are checked through
+  `NativeSamplePlanes`. Existing planar/gray/JP2/TIFF APIs remain unsigned,
+  retain their 1..4-component ceiling, and reject the same signed codestream
+  rather than reinterpreting it
 - `decodeLosslessPlanar(allocator, bytes)` /
   `decodeLosslessPlanarWithOptions(allocator, bytes, options)` — strict
-  decode of bounded reversible 5/3 streams with SIZ Csiz 1..4, including
+  decode of bounded reversible 5/3 and no-MCT irreversible 9/7 streams with
+  SIZ Csiz 1..4, including
   single-tile no-MCT layouts, four-component RGB-triplet RCT, and bounded mixed unsigned
   8/16-bit no-MCT streams. Mixed output uses `SamplePlanes.bit_depth == 0` and
   exposes each precision through `component_bit_depths`/
@@ -281,10 +311,11 @@ Primary public functions:
   supported when all three transformed components share sampling and precision.
   `DecodeOptions.resolution_reduction`
   reconstructs a requested lower DWT resolution directly for bounded
-  single-tile reversible 5/3 no-MCT streams, including component-sampled
-  layouts. Each sampled plane preserves its own reduced dimensions and
-  absolute registered origin; the value must not exceed COD/NL. Reduced
-  samples are saturated to their declared unsigned precision. Packet headers
+  reversible 5/3 and irreversible no-MCT 9/7 streams, including component-
+  sampled single- and multi-tile layouts. Each sampled plane preserves its own
+  reduced dimensions and absolute registered origin; the value must not exceed
+  COD/NL. Reduced samples are saturated to their declared unsigned precision.
+  Packet headers
   remain fully validated, while T1 entropy decode skips detail subbands
   discarded by the selected resolution. Profiled calls expose the
   saved work through `DecodeTimings.t1_skipped_blocks` and
@@ -456,7 +487,7 @@ component's SIZ sampling factors; `componentSampling(index)` returns the pair.
 `Info.image_origin_x/y` and `Info.tile_origin_x/y` retain the independent SIZ
 image and tile-partition origins for container/tool-layer registration.
 Metadata parsing accepts nonzero factors, while normal JP2 wrapping still
-requires unit sampling. Strict planar decode supports RPCL, reversible 5/3,
+requires unit sampling. Strict planar decode supports RPCL, reversible 5/3
 no-MCT subsampling with inline, PPT, or PPM packet headers and all SOP/EPH
 combinations; PLT is optional where the layout permits it. It merges unequal
 component precinct grids in reference-grid RPCL order and uses component-local
@@ -466,10 +497,12 @@ single- and multi-tile component plans; absolute tile rectangles are translated
 into native-size image-local output planes per component. PPM combined with sampled
 POC and MCT over subsampled planes remain fail-closed. The explicit
 `DecodeOptions.resolution_reduction` applies to sampled no-MCT reversible 5/3
-on single- and multi-tile streams. It returns each component at its independently
+on single- and multi-tile streams and bounded irreversible 9/7 with inline PLT.
+It returns each component at its independently
 reduced native dimensions while retaining complete packet-header validation
 and skipping discarded T1 detail payloads. Inline, PPT, and PPM headers are
-supported in this bounded profile. The explicit
+supported for 5/3; the committed 9/7 profile is pinned by a four-tile Kakadu
+RPCL/PLT stream at full and reduction-1 output. The explicit
 `decodeLosslessPlanarUpsampled` boundary expands native planes using absolute
 reference-grid registration; `decode-temp-jp2` interleaves them only for a
 bounded three-component sRGB JP2 wrapper. `Info.color_space` preserves the

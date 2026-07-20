@@ -16,6 +16,7 @@ const icc_color = @import("icc.zig");
 const jp2 = @import("jp2.zig");
 const mq = @import("mq.zig");
 const mq_iso = @import("mq_iso.zig");
+const native_samples = @import("native_samples.zig");
 const packet_plan = @import("packet_plan.zig");
 const part1_corpus = @import("part1_corpus.zig");
 const poc = @import("poc.zig");
@@ -33,6 +34,475 @@ const wavelet_int = @import("wavelet_int.zig");
 
 test "Part 1 corpus runner unit tests are linked into the main test binary" {
     _ = part1_corpus;
+}
+
+test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
+    const allocator = std.testing.allocator;
+    var stream: std.ArrayList(u8) = .empty;
+    defer stream.deinit(allocator);
+    try appendU16BeTest(allocator, &stream, 0xff4f);
+    try appendU16BeTest(allocator, &stream, 0xff51);
+    try appendU16BeTest(allocator, &stream, 38 + 5 * 3);
+    try appendU16BeTest(allocator, &stream, 0);
+    try appendU32BeTest(allocator, &stream, 33);
+    try appendU32BeTest(allocator, &stream, 17);
+    try appendU32BeTest(allocator, &stream, 1);
+    try appendU32BeTest(allocator, &stream, 2);
+    try appendU32BeTest(allocator, &stream, 16);
+    try appendU32BeTest(allocator, &stream, 16);
+    try appendU32BeTest(allocator, &stream, 0);
+    try appendU32BeTest(allocator, &stream, 0);
+    try appendU16BeTest(allocator, &stream, 5);
+    try stream.appendSlice(allocator, &.{
+        7,         1, 1,
+        0x80 | 11, 2, 2,
+        19,        2, 1,
+        0x80,      1, 2,
+        37,        4, 4,
+    });
+    try appendU16BeTest(allocator, &stream, 0xffd9);
+
+    var layout = try codestream.inspectNativeCodestreamLayout(
+        allocator,
+        stream.items,
+        .{ .max_components = 8, .max_reference_pixels = 1024, .max_total_component_samples = 4096 },
+    );
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 32), layout.referenceWidth());
+    try std.testing.expectEqual(@as(usize, 15), layout.referenceHeight());
+    try std.testing.expectEqual(@as(usize, 5), layout.components.len);
+    try std.testing.expectEqual(@as(u8, 12), layout.components[1].precision);
+    try std.testing.expect(layout.components[1].signed);
+    try std.testing.expectEqual(@as(usize, 16), layout.components[1].width);
+    try std.testing.expectEqual(@as(usize, 8), layout.components[1].height);
+    try std.testing.expectEqual(@as(u8, 38), layout.components[4].precision);
+    try std.testing.expect(!layout.components[4].signed);
+    try std.testing.expectEqual(@as(usize, 8), layout.components[4].width);
+    try std.testing.expectEqual(@as(usize, 4), layout.components[4].height);
+
+    var planes = try native_samples.SamplePlanes.initFromLayout(
+        allocator,
+        layout,
+        .{ .max_components = 8, .max_reference_pixels = 1024, .max_total_component_samples = 4096 },
+    );
+    defer planes.deinit();
+    try std.testing.expectEqual(@as(usize, 5), planes.componentCount());
+    for (planes.planes) |plane| {
+        plane.samples[0] = try plane.layout.minimumSample();
+        plane.samples[1] = try plane.layout.maximumSample();
+    }
+    try planes.validateSamples();
+
+    const signed_pgx = try planes.encodePgx(allocator, 1, .most_significant_first);
+    defer allocator.free(signed_pgx);
+    const signed_header = "PG ML -12 16 8\n";
+    try std.testing.expect(std.mem.startsWith(u8, signed_pgx, signed_header));
+    try std.testing.expectEqualSlices(u8, &.{ 0xf8, 0x00, 0x07, 0xff }, signed_pgx[signed_header.len..][0..4]);
+
+    const unsigned_pgx = try planes.encodePgx(allocator, 2, .least_significant_first);
+    defer allocator.free(unsigned_pgx);
+    const unsigned_header = "PG LM +20 16 15\n";
+    try std.testing.expect(std.mem.startsWith(u8, unsigned_pgx, unsigned_header));
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0f, 0x00 }, unsigned_pgx[unsigned_header.len..][0..8]);
+    try std.testing.expectError(
+        native_samples.NativeSampleError.UnsupportedPgxPrecision,
+        planes.encodePgx(allocator, 4, .most_significant_first),
+    );
+
+    planes.planes[1].samples[0] = -2049;
+    try std.testing.expectError(native_samples.NativeSampleError.SampleOutOfRange, planes.validateSamples());
+    try std.testing.expectError(
+        native_samples.NativeSampleError.ResourceLimitExceeded,
+        codestream.inspectNativeCodestreamLayout(allocator, stream.items, .{ .max_components = 4 }),
+    );
+
+    const reserved_precision = try allocator.dupe(u8, stream.items);
+    defer allocator.free(reserved_precision);
+    reserved_precision[6 + 36 + 4 * 3] = 38;
+    try std.testing.expectError(
+        native_samples.NativeSampleError.InvalidLayout,
+        codestream.inspectNativeCodestreamLayout(allocator, reserved_precision, .{ .max_components = 8 }),
+    );
+
+    const signed_base = try jp2.extractCodestream(
+        @embedFile("testdata/kakadu-rpcl-420-multi-precinct.jp2"),
+    );
+    const signed_foreign = try allocator.dupe(u8, signed_base);
+    defer allocator.free(signed_foreign);
+    const siz_offset = findMarker(signed_foreign, codestream.markerValue("siz")) orelse
+        return error.MissingMarker;
+    signed_foreign[siz_offset + 40] = 0x87;
+    var signed_foreign_layout = try codestream.inspectNativeCodestreamLayout(
+        allocator,
+        signed_foreign,
+        .{},
+    );
+    defer signed_foreign_layout.deinit();
+    try std.testing.expectEqual(@as(usize, 3), signed_foreign_layout.components.len);
+    try std.testing.expectEqual(@as(u8, 8), signed_foreign_layout.components[0].precision);
+    try std.testing.expect(signed_foreign_layout.components[0].signed);
+}
+
+test "Kakadu signed 8-bit reversible codestream decodes into native samples" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-signed-8bit.j2c");
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 1), layout.components.len);
+    try std.testing.expectEqual(@as(u8, 8), layout.components[0].precision);
+    try std.testing.expect(layout.components[0].signed);
+    try std.testing.expectEqual(@as(usize, 16), layout.components[0].width);
+    try std.testing.expectEqual(@as(usize, 16), layout.components[0].height);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessGray(allocator, bytes),
+    );
+
+    var native = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer native.deinit();
+    try std.testing.expectEqual(@as(usize, 1), native.componentCount());
+    try std.testing.expect(native.planes[0].layout.signed);
+    try std.testing.expectEqual(@as(i64, -128), native.planes[0].samples[0]);
+    try std.testing.expectEqual(@as(i64, -1), native.planes[0].samples[127]);
+    try std.testing.expectEqual(@as(i64, 0), native.planes[0].samples[128]);
+    try std.testing.expectEqual(@as(i64, 127), native.planes[0].samples[255]);
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+        .{},
+    );
+    defer parallel.deinit();
+    try std.testing.expectEqualSlices(i64, native.planes[0].samples, parallel.planes[0].samples);
+
+    const decoded_pgx = try native.encodePgx(allocator, 0, .most_significant_first);
+    defer allocator.free(decoded_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-8bit-source.pgx"),
+        decoded_pgx,
+    );
+    const kakadu_reference = @embedFile("testdata/kakadu-signed-8bit-reference.pgx");
+    const reference_header_end = std.mem.indexOfScalar(u8, kakadu_reference, '\n') orelse
+        return error.InvalidPgx;
+    const decoded_header_end = std.mem.indexOfScalar(u8, decoded_pgx, '\n') orelse
+        return error.InvalidPgx;
+    try std.testing.expectEqualSlices(
+        u8,
+        kakadu_reference[reference_header_end + 1 ..],
+        decoded_pgx[decoded_header_end + 1 ..],
+    );
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    try std.testing.expectEqual(@as(u32, 0), reduced.reference_x0);
+    try std.testing.expectEqual(@as(u32, 0), reduced.reference_y0);
+    try std.testing.expectEqual(@as(u32, 8), reduced.reference_x1);
+    try std.testing.expectEqual(@as(u32, 8), reduced.reference_y1);
+    try std.testing.expectEqual(@as(usize, 8), reduced.planes[0].layout.width);
+    try std.testing.expectEqual(@as(usize, 8), reduced.planes[0].layout.height);
+    const reduced_pgx = try reduced.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(reduced_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-8bit-r1-reference.pgx"),
+        reduced_pgx,
+    );
+
+    var reduced_parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced_parallel.deinit();
+    try std.testing.expectEqualSlices(
+        i64,
+        reduced.planes[0].samples,
+        reduced_parallel.planes[0].samples,
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            bytes,
+            .{ .resolution_reduction = 2 },
+            .{},
+        ),
+    );
+}
+
+test "Kakadu signed 8-bit multi-tile codestream assembles native reductions" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-signed-8bit-multitile.j2c");
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(u32, 8), layout.tile_width);
+    try std.testing.expectEqual(@as(u32, 8), layout.tile_height);
+    try std.testing.expect(layout.components[0].signed);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer full.deinit();
+    const full_pgx = try full.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(full_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-8bit-multitile-reference.pgx"),
+        full_pgx,
+    );
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    try std.testing.expectEqual(@as(usize, 8), reduced.planes[0].layout.width);
+    try std.testing.expectEqual(@as(usize, 8), reduced.planes[0].layout.height);
+    const reduced_pgx = try reduced.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(reduced_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-8bit-multitile-r1-reference.pgx"),
+        reduced_pgx,
+    );
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer parallel.deinit();
+    try std.testing.expectEqualSlices(i64, reduced.planes[0].samples, parallel.planes[0].samples);
+}
+
+test "Kakadu five-component signed codestream exceeds only the legacy ceiling" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-five-component-signed.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-five-component-signed-full-c0.pgx"),
+        @embedFile("testdata/kakadu-five-component-signed-full-c1.pgx"),
+        @embedFile("testdata/kakadu-five-component-signed-full-c2.pgx"),
+        @embedFile("testdata/kakadu-five-component-signed-full-c3.pgx"),
+        @embedFile("testdata/kakadu-five-component-signed-full-c4.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-five-component-signed-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-five-component-signed-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-five-component-signed-r1-c2.pgx"),
+        @embedFile("testdata/kakadu-five-component-signed-r1-c3.pgx"),
+        @embedFile("testdata/kakadu-five-component-signed-r1-c4.pgx"),
+    };
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 5), layout.components.len);
+    for (layout.components) |component| {
+        try std.testing.expect(component.signed);
+        try std.testing.expectEqual(@as(u8, 8), component.precision);
+    }
+    try std.testing.expectError(
+        native_samples.NativeSampleError.ResourceLimitExceeded,
+        codestream.inspectNativeCodestreamLayout(allocator, bytes, .{ .max_components = 4 }),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer full.deinit();
+    try std.testing.expectEqual(@as(usize, 5), full.componentCount());
+    for (full_references, 0..) |reference, component| {
+        const pgx = try full.encodePgx(allocator, component, .least_significant_first);
+        defer allocator.free(pgx);
+        try std.testing.expectEqualSlices(u8, reference, pgx);
+    }
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    try std.testing.expectEqual(@as(usize, 5), reduced.componentCount());
+    for (reduced_references, 0..) |reference, component| {
+        const pgx = try reduced.encodePgx(allocator, component, .least_significant_first);
+        defer allocator.free(pgx);
+        try std.testing.expectEqualSlices(u8, reference, pgx);
+    }
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer parallel.deinit();
+    for (0..5) |component| {
+        try std.testing.expectEqualSlices(
+            i64,
+            reduced.planes[component].samples,
+            parallel.planes[component].samples,
+        );
+    }
+}
+
+test "Kakadu signed 20-bit codestream decodes only through the native payload path" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-signed-20bit.j2c");
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 1), layout.components.len);
+    try std.testing.expectEqual(@as(u8, 20), layout.components[0].precision);
+    try std.testing.expect(layout.components[0].signed);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer full.deinit();
+    try std.testing.expectEqual(@as(i64, -524288), full.planes[0].samples[0]);
+    try std.testing.expectEqual(@as(i64, 0), full.planes[0].samples[128]);
+    try std.testing.expectEqual(@as(i64, 524287), full.planes[0].samples[255]);
+    const full_pgx = try full.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(full_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-20bit-reference.pgx"),
+        full_pgx,
+    );
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    const reduced_pgx = try reduced.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(reduced_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-20bit-r1-reference.pgx"),
+        reduced_pgx,
+    );
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer parallel.deinit();
+    try std.testing.expectEqualSlices(i64, reduced.planes[0].samples, parallel.planes[0].samples);
+
+    const unsupported_precision = try allocator.dupe(u8, bytes);
+    defer allocator.free(unsupported_precision);
+    const siz = findMarker(unsupported_precision, codestream.markerValue("siz")) orelse
+        return error.MissingMarker;
+    unsupported_precision[siz + 40] = 0x94;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessNative(allocator, unsupported_precision, .{}),
+    );
+}
+
+test "Kakadu mixed signed 8 16 20-bit codestream preserves component precision" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-mixed-signed-8-16-20.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-signed-full-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-signed-full-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-signed-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-signed-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-signed-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-signed-r1-c2.pgx"),
+    };
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 3), layout.components.len);
+    try std.testing.expectEqualSlices(u8, &.{ 8, 16, 20 }, &.{
+        layout.components[0].precision,
+        layout.components[1].precision,
+        layout.components[2].precision,
+    });
+    for (layout.components) |component| try std.testing.expect(component.signed);
+    try std.testing.expectError(
+        native_samples.NativeSampleError.ResourceLimitExceeded,
+        codestream.inspectNativeCodestreamLayout(allocator, bytes, .{ .max_components = 2 }),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer full.deinit();
+    try std.testing.expectEqual(@as(i64, -128), full.planes[0].samples[0]);
+    try std.testing.expectEqual(@as(i64, -32768), full.planes[1].samples[0]);
+    try std.testing.expectEqual(@as(i64, -524288), full.planes[2].samples[0]);
+    try std.testing.expectEqual(@as(i64, 127), full.planes[0].samples[255]);
+    try std.testing.expectEqual(@as(i64, 32767), full.planes[1].samples[255]);
+    try std.testing.expectEqual(@as(i64, 524287), full.planes[2].samples[255]);
+    for (full_references, 0..) |reference, component| {
+        const pgx = try full.encodePgx(allocator, component, .least_significant_first);
+        defer allocator.free(pgx);
+        try std.testing.expectEqualSlices(u8, reference, pgx);
+    }
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    for (reduced_references, 0..) |reference, component| {
+        const pgx = try reduced.encodePgx(allocator, component, .least_significant_first);
+        defer allocator.free(pgx);
+        try std.testing.expectEqualSlices(u8, reference, pgx);
+    }
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer parallel.deinit();
+    for (0..3) |component| {
+        try std.testing.expectEqualSlices(
+            i64,
+            reduced.planes[component].samples,
+            parallel.planes[component].samples,
+        );
+    }
 }
 
 fn putBmpU16(bytes: []u8, offset: usize, value: u16) void {
@@ -7019,6 +7489,15 @@ test "strict planar decode reconstructs foreign Kakadu mixed precision QCC" {
         try std.testing.expectEqual(@as(u16, @intCast(index)), decoded.planes[0][index]);
         try std.testing.expectEqual(@as(u16, @intCast(1000 + index * 2000)), decoded.planes[1][index]);
         try std.testing.expectEqual(@as(u16, @intCast(15 + index)), decoded.planes[2][index]);
+    }
+    var native = try codestream.decodeLosslessNative(allocator, &mixed, .{});
+    defer native.deinit();
+    try std.testing.expectEqual(@as(usize, 3), native.componentCount());
+    try std.testing.expectEqual(@as(u8, 16), native.planes[1].layout.precision);
+    for (decoded.planes, native.planes) |legacy_plane, native_plane| {
+        for (legacy_plane, native_plane.samples) |legacy_sample, native_sample| {
+            try std.testing.expectEqual(@as(i64, legacy_sample), native_sample);
+        }
     }
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
@@ -15365,6 +15844,90 @@ test "irreversible 9/7 no-MCT strict decode returns native planar samples" {
     }
 }
 
+const Unsigned8PgxDiff = struct {
+    peak: u16,
+    mse: f64,
+};
+
+fn compareUnsigned8Pgx(samples: []const u16, pgx: []const u8) !Unsigned8PgxDiff {
+    const header_end = std.mem.indexOfScalar(u8, pgx, '\n') orelse return error.InvalidPgx;
+    const payload = pgx[header_end + 1 ..];
+    try std.testing.expectEqual(samples.len, payload.len);
+    var peak: u16 = 0;
+    var squared_error: u64 = 0;
+    for (samples, payload) |actual, expected| {
+        const difference = @abs(@as(i64, actual) - @as(i64, expected));
+        peak = @max(peak, @as(u16, @intCast(difference)));
+        squared_error += @as(u64, @intCast(difference * difference));
+    }
+    return .{
+        .peak = peak,
+        .mse = @as(f64, @floatFromInt(squared_error)) / @as(f64, @floatFromInt(samples.len)),
+    };
+}
+
+test "Kakadu sampled multi-tile 9/7 decodes native planes at reduced resolution" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-sampled-97-multitile.j2c");
+
+    var full = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+    );
+    defer full.deinit();
+    try std.testing.expectEqual(@as(usize, 3), full.componentCount());
+    try std.testing.expectEqual(@as(?[2]usize, .{ 32, 32 }), full.componentDimensions(0));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 16, 16 }), full.componentDimensions(1));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 16, 16 }), full.componentDimensions(2));
+
+    var timings = codestream.DecodeTimings{};
+    var reduced = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        &timings,
+    );
+    defer reduced.deinit();
+    try std.testing.expectEqual(@as(?[2]usize, .{ 16, 16 }), reduced.componentDimensions(0));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 8, 8 }), reduced.componentDimensions(1));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 8, 8 }), reduced.componentDimensions(2));
+    try std.testing.expect(timings.t1_skipped_blocks > 0);
+    try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
+    try std.testing.expect(timings.packet_catalog_payload_bytes_discarded > 0);
+
+    var parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+    );
+    defer parallel.deinit();
+    for (reduced.planes, parallel.planes) |serial_plane, parallel_plane| {
+        try std.testing.expectEqualSlices(u16, serial_plane, parallel_plane);
+    }
+
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-sampled-97-multitile-full-c0.pgx"),
+        @embedFile("testdata/kakadu-sampled-97-multitile-full-c1.pgx"),
+        @embedFile("testdata/kakadu-sampled-97-multitile-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-sampled-97-multitile-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-sampled-97-multitile-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-sampled-97-multitile-r1-c2.pgx"),
+    };
+    for (full.planes, full_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.12);
+    }
+    for (reduced.planes, reduced_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.12);
+    }
+}
+
 test "single-tile irreversible 9/7 pipeline is deterministic across thread counts" {
     const allocator = std.testing.allocator;
     const width = 129;
@@ -19183,7 +19746,7 @@ test "strict SIZ marker reader rejects unsupported component layout" {
         }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "unsupported component count", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
-                writeU16BeTest(corrupted, siz + 38, 5);
+                writeU16BeTest(corrupted, siz + 38, codestream.max_codestream_components + 1);
             }
         }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "four-component count with RGB-sized SIZ payload", .mutate = struct {
@@ -19196,11 +19759,6 @@ test "strict SIZ marker reader rejects unsupported component layout" {
                 writeU16BeTest(corrupted, siz + 38, 1);
             }
         }.mutate, .expected = codestream.CodestreamError.InvalidCodestream },
-        .{ .label = "signed component", .mutate = struct {
-            fn mutate(corrupted: []u8, siz: usize) void {
-                corrupted[siz + 40] = 0x87;
-            }
-        }.mutate, .expected = codestream.CodestreamError.UnsupportedPayload },
         .{ .label = "mixed precision component", .mutate = struct {
             fn mutate(corrupted: []u8, siz: usize) void {
                 corrupted[siz + 43] = 15;
@@ -19226,6 +19784,16 @@ test "strict SIZ marker reader rejects unsupported component layout" {
         scenario.mutate(corrupted, siz);
         try std.testing.expectError(scenario.expected, codestream.auditStrictPacketHeaders(allocator, corrupted));
     }
+
+    const signed = try allocator.dupe(u8, bytes);
+    defer allocator.free(signed);
+    const siz = findMarker(signed, codestream.markerValue("siz")) orelse return error.MissingMarker;
+    signed[siz + 40] = 0x87;
+    _ = try codestream.auditStrictPacketHeaders(allocator, signed);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, signed),
+    );
 }
 
 test "strict QCD marker reader rejects exponent that diverges from SIZ bit depth" {
@@ -28205,6 +28773,96 @@ test "sampled PPM streams decode identically to their inline originals" {
     const poc_ppm = try repackInlineHeadersToPacked(allocator, poc_inline, .ppm, .{});
     defer allocator.free(poc_ppm);
     try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, poc_ppm)));
+}
+
+test "sampled multi-tile 9/7 reduction decodes across inline PPT and PPM headers" {
+    const allocator = std.testing.allocator;
+    // Kakadu 8.4.1 produced this independent packet payload with the same
+    // source/options as the PLT fixture above except ORGgen_plt=no. The test
+    // repacker changes only T2 header placement; code-block bodies stay byte-
+    // identical to the foreign stream.
+    const source = @embedFile("testdata/kakadu-sampled-97-multitile-pltless.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-sampled-97-multitile-full-c0.pgx"),
+        @embedFile("testdata/kakadu-sampled-97-multitile-full-c1.pgx"),
+        @embedFile("testdata/kakadu-sampled-97-multitile-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-sampled-97-multitile-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-sampled-97-multitile-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-sampled-97-multitile-r1-c2.pgx"),
+    };
+    const placements = [_]RepackedHeaderPlacement{ .inline_headers, .ppt, .ppm };
+
+    for (placements) |placement| {
+        const framed = try repackInlineHeadersToPacked(allocator, source, placement, .{});
+        defer allocator.free(framed);
+        switch (placement) {
+            .inline_headers => {
+                try std.testing.expect(!codestream.hasMarker(framed, codestream.markerValue("ppt")));
+                try std.testing.expect(!codestream.hasMarker(framed, codestream.markerValue("ppm")));
+            },
+            .ppt => try std.testing.expect(codestream.hasMarker(framed, codestream.markerValue("ppt"))),
+            .ppm => try std.testing.expect(codestream.hasMarker(framed, codestream.markerValue("ppm"))),
+        }
+
+        var full = try codestream.decodeLosslessPlanarWithOptions(
+            allocator,
+            framed,
+            .{ .threads = 1 },
+        );
+        defer full.deinit();
+        for (full.planes, full_references) |plane, reference| {
+            const difference = try compareUnsigned8Pgx(plane, reference);
+            try std.testing.expect(difference.peak <= 1);
+            try std.testing.expect(difference.mse <= 0.12);
+        }
+
+        var timings = codestream.DecodeTimings{};
+        var reduced = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+            allocator,
+            framed,
+            .{ .threads = 1, .resolution_reduction = 1 },
+            &timings,
+        );
+        defer reduced.deinit();
+        try std.testing.expect(timings.t1_skipped_blocks > 0);
+        try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
+        try std.testing.expect(timings.packet_catalog_payload_bytes_discarded > 0);
+        for (reduced.planes, reduced_references) |plane, reference| {
+            const difference = try compareUnsigned8Pgx(plane, reference);
+            try std.testing.expect(difference.peak <= 1);
+            try std.testing.expect(difference.mse <= 0.12);
+        }
+
+        var parallel = try codestream.decodeLosslessPlanarWithOptions(
+            allocator,
+            framed,
+            .{ .threads = 8, .resolution_reduction = 1 },
+        );
+        defer parallel.deinit();
+        for (reduced.planes, parallel.planes) |serial_plane, parallel_plane| {
+            try std.testing.expectEqualSlices(u16, serial_plane, parallel_plane);
+        }
+
+        if (placement != .inline_headers) {
+            const corrupted = try allocator.dupe(u8, framed);
+            defer allocator.free(corrupted);
+            const marker = if (placement == .ppt)
+                codestream.markerValue("ppt")
+            else
+                codestream.markerValue("ppm");
+            const marker_offset = findMarker(corrupted, marker) orelse return error.MissingMarker;
+            writeU16BeTest(corrupted, marker_offset + 2, 3);
+            try std.testing.expect(std.meta.isError(
+                codestream.decodeLosslessPlanarWithOptions(
+                    allocator,
+                    corrupted,
+                    .{ .resolution_reduction = 1 },
+                ),
+            ));
+        }
+    }
 }
 
 test "sampled SOP/EPH placement decodes across inline, PPT, and PPM layouts" {

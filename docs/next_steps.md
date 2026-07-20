@@ -154,12 +154,16 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Seven foreign-encoded streams now pin sampled multi-precinct/origin/POC,
-  Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, and a
-  24-part `TLM` layout. Four mutations pin reserved COC/QCC values, TLM length
-  accounting, and signed-component fail-closed behavior.
-- Each entry selects the real planar or interleaved RGB strict path. Both are
-  normalized to one component-major hash, and JP2 entries validate their
+- Thirteen foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+  Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
+  24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
+  component native assembly, signed 20-bit, and mixed signed 8/16/20-bit native
+  decode. Four mutations
+  pin reserved COC/QCC values, TLM length accounting, and unsupported payload
+  behavior.
+- Each entry selects the real legacy-planar, generic-native, or interleaved RGB
+  strict path. Legacy planar/RGB results normalize to one component-major hash;
+  native signed output uses exact PGX references. JP2 entries validate their
   container metadata before codestream extraction.
 - The official WG1 T.803 corpus is pinned at commit `f6b9ede0` through
   `tools/setup_part1_corpus.ps1` and remains local under its conformance-use
@@ -178,7 +182,7 @@ The foundation landed on 2026-07-17:
   guard bits plus sampled RCT and inline PLT-less multipart state cover
   `p0_10`.
 - The PGX oracle now accepts reference lists, component selectors, signed or
-  unsigned 1..16-bit ML/LM samples, reduction metadata, peak-error limits, and
+  unsigned 1..31-bit ML/LM samples, reduction metadata, peak-error limits, and
   independent MSE limits. Every declared reference is checksum-verified even
   when its input is an expected fail-closed profile.
 - `DecodeOptions.resolution_reduction` now drives direct partial synthesis for
@@ -196,6 +200,14 @@ The foundation landed on 2026-07-17:
   boundaries. An odd 3x3 RCT/5-3 grid is exact against a manually assembled
   per-tile oracle; ICT/9-7 reduced output is deterministic across worker counts
   and reports discarded T1 blocks/bytes.
+- Sampled multi-tile no-MCT 9/7 now applies component-local packet selection,
+  selective dequantization, partial inverse synthesis, and reduced absolute
+  assembly on each native grid. A committed Kakadu 8.4.1 four-tile RPCL/PLT
+  fixture pins full and reduction-1 output for all three components against six
+  PGX references (peak <= 1, MSE <= 0.12) and proves 1/8-thread determinism.
+  A matching independent PLT-less stream additionally drives inline, PPT, and
+  PPM full/reduced decode, packed-marker corruption, and 1/8-thread gates. PPT
+  and PPM are deterministic structural repacks, not foreign encoder output.
 - Reduced decode now validates the complete packet-header catalog but skips T1
   entropy reconstruction for detail subbands at or below the discarded DWT
   levels. Both sequential and parallel paths report skipped blocks and payload
@@ -235,11 +247,16 @@ The active G0/G4 corpus expansion is:
    post-transform rather than chroma-plane saturation. The sampled multi-tile
    oracle covers odd image/tile bounds and inline, PPT, and PPM headers. Keep
    the public packet catalog owned and the production scatter/gather
-   validation pinned throughout.
+   validation pinned throughout. Sampled multi-tile no-MCT 9/7 additionally
+   covers odd tile bounds with independent inline PLT/PLT-less Kakadu payloads
+   and full/reduced PGX references. Deterministic PPT/PPM repacks preserve the
+   foreign T1 bodies and pass the same gates; a natively emitted packed-header
+   fixture from an independent producer remains useful matrix breadth.
 2. Add class-1 all-component reference lists as G1/G2 make those profiles
    decodable, retaining the published peak and MSE bounds per component.
-3. Add licensed or local-only independent streams for >16-bit layouts and
-   explicit `PLM`, `CAP`, and `PRF` handling where applicable. Broaden the
+3. Expand the landed signed 20-bit and mixed-precision independent streams with
+   sub-byte and remaining wider layouts; add explicit `PLM`, `CAP`, and
+   `PRF` handling where applicable. Broaden the
    seeded `TLM` case as G3 requires. Inline PLT-less multipart packet-count
    derivation is complete; packed-header/POC combinations remain.
 4. Record OpenJPEG, Grok, and Kakadu disagreement instead of selecting a
@@ -254,20 +271,43 @@ the current 100/100 bounded scores.
 
 #### 4.2 Generic Native Sample Carrier
 
-1. Audit every `u16`, RGB, three/four-component, and common-grid assumption at
-   the codestream/API/container boundaries.
-2. Introduce a checked native integer representation that preserves Part
-   1-legal precision and signedness without clipping or bias ambiguity.
-3. Remove the four-component public ceiling and carry per-component precision,
-   sign, origin, and subsampling through allocation, T1/DWT, assembly, and
-   diagnostics. Resource limits remain explicit even when the syntax allows a
-   larger count.
-4. Add PGX plus checked PAM/raw-planar diagnostic output for sample layouts
-   that TIFF cannot represent exactly. Add direct `.j2k`/`.j2c` decode dispatch
-   without requiring a JP2 wrapper.
-5. Pin lossless fixtures covering signed data, sub-byte precision, precision
-   above 16 bits, mixed component precision, more than four components, and
-   independently subsampled components without MCT.
+The first non-breaking foundation is now in place. `src/native_samples.zig`
+adds a caller-limited SIZ inspector and dynamic `i64` planes carrying per-
+component 1..38-bit precision, signedness, native origin, subsampling, and
+dimensions. It validates sample ranges and emits checked PGX for 8/16/32-bit
+storage widths. A five-component mixed 1/8/12/20/38-bit regression plus the
+existing signed-SIZ mutation pin metadata preservation, allocation ceilings,
+range failures, and Zig 0.16 behavior. The legacy `u16` decoder remains
+unchanged and unsigned-only. Committed Kakadu 8.4.1 signed 8-bit single- and
+four-tile streams now pass exact PGX comparison through `decodeLosslessNative`
+at full and reduction-1 resolution. A third Kakadu fixture carries five signed
+components across four tiles and matches ten per-component PGX references. A
+fourth fixture carries signed 20-bit samples, including both extrema and zero,
+and matches Kakadu at full and reduction-1 resolution; a 21-bit SIZ mutation
+pins the current fail-closed edge. A fifth Kakadu stream combines signed
+8/16/20-bit components and matches all six full/reduction-1 PGX references,
+proving that T2/T1/DWT reconstruction retains component-local precision. The
+bounded native payload path is reversible 5/3, no-MCT, 1..16 components at
+8/16/20 bits, including mixed precision, with exact 1/8-thread output and
+caller-controlled lower limits.
+Packet pruning and per-tile partial synthesis retain reduced absolute
+component origins and dimensions; reductions above COD/NL fail closed. Signed
+components skip the unsigned DC shift; the same codestreams remain fail-closed
+in legacy planar/gray APIs.
+
+1. Continue the audit of every `u16`, RGB, three/four-component, and common-
+   grid assumption through T1/DWT, tile assembly, JP2 validation, and CLI
+   conversion boundaries. The SIZ/API allocation boundary is complete.
+2. Replace the bounded 16-slot strict-pipeline arrays with caller-limited
+   dynamic structures, then carry the remaining Part 1 precisions through
+   T1/DWT reconstruction without clipping or bias ambiguity.
+3. Wire the landed PGX writer into raw-codestream diagnostic decode, then add
+   checked PAM/raw-planar output for layouts PGX or TIFF cannot represent exactly. Add
+   direct `.j2k`/`.j2c` decode dispatch without requiring a JP2 wrapper.
+4. Pin payload fixtures covering sub-byte precision, remaining precision above
+   16 bits, and independently subsampled signed components without MCT. Signed
+   data, mixed 8/16/20-bit precision, one explicit 20-bit profile, and more-
+   than-four-component assembly are complete within the current bounded path.
 
 Exit when those fixtures round-trip through the native API and diagnostic
 outputs with exact values, while legacy JP2/TIFF paths remain unchanged.

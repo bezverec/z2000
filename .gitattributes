@@ -1,2 +1,5 @@
 *.sh text eol=lf
 tools/*.py text eol=lf
+*.pgm binary
+*.pgx binary
+*.j2c binary

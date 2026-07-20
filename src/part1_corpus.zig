@@ -29,7 +29,7 @@ const Capability = struct {
 
 const Availability = enum { committed, optional };
 const InputFormat = enum { jp2, j2k };
-const Decoder = enum { planar, interleaved_rgb };
+const Decoder = enum { planar, native, interleaved_rgb };
 const Expectation = enum { decode_pass, fail_closed };
 const ReferenceSpace = enum { output_components, codestream_components };
 const Marker = enum { siz, cod, coc, qcd, qcc, tlm, poc };
@@ -456,6 +456,31 @@ fn runDecodePass(
                         return .mismatch;
                     };
                 },
+                .native => blk: {
+                    var decoded = codestream.decodeLosslessNativeWithOptions(
+                        allocator,
+                        stream,
+                        options,
+                        .{},
+                    ) catch |err| {
+                        std.debug.print("MISMATCH {s}: reference {s} decode error={s}\n", .{
+                            entry.id,
+                            reference.metadata.path,
+                            @errorName(err),
+                        });
+                        return .mismatch;
+                    };
+                    defer decoded.deinit();
+                    break :blk compareNativePgx(decoded, reference) catch |err| {
+                        reportNativePgxMismatch(decoded, reference);
+                        std.debug.print("MISMATCH {s}: reference {s} error={s}\n", .{
+                            entry.id,
+                            reference.metadata.path,
+                            @errorName(err),
+                        });
+                        return .mismatch;
+                    };
+                },
                 .interleaved_rgb => blk: {
                     var decoded = codestream.decodeLosslessTemporaryWithOptions(allocator, stream, options) catch |err| {
                         std.debug.print("MISMATCH {s}: reference {s} decode error={s}\n", .{
@@ -502,6 +527,29 @@ fn runDecodePass(
                 reportReferenceMetrics(entry, reference, metrics);
             }
             break :blk nativeSampleSha256(decoded) catch |err| {
+                std.debug.print("MISMATCH {s}: native hash error={s}\n", .{ entry.id, @errorName(err) });
+                return .mismatch;
+            };
+        },
+        .native => blk: {
+            var decoded = codestream.decodeLosslessNative(allocator, stream, .{}) catch |err| {
+                std.debug.print("MISMATCH {s}: decode error={s}\n", .{ entry.id, @errorName(err) });
+                return .mismatch;
+            };
+            defer decoded.deinit();
+            for (reference_assets) |reference| {
+                const metrics = compareNativePgx(decoded, reference) catch |err| {
+                    reportNativePgxMismatch(decoded, reference);
+                    std.debug.print("MISMATCH {s}: reference {s} error={s}\n", .{
+                        entry.id,
+                        reference.metadata.path,
+                        @errorName(err),
+                    });
+                    return .mismatch;
+                };
+                reportReferenceMetrics(entry, reference, metrics);
+            }
+            break :blk nativeWideSampleSha256(decoded) catch |err| {
                 std.debug.print("MISMATCH {s}: native hash error={s}\n", .{ entry.id, @errorName(err) });
                 return .mismatch;
             };
@@ -592,6 +640,11 @@ fn runFailClosed(allocator: std.mem.Allocator, entry: Entry, stream: []const u8)
             defer decoded.deinit();
             break :blk reportUnexpectedAcceptance(entry);
         } else |err| reportExpectedDecodeError(entry, err),
+        .native => if (codestream.decodeLosslessNative(allocator, stream, .{})) |decoded_value| blk: {
+            var decoded = decoded_value;
+            defer decoded.deinit();
+            break :blk reportUnexpectedAcceptance(entry);
+        } else |err| reportExpectedDecodeError(entry, err),
         .interleaved_rgb => if (codestream.decodeLosslessTemporary(allocator, stream)) |decoded_value| blk: {
             var decoded = decoded_value;
             defer decoded.deinit();
@@ -667,6 +720,29 @@ fn nativeSampleSha256(planes: color.SamplePlanes) ![64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+fn nativeWideSampleSha256(planes: codestream.NativeSamplePlanes) ![64]u8 {
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var hasher = Sha256.init(.{});
+    hasher.update("z2000-part1-native-wide-v1\x00");
+    try hashU32(&hasher, planes.reference_x1 - planes.reference_x0);
+    try hashU32(&hasher, planes.reference_y1 - planes.reference_y0);
+    try hashU32(&hasher, planes.componentCount());
+    for (planes.planes) |plane| {
+        hasher.update(&.{ plane.layout.precision, @intFromBool(plane.layout.signed) });
+        try hashU32(&hasher, plane.layout.width);
+        try hashU32(&hasher, plane.layout.height);
+        try hashU32(&hasher, plane.samples.len);
+        for (plane.samples) |sample| {
+            var encoded: [8]u8 = undefined;
+            std.mem.writeInt(i64, &encoded, sample, .big);
+            hasher.update(&encoded);
+        }
+    }
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
 fn interleavedRgbSha256(decoded: image.RgbImage) ![64]u8 {
     const Sha256 = std.crypto.hash.sha2.Sha256;
     const component_count = 3;
@@ -716,6 +792,7 @@ const ComponentSamples = union(enum) {
     unsigned_contiguous: []const u16,
     unsigned_interleaved: InterleavedSamples,
     signed_contiguous: []const i32,
+    native_contiguous: []const i64,
 };
 
 const ComponentView = struct {
@@ -741,6 +818,10 @@ const ComponentView = struct {
             },
             .signed_contiguous => |values| if (index < values.len)
                 values[index]
+            else
+                CorpusError.InvalidReference,
+            .native_contiguous => |values| if (index < values.len)
+                std.math.cast(i32, values[index]) orelse CorpusError.InvalidReference
             else
                 CorpusError.InvalidReference,
         };
@@ -776,7 +857,7 @@ fn parsePgx(bytes: []const u8) !PgxImage {
         depth_token = depth_token[1..];
     }
     const bit_depth = std.fmt.parseInt(u8, depth_token, 10) catch return CorpusError.InvalidReference;
-    if (bit_depth == 0 or bit_depth > 16) return CorpusError.InvalidReference;
+    if (bit_depth == 0 or bit_depth > 31) return CorpusError.InvalidReference;
     const width = std.fmt.parseInt(usize, tokens.next() orelse return CorpusError.InvalidReference, 10) catch
         return CorpusError.InvalidReference;
     const height = std.fmt.parseInt(usize, tokens.next() orelse return CorpusError.InvalidReference, 10) catch
@@ -784,7 +865,12 @@ fn parsePgx(bytes: []const u8) !PgxImage {
     if (tokens.next() != null) return CorpusError.InvalidReference;
 
     const sample_count = std.math.mul(usize, width, height) catch return CorpusError.ImageTooLarge;
-    const bytes_per_sample: usize = if (bit_depth <= 8) 1 else 2;
+    const bytes_per_sample: usize = if (bit_depth <= 8)
+        1
+    else if (bit_depth <= 16)
+        2
+    else
+        4;
     const payload_size = std.math.mul(usize, sample_count, bytes_per_sample) catch
         return CorpusError.ImageTooLarge;
     const payload = bytes[newline + 1 ..];
@@ -800,16 +886,27 @@ fn parsePgx(bytes: []const u8) !PgxImage {
 }
 
 fn pgxSample(reference: PgxImage, index: usize) !i32 {
-    const bytes_per_sample: usize = if (reference.bit_depth <= 8) 1 else 2;
+    const bytes_per_sample: usize = if (reference.bit_depth <= 8)
+        1
+    else if (reference.bit_depth <= 16)
+        2
+    else
+        4;
     const offset = std.math.mul(usize, index, bytes_per_sample) catch
         return CorpusError.ImageTooLarge;
     if (offset + bytes_per_sample > reference.payload.len) return CorpusError.InvalidReference;
-    const raw: u16 = if (bytes_per_sample == 1)
-        reference.payload[offset]
-    else if (reference.big_endian)
-        (@as(u16, reference.payload[offset]) << 8) | reference.payload[offset + 1]
-    else
-        (@as(u16, reference.payload[offset + 1]) << 8) | reference.payload[offset];
+    var raw: u32 = 0;
+    if (reference.big_endian) {
+        for (reference.payload[offset..][0..bytes_per_sample]) |byte| {
+            raw = (raw << 8) | byte;
+        }
+    } else {
+        var byte_index = bytes_per_sample;
+        while (byte_index > 0) {
+            byte_index -= 1;
+            raw = (raw << 8) | reference.payload[offset + byte_index];
+        }
+    }
     const range: u32 = @as(u32, 1) << @as(u5, @intCast(reference.bit_depth));
     const masked: u32 = raw & (range - 1);
     if (!reference.signed) return @intCast(masked);
@@ -817,7 +914,7 @@ fn pgxSample(reference: PgxImage, index: usize) !i32 {
     return if ((masked & sign_bit) == 0)
         @intCast(masked)
     else
-        @as(i32, @intCast(masked)) - @as(i32, @intCast(range));
+        @intCast(@as(i64, masked) - @as(i64, range));
 }
 
 fn comparePgxView(view: ComponentView, bytes: []const u8, limits: Reference) !ErrorMetrics {
@@ -910,6 +1007,32 @@ fn comparePlanarPgx(decoded: color.SamplePlanes, asset: ReferenceAsset) !ErrorMe
         .signed = false,
         .samples = .{ .unsigned_contiguous = decoded.planes[component] },
     }, asset.bytes, asset.metadata);
+}
+
+fn compareNativePgx(decoded: codestream.NativeSamplePlanes, asset: ReferenceAsset) !ErrorMetrics {
+    const component = asset.metadata.component;
+    if (component >= decoded.planes.len) return CorpusError.InvalidReference;
+    const plane = decoded.planes[component];
+    return comparePgxView(.{
+        .width = plane.layout.width,
+        .height = plane.layout.height,
+        .bit_depth = plane.layout.precision,
+        .signed = plane.layout.signed,
+        .samples = .{ .native_contiguous = plane.samples },
+    }, asset.bytes, asset.metadata);
+}
+
+fn reportNativePgxMismatch(decoded: codestream.NativeSamplePlanes, asset: ReferenceAsset) void {
+    const component = asset.metadata.component;
+    if (component >= decoded.planes.len) return;
+    const plane = decoded.planes[component];
+    reportPgxMismatch(.{
+        .width = plane.layout.width,
+        .height = plane.layout.height,
+        .bit_depth = plane.layout.precision,
+        .signed = plane.layout.signed,
+        .samples = .{ .native_contiguous = plane.samples },
+    }, asset);
 }
 
 fn reportPlanarPgxMismatch(decoded: color.SamplePlanes, asset: ReferenceAsset) void {

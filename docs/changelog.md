@@ -5,6 +5,38 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Generic Native Sample Foundation
+
+- Added a caller-limited raw-codestream SIZ inspector and dynamic `i64` native
+  carrier for arbitrary bounded component counts, component-local geometry,
+  signedness, and every Part 1 precision from 1 through 38 bits. Reference
+  pixels and aggregate native samples are checked before allocation.
+- Added range validation and big-/little-endian PGX diagnostic serialization
+  for components that fit the format's 8/16/32-bit storage widths. Mixed
+  five-component 1/8/12/20/38-bit, signed-SIZ, invalid-range, reserved-
+  precision, and resource-limit regressions leave the legacy `u16` decoder
+  unchanged and fail-closed for unsupported payload breadth.
+- Added `decodeLosslessNative` for bounded single- and multi-tile reversible
+  5/3, no-MCT signed/unsigned 8/16/20-bit payloads. Full and requested lower DWT
+  resolutions use packet pruning plus partial 5/3 synthesis and retain reduced
+  native-grid metadata; multi-tile output assembles by absolute component
+  coordinates. Independent Kakadu 8.4.1 single- and four-tile signed 8-bit
+  streams match kdu_expand PGX exactly at reduction 0 and 1, are deterministic
+  at 1/8 threads, reject reductions above COD/NL, and remain fail-closed through
+  legacy planar/gray APIs.
+- Added an independent Kakadu signed 20-bit codestream with exact full- and
+  reduction-1 PGX references, extrema/zero checks, 1/8-thread determinism, and
+  a fail-closed 21-bit SIZ mutation. The legacy planar surface remains limited
+  to unsigned 8/16-bit payloads.
+- Added an independent three-component Kakadu signed 8/16/20-bit stream. All
+  six full/reduction-1 PGX references match exactly, per-component extrema are
+  preserved, 1/8-thread output is deterministic, and caller/legacy boundaries
+  remain fail-closed.
+- Raised only the bounded strict/native no-MCT component capacity from four to
+  16 while preserving the legacy colour/JP2/TIFF ceiling. A five-component,
+  four-tile Kakadu signed stream matches ten full/reduction-1 PGX references
+  exactly; caller limits below five and legacy planar decode fail closed.
+
 ### Part 1 Corpus Gate
 
 - Added an unscored broad Part 1 readiness matrix, separate from the completed
@@ -12,23 +44,33 @@ entries are grouped by development milestone rather than semantic version.
   independent-interop status.
 - Added a machine-readable provenance, licence, input-checksum, capability,
   and expected-result manifest plus `zig build part1-corpus`. The runner uses
-  the selected production planar or interleaved RGB strict decoder, validates
+  the selected production planar, generic-native, or interleaved RGB strict
+  decoder, validates
   JP2 metadata before extraction, canonicalizes both paths to one native hash,
   and distinguishes decode pass, expected
   fail-closed, unexpected acceptance, native-raster mismatch, and skipped
   optional local assets.
-- Expanded the seed to seven foreign-encoded fixtures: sampled Kakadu
-  multi-tile/POC/origin, Grok CMYK, Kakadu all-six-bit T1, uniform COC/QCC,
-  and padded multipart TLM. Four input-hash-verified mutations pin invalid COC,
+- Expanded the seed to thirteen foreign-encoded fixtures: sampled Kakadu
+  multi-tile/POC/origin and sampled multi-tile no-MCT 9/7, Grok CMYK, Kakadu
+  signed 8-bit single-/multi-tile, signed 20-bit, and mixed signed 8/16/20-bit
+  native decode, all-six-bit T1, uniform
+  COC/QCC, and padded
+  multipart TLM. Four
+  input-hash-verified mutations pin invalid COC,
   QCC and TLM plus unsupported signed-SIZ fail-closed behavior.
+- Added a Kakadu 8.4.1 sampled multi-tile no-MCT 9/7 PLT-less fixture. Its
+  unchanged foreign packet bodies now pass inline, PPT, and PPM full/reduced
+  decode, packed-marker corruption, and 1/8-thread determinism gates. PPT/PPM
+  are explicitly recorded as structural repacks rather than foreign encoder
+  output.
 - Added PGX reference-list comparison and a reproducible local setup for the
   official WG1 T.803 corpus pinned at commit `f6b9ede0`. The oracle supports
-  component/reduction selectors, signed or unsigned 1..16-bit ML/LM samples,
+  component/reduction selectors, signed or unsigned 1..31-bit ML/LM samples,
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 27-entry gate
-  reports 16 decode passes, 11 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 33-entry gate
+  reports 22 decode passes, 11 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
@@ -147,6 +189,12 @@ entries are grouped by development milestone rather than semantic version.
   resolution reduction and T1 detail skipping. Full and reduced planar samples
   match the established interleaved no-MCT decoder exactly across thread
   counts.
+- Extended that native-planar no-MCT 9/7 path across sampled multi-tile RPCL
+  streams. Each tile-component now performs selective dequantization and
+  partial synthesis on its own sampled grid before reduced absolute assembly.
+  A committed Kakadu 8.4.1 four-tile PLT fixture and six full/reduction-1 PGX
+  references pin all components at peak error <= 1 and MSE <= 0.12, discarded
+  T1 work, and exact 1/8-thread determinism.
 - Added a conformance decode boundary for codestream image components before
   inverse RCT/ICT, while preserving normal output-component behavior. The PGX
   runner reports observed peak/MSE on failure and uses the explicit reference

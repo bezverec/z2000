@@ -38,10 +38,33 @@ floating, and unsigned sample planes. It records:
 - native width and height per component;
 - one owned slice per component.
 
-The bounded public carrier supports one to four components. `RgbImage`,
+The bounded legacy carrier supports one to four components. `RgbImage`,
 `GrayImage`, and TIFF alpha layouts are conversion-layer views over those
 planes. Alpha semantics remain explicit through TIFF ExtraSamples and JP2
 `cdef`; the codec does not silently associate or unassociate samples.
+
+`src/native_samples.zig` is the G1 replacement foundation rather than an
+extension of that fixed array. Its SIZ inspector retains `Rsiz`, reference and
+tile grids, arbitrary caller-bounded component counts, component-local
+origins/sampling, signedness, and every Part 1 precision from 1 through 38
+bits. Owned planes use `i64`, so neither unsigned 38-bit samples nor signed DC
+values require biasing into `u16`. Component count, reference pixels, and
+total native samples are checked before allocation. Range validation is
+explicit, and PGX serialization is available where the diagnostic format has
+an 8/16/32-bit storage container. The strict payload slice reconstructs single-
+and multi-tile reversible no-MCT signed/unsigned 8/16/20-bit components,
+including mixed component precision, through
+the production T2/T1/5/3 path directly into these planes. Each tile retains its
+absolute component grid during independent synthesis and checked assembly.
+Full and requested lower DWT resolutions preserve reduced reference/component
+origins and dimensions while pruning discarded packet bodies before partial
+synthesis. Signed output receives no DC level shift; unsigned output receives
+`2^(precision-1)`. The strict pipeline currently has 16 component slots and
+the caller may impose a lower allocation limit. Other precisions and component
+counts above 16 remain fail-closed rather than being silently truncated; a
+21-bit mutation pins the current upper payload boundary. The legacy `u16`
+decode surface deliberately still rejects signed input, accepts only 8/16-bit
+precision, and retains `color.max_components` (four).
 
 Native component geometry is the strict decode boundary. Component upsampling
 is a separate operation: `decodeLosslessPlanarUpsampled` performs
@@ -169,7 +192,7 @@ locations, RPCL precinct indexes, inverse-DWT origin, and output dimensions.
 positions and provides all five Part 1 orders; canonical RPCL is its default
 specialization.
 
-The current sampled decode profile is no-MCT, reversible 5/3, RPCL, one or more
+The primary sampled decode profile is no-MCT, reversible 5/3, RPCL, one or more
 tiles, inline/PPT/PPM packet headers, all SOP/EPH combinations, independent
 image and tile-partition origins, and checked POC in the main or first
 tile-part header.
@@ -207,14 +230,16 @@ after inverse DWT and unsigned component formatting, which lets T.803 class-0
 PGX references compare at their specified pre-MCT boundary without changing
 normal RGB semantics.
 
-Resolution reduction follows that same geometry. For sampled multi-tile 5/3,
+Resolution reduction follows that same geometry. For sampled multi-tile 5/3
+and bounded no-MCT 9/7,
 each tile-component selects retained packets, skips discarded T1 blocks, and
-performs partial inverse lifting at its absolute component origin. Assembly
+performs partial inverse synthesis at its absolute component origin. The 9/7
+path additionally dequantizes only retained bands. Assembly
 first maps the clipped reference tile through `XRsiz/YRsiz`, then reduces those
 component coordinates; this preserves odd image, tile, and sampling phases
 without synthesizing or upsampling a full raster.
 
-The single-tile irreversible planar backend reuses the same strict block
+The irreversible planar backend reuses the same strict block
 catalog without interleaving through a temporary RGB image. Each component owns
 its quantized coefficient plane, effective QCD/QCC-derived subband steps, float
 9/7 inverse job, reduced shape, and final precision saturation. The normal
@@ -222,7 +247,13 @@ surface covers no-MCT output; the conformance surface also exposes pre-ICT
 codestream components for bounded three-component ICT streams, preserving
 component-specific QCC state. Bounded component jobs share the existing worker
 runner, while nearest-integer output matches the established interleaved
-no-MCT reconstruction exactly.
+no-MCT reconstruction exactly. Multi-tile sampled no-MCT 9/7 invokes that same
+backend per tile-component and assembles reduced native planes without
+upsampling them to the reference grid. Its packet-layout gate starts from an
+independent Kakadu PLT-less codestream and moves only the T2 headers into PPT
+or PPM framing; the foreign T1 packet bodies remain byte-identical. All three
+layouts share the same full/reduction-1 PGX bounds and corruption checks, but
+the repacked PPT/PPM framing is not claimed as independently encoded.
 
 ## JP2 And Metadata
 

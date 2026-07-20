@@ -44,11 +44,10 @@ certification.
   the conformance API can expose reduced pre-ICT codestream components.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
-- Direct lower-resolution reconstruction for bounded single-tile 5/3 and 9/7
-  profiles, including no-MCT/RCT/ICT RGB, native no-MCT 9/7 planes, and native
-  sampled no-MCT 5/3 planes.
-  Common-grid multi-tile RCT/5/3 and ICT/9/7 are assembled directly at the
-  requested reduced resolution.
+- Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,
+  including no-MCT/RCT/ICT RGB and native sampled no-MCT planes. Common-grid
+  multi-tile RCT/5/3 and ICT/9/7 plus sampled multi-tile no-MCT 5/3 and 9/7
+  are assembled directly at the requested reduced resolution.
 - ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
   PPM, and PPT packet headers on their documented profiles.
 - Bounded grayscale and palette JP2 profiles, plus bounded 1..4-component
@@ -70,6 +69,15 @@ certification.
   precision, including JP2 `BPCC`/codestream `SIZ` agreement and
   per-component QCD/QCC on the single-tile RPCL 5/3 path. z2000 output is
   pixel-exact through OpenJPEG, Grok, and Kakadu PGX decode.
+- A separate generic native-sample foundation inspects raw Part 1 `SIZ`
+  layouts with caller-provided resource limits and preserves 1..38-bit
+  signedness, arbitrary component counts, origins, and subsampling in dynamic
+  `i64` planes. The bounded native payload path decodes single- and multi-tile
+  reversible no-MCT signed/unsigned 8/16/20-bit streams, including mixed
+  component precision, with 1..16 components at
+  full or requested lower DWT resolutions without DC-bias ambiguity; the legacy `u16` API remains
+  unsigned-only. Checked PGX diagnostics currently cover components up to
+  32-bit storage.
 - Bounded component-subsampling decode with per-component SIZ `XRsiz/YRsiz`,
   reference-grid RPCL merging across unequal component precinct grids,
   component-local T1/DWT geometry, and variable-size planar output. Embedded
@@ -84,7 +92,10 @@ certification.
   covered. The sampled reversible API emits single- and multi-tile RPCL with
   inline PLT/PLT-less, PPT, or PPM packet headers; all layouts carry one or
   more quality layers. Requested resolution reduction is performed directly
-  per native component for both single- and multi-tile sampled 5/3 streams.
+  per native component for single- and multi-tile sampled 5/3 streams and the
+  bounded multi-tile sampled no-MCT 9/7 decode profile. The 9/7 gate covers a
+  foreign Kakadu inline PLT/PLT-less payload plus deterministic PPT/PPM
+  structural repacks at full and reduced resolution.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.

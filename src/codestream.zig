@@ -5,6 +5,7 @@ const color = @import("color.zig");
 const ebcot = @import("ebcot.zig");
 const entropy = @import("entropy.zig");
 const image = @import("image.zig");
+const native_samples = @import("native_samples.zig");
 const packet_plan = @import("packet_plan.zig");
 const poc = @import("poc.zig");
 const ppm = @import("ppm.zig");
@@ -23,6 +24,23 @@ pub const CodestreamError = error{
     UnsupportedPayload,
     TruncatedData,
 };
+
+/// Generic Part 1 SIZ/native-sample foundation. These types preserve legal
+/// 1..38-bit signedness, arbitrary component counts within caller limits, and
+/// component-local geometry without changing the legacy u16 decode surface.
+pub const NativeSampleLimits = native_samples.Limits;
+pub const NativeCodestreamLayout = native_samples.CodestreamLayout;
+pub const NativeSamplePlanes = native_samples.SamplePlanes;
+pub const NativePgxByteOrder = native_samples.PgxByteOrder;
+pub const NativeSampleError = native_samples.NativeSampleError;
+
+pub fn inspectNativeCodestreamLayout(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    limits: NativeSampleLimits,
+) !NativeCodestreamLayout {
+    return native_samples.inspectCodestreamLayout(allocator, bytes, limits);
+}
 
 const Marker = enum(u16) {
     soc = 0xff4f,
@@ -48,10 +66,11 @@ const Marker = enum(u16) {
     eoc = 0xffd9,
 };
 
-/// F1 component-layout bound: SIZ Csiz values 1..4 are the implemented
-/// envelope (grayscale=1, RGB=3 as MCT-capable specials; 2 and 4 ride the
-/// no-MCT planar path). Mirrors color.max_components.
-pub const max_codestream_components = color.max_components;
+/// Internal bounded strict-pipeline component capacity. The generic native
+/// no-MCT path may use all slots subject to caller resource limits; legacy
+/// colour/JP2/TIFF surfaces retain `color.max_components` (four).
+pub const max_codestream_components = 16;
+pub const max_native_payload_precision: u8 = 20;
 
 const temporary_magic_v0 = "ZJ2K-CBLK-BP0";
 const temporary_magic_v1 = "ZJ2K-CBLK-BP1";
@@ -436,7 +455,7 @@ pub fn encodeLosslessPlanarWithOptions(
     {
         return CodestreamError.ImageTooLarge;
     }
-    if (planar.planes.len == 0 or planar.planes.len > max_codestream_components) {
+    if (planar.planes.len == 0 or planar.planes.len > color.max_components) {
         return CodestreamError.UnsupportedPayload;
     }
     var component_bit_depths = [_]u8{0} ** max_codestream_components;
@@ -579,7 +598,7 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         return CodestreamError.ImageTooLarge;
     }
     const component_count = planar.planes.len;
-    if (component_count == 0 or component_count > max_codestream_components) {
+    if (component_count == 0 or component_count > color.max_components) {
         return CodestreamError.UnsupportedPayload;
     }
     if (sampling.len != component_count) return CodestreamError.InvalidCodestream;
@@ -3080,6 +3099,143 @@ pub fn decodeLosslessPlanarWithOptionsProfiled(
     return decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, timings);
 }
 
+/// Bounded G1 native-payload slice: reconstructs a single-tile reversible 5/3,
+/// no-MCT codestream directly into signed/unsigned i64 component planes.
+/// The strict packet/T1/DWT pipeline is shared with the legacy decoder, while
+/// DC level shifting follows each component's SIZ signedness. Current payload
+/// support remains 1..16 components at 8, 16, or 20 bits, including requested lower
+/// resolutions up to the codestream decomposition count.
+pub fn decodeLosslessNative(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    limits: NativeSampleLimits,
+) !NativeSamplePlanes {
+    return decodeLosslessNativeWithOptions(allocator, bytes, .{}, limits);
+}
+
+pub fn decodeLosslessNativeWithOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    limits: NativeSampleLimits,
+) !NativeSamplePlanes {
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
+    const header = try readStrictCodestreamMetadata(allocator, bytes);
+    if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
+    if (header.transform != .reversible_5_3 or header.quantization != .none or
+        header.mct != .none)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return decodeStrictMultiTileNative(allocator, bytes, header, options, limits);
+    }
+
+    var layout = try inspectNativeCodestreamLayout(allocator, bytes, limits);
+    defer layout.deinit();
+    if (layout.components.len != header.component_count) return CodestreamError.InvalidCodestream;
+    try reduceNativeCodestreamLayout(&layout, options.resolution_reduction);
+    var output = try NativeSamplePlanes.initFromLayout(allocator, layout, limits);
+    errdefer output.deinit();
+
+    var catalog = try readStrictPacketBlockCatalogWithHeaderProfiled(
+        allocator,
+        bytes,
+        header,
+        options.resolution_reduction,
+        null,
+    );
+    defer catalog.deinit();
+    try compactStrictPacketBlockCatalogForReduction(
+        &catalog,
+        header.levels,
+        options.resolution_reduction,
+        null,
+    );
+    if (catalog.component_count != header.component_count) return CodestreamError.InvalidCodestream;
+
+    var max_component_dimension: usize = 0;
+    for (0..header.component_count) |component| {
+        max_component_dimension = @max(max_component_dimension, catalog.component_widths[component]);
+        max_component_dimension = @max(max_component_dimension, catalog.component_heights[component]);
+    }
+    if (max_component_dimension == 0) return CodestreamError.InvalidCodestream;
+    var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
+    defer workspace.deinit();
+
+    for (0..header.component_count) |component| {
+        const component_width = catalog.component_widths[component];
+        const component_height = catalog.component_heights[component];
+        const plane_layout = output.planes[component].layout;
+        if (plane_layout.precision != componentBitDepthForHeader(header, component) or
+            plane_layout.signed != header.component_signed[component])
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        var coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+            allocator,
+            component_width,
+            component_height,
+            header.levels,
+            catalog,
+            component,
+            options,
+            null,
+        );
+        defer allocator.free(coefficients);
+        var decoded_width = component_width;
+        var decoded_height = component_height;
+        if (options.resolution_reduction == 0) {
+            try wavelet_int.inverse53WithWorkspaceOrigin(
+                &workspace,
+                coefficients,
+                component_width,
+                component_height,
+                header.levels,
+                catalog.component_x0[component],
+                catalog.component_y0[component],
+            );
+        } else {
+            const reduced = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+                &workspace,
+                coefficients,
+                component_width,
+                component_height,
+                header.levels,
+                options.resolution_reduction,
+                catalog.component_x0[component],
+                catalog.component_y0[component],
+            );
+            const compact = try compactTopLeftCoefficientPlane(
+                allocator,
+                coefficients,
+                component_width,
+                component_height,
+                reduced.width,
+                reduced.height,
+            );
+            allocator.free(coefficients);
+            coefficients = compact;
+            decoded_width = reduced.width;
+            decoded_height = reduced.height;
+        }
+        if (plane_layout.width != decoded_width or plane_layout.height != decoded_height or
+            coefficients.len != output.planes[component].samples.len)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        const level_shift: i64 = if (plane_layout.signed)
+            0
+        else
+            @as(i64, 1) << @as(u6, @intCast(plane_layout.precision - 1));
+        for (coefficients, output.planes[component].samples) |coefficient, *sample| {
+            sample.* = @as(i64, coefficient) + level_shift;
+        }
+    }
+    try output.validateSamples();
+    return output;
+}
+
 /// Reconstructs codestream image components after inverse DWT and component
 /// level shifting, but before inversion of a bounded Part 1 RCT or ICT. This is
 /// mainly useful for conformance references that are defined in codestream-
@@ -3324,7 +3480,8 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
     const irreversible = header.transform == .irreversible_9_7 and
         header.quantization != .none and
         (header.mct == .none or irreversible_codestream_components);
-    if (header.component_count < 1 or header.component_count > max_codestream_components or
+    if (headerHasSignedComponent(header) or headerHasNonLegacyPrecision(header) or
+        header.component_count < 1 or header.component_count > color.max_components or
         (header.mct != .none and !rct_alpha and !sampled_rct) or (!reversible and !irreversible))
     {
         return CodestreamError.UnsupportedPayload;
@@ -3399,8 +3556,16 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
     var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
     defer workspace.deinit();
     const coefficient_planes = try allocator.alloc([]i32, header.component_count);
-    var decoded_component_widths = catalog.component_widths;
-    var decoded_component_heights = catalog.component_heights;
+    var decoded_component_widths = [_]usize{0} ** color.max_components;
+    var decoded_component_heights = [_]usize{0} ** color.max_components;
+    @memcpy(
+        decoded_component_widths[0..header.component_count],
+        catalog.component_widths[0..header.component_count],
+    );
+    @memcpy(
+        decoded_component_heights[0..header.component_count],
+        catalog.component_heights[0..header.component_count],
+    );
     var initialized: usize = 0;
     var coefficient_planes_owned = true;
     errdefer if (coefficient_planes_owned) {
@@ -3567,6 +3732,7 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     const header = try readStrictCodestreamMetadata(allocator, bytes);
     if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
     if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
+    if (headerHasSignedComponent(header)) return CodestreamError.UnsupportedPayload;
     if (header.component_count != 3) return CodestreamError.UnsupportedPayload;
     if (headerHasMixedComponentPrecision(header)) return CodestreamError.UnsupportedPayload;
     if (headerHasComponentSubsampling(header)) return CodestreamError.UnsupportedPayload;
@@ -3930,6 +4096,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
     var height: usize = 0;
     var bit_depth: u8 = 0;
     var component_bit_depths = [_]u8{0} ** max_codestream_components;
+    var component_signed = [_]bool{false} ** max_codestream_components;
     var component_xrsiz = [_]u8{1} ** max_codestream_components;
     var component_yrsiz = [_]u8{1} ** max_codestream_components;
     var mixed_component_precision = false;
@@ -4034,17 +4201,17 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
             };
             bit_depth = (segment[36] & 0x7f) + 1;
-            if (bit_depth != 8 and bit_depth != 16) return CodestreamError.UnsupportedPayload;
+            if (!isSupportedStrictPayloadPrecision(bit_depth)) return CodestreamError.UnsupportedPayload;
             var component_index: usize = 0;
             while (component_index < component_count) : (component_index += 1) {
                 const component_offset = 36 + component_index * 3;
                 const ssiz = segment[component_offset];
-                if ((ssiz & 0x80) != 0) return CodestreamError.UnsupportedPayload;
                 const component_bit_depth = (ssiz & 0x7f) + 1;
-                if (component_bit_depth != 8 and component_bit_depth != 16) {
+                if (!isSupportedStrictPayloadPrecision(component_bit_depth)) {
                     return CodestreamError.UnsupportedPayload;
                 }
                 component_bit_depths[component_index] = component_bit_depth;
+                component_signed[component_index] = (ssiz & 0x80) != 0;
                 mixed_component_precision = mixed_component_precision or component_bit_depth != bit_depth;
                 const xrsiz = segment[component_offset + 1];
                 const yrsiz = segment[component_offset + 2];
@@ -4314,8 +4481,11 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         }
         const sampled_no_mct = parsed_mct == .none;
         const sampled_rct = parsed_mct == .rct and uniform_sampling and !mixed_component_precision;
+        const sampled_reversible = parsed_transform == .reversible_5_3 and parsed_quantization == .none;
+        const sampled_irreversible_no_mct = sampled_no_mct and !mixed_component_precision and
+            parsed_transform == .irreversible_9_7 and parsed_quantization != .none;
         if ((!sampled_no_mct and !sampled_rct) or
-            parsed_transform != .reversible_5_3 or parsed_quantization != .none)
+            (!sampled_reversible and !sampled_irreversible_no_mct))
         {
             return CodestreamError.UnsupportedPayload;
         }
@@ -4398,12 +4568,9 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         null;
     defer if (ppm_headers) |*headers| headers.deinit();
     if (!grid.isSingleTile()) {
-        if (component_count != 3) return CodestreamError.UnsupportedPayload;
-        // Multi-tile: validate one-part tiles or PLT-backed RPCL resolution
-        // divisions, per-tile packet plans, TLM cross-check, and the same
-        // geometry envelope the encoder enforces. The per-tile
-        // spans this produces feed the Stage C decode. The multi-tile envelope
-        // currently covers RPCL plus the single-layer LRCP/RLCP permutations.
+        // Multi-tile metadata and packet spans are component-count agnostic;
+        // individual public decode surfaces apply their narrower output/MCT
+        // envelopes after this structural validation.
         try validateMultiTileProgression(parsed_progression, layers);
         try validateMultiTileDecodeGeometry(grid, levels, options);
         const tile_count = std.math.cast(usize, grid.tileCount()) orelse return CodestreamError.UnsupportedPayload;
@@ -4546,6 +4713,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
             .reference_y0 = grid.params.yosiz,
             .bit_depth = bit_depth,
             .component_bit_depths = component_bit_depths,
+            .component_signed = component_signed,
             .component_xrsiz = component_xrsiz,
             .component_yrsiz = component_yrsiz,
             .component_qcd = component_qcd,
@@ -4618,6 +4786,7 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
         .reference_y0 = grid.params.yosiz,
         .bit_depth = bit_depth,
         .component_bit_depths = component_bit_depths,
+        .component_signed = component_signed,
         .component_xrsiz = component_xrsiz,
         .component_yrsiz = component_yrsiz,
         .component_qcd = component_qcd,
@@ -5023,6 +5192,57 @@ fn headerHasMixedComponentPrecision(header: TemporaryHeader) bool {
     const first = componentBitDepthForHeader(header, 0);
     for (1..header.component_count) |component| {
         if (componentBitDepthForHeader(header, component) != first) return true;
+    }
+    return false;
+}
+
+fn reduceNativeCodestreamLayout(layout: *NativeCodestreamLayout, reduction: u8) !void {
+    if (reduction == 0) return;
+    layout.reference_x0 = reducedGridCoordinate(layout.reference_x0, reduction);
+    layout.reference_y0 = reducedGridCoordinate(layout.reference_y0, reduction);
+    layout.reference_x1 = reducedGridCoordinate(layout.reference_x1, reduction);
+    layout.reference_y1 = reducedGridCoordinate(layout.reference_y1, reduction);
+    if (layout.reference_x1 <= layout.reference_x0 or layout.reference_y1 <= layout.reference_y0) {
+        return CodestreamError.InvalidCodestream;
+    }
+    for (layout.components) |*component| {
+        const width_u32 = std.math.cast(u32, component.width) orelse
+            return CodestreamError.InvalidCodestream;
+        const height_u32 = std.math.cast(u32, component.height) orelse
+            return CodestreamError.InvalidCodestream;
+        const x1 = std.math.add(u32, component.x0, width_u32) catch
+            return CodestreamError.InvalidCodestream;
+        const y1 = std.math.add(u32, component.y0, height_u32) catch
+            return CodestreamError.InvalidCodestream;
+        const reduced_x0 = reducedGridCoordinate(component.x0, reduction);
+        const reduced_y0 = reducedGridCoordinate(component.y0, reduction);
+        const reduced_x1 = reducedGridCoordinate(x1, reduction);
+        const reduced_y1 = reducedGridCoordinate(y1, reduction);
+        if (reduced_x1 <= reduced_x0 or reduced_y1 <= reduced_y0) {
+            return CodestreamError.InvalidCodestream;
+        }
+        component.x0 = reduced_x0;
+        component.y0 = reduced_y0;
+        component.width = reduced_x1 - reduced_x0;
+        component.height = reduced_y1 - reduced_y0;
+    }
+}
+
+fn headerHasSignedComponent(header: TemporaryHeader) bool {
+    for (header.component_signed[0..header.component_count]) |signed| {
+        if (signed) return true;
+    }
+    return false;
+}
+
+fn isSupportedStrictPayloadPrecision(precision: u8) bool {
+    return precision == 8 or precision == 16 or precision == max_native_payload_precision;
+}
+
+fn headerHasNonLegacyPrecision(header: TemporaryHeader) bool {
+    for (0..header.component_count) |component| {
+        const precision = componentBitDepthForHeader(header, component);
+        if (precision != 8 and precision != 16) return true;
     }
     return false;
 }
@@ -7519,9 +7739,12 @@ fn decodeStrictMultiTilePlanarMeasured(
 ) !color.SamplePlanes {
     const sampled_rct = header.component_count == 3 and header.mct == .rct and
         headerHasUniformComponentSampling(header);
+    const reversible = header.transform == .reversible_5_3 and header.quantization == .none;
+    const irreversible_no_mct = header.transform == .irreversible_9_7 and
+        header.quantization != .none and header.mct == .none;
     if ((header.mct != .none and !sampled_rct) or
         (header.progression != .rpcl and !sampled_rct) or
-        header.transform != .reversible_5_3 or header.quantization != .none or
+        (!reversible and !irreversible_no_mct) or
         !headerHasComponentSubsampling(header))
     {
         return CodestreamError.UnsupportedPayload;
@@ -7683,6 +7906,194 @@ fn decodeStrictMultiTilePlanarMeasured(
         }
     }
     return assembled;
+}
+
+/// Bounded multi-tile continuation of the generic native-sample path. Each
+/// tile keeps its component-local absolute grid while T2/T1 and partial 5/3
+/// synthesis run independently; the resulting signed or level-shifted samples
+/// are copied into the reduced whole-image native planes without an MCT.
+fn decodeStrictMultiTileNative(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    limits: NativeSampleLimits,
+) !NativeSamplePlanes {
+    if (header.transform != .reversible_5_3 or header.quantization != .none or
+        header.mct != .none or options.resolution_reduction > header.levels)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+
+    var layout = try inspectNativeCodestreamLayout(allocator, bytes, limits);
+    defer layout.deinit();
+    if (layout.components.len != header.component_count) return CodestreamError.InvalidCodestream;
+    try reduceNativeCodestreamLayout(&layout, options.resolution_reduction);
+    var output = try NativeSamplePlanes.initFromLayout(allocator, layout, limits);
+    errdefer output.deinit();
+    for (0..header.component_count) |component| {
+        if (output.planes[component].layout.precision != componentBitDepthForHeader(header, component) or
+            output.planes[component].layout.signed != header.component_signed[component])
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
+
+    var context = try readStrictMultiTileContext(allocator, bytes, header);
+    defer context.deinit();
+    var tile_index: u32 = 0;
+    while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
+        const tile = context.grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
+        const tile_header = try context.tileHeader(header, tile);
+        if (tile_header.transform != .reversible_5_3 or tile_header.quantization != .none or
+            tile_header.mct != .none or options.resolution_reduction > tile_header.levels)
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+        const tile_plan = temporaryPacketPlan(tile_header);
+        var effective_poc_records: std.ArrayList(poc.Record) = .empty;
+        defer effective_poc_records.deinit(allocator);
+        const tile_poc_records = try context.appendEffectivePocRecords(
+            allocator,
+            tile_index,
+            &effective_poc_records,
+        );
+        if (context.main_header.ppm_headers != null and tile_poc_records != null) {
+            return CodestreamError.UnsupportedPayload;
+        }
+
+        var catalog = try readStrictMultiTilePacketCatalogForTile(
+            allocator,
+            bytes,
+            context.spans.items,
+            @intCast(tile_index),
+            tile_header,
+            tile_plan,
+            header.layers,
+            header.progression,
+            tile_poc_records,
+            context.main_header.packet_markers,
+            context.main_header.ppm_headers,
+        );
+        defer catalog.deinit();
+        var audit = StrictPacketHeaderAudit{};
+        var assemblies = try assembleStrictPacketCatalogHeaders(
+            allocator,
+            tile_header,
+            catalog,
+            options.resolution_reduction,
+            &audit,
+        );
+        defer assemblies.deinit();
+        const build = try strictPacketBlockCatalogFromAssembliesChecked(
+            allocator,
+            assemblies.assemblies[0..assemblies.initialized],
+        );
+        var block_catalog = build.catalog;
+        defer block_catalog.deinit();
+        if (build.stats.bytes != audit.payload_bytes or
+            block_catalog.component_count != header.component_count)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        try compactStrictPacketBlockCatalogForReduction(
+            &block_catalog,
+            tile_header.levels,
+            options.resolution_reduction,
+            null,
+        );
+
+        var max_component_dimension: usize = 0;
+        for (0..header.component_count) |component| {
+            max_component_dimension = @max(max_component_dimension, block_catalog.component_widths[component]);
+            max_component_dimension = @max(max_component_dimension, block_catalog.component_heights[component]);
+        }
+        if (max_component_dimension == 0) return CodestreamError.InvalidCodestream;
+        var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
+        defer workspace.deinit();
+
+        for (0..header.component_count) |component| {
+            const source_width = block_catalog.component_widths[component];
+            const source_height = block_catalog.component_heights[component];
+            const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+                allocator,
+                source_width,
+                source_height,
+                tile_header.levels,
+                block_catalog,
+                component,
+                options,
+                null,
+            );
+            defer allocator.free(coefficients);
+            var tile_width = source_width;
+            var tile_height = source_height;
+            if (options.resolution_reduction == 0) {
+                try wavelet_int.inverse53WithWorkspaceOrigin(
+                    &workspace,
+                    coefficients,
+                    source_width,
+                    source_height,
+                    tile_header.levels,
+                    block_catalog.component_x0[component],
+                    block_catalog.component_y0[component],
+                );
+            } else {
+                const reduced = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+                    &workspace,
+                    coefficients,
+                    source_width,
+                    source_height,
+                    tile_header.levels,
+                    options.resolution_reduction,
+                    block_catalog.component_x0[component],
+                    block_catalog.component_y0[component],
+                );
+                tile_width = reduced.width;
+                tile_height = reduced.height;
+            }
+
+            const plane = output.planes[component];
+            const reduced_x0 = reducedGridCoordinate(
+                block_catalog.component_x0[component],
+                options.resolution_reduction,
+            );
+            const reduced_y0 = reducedGridCoordinate(
+                block_catalog.component_y0[component],
+                options.resolution_reduction,
+            );
+            if (reduced_x0 < plane.layout.x0 or reduced_y0 < plane.layout.y0) {
+                return CodestreamError.InvalidCodestream;
+            }
+            const destination_x = @as(usize, reduced_x0 - plane.layout.x0);
+            const destination_y = @as(usize, reduced_y0 - plane.layout.y0);
+            if (destination_x + tile_width > plane.layout.width or
+                destination_y + tile_height > plane.layout.height)
+            {
+                return CodestreamError.InvalidCodestream;
+            }
+            const level_shift: i64 = if (plane.layout.signed)
+                0
+            else
+                @as(i64, 1) << @as(u6, @intCast(plane.layout.precision - 1));
+            const minimum = try plane.layout.minimumSample();
+            const maximum = try plane.layout.maximumSample();
+            for (0..tile_height) |row| {
+                const source_row = coefficients[row * source_width ..][0..tile_width];
+                const destination_start = (destination_y + row) * plane.layout.width + destination_x;
+                const destination_row = plane.samples[destination_start..][0..tile_width];
+                for (source_row, destination_row) |coefficient, *sample| {
+                    const value = @as(i64, coefficient) + level_shift;
+                    if (value < minimum or value > maximum) {
+                        return native_samples.NativeSampleError.SampleOutOfRange;
+                    }
+                    sample.* = value;
+                }
+            }
+        }
+    }
+    try output.validateSamples();
+    return output;
 }
 
 /// Stage C multi-tile decode (docs/multi_tile_plan.md): every tile decodes as
@@ -11273,6 +11684,7 @@ const TemporaryHeader = struct {
     reference_y0: u32 = 0,
     bit_depth: u8,
     component_bit_depths: [max_codestream_components]u8 = [_]u8{0} ** max_codestream_components,
+    component_signed: [max_codestream_components]bool = [_]bool{false} ** max_codestream_components,
     component_xrsiz: [max_codestream_components]u8 = [_]u8{1} ** max_codestream_components,
     component_yrsiz: [max_codestream_components]u8 = [_]u8{1} ** max_codestream_components,
     component_qcd: [max_codestream_components]StrictQcdInfo = [_]StrictQcdInfo{.{

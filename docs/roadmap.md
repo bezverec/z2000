@@ -52,7 +52,8 @@ The bounded F3 campaign is complete. Distinct tile-partition origins have an
 independent Kakadu fixture and bidirectional exact interop; reordered sampled
 POC and the multi-tile diagnostic packet catalog share production decode's
 component-local topology. Keep sampled MCT and irreversible combinations closed
-until their transform and registration semantics are explicit.
+unless their transform and registration semantics are explicit; bounded
+sampled no-MCT 9/7 native-plane decode is the documented exception.
 
 ### 2. Colour And ICC
 
@@ -142,16 +143,20 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 G0 is active. Its 2026-07-17 foundation includes an unscored broad capability
 matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
-Seven committed foreign-encoded streams cover sampled origins/POC,
-four-component CMYK, all T1 style bits, uniform COC/QCC, and padded multipart
-TLM; four mutations pin malformed and unsupported fail-closed behavior. The
+Thirteen committed foreign-encoded streams cover sampled origins/POC and sampled
+multi-tile no-MCT 9/7 reduction,
+signed 8-bit single-/multi-tile, signed 20-bit, and mixed signed 8/16/20-bit
+full/reduced native decode, four-component
+CMYK, all T1 style bits, uniform
+COC/QCC, and padded multipart TLM; four mutations pin malformed and unsupported
+fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 27-entry result of 16 decode passes and 11 expected fail-closed
+a complete 33-entry result of 22 decode passes and 11 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
-signed 1..16-bit PGX data, peak error, and MSE. G0 remains open for independent
+signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
 fixtures covering the remaining rows. G4 has started with a bounded
 `DecodeOptions.resolution_reduction` slice: single-tile reversible 5/3 and
 irreversible 9/7 decode stop synthesis at the requested DWT level and compact
@@ -175,15 +180,33 @@ per tile, then assemble by reduced absolute tile boundaries; the odd-grid RCT
 path has an exact manual oracle. Sampled multi-tile no-MCT 5/3 reduction now
 uses component-local partial synthesis and reduced absolute assembly across
 odd image/tile origins. Native-planar no-MCT 9/7 now reconstructs bounded
-single-tile scalar-derived/expounded streams directly. Sampled colour
-transforms remain the next G4 gate. Class-1
+single-tile scalar-derived/expounded streams directly. A committed Kakadu
+four-tile sampled no-MCT 9/7 stream now pins full and reduction-1 native
+planes against six PGX references. A second Kakadu PLT-less stream supplies
+the unchanged foreign packet bodies for inline/PPT/PPM full and reduced gates;
+the PPT/PPM framing is a deterministic structural repack, not independent
+encoder evidence. Sampled colour transforms remain the next G4 gate. Class-1
 all-component evaluation advances with G1/G2 decode breadth.
 
-G1 must define a lossless internal carrier before adding source adapters above
-16 bits. Part 1 samples are integers; floating-point codestream samples and
-general multiple-component transforms belong to extension work rather than
-being smuggled into this milestone. Diagnostic PGX/PAM/raw planar output is
-needed for combinations that TIFF or a display-oriented conversion cannot
+G1 now has its non-breaking carrier foundation plus the first payload slice: a
+caller-limited SIZ inspector and dynamic `i64` planes preserve 1..38-bit
+signed/unsigned metadata, while committed Kakadu signed 8-bit single- and
+four-tile streams decode exactly at full and reduction-1 resolution through
+bounded reversible no-MCT T1/DWT reconstruction and absolute native-grid
+assembly. A five-component, four-tile Kakadu stream additionally matches ten
+full/reduction-1 PGX references through the new 16-slot strict/native bound.
+An independent signed 20-bit Kakadu stream now matches full and reduction-1
+PGX output exactly, including both extrema, while a 21-bit mutation fails
+closed. A mixed signed 8/16/20-bit Kakadu stream additionally matches all six
+component/reduction references exactly, proving component-local precision
+through T2/T1/DWT. Caller limits and the legacy four-component, unsigned 8/16-bit `u16`
+surface remain intact. Dynamic strict structures plus sub-byte, mixed, and
+remaining precision breadth come next.
+Part 1 samples are integers;
+floating-point codestream samples and general multiple-component transforms
+belong to extension work rather than being smuggled into this milestone.
+Checked PGX exists for 8/16/32-bit storage; PAM/raw-planar output is still
+needed for combinations that PGX, TIFF, or a display conversion cannot
 represent faithfully.
 
 G2 and G3 replace the current byte-redundant/uniform override shortcuts with
@@ -203,9 +226,10 @@ no-MCT, RCT, and ICT output; 9/7 additionally performs selective
 dequantization. Sampled no-MCT 5/3 now reconstructs each native component grid
 directly across single- and multi-tile inline, PPT, and PPM headers. Multi-tile
 assembly reduces each tile-component's absolute sampled bounds independently.
-Native-planar no-MCT 9/7 has landed for bounded single-tile decode. Sampled
-colour transforms are the next functional gate; common-grid multi-tile RCT/ICT
-selection has landed. A large image
+Native-planar no-MCT 9/7 covers bounded single-tile and sampled multi-tile
+decode, with the latter independently reference-relative through Kakadu.
+Sampled colour transforms are the next functional gate; common-grid multi-tile
+RCT/ICT selection has landed. A large image
 still must not require retaining every discarded layer, tile, or pixel when the
 caller requests a bounded subset.
 Performance work continues in parallel, but no throughput result substitutes

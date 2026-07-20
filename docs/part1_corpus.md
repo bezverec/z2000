@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-17 gate contains 27 entries: 11 committed entries plus all 16
+The 2026-07-20 gate contains 33 entries: 17 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -60,10 +60,34 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 `p0_09` covers reduced irreversible 9/7,
 `p0_10` covers uniform 4x4-sampled RCT across interleaved PLT-less tile-parts,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
-also pins legal QCD-before-COD ordering. The other seven optional profiles return
-their manifested fail-closed boundary. The complete result is therefore 16
-decode passes, 11 expected fail-closed cases, zero mismatches, and zero skips
+also pins legal QCD-before-COD ordering. The other seven optional profiles
+return their manifested fail-closed boundary. The complete result is therefore
+22 decode passes, 11 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
+
+Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
+8-bit reversible/no-MCT codestreams. The corpus selects the native `i64`
+decoder and compares Kakadu's signed PGX output exactly at full and reduction-1
+resolution. The multi-tile oracle deliberately differs at reduction 1 because
+each tile synthesizes its own low-resolution grid. Unit tests also pin legacy
+planar/gray fail-closed behavior, invalid excessive reduction, and 1/8-thread
+determinism.
+
+The third native signed entry is a Kakadu five-component, four-tile stream.
+All five components compare exactly at full and reduction-1 output (ten PGX
+references total), while a four-component caller limit and the unchanged legacy
+planar API reject it before sample allocation/reinterpretation.
+
+The fourth native signed entry is a Kakadu 20-bit stream. Full and reduction-1
+output compare byte-exactly with Kakadu PGX, including the signed extrema and
+zero; 1/8-thread decoding is deterministic. Legacy planar decode still rejects
+the stream, and a 21-bit SIZ mutation pins the current native payload boundary.
+
+The fifth native signed entry combines 8-, 16-, and 20-bit components in one
+Kakadu stream. All three native planes compare byte-exactly at full and
+reduction-1 resolution, including each precision's extrema, and remain
+deterministic at one and eight threads. A two-component caller limit and the
+legacy planar API reject the stream without reinterpretation.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT
@@ -71,7 +95,10 @@ level, with precision saturation and checked reduced dimensions. The runner
 passes each reference's reduction selector to the production decoder. The
 bounded reduction path now also covers sampled reversible 5/3 across
 single- and multi-tile streams plus native-planar no-MCT 9/7 for bounded
-single-tile streams. T.803 `p0_04`, `p0_09`, and `p0_14` exercise those reduced paths;
+single- and sampled multi-tile streams. The committed Kakadu four-tile 9/7
+entry compares every component at full and reduction-1 output against six PGX
+references with peak <= 1 and MSE <= 0.12. T.803 `p0_04`, `p0_09`, and
+`p0_14` exercise those reduced paths;
 the remaining reduced references still require signedness, RGN, or divergent
 component coding styles.
 Class-1 all-component comparison can reuse the reference-list oracle as G1 and
@@ -86,7 +113,7 @@ pass may pin either the canonical native hash or a list of PGX `references`,
 each with its own checksum, component index, resolution reduction, peak-error
 limit, MSE limit, and explicit `space`: normal output components after MCT or
 codestream components before inverse MCT. The PGX reader accepts big- or little-endian signed and
-unsigned integer samples from 1 through 16 bits, and evaluates peak error and
+unsigned integer samples from 1 through 31 bits, and evaluates peak error and
 MSE independently. Multiple component and reduction records are represented
 without ambiguity. The runner decodes each reference at its declared
 reduction; non-zero-reduction references whose inputs remain expected
@@ -116,9 +143,10 @@ sequence before hashing. It therefore produces the same hash as an equivalent
 three-plane decode; TIFF layout, metadata, and row serialization never enter
 the digest.
 
-This version deliberately describes the current bounded native carrier. G1
-must introduce a new hash version when signed samples, precision above 16 bits,
-or a wider carrier land; it must not reinterpret existing v1 hashes.
+This hash version deliberately remains the unsigned `u16` canonical form used
+by legacy planar/interleaved entries. Signed or wider native entries use exact
+PGX references instead, so adding the 20-bit slice does not reinterpret v1. A
+future native hash format must use a new version tag.
 
 `zig build part1-corpus -- --bless` only prints observed hashes. It does not
 edit the manifest. Before copying a hash into the manifest, compare the samples
