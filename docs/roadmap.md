@@ -149,12 +149,13 @@ signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
 8/16/20-bit, and independently sampled signed 7/13/23-bit
 full/reduced native decode, four-component
 CMYK, all T1 style bits, uniform COC/QCC, genuinely divergent ICT/9-7 QCC,
-and padded multipart TLM; five mutations pin malformed and unsupported
+reversible component-local COC decomposition/precinct geometry, and padded
+multipart TLM; six mutations pin malformed and unsupported
 fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 39-entry result of 27 decode passes and 12 expected fail-closed
+a complete 41-entry result of 28 decode passes and 13 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
 signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
@@ -236,11 +237,17 @@ non-recursive batch CLI syntax, with reduction and byte order kept explicit.
 The second surface writes all native components to exact ZRAW through the same
 dispatch forms and round-trips its self-describing metadata and payload.
 
-G2 has begun with genuinely component-specific scalar-expounded QCC in the
-bounded three-component ICT/9-7 profile, independently pinned by Kakadu at full
-and reduced resolution plus a malformed counterpart. Its remaining COC and
-tile-header slices, together with G3, replace the other byte-redundant/uniform
-override shortcuts with real component- and tile-local semantics. Unknown or profile-inapplicable
+G2 now has two independently pinned slices. Genuinely component-specific
+scalar-expounded QCC works in the bounded three-component ICT/9-7 profile at
+full and reduced resolution. A reversible single-tile no-MCT Kakadu stream also
+decodes component-local decomposition counts 3/2/1, component-sized precinct
+lists, and matching QCD/QCC tables exactly at full resolution and reduction 1.
+Its packet scheduling, T1 geometry, reduced-catalog compaction, and inverse DWT
+all use effective component levels; common code-block geometry/style/transform
+remains the current boundary. The next slices add legal component-local block
+geometry/style and tile-header overrides. Together with G3 they replace the
+remaining byte-redundant/uniform shortcuts with real component- and tile-local
+semantics. Unknown or profile-inapplicable
 markers must be validated deliberately, not blindly ignored. Packet indexing
 created here becomes the basis for G4 random access instead of a second packet
 parser.

@@ -2555,13 +2555,15 @@ const StrictComponentGeometrySet = struct {
         if (reference_plan.resolution_count != @as(u8, header.levels) + 1) {
             return CodestreamError.InvalidCodestream;
         }
-        var component_plans = try StrictComponentPacketPlans.init(
+        const explicit_coding = componentCodingSliceForHeader(header);
+        var component_plans = try StrictComponentPacketPlans.initWithCoding(
             allocator,
             reference_plan,
             header.component_count,
             header.layers,
             header.component_xrsiz[0..header.component_count],
             header.component_yrsiz[0..header.component_count],
+            explicit_coding,
         );
         defer component_plans.deinit();
 
@@ -2579,12 +2581,15 @@ const StrictComponentGeometrySet = struct {
         errdefer set.deinit();
         for (0..header.component_count) |component| {
             const component_plan = component_plans.components[component];
+            const component_levels = component_plan.plan.resolution_count - 1;
             const xrsiz = component_plan.xrsiz;
             const yrsiz = component_plan.yrsiz;
 
             var existing_index: ?usize = null;
             for (set.geometries[0..set.initialized], 0..) |geometry, geometry_index| {
-                if (geometry.xrsiz == xrsiz and geometry.yrsiz == yrsiz) {
+                if (geometry.xrsiz == xrsiz and geometry.yrsiz == yrsiz and
+                    strictPacketPlanGeometryEqual(geometry.plan, component_plan.plan))
+                {
                     existing_index = geometry_index;
                     break;
                 }
@@ -2597,11 +2602,11 @@ const StrictComponentGeometrySet = struct {
             const plan = component_plan.plan;
             const full = plan.resolutions[plan.resolution_count - 1];
 
-            const bands = try makeBandsForPacketPlan(allocator, plan, header.levels);
+            const bands = try makeBandsForPacketPlan(allocator, plan, component_levels);
             errdefer allocator.free(bands);
             const blocks = try makeCodeBlocksForPacketPlan(allocator, bands, header.block_width, header.block_height, plan);
             errdefer allocator.free(blocks);
-            var rpcl_index = try buildRpclBlockIndex(allocator, plan, 1, header.levels, bands, blocks);
+            var rpcl_index = try buildRpclBlockIndex(allocator, plan, 1, component_levels, bands, blocks);
             errdefer rpcl_index.deinit();
 
             const geometry_index = set.initialized;
@@ -2639,6 +2644,20 @@ const StrictComponentGeometrySet = struct {
     }
 };
 
+fn strictPacketPlanGeometryEqual(a: packet_plan.Plan, b: packet_plan.Plan) bool {
+    if (a.resolution_count != b.resolution_count) return false;
+    for (a.resolutions[0..a.resolution_count], b.resolutions[0..b.resolution_count]) |ar, br| {
+        if (ar.x0 != br.x0 or ar.y0 != br.y0 or ar.width != br.width or ar.height != br.height or
+            ar.precinct_width != br.precinct_width or ar.precinct_height != br.precinct_height or
+            ar.precinct_x0 != br.precinct_x0 or ar.precinct_y0 != br.precinct_y0 or
+            ar.precincts_x != br.precincts_x or ar.precincts_y != br.precincts_y)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn ceilDivU32(value: u32, divisor: u8) u32 {
     return @intCast((@as(u64, value) + divisor - 1) / divisor);
 }
@@ -2658,19 +2677,42 @@ const StrictComponentPacketPlans = struct {
         component_xrsiz: []const u8,
         component_yrsiz: []const u8,
     ) !StrictComponentPacketPlans {
+        return initWithCoding(
+            allocator,
+            reference,
+            component_count,
+            layers,
+            component_xrsiz,
+            component_yrsiz,
+            null,
+        );
+    }
+
+    fn initWithCoding(
+        allocator: std.mem.Allocator,
+        reference: packet_plan.Plan,
+        component_count: u16,
+        layers: u16,
+        component_xrsiz: []const u8,
+        component_yrsiz: []const u8,
+        component_coding: ?[]const StrictComponentCoding,
+    ) !StrictComponentPacketPlans {
         if (component_count < 1 or reference.resolution_count == 0 or layers == 0 or
             component_xrsiz.len != component_count or component_yrsiz.len != component_count)
         {
             return CodestreamError.InvalidCodestream;
+        }
+        if (component_coding) |coding| {
+            if (coding.len != component_count) return CodestreamError.InvalidCodestream;
         }
         const reference_full = reference.resolutions[reference.resolution_count - 1];
         const reference_x1 = std.math.add(u32, reference_full.x0, reference_full.width) catch
             return CodestreamError.InvalidCodestream;
         const reference_y1 = std.math.add(u32, reference_full.y0, reference_full.height) catch
             return CodestreamError.InvalidCodestream;
-        var precincts: [33]packet_plan.Precinct = undefined;
+        var reference_precincts: [33]packet_plan.Precinct = undefined;
         for (reference.resolutions[0..reference.resolution_count], 0..) |resolution, index| {
-            precincts[index] = .{ .width = resolution.precinct_width, .height = resolution.precinct_height };
+            reference_precincts[index] = .{ .width = resolution.precinct_width, .height = resolution.precinct_height };
         }
 
         const components = try allocator.alloc(packet_plan.SampledComponentPlan, component_count);
@@ -2692,17 +2734,36 @@ const StrictComponentPacketPlans = struct {
             if (component_x1 <= component_x0 or component_y1 <= component_y0) {
                 return CodestreamError.InvalidCodestream;
             }
+            var precincts: [33]packet_plan.Precinct = undefined;
+            const component_levels: u8 = if (component_coding) |coding| coding[component].levels else reference.resolution_count - 1;
+            const precinct_count: u8 = if (component_coding) |coding| coding[component].precinct_count else reference.resolution_count;
+            if (component_levels > 32 or precinct_count != component_levels + 1) {
+                return CodestreamError.InvalidCodestream;
+            }
+            if (component_coding) |coding| {
+                for (coding[component].precincts[0..precinct_count], 0..) |precinct, index| {
+                    precincts[index] = .{ .width = precinct.width, .height = precinct.height };
+                }
+            } else {
+                @memcpy(precincts[0..precinct_count], reference_precincts[0..precinct_count]);
+            }
             const plan = packet_plan.rpclTileRegion(
                 component_x0,
                 component_y0,
                 component_x1,
                 component_y1,
-                reference.resolution_count - 1,
+                component_levels,
                 1,
                 layers,
-                precincts[0..reference.resolution_count],
+                precincts[0..precinct_count],
             ) catch return CodestreamError.InvalidCodestream;
-            try validateComponentPacketTopology(reference, plan, xrsiz != 1 or yrsiz != 1);
+            if (component_coding == null) {
+                try validateComponentPacketTopology(reference, plan, xrsiz != 1 or yrsiz != 1);
+            } else {
+                for (plan.resolutions[0..plan.resolution_count]) |resolution| {
+                    if (resolution.precincts == 0) return CodestreamError.InvalidCodestream;
+                }
+            }
             result.components[component] = .{ .plan = plan, .xrsiz = xrsiz, .yrsiz = yrsiz };
             result.packet_count = std.math.add(u64, result.packet_count, plan.packets) catch
                 return CodestreamError.InvalidCodestream;
@@ -3373,6 +3434,11 @@ pub fn decodeLosslessNativeWithOptions(
     var header = try readStrictNativeCodestreamMetadata(allocator, bytes);
     defer header.deinit();
     if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
+    if (componentCodingSliceForHeader(header)) |coding| {
+        for (coding) |component| {
+            if (options.resolution_reduction > component.levels) return CodestreamError.InvalidCodestream;
+        }
+    }
     if (header.transform != .reversible_5_3 or header.quantization != .none or
         header.mct != .none)
     {
@@ -3397,9 +3463,10 @@ pub fn decodeLosslessNativeWithOptions(
         null,
     );
     defer catalog.deinit();
-    try compactStrictPacketBlockCatalogForReduction(
+    try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
         &catalog,
         header.levels,
+        componentCodingSliceForHeader(header),
         options.resolution_reduction,
         null,
     );
@@ -3415,6 +3482,7 @@ pub fn decodeLosslessNativeWithOptions(
     defer workspace.deinit();
 
     for (0..header.component_count) |component| {
+        const component_levels = componentLevelsForHeader(header, component);
         const component_width = catalog.component_widths[component];
         const component_height = catalog.component_heights[component];
         const plane_layout = output.planes[component].layout;
@@ -3427,7 +3495,7 @@ pub fn decodeLosslessNativeWithOptions(
             allocator,
             component_width,
             component_height,
-            header.levels,
+            component_levels,
             catalog,
             component,
             options,
@@ -3442,7 +3510,7 @@ pub fn decodeLosslessNativeWithOptions(
                 coefficients,
                 component_width,
                 component_height,
-                header.levels,
+                component_levels,
                 catalog.component_x0[component],
                 catalog.component_y0[component],
             ) catch |err| switch (err) {
@@ -3455,7 +3523,7 @@ pub fn decodeLosslessNativeWithOptions(
                 coefficients,
                 component_width,
                 component_height,
-                header.levels,
+                component_levels,
                 options.resolution_reduction,
                 catalog.component_x0[component],
                 catalog.component_y0[component],
@@ -4384,12 +4452,14 @@ fn readStrictCodestreamMetadataForProfile(
     var component_xrsiz: []u8 = &.{};
     var component_yrsiz: []u8 = &.{};
     var component_qcd: []StrictQcdInfo = &.{};
+    var component_coding: []StrictComponentCoding = &.{};
     errdefer {
         if (component_bit_depths.len != 0) allocator.free(component_bit_depths);
         if (component_signed.len != 0) allocator.free(component_signed);
         if (component_xrsiz.len != 0) allocator.free(component_xrsiz);
         if (component_yrsiz.len != 0) allocator.free(component_yrsiz);
         if (component_qcd.len != 0) allocator.free(component_qcd);
+        if (component_coding.len != 0) allocator.free(component_coding);
     }
     var mixed_component_precision = false;
     var subsampled_components = false;
@@ -4417,11 +4487,11 @@ fn readStrictCodestreamMetadataForProfile(
     // Captured COD/QCD payload slices (into `bytes`) let the bounded reader
     // distinguish redundant markers from uniform all-component overrides.
     var cod_scod: u8 = 0;
-    var cod_coding: []const u8 = &.{};
     var qcd_payload: []const u8 = &.{};
     var coc_component_seen: []bool = &.{};
     defer if (coc_component_seen.len != 0) allocator.free(coc_component_seen);
     var coc_payload_first: []const u8 = &.{};
+    var coc_payloads_uniform = true;
     var qcc_component_seen: []bool = &.{};
     defer if (qcc_component_seen.len != 0) allocator.free(qcc_component_seen);
     var qcc_payload_first: []const u8 = &.{};
@@ -4479,6 +4549,7 @@ fn readStrictCodestreamMetadataForProfile(
             component_xrsiz = try allocator.alloc(u8, component_count);
             component_yrsiz = try allocator.alloc(u8, component_count);
             component_qcd = try allocator.alloc(StrictQcdInfo, component_count);
+            component_coding = try allocator.alloc(StrictComponentCoding, component_count);
             coc_component_seen = try allocator.alloc(bool, component_count);
             qcc_component_seen = try allocator.alloc(bool, component_count);
             @memset(component_bit_depths, 0);
@@ -4486,6 +4557,7 @@ fn readStrictCodestreamMetadataForProfile(
             @memset(component_xrsiz, 1);
             @memset(component_yrsiz, 1);
             @memset(component_qcd, empty_strict_qcd_info);
+            @memset(component_coding, .{});
             @memset(coc_component_seen, false);
             @memset(qcc_component_seen, false);
             width = xsiz - xosiz;
@@ -4589,7 +4661,11 @@ fn readStrictCodestreamMetadataForProfile(
             }
             precinct_count = levels + 1;
             cod_scod = scod;
-            cod_coding = segment[5..];
+            for (component_coding[0..component_count]) |*coding| {
+                coding.levels = levels;
+                coding.precinct_count = precinct_count;
+                @memcpy(coding.precincts[0..precinct_count], precincts[0..precinct_count]);
+            }
             saw_cod = true;
             // Part 1 permits QCD before COD in the main header (the T.803
             // profile-0 p0_01 stream uses that order). Keep the QCD payload
@@ -4640,12 +4716,10 @@ fn readStrictCodestreamMetadataForProfile(
                 for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
             }
         } else if (marker == @intFromEnum(Marker.coc)) {
-            // ISO 15444-1 A.6.2: component-specific coding style. z2000 has no
-            // per-component coding path, so a COC is accepted only when it
-            // byte-replicates the main COD, or as a uniform override: every
-            // component carries identical SPcoc values. The latter is globally
-            // effective for levels, block geometry, style, transform, and
-            // precincts. Genuinely per-component divergence fails closed. Layout:
+            // ISO 15444-1 A.6.2 component-specific coding style. The bounded
+            // native path accepts component-local decomposition counts and
+            // precinct geometry. Block geometry/style and transform remain
+            // common so the existing T1 contract cannot silently diverge. Layout:
             // Ccoc(1) Scoc(1) SPcoc(NL,xcb,ycb,cblk,transform,precincts).
             if (!saw_cod) return CodestreamError.InvalidCodestream;
             if (segment.len < 3) return CodestreamError.InvalidCodestream;
@@ -4656,12 +4730,26 @@ fn readStrictCodestreamMetadataForProfile(
             const coc_component = segment[0];
             if (coc_component_seen[coc_component]) return CodestreamError.InvalidCodestream;
             coc_component_seen[coc_component] = true;
+            const spcoc = segment[2..];
+            const coding = &component_coding[coc_component];
+            coding.levels = spcoc[0];
+            coding.precinct_count = coding.levels + 1;
+            if ((segment[1] & 0x01) == 0) {
+                for (coding.precincts[0..coding.precinct_count]) |*precinct| {
+                    precinct.* = .{ .width = 32768, .height = 32768 };
+                }
+            } else {
+                for (spcoc[5..], 0..) |byte, index| {
+                    coding.precincts[index] = .{
+                        .width = @as(u16, 1) << @as(u4, @intCast(byte & 0x0f)),
+                        .height = @as(u16, 1) << @as(u4, @intCast(byte >> 4)),
+                    };
+                }
+            }
             if (coc_payload_first.len == 0) {
                 coc_payload_first = segment[1..];
             } else if (!std.mem.eql(u8, segment[1..], coc_payload_first)) {
-                // Components disagree with each other: genuine per-component
-                // coding, which z2000 cannot decode.
-                return CodestreamError.UnsupportedPayload;
+                coc_payloads_uniform = false;
             }
         } else if (marker == @intFromEnum(Marker.qcc)) {
             // ISO 15444-1 A.6.5: component-specific quantization. Reversible
@@ -4676,7 +4764,7 @@ fn readStrictCodestreamMetadataForProfile(
             const qcc_info = try validateStrictQcdSegment(
                 segment[1..],
                 component_bit_depths[qcc_component],
-                levels,
+                component_coding[qcc_component].levels,
                 parsed_transform,
             );
             if (qcc_component_seen[qcc_component]) return CodestreamError.InvalidCodestream;
@@ -4690,6 +4778,7 @@ fn readStrictCodestreamMetadataForProfile(
                 qcc_payload_first = segment[1..];
                 qcc_override_info = qcc_info;
             } else if (!std.mem.eql(u8, segment[1..], qcc_payload_first) and
+                !strictComponentCodingDiverges(component_coding[0..component_count]) and
                 !allowsComponentSpecificIrreversibleQcc(
                     component_count,
                     parsed_transform,
@@ -4731,47 +4820,52 @@ fn readStrictCodestreamMetadataForProfile(
     }
     if (coc_payload_first.len != 0) {
         const spcoc = coc_payload_first[1..];
-        if (!std.mem.eql(u8, spcoc, cod_coding)) {
-            // A common COC override is equivalent to making that coding style
-            // effective for every component. Divergent component styles still
-            // require the future component-local geometry/decode model.
+        const override_block_width = try codeBlockSizeFromCodExponent(spcoc[1]);
+        const override_block_height = try codeBlockSizeFromCodExponent(spcoc[2]);
+        const override_style = try parseCodeBlockStyleByte(spcoc[3]);
+        const override_transform: WaveletTransform = @enumFromInt(spcoc[4]);
+        const changes_common_coding = override_block_width != block_width or
+            override_block_height != block_height or !std.meta.eql(override_style, parsed_code_block_style) or
+            override_transform != parsed_transform;
+        if (changes_common_coding) {
+            if (!coc_payloads_uniform) return CodestreamError.UnsupportedPayload;
             for (coc_component_seen[0..component_count]) |seen| {
                 if (!seen) return CodestreamError.UnsupportedPayload;
             }
-            levels = spcoc[0];
-            block_width = try codeBlockSizeFromCodExponent(spcoc[1]);
-            block_height = try codeBlockSizeFromCodExponent(spcoc[2]);
-            try validateBlockSize(block_width, block_height);
-            parsed_code_block_style = try parseCodeBlockStyleByte(spcoc[3]);
-            parsed_transform = @enumFromInt(spcoc[4]);
-            const wire_precinct_count: usize = if ((coc_payload_first[0] & 0x01) != 0)
-                @as(usize, levels) + 1
-            else
-                0;
-            if (wire_precinct_count > precincts.len or spcoc.len != 5 + wire_precinct_count) {
-                return CodestreamError.InvalidCodestream;
-            }
-            if (wire_precinct_count == 0) {
-                for (precincts[0 .. @as(usize, levels) + 1]) |*precinct| {
-                    precinct.* = .{ .width = 32768, .height = 32768 };
-                }
-            } else {
-                for (spcoc[5..], 0..) |byte, index| {
-                    precincts[index] = .{
-                        .width = @as(u16, 1) << @as(u4, @intCast(byte & 0x0f)),
-                        .height = @as(u16, 1) << @as(u4, @intCast(byte >> 4)),
-                    };
-                }
-            }
-            precinct_count = levels + 1;
+            block_width = override_block_width;
+            block_height = override_block_height;
+            parsed_code_block_style = override_style;
+            parsed_transform = override_transform;
         }
     }
+    const component_coding_divergent = strictComponentCodingDiverges(component_coding[0..component_count]);
+    var max_levels: u8 = 0;
+    var max_levels_component: usize = 0;
+    for (component_coding[0..component_count], 0..) |coding, component| {
+        if (coding.precinct_count != coding.levels + 1) return CodestreamError.InvalidCodestream;
+        if (coding.levels > max_levels) {
+            max_levels = coding.levels;
+            max_levels_component = component;
+        }
+    }
+    levels = max_levels;
+    precinct_count = component_coding[max_levels_component].precinct_count;
+    @memcpy(
+        precincts[0..precinct_count],
+        component_coding[max_levels_component].precincts[0..precinct_count],
+    );
     if (parsed_mct != .none and component_count != 3 and
         !(component_count == 4 and parsed_transform == .reversible_5_3))
     {
         return CodestreamError.UnsupportedPayload;
     }
     const parsed_grid_value = parsed_grid orelse return CodestreamError.InvalidCodestream;
+    if (component_coding_divergent and
+        (precision_profile != .native or !parsed_grid_value.isSingleTile() or parsed_mct != .none or subsampled_components or
+            parsed_transform != .reversible_5_3 or parsed_quantization != .none))
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
     const native_mixed_multitile = precision_profile == .native and
         parsed_mct == .none and parsed_transform == .reversible_5_3 and
         parsed_quantization == .none;
@@ -4808,7 +4902,15 @@ fn readStrictCodestreamMetadataForProfile(
         // independently. Other profiles require all components to carry one
         // uniform divergent override, which then replaces the main QCD state.
         if (!std.mem.eql(u8, qcc_payload_first, qcd_payload)) {
-            if (allowsComponentSpecificIrreversibleQcc(
+            if (component_coding_divergent) {
+                for (component_qcd[0..component_count], component_coding[0..component_count]) |component_info, coding| {
+                    if (component_info.bands != 1 + 3 * @as(usize, coding.levels) or
+                        component_info.quantization != .none or component_info.exponent_count == 0)
+                    {
+                        return CodestreamError.InvalidCodestream;
+                    }
+                }
+            } else if (allowsComponentSpecificIrreversibleQcc(
                 component_count,
                 parsed_transform,
                 parsed_mct,
@@ -4840,9 +4942,10 @@ fn readStrictCodestreamMetadataForProfile(
         }
     }
     if (mixed_component_precision) {
-        for (component_qcd[0..component_count]) |component_info| {
-            if (component_info.bands != qcd_band_count or component_info.quantization != .none or
-                component_info.exponent_count != qcd_band_count)
+        for (component_qcd[0..component_count], component_coding[0..component_count]) |component_info, coding| {
+            const component_bands = 1 + 3 * @as(usize, coding.levels);
+            if (component_info.bands != component_bands or component_info.quantization != .none or
+                component_info.exponent_count != component_bands)
             {
                 return CodestreamError.InvalidCodestream;
             }
@@ -4951,6 +5054,7 @@ fn readStrictCodestreamMetadataForProfile(
                         layers,
                         component_xrsiz,
                         component_yrsiz,
+                        null,
                         if (poc_records.items.len == 0) null else poc_records.items,
                         tile_poc_records[tile_index].items,
                     )
@@ -5030,6 +5134,7 @@ fn readStrictCodestreamMetadataForProfile(
             .component_xrsiz = component_xrsiz,
             .component_yrsiz = component_yrsiz,
             .component_qcd = component_qcd,
+            .component_coding = component_coding,
             .component_count = component_count,
             .levels = levels,
             .layers = layers,
@@ -5066,13 +5171,14 @@ fn readStrictCodestreamMetadataForProfile(
     }
     const single_tile = grid.tile(0) catch return CodestreamError.InvalidCodestream;
     var plan = try makePacketPlanForTileComponents(single_tile, levels, component_count, options);
-    var component_plans = try StrictComponentPacketPlans.init(
+    var component_plans = try StrictComponentPacketPlans.initWithCoding(
         allocator,
         plan,
         component_count,
         layers,
         component_xrsiz[0..component_count],
         component_yrsiz[0..component_count],
+        component_coding[0..component_count],
     );
     defer component_plans.deinit();
     plan.packets = component_plans.packet_count;
@@ -5106,6 +5212,7 @@ fn readStrictCodestreamMetadataForProfile(
         .component_xrsiz = component_xrsiz,
         .component_yrsiz = component_yrsiz,
         .component_qcd = component_qcd,
+        .component_coding = component_coding,
         .component_count = component_count,
         .levels = levels,
         .layers = layers,
@@ -5463,7 +5570,7 @@ fn bandNominalBitplanesForHeader(
     if (component_info.exponent_count != 0) {
         const epsilon = signalledQcdBandEpsilon(
             &component_info,
-            header.levels,
+            componentLevelsForHeader(header, component),
             kind,
             band_level,
         ) orelse return CodestreamError.InvalidCodestream;
@@ -5576,6 +5683,42 @@ fn headerHasNonLegacyPrecision(header: TemporaryHeader) bool {
 fn headerHasComponentSubsampling(header: TemporaryHeader) bool {
     for (0..header.component_count) |component| {
         if (header.component_xrsiz[component] != 1 or header.component_yrsiz[component] != 1) return true;
+    }
+    return false;
+}
+
+fn componentCodingSliceForHeader(header: TemporaryHeader) ?[]const StrictComponentCoding {
+    if (header.component_coding.len < header.component_count) return null;
+    const coding = header.component_coding[0..header.component_count];
+    for (coding) |component| {
+        if (component.precinct_count == 0 or component.precinct_count != component.levels + 1) return null;
+    }
+    return coding;
+}
+
+fn componentLevelsForHeader(header: TemporaryHeader, component: usize) u8 {
+    if (component < header.component_count and header.component_coding.len >= header.component_count) {
+        const coding = header.component_coding[component];
+        if (coding.precinct_count != 0 and coding.precinct_count == coding.levels + 1) {
+            return coding.levels;
+        }
+    }
+    return header.levels;
+}
+
+fn headerHasComponentCodingDivergence(header: TemporaryHeader) bool {
+    const coding = componentCodingSliceForHeader(header) orelse return false;
+    return strictComponentCodingDiverges(coding);
+}
+
+fn strictComponentCodingDiverges(coding: []const StrictComponentCoding) bool {
+    if (coding.len < 2) return false;
+    const first = coding[0];
+    for (coding[1..]) |component| {
+        if (component.levels != first.levels or component.precinct_count != first.precinct_count) return true;
+        for (component.precincts[0..component.precinct_count], first.precincts[0..first.precinct_count]) |a, b| {
+            if (a.width != b.width or a.height != b.height) return true;
+        }
     }
     return false;
 }
@@ -7613,6 +7756,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
             layers,
             tile_header.component_xrsiz,
             tile_header.component_yrsiz,
+            null,
             poc_records,
             &.{},
         )
@@ -9382,6 +9526,22 @@ fn compactStrictPacketBlockCatalogForReduction(
     reduction: u8,
     timings: ?*DecodeTimings,
 ) !void {
+    return compactStrictPacketBlockCatalogForReductionWithComponentCoding(
+        catalog,
+        levels,
+        null,
+        reduction,
+        timings,
+    );
+}
+
+fn compactStrictPacketBlockCatalogForReductionWithComponentCoding(
+    catalog: *StrictPacketBlockCatalog,
+    levels: u8,
+    component_coding: ?[]const StrictComponentCoding,
+    reduction: u8,
+    timings: ?*DecodeTimings,
+) !void {
     if (reduction > levels) return CodestreamError.InvalidCodestream;
     const component_count: usize = catalog.component_count;
     if (component_count < 1 or catalog.components.len != component_count or
@@ -9391,10 +9551,17 @@ fn compactStrictPacketBlockCatalogForReduction(
     {
         return CodestreamError.InvalidCodestream;
     }
+    if (component_coding) |coding| {
+        if (coding.len != component_count) return CodestreamError.InvalidCodestream;
+        for (coding) |component| {
+            if (reduction > component.levels) return CodestreamError.InvalidCodestream;
+        }
+    }
 
     var retained_total: u64 = 0;
     var discarded_total: u64 = 0;
     for (0..catalog.component_count) |component| {
+        const component_levels = if (component_coding) |coding| coding[component].levels else levels;
         const blocks = catalog.components[component];
         const payload = catalog.payloads[component];
         var payload_total: usize = 0;
@@ -9430,7 +9597,7 @@ fn compactStrictPacketBlockCatalogForReduction(
             catalog.component_y0[component],
             component_x1,
             component_y1,
-            levels,
+            component_levels,
         );
         defer catalog.allocator.free(bands);
 
@@ -10365,16 +10532,18 @@ fn buildSampledStrictPacketSequence(
     layers: u16,
     component_xrsiz: []const u8,
     component_yrsiz: []const u8,
+    component_coding: ?[]const StrictComponentCoding,
     main_records: ?[]const poc.Record,
     tile_records: []const poc.Record,
 ) ![]packet_plan.Packet {
-    var component_plans = try StrictComponentPacketPlans.init(
+    var component_plans = try StrictComponentPacketPlans.initWithCoding(
         allocator,
         plan,
         component_count,
         layers,
         component_xrsiz[0..component_count],
         component_yrsiz[0..component_count],
+        component_coding,
     );
     defer component_plans.deinit();
     const full = plan.resolutions[plan.resolution_count - 1];
@@ -10494,8 +10663,8 @@ pub fn collectStrictInlinePacketSpans(
     );
     defer tile_poc_records.deinit(allocator);
 
-    const subsampled = headerHasComponentSubsampling(header);
-    const sequence = if (subsampled) blk: {
+    const component_local = headerHasComponentSubsampling(header) or headerHasComponentCodingDivergence(header);
+    const sequence = if (component_local) blk: {
         break :blk try buildSampledStrictPacketSequence(
             allocator,
             plan,
@@ -10504,6 +10673,7 @@ pub fn collectStrictInlinePacketSpans(
             header.layers,
             header.component_xrsiz,
             header.component_yrsiz,
+            componentCodingSliceForHeader(header),
             main_header.poc_records,
             tile_poc_records.items,
         );
@@ -10671,6 +10841,7 @@ fn collectStrictInlineMultiTileSpans(
                     header.layers,
                     tile_header.component_xrsiz,
                     tile_header.component_yrsiz,
+                    null,
                     main_records,
                     context.tile_poc_records[tile_index].items,
                 );
@@ -10813,8 +10984,8 @@ fn readStrictSodPacketCatalog(
         poc_limits,
     );
     defer tile_poc_records.deinit(allocator);
-    const subsampled = headerHasComponentSubsampling(header);
-    const sequence = if (subsampled) blk: {
+    const component_local = headerHasComponentSubsampling(header) or headerHasComponentCodingDivergence(header);
+    const sequence = if (component_local) blk: {
         break :blk try buildSampledStrictPacketSequence(
             allocator,
             plan,
@@ -10823,6 +10994,7 @@ fn readStrictSodPacketCatalog(
             layers,
             header.component_xrsiz,
             header.component_yrsiz,
+            componentCodingSliceForHeader(header),
             main_header.poc_records,
             tile_poc_records.items,
         );
@@ -10861,7 +11033,7 @@ fn readStrictSodPacketCatalog(
 
             const owned_entries = try entries.toOwnedSlice(allocator);
             errdefer allocator.free(owned_entries);
-            if (!subsampled and (progression != .rpcl or main_header.poc_records != null or tile_poc_records.items.len != 0)) {
+            if (!component_local and (progression != .rpcl or main_header.poc_records != null or tile_poc_records.items.len != 0)) {
                 try reorderStrictEntriesToRpcl(allocator, owned_entries, plan, header.component_count, layers);
             }
             const owned_packet_bytes = if (borrowing_packet_bytes) blk: {
@@ -12046,6 +12218,14 @@ const temporary_component_xrsiz = [_]u8{1} ** max_codestream_components;
 const temporary_component_yrsiz = [_]u8{1} ** max_codestream_components;
 const temporary_component_qcd = [_]StrictQcdInfo{empty_strict_qcd_info} ** max_codestream_components;
 
+const StrictComponentCoding = struct {
+    levels: u8 = 0,
+    precinct_count: u8 = 0,
+    precincts: [33]PrecinctSize = defaultPrecincts(),
+};
+
+const temporary_component_coding = [_]StrictComponentCoding{.{}} ** max_codestream_components;
+
 const TemporaryHeader = struct {
     component_allocator: ?std.mem.Allocator = null,
     version: u8,
@@ -12061,6 +12241,10 @@ const TemporaryHeader = struct {
     component_xrsiz: []const u8 = &temporary_component_xrsiz,
     component_yrsiz: []const u8 = &temporary_component_yrsiz,
     component_qcd: []const StrictQcdInfo = &temporary_component_qcd,
+    /// Effective COD/COC decomposition and precinct geometry per component.
+    /// Temporary sidecar headers leave `precinct_count` at zero and use the
+    /// historical global packet plan through `componentCodingForHeader`.
+    component_coding: []const StrictComponentCoding = &temporary_component_coding,
     component_count: u16 = 3,
     levels: u8,
     layers: u16,
@@ -12101,6 +12285,7 @@ const TemporaryHeader = struct {
             allocator.free(@constCast(self.component_xrsiz));
             allocator.free(@constCast(self.component_yrsiz));
             allocator.free(@constCast(self.component_qcd));
+            allocator.free(@constCast(self.component_coding));
         }
         self.* = undefined;
     }

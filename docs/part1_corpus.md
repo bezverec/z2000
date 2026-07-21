@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-21 gate contains 39 entries: 23 committed entries plus all 16
+The 2026-07-21 gate contains 41 entries: 25 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-27 decode passes, 12 expected fail-closed cases, zero mismatches, and zero skips
+28 decode passes, 13 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -119,6 +119,13 @@ six full/reduction-1 output-component PGX references stay within peak 2 and
 MSE 0.098, and one/eight-thread output is identical. A paired mutation changes
 the first `Sqcc` to reserved style 3 and must fail with `InvalidCodestream`
 before reconstruction.
+
+The second G2 entry is a reversible single-tile no-MCT Kakadu stream with
+effective component decomposition counts 3/2/1, component-sized precinct
+lists, and matching QCD/QCC band tables. All six full/reduction-1 native PGX
+references match exactly and one/eight-thread output is identical. Reduction
+above the minimum component level, duplicate COC, and component-local transform
+divergence fail closed; the latter is also a manifested mutation.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT

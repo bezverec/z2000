@@ -35,7 +35,7 @@ The machine-readable source and runnable evidence are documented in
 | --- | --- | --- | --- | --- | --- | --- |
 | Integer components and precision | SIZ-general | Bounded | Bounded | Bounded | Bounded | `inspectNativeCodestreamLayout` and the dynamic `i64` carrier preserve caller-bounded component counts plus signed/unsigned 1..38-bit layouts, origins, and sampling. `decodeLosslessNative` additionally reconstructs caller-limited single- and multi-tile reversible no-MCT signed/unsigned 1..29-bit payloads, including mixed component precision and independent component sampling, exactly at full and lower DWT resolutions through the 256-component metadata bound. Independent Kakadu fixtures pin 5/7/8/12/13/16/19/20/23/29-bit payloads and 19-component assembly. Checked `i64` inverse-lifting intermediates prevent malformed coefficients from overflowing the `i32` T1/DWT carrier. The legacy planar/JP2/TIFF surface remains 1..4 unsigned 8/16-bit; 30..38-bit payload reconstruction requires a wider T1 carrier and remains G1. |
 | Component sampling and origins | Bounded | Bounded | Bounded | Bounded | Bounded | Component-local sampling plus distinct image/tile origins in reversible no-MCT profiles. A signed mixed-precision Kakadu fixture pins independent 1x1, 2x1, and 2x2 grids across four tiles at full and reduced resolution. |
-| `COD`/`QCD` and `COC`/`QCC` overrides | Bounded | Bounded | Bounded | Bounded | Bounded | Uniform or byte-redundant overrides, mixed-precision reversible QCC, and genuinely component-specific scalar-expounded QCC for bounded three-component ICT/9-7 are decoded. Kakadu full/reduced PGX and a reserved-style mutation pin the divergent-QCC slice; divergent COC and tile-header semantics remain G2. |
+| `COD`/`QCD` and `COC`/`QCC` overrides | Bounded | Bounded | Bounded | Bounded | Bounded | Uniform or byte-redundant overrides, mixed-precision reversible QCC, genuinely component-specific scalar-expounded QCC for bounded three-component ICT/9-7, and single-tile reversible no-MCT component-local decomposition/precinct geometry are decoded. Kakadu full/reduced PGX plus malformed mutations pin both divergent slices; local block/style/transform and tile-header semantics remain G2. |
 | Progression and `POC` | Bounded | Bounded | Bounded | Bounded | Bounded | All five orders in checked schedules; sampled PPM+POC remains closed. |
 | Packet headers and lengths | Bounded | Bounded | Bounded | Bounded | Bounded | Inline/PLT, PPT and PPM profiles are public; `PLM` is not implemented. |
 | Tiles and tile parts | Bounded | Bounded | Bounded | Bounded | Bounded | Practical single/multipart schedules are covered, including inline PLT-less parts whose packet counts are derived at checked `Psot` boundaries; broader packed-header/POC schedules remain G3. |
@@ -48,19 +48,21 @@ The machine-readable source and runnable evidence are documented in
 | JP2 core container/mappings | Bounded | Bounded | Bounded | Bounded | Bounded | Core JP2 plus documented palette/alpha/colour/metadata slices; JPX excluded. |
 | Selective and streaming decode | Not applicable | Bounded | Not applicable | Bounded | Not applicable | `DecodeOptions.resolution_reduction` performs partial 5/3 synthesis for single-tile reversible no-MCT planar/gray/RGB, component-sampled native planes, and no-MCT/RCT interleaved RGB, plus partial 9/7 synthesis for single-tile irreversible no-MCT/ICT interleaved RGB and native no-MCT planes. Common-grid multi-tile interleaved RCT/5/3 and ICT/9/7 select inside each tile and assemble directly on reduced absolute boundaries; odd-grid RCT is exact against a manual per-tile oracle. Sampled no-MCT 5/3 covers single- and multi-tile streams, using each component's independent dimensions and registered origin through packet selection, T1 skip, partial synthesis, and reduced assembly; inline, PPT, and PPM are pinned by independent oracles. Native-planar 9/7 directly consumes component-local strict catalogs for bounded single-tile scalar-derived/expounded streams and sampled multi-tile no-MCT RPCL streams; the latter has independent Kakadu inline PLT/PLT-less payloads and full/reduction-1 PGX bounds for every component. Deterministic PPT/PPM structural repacks retain those foreign T1 bodies and pass the same decode, reduction, threading, and corruption gates; natively encoded packed-header framing remains independent-interop breadth. The 9/7 path dequantizes only retained bands and uses checked nearest-integer reconstruction; inverse RCT/ICT runs on compact planes before output saturation. Reductions above COD/NL fail closed. All packet headers and payload lengths remain validated, while discarded detail subbands skip T1 entropy decode in sequential and parallel paths with measured skipped blocks/bytes. Packet assembly validates but never appends discarded bodies to component-owned buffers. The single-tile production catalog borrows checked packet/body spans from the caller-owned codestream; SOP is removed by offset, EPH uses separate header/body spans, and PPT/PPM own only decoded T2 headers while borrowing SOD bodies. Sampled colour transforms, layer/tile/region selection, and general incremental bounded-memory selection remain G4. |
 
-The committed corpus now pins seventeen independently encoded streams: four
+The committed corpus now pins eighteen independently encoded streams: four
 sampled Kakadu profiles, Grok four-component CMYK, Kakadu all-six-bit T1,
 uniform `COC/QCC`, a 24-part Kakadu `TLM` layout with empty padding parts, and
 a pair of signed 8-bit Kakadu reversible single-/multi-tile streams, a
 five-component four-tile stream, a 19-component four-tile stream, a signed
 20-bit stream, mixed signed 8/16/20-bit plus 5/12/19-bit streams, and an
 independently sampled signed 7/13/23-bit four-tile stream decoded
-through the native carrier, plus a Kakadu ICT/9-7 stream with two genuinely
-divergent scalar-expounded QCC tables.
+through the native carrier, a Kakadu ICT/9-7 stream with two genuinely
+divergent scalar-expounded QCC tables, and a reversible Kakadu stream with
+component-local decomposition counts 3/2/1 plus matching precinct/QCC tables.
 Legacy planar/interleaved entries share one canonical native hash; the signed
 native entries use exact full/reduction-1 PGX oracles so sign, precision, and
 tile-local low-resolution synthesis remain explicit.
-Five mutations separately pin reserved COC style, reserved QCC style in both
+Six mutations separately pin reserved COC style, divergent COC transform,
+reserved QCC style in both
 uniform-reversible and divergent-irreversible contexts, TLM length mismatch,
 and the currently unsupported signed-component profile as fail-closed. All 16
 optional streams and 18 class-0 PGX references from the
@@ -86,7 +88,7 @@ oracle represents component lists, signed/unsigned 1..31-bit samples,
 resolution reduction, peak error, and MSE, and passes each selector into the
 production decoder. Non-zero-reduction references are checksum-verified while
 their inputs remain fail-closed for other unsupported features. The
-complete optional run reports 27 decode passes, 12 expected fail-closed
+complete optional run reports 28 decode passes, 13 expected fail-closed
 results, no mismatch, and no skip. G0 remains open for independent streams
 covering the remaining matrix rows.
 

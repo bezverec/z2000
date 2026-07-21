@@ -42,8 +42,8 @@
       "encode": "bounded",
       "malformed": "complete",
       "interop": "bounded",
-      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture and malformed counterpart"],
-      "note": "Uniform or byte-redundant overrides and component-specific scalar-expounded QCC in the bounded three-component ICT/9-7 profile are accepted; other genuinely divergent component/tile semantics remain fail-closed."
+      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture and malformed counterpart"],
+      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in the bounded three-component ICT/9-7 profile, and single-tile no-MCT reversible component-local decomposition/precinct geometry are accepted; other genuinely divergent component/tile semantics remain fail-closed."
     },
     {
       "id": "progression-poc",
@@ -700,6 +700,55 @@
         { "path": "src/testdata/kakadu-divergent-qcc-ict97-r1-c0.pgx", "sha256": "068ad5fe44025565fb2b46af10012ec284d2d5314a43471ae49b005a68793183", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 3, "max_mse": 0.12 },
         { "path": "src/testdata/kakadu-divergent-qcc-ict97-r1-c1.pgx", "sha256": "c6ee5346cf270ef3e4e8c0b0ecddc0c0855a823a1b423d33074ac8fbe9a88ebf", "format": "pgx", "component": 1, "resolution_reduction": 1, "max_peak_error": 3, "max_mse": 0.12 },
         { "path": "src/testdata/kakadu-divergent-qcc-ict97-r1-c2.pgx", "sha256": "ec34e50a099d64728cc7e724b8a05887bec528d294f18b52d489ceaf1c1c3e8a", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 3, "max_mse": 0.12 }
+      ]
+    },
+    {
+      "id": "kakadu-divergent-coc-levels-precincts",
+      "path": "src/testdata/kakadu-divergent-coc.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "b2d73279b1eadc4f15ad034113d59b8668bdb886d3037cdeaa7e86f919e4c47c",
+      "source": {
+        "producer": "Kakadu demo applications from the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "single-tile no-MCT reversible stream with effective component decomposition counts 3/2/1, component-sized COC precinct lists, and matching QCD/QCC band tables",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm -o src/testdata/kakadu-divergent-coc.j2c Creversible=yes Cycc=no Clevels=3 Clevels:C1=2 Clevels:C2=1 Corder=RPCL Cprecincts={16,16},{16,16},{16,16},{16,16} Cblk={4,4} Clayers=1 ORGgen_plt=yes -rate - -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX payloads; every native component is exact at full resolution and reduction 1",
+      "features": ["cod-qcd-component-overrides", "reversible-53", "packet-header-placement"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-divergent-coc-c0.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 0 },
+        { "path": "src/testdata/kakadu-divergent-coc-c1.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 1 },
+        { "path": "src/testdata/kakadu-divergent-coc-c2.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 2 },
+        { "path": "src/testdata/kakadu-divergent-coc-r1-c0.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 0, "resolution_reduction": 1 },
+        { "path": "src/testdata/kakadu-divergent-coc-r1-c1.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 1, "resolution_reduction": 1 },
+        { "path": "src/testdata/kakadu-divergent-coc-r1-c2.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 2, "resolution_reduction": 1 }
+      ]
+    },
+    {
+      "id": "synthetic-divergent-coc-transform",
+      "path": "src/testdata/kakadu-divergent-coc.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "b2d73279b1eadc4f15ad034113d59b8668bdb886d3037cdeaa7e86f919e4c47c",
+      "source": {
+        "producer": "z2000 boundary mutation over the Kakadu 8.4.1 divergent-COC fixture",
+        "version": "schema 1",
+        "origin": "first COC transform changed from reversible 5/3 to irreversible 9/7 after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "the bounded component-local profile requires one common transform; a divergent COC transform must fail closed before packet reconstruction",
+      "features": ["cod-qcd-component-overrides", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "patches": [
+        { "marker": "coc", "marker_offset": 10, "value": 0 }
       ]
     },
     {

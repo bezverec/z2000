@@ -383,6 +383,102 @@ test "Kakadu signed 8-bit reversible codestream decodes into native samples" {
     );
 }
 
+test "Kakadu divergent COC levels and precinct geometry decode exactly" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-divergent-coc.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-divergent-coc-c0.pgx"),
+        @embedFile("testdata/kakadu-divergent-coc-c1.pgx"),
+        @embedFile("testdata/kakadu-divergent-coc-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-divergent-coc-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-divergent-coc-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-divergent-coc-r1-c2.pgx"),
+    };
+
+    const first_coc = findMarker(bytes, codestream.markerValue("coc")) orelse return error.MissingCoc;
+    const second_coc = findMarkerAfter(bytes, codestream.markerValue("coc"), first_coc + 2) orelse
+        return error.MissingCoc;
+    try std.testing.expectEqual(@as(u8, 1), bytes[first_coc + 4]);
+    try std.testing.expectEqual(@as(u8, 2), bytes[first_coc + 6]);
+    try std.testing.expectEqual(@as(u8, 2), bytes[second_coc + 4]);
+    try std.testing.expectEqual(@as(u8, 1), bytes[second_coc + 6]);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+        .{},
+    );
+    defer full.deinit();
+    try std.testing.expectEqual(@as(usize, 3), full.componentCount());
+    for (full_references, 0..) |reference, component| {
+        const encoded = try full.encodePgx(allocator, component, .most_significant_first);
+        defer allocator.free(encoded);
+        const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+        const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+        try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+    }
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+        .{},
+    );
+    defer parallel.deinit();
+    for (full.planes, parallel.planes) |serial, threaded| {
+        try std.testing.expectEqualSlices(i64, serial.samples, threaded.samples);
+    }
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    for (reduced_references, 0..) |reference, component| {
+        try std.testing.expectEqual(@as(usize, 16), reduced.planes[component].layout.width);
+        try std.testing.expectEqual(@as(usize, 16), reduced.planes[component].layout.height);
+        const encoded = try reduced.encodePgx(allocator, component, .most_significant_first);
+        defer allocator.free(encoded);
+        const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+        const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+        try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+    }
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            bytes,
+            .{ .resolution_reduction = 2 },
+            .{},
+        ),
+    );
+
+    const duplicate = try allocator.dupe(u8, bytes);
+    defer allocator.free(duplicate);
+    duplicate[second_coc + 4] = duplicate[first_coc + 4];
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessNative(allocator, duplicate, .{}),
+    );
+
+    const divergent_transform = try allocator.dupe(u8, bytes);
+    defer allocator.free(divergent_transform);
+    divergent_transform[first_coc + 10] = @intFromEnum(codestream.WaveletTransform.irreversible_9_7);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessNative(allocator, divergent_transform, .{}),
+    );
+}
+
 test "Kakadu signed 8-bit multi-tile codestream assembles native reductions" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-signed-8bit-multitile.j2c");

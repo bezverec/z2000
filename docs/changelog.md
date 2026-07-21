@@ -112,15 +112,15 @@ entries are grouped by development milestone rather than semantic version.
   and distinguishes decode pass, expected
   fail-closed, unexpected acceptance, native-raster mismatch, and skipped
   optional local assets.
-- Expanded the seed to sixteen foreign-encoded fixtures: sampled Kakadu
+- Expanded the seed to eighteen foreign-encoded fixtures: sampled Kakadu
   multi-tile/POC/origin and sampled multi-tile no-MCT 9/7, Grok CMYK, Kakadu
   signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
   8/16/20-bit, and independently sampled signed 7/13/23-bit
   native decode, all-six-bit T1, uniform
-  COC/QCC, and padded
-  multipart TLM. Four
-  input-hash-verified mutations pin invalid COC,
-  QCC and TLM plus unsupported signed-SIZ fail-closed behavior.
+  COC/QCC, divergent ICT/9-7 QCC, reversible component-local 3/2/1-level COC,
+  and padded multipart TLM. Six
+  input-hash-verified mutations pin invalid/divergent COC, QCC and TLM plus
+  unsupported signed-SIZ fail-closed behavior.
 - Added a Kakadu 8.4.1 sampled multi-tile no-MCT 9/7 PLT-less fixture. Its
   unchanged foreign packet bodies now pass inline, PPT, and PPM full/reduced
   decode, packed-marker corruption, and 1/8-thread determinism gates. PPT/PPM
@@ -132,8 +132,8 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 39-entry gate
-  reports 27 decode passes, 12 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 41-entry gate
+  reports 28 decode passes, 13 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
@@ -165,6 +165,13 @@ entries are grouped by development milestone rather than semantic version.
   QCD. All six full/reduction-1 PGX references stay within peak 2/MSE 0.098,
   one/eight-thread output is identical, and a paired reserved-`Sqcc` mutation
   fails with `InvalidCodestream` before T1 allocation.
+- Added bounded component-local COC decomposition and precinct geometry for
+  reversible single-tile no-MCT decode. A Kakadu stream with effective levels
+  3/2/1 and matching QCD/QCC tables reconstructs all components exactly at
+  full resolution and reduction 1; packet scheduling, T1 geometry, catalog
+  compaction, and inverse 5/3 use the local level count. Duplicate COC,
+  reduction above the minimum component level, and divergent transforms fail
+  closed while common block geometry/style remains the profile boundary.
 - Accepted the Part 1-legal zero value for QCD guard bits and derived band
   bitplane counts without unsigned underflow. A pixel-exact rewrite test covers
   `G=0`; at that checkpoint official T.803 `p0_10` reached the deliberate

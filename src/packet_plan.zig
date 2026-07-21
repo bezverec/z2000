@@ -389,12 +389,9 @@ pub fn sampledOrderedPackets(
         return PacketPlanError.InvalidDimensions;
     }
 
-    const resolution_count = components[0].plan.resolution_count;
     var total: u64 = 0;
     for (components) |component| {
-        if (component.xrsiz == 0 or component.yrsiz == 0 or
-            component.plan.resolution_count != resolution_count)
-        {
+        if (component.xrsiz == 0 or component.yrsiz == 0 or component.plan.resolution_count == 0) {
             return PacketPlanError.InvalidDimensions;
         }
         try validatePlan(component.plan, 1, layers);
