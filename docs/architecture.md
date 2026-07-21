@@ -282,7 +282,10 @@ surface covers no-MCT output; the conformance surface also exposes pre-ICT
 codestream components for bounded three-component ICT streams, preserving
 component-specific QCC state. Bounded component jobs share the existing worker
 runner, while nearest-integer output matches the established interleaved
-no-MCT reconstruction exactly. Multi-tile sampled no-MCT 9/7 invokes that same
+no-MCT reconstruction exactly. A genuine Kakadu ICT/9/7 stream pins distinct
+QCC mantissas for components 1 and 2 at full and reduced resolution, while a
+reserved `Sqcc` mutation fails before T1 allocation. Multi-tile sampled no-MCT
+9/7 invokes that same
 backend per tile-component and assembles reduced native planes without
 upsampling them to the reference grid. Its packet-layout gate starts from an
 independent Kakadu PLT-less codestream and moves only the T2 headers into PPT

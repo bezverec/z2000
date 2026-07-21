@@ -516,7 +516,9 @@ also returns native planes for the bounded uniform unsigned no-MCT 9/7 profile,
 using scalar-derived or scalar-expounded quantization at full or reduced
 resolution. `decodeLosslessCodestreamComponentsWithOptions` additionally
 returns reduced pre-ICT planes for bounded three-component ICT/9/7 streams with
-component-specific scalar-expounded QCC steps. The legacy RGB/TIFF API remains
+component-specific scalar-expounded QCC steps. A Kakadu fixture with distinct
+component 1/2 step tables pins full and reduction-1 output-component PGX
+agreement plus reserved-style rejection. The legacy RGB/TIFF API remains
 uniform-depth; mixed multi-tile and broader quantized planar profiles remain
 fail-closed.
 

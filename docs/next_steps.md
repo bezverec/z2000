@@ -154,12 +154,12 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Sixteen foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Seventeen foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
   component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
-  8/16/20-bit, and independently sampled signed 7/13/23-bit native
-  decode. Four mutations
+  8/16/20-bit, independently sampled signed 7/13/23-bit native decode, and
+  genuinely divergent ICT/9-7 QCC. Five mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
 - Each entry selects the real legacy-planar, generic-native, or interleaved RGB
@@ -349,6 +349,14 @@ ZRAW diagnostics, while legacy JP2/TIFF paths remain unchanged. Continue with
 4.3 divergent component and tile overrides.
 
 #### 4.3 Component And Tile Overrides
+
+The first G2 slice is complete: a committed Kakadu ICT/9-7 stream leaves
+component 0 on QCD while components 1 and 2 carry distinct scalar-expounded
+QCC tables. Full and reduction-1 decode matches six Kakadu PGX references
+within peak 2/MSE 0.098, one/eight-thread output is identical, and a paired
+reserved-`Sqcc` mutation fails before T1 allocation. The next slice is genuine
+COC divergence, beginning with component-local decomposition and packet
+geometry before adding code-block/style/transform combinations.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,

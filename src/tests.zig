@@ -17465,6 +17465,92 @@ test "component-specific irreversible QCC drives bounded ICT reconstruction" {
     );
 }
 
+test "Kakadu divergent irreversible QCC drives independent ICT reconstruction" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-divergent-qcc-ict97.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-divergent-qcc-ict97-c0.pgx"),
+        @embedFile("testdata/kakadu-divergent-qcc-ict97-c1.pgx"),
+        @embedFile("testdata/kakadu-divergent-qcc-ict97-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-divergent-qcc-ict97-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-divergent-qcc-ict97-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-divergent-qcc-ict97-r1-c2.pgx"),
+    };
+
+    const first_qcc = findMarker(bytes, codestream.markerValue("qcc")) orelse
+        return error.MissingQcc;
+    const second_qcc = findMarkerAfter(bytes, codestream.markerValue("qcc"), first_qcc + 2) orelse
+        return error.MissingQcc;
+    try std.testing.expectEqual(@as(u16, 18), readU16BeTest(bytes, first_qcc + 2));
+    try std.testing.expectEqual(@as(u16, 18), readU16BeTest(bytes, second_qcc + 2));
+    try std.testing.expectEqual(@as(u8, 1), bytes[first_qcc + 4]);
+    try std.testing.expectEqual(@as(u8, 2), bytes[second_qcc + 4]);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        bytes[first_qcc + 5 .. first_qcc + 20],
+        bytes[second_qcc + 5 .. second_qcc + 20],
+    ));
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .t1_backend = .iso_mq },
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 32), decoded.width);
+    try std.testing.expectEqual(@as(usize, 32), decoded.height);
+    var threaded = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .t1_backend = .iso_mq },
+    );
+    defer threaded.deinit();
+    try std.testing.expectEqualSlices(u16, decoded.samples, threaded.samples);
+
+    const plane = try allocator.alloc(u16, decoded.width * decoded.height);
+    defer allocator.free(plane);
+    for (full_references, 0..) |reference, component| {
+        for (plane, 0..) |*sample, pixel| sample.* = decoded.samples[pixel * 3 + component];
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 3);
+        try std.testing.expect(difference.mse <= 0.12);
+    }
+
+    var reduced = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .t1_backend = .iso_mq, .resolution_reduction = 1 },
+    );
+    defer reduced.deinit();
+    try std.testing.expectEqual(@as(usize, 16), reduced.width);
+    try std.testing.expectEqual(@as(usize, 16), reduced.height);
+    var reduced_threaded = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .t1_backend = .iso_mq, .resolution_reduction = 1 },
+    );
+    defer reduced_threaded.deinit();
+    try std.testing.expectEqualSlices(u16, reduced.samples, reduced_threaded.samples);
+    const reduced_plane = try allocator.alloc(u16, reduced.width * reduced.height);
+    defer allocator.free(reduced_plane);
+    for (reduced_references, 0..) |reference, component| {
+        for (reduced_plane, 0..) |*sample, pixel| sample.* = reduced.samples[pixel * 3 + component];
+        const difference = try compareUnsigned8Pgx(reduced_plane, reference);
+        try std.testing.expect(difference.peak <= 3);
+        try std.testing.expect(difference.mse <= 0.12);
+    }
+
+    const malformed = try allocator.dupe(u8, bytes);
+    defer allocator.free(malformed);
+    malformed[first_qcc + 5] = (malformed[first_qcc + 5] & 0xe0) | 0x03;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, malformed),
+    );
+}
+
 test "uniform full COC overrides drive coding geometry and transform" {
     const allocator = std.testing.allocator;
     const width = 48;

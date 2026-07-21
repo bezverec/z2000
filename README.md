@@ -41,7 +41,8 @@ certification.
   and rate allocation. Single-tile no-MCT or transform-appropriate RCT/ICT
   decode can reconstruct a selected lower DWT resolution directly.
 - Strict foreign ICT/9-7 decode consumes bounded component-specific QCC steps;
-  the conformance API can expose reduced pre-ICT codestream components.
+  full and reduced output is pinned against a genuinely divergent Kakadu
+  fixture, and the conformance API can expose reduced pre-ICT components.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,

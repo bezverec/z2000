@@ -132,8 +132,8 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 37-entry gate
-  reports 26 decode passes, 11 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 39-entry gate
+  reports 27 decode passes, 12 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
@@ -160,6 +160,11 @@ entries are grouped by development milestone rather than semantic version.
   existing conformance API. Official T.803 `p0_04` passes its reduction-3
   class-0 oracle at peak 30/33 and MSE 48.57/55.8. Divergent QCC remains
   fail-closed outside this bounded profile.
+- Added an independent Kakadu ICT/9-7 fixture whose components 1 and 2 carry
+  genuinely different scalar-expounded QCC tables while component 0 inherits
+  QCD. All six full/reduction-1 PGX references stay within peak 2/MSE 0.098,
+  one/eight-thread output is identical, and a paired reserved-`Sqcc` mutation
+  fails with `InvalidCodestream` before T1 allocation.
 - Accepted the Part 1-legal zero value for QCD guard bits and derived band
   bitplane counts without unsigned underflow. A pixel-exact rewrite test covers
   `G=0`; at that checkpoint official T.803 `p0_10` reached the deliberate
