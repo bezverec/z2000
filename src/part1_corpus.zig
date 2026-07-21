@@ -52,6 +52,7 @@ const ReferenceAsset = struct {
 
 const Patch = struct {
     marker: Marker,
+    marker_occurrence: u32 = 0,
     marker_offset: u32,
     value: u8,
 };
@@ -682,7 +683,14 @@ fn applyPatches(stream: []u8, patches: []const Patch) !void {
             .poc => codestream.markerValue("poc"),
         };
         const marker_bytes = [2]u8{ @intCast(marker_value >> 8), @intCast(marker_value & 0xff) };
-        const marker_index = std.mem.indexOf(u8, stream, &marker_bytes) orelse return CorpusError.MissingMarker;
+        var marker_index: usize = 0;
+        var search_start: usize = 0;
+        for (0..@as(usize, patch.marker_occurrence) + 1) |_| {
+            marker_index = std.mem.indexOfPos(u8, stream, search_start, &marker_bytes) orelse
+                return CorpusError.MissingMarker;
+            search_start = std.math.add(usize, marker_index, marker_bytes.len) catch
+                return CorpusError.InvalidManifest;
+        }
         const target = std.math.add(usize, marker_index, patch.marker_offset) catch return CorpusError.InvalidManifest;
         if (target >= stream.len) return CorpusError.InvalidManifest;
         stream[target] = patch.value;

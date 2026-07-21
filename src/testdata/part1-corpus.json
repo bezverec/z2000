@@ -42,8 +42,8 @@
       "encode": "bounded",
       "malformed": "complete",
       "interop": "bounded",
-      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style fixture and malformed counterparts"],
-      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in the bounded three-component ICT/9-7 profile, and single-tile no-MCT reversible component-local decomposition, precinct, code-block geometry, and T1 style are accepted; component-local transforms and tile-header semantics remain fail-closed."
+      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style fixture", "Kakadu multi-tile COD/QCD override fixture and malformed counterparts"],
+      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in the bounded three-component ICT/9-7 profile, single-tile no-MCT reversible component-local decomposition/precinct/block/style, and first-tile-part reversible no-MCT tile-local COD/QCD are accepted; component-local transforms and broader tile-header combinations remain fail-closed."
     },
     {
       "id": "progression-poc",
@@ -776,6 +776,55 @@
       "expected_error": "UnsupportedPayload",
       "patches": [
         { "marker": "coc", "marker_offset": 7, "value": 4 }
+      ]
+    },
+    {
+      "id": "kakadu-tile-cod-qcd-override",
+      "path": "src/testdata/kakadu-tile-cod-qcd-override.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "ae95068752e9c8926b8383e5369b49b17020ee5831e9f143b881ad14af865e1e",
+      "source": {
+        "producer": "Kakadu demo applications from three copies of the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "four-tile reversible no-MCT stream whose tile 1 replaces main NL=2/4x4 COD and seven-band QCD with tile-local NL=1/8x8 COD and four-band QCD",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm repeated three times -o src/testdata/kakadu-tile-cod-qcd-override.j2c Creversible=yes Cycc=no Stiles={16,16} Clevels=2 Corder=RPCL Cprecincts={16,16},{16,16},{16,16} Cblk={4,4} Clevels:T1=1 Cblk:T1={8,8} Clayers=1 ORGgen_plt=yes -rate - -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX payloads; all three native components are exact at full resolution and reduction 1 across the tile-local decomposition boundary",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53", "packet-header-placement"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-tile-cod-qcd-override-c0.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 0 },
+        { "path": "src/testdata/kakadu-tile-cod-qcd-override-c1.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 1 },
+        { "path": "src/testdata/kakadu-tile-cod-qcd-override-c2.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 2 },
+        { "path": "src/testdata/kakadu-tile-cod-qcd-override-r1-c0.pgx", "sha256": "cf36f81e544ef147e785a18463dde65956787f5591289ace6005ec85177c6a2e", "format": "pgx", "component": 0, "resolution_reduction": 1 },
+        { "path": "src/testdata/kakadu-tile-cod-qcd-override-r1-c1.pgx", "sha256": "cf36f81e544ef147e785a18463dde65956787f5591289ace6005ec85177c6a2e", "format": "pgx", "component": 1, "resolution_reduction": 1 },
+        { "path": "src/testdata/kakadu-tile-cod-qcd-override-r1-c2.pgx", "sha256": "cf36f81e544ef147e785a18463dde65956787f5591289ace6005ec85177c6a2e", "format": "pgx", "component": 2, "resolution_reduction": 1 }
+      ]
+    },
+    {
+      "id": "synthetic-tile-cod-transform-override",
+      "path": "src/testdata/kakadu-tile-cod-qcd-override.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "ae95068752e9c8926b8383e5369b49b17020ee5831e9f143b881ad14af865e1e",
+      "source": {
+        "producer": "z2000 boundary mutation over the Kakadu 8.4.1 tile-override fixture",
+        "version": "schema 1",
+        "origin": "the second COD marker's transform changes from reversible 5/3 to irreversible 9/7 after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "the bounded tile-local profile keeps one common transform and must reject a divergent tile transform before packet reconstruction",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "patches": [
+        { "marker": "cod", "marker_occurrence": 1, "marker_offset": 13, "value": 0 }
       ]
     },
     {

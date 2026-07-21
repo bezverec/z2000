@@ -569,6 +569,98 @@ test "Kakadu divergent COC block geometry and styles decode exactly" {
     );
 }
 
+test "Kakadu tile-header COD and QCD overrides decode exactly" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-tile-cod-qcd-override.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-cod-qcd-override-c0.pgx"),
+        @embedFile("testdata/kakadu-tile-cod-qcd-override-c1.pgx"),
+        @embedFile("testdata/kakadu-tile-cod-qcd-override-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-cod-qcd-override-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-tile-cod-qcd-override-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-tile-cod-qcd-override-r1-c2.pgx"),
+    };
+
+    const main_cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const tile_cod = findMarkerAfter(bytes, codestream.markerValue("cod"), main_cod + 2) orelse
+        return error.MissingCod;
+    const main_qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const tile_qcd = findMarkerAfter(bytes, codestream.markerValue("qcd"), main_qcd + 2) orelse
+        return error.MissingQcd;
+    // Main COD: NL=2, 4x4 blocks. Tile 1 COD: NL=1, 8x8 blocks. Its QCD has
+    // four reversible band exponents instead of the main header's seven.
+    try std.testing.expectEqual(@as(u8, 2), bytes[main_cod + 9]);
+    try std.testing.expectEqual(@as(u8, 0), bytes[main_cod + 10]);
+    try std.testing.expectEqual(@as(u8, 1), bytes[tile_cod + 9]);
+    try std.testing.expectEqual(@as(u8, 1), bytes[tile_cod + 10]);
+    try std.testing.expectEqual(@as(u16, 7), readU16BeTest(bytes, tile_qcd + 2));
+
+    var catalog = try codestream.readStrictPacketCatalog(allocator, bytes);
+    defer catalog.deinit();
+    try std.testing.expect(catalog.entries.len > 0);
+
+    var full = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+        .{},
+    );
+    defer full.deinit();
+    for (full_references, 0..) |reference, component| {
+        const encoded = try full.encodePgx(allocator, component, .most_significant_first);
+        defer allocator.free(encoded);
+        const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+        const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+        try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+    }
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+        .{},
+    );
+    defer parallel.deinit();
+    for (full.planes, parallel.planes) |serial, threaded| {
+        try std.testing.expectEqualSlices(i64, serial.samples, threaded.samples);
+    }
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    for (reduced_references, 0..) |reference, component| {
+        try std.testing.expectEqual(@as(usize, 16), reduced.planes[component].layout.width);
+        try std.testing.expectEqual(@as(usize, 16), reduced.planes[component].layout.height);
+        const encoded = try reduced.encodePgx(allocator, component, .most_significant_first);
+        defer allocator.free(encoded);
+        const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+        const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+        try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+    }
+
+    const divergent_transform = try allocator.dupe(u8, bytes);
+    defer allocator.free(divergent_transform);
+    divergent_transform[tile_cod + 13] = @intFromEnum(codestream.WaveletTransform.irreversible_9_7);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessNative(allocator, divergent_transform, .{}),
+    );
+
+    const reserved_qcd = try allocator.dupe(u8, bytes);
+    defer allocator.free(reserved_qcd);
+    reserved_qcd[tile_qcd + 4] |= 0x03;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessNative(allocator, reserved_qcd, .{}),
+    );
+}
+
 test "Kakadu signed 8-bit multi-tile codestream assembles native reductions" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-signed-8bit-multitile.j2c");

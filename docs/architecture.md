@@ -250,6 +250,15 @@ The public strict packet diagnostic follows the same per-tile sampled catalogs
 and rebases only their normalized byte storage when returning a whole-stream
 view, so it does not maintain a second geometry or T2 parser.
 
+The bounded G2 tile-override path records a complete `COD` and matching `QCD`
+from `TPsot=0` into per-tile effective state. The Stage B packet-plan walk and
+Stage C catalog/T1/DWT reconstruction use allocator-owned component coding and
+quantization tables for that tile; the marker replay must equal those tables.
+The current envelope is reversible no-MCT RPCL, one part per tile, inline
+packet headers, common layers/transform, and a tile decomposition count no
+larger than the main header. Tile `COC/QCC`, packed headers, multipart
+overrides, and local transform changes fail closed.
+
 Inline PLT-less multipart streams carry no packet count at the Stage B frame
 scan. Their spans therefore retain an explicit deferred-count state and exact
 `Psot` boundary. Stage C resumes the tile-local packet sequence and persistent
