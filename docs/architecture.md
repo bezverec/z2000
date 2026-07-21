@@ -59,9 +59,10 @@ explicit. PGX serialization is available where that diagnostic format has an
 all planes component-major with fixed metadata records and canonical
 big-endian 1/2/4/8-byte words, preserving the complete 1..38-bit native model.
 Its bounded parser validates reserved fields, dimensions, counts, sample
-ranges, and exact end-of-file before returning owned planes. The strict payload slice reconstructs single-
-and multi-tile reversible no-MCT signed/unsigned 1..29-bit components,
-including mixed component precision, through
+ranges, and exact end-of-file before returning owned planes. The strict payload
+slice reconstructs single- and multi-tile reversible no-MCT signed/unsigned
+1..29-bit components, including mixed component precision and independently
+sampled component grids, through
 the production T2/T1/5/3 path directly into these planes. Each tile retains its
 absolute component grid during independent synthesis and checked assembly.
 Full and requested lower DWT resolutions preserve reduced reference/component
@@ -70,7 +71,9 @@ synthesis. Signed output receives no DC level shift; unsigned output receives
 `2^(precision-1)`. Reversible native decode is caller-limited up to the
 256-component strict metadata boundary and is independently pinned at 19
 components across four tiles. Independent Kakadu fixtures pin
-5/8/12/16/19/20/29-bit T1/DWT payload reconstruction. The 29-bit four-tile
+5/7/8/12/13/16/19/20/23/29-bit T1/DWT payload reconstruction. The signed
+7/13/23-bit four-tile fixture also pins 1x1, 2x1, and 2x2 component sampling
+at full and reduced resolution. The 29-bit four-tile
 fixture reaches the current `i32` T1 boundary: reversible HH can add two
 magnitude bits, while T1 admits at most 31. Native inverse lifting therefore
 uses `i64` sums with checked `i32` stores for both full and reduced synthesis.

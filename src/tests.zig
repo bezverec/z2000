@@ -687,6 +687,114 @@ test "Kakadu signed 29-bit multitile codestream reaches the checked i32 boundary
     );
 }
 
+test "Kakadu independently sampled signed components preserve native grids" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-signed-sampled-multitile.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-signed-sampled-multitile-full-c0.pgx"),
+        @embedFile("testdata/kakadu-signed-sampled-multitile-full-c1.pgx"),
+        @embedFile("testdata/kakadu-signed-sampled-multitile-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-signed-sampled-multitile-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-signed-sampled-multitile-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-signed-sampled-multitile-r1-c2.pgx"),
+    };
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 3), layout.components.len);
+    try std.testing.expectEqual(@as(u32, 8), layout.tile_width);
+    try std.testing.expectEqual(@as(u32, 8), layout.tile_height);
+    try std.testing.expectEqualSlices(u8, &.{ 7, 13, 23 }, &.{
+        layout.components[0].precision,
+        layout.components[1].precision,
+        layout.components[2].precision,
+    });
+    for (layout.components) |component| try std.testing.expect(component.signed);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 2 }, &.{
+        layout.components[0].x_step,
+        layout.components[1].x_step,
+        layout.components[2].x_step,
+    });
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 2 }, &.{
+        layout.components[0].y_step,
+        layout.components[1].y_step,
+        layout.components[2].y_step,
+    });
+    try std.testing.expectEqualSlices(usize, &.{ 16, 8, 8 }, &.{
+        layout.components[0].width,
+        layout.components[1].width,
+        layout.components[2].width,
+    });
+    try std.testing.expectEqualSlices(usize, &.{ 16, 16, 8 }, &.{
+        layout.components[0].height,
+        layout.components[1].height,
+        layout.components[2].height,
+    });
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+        .{},
+    );
+    defer full.deinit();
+    for (full_references, 0..) |reference, component| {
+        const pgx = try full.encodePgx(allocator, component, .least_significant_first);
+        defer allocator.free(pgx);
+        try std.testing.expectEqualSlices(u8, reference, pgx);
+    }
+
+    const zraw = try full.encodeRawPlanar(allocator);
+    defer allocator.free(zraw);
+    var round_trip = try codestream.decodeNativeRawPlanar(allocator, zraw, .{});
+    defer round_trip.deinit();
+    for (full.planes, round_trip.planes) |expected, actual| {
+        try std.testing.expectEqualDeep(expected.layout, actual.layout);
+        try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+    }
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    try std.testing.expectEqualSlices(usize, &.{ 8, 4, 4 }, &.{
+        reduced.planes[0].layout.width,
+        reduced.planes[1].layout.width,
+        reduced.planes[2].layout.width,
+    });
+    try std.testing.expectEqualSlices(usize, &.{ 8, 8, 4 }, &.{
+        reduced.planes[0].layout.height,
+        reduced.planes[1].layout.height,
+        reduced.planes[2].layout.height,
+    });
+    for (reduced_references, 0..) |reference, component| {
+        const pgx = try reduced.encodePgx(allocator, component, .least_significant_first);
+        defer allocator.free(pgx);
+        try std.testing.expectEqualSlices(u8, reference, pgx);
+    }
+
+    var reduced_serial = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced_serial.deinit();
+    for (reduced.planes, reduced_serial.planes) |parallel, serial| {
+        try std.testing.expectEqualDeep(parallel.layout, serial.layout);
+        try std.testing.expectEqualSlices(i64, parallel.samples, serial.samples);
+    }
+}
+
 test "Kakadu mixed signed 8 16 20-bit codestream preserves component precision" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-mixed-signed-8-16-20.j2c");

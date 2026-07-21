@@ -154,11 +154,11 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Fifteen foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Sixteen foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
-  component native assembly, signed 20-bit, and mixed signed 5/12/19-bit plus
-  8/16/20-bit native
+  component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
+  8/16/20-bit, and independently sampled signed 7/13/23-bit native
   decode. Four mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
@@ -256,7 +256,7 @@ The active G0/G4 corpus expansion is:
 2. Add class-1 all-component reference lists as G1/G2 make those profiles
    decodable, retaining the published peak and MSE bounds per component.
 3. Expand the landed signed mixed-precision evidence beyond the pinned
-   5/8/12/16/19/20-bit payloads; add explicit `PLM`, `CAP`, and
+   5/7/8/12/13/16/19/20/23/29-bit payloads; add explicit `PLM`, `CAP`, and
    `PRF` handling where applicable. Broaden the
    seeded `TLM` case as G3 requires. Inline PLT-less multipart packet-count
    derivation is complete; packed-header/POC combinations remain.
@@ -289,7 +289,7 @@ and matches Kakadu at full and reduction-1 resolution. A fifth Kakadu stream com
 proving that T2/T1/DWT reconstruction retains component-local precision. The
 bounded native payload path is reversible 5/3, no-MCT, caller-limited up to
 256 components at every precision from 1 through 29 bits, including mixed
-precision, with exact
+precision and independent component sampling, with exact
 1/8-thread output and caller-controlled lower limits. A 19-component,
 four-tile Kakadu fixture pins full and reduction-1 assembly beyond the former
 strict ceiling. A further mixed 5/12/19-bit Kakadu fixture matches all six
@@ -302,6 +302,9 @@ Packet pruning and per-tile partial synthesis retain reduced absolute
 component origins and dimensions; reductions above COD/NL fail closed. Signed
 components skip the unsigned DC shift; the same codestreams remain fail-closed
 in legacy planar/gray APIs.
+A signed mixed 7/13/23-bit four-tile fixture now pins independent 1x1, 2x1,
+and 2x2 component grids against all six Kakadu full/reduction-1 PGX outputs;
+one/eight-thread decode and canonical ZRAW round-trip remain exact.
 The first six strict-storage migrations are complete: component assembly,
 public block catalog, component packet plans, deduplicated geometry storage,
 RPCL indexes, the strict metadata header/parser state, persistent precinct
@@ -335,14 +338,15 @@ contracts, and generic irreversible output remains on that legacy carrier.
    supplies the landed continuous 1..29-bit profile. A future PAM adapter
    should be added only for the subset
    PAM can represent faithfully; it must not replace ZRAW or silently narrow.
-4. Pin payload fixtures for independently subsampled signed components without
-   MCT. Signed data, continuous 1..29-bit payload support,
-   mixed 5/12/19-bit and 8/16/20-bit precision, more-than-four-component
-   assembly, and the independent 29-bit boundary fixture are complete within
-   the current bounded path.
+4. **Complete:** independently subsampled signed components without MCT now
+   have a committed mixed 7/13/23-bit, four-tile Kakadu fixture. Signed data,
+   continuous 1..29-bit payload support, mixed precision, more-than-four-
+   component assembly, and the independent 29-bit boundary fixture are all
+   covered within the current bounded path.
 
-Exit when those fixtures round-trip through the native API and diagnostic
-outputs with exact values, while legacy JP2/TIFF paths remain unchanged.
+Exit achieved: the fixtures round-trip through the native API and exact PGX/
+ZRAW diagnostics, while legacy JP2/TIFF paths remain unchanged. Continue with
+4.3 divergent component and tile overrides.
 
 #### 4.3 Component And Tile Overrides
 

@@ -143,10 +143,10 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 G0 is active. Its 2026-07-17 foundation includes an unscored broad capability
 matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
-Fifteen committed foreign-encoded streams cover sampled origins/POC and sampled
+Sixteen committed foreign-encoded streams cover sampled origins/POC and sampled
 multi-tile no-MCT 9/7 reduction,
-signed 8-bit single-/multi-tile, signed 20-bit, and mixed signed 5/12/19-bit
-plus 8/16/20-bit
+signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
+8/16/20-bit, and independently sampled signed 7/13/23-bit
 full/reduced native decode, four-component
 CMYK, all T1 style bits, uniform
 COC/QCC, and padded multipart TLM; four mutations pin malformed and unsupported
@@ -154,7 +154,7 @@ fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 36-entry result of 25 decode passes and 11 expected fail-closed
+a complete 37-entry result of 26 decode passes and 11 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
 signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
@@ -205,9 +205,13 @@ references exactly. A signed 29-bit four-tile Kakadu stream reaches the
 31-magnitude-bitplane T1/HH boundary and matches full/reduction-1 PGX exactly;
 checked `i64` inverse-lifting intermediates prevent `i32` overflow, while a
 30-bit mutation stays fail-closed. The native payload contract is therefore
-continuous across 1..29 bits. Caller limits and the
-legacy four-component, unsigned 8/16-bit `u16` surface remain intact. Precision
-above 29 bits require a wider T1 coefficient carrier. Remaining dynamic strict structures come next. The first six dynamic strict-storage
+continuous across 1..29 bits. The native 5/3/no-MCT profile now also
+reconstructs mixed signed 7/13/23-bit components on independent 1x1, 2x1, and
+2x2 grids across four tiles, with
+exact full/reduction-1 Kakadu PGX and ZRAW round-trip evidence. Caller limits and the
+legacy four-component, unsigned 8/16-bit `u16` surface remain intact.
+Precisions above 29 bits require a wider T1 coefficient carrier. Remaining
+dynamic strict structures come next. The first six dynamic strict-storage
 slices have landed: component assembly, the public block catalog, component
 packet plans, geometry/index state, RPCL indexes, strict metadata, and
 persistent precinct groups, parallel job handles, and generic irreversible
@@ -264,8 +268,9 @@ formal certification must remain distinct from internal test success.
 
 ## Still Outside The Bounded Baseline Today
 
-- arbitrary component counts, signed samples, and general mixed
-  subsampling/precision combinations, planned under G1;
+- precision above 29 bits in the T1/DWT payload path, generic irreversible
+  high-component output, and encoder controls for the native component model,
+  remaining under G1/G7;
 - divergent component/tile coding styles, remaining Part 1 ROI/registration
   markers, broad tile-part schedules, and selective decode, planned under
   G2-G4;

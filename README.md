@@ -74,8 +74,9 @@ certification.
   signedness, arbitrary component counts, origins, and subsampling in dynamic
   `i64` planes. The bounded native payload path decodes single- and multi-tile
   reversible no-MCT signed/unsigned 1..29-bit streams, including mixed
-  component precision, with caller-limited counts up to 256 components at
-  full or requested lower DWT resolutions without DC-bias ambiguity. Native
+  component precision and independent component sampling, with caller-limited
+  counts up to 256 components at full or requested lower DWT resolutions
+  without DC-bias ambiguity. Native
   inverse 5/3 lifting uses checked `i64` intermediates before storing `i32`
   coefficients; 29 bits is the T1/HH boundary and 30 bits fails closed. The legacy `u16` API remains
   unsigned-only. Checked PGX diagnostics cover one component up to 32-bit

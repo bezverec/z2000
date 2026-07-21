@@ -7,6 +7,12 @@ entries are grouped by development milestone rather than semantic version.
 
 ### Generic Native Sample Foundation
 
+- Added an independent Kakadu signed 7/13/23-bit fixture with 1x1, 2x1, and
+  2x2 component sampling across four tiles. Native full/reduction-1 decode
+  matches all six PGX references exactly, is deterministic at one/eight
+  threads, and round-trips the divergent grids through canonical ZRAW. Mixed-
+  precision multi-tile metadata is enabled only for the bounded native
+  reversible 5/3 no-MCT profile; legacy paths remain fail-closed.
 - Added a caller-limited raw-codestream SIZ inspector and dynamic `i64` native
   carrier for arbitrary bounded component counts, component-local geometry,
   signedness, and every Part 1 precision from 1 through 38 bits. Reference
@@ -106,10 +112,10 @@ entries are grouped by development milestone rather than semantic version.
   and distinguishes decode pass, expected
   fail-closed, unexpected acceptance, native-raster mismatch, and skipped
   optional local assets.
-- Expanded the seed to fifteen foreign-encoded fixtures: sampled Kakadu
+- Expanded the seed to sixteen foreign-encoded fixtures: sampled Kakadu
   multi-tile/POC/origin and sampled multi-tile no-MCT 9/7, Grok CMYK, Kakadu
-  signed 8-bit single-/multi-tile, signed 20-bit, and mixed signed 5/12/19-bit
-  plus 8/16/20-bit
+  signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
+  8/16/20-bit, and independently sampled signed 7/13/23-bit
   native decode, all-six-bit T1, uniform
   COC/QCC, and padded
   multipart TLM. Four
@@ -126,8 +132,8 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 36-entry gate
-  reports 25 decode passes, 11 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 37-entry gate
+  reports 26 decode passes, 11 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803

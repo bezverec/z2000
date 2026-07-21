@@ -4772,9 +4772,13 @@ fn readStrictCodestreamMetadataForProfile(
         return CodestreamError.UnsupportedPayload;
     }
     const parsed_grid_value = parsed_grid orelse return CodestreamError.InvalidCodestream;
+    const native_mixed_multitile = precision_profile == .native and
+        parsed_mct == .none and parsed_transform == .reversible_5_3 and
+        parsed_quantization == .none;
     if (mixed_component_precision and
         (parsed_mct != .none or parsed_transform != .reversible_5_3 or
-            parsed_quantization != .none or !parsed_grid_value.isSingleTile()))
+            parsed_quantization != .none or
+            (!parsed_grid_value.isSingleTile() and !native_mixed_multitile)))
     {
         return CodestreamError.UnsupportedPayload;
     }

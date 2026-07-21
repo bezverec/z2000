@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-21 gate contains 36 entries: 20 committed entries plus all 16
+The 2026-07-21 gate contains 37 entries: 21 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-25 decode passes, 11 expected fail-closed cases, zero mismatches, and zero skips
+26 decode passes, 11 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -105,6 +105,13 @@ extrema, and 1/8-thread output is deterministic. It reaches the 31-magnitude-
 bitplane T1/HH limit of the current `i32` carrier. Checked `i64` inverse 5/3
 lifting intermediates fail overflow closed, and a 30-bit SIZ mutation pins the
 unsupported wider boundary.
+
+The ninth native signed entry combines 7-, 13-, and 23-bit components on
+independent 16x16, 8x16, and 8x8 grids across four reference-grid tiles. All
+six full/reduction-1 PGX references match Kakadu byte-exactly, one- and
+eight-thread reductions agree, and canonical ZRAW round-trips the divergent
+component layouts and signed samples exactly. The unchanged legacy planar API
+rejects the stream.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT

@@ -316,7 +316,8 @@ Primary public functions:
   `decodeLosslessNativeWithOptions(allocator, bytes, options, limits)` — first
   native payload profile: strict single- and multi-tile reversible 5/3, no MCT,
   and caller-limited signed or unsigned 1..29-bit components, including mixed
-  component precision and counts up to the 256-component metadata boundary,
+  component precision, independent SIZ sampling grids, and counts up to the
+  256-component metadata boundary,
   additionally bounded by
   `limits.max_components`. Multi-tile T2/T1/DWT runs
   independently per tile and assembles by absolute component coordinates.
