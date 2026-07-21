@@ -13,40 +13,34 @@ pub fn main(init: std.process.Init) !void {
     else
         8;
 
+    if (precision == 0 or precision > 32) return error.UnsupportedPrecision;
+
     var pgx: std.ArrayList(u8) = .empty;
     defer pgx.deinit(allocator);
-    switch (precision) {
-        8 => {
-            try pgx.appendSlice(allocator, "PG ML -8 16 16\n");
-            for (0..256) |index| try pgx.append(allocator, @truncate(index + 128));
-        },
-        16 => {
-            try pgx.appendSlice(allocator, "PG ML -16 16 16\n");
-            for (0..256) |index| {
-                const sample: i16 = if (index == 255)
-                    32767
-                else
-                    @intCast(-32768 + @as(i32, @intCast(index)) * 256);
-                const raw: u16 = @bitCast(sample);
-                try pgx.append(allocator, @truncate(raw >> 8));
-                try pgx.append(allocator, @truncate(raw));
-            }
-        },
-        20 => {
-            try pgx.appendSlice(allocator, "PG ML -20 16 16\n");
-            for (0..256) |index| {
-                const sample: i32 = if (index == 255)
-                    524287
-                else
-                    -524288 + @as(i32, @intCast(index)) * 4096;
-                const raw: u32 = @bitCast(sample);
-                try pgx.append(allocator, @truncate(raw >> 24));
-                try pgx.append(allocator, @truncate(raw >> 16));
-                try pgx.append(allocator, @truncate(raw >> 8));
-                try pgx.append(allocator, @truncate(raw));
-            }
-        },
-        else => return error.UnsupportedPrecision,
+    const header = try std.fmt.allocPrint(allocator, "PG ML -{d} 16 16\n", .{precision});
+    defer allocator.free(header);
+    try pgx.appendSlice(allocator, header);
+
+    const span = @as(i64, 1) << @as(u6, @intCast(precision));
+    const minimum = -(span >> 1);
+    const maximum = (span >> 1) - 1;
+    for (0..256) |index| {
+        const sample = if (index == 255)
+            maximum
+        else
+            minimum + @divTrunc(@as(i64, @intCast(index)) * span, 256);
+        const raw: u64 = @bitCast(sample);
+        if (precision <= 8) {
+            try pgx.append(allocator, @truncate(raw));
+        } else if (precision <= 16) {
+            try pgx.append(allocator, @truncate(raw >> 8));
+            try pgx.append(allocator, @truncate(raw));
+        } else {
+            try pgx.append(allocator, @truncate(raw >> 24));
+            try pgx.append(allocator, @truncate(raw >> 16));
+            try pgx.append(allocator, @truncate(raw >> 8));
+            try pgx.append(allocator, @truncate(raw));
+        }
     }
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = output_path, .data = pgx.items });
 }

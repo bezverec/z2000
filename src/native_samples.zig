@@ -1,6 +1,10 @@
 const std = @import("std");
 
 pub const max_precision: u8 = 38;
+pub const raw_planar_magic = "Z2KRAW1\n";
+
+const raw_planar_header_size: usize = raw_planar_magic.len + 20;
+const raw_planar_component_size: usize = 28;
 
 pub const NativeSampleError = error{
     InvalidCodestream,
@@ -212,6 +216,71 @@ pub const SamplePlanes = struct {
         return out.toOwnedSlice(allocator);
     }
 
+    /// Encodes every native component without losing precision, signedness, or
+    /// component-local geometry. ZRAW is a z2000 diagnostic interchange format;
+    /// all multibyte integers and sample words use canonical big-endian order.
+    pub fn encodeRawPlanar(self: SamplePlanes, allocator: std.mem.Allocator) ![]u8 {
+        if (self.planes.len == 0 or self.planes.len > std.math.maxInt(u16) or
+            self.reference_x1 <= self.reference_x0 or self.reference_y1 <= self.reference_y0)
+        {
+            return NativeSampleError.InvalidLayout;
+        }
+        try self.validateSamples();
+
+        const records_size = std.math.mul(usize, self.planes.len, raw_planar_component_size) catch
+            return NativeSampleError.ResourceLimitExceeded;
+        var output_size = std.math.add(usize, raw_planar_header_size, records_size) catch
+            return NativeSampleError.ResourceLimitExceeded;
+        for (self.planes) |plane| {
+            _ = std.math.cast(u32, plane.layout.width) orelse
+                return NativeSampleError.ResourceLimitExceeded;
+            _ = std.math.cast(u32, plane.layout.height) orelse
+                return NativeSampleError.ResourceLimitExceeded;
+            const payload_size = std.math.mul(
+                usize,
+                plane.samples.len,
+                rawPlanarBytesPerSample(plane.layout.precision),
+            ) catch return NativeSampleError.ResourceLimitExceeded;
+            output_size = std.math.add(usize, output_size, payload_size) catch
+                return NativeSampleError.ResourceLimitExceeded;
+        }
+
+        var out = try std.ArrayList(u8).initCapacity(allocator, output_size);
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, raw_planar_magic);
+        try appendU32Be(allocator, &out, self.reference_x0);
+        try appendU32Be(allocator, &out, self.reference_y0);
+        try appendU32Be(allocator, &out, self.reference_x1);
+        try appendU32Be(allocator, &out, self.reference_y1);
+        try appendU16Be(allocator, &out, @intCast(self.planes.len));
+        try appendU16Be(allocator, &out, 0);
+
+        for (self.planes) |plane| {
+            try out.append(allocator, plane.layout.precision);
+            try out.append(allocator, @intFromBool(plane.layout.signed));
+            try out.append(allocator, plane.layout.x_step);
+            try out.append(allocator, plane.layout.y_step);
+            try appendU32Be(allocator, &out, plane.layout.x0);
+            try appendU32Be(allocator, &out, plane.layout.y0);
+            try appendU32Be(allocator, &out, @intCast(plane.layout.width));
+            try appendU32Be(allocator, &out, @intCast(plane.layout.height));
+            try appendU64Be(allocator, &out, plane.samples.len);
+        }
+        for (self.planes) |plane| {
+            const bytes_per_sample = rawPlanarBytesPerSample(plane.layout.precision);
+            for (plane.samples) |sample| {
+                const raw: u64 = @bitCast(sample);
+                var byte_index = bytes_per_sample;
+                while (byte_index > 0) {
+                    byte_index -= 1;
+                    try out.append(allocator, @truncate(raw >> @as(u6, @intCast(byte_index * 8))));
+                }
+            }
+        }
+        std.debug.assert(out.items.len == output_size);
+        return out.toOwnedSlice(allocator);
+    }
+
     pub fn deinit(self: *SamplePlanes) void {
         for (self.planes) |plane| self.allocator.free(plane.samples);
         self.allocator.free(self.planes);
@@ -223,6 +292,109 @@ pub const PgxByteOrder = enum {
     most_significant_first,
     least_significant_first,
 };
+
+/// Parses the canonical ZRAW diagnostic format emitted by `encodeRawPlanar`.
+/// The caller-provided limits apply before component sample buffers are
+/// allocated, matching native codestream decoding.
+pub fn decodeRawPlanar(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    limits: Limits,
+) !SamplePlanes {
+    if (bytes.len < raw_planar_header_size or
+        !std.mem.eql(u8, bytes[0..raw_planar_magic.len], raw_planar_magic))
+    {
+        return NativeSampleError.InvalidCodestream;
+    }
+    const reference_x0 = readU32Be(bytes, 8);
+    const reference_y0 = readU32Be(bytes, 12);
+    const reference_x1 = readU32Be(bytes, 16);
+    const reference_y1 = readU32Be(bytes, 20);
+    const component_count = readU16Be(bytes, 24);
+    if (readU16Be(bytes, 26) != 0 or component_count == 0) {
+        return NativeSampleError.InvalidCodestream;
+    }
+    if (component_count > limits.max_components) {
+        return NativeSampleError.ResourceLimitExceeded;
+    }
+    const records_size = std.math.mul(usize, component_count, raw_planar_component_size) catch
+        return NativeSampleError.ResourceLimitExceeded;
+    const payload_start = std.math.add(usize, raw_planar_header_size, records_size) catch
+        return NativeSampleError.ResourceLimitExceeded;
+    if (payload_start > bytes.len) return NativeSampleError.InvalidCodestream;
+
+    const layouts = try allocator.alloc(ComponentLayout, component_count);
+    defer allocator.free(layouts);
+    for (layouts, 0..) |*layout, component| {
+        const offset = raw_planar_header_size + component * raw_planar_component_size;
+        const flags = bytes[offset + 1];
+        if ((flags & ~@as(u8, 1)) != 0) return NativeSampleError.InvalidCodestream;
+        const width = readU32Be(bytes, offset + 12);
+        const height = readU32Be(bytes, offset + 16);
+        layout.* = .{
+            .precision = bytes[offset],
+            .signed = (flags & 1) != 0,
+            .x_step = bytes[offset + 2],
+            .y_step = bytes[offset + 3],
+            .x0 = readU32Be(bytes, offset + 4),
+            .y0 = readU32Be(bytes, offset + 8),
+            .width = width,
+            .height = height,
+        };
+        validateComponentLayout(layout.*) catch return NativeSampleError.InvalidCodestream;
+        const sample_count = layout.sampleCount() catch
+            return NativeSampleError.ResourceLimitExceeded;
+        if (readU64Be(bytes, offset + 20) != sample_count) {
+            return NativeSampleError.InvalidCodestream;
+        }
+    }
+
+    const reference_width = reference_x1 -| reference_x0;
+    const reference_height = reference_y1 -| reference_y0;
+    const layout = CodestreamLayout{
+        .allocator = allocator,
+        .capabilities = 0,
+        .reference_x0 = reference_x0,
+        .reference_y0 = reference_y0,
+        .reference_x1 = reference_x1,
+        .reference_y1 = reference_y1,
+        .tile_width = reference_width,
+        .tile_height = reference_height,
+        .tile_origin_x = reference_x0,
+        .tile_origin_y = reference_y0,
+        .components = layouts,
+    };
+    var result = SamplePlanes.initFromLayout(allocator, layout, limits) catch |err| switch (err) {
+        NativeSampleError.InvalidLayout => return NativeSampleError.InvalidCodestream,
+        else => return err,
+    };
+    errdefer result.deinit();
+
+    var cursor = payload_start;
+    for (result.planes) |plane| {
+        const bytes_per_sample = rawPlanarBytesPerSample(plane.layout.precision);
+        const payload_size = std.math.mul(usize, plane.samples.len, bytes_per_sample) catch
+            return NativeSampleError.ResourceLimitExceeded;
+        const payload_end = std.math.add(usize, cursor, payload_size) catch
+            return NativeSampleError.ResourceLimitExceeded;
+        if (payload_end > bytes.len) return NativeSampleError.InvalidCodestream;
+        for (plane.samples, 0..) |*sample, index| {
+            const offset = cursor + index * bytes_per_sample;
+            const raw = readUnsignedBe(bytes[offset..][0..bytes_per_sample]);
+            sample.* = if (plane.layout.signed)
+                signExtendStorage(raw, bytes_per_sample)
+            else
+                @intCast(raw);
+        }
+        cursor = payload_end;
+    }
+    if (cursor != bytes.len) return NativeSampleError.InvalidCodestream;
+    result.validateSamples() catch |err| switch (err) {
+        NativeSampleError.SampleOutOfRange, NativeSampleError.InvalidLayout => return NativeSampleError.InvalidCodestream,
+        else => return err,
+    };
+    return result;
+}
 
 pub fn inspectCodestreamLayout(
     allocator: std.mem.Allocator,
@@ -336,4 +508,46 @@ fn readU32Be(bytes: []const u8, offset: usize) u32 {
         (@as(u32, bytes[offset + 1]) << 16) |
         (@as(u32, bytes[offset + 2]) << 8) |
         bytes[offset + 3];
+}
+
+fn readU64Be(bytes: []const u8, offset: usize) u64 {
+    return (@as(u64, readU32Be(bytes, offset)) << 32) |
+        readU32Be(bytes, offset + 4);
+}
+
+fn readUnsignedBe(bytes: []const u8) u64 {
+    var value: u64 = 0;
+    for (bytes) |byte| value = (value << 8) | byte;
+    return value;
+}
+
+fn signExtendStorage(raw: u64, bytes_per_sample: usize) i64 {
+    return switch (bytes_per_sample) {
+        1 => @as(i8, @bitCast(@as(u8, @truncate(raw)))),
+        2 => @as(i16, @bitCast(@as(u16, @truncate(raw)))),
+        4 => @as(i32, @bitCast(@as(u32, @truncate(raw)))),
+        8 => @bitCast(raw),
+        else => unreachable,
+    };
+}
+
+fn rawPlanarBytesPerSample(precision: u8) usize {
+    return if (precision <= 8) 1 else if (precision <= 16) 2 else if (precision <= 32) 4 else 8;
+}
+
+fn appendU16Be(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16) !void {
+    try out.append(allocator, @truncate(value >> 8));
+    try out.append(allocator, @truncate(value));
+}
+
+fn appendU32Be(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u32) !void {
+    try out.append(allocator, @truncate(value >> 24));
+    try out.append(allocator, @truncate(value >> 16));
+    try out.append(allocator, @truncate(value >> 8));
+    try out.append(allocator, @truncate(value));
+}
+
+fn appendU64Be(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u64) !void {
+    try appendU32Be(allocator, out, @truncate(value >> 32));
+    try appendU32Be(allocator, out, @truncate(value));
 }

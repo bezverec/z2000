@@ -16,7 +16,8 @@ The binary installs as both `z2000` and the `z2k` alias; conversions accept
 the extension-inferred shorthand (`z2k input.tif output.jp2`,
 `z2k input.bmp output.jp2`, `z2k input.png output.jp2`, or
 `z2k input.jpg output.jp2`, `z2k input.dng output.jp2`, or
-`z2k input.exr output.jp2`). The custom
+`z2k input.exr output.jp2`, `z2k input.j2k output.pgx`, or
+`z2k input.j2k output.zraw`). The custom
 grayscale codec:
 
 ```sh
@@ -46,6 +47,10 @@ zig build run -- *.jpg .jp2 [tiff-to-jp2 options]
 zig build run -- *.dng .jp2 [tiff-to-jp2 options]
 zig build run -- *.exr .jp2 [tiff-to-jp2 options]
 zig build run -- *.jp2 .tif [decode-temp-jp2 options]
+zig build run -- j2k-to-pgx input.j2k component.pgx [--component N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq] [--pgx-order ML|LM]
+zig build run -- *.j2c .pgx [j2k-to-pgx options]
+zig build run -- j2k-to-zraw input.j2k components.zraw [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq]
+zig build run -- *.j2c .zraw [j2k-to-zraw options]
 ```
 
 `--version` (or `-V`) prints the generated SemVer application version including
@@ -67,6 +72,27 @@ DC level shift. Explicit `--mct none` keeps all four components independent.
 `decode-temp-jp2` dispatches one- through four-component bounded JP2 output to
 the matching TIFF writer; a supported one-component `pclr`/`cmap` stream is
 expanded to RGB first.
+
+`j2k-to-pgx` is the raw-codestream diagnostic boundary. It accepts `.j2k` or
+`.j2c` without a JP2 wrapper, decodes through `decodeLosslessNativeWithOptions`,
+and writes exactly one caller-selected component. Component 0, full resolution,
+all logical CPUs, the ISO MQ backend, and big-endian `ML` PGX are defaults.
+`--component N`, `--reduce N`, `--threads N`, `--t1-backend`, and
+`--pgx-order ML|LM` are available in explicit, shorthand, and batch forms.
+Invalid component indexes and profiles outside the native reversible contract
+fail before an output file is written.
+
+`j2k-to-zraw` uses the same raw-codestream decode boundary but writes every
+native component. ZRAW begins with the eight-byte `Z2KRAW1\n` magic, four
+big-endian `u32` reference-grid coordinates, a `u16` component count and zero
+reserved `u16`. Each fixed 28-byte component record stores precision,
+signedness, sampling steps, origin, dimensions, and a checked `u64` sample
+count. Component-major sample payloads use canonical big-endian two's-
+complement/unsigned words of 1, 2, 4, or 8 bytes as required by the declared
+1..38-bit precision. The parser rejects reserved flags, inconsistent counts,
+out-of-range/noncanonical sample words, truncation, trailing bytes, and caller
+limit violations. ZRAW is a private exact diagnostic interchange format, not
+an ISO JPEG 2000 box or a display-oriented raster standard.
 
 `formats/bmp.zig` exposes `read` and `parse` for the bounded Windows BMP input
 profile: a 14-byte file header, 40-byte `BITMAPINFOHEADER`, one plane,
@@ -280,15 +306,24 @@ Primary public functions:
   and `Rsiz`; caller limits bound component count, reference pixels, and total
   component samples before allocation. `NativeSamplePlanes.initFromLayout`
   allocates dynamic `i64` planes, validates every sample against its declared
-  signed range, and exports checked PGX for precisions with 8/16/32-bit PGX
-  storage
+  signed range, exports checked PGX for precisions with 8/16/32-bit PGX
+  storage, and exports canonical all-component ZRAW without precision loss
+- `NativeSamplePlanes.encodeRawPlanar(allocator)` /
+  `decodeNativeRawPlanar(allocator, bytes, limits)` — serialize or parse the
+  exact ZRAW diagnostic carrier with allocation limits and exact payload-
+  boundary validation
 - `decodeLosslessNative(allocator, bytes, limits)` /
   `decodeLosslessNativeWithOptions(allocator, bytes, options, limits)` — first
   native payload profile: strict single- and multi-tile reversible 5/3, no MCT,
-  and 1..16 signed or unsigned 8/16/20-bit components, including mixed
-  component precision, additionally bounded by
+  and caller-limited signed or unsigned 1..29-bit components, including mixed
+  component precision and counts up to the 256-component metadata boundary,
+  additionally bounded by
   `limits.max_components`. Multi-tile T2/T1/DWT runs
   independently per tile and assembles by absolute component coordinates.
+  Native inverse 5/3 synthesis forms every lifting sum in `i64`, checks the
+  result before storing it in the `i32` T1/DWT plane, and fails malformed
+  overflow cases closed. The 29-bit ceiling follows the 31-magnitude-bitplane
+  T1 limit after the reversible HH gain; 30-bit SIZ payloads are unsupported.
   `options.resolution_reduction`
   selects full or lower DWT resolutions through the production packet-pruning
   and partial-synthesis path; values above COD/NL fail as invalid. Signed

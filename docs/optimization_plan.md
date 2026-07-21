@@ -141,6 +141,12 @@ dequantize-to-inverse-9/7 fusion only behind reference-relative pixel/hash
 gates. Keep either only if cache/allocation savings exceed the added complexity
 and all pinned accuracy bounds remain unchanged.
 
+The native 1..29-bit diagnostic path deliberately uses scalar inverse 5/3 with
+`i64` lifting sums and checked `i32` stores. Do not route it back through the
+unchecked SIMD kernels. A future vectorized version must retain lane-wise
+overflow detection and the 29-bit Kakadu plus synthetic-overflow gates; profile
+this path separately from the ordinary unsigned 8/16-bit display decoder.
+
 ### P6. Encode-Side Follow-Up
 
 Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode

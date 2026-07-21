@@ -20,8 +20,8 @@
       "encode": "not_implemented",
       "malformed": "bounded",
       "interop": "bounded",
-      "evidence": ["Kakadu signed 8-bit single-, five-, and nineteen-component multi-tile fixtures plus signed 20-bit and mixed 8/16/20-bit PGX/codestream fixtures", "native carrier signed-range, caller-limit, and legacy fail-closed tests"],
-      "note": "The native i64 API decodes caller-limited single- and multi-tile reversible no-MCT signed 8/16/20-bit payloads through the 256-component metadata bound, including mixed component precision, at full and lower resolutions; independent interop is pinned at 19 components."
+      "evidence": ["Kakadu signed 8-bit single-, five-, and nineteen-component multi-tile fixtures plus signed mixed 5/12/19-bit and 8/16/20-bit PGX/codestream fixtures", "native carrier signed-range, caller-limit, and legacy fail-closed tests"],
+      "note": "The native i64 API decodes caller-limited single- and multi-tile reversible no-MCT signed 1..20-bit payloads through the 256-component metadata bound, including mixed component precision, at full and lower resolutions; independent interop is pinned at 5/8/12/16/19/20 bits and 19 components."
     },
     {
       "id": "siz-subsampled-components",
@@ -489,6 +489,61 @@
         { "path": "src/testdata/kakadu-mixed-signed-r1-c0.pgx", "sha256": "12c551da229a41978541a0f95a57ae34d032daef0aafc35672d54113071b6cdd", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 },
         { "path": "src/testdata/kakadu-mixed-signed-r1-c1.pgx", "sha256": "5f407d80f0159e674b871efdf08f2c703356dc1c97a4d99bb992b043f4c1ce60", "format": "pgx", "component": 1, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 },
         { "path": "src/testdata/kakadu-mixed-signed-r1-c2.pgx", "sha256": "36fe0d9b76dbbb5b39d5e459eaf84dce7dc3149a76e940781304bcc9cd988735", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 }
+      ]
+    },
+    {
+      "id": "kakadu-mixed-signed-5-12-19-native",
+      "path": "src/testdata/kakadu-mixed-signed-5-12-19.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "407f375c4d3dba38f37f95208424aedbf4bf1fe02506cf60c198cf4c49bc8e85",
+      "source": {
+        "producer": "Kakadu demo applications from committed synthetic signed PGX ramps",
+        "version": "Kakadu 8.4.1; Zig 0.16.0 fixture generator",
+        "origin": "three 16x16 signed 5/12/19-bit components including extrema, single tile, RPCL, reversible 5/3, no MCT, inline PLT",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "source/reference PGX and codestream committed; Kakadu application not redistributed",
+        "command": "generate signed 5/12/19-bit PGX sources with tools/generate_signed_pgx.zig; kdu_compress -i source5.pgx,source12.pgx,source19.pgx -o kakadu-mixed-signed-5-12-19.j2c Creversible=yes Cycc=no Clevels=1 Corder=RPCL Cprecincts={8,8} Cblk={4,4} Clayers=1 ORGgen_plt=yes -rate - -num_threads 0; kdu_expand full and -reduce 1 to the six manifested PGX outputs"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand signed mixed-precision PGX for all three components at full and reduced resolution; exact native samples including sub-byte and component-local extrema",
+      "features": ["siz-native-signed-components", "cod-qcd-component-overrides", "reversible-53", "packet-header-placement"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-mixed-signed-5-12-19-full-c0.pgx", "sha256": "427727b325f7e88e195314e20bd668f64187fc8ba1bb28461ff718a4be1f2201", "format": "pgx", "component": 0, "max_peak_error": 0, "max_mse": 0 },
+        { "path": "src/testdata/kakadu-mixed-signed-5-12-19-full-c1.pgx", "sha256": "c9043cf1e06e677b488fef5759d7e7ba02706f24da0b9fb3dcdcda572ed52171", "format": "pgx", "component": 1, "max_peak_error": 0, "max_mse": 0 },
+        { "path": "src/testdata/kakadu-mixed-signed-5-12-19-full-c2.pgx", "sha256": "80071558f6e585ee5017ecb6b8eddc59269561aa557d680c3f6aa04bb10a89c2", "format": "pgx", "component": 2, "max_peak_error": 0, "max_mse": 0 },
+        { "path": "src/testdata/kakadu-mixed-signed-5-12-19-r1-c0.pgx", "sha256": "186b5e142c32eb60584054c46b9f1934078f1d121eaf6003d45bccc2c4e060ba", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 },
+        { "path": "src/testdata/kakadu-mixed-signed-5-12-19-r1-c1.pgx", "sha256": "34b76976ce73c5d0763c2e642883f8d7a4319869c8e0dff1338a2d666694df7f", "format": "pgx", "component": 1, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 },
+        { "path": "src/testdata/kakadu-mixed-signed-5-12-19-r1-c2.pgx", "sha256": "9afbbe17ee73b2e3a0a4ddc7fe87da15daa44ae8b10e8f95e69d70f10b5f4838", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 }
+      ]
+    },
+    {
+      "id": "kakadu-signed-29bit-native-multitile",
+      "path": "src/testdata/kakadu-signed-29bit-multitile.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "1c1ab1bd9ef2c2f74f67b49fdd22f7d97f209c8744aadb417b694b0f13ad1035",
+      "source": {
+        "producer": "Kakadu demo applications from a committed synthetic signed 29-bit PGX ramp",
+        "version": "Kakadu 8.4.1; Zig 0.16.0 fixture generator",
+        "origin": "16x16 signed 29-bit ramp including both extrema, four 8x8 tiles, RPCL, reversible 5/3, no MCT, inline PLT",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "source/reference PGX and codestream committed; Kakadu application not redistributed",
+        "command": "zig run tools/generate_signed_pgx.zig -- src/testdata/kakadu-signed-29bit-source.pgx 29; kdu_compress -i src/testdata/kakadu-signed-29bit-source.pgx -o src/testdata/kakadu-signed-29bit-multitile.j2c Creversible=yes Cycc=no Stiles={8,8} Clevels=1 Corder=RPCL Cprecincts={8,8} Cblk={4,4} Clayers=1 ORGgen_plt=yes -rate - -num_threads 0; kdu_expand full and -reduce 1 to the manifested PGX outputs"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand signed 29-bit PGX at full and reduced resolution; exact native samples at the checked i32 T1/DWT boundary",
+      "features": [
+        "siz-native-signed-components",
+        "reversible-53",
+        "tiles-and-tile-parts",
+        "packet-header-placement"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-signed-29bit-multitile-reference.pgx", "sha256": "4e14f6bd5676a2f2d5007d4a347698437eeced6a1afe02616a54d4ed788dac7e", "format": "pgx", "component": 0, "max_peak_error": 0, "max_mse": 0 },
+        { "path": "src/testdata/kakadu-signed-29bit-multitile-r1-reference.pgx", "sha256": "a22a7413add0f08320b3bf09c19349a43d1dccbab9391fcb05c351f3a53781bf", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 0, "max_mse": 0 }
       ]
     },
     {

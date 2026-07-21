@@ -2,6 +2,7 @@ const std = @import("std");
 const simd = @import("simd.zig");
 
 pub const TransformError = error{
+    CoefficientOverflow,
     InvalidDimensions,
     TooManyLevels,
 };
@@ -247,6 +248,97 @@ pub fn inverse53ReducedWithWorkspaceOrigin(
         }
 
         inverse53ColumnsOrigin(data, width, shape.width, shape.height, scratch, shape.y0);
+    }
+    return resolutions[reduction];
+}
+
+/// Scalar inverse 5/3 synthesis for untrusted high-precision codestreams.
+/// Every lifting result is formed in i64 and checked before it is stored back
+/// into the i32 coefficient plane, so malformed but syntactically legal T1
+/// magnitudes cannot wrap or trap in the native decoder.
+pub fn inverse53CheckedWithWorkspaceOrigin(
+    workspace: *Workspace,
+    data: []i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    x0: u32,
+    y0: u32,
+) !void {
+    _ = try inverse53ReducedCheckedWithWorkspaceOrigin(
+        workspace,
+        data,
+        width,
+        height,
+        levels,
+        0,
+        x0,
+        y0,
+    );
+}
+
+pub fn inverse53ReducedCheckedWithWorkspaceOrigin(
+    workspace: *Workspace,
+    data: []i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+    x0: u32,
+    y0: u32,
+) !ResolutionShape {
+    if (width == 0 or height == 0 or data.len != width * height) {
+        return TransformError.InvalidDimensions;
+    }
+    if (reduction > levels) return TransformError.InvalidDimensions;
+
+    var shapes: [32]LevelShape = undefined;
+    var resolutions: [33]ResolutionShape = undefined;
+    if (levels > shapes.len) return TransformError.TooManyLevels;
+
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    resolutions[0] = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 };
+    var actual_levels: u8 = 0;
+    while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
+        shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+        cur_width = lowCountOrigin(cur_width, cur_x0);
+        cur_height = lowCountOrigin(cur_height, cur_y0);
+        if (cur_width == 0 or cur_height == 0) return TransformError.InvalidDimensions;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+        resolutions[@as(usize, actual_levels) + 1] = .{
+            .width = cur_width,
+            .height = cur_height,
+            .x0 = cur_x0,
+            .y0 = cur_y0,
+        };
+    }
+    if (reduction > actual_levels) return TransformError.InvalidDimensions;
+
+    try workspace.require(@max(width, height));
+    const scratch = workspace.scratch;
+    var level = actual_levels;
+    while (level > reduction) {
+        level -= 1;
+        const shape = shapes[level];
+        for (0..shape.height) |row| {
+            try inverse53LineOriginChecked(
+                rowSlice(data, width, row, shape.width),
+                scratch[0..shape.width],
+                shape.x0,
+            );
+        }
+        try inverse53ColumnsOriginChecked(
+            data,
+            width,
+            shape.width,
+            shape.height,
+            scratch,
+            shape.y0,
+        );
     }
     return resolutions[reduction];
 }
@@ -874,6 +966,79 @@ fn inverse53Line(data: []i32, scratch: []i32) void {
         const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
         data[i] += floorHalf(data[i - 1] + right);
     }
+}
+
+fn inverse53ColumnsOriginChecked(
+    data: []i32,
+    stride: usize,
+    width: usize,
+    height: usize,
+    scratch: []i32,
+    y0: u32,
+) !void {
+    const line = scratch[0..height];
+    const temp = scratch[height .. height * 2];
+    for (0..width) |col| {
+        for (0..height) |row| line[row] = data[row * stride + col];
+        try inverse53LineOriginChecked(line, temp, y0);
+        for (0..height) |row| data[row * stride + col] = line[row];
+    }
+}
+
+fn inverse53LineOriginChecked(data: []i32, scratch: []i32, origin: u32) !void {
+    if ((origin & 1) == 0) return inverse53LineChecked(data, scratch);
+    if (data.len == 1) {
+        if ((data[0] & 1) != 0) return TransformError.CoefficientOverflow;
+        data[0] = @divExact(data[0], 2);
+        return;
+    }
+
+    unpackOddEven(data, scratch);
+    var i: usize = 1;
+    while (i < data.len) : (i += 2) {
+        const left = @as(i64, data[i - 1]);
+        const right = @as(i64, if (i + 1 < data.len) data[i + 1] else data[i - 1]);
+        data[i] = try checkedI32(@as(i64, data[i]) - floorQuarterBiasedWide(left + right));
+    }
+    i = 0;
+    while (i < data.len) : (i += 2) {
+        const left = @as(i64, if (i > 0) data[i - 1] else data[i + 1]);
+        const right = @as(i64, if (i + 1 < data.len) data[i + 1] else data[i - 1]);
+        data[i] = try checkedI32(@as(i64, data[i]) + floorHalfWide(left + right));
+    }
+}
+
+fn inverse53LineChecked(data: []i32, scratch: []i32) !void {
+    if (data.len < 2) return;
+    unpackEvenOdd(data, scratch);
+
+    data[0] = try checkedI32(
+        @as(i64, data[0]) - floorQuarterBiasedWide(@as(i64, data[1]) * 2),
+    );
+    var i: usize = 2;
+    while (i < data.len) : (i += 2) {
+        const left = @as(i64, data[i - 1]);
+        const right = @as(i64, if (i + 1 < data.len) data[i + 1] else data[i - 1]);
+        data[i] = try checkedI32(@as(i64, data[i]) - floorQuarterBiasedWide(left + right));
+    }
+
+    i = 1;
+    while (i < data.len) : (i += 2) {
+        const right = @as(i64, if (i + 1 < data.len) data[i + 1] else data[i - 1]);
+        data[i] = try checkedI32(@as(i64, data[i]) + floorHalfWide(@as(i64, data[i - 1]) + right));
+    }
+}
+
+fn checkedI32(value: i64) TransformError!i32 {
+    return std.math.cast(i32, value) orelse TransformError.CoefficientOverflow;
+}
+
+fn floorHalfWide(value: i64) i64 {
+    return value >> 1;
+}
+
+fn floorQuarterBiasedWide(value: i64) i64 {
+    return (value + 2) >> 2;
 }
 
 fn floorHalf(value: i32) i32 {

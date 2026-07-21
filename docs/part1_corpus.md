@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-20 gate contains 33 entries: 17 committed entries plus all 16
+The 2026-07-21 gate contains 36 entries: 20 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-22 decode passes, 11 expected fail-closed cases, zero mismatches, and zero skips
+25 decode passes, 11 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -81,13 +81,30 @@ planar API reject it before sample allocation/reinterpretation.
 The fourth native signed entry is a Kakadu 20-bit stream. Full and reduction-1
 output compare byte-exactly with Kakadu PGX, including the signed extrema and
 zero; 1/8-thread decoding is deterministic. Legacy planar decode still rejects
-the stream, and a 21-bit SIZ mutation pins the current native payload boundary.
+the stream. The native boundary is now pinned separately at 29/30 bits.
 
 The fifth native signed entry combines 8-, 16-, and 20-bit components in one
 Kakadu stream. All three native planes compare byte-exactly at full and
 reduction-1 resolution, including each precision's extrema, and remain
 deterministic at one and eight threads. A two-component caller limit and the
 legacy planar API reject the stream without reinterpretation.
+
+The sixth native signed entry is a Kakadu 19-component, four-tile stream. All
+nineteen native planes compare byte-exactly at full and reduction-1 resolution;
+an 18-component caller limit and the unchanged legacy planar API reject it.
+
+The seventh native signed entry combines 5-, 12-, and 19-bit components. All
+six full/reduction-1 PGX references match Kakadu byte-exactly, including the
+sub-byte plane and every component's extrema. Together with the existing
+8/16/20-bit stream it pins representative storage widths across the continuous
+lower and intermediate widths of the continuous native payload contract.
+
+The eighth native signed entry is a Kakadu 29-bit, four-tile stream. Full and
+reduction-1 output compare byte-exactly with Kakadu PGX, including both signed
+extrema, and 1/8-thread output is deterministic. It reaches the 31-magnitude-
+bitplane T1/HH limit of the current `i32` carrier. Checked `i64` inverse 5/3
+lifting intermediates fail overflow closed, and a 30-bit SIZ mutation pins the
+unsupported wider boundary.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT

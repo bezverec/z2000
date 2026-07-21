@@ -16,8 +16,20 @@ entries are grouped by development milestone rather than semantic version.
   five-component 1/8/12/20/38-bit, signed-SIZ, invalid-range, reserved-
   precision, and resource-limit regressions leave the legacy `u16` decoder
   unchanged and fail-closed for unsupported payload breadth.
+- Added direct raw `.j2k`/`.j2c` to PGX CLI dispatch through the native
+  reversible decoder. Explicit `j2k-to-pgx`, extension shorthand, and
+  non-recursive batch forms select one component plus optional resolution
+  reduction, thread count, T1 backend, and `ML`/`LM` byte order. End-to-end
+  outputs match the committed Kakadu full/reduced PGX references exactly.
+- Added canonical all-component ZRAW diagnostic serialization and bounded
+  parsing. It retains 1..38-bit precision, signedness, origins, sampling steps,
+  and native dimensions using checked big-endian component-major payloads;
+  malformed metadata, noncanonical values, truncation, trailing bytes, and
+  resource-limit violations fail closed. Explicit `j2k-to-zraw`, extension
+  shorthand, and non-recursive batch CLI forms share reduction/thread/T1
+  controls with native raw-codestream decode.
 - Added `decodeLosslessNative` for bounded single- and multi-tile reversible
-  5/3, no-MCT signed/unsigned 8/16/20-bit payloads. Full and requested lower DWT
+  5/3, no-MCT signed/unsigned 1..29-bit payloads. Full and requested lower DWT
   resolutions use packet pruning plus partial 5/3 synthesis and retain reduced
   native-grid metadata; multi-tile output assembles by absolute component
   coordinates. Independent Kakadu 8.4.1 single- and four-tile signed 8-bit
@@ -26,12 +38,22 @@ entries are grouped by development milestone rather than semantic version.
   legacy planar/gray APIs.
 - Added an independent Kakadu signed 20-bit codestream with exact full- and
   reduction-1 PGX references, extrema/zero checks, 1/8-thread determinism, and
-  a fail-closed 21-bit SIZ mutation. The legacy planar surface remains limited
+  a separately pinned wider boundary. The legacy planar surface remains limited
   to unsigned 8/16-bit payloads.
 - Added an independent three-component Kakadu signed 8/16/20-bit stream. All
   six full/reduction-1 PGX references match exactly, per-component extrema are
   preserved, 1/8-thread output is deterministic, and caller/legacy boundaries
   remain fail-closed.
+- Added an independent mixed signed 5/12/19-bit Kakadu stream. All six full-
+  and reduction-1 PGX references match exactly, including sub-byte and each
+  component's extrema; 1/8-thread output is deterministic. Together with the
+  wider boundary fixture this pins lower/intermediate widths, while the legacy
+  unsigned 8/16-bit API remains fail-closed.
+- Added an independent Kakadu signed 29-bit four-tile codestream with exact
+  full/reduction-1 PGX references, extrema checks, and 1/8-thread determinism.
+  This reaches the 31-magnitude-bitplane T1/HH limit of the current `i32`
+  carrier. Native full/reduced inverse 5/3 lifting now forms sums in `i64` and
+  checks every `i32` store; malformed overflow and 30-bit payloads fail closed.
 - Raised only the bounded strict/native no-MCT component capacity from four to
   16 while preserving the legacy colour/JP2/TIFF ceiling. A five-component,
   four-tile Kakadu signed stream matches ten full/reduction-1 PGX references
@@ -62,8 +84,14 @@ entries are grouped by development milestone rather than semantic version.
   8-bit, four-tile reversible codestream now decodes exactly at full and
   reduction-1 resolution through the caller-limited native API; all nineteen
   planes match, a caller limit of 18 fails before payload allocation, and the
-  four-component legacy API remains closed. Parallel irreversible job tables
-  retain the remaining 16-slot implementation bound.
+  four-component legacy API remains closed.
+- Replaced the parallel component-job runner's fixed thread handles and the
+  generic irreversible decode path's component bands, quantization deltas,
+  jobs, bit depths, and output-layout scratch with exact-length allocator-owned
+  slices. Multi-tile and reference-grid layout scratch follows the same
+  ownership model, and a direct 19-job regression pins execution beyond the
+  former 16-slot bound. The legacy four-component colour output contract is
+  unchanged.
 
 ### Part 1 Corpus Gate
 
@@ -78,9 +106,10 @@ entries are grouped by development milestone rather than semantic version.
   and distinguishes decode pass, expected
   fail-closed, unexpected acceptance, native-raster mismatch, and skipped
   optional local assets.
-- Expanded the seed to thirteen foreign-encoded fixtures: sampled Kakadu
+- Expanded the seed to fifteen foreign-encoded fixtures: sampled Kakadu
   multi-tile/POC/origin and sampled multi-tile no-MCT 9/7, Grok CMYK, Kakadu
-  signed 8-bit single-/multi-tile, signed 20-bit, and mixed signed 8/16/20-bit
+  signed 8-bit single-/multi-tile, signed 20-bit, and mixed signed 5/12/19-bit
+  plus 8/16/20-bit
   native decode, all-six-bit T1, uniform
   COC/QCC, and padded
   multipart TLM. Four
@@ -97,8 +126,8 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 33-entry gate
-  reports 22 decode passes, 11 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 36-entry gate
+  reports 25 decode passes, 11 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803

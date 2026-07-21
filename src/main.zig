@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const batch = @import("batch.zig");
+const cli_dispatch = @import("cli_dispatch.zig");
 const codec = @import("codec.zig");
 const color = @import("color.zig");
 const codestream = @import("codestream.zig");
@@ -15,6 +16,10 @@ const jp2 = @import("jp2.zig");
 const tiff = @import("tiff.zig");
 const app_version = @import("version.zig");
 const wavelet = @import("wavelet.zig");
+
+const InferredConversion = cli_dispatch.InferredConversion;
+const inferConversion = cli_dispatch.inferConversion;
+const inferConversionExtensions = cli_dispatch.inferConversionExtensions;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -70,6 +75,10 @@ pub fn main(init: std.process.Init) !void {
         try jp2StatsCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "decode-temp-jp2")) {
         try decodeTempJp2Command(io, allocator, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "j2k-to-pgx")) {
+        try j2kToPgxCommand(io, allocator, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "j2k-to-zraw")) {
+        try j2kToZrawCommand(io, allocator, args[2..]);
     } else if (batch.hasWildcards(std.fs.path.basename(args[1]))) {
         try batchConversionCommand(io, allocator, args[1..]);
     } else if (expandedBatchTargetIndex(args[1..])) |target_index| {
@@ -83,46 +92,13 @@ pub fn main(init: std.process.Init) !void {
             .dng_to_jp2 => try dngToJp2Command(io, allocator, args[1..]),
             .exr_to_jp2 => try exrToJp2Command(io, allocator, args[1..]),
             .jp2_to_tiff => try decodeTempJp2Command(io, allocator, args[1..]),
+            .j2k_to_pgx => try j2kToPgxCommand(io, allocator, args[1..]),
+            .j2k_to_zraw => try j2kToZrawCommand(io, allocator, args[1..]),
         }
     } else {
         usage();
         return error.InvalidCommand;
     }
-}
-
-const InferredConversion = enum { tiff_to_jp2, bmp_to_jp2, png_to_jp2, jpeg_to_jp2, dng_to_jp2, exr_to_jp2, jp2_to_tiff };
-
-/// Shorthand dispatch: `z2000 input.tif output.jp2 [options]` needs no
-/// subcommand — the conversion direction is inferred from the two leading
-/// path extensions (case-insensitive; `.tif`/`.tiff` on the TIFF side).
-/// Explicit subcommand names always win because they are matched first.
-fn inferConversion(args: []const []const u8) ?InferredConversion {
-    if (args.len < 2) return null;
-    if (std.mem.startsWith(u8, args[0], "-") or std.mem.startsWith(u8, args[1], "-")) return null;
-    return inferConversionExtensions(
-        std.fs.path.extension(args[0]),
-        std.fs.path.extension(args[1]),
-    );
-}
-
-fn inferConversionExtensions(input_ext: []const u8, output_ext: []const u8) ?InferredConversion {
-    const input_is_tiff = std.ascii.eqlIgnoreCase(input_ext, ".tif") or std.ascii.eqlIgnoreCase(input_ext, ".tiff");
-    const input_is_bmp = std.ascii.eqlIgnoreCase(input_ext, ".bmp");
-    const input_is_png = std.ascii.eqlIgnoreCase(input_ext, ".png");
-    const input_is_jpeg = std.ascii.eqlIgnoreCase(input_ext, ".jpg") or std.ascii.eqlIgnoreCase(input_ext, ".jpeg");
-    const input_is_dng = std.ascii.eqlIgnoreCase(input_ext, ".dng");
-    const input_is_exr = std.ascii.eqlIgnoreCase(input_ext, ".exr");
-    const output_is_tiff = std.ascii.eqlIgnoreCase(output_ext, ".tif") or std.ascii.eqlIgnoreCase(output_ext, ".tiff");
-    const input_is_jp2 = std.ascii.eqlIgnoreCase(input_ext, ".jp2");
-    const output_is_jp2 = std.ascii.eqlIgnoreCase(output_ext, ".jp2");
-    if (input_is_tiff and output_is_jp2) return .tiff_to_jp2;
-    if (input_is_bmp and output_is_jp2) return .bmp_to_jp2;
-    if (input_is_png and output_is_jp2) return .png_to_jp2;
-    if (input_is_jpeg and output_is_jp2) return .jpeg_to_jp2;
-    if (input_is_dng and output_is_jp2) return .dng_to_jp2;
-    if (input_is_exr and output_is_jp2) return .exr_to_jp2;
-    if (input_is_jp2 and output_is_tiff) return .jp2_to_tiff;
-    return null;
 }
 
 /// Detects the argument shape produced when a shell expands an unquoted glob:
@@ -227,6 +203,8 @@ fn executeBatchPlan(
             .dng_to_jp2 => try dngToJp2Command(io, allocator, file_args.items),
             .exr_to_jp2 => try exrToJp2Command(io, allocator, file_args.items),
             .jp2_to_tiff => try decodeTempJp2Command(io, allocator, file_args.items),
+            .j2k_to_pgx => try j2kToPgxCommand(io, allocator, file_args.items),
+            .j2k_to_zraw => try j2kToZrawCommand(io, allocator, file_args.items),
         }
     }
     std.debug.print("batch converted {} file{s}\n", .{
@@ -895,6 +873,164 @@ fn jp2StatsCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
     const j2k = try jp2.extractCodestream(bytes);
     const stats = try codestream.analyzeLosslessTemporaryWithOptions(j2k, options);
     printTemporaryStats(args[0], stats);
+}
+
+fn j2kToPgxCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        usage();
+        return error.InvalidCommand;
+    }
+    if (!std.ascii.eqlIgnoreCase(std.fs.path.extension(args[1]), ".pgx")) {
+        return error.InvalidValue;
+    }
+
+    var options = codestream.DecodeOptions{};
+    options.threads = defaultThreadCount();
+    var component: usize = 0;
+    var byte_order: codestream.NativePgxByteOrder = .most_significant_first;
+    var index: usize = 2;
+    while (index < args.len) {
+        if (std.mem.eql(u8, args[index], "--component")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            component = try std.fmt.parseInt(usize, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--reduce")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.resolution_reduction = try std.fmt.parseInt(u8, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--threads")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.threads = try parseThreadCount(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--t1-backend")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.t1_backend = try parseT1Backend(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--pgx-order")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            if (std.ascii.eqlIgnoreCase(args[index], "ML") or
+                std.ascii.eqlIgnoreCase(args[index], "big"))
+            {
+                byte_order = .most_significant_first;
+            } else if (std.ascii.eqlIgnoreCase(args[index], "LM") or
+                std.ascii.eqlIgnoreCase(args[index], "little"))
+            {
+                byte_order = .least_significant_first;
+            } else {
+                return error.InvalidValue;
+            }
+        } else {
+            return error.UnknownOption;
+        }
+        index += 1;
+    }
+
+    const max_file_size = 1024 * 1024 * 1024;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        args[0],
+        allocator,
+        .limited(max_file_size),
+    );
+    defer allocator.free(bytes);
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    if (component >= layout.components.len) return codestream.NativeSampleError.InvalidLayout;
+
+    var decoded = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        options,
+        .{},
+    );
+    defer decoded.deinit();
+    const pgx = try decoded.encodePgx(allocator, component, byte_order);
+    defer allocator.free(pgx);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = pgx });
+
+    const plane = decoded.planes[component];
+    std.debug.print(
+        "decoded raw JPEG 2000 {s} component {} -> {s} ({}x{}, {s} {} bits, reduction {}, threads {}, PGX {s})\n",
+        .{
+            args[0],
+            component,
+            args[1],
+            plane.layout.width,
+            plane.layout.height,
+            if (plane.layout.signed) "signed" else "unsigned",
+            plane.layout.precision,
+            options.resolution_reduction,
+            options.threads,
+            if (byte_order == .most_significant_first) "ML" else "LM",
+        },
+    );
+}
+
+fn j2kToZrawCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        usage();
+        return error.InvalidCommand;
+    }
+    if (!std.ascii.eqlIgnoreCase(std.fs.path.extension(args[1]), ".zraw")) {
+        return error.InvalidValue;
+    }
+
+    var options = codestream.DecodeOptions{};
+    options.threads = defaultThreadCount();
+    var index: usize = 2;
+    while (index < args.len) {
+        if (std.mem.eql(u8, args[index], "--reduce")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.resolution_reduction = try std.fmt.parseInt(u8, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--threads")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.threads = try parseThreadCount(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--t1-backend")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.t1_backend = try parseT1Backend(args[index]);
+        } else {
+            return error.UnknownOption;
+        }
+        index += 1;
+    }
+
+    const max_file_size = 1024 * 1024 * 1024;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        args[0],
+        allocator,
+        .limited(max_file_size),
+    );
+    defer allocator.free(bytes);
+
+    var decoded = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        options,
+        .{},
+    );
+    defer decoded.deinit();
+    const zraw = try decoded.encodeRawPlanar(allocator);
+    defer allocator.free(zraw);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = zraw });
+
+    std.debug.print(
+        "decoded raw JPEG 2000 {s} -> {s} ({} components, reference {}x{}, reduction {}, threads {}, canonical ZRAW)\n",
+        .{
+            args[0],
+            args[1],
+            decoded.componentCount(),
+            decoded.reference_x1 - decoded.reference_x0,
+            decoded.reference_y1 - decoded.reference_y0,
+            options.resolution_reduction,
+            options.threads,
+        },
+    );
 }
 
 fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -1721,6 +1857,8 @@ fn usage() void {
         \\  z2000 <input.dng> <output.jp2> [options]   (shorthand for dng-to-jp2)
         \\  z2000 <input.exr> <output.jp2> [options]   (shorthand for exr-to-jp2)
         \\  z2000 <input.jp2> <output.tif> [options]   (shorthand for decode-temp-jp2)
+        \\  z2000 <input.j2k> <output.pgx> [options]   (raw codestream component diagnostic)
+        \\  z2000 <input.j2k> <output.zraw> [options]  (exact all-component raw diagnostic)
         \\  z2000 *.tif .jp2 [options]                  (non-recursive batch; supports * and ?)
         \\  z2000 *.bmp .jp2 [options]                  (non-recursive BMP batch)
         \\  z2000 *.png .jp2 [options]                  (non-recursive PNG batch)
@@ -1728,6 +1866,8 @@ fn usage() void {
         \\  z2000 *.dng .jp2 [options]                  (non-recursive DNG batch)
         \\  z2000 *.exr .jp2 [options]                  (non-recursive OpenEXR batch)
         \\  z2000 *.jp2 .tif [options]                  (non-recursive reverse batch)
+        \\  z2000 *.j2k .pgx [options]                  (non-recursive raw component batch)
+        \\  z2000 *.j2k .zraw [options]                 (non-recursive exact all-component batch)
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
@@ -1741,11 +1881,15 @@ fn usage() void {
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
+        \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
+        \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.
         \\  Batch patterns apply only to filenames in one concrete directory; shell-expanded input lists are accepted too.
         \\  Existing targets follow single-file overwrite behavior.
+        \\  Raw PGX diagnostics write one selected codestream component; --component defaults to 0 and --pgx-order defaults to ML.
+        \\  ZRAW diagnostics preserve every native component, signedness, precision, sampling geometry, and origin in canonical big-endian form.
         \\  .z2000 is an educational codestream, not ISO JPEG2000 yet.
         \\  tiff-to-jp2 writes the selected checked progression profile; --debug-temp-sidecar adds the legacy BP8 COM payload for diagnostics.
         \\  --poc uses quoted ISO records: RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;... and supports tile-parts none or compatible R/L/C/P; --poc-location defaults to main.

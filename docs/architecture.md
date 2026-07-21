@@ -17,7 +17,11 @@ The ISO path is fail-closed. Marker parsing may recognize more syntax than the
 payload pipeline supports, but a profile is accepted only when its transform,
 quantization, T1, T2, tile, and container behavior agree end to end.
 
-`src/main.zig` owns CLI routing and conversion policy. `src/tiff.zig` and the
+`src/main.zig` owns CLI routing and conversion policy, while
+`src/cli_dispatch.zig` keeps extension inference independently testable.
+Raw `.j2k`/`.j2c` to PGX dispatch selects one native component, while ZRAW
+dispatch preserves every native plane and its geometry; neither assigns
+colour semantics. `src/tiff.zig` and the
 isolated format modules own source-file parsing; the bounded BMP adapter maps
 24/32-bit BI_RGB storage into the same owned `RgbImage` encode boundary.
 The PNG adapter maps checked gray/RGB/palette/alpha scanlines into the existing
@@ -50,9 +54,13 @@ origins/sampling, signedness, and every Part 1 precision from 1 through 38
 bits. Owned planes use `i64`, so neither unsigned 38-bit samples nor signed DC
 values require biasing into `u16`. Component count, reference pixels, and
 total native samples are checked before allocation. Range validation is
-explicit, and PGX serialization is available where the diagnostic format has
-an 8/16/32-bit storage container. The strict payload slice reconstructs single-
-and multi-tile reversible no-MCT signed/unsigned 8/16/20-bit components,
+explicit. PGX serialization is available where that diagnostic format has an
+8/16/32-bit storage container. The project-private ZRAW carrier instead stores
+all planes component-major with fixed metadata records and canonical
+big-endian 1/2/4/8-byte words, preserving the complete 1..38-bit native model.
+Its bounded parser validates reserved fields, dimensions, counts, sample
+ranges, and exact end-of-file before returning owned planes. The strict payload slice reconstructs single-
+and multi-tile reversible no-MCT signed/unsigned 1..29-bit components,
 including mixed component precision, through
 the production T2/T1/5/3 path directly into these planes. Each tile retains its
 absolute component grid during independent synthesis and checked assembly.
@@ -61,17 +69,22 @@ origins and dimensions while pruning discarded packet bodies before partial
 synthesis. Signed output receives no DC level shift; unsigned output receives
 `2^(precision-1)`. Reversible native decode is caller-limited up to the
 256-component strict metadata boundary and is independently pinned at 19
-components across four tiles. Component counts above 256 and precisions beyond
-the current 8/16/20-bit payload set remain fail-closed rather than being
-silently truncated; a 21-bit mutation pins the precision boundary. The legacy `u16`
+components across four tiles. Independent Kakadu fixtures pin
+5/8/12/16/19/20/29-bit T1/DWT payload reconstruction. The 29-bit four-tile
+fixture reaches the current `i32` T1 boundary: reversible HH can add two
+magnitude bits, while T1 admits at most 31. Native inverse lifting therefore
+uses `i64` sums with checked `i32` stores for both full and reduced synthesis.
+Component counts above 256 and precisions beyond 29 bits remain fail-closed
+rather than being silently truncated; a 30-bit mutation pins the precision boundary. The legacy `u16`
 decode surface deliberately still rejects signed input, accepts only 8/16-bit
 precision, and retains `color.max_components` (four).
 
-The first five strict-pipeline dynamization slices replace component-indexed
+The first six strict-pipeline dynamization slices replace component-indexed
 assembly, public block-catalog, packet-plan, geometry-set, and RPCL-index fixed
 arrays, the strict metadata header and its COC/QCC parser state, and persistent
-precinct-group slot tables with allocator-owned slices sized to the active
-component count.
+precinct-group slot tables, parallel component-job thread handles, and the
+generic irreversible decode working tables with allocator-owned slices sized
+to the active component count.
 Catalog `deinit` owns both the outer metadata/slice tables and every component's
 block/payload storage; packet plans and geometry sets likewise release their
 outer collections after all nested state. Precinct groups release every active
@@ -79,9 +92,11 @@ tag-tree/lblock group before their per-component and outer slot slices. Direct
 19-component tests pin storage, planning, SIZ parsing, persistent precinct
 state, and full/reduced multi-tile native assembly beyond the historical slot count. Metadata
 parsing is bounded at 256 components, matching the default native-sample limit
-and the Part 1 one-byte COC/QCC selector range. The remaining 16-slot parallel
-job tables belong to the generic irreversible path and are the next migration;
-legacy colour and encode carriers retain their intentional narrower bounds.
+and the Part 1 one-byte COC/QCC selector range. A direct 19-job regression pins
+the parallel runner beyond its historical slot count. Legacy colour and encode
+carriers retain their intentional narrower bounds; the generic irreversible
+output still uses the bounded legacy colour carrier and is not yet a public
+greater-than-four-component profile.
 
 Native component geometry is the strict decode boundary. Component upsampling
 is a separate operation: `decodeLosslessPlanarUpsampled` performs

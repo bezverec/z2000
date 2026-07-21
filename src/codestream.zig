@@ -33,6 +33,7 @@ pub const NativeCodestreamLayout = native_samples.CodestreamLayout;
 pub const NativeSamplePlanes = native_samples.SamplePlanes;
 pub const NativePgxByteOrder = native_samples.PgxByteOrder;
 pub const NativeSampleError = native_samples.NativeSampleError;
+pub const native_raw_planar_magic = native_samples.raw_planar_magic;
 
 pub fn inspectNativeCodestreamLayout(
     allocator: std.mem.Allocator,
@@ -40,6 +41,14 @@ pub fn inspectNativeCodestreamLayout(
     limits: NativeSampleLimits,
 ) !NativeCodestreamLayout {
     return native_samples.inspectCodestreamLayout(allocator, bytes, limits);
+}
+
+pub fn decodeNativeRawPlanar(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    limits: NativeSampleLimits,
+) !NativeSamplePlanes {
+    return native_samples.decodeRawPlanar(allocator, bytes, limits);
 }
 
 const Marker = enum(u16) {
@@ -75,7 +84,10 @@ pub const max_codestream_components = 16;
 /// strict-pipeline tables. Part 1 uses one-byte COC/QCC component selectors
 /// through 256 components, which is also the default native-sample limit.
 const max_strict_metadata_components: usize = 256;
-pub const max_native_payload_precision: u8 = 20;
+/// The i32 T1 carrier supports at most 31 magnitude bitplanes. Reversible
+/// HH coefficients can require two more bits than SIZ precision, so 29 is the
+/// highest native precision admitted by this generation of the pipeline.
+pub const max_native_payload_precision: u8 = 29;
 
 const temporary_magic_v0 = "ZJ2K-CBLK-BP0";
 const temporary_magic_v1 = "ZJ2K-CBLK-BP1";
@@ -1450,7 +1462,7 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
             .{ .plane = ict.planes[1], .quantized = cb, .width = ict.width, .bands = bands, .deltas = deltas },
             .{ .plane = ict.planes[2], .quantized = cr, .width = ict.width, .bands = bands, .deltas = deltas },
         };
-        try runComponentJobs(IrreversibleQuantizePlaneJob, jobs[0..], componentThreadCountFor(thread_count), irreversibleQuantizePlaneWorker);
+        try runComponentJobs(IrreversibleQuantizePlaneJob, allocator, jobs[0..], componentThreadCountFor(thread_count), irreversibleQuantizePlaneWorker);
     } else {
         // Serial/tile-worker path: each component's 9/7 DWT and deadzone
         // quantization is independent, so the three planes run as fused
@@ -1460,7 +1472,7 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
             .{ .plane = ict.planes[1], .quantized = cb, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
             .{ .plane = ict.planes[2], .quantized = cr, .width = ict.width, .height = ict.height, .levels = levels, .x0 = x0, .y0 = y0, .bands = bands, .deltas = deltas },
         };
-        try runComponentJobs(IrreversibleForwardPlaneJob, jobs[0..], thread_count, irreversibleForwardPlaneWorker);
+        try runComponentJobs(IrreversibleForwardPlaneJob, allocator, jobs[0..], thread_count, irreversibleForwardPlaneWorker);
     }
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
@@ -1652,16 +1664,18 @@ fn inverseComponents53(
 
 fn runComponentJobs(
     comptime Job: type,
+    allocator: std.mem.Allocator,
     jobs: []Job,
     thread_count: u8,
     comptime worker: fn (*Job) void,
 ) !void {
-    if (jobs.len == 0 or jobs.len > max_codestream_components or thread_count == 0) {
+    if (jobs.len == 0 or thread_count == 0) {
         return CodestreamError.InvalidCodestream;
     }
     const active_threads: usize = @min(@as(usize, thread_count), jobs.len);
     const spawn_count = active_threads - 1;
-    var threads: [max_codestream_components - 1]std.Thread = undefined;
+    const threads = try allocator.alloc(std.Thread, spawn_count);
+    defer allocator.free(threads);
     var spawned: usize = 0;
     while (spawned < spawn_count) : (spawned += 1) {
         threads[spawned] = std.Thread.spawn(.{}, worker, .{&jobs[spawned]}) catch |err| {
@@ -1677,6 +1691,20 @@ fn runComponentJobs(
 
     for (threads[0..spawned]) |thread| thread.join();
     for (jobs) |job| try job.result;
+}
+
+test "component job runner exceeds the legacy slot count" {
+    const Job = struct {
+        completed: bool = false,
+        result: anyerror!void = {},
+
+        fn run(job: *@This()) void {
+            job.completed = true;
+        }
+    };
+    var jobs = [_]Job{.{}} ** (max_codestream_components + 3);
+    try runComponentJobs(Job, std.testing.allocator, &jobs, 8, Job.run);
+    for (jobs) |job| try std.testing.expect(job.completed);
 }
 
 fn actualDwtLevels(width: usize, height: usize, requested_levels: u8) u8 {
@@ -3324,7 +3352,7 @@ pub fn decodeLosslessPlanarWithOptionsProfiled(
 /// no-MCT codestream directly into signed/unsigned i64 component planes.
 /// The strict packet/T1/DWT pipeline is shared with the legacy decoder, while
 /// DC level shifting follows each component's SIZ signedness. Current payload
-/// support is caller-limited up to 256 components at 8, 16, or 20 bits,
+/// support is caller-limited up to 256 components at 1 through 29 bits,
 /// including requested lower resolutions up to the codestream decomposition
 /// count. Independent interop coverage currently reaches 19 components.
 pub fn decodeLosslessNative(
@@ -3342,7 +3370,7 @@ pub fn decodeLosslessNativeWithOptions(
     limits: NativeSampleLimits,
 ) !NativeSamplePlanes {
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
-    var header = try readStrictCodestreamMetadata(allocator, bytes);
+    var header = try readStrictNativeCodestreamMetadata(allocator, bytes);
     defer header.deinit();
     if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     if (header.transform != .reversible_5_3 or header.quantization != .none or
@@ -3409,7 +3437,7 @@ pub fn decodeLosslessNativeWithOptions(
         var decoded_width = component_width;
         var decoded_height = component_height;
         if (options.resolution_reduction == 0) {
-            try wavelet_int.inverse53WithWorkspaceOrigin(
+            wavelet_int.inverse53CheckedWithWorkspaceOrigin(
                 &workspace,
                 coefficients,
                 component_width,
@@ -3417,9 +3445,12 @@ pub fn decodeLosslessNativeWithOptions(
                 header.levels,
                 catalog.component_x0[component],
                 catalog.component_y0[component],
-            );
+            ) catch |err| switch (err) {
+                wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                else => return err,
+            };
         } else {
-            const reduced = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+            const reduced = wavelet_int.inverse53ReducedCheckedWithWorkspaceOrigin(
                 &workspace,
                 coefficients,
                 component_width,
@@ -3428,7 +3459,10 @@ pub fn decodeLosslessNativeWithOptions(
                 options.resolution_reduction,
                 catalog.component_x0[component],
                 catalog.component_y0[component],
-            );
+            ) catch |err| switch (err) {
+                wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                else => return err,
+            };
             const compact = try compactTopLeftCoefficientPlane(
                 allocator,
                 coefficients,
@@ -3541,11 +3575,14 @@ fn upsamplePlanarNearestToReferenceGrid(
     const reference_height = std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream;
     const reference_x1 = std.math.add(u32, header.reference_x0, reference_width) catch return CodestreamError.InvalidCodestream;
     const reference_y1 = std.math.add(u32, header.reference_y0, reference_height) catch return CodestreamError.InvalidCodestream;
-    var component_depths = [_]u8{0} ** max_codestream_components;
-    var output_widths = [_]usize{0} ** max_codestream_components;
-    var output_heights = [_]usize{0} ** max_codestream_components;
-    @memset(output_widths[0..header.component_count], header.width);
-    @memset(output_heights[0..header.component_count], header.height);
+    const component_depths = try allocator.alloc(u8, header.component_count);
+    defer allocator.free(component_depths);
+    const output_widths = try allocator.alloc(usize, header.component_count);
+    defer allocator.free(output_widths);
+    const output_heights = try allocator.alloc(usize, header.component_count);
+    defer allocator.free(output_heights);
+    @memset(output_widths, header.width);
+    @memset(output_heights, header.height);
     for (0..header.component_count) |component| {
         component_depths[component] = native.componentBitDepth(component) orelse
             return CodestreamError.InvalidCodestream;
@@ -3555,9 +3592,9 @@ fn upsamplePlanarNearestToReferenceGrid(
         allocator,
         header.width,
         header.height,
-        component_depths[0..header.component_count],
-        output_widths[0..header.component_count],
-        output_heights[0..header.component_count],
+        component_depths,
+        output_widths,
+        output_heights,
     );
     errdefer output.deinit();
     const source_x_by_destination = try allocator.alloc(usize, header.width);
@@ -4018,7 +4055,7 @@ fn decodeTemporaryPayloadWithOptionsMeasured(
     @memset(cb, 0);
     @memset(cr, 0);
 
-    try readComponentPayloads(&cursor, y, cb, cr, width, header.version, header.layers, options);
+    try readComponentPayloads(allocator, &cursor, y, cb, cr, width, header.version, header.layers, options);
     _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
     if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(legacy_start);
@@ -4317,7 +4354,24 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
     return build.catalog;
 }
 
+const StrictPayloadPrecisionProfile = enum {
+    legacy,
+    native,
+};
+
 fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8) !TemporaryHeader {
+    return readStrictCodestreamMetadataForProfile(allocator, bytes, .legacy);
+}
+
+fn readStrictNativeCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8) !TemporaryHeader {
+    return readStrictCodestreamMetadataForProfile(allocator, bytes, .native);
+}
+
+fn readStrictCodestreamMetadataForProfile(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    precision_profile: StrictPayloadPrecisionProfile,
+) !TemporaryHeader {
     if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
@@ -4451,13 +4505,15 @@ fn readStrictCodestreamMetadata(allocator: std.mem.Allocator, bytes: []const u8)
                 tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
             };
             bit_depth = (segment[36] & 0x7f) + 1;
-            if (!isSupportedStrictPayloadPrecision(bit_depth)) return CodestreamError.UnsupportedPayload;
+            if (!isSupportedStrictPayloadPrecisionForProfile(bit_depth, precision_profile)) {
+                return CodestreamError.UnsupportedPayload;
+            }
             var component_index: usize = 0;
             while (component_index < component_count) : (component_index += 1) {
                 const component_offset = 36 + component_index * 3;
                 const ssiz = segment[component_offset];
                 const component_bit_depth = (ssiz & 0x7f) + 1;
-                if (!isSupportedStrictPayloadPrecision(component_bit_depth)) {
+                if (!isSupportedStrictPayloadPrecisionForProfile(component_bit_depth, precision_profile)) {
                     return CodestreamError.UnsupportedPayload;
                 }
                 component_bit_depths[component_index] = component_bit_depth;
@@ -5493,6 +5549,16 @@ fn headerHasSignedComponent(header: TemporaryHeader) bool {
 
 fn isSupportedStrictPayloadPrecision(precision: u8) bool {
     return precision == 8 or precision == 16 or precision == max_native_payload_precision;
+}
+
+fn isSupportedStrictPayloadPrecisionForProfile(
+    precision: u8,
+    profile: StrictPayloadPrecisionProfile,
+) bool {
+    return switch (profile) {
+        .legacy => isSupportedStrictPayloadPrecision(precision),
+        .native => precision >= 1 and precision <= max_native_payload_precision,
+    };
 }
 
 fn headerHasNonLegacyPrecision(header: TemporaryHeader) bool {
@@ -8014,9 +8080,12 @@ fn decodeStrictMultiTilePlanarMeasured(
     const reference_height = std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream;
     const reference_x1 = std.math.add(u32, header.reference_x0, reference_width) catch return CodestreamError.InvalidCodestream;
     const reference_y1 = std.math.add(u32, header.reference_y0, reference_height) catch return CodestreamError.InvalidCodestream;
-    var component_depths = [_]u8{0} ** max_codestream_components;
-    var component_widths = [_]usize{0} ** max_codestream_components;
-    var component_heights = [_]usize{0} ** max_codestream_components;
+    const component_depths = try allocator.alloc(u8, header.component_count);
+    defer allocator.free(component_depths);
+    const component_widths = try allocator.alloc(usize, header.component_count);
+    defer allocator.free(component_widths);
+    const component_heights = try allocator.alloc(usize, header.component_count);
+    defer allocator.free(component_heights);
     for (0..header.component_count) |component| {
         component_depths[component] = componentBitDepthForHeader(header, component);
         const component_x0 = ceilDivU32(header.reference_x0, header.component_xrsiz[component]);
@@ -8040,9 +8109,9 @@ fn decodeStrictMultiTilePlanarMeasured(
         allocator,
         if (sampled_rct) component_widths[0] else decoded_width,
         if (sampled_rct) component_heights[0] else decoded_height,
-        component_depths[0..header.component_count],
-        component_widths[0..header.component_count],
-        component_heights[0..header.component_count],
+        component_depths,
+        component_widths,
+        component_heights,
     );
     errdefer assembled.deinit();
 
@@ -8286,7 +8355,7 @@ fn decodeStrictMultiTileNative(
             var tile_width = source_width;
             var tile_height = source_height;
             if (options.resolution_reduction == 0) {
-                try wavelet_int.inverse53WithWorkspaceOrigin(
+                wavelet_int.inverse53CheckedWithWorkspaceOrigin(
                     &workspace,
                     coefficients,
                     source_width,
@@ -8294,9 +8363,12 @@ fn decodeStrictMultiTileNative(
                     tile_header.levels,
                     block_catalog.component_x0[component],
                     block_catalog.component_y0[component],
-                );
+                ) catch |err| switch (err) {
+                    wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                    else => return err,
+                };
             } else {
-                const reduced = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+                const reduced = wavelet_int.inverse53ReducedCheckedWithWorkspaceOrigin(
                     &workspace,
                     coefficients,
                     source_width,
@@ -8305,7 +8377,10 @@ fn decodeStrictMultiTileNative(
                     options.resolution_reduction,
                     block_catalog.component_x0[component],
                     block_catalog.component_y0[component],
-                );
+                ) catch |err| switch (err) {
+                    wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                    else => return err,
+                };
                 tile_width = reduced.width;
                 tile_height = reduced.height;
             }
@@ -8640,7 +8715,7 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
         .{ .quantized = quantized.planes[1], .plane = reconstructed.planes[1], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[bands.len .. 2 * bands.len], .reduction = resolution_reduction },
         .{ .quantized = quantized.planes[2], .plane = reconstructed.planes[2], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[2 * bands.len .. 3 * bands.len], .reduction = resolution_reduction },
     };
-    try runComponentJobs(IrreversibleInversePlaneJob, jobs[0..], componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
+    try runComponentJobs(IrreversibleInversePlaneJob, allocator, jobs[0..], componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
     const decoded_width = try reducedGridLength(header.reference_x0, header.width, resolution_reduction);
@@ -8695,7 +8770,8 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
         return CodestreamError.UnsupportedPayload;
     }
 
-    var component_depths = [_]u8{0} ** max_codestream_components;
+    const component_depths = try allocator.alloc(u8, header.component_count);
+    defer allocator.free(component_depths);
     for (0..header.component_count) |component| {
         component_depths[component] = componentBitDepthForHeader(header, component);
     }
@@ -8704,7 +8780,7 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
         allocator,
         header.width,
         header.height,
-        component_depths[0..header.component_count],
+        component_depths,
         catalog.component_widths[0..header.component_count],
         catalog.component_heights[0..header.component_count],
     );
@@ -8730,14 +8806,20 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
         allocator,
         header.width,
         header.height,
-        component_depths[0..header.component_count],
+        component_depths,
         catalog.component_widths[0..header.component_count],
         catalog.component_heights[0..header.component_count],
     );
     defer reconstructed.deinit();
 
-    var component_bands = [_][]subband.Band{&.{}} ** max_codestream_components;
-    var component_deltas = [_][]f64{&.{}} ** max_codestream_components;
+    const component_bands = try allocator.alloc([]subband.Band, header.component_count);
+    defer allocator.free(component_bands);
+    for (component_bands) |*bands| bands.* = &.{};
+    const component_deltas = try allocator.alloc([]f64, header.component_count);
+    defer allocator.free(component_deltas);
+    for (component_deltas) |*deltas| deltas.* = &.{};
+    const jobs = try allocator.alloc(IrreversibleInversePlaneJob, header.component_count);
+    defer allocator.free(jobs);
     var initialized: usize = 0;
     defer {
         for (0..initialized) |component| {
@@ -8745,7 +8827,6 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
             allocator.free(component_deltas[component]);
         }
     }
-    var jobs: [max_codestream_components]IrreversibleInversePlaneJob = undefined;
     while (initialized < header.component_count) {
         const component = initialized;
         const width_u32 = std.math.cast(u32, catalog.component_widths[component]) orelse
@@ -8804,15 +8885,18 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
     const wavelet_start = monotonicNs();
     try runComponentJobs(
         IrreversibleInversePlaneJob,
-        jobs[0..header.component_count],
+        allocator,
+        jobs,
         options.threads,
         irreversibleInversePlaneWorker,
     );
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
 
-    var output_widths = [_]usize{0} ** max_codestream_components;
-    var output_heights = [_]usize{0} ** max_codestream_components;
-    for (jobs[0..header.component_count], 0..) |job, component| {
+    const output_widths = try allocator.alloc(usize, header.component_count);
+    defer allocator.free(output_widths);
+    const output_heights = try allocator.alloc(usize, header.component_count);
+    defer allocator.free(output_heights);
+    for (jobs, 0..) |job, component| {
         const expected_width = try reducedGridLength(
             catalog.component_x0[component],
             catalog.component_widths[component],
@@ -8844,9 +8928,9 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
         allocator,
         decoded_width,
         decoded_height,
-        component_depths[0..header.component_count],
-        output_widths[0..header.component_count],
-        output_heights[0..header.component_count],
+        component_depths,
+        output_widths,
+        output_heights,
     );
     errdefer output.deinit();
 
@@ -11867,6 +11951,7 @@ const DecodeComponentPayloadJob = struct {
 };
 
 fn readComponentPayloads(
+    allocator: std.mem.Allocator,
     cursor: *Cursor,
     y: []i32,
     cb: []i32,
@@ -11889,7 +11974,7 @@ fn readComponentPayloads(
         .{ .bytes = slices[1], .plane = cb, .stride = stride, .component_index = 1, .payload_version = payload_version, .layer_count = layer_count },
         .{ .bytes = slices[2], .plane = cr, .stride = stride, .component_index = 2, .payload_version = payload_version, .layer_count = layer_count },
     };
-    try runComponentJobs(DecodeComponentPayloadJob, jobs[0..], componentThreadCountFor(options.threads), decodeComponentPayloadWorker);
+    try runComponentJobs(DecodeComponentPayloadJob, allocator, jobs[0..], componentThreadCountFor(options.threads), decodeComponentPayloadWorker);
 }
 
 fn readComponentPayloadSlices(cursor: *Cursor, payload_version: u8, layer_count: u16) ![3][]const u8 {
@@ -13263,7 +13348,7 @@ fn appendComponentPayloadsParallel(
     };
     defer for (&jobs) |*job| job.deinit();
 
-    try runComponentJobs(ComponentPayloadJob, jobs[0..], componentThreadCount(options), componentPayloadWorker);
+    try runComponentJobs(ComponentPayloadJob, allocator, jobs[0..], componentThreadCount(options), componentPayloadWorker);
     for (jobs) |job| try out.appendSlice(allocator, job.bytes);
 }
 
@@ -13726,7 +13811,7 @@ fn buildComponentRpclShadowCatalogs(
     };
     defer for (&jobs) |*job| job.deinit();
 
-    try runComponentJobs(ComponentCatalogJob, jobs[0..], componentThreadCount(options), componentCatalogWorker);
+    try runComponentJobs(ComponentCatalogJob, allocator, jobs[0..], componentThreadCount(options), componentCatalogWorker);
 
     var catalogs: [3]ComponentRpclShadowCatalog = undefined;
     for (&jobs, 0..) |*job, index| {

@@ -73,11 +73,14 @@ certification.
   layouts with caller-provided resource limits and preserves 1..38-bit
   signedness, arbitrary component counts, origins, and subsampling in dynamic
   `i64` planes. The bounded native payload path decodes single- and multi-tile
-  reversible no-MCT signed/unsigned 8/16/20-bit streams, including mixed
-  component precision, with 1..16 components at
-  full or requested lower DWT resolutions without DC-bias ambiguity; the legacy `u16` API remains
-  unsigned-only. Checked PGX diagnostics currently cover components up to
-  32-bit storage.
+  reversible no-MCT signed/unsigned 1..29-bit streams, including mixed
+  component precision, with caller-limited counts up to 256 components at
+  full or requested lower DWT resolutions without DC-bias ambiguity. Native
+  inverse 5/3 lifting uses checked `i64` intermediates before storing `i32`
+  coefficients; 29 bits is the T1/HH boundary and 30 bits fails closed. The legacy `u16` API remains
+  unsigned-only. Checked PGX diagnostics cover one component up to 32-bit
+  storage; canonical ZRAW preserves all components, signedness, 1..38-bit
+  precision, sampling geometry, and origins without narrowing.
 - Bounded component-subsampling decode with per-component SIZ `XRsiz/YRsiz`,
   reference-grid RPCL merging across unequal component precinct grids,
   component-local T1/DWT geometry, and variable-size planar output. Embedded
@@ -166,10 +169,10 @@ prefix the commands with `./zig-out/bin/`. The build installs the binary
 twice: as `z2000` and as the short alias `z2k` — every command works
 identically under both names. Conversions need no subcommand — the
 direction is inferred from the file extensions (`.tif`/`.tiff`, `.bmp`,
-`.png`, `.jpg`/`.jpeg`, `.dng`, `.exr`, and `.jp2`,
+`.png`, `.jpg`/`.jpeg`, `.dng`, `.exr`, `.jp2`, `.j2k`/`.j2c`, `.pgx`, and `.zraw`,
 case-insensitive); the explicit `tiff-to-jp2` and `decode-temp-jp2`
 subcommands keep working, as do `bmp-to-jp2`, `png-to-jp2`, and
-`jpeg-to-jp2`, `dng-to-jp2`, and `exr-to-jp2`. All commands
+`jpeg-to-jp2`, `dng-to-jp2`, `exr-to-jp2`, `j2k-to-pgx`, and `j2k-to-zraw`. All commands
 default to using every logical CPU thread; pass `--threads N` to limit the
 worker count.
 
@@ -248,6 +251,26 @@ z2k jp2-info output.jp2
 z2k jp2-stats output.jp2
 ```
 
+Decode one native component from a raw codestream to checked PGX. Component 0
+and big-endian `ML` output are the defaults; `--reduce` selects a lower DWT
+resolution directly:
+
+```sh
+z2k input.j2k component0.pgx
+z2k input.j2c component2-r1.pgx --component 2 --reduce 1 --pgx-order LM
+z2k *.j2k .pgx --component 0
+```
+
+Decode every native component without losing mixed precision, signedness,
+subsampling, or component origins. ZRAW is a canonical z2000 diagnostic
+container rather than a display image format:
+
+```sh
+z2k input.j2k all-components.zraw
+z2k input.j2c reduced.zraw --reduce 1
+z2k *.j2k .zraw --threads 4
+```
+
 Inspect TIFF or DNG metadata:
 
 ```sh
@@ -280,6 +303,10 @@ z2000 input.dng output.jp2 [options]
 z2000 dng-to-jp2 input.dng output.jp2 [options]
 z2000 input.exr output.jp2 [options]
 z2000 exr-to-jp2 input.exr output.jp2 [options]
+z2000 input.j2k output.pgx [--component N] [--reduce N] [--threads N] [--t1-backend BACKEND] [--pgx-order ML|LM]
+z2000 j2k-to-pgx input.j2c output.pgx [options]
+z2000 input.j2k output.zraw [--reduce N] [--threads N] [--t1-backend BACKEND]
+z2000 j2k-to-zraw input.j2c output.zraw [options]
 ```
 
 The DNG adapter accepts exactly one uncompressed, chunky, unsigned 8/16-bit
@@ -375,6 +402,15 @@ Other commands:
   keeps its historical name for compatibility and accepts --threads,
   --t1-backend, --convert-to-srgb, and --timings. ICC conversion is opt-in;
   without the flag, profile bytes and samples are preserved unchanged.
+- **j2k-to-pgx INPUT OUTPUT**: Decode one selected component from a raw `.j2k`
+  or `.j2c` codestream through the native reversible path. `--component`
+  defaults to 0, `--reduce` to 0, and `--pgx-order` to big-endian `ML`.
+  Extension shorthand and non-recursive unquoted batch syntax are supported.
+- **j2k-to-zraw INPUT OUTPUT**: Decode all components from a raw `.j2k` or
+  `.j2c` codestream into canonical big-endian ZRAW. Precision, signedness,
+  component-local dimensions, sampling steps, and origins are retained.
+  `--reduce`, `--threads`, and `--t1-backend` work in explicit, shorthand,
+  and non-recursive batch forms.
 
 The full profile matrix and internal API surface are documented in
 [API notes](docs/api.md).

@@ -143,9 +143,10 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 G0 is active. Its 2026-07-17 foundation includes an unscored broad capability
 matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
-Thirteen committed foreign-encoded streams cover sampled origins/POC and sampled
+Fifteen committed foreign-encoded streams cover sampled origins/POC and sampled
 multi-tile no-MCT 9/7 reduction,
-signed 8-bit single-/multi-tile, signed 20-bit, and mixed signed 8/16/20-bit
+signed 8-bit single-/multi-tile, signed 20-bit, and mixed signed 5/12/19-bit
+plus 8/16/20-bit
 full/reduced native decode, four-component
 CMYK, all T1 style bits, uniform
 COC/QCC, and padded multipart TLM; four mutations pin malformed and unsupported
@@ -153,7 +154,7 @@ fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 33-entry result of 22 decode passes and 11 expected fail-closed
+a complete 36-entry result of 25 decode passes and 11 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
 signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
@@ -196,27 +197,40 @@ bounded reversible no-MCT T1/DWT reconstruction and absolute native-grid
 assembly. A five-component, four-tile Kakadu stream additionally matches ten
 full/reduction-1 PGX references, and a 19-component four-tile stream now pins
 the caller-limited native path beyond the former 16-slot strict bound.
-An independent signed 20-bit Kakadu stream now matches full and reduction-1
-PGX output exactly, including both extrema, while a 21-bit mutation fails
-closed. A mixed signed 8/16/20-bit Kakadu stream additionally matches all six
+An independent signed 20-bit Kakadu stream matches full and reduction-1
+PGX output exactly, including both extrema. A mixed signed 8/16/20-bit Kakadu stream additionally matches all six
 component/reduction references exactly, proving component-local precision
-through T2/T1/DWT. Caller limits and the legacy four-component, unsigned 8/16-bit `u16`
-surface remain intact. Remaining dynamic strict structures plus sub-byte, mixed, and
-remaining precision breadth come next. The first five dynamic strict-storage
+through T2/T1/DWT. A second mixed signed 5/12/19-bit stream matches all six
+references exactly. A signed 29-bit four-tile Kakadu stream reaches the
+31-magnitude-bitplane T1/HH boundary and matches full/reduction-1 PGX exactly;
+checked `i64` inverse-lifting intermediates prevent `i32` overflow, while a
+30-bit mutation stays fail-closed. The native payload contract is therefore
+continuous across 1..29 bits. Caller limits and the
+legacy four-component, unsigned 8/16-bit `u16` surface remain intact. Precision
+above 29 bits require a wider T1 coefficient carrier. Remaining dynamic strict structures come next. The first six dynamic strict-storage
 slices have landed: component assembly, the public block catalog, component
 packet plans, geometry/index state, RPCL indexes, strict metadata, and
-persistent precinct groups now own exact-length allocator-backed slices.
+persistent precinct groups, parallel job handles, and generic irreversible
+working tables now own exact-length allocator-backed slices.
 Metadata parsing is independently capped at 256 components, with 19-component
 storage, planning, SIZ, active precinct-state, and full/reduced multi-tile
 native regressions. Reversible native decode is caller-limited through that
-metadata boundary; parallel irreversible job structures remain the next G1
-migration. Legacy colour and encode carriers remain intentionally narrower.
+metadata boundary; a direct 19-job regression also crosses the former runner
+limit. Legacy colour and encode carriers remain intentionally narrower, so the
+generic irreversible output is not yet a public high-component profile.
 Part 1 samples are integers;
 floating-point codestream samples and general multiple-component transforms
 belong to extension work rather than being smuggled into this milestone.
-Checked PGX exists for 8/16/32-bit storage; PAM/raw-planar output is still
-needed for combinations that PGX, TIFF, or a display conversion cannot
-represent faithfully.
+Checked PGX exists for 8/16/32-bit storage. Canonical all-component ZRAW now
+covers combinations that PGX, TIFF, or a display conversion cannot represent
+faithfully, including signed mixed precision and divergent component grids.
+PAM remains an optional bounded adapter for representable display-oriented
+layouts, not an exact-native substitute.
+The first G6 diagnostic surface now decodes one selected native component from
+raw `.j2k`/`.j2c` directly to PGX through explicit, extension-inferred, or
+non-recursive batch CLI syntax, with reduction and byte order kept explicit.
+The second surface writes all native components to exact ZRAW through the same
+dispatch forms and round-trips its self-describing metadata and payload.
 
 G2 and G3 replace the current byte-redundant/uniform override shortcuts with
 real component- and tile-local semantics. Unknown or profile-inapplicable

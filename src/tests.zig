@@ -1,5 +1,6 @@
 const std = @import("std");
 const batch = @import("batch.zig");
+const cli_dispatch = @import("cli_dispatch.zig");
 const bitplane = @import("bitplane.zig");
 const bmp = @import("formats/bmp.zig");
 const color = @import("color.zig");
@@ -109,6 +110,25 @@ test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
         planes.encodePgx(allocator, 4, .most_significant_first),
     );
 
+    const zraw = try planes.encodeRawPlanar(allocator);
+    defer allocator.free(zraw);
+    try std.testing.expect(std.mem.startsWith(u8, zraw, native_samples.raw_planar_magic));
+    var round_trip = try codestream.decodeNativeRawPlanar(
+        allocator,
+        zraw,
+        .{ .max_components = 8, .max_reference_pixels = 1024, .max_total_component_samples = 4096 },
+    );
+    defer round_trip.deinit();
+    try std.testing.expectEqual(planes.reference_x0, round_trip.reference_x0);
+    try std.testing.expectEqual(planes.reference_y0, round_trip.reference_y0);
+    try std.testing.expectEqual(planes.reference_x1, round_trip.reference_x1);
+    try std.testing.expectEqual(planes.reference_y1, round_trip.reference_y1);
+    try std.testing.expectEqual(planes.componentCount(), round_trip.componentCount());
+    for (planes.planes, round_trip.planes) |expected, actual| {
+        try std.testing.expectEqualDeep(expected.layout, actual.layout);
+        try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+    }
+
     planes.planes[1].samples[0] = -2049;
     try std.testing.expectError(native_samples.NativeSampleError.SampleOutOfRange, planes.validateSamples());
     try std.testing.expectError(
@@ -141,6 +161,125 @@ test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
     try std.testing.expectEqual(@as(usize, 3), signed_foreign_layout.components.len);
     try std.testing.expectEqual(@as(u8, 8), signed_foreign_layout.components[0].precision);
     try std.testing.expect(signed_foreign_layout.components[0].signed);
+}
+
+test "checked native inverse 5 3 matches ordinary synthesis and rejects i32 overflow" {
+    const allocator = std.testing.allocator;
+    const width = 9;
+    const height = 7;
+    const x0 = 3;
+    const y0 = 5;
+    var source: [width * height]i32 = undefined;
+    for (&source, 0..) |*sample, index| {
+        sample.* = @as(i32, @intCast((index * 37 + 11) % 4096)) - 2048;
+    }
+    var coefficients = source;
+    var workspace = try wavelet_int.Workspace.init(allocator, @max(width, height));
+    defer workspace.deinit();
+    const levels = try wavelet_int.forward53WithWorkspaceOrigin(
+        &workspace,
+        &coefficients,
+        width,
+        height,
+        2,
+        x0,
+        y0,
+    );
+    try std.testing.expectEqual(@as(u8, 2), levels);
+
+    var ordinary = coefficients;
+    var checked = coefficients;
+    try wavelet_int.inverse53WithWorkspaceOrigin(&workspace, &ordinary, width, height, levels, x0, y0);
+    try wavelet_int.inverse53CheckedWithWorkspaceOrigin(&workspace, &checked, width, height, levels, x0, y0);
+    try std.testing.expectEqualSlices(i32, &source, &ordinary);
+    try std.testing.expectEqualSlices(i32, &ordinary, &checked);
+
+    var ordinary_reduced = coefficients;
+    var checked_reduced = coefficients;
+    const ordinary_shape = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+        &workspace,
+        &ordinary_reduced,
+        width,
+        height,
+        levels,
+        1,
+        x0,
+        y0,
+    );
+    const checked_shape = try wavelet_int.inverse53ReducedCheckedWithWorkspaceOrigin(
+        &workspace,
+        &checked_reduced,
+        width,
+        height,
+        levels,
+        1,
+        x0,
+        y0,
+    );
+    try std.testing.expectEqualDeep(ordinary_shape, checked_shape);
+    for (0..ordinary_shape.height) |row| {
+        const start = row * width;
+        try std.testing.expectEqualSlices(
+            i32,
+            ordinary_reduced[start..][0..ordinary_shape.width],
+            checked_reduced[start..][0..checked_shape.width],
+        );
+    }
+
+    var overflowing = [_]i32{ std.math.minInt(i32), std.math.maxInt(i32) };
+    try std.testing.expectError(
+        wavelet_int.TransformError.CoefficientOverflow,
+        wavelet_int.inverse53CheckedWithWorkspaceOrigin(&workspace, &overflowing, 2, 1, 1, 0, 0),
+    );
+}
+
+test "ZRAW parser rejects malformed metadata payload boundaries and noncanonical samples" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-mixed-signed-5-12-19.j2c");
+    var planes = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer planes.deinit();
+    const zraw = try planes.encodeRawPlanar(allocator);
+    defer allocator.free(zraw);
+
+    try std.testing.expectError(
+        native_samples.NativeSampleError.ResourceLimitExceeded,
+        native_samples.decodeRawPlanar(allocator, zraw, .{ .max_components = 2 }),
+    );
+    try std.testing.expectError(
+        native_samples.NativeSampleError.InvalidCodestream,
+        native_samples.decodeRawPlanar(allocator, zraw[0 .. zraw.len - 1], .{}),
+    );
+    const trailing = try std.mem.concat(allocator, u8, &.{ zraw, &.{0} });
+    defer allocator.free(trailing);
+    try std.testing.expectError(
+        native_samples.NativeSampleError.InvalidCodestream,
+        native_samples.decodeRawPlanar(allocator, trailing, .{}),
+    );
+
+    const mutations = [_]struct { offset: usize, value: u8 }{
+        .{ .offset = 0, .value = 'X' },
+        .{ .offset = 27, .value = 1 },
+        .{ .offset = 29, .value = 0x80 },
+        .{ .offset = 55, .value = 0xff },
+    };
+    for (mutations) |mutation| {
+        const malformed = try allocator.dupe(u8, zraw);
+        defer allocator.free(malformed);
+        malformed[mutation.offset] = mutation.value;
+        try std.testing.expectError(
+            native_samples.NativeSampleError.InvalidCodestream,
+            native_samples.decodeRawPlanar(allocator, malformed, .{}),
+        );
+    }
+
+    const noncanonical = try allocator.dupe(u8, zraw);
+    defer allocator.free(noncanonical);
+    const payload_start = 28 + planes.componentCount() * 28;
+    noncanonical[payload_start] = 0x10;
+    try std.testing.expectError(
+        native_samples.NativeSampleError.InvalidCodestream,
+        native_samples.decodeRawPlanar(allocator, noncanonical, .{}),
+    );
 }
 
 test "Kakadu signed 8-bit reversible codestream decodes into native samples" {
@@ -479,10 +618,72 @@ test "Kakadu signed 20-bit codestream decodes only through the native payload pa
     defer allocator.free(unsupported_precision);
     const siz = findMarker(unsupported_precision, codestream.markerValue("siz")) orelse
         return error.MissingMarker;
-    unsupported_precision[siz + 40] = 0x94;
+    unsupported_precision[siz + 40] = 0x9d;
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.decodeLosslessNative(allocator, unsupported_precision, .{}),
+    );
+}
+
+test "Kakadu signed 29-bit multitile codestream reaches the checked i32 boundary" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-signed-29bit-multitile.j2c");
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 1), layout.components.len);
+    try std.testing.expectEqual(@as(u8, 29), layout.components[0].precision);
+    try std.testing.expect(layout.components[0].signed);
+    try std.testing.expectEqual(@as(u32, 8), layout.tile_width);
+    try std.testing.expectEqual(@as(u32, 8), layout.tile_height);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+        .{},
+    );
+    defer full.deinit();
+    try std.testing.expectEqual(@as(i64, -268435456), full.planes[0].samples[0]);
+    try std.testing.expectEqual(@as(i64, 268435455), full.planes[0].samples[255]);
+    const full_pgx = try full.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(full_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-29bit-multitile-reference.pgx"),
+        full_pgx,
+    );
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    const reduced_pgx = try reduced.encodePgx(allocator, 0, .least_significant_first);
+    defer allocator.free(reduced_pgx);
+    try std.testing.expectEqualSlices(
+        u8,
+        @embedFile("testdata/kakadu-signed-29bit-multitile-r1-reference.pgx"),
+        reduced_pgx,
+    );
+
+    var reduced_serial = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced_serial.deinit();
+    try std.testing.expectEqualSlices(
+        i64,
+        reduced_serial.planes[0].samples,
+        reduced.planes[0].samples,
     );
 }
 
@@ -526,6 +727,81 @@ test "Kakadu mixed signed 8 16 20-bit codestream preserves component precision" 
     try std.testing.expectEqual(@as(i64, 127), full.planes[0].samples[255]);
     try std.testing.expectEqual(@as(i64, 32767), full.planes[1].samples[255]);
     try std.testing.expectEqual(@as(i64, 524287), full.planes[2].samples[255]);
+    for (full_references, 0..) |reference, component| {
+        const pgx = try full.encodePgx(allocator, component, .least_significant_first);
+        defer allocator.free(pgx);
+        try std.testing.expectEqualSlices(u8, reference, pgx);
+    }
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    for (reduced_references, 0..) |reference, component| {
+        const pgx = try reduced.encodePgx(allocator, component, .least_significant_first);
+        defer allocator.free(pgx);
+        try std.testing.expectEqualSlices(u8, reference, pgx);
+    }
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer parallel.deinit();
+    for (0..3) |component| {
+        try std.testing.expectEqualSlices(
+            i64,
+            reduced.planes[component].samples,
+            parallel.planes[component].samples,
+        );
+    }
+}
+
+test "Kakadu mixed signed 5 12 19-bit codestream spans native precision ranges" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-mixed-signed-5-12-19.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-signed-5-12-19-full-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-signed-5-12-19-full-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-signed-5-12-19-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-signed-5-12-19-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-signed-5-12-19-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-signed-5-12-19-r1-c2.pgx"),
+    };
+
+    var layout = try codestream.inspectNativeCodestreamLayout(allocator, bytes, .{});
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(usize, 3), layout.components.len);
+    try std.testing.expectEqualSlices(u8, &.{ 5, 12, 19 }, &.{
+        layout.components[0].precision,
+        layout.components[1].precision,
+        layout.components[2].precision,
+    });
+    for (layout.components) |component| try std.testing.expect(component.signed);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer full.deinit();
+    try std.testing.expectEqualSlices(i64, &.{ -16, -2048, -262144 }, &.{
+        full.planes[0].samples[0],
+        full.planes[1].samples[0],
+        full.planes[2].samples[0],
+    });
+    try std.testing.expectEqualSlices(i64, &.{ 15, 2047, 262143 }, &.{
+        full.planes[0].samples[255],
+        full.planes[1].samples[255],
+        full.planes[2].samples[255],
+    });
     for (full_references, 0..) |reference, component| {
         const pgx = try full.encodePgx(allocator, component, .least_significant_first);
         defer allocator.free(pgx);
@@ -1214,6 +1490,32 @@ test "batch filename globs are bounded case-insensitive and non-recursive" {
     try std.testing.expect(!batch.matches("*.tif", "nested/scan.tif"));
     try std.testing.expect(batch.hasWildcards("*.jp2"));
     try std.testing.expect(!batch.hasWildcards("scan.jp2"));
+}
+
+test "CLI extension dispatch recognizes raw codestream PGX diagnostics" {
+    try std.testing.expectEqual(
+        cli_dispatch.InferredConversion.j2k_to_pgx,
+        cli_dispatch.inferConversionExtensions(".j2k", ".pgx").?,
+    );
+    try std.testing.expectEqual(
+        cli_dispatch.InferredConversion.j2k_to_pgx,
+        cli_dispatch.inferConversionExtensions(".J2C", ".PGX").?,
+    );
+    try std.testing.expect(cli_dispatch.inferConversionExtensions(".jp2", ".pgx") == null);
+    try std.testing.expect(cli_dispatch.inferConversionExtensions(".j2k", ".tif") == null);
+}
+
+test "CLI extension dispatch recognizes exact all-component ZRAW diagnostics" {
+    try std.testing.expectEqual(
+        cli_dispatch.InferredConversion.j2k_to_zraw,
+        cli_dispatch.inferConversionExtensions(".j2k", ".zraw").?,
+    );
+    try std.testing.expectEqual(
+        cli_dispatch.InferredConversion.j2k_to_zraw,
+        cli_dispatch.inferConversionExtensions(".J2C", ".ZRAW").?,
+    );
+    try std.testing.expect(cli_dispatch.inferConversionExtensions(".jp2", ".zraw") == null);
+    try std.testing.expect(cli_dispatch.inferConversionExtensions(".j2k", ".raw") == null);
 }
 
 test "batch plan sorts matches derives targets and rejects collisions" {
