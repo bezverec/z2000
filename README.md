@@ -43,10 +43,11 @@ certification.
 - Strict foreign ICT/9-7 decode consumes bounded component-specific QCC steps;
   full and reduced output is pinned against a genuinely divergent Kakadu
   fixture, and the conformance API can expose reduced pre-ICT components.
-- Strict native reversible no-MCT decode accepts bounded single-tile COC divergence
-  in decomposition count and precinct geometry. A Kakadu 3/2/1-level fixture
-  matches every component exactly at full resolution and reduction 1; local
-  block style/transform and tile-header divergence remain fail-closed.
+- Strict native reversible no-MCT decode accepts bounded single-tile COC
+  divergence in decomposition count, precinct geometry, code-block dimensions,
+  and T1 style. Kakadu fixtures match every component exactly at full
+  resolution and reduction 1; component-local transform, general B.7 block
+  clamping, and tile-header divergence remain fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,

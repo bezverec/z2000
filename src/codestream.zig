@@ -2516,6 +2516,8 @@ const StrictComponentGeometry = struct {
     y0: u32,
     xrsiz: u8,
     yrsiz: u8,
+    block_width: u16,
+    block_height: u16,
 
     fn deinit(self: *StrictComponentGeometry) void {
         self.rpcl_index.deinit();
@@ -2582,12 +2584,16 @@ const StrictComponentGeometrySet = struct {
         for (0..header.component_count) |component| {
             const component_plan = component_plans.components[component];
             const component_levels = component_plan.plan.resolution_count - 1;
+            const component_block_width = componentBlockWidthForHeader(header, component);
+            const component_block_height = componentBlockHeightForHeader(header, component);
             const xrsiz = component_plan.xrsiz;
             const yrsiz = component_plan.yrsiz;
 
             var existing_index: ?usize = null;
             for (set.geometries[0..set.initialized], 0..) |geometry, geometry_index| {
                 if (geometry.xrsiz == xrsiz and geometry.yrsiz == yrsiz and
+                    geometry.block_width == component_block_width and
+                    geometry.block_height == component_block_height and
                     strictPacketPlanGeometryEqual(geometry.plan, component_plan.plan))
                 {
                     existing_index = geometry_index;
@@ -2604,7 +2610,13 @@ const StrictComponentGeometrySet = struct {
 
             const bands = try makeBandsForPacketPlan(allocator, plan, component_levels);
             errdefer allocator.free(bands);
-            const blocks = try makeCodeBlocksForPacketPlan(allocator, bands, header.block_width, header.block_height, plan);
+            const blocks = try makeCodeBlocksForPacketPlan(
+                allocator,
+                bands,
+                component_block_width,
+                component_block_height,
+                plan,
+            );
             errdefer allocator.free(blocks);
             var rpcl_index = try buildRpclBlockIndex(allocator, plan, 1, component_levels, bands, blocks);
             errdefer rpcl_index.deinit();
@@ -2622,6 +2634,8 @@ const StrictComponentGeometrySet = struct {
                 .y0 = full.y0,
                 .xrsiz = xrsiz,
                 .yrsiz = yrsiz,
+                .block_width = component_block_width,
+                .block_height = component_block_height,
             };
             set.component_geometry_indexes[component] = geometry_index;
             set.initialized += 1;
@@ -4665,6 +4679,10 @@ fn readStrictCodestreamMetadataForProfile(
                 coding.levels = levels;
                 coding.precinct_count = precinct_count;
                 @memcpy(coding.precincts[0..precinct_count], precincts[0..precinct_count]);
+                coding.block_width = block_width;
+                coding.block_height = block_height;
+                coding.code_block_style = parsed_code_block_style;
+                coding.transform = parsed_transform;
             }
             saw_cod = true;
             // Part 1 permits QCD before COD in the main header (the T.803
@@ -4734,6 +4752,10 @@ fn readStrictCodestreamMetadataForProfile(
             const coding = &component_coding[coc_component];
             coding.levels = spcoc[0];
             coding.precinct_count = coding.levels + 1;
+            coding.block_width = try codeBlockSizeFromCodExponent(spcoc[1]);
+            coding.block_height = try codeBlockSizeFromCodExponent(spcoc[2]);
+            coding.code_block_style = try parseCodeBlockStyleByte(spcoc[3]);
+            coding.transform = @enumFromInt(spcoc[4]);
             if ((segment[1] & 0x01) == 0) {
                 for (coding.precincts[0..coding.precinct_count]) |*precinct| {
                     precinct.* = .{ .width = 32768, .height = 32768 };
@@ -4824,14 +4846,16 @@ fn readStrictCodestreamMetadataForProfile(
         const override_block_height = try codeBlockSizeFromCodExponent(spcoc[2]);
         const override_style = try parseCodeBlockStyleByte(spcoc[3]);
         const override_transform: WaveletTransform = @enumFromInt(spcoc[4]);
-        const changes_common_coding = override_block_width != block_width or
-            override_block_height != block_height or !std.meta.eql(override_style, parsed_code_block_style) or
-            override_transform != parsed_transform;
-        if (changes_common_coding) {
-            if (!coc_payloads_uniform) return CodestreamError.UnsupportedPayload;
-            for (coc_component_seen[0..component_count]) |seen| {
-                if (!seen) return CodestreamError.UnsupportedPayload;
-            }
+        var all_components_overridden = true;
+        for (coc_component_seen[0..component_count]) |seen| {
+            all_components_overridden = all_components_overridden and seen;
+        }
+        if (override_transform != parsed_transform and
+            (!coc_payloads_uniform or !all_components_overridden))
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+        if (coc_payloads_uniform and all_components_overridden) {
             block_width = override_block_width;
             block_height = override_block_height;
             parsed_code_block_style = override_style;
@@ -4843,6 +4867,7 @@ fn readStrictCodestreamMetadataForProfile(
     var max_levels_component: usize = 0;
     for (component_coding[0..component_count], 0..) |coding, component| {
         if (coding.precinct_count != coding.levels + 1) return CodestreamError.InvalidCodestream;
+        if (coding.transform != parsed_transform) return CodestreamError.UnsupportedPayload;
         if (coding.levels > max_levels) {
             max_levels = coding.levels;
             max_levels_component = component;
@@ -4972,6 +4997,26 @@ fn readStrictCodestreamMetadataForProfile(
         grid.params.xosiz,
         grid.params.yosiz,
     );
+    if (component_coding_divergent) {
+        for (component_coding[0..component_count]) |coding| {
+            var component_options = options;
+            component_options.levels = coding.levels;
+            component_options.block_width = coding.block_width;
+            component_options.block_height = coding.block_height;
+            component_options.precinct_count = coding.precinct_count;
+            @memcpy(
+                component_options.precincts[0..coding.precinct_count],
+                coding.precincts[0..coding.precinct_count],
+            );
+            try validateDecodePrecinctBlockSpans(
+                component_options,
+                width,
+                height,
+                grid.params.xosiz,
+                grid.params.yosiz,
+            );
+        }
+    }
     var ppm_headers: ?ppm.PackedHeaders = if (ppm_collector.expected_index != 0)
         ppm_collector.finish() catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -5691,7 +5736,11 @@ fn componentCodingSliceForHeader(header: TemporaryHeader) ?[]const StrictCompone
     if (header.component_coding.len < header.component_count) return null;
     const coding = header.component_coding[0..header.component_count];
     for (coding) |component| {
-        if (component.precinct_count == 0 or component.precinct_count != component.levels + 1) return null;
+        if (component.precinct_count == 0 or component.precinct_count != component.levels + 1 or
+            component.block_width == 0 or component.block_height == 0)
+        {
+            return null;
+        }
     }
     return coding;
 }
@@ -5706,6 +5755,32 @@ fn componentLevelsForHeader(header: TemporaryHeader, component: usize) u8 {
     return header.levels;
 }
 
+fn componentBlockWidthForHeader(header: TemporaryHeader, component: usize) u16 {
+    if (component < header.component_count and header.component_coding.len >= header.component_count) {
+        const width = header.component_coding[component].block_width;
+        if (width != 0) return width;
+    }
+    return header.block_width;
+}
+
+fn componentBlockHeightForHeader(header: TemporaryHeader, component: usize) u16 {
+    if (component < header.component_count and header.component_coding.len >= header.component_count) {
+        const height = header.component_coding[component].block_height;
+        if (height != 0) return height;
+    }
+    return header.block_height;
+}
+
+fn componentCodeBlockStyleForHeader(header: TemporaryHeader, component: usize) ebcot.CodeBlockStyle {
+    if (component < header.component_count and header.component_coding.len >= header.component_count and
+        header.component_coding[component].block_width != 0 and
+        header.component_coding[component].block_height != 0)
+    {
+        return header.component_coding[component].code_block_style;
+    }
+    return header.code_block_style;
+}
+
 fn headerHasComponentCodingDivergence(header: TemporaryHeader) bool {
     const coding = componentCodingSliceForHeader(header) orelse return false;
     return strictComponentCodingDiverges(coding);
@@ -5715,7 +5790,13 @@ fn strictComponentCodingDiverges(coding: []const StrictComponentCoding) bool {
     if (coding.len < 2) return false;
     const first = coding[0];
     for (coding[1..]) |component| {
-        if (component.levels != first.levels or component.precinct_count != first.precinct_count) return true;
+        if (component.levels != first.levels or component.precinct_count != first.precinct_count or
+            component.block_width != first.block_width or component.block_height != first.block_height or
+            !std.meta.eql(component.code_block_style, first.code_block_style) or
+            component.transform != first.transform)
+        {
+            return true;
+        }
         for (component.precincts[0..component.precinct_count], first.precincts[0..first.precinct_count]) |a, b| {
             if (a.width != b.width or a.height != b.height) return true;
         }
@@ -6878,7 +6959,10 @@ fn initializeStrictAssemblyGeometry(
             dwtLevelsFromBands(bands),
         );
         block.encoded_bitplanes = 0;
-        block.code_block_style = codeBlockStyleForBand(header.code_block_style, bands[source.band_index].kind);
+        block.code_block_style = codeBlockStyleForBand(
+            componentCodeBlockStyleForHeader(header, component),
+            bands[source.band_index].kind,
+        );
     }
 }
 
@@ -7105,15 +7189,18 @@ fn buildStrictPacketAuditBandGroup(
     component: usize,
 ) !StrictPacketAuditBandGroup {
     if (selected.len == 0) return CodestreamError.InvalidCodestream;
+    const block_width = componentBlockWidthForHeader(header, component);
+    const block_height = componentBlockHeightForHeader(header, component);
+    const code_block_style = componentCodeBlockStyleForHeader(header, component);
     const grid = try t2.CodeBlockGrid.initAnchored(
         band.rect.x,
         band.rect.y,
         band.rect.width,
         band.rect.height,
-        header.block_width,
-        header.block_height,
-        @as(usize, band.origin_x) % header.block_width,
-        @as(usize, band.origin_y) % header.block_height,
+        block_width,
+        block_height,
+        @as(usize, band.origin_x) % block_width,
+        @as(usize, band.origin_y) % block_height,
     );
 
     var min_x: usize = std.math.maxInt(usize);
@@ -7161,8 +7248,8 @@ fn buildStrictPacketAuditBandGroup(
 
     var reader_state = try t2.PrecinctPacketReaderState.initWithLayerCount(allocator, leaves_x, leaves_y, leaf_count, header.layers);
     errdefer reader_state.deinit();
-    reader_state.bypass = header.code_block_style.bypass;
-    reader_state.terminate_all = header.code_block_style.terminate_all;
+    reader_state.bypass = code_block_style.bypass;
+    reader_state.terminate_all = code_block_style.terminate_all;
     const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
     errdefer allocator.free(decoded);
 
@@ -12222,6 +12309,10 @@ const StrictComponentCoding = struct {
     levels: u8 = 0,
     precinct_count: u8 = 0,
     precincts: [33]PrecinctSize = defaultPrecincts(),
+    block_width: u16 = 0,
+    block_height: u16 = 0,
+    code_block_style: ebcot.CodeBlockStyle = .{},
+    transform: WaveletTransform = .reversible_5_3,
 };
 
 const temporary_component_coding = [_]StrictComponentCoding{.{}} ** max_codestream_components;

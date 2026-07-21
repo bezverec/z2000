@@ -154,13 +154,15 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Eighteen foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Nineteen foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
   component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
   8/16/20-bit, independently sampled signed 7/13/23-bit native decode, and
   genuinely divergent ICT/9-7 QCC, and reversible no-MCT components with
-  decomposition counts 3/2/1 plus component-local precinct geometry. Six mutations
+  decomposition counts 3/2/1 plus component-local precinct geometry, and
+  component-local 4x4/default, 8x8/RESET, and 4x16/CAUSAL+SEGMARK block
+  profiles. Seven mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
 - Each entry selects the real legacy-planar, generic-native, or interleaved RGB
@@ -367,10 +369,18 @@ thread output. Reduction above the minimum component level, duplicate COC, and
 a divergent transform fail closed. This bounded slice remains single-tile,
 no-MCT, reversible, and common-code-block/style only.
 
-The next G2 slice is component-local code-block geometry/style where legal,
-followed by tile-header overrides and broader transform/quantization
-combinations. General B.7 code-block clamping remains a separate prerequisite
-for precinct spans smaller than the nominal code block.
+The third G2 slice is complete: a second reversible no-MCT Kakadu stream keeps
+NL=3 and common 32x32 precincts while assigning component-local 4x4/default,
+8x8/RESET, and 4x16/CAUSAL+SEGMARK code-block profiles. Geometry construction,
+packet-header state, T1 metadata, and sequential/parallel reconstruction use
+the effective component block dimensions and style. All six full/reduction-1
+PGX references match exactly. A reserved style bit is malformed, and a
+component-local 64-wide block that requires B.7 clamping remains fail-closed.
+
+The next G2 slice is tile-header coding/quantization overrides, followed by
+broader component-local transform/quantization combinations. General B.7
+code-block clamping remains a separate prerequisite for precinct spans smaller
+than the nominal code block.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,
