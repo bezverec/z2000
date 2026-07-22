@@ -154,7 +154,7 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Twenty-one foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Twenty-two foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
   component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
@@ -163,7 +163,8 @@ The foundation landed on 2026-07-17:
   decomposition counts 3/2/1 plus component-local precinct geometry, and
   component-local 4x4/default, 8x8/RESET, and 4x16/CAUSAL+SEGMARK block
   profiles, plus four-tile streams with local `COD/QCD` and component-specific
-  `COC/QCC` decomposition/block/band-table overrides. Nine mutations
+  `COC/QCC` decomposition/block/band-table overrides, including inherited
+  state across RPCL resolution parts and empty padding parts. Ten mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
 - Each entry selects the real legacy-planar, generic-native, or interleaved RGB
@@ -396,8 +397,16 @@ references are exact and one/eight-thread output agrees. Reduction above the
 overridden component level, a divergent COC transform, and reserved QCC style
 bits fail closed.
 
-The next G2 slices add legal multi-part and packed-header combinations, then
-broader component-local transform/quantization choices.
+The sixth G2 slice is complete: Kakadu divides the fifth slice into three
+non-empty RPCL resolution parts plus three empty padding parts per tile. The
+first-part tile/component override persists through every continuation part;
+per-tile packet cursors, PLT accounting, and T2 state join the parts before
+T1/DWT reconstruction. Full and reduction-1 output remains exact against the
+same six Kakadu PGX references. A corpus mutation duplicates the fifth SOT's
+`TPsot` and fails before inherited state can be reused.
+
+The next G2 slice adds packed-header combinations, followed by broader
+component-local transform/quantization choices.
 General B.7 code-block clamping remains a separate prerequisite for precinct
 spans smaller than the nominal code block.
 

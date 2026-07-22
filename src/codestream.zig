@@ -11883,7 +11883,7 @@ fn readStrictMultiTileTilePartSpans(
         const has_coding_override = coding_override.saw_cod or coding_override.saw_qcd or
             coding_override.components.items.len != 0;
         if (has_coding_override and
-            (sot.tile_part_count != 1 or packed_headers.items.len != 0 or external_headers != null or
+            (packed_headers.items.len != 0 or external_headers != null or
                 tile_poc_records[tile_index].items.len != 0 or transform != .reversible_5_3 or
                 mct != .none or options.progression != .rpcl))
         {

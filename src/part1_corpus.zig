@@ -32,7 +32,7 @@ const InputFormat = enum { jp2, j2k };
 const Decoder = enum { planar, native, interleaved_rgb };
 const Expectation = enum { decode_pass, fail_closed };
 const ReferenceSpace = enum { output_components, codestream_components };
-const Marker = enum { siz, cod, coc, qcd, qcc, tlm, poc };
+const Marker = enum { siz, cod, coc, qcd, qcc, tlm, poc, sot };
 
 const Reference = struct {
     path: []const u8,
@@ -681,6 +681,7 @@ fn applyPatches(stream: []u8, patches: []const Patch) !void {
             .qcc => codestream.markerValue("qcc"),
             .tlm => codestream.markerValue("tlm"),
             .poc => codestream.markerValue("poc"),
+            .sot => codestream.markerValue("sot"),
         };
         const marker_bytes = [2]u8{ @intCast(marker_value >> 8), @intCast(marker_value & 0xff) };
         var marker_index: usize = 0;

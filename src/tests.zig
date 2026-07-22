@@ -758,6 +758,88 @@ test "Kakadu tile-header COC and QCC overrides decode exactly" {
     );
 }
 
+test "Kakadu tile-header COC and QCC overrides persist across resolution parts" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-tile-coc-qcc-rparts.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-c0.pgx"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-c1.pgx"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-r1-c2.pgx"),
+    };
+
+    // Kakadu emits three non-empty resolution parts and three empty padding
+    // parts per tile. COC/QCC occurs only in tile 1 part 0 and remains
+    // effective while the later parts continue that tile's packet sequence.
+    try std.testing.expectEqual(@as(usize, 24), countMarker(bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 12), countMarker(bytes, codestream.markerValue("plt")));
+    try std.testing.expectEqual(@as(usize, 1), countMarker(bytes, codestream.markerValue("coc")));
+    try std.testing.expectEqual(@as(usize, 1), countMarker(bytes, codestream.markerValue("qcc")));
+
+    var catalog = try codestream.readStrictPacketCatalog(allocator, bytes);
+    defer catalog.deinit();
+    try std.testing.expect(catalog.entries.len > 0);
+
+    var full = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+        .{},
+    );
+    defer full.deinit();
+    for (full_references, 0..) |reference, component| {
+        const encoded = try full.encodePgx(allocator, component, .most_significant_first);
+        defer allocator.free(encoded);
+        const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+        const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+        try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+    }
+
+    var parallel = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+        .{},
+    );
+    defer parallel.deinit();
+    for (full.planes, parallel.planes) |serial, threaded| {
+        try std.testing.expectEqualSlices(i64, serial.samples, threaded.samples);
+    }
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    for (reduced_references, 0..) |reference, component| {
+        const encoded = try reduced.encodePgx(allocator, component, .most_significant_first);
+        defer allocator.free(encoded);
+        const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+        const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+        try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+    }
+
+    var fifth_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
+    for (0..4) |_| {
+        fifth_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), fifth_sot + 2) orelse
+            return error.MissingSot;
+    }
+    try std.testing.expectEqual(@as(u8, 1), bytes[fifth_sot + 10]);
+    const duplicate_part = try allocator.dupe(u8, bytes);
+    defer allocator.free(duplicate_part);
+    duplicate_part[fifth_sot + 10] = 0;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessNative(allocator, duplicate_part, .{}),
+    );
+}
+
 test "Kakadu signed 8-bit multi-tile codestream assembles native reductions" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-signed-8bit-multitile.j2c");

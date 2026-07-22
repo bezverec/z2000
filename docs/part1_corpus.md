@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-22 gate contains 47 entries: 31 committed entries plus all 16
+The 2026-07-22 gate contains 49 entries: 33 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-31 decode passes, 16 expected fail-closed cases, zero mismatches, and zero skips
+32 decode passes, 17 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -149,6 +149,14 @@ and inverse 5/3 synthesis use the effective tile-by-component tables; all six
 full/reduction-1 PGX references match Kakadu exactly. A manifested reserved-
 Sqcc mutation is structurally invalid, while unit tests also pin excessive
 reduction and component-local transform divergence.
+
+The sixth G2 entry divides that profile into Kakadu RPCL resolution tile-parts.
+Each tile has three non-empty PLT-backed parts followed by three empty padding
+parts; the first-part COC/QCC state persists throughout the tile. Full and
+reduction-1 output reuses and exactly matches the same six Kakadu PGX
+references. The manifest's marker patch vocabulary now includes SOT, and a
+paired mutation duplicates the fifth part's `TPsot` to pin checked per-tile
+continuation ordering.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT
