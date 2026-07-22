@@ -143,20 +143,21 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 G0 is active. Its 2026-07-17 foundation includes an unscored broad capability
 matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
-Twenty-two committed foreign-encoded streams cover sampled origins/POC and sampled
+Twenty-three committed foreign-encoded streams cover sampled origins/POC and sampled
 multi-tile no-MCT 9/7 reduction,
 signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
 8/16/20-bit, and independently sampled signed 7/13/23-bit
 full/reduced native decode, four-component
 CMYK, all T1 style bits, uniform COC/QCC, genuinely divergent ICT/9-7 QCC,
 reversible component-local COC decomposition/precinct geometry, divergent
-component block geometry/T1 style, tile-local COD/QCD and COC/QCC including
-resolution-part continuation, and padded multipart TLM; ten mutations pin malformed and unsupported
+component block geometry/T1 style, reversible tile-local COD/QCD and COC/QCC
+including resolution-part continuation, irreversible tile/component QCD/QCC,
+and padded multipart TLM; eleven mutations pin malformed and unsupported
 fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 49-entry result of 32 decode passes and 17 expected fail-closed
+a complete 51-entry result of 33 decode passes and 18 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
 signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
@@ -238,7 +239,7 @@ non-recursive batch CLI syntax, with reduction and byte order kept explicit.
 The second surface writes all native components to exact ZRAW through the same
 dispatch forms and round-trips its self-describing metadata and payload.
 
-G2 now has seven pinned slices. Genuinely component-specific
+G2 now has eight pinned slices. Genuinely component-specific
 scalar-expounded QCC works in the bounded three-component ICT/9-7 profile at
 full and reduced resolution. A reversible single-tile no-MCT Kakadu stream also
 decodes component-local decomposition counts 3/2/1, component-sized precinct
@@ -261,9 +262,12 @@ tile/component divergence while a deterministic structural repack moves only
 their T2 headers: multipart PPT+PLT and one-part-per-tile PPM both match the
 same six full/reduced PGX references and one/eight-thread output, with packed-
 marker corruption failing closed. The packed framing itself is not claimed as
-foreign-encoder output. Broader legal component-local transform/quantization,
-general B.7 clamping, arbitrary PLT-less multipart PPM, and packed TLM/POC
-combinations remain the next boundaries.
+foreign-encoder output. A directly emitted four-tile no-MCT 9/7 stream now
+layers tile QCD and component QCC scalar-expounded steps over the main QCD;
+all six full/reduced Kakadu PGX references stay within peak 1/MSE 0.125 and a
+reserved-`Sqcc` mutation fails closed. Component-local transforms, general B.7
+clamping, arbitrary PLT-less multipart PPM, and packed TLM/POC combinations
+remain the next boundaries.
 Together with G3 they replace the
 remaining byte-redundant/uniform shortcuts with real component- and tile-local
 semantics. Unknown or profile-inapplicable

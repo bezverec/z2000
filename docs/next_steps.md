@@ -414,7 +414,16 @@ Kakadu full/reduction-1 PGX references exactly, agree at one/eight threads,
 retain the COC/QCC markers, and reject truncated packed-marker payloads. The
 packed framing is structural evidence, not claimed as Kakadu-produced.
 
-The next G2 slice broadens component-local transform/quantization choices.
+The eighth G2 slice is complete: a directly emitted four-tile Kakadu no-MCT
+9/7 stream uses scalar-expounded Qstep 1/256 in the main QCD, replaces tile 1
+with Qstep 0.01 in a tile QCD, and replaces that tile's component 1 again with
+Qstep 0.02 in QCC. The component-local planar path now consumes those effective
+tables at full and reduction-1 resolution. All six Kakadu PGX references stay
+within peak 1; measured MSE is at most 0.0381 full and 0.125 reduced, and
+one/eight-thread output agrees. A manifested reserved-`Sqcc` mutation fails
+before packet reconstruction.
+
+The next G2 slice addresses component-local transform choices.
 General B.7 code-block clamping remains a separate prerequisite for precinct
 spans smaller than the nominal code block. Arbitrary PLT-less multipart PPM,
 PPM+POC, and packed-header/TLM combinations remain G3 rather than being

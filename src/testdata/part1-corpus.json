@@ -42,8 +42,8 @@
       "encode": "bounded",
       "malformed": "complete",
       "interop": "bounded",
-      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style fixture", "Kakadu multi-tile COD/QCD override fixture and malformed counterparts"],
-      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in the bounded three-component ICT/9-7 profile, single-tile no-MCT reversible component-local decomposition/precinct/block/style, and first-tile-part reversible no-MCT tile-local COD/QCD are accepted; component-local transforms and broader tile-header combinations remain fail-closed."
+      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style fixture", "Kakadu multi-tile reversible COD/QCD/COC/QCC fixtures", "Kakadu multi-tile no-MCT 9/7 tile QCD and component QCC fixture plus malformed counterparts"],
+      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in bounded three-component 9/7 profiles, single-tile no-MCT reversible component-local decomposition/precinct/block/style, and first-tile-part no-MCT tile/component coding or quantization overrides are accepted within the documented RPCL envelopes; component-local transforms and broader tile-header combinations remain fail-closed."
     },
     {
       "id": "progression-poc",
@@ -901,6 +901,55 @@
       "expected_error": "InvalidCodestream",
       "patches": [
         { "marker": "sot", "marker_occurrence": 4, "marker_offset": 10, "value": 0 }
+      ]
+    },
+    {
+      "id": "kakadu-tile-qcd-qcc-97",
+      "path": "src/testdata/kakadu-tile-qcd-qcc-97.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "922d5db01518c4290ec8fb7a4a5a19d39496c45971ffaf811945b812d5765b00",
+      "source": {
+        "producer": "Kakadu demo applications from three copies of the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "four-tile irreversible 9/7 no-MCT stream whose tile 1 replaces the main scalar-expounded QCD and whose component 1 replaces that tile value again through QCC",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm -o src/testdata/kakadu-tile-qcd-qcc-97.j2c Creversible=no Cycc=no Stiles={16,16} Clevels=2 Corder=RPCL Cprecincts={16,16},{16,16},{16,16} Cblk={4,4} Clayers=1 Qstep=0.00390625 Qstep:T1=0.01 Qstep:T1C1=0.02 -rate - -num_threads 0; kdu_expand full and -reduce 1 to the six committed PGX paths"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand native PGX planes; full resolution stays within peak 1/MSE 0.12 and reduction 1 within peak 1/MSE 0.13 for every component",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "irreversible-97", "packet-header-placement", "selective-streaming-decode"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-tile-qcd-qcc-97-full-c0.pgx", "sha256": "0ac577a57034754a1cc3ce073fc473ac6ce1cdbea1d75b8d5bfa44c78abfb1c4", "format": "pgx", "component": 0, "max_peak_error": 1, "max_mse": 0.12 },
+        { "path": "src/testdata/kakadu-tile-qcd-qcc-97-full-c1.pgx", "sha256": "e2b28b25fa8143f39e6e5117d17348d4be0d1b445a4ca14be92f8a95020120a3", "format": "pgx", "component": 1, "max_peak_error": 1, "max_mse": 0.12 },
+        { "path": "src/testdata/kakadu-tile-qcd-qcc-97-full-c2.pgx", "sha256": "0ac577a57034754a1cc3ce073fc473ac6ce1cdbea1d75b8d5bfa44c78abfb1c4", "format": "pgx", "component": 2, "max_peak_error": 1, "max_mse": 0.12 },
+        { "path": "src/testdata/kakadu-tile-qcd-qcc-97-r1-c0.pgx", "sha256": "d8db52c3d6cfe27ef5eef25caf66996b6024eb584f51eba0e84463e3f5e9b876", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.13 },
+        { "path": "src/testdata/kakadu-tile-qcd-qcc-97-r1-c1.pgx", "sha256": "740796f432ffb03da9bd7aa5df74c31cf1b7d83717d009fd096b6403c3e096a6", "format": "pgx", "component": 1, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.13 },
+        { "path": "src/testdata/kakadu-tile-qcd-qcc-97-r1-c2.pgx", "sha256": "d8db52c3d6cfe27ef5eef25caf66996b6024eb584f51eba0e84463e3f5e9b876", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.13 }
+      ]
+    },
+    {
+      "id": "synthetic-tile-qcc-97-reserved-style",
+      "path": "src/testdata/kakadu-tile-qcd-qcc-97.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "922d5db01518c4290ec8fb7a4a5a19d39496c45971ffaf811945b812d5765b00",
+      "source": {
+        "producer": "z2000 boundary mutation over the Kakadu 8.4.1 tile/component quantization fixture",
+        "version": "schema 1",
+        "origin": "tile-header QCC Sqcc low bits change from scalar-expounded style two to reserved style three after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "reserved tile-header QCC quantization style is malformed and must fail before packet reconstruction",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "irreversible-97"],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream",
+      "patches": [
+        { "marker": "qcc", "marker_offset": 5, "value": 35 }
       ]
     },
     {

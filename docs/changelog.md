@@ -112,14 +112,15 @@ entries are grouped by development milestone rather than semantic version.
   and distinguishes decode pass, expected
   fail-closed, unexpected acceptance, native-raster mismatch, and skipped
   optional local assets.
-- Expanded the seed to twenty-two foreign-encoded fixtures: sampled Kakadu
+- Expanded the seed to twenty-three foreign-encoded fixtures: sampled Kakadu
   multi-tile/POC/origin and sampled multi-tile no-MCT 9/7, Grok CMYK, Kakadu
   signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
   8/16/20-bit, and independently sampled signed 7/13/23-bit
   native decode, all-six-bit T1, uniform
   COC/QCC, divergent ICT/9-7 QCC, reversible component-local 3/2/1-level COC,
-  divergent component-local code-block geometry/T1 style, tile-local COD/QCD
-  and COC/QCC including resolution-part inheritance, and padded multipart TLM. Ten
+  divergent component-local code-block geometry/T1 style, reversible tile-local
+  COD/QCD and COC/QCC including resolution-part inheritance, irreversible
+  tile/component QCD/QCC, and padded multipart TLM. Eleven
   input-hash-verified mutations pin invalid/divergent COC, QCC and TLM plus
   unsupported signed-SIZ fail-closed behavior.
 - Added a Kakadu 8.4.1 sampled multi-tile no-MCT 9/7 PLT-less fixture. Its
@@ -133,8 +134,8 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 49-entry gate
-  reports 32 decode passes, 17 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 51-entry gate
+  reports 33 decode passes, 18 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Added bounded component-local code-block geometry and T1 style for the
   single-tile reversible no-MCT native profile. A Kakadu stream combines
@@ -170,6 +171,12 @@ entries are grouped by development milestone rather than semantic version.
   PPT/PPM segments. The structural packed framing is not presented as Kakadu
   encoder output; arbitrary PLT-less multipart PPM and packed TLM/POC remain
   closed.
+- Added bounded tile/component-local scalar-expounded quantization for the
+  multi-tile no-MCT 9/7 planar path. A Kakadu stream layers tile 1 Qstep 0.01
+  over main Qstep 1/256 and component 1 Qstep 0.02 over that tile value. Six
+  full/reduction-1 PGX references stay within peak 1 and measured MSE 0.125,
+  one/eight-thread output agrees, and a manifested reserved-`Sqcc` mutation
+  fails before packet reconstruction.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
   `p0_01` moved from `InvalidCodestream` to an exact PGX pass, with a committed

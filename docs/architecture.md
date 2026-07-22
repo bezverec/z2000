@@ -257,9 +257,11 @@ quantization tables for every tile/component; marker replay must equal those
 tables. The current envelope is reversible no-MCT RPCL with common layers and
 transform, and no effective decomposition count may exceed the main header.
 It accepts one part per tile, PLT-backed RPCL resolution/padding parts, and the
-same divergent COC/QCC state through bounded packed layouts: multipart PPT
-with PLT or one-part-per-tile PPM. Inline PLT-less multipart state is likewise
-component-local. Component-local transform changes, general B.7 clamping,
+same divergent reversible COC/QCC state through bounded packed layouts:
+multipart PPT with PLT or one-part-per-tile PPM. Inline PLT-less multipart state
+is likewise component-local. A separate one-part-per-tile no-MCT 9/7 profile consumes
+scalar-expounded main, tile, and component QCD/QCC tables through native planar
+full/reduced reconstruction. Component-local transform changes, general B.7 clamping,
 arbitrary PLT-less multipart PPM, PPM+POC, and packed-header/TLM combinations
 remain fail-closed.
 

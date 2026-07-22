@@ -3872,7 +3872,11 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
         return CodestreamError.UnsupportedPayload;
     }
     if (header.tile_width != 0 or header.tile_height != 0) {
-        if (!headerHasComponentSubsampling(header)) return CodestreamError.UnsupportedPayload;
+        if (!headerHasComponentSubsampling(header) and
+            !(header.transform == .irreversible_9_7 and header.quantization != .none and header.mct == .none))
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
         return decodeStrictMultiTilePlanarMeasured(
             allocator,
             bytes,
@@ -8538,10 +8542,11 @@ fn decodeStrictMultiTilePlanarMeasured(
     const reversible = header.transform == .reversible_5_3 and header.quantization == .none;
     const irreversible_no_mct = header.transform == .irreversible_9_7 and
         header.quantization != .none and header.mct == .none;
+    const component_local_layout = headerHasComponentSubsampling(header) or irreversible_no_mct;
     if ((header.mct != .none and !sampled_rct) or
         (header.progression != .rpcl and !sampled_rct) or
         (!reversible and !irreversible_no_mct) or
-        !headerHasComponentSubsampling(header))
+        !component_local_layout)
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -11920,8 +11925,11 @@ fn readStrictMultiTileTilePartSpans(
         const coding_override = if (tile_coding_overrides) |overrides| overrides[tile_index] else StrictTileCodingOverride{};
         const has_coding_override = coding_override.saw_cod or coding_override.saw_qcd or
             coding_override.components.items.len != 0;
+        const reversible_override = transform == .reversible_5_3;
+        const irreversible_override = transform == .irreversible_9_7;
         if (has_coding_override and
-            (tile_poc_records[tile_index].items.len != 0 or transform != .reversible_5_3 or
+            (tile_poc_records[tile_index].items.len != 0 or
+                (!reversible_override and !irreversible_override) or
                 mct != .none or options.progression != .rpcl))
         {
             return CodestreamError.UnsupportedPayload;
@@ -11956,10 +11964,12 @@ fn readStrictMultiTileTilePartSpans(
         );
         if (has_coding_override) {
             for (effective_component_coding, effective_component_qcd) |coding, qcd| {
-                if (qcd.quantization != .none or
-                    qcd.bands != 1 + 3 * @as(usize, coding.levels) or
-                    qcd.exponent_count != qcd.bands)
-                {
+                const expected_bands = 1 + 3 * @as(usize, coding.levels);
+                const valid_quantization = if (reversible_override)
+                    qcd.quantization == .none and qcd.exponent_count == qcd.bands
+                else
+                    qcd.quantization != .none and qcd.exponent_count != 0 and qcd.step_count != 0;
+                if (!valid_quantization or qcd.bands != expected_bands) {
                     return CodestreamError.UnsupportedPayload;
                 }
                 var component_options = tile_options;

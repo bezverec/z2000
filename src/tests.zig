@@ -16854,6 +16854,91 @@ test "Kakadu sampled multi-tile 9/7 decodes native planes at reduced resolution"
     }
 }
 
+test "Kakadu tile QCD and component QCC 9/7 overrides decode native planes" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-tile-qcd-qcc-97.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-qcd-qcc-97-full-c0.pgx"),
+        @embedFile("testdata/kakadu-tile-qcd-qcc-97-full-c1.pgx"),
+        @embedFile("testdata/kakadu-tile-qcd-qcc-97-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-qcd-qcc-97-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-tile-qcd-qcc-97-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-tile-qcd-qcc-97-r1-c2.pgx"),
+    };
+
+    // Main QCD uses Qstep=1/256. Tile 1 replaces it with Qstep=0.01 and
+    // component 1 replaces that tile value again with Qstep=0.02.
+    try std.testing.expectEqual(@as(usize, 4), countMarker(bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 2), countMarker(bytes, codestream.markerValue("qcd")));
+    try std.testing.expectEqual(@as(usize, 1), countMarker(bytes, codestream.markerValue("qcc")));
+    const full_c0_header = std.mem.indexOfScalar(u8, full_references[0], '\n') orelse return error.InvalidPgx;
+    const full_c1_header = std.mem.indexOfScalar(u8, full_references[1], '\n') orelse return error.InvalidPgx;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        full_references[0][full_c0_header + 1 ..],
+        full_references[1][full_c1_header + 1 ..],
+    ));
+
+    var full = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+    );
+    defer full.deinit();
+    for (full.planes, full_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.12);
+    }
+
+    var full_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+    );
+    defer full_parallel.deinit();
+    for (full.planes, full_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    var timings = codestream.DecodeTimings{};
+    var reduced = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        &timings,
+    );
+    defer reduced.deinit();
+    try std.testing.expect(timings.t1_skipped_blocks > 0);
+    try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
+    for (reduced.planes, reduced_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.13);
+    }
+
+    var reduced_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+    );
+    defer reduced_parallel.deinit();
+    for (reduced.planes, reduced_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    const reserved_qcc = try allocator.dupe(u8, bytes);
+    defer allocator.free(reserved_qcc);
+    const qcc = findMarker(reserved_qcc, codestream.markerValue("qcc")) orelse return error.MissingMarker;
+    reserved_qcc[qcc + 5] |= 0x03;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanar(allocator, reserved_qcc),
+    );
+}
+
 test "single-tile irreversible 9/7 pipeline is deterministic across thread counts" {
     const allocator = std.testing.allocator;
     const width = 129;

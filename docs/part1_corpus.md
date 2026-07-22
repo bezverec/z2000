@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-22 gate contains 49 entries: 33 committed entries plus all 16
+The 2026-07-22 gate contains 51 entries: 35 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-32 decode passes, 17 expected fail-closed cases, zero mismatches, and zero skips
+33 decode passes, 18 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -165,11 +165,19 @@ packet headers into one-part-per-tile PPM or multipart PPT+PLT. The unchanged
 foreign T1 bodies match the same six full/reduction-1 PGX references exactly,
 one/eight-thread output agrees, and shortened PPT/PPM segments fail closed.
 Because Kakadu did not emit the packed framing, it is not counted among the
-manifest's independent packed-header streams or the 49-entry corpus totals.
+manifest's independent packed-header streams or the 51-entry corpus totals.
 Both sources use Kakadu 8.4.1 with `Creversible=yes`, `Cycc=no`,
 `Stiles={16,16}`, `Clevels=2`, `Corder=RPCL`, three 16x16 precinct levels,
 4x4 main code blocks, `Clevels:T1C1=1`, `Cblk:T1C1={8,8}`, and one layer;
 the multipart source adds `ORGtparts=R`. Neither source requests PLT or TLM.
+
+The eighth G2 entry is independently emitted by Kakadu rather than structurally
+repacked. Its four-tile no-MCT 9/7 stream starts with main Qstep 1/256, replaces
+tile 1 with Qstep 0.01 through QCD, and replaces component 1 in that tile with
+Qstep 0.02 through QCC. Six full/reduction-1 PGX references pin effective
+tile-by-component dequantization with peak error at most one and measured MSE
+at most 0.125. A paired manifest mutation changes the tile QCC from scalar-
+expounded style two to reserved style three and fails before packet decode.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT

@@ -54,8 +54,11 @@ certification.
   with empty Kakadu padding parts. PLT-less Kakadu variants additionally pass
   deterministic packed-header repacks as multipart PPT+PLT or one-part-per-
   tile PPM, including full/reduced PGX, 1/8-thread, and malformed-marker gates.
-  Component-local transform, general B.7 block clamping, arbitrary PLT-less
-  multipart PPM, and packed POC/TLM combinations remain fail-closed.
+  A separate four-tile no-MCT 9/7 Kakadu profile consumes a tile-local scalar-
+  expounded QCD plus a component-specific QCC at full/reduced resolution with
+  peak error at most one. Component-local transform, general B.7 block
+  clamping, arbitrary PLT-less multipart PPM, and packed POC/TLM combinations
+  remain fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,
