@@ -112,14 +112,14 @@ entries are grouped by development milestone rather than semantic version.
   and distinguishes decode pass, expected
   fail-closed, unexpected acceptance, native-raster mismatch, and skipped
   optional local assets.
-- Expanded the seed to twenty foreign-encoded fixtures: sampled Kakadu
+- Expanded the seed to twenty-one foreign-encoded fixtures: sampled Kakadu
   multi-tile/POC/origin and sampled multi-tile no-MCT 9/7, Grok CMYK, Kakadu
   signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
   8/16/20-bit, and independently sampled signed 7/13/23-bit
   native decode, all-six-bit T1, uniform
   COC/QCC, divergent ICT/9-7 QCC, reversible component-local 3/2/1-level COC,
-  divergent component-local code-block geometry/T1 style, tile-local COD/QCD,
-  and padded multipart TLM. Eight
+  divergent component-local code-block geometry/T1 style, tile-local COD/QCD
+  and COC/QCC, and padded multipart TLM. Nine
   input-hash-verified mutations pin invalid/divergent COC, QCC and TLM plus
   unsupported signed-SIZ fail-closed behavior.
 - Added a Kakadu 8.4.1 sampled multi-tile no-MCT 9/7 PLT-less fixture. Its
@@ -133,8 +133,8 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 45-entry gate
-  reports 30 decode passes, 15 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 47-entry gate
+  reports 31 decode passes, 16 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Added bounded component-local code-block geometry and T1 style for the
   single-tile reversible no-MCT native profile. A Kakadu stream combines
@@ -148,6 +148,14 @@ entries are grouped by development milestone rather than semantic version.
   full/reduction-1 PGX references match exactly and one/eight-thread output is
   identical. The corpus patch schema can select repeated marker occurrences,
   and a divergent second-COD transform remains fail-closed.
+- Added bounded component-specific first-tile-part `COC/QCC` overrides to the
+  same reversible no-MCT multi-tile profile. A second Kakadu four-tile stream
+  changes only tile 1 component 1 from inherited NL=2/4x4/seven bands to
+  NL=1/8x8/four bands. Tile-local packet planning, T2/T1 state, reduced catalog
+  compaction, and inverse 5/3 synthesis consume the effective component table;
+  all six Kakadu PGX references match exactly, 1/8-thread output agrees, and
+  excessive reduction, divergent transform, and reserved QCC style fail
+  closed.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
   `p0_01` moved from `InvalidCodestream` to an exact PGX pass, with a committed

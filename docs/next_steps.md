@@ -154,7 +154,7 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Twenty foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Twenty-one foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
   component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
@@ -162,8 +162,8 @@ The foundation landed on 2026-07-17:
   genuinely divergent ICT/9-7 QCC, and reversible no-MCT components with
   decomposition counts 3/2/1 plus component-local precinct geometry, and
   component-local 4x4/default, 8x8/RESET, and 4x16/CAUSAL+SEGMARK block
-  profiles, plus a four-tile stream with a local `COD/QCD` decomposition/block/
-  band-table override. Eight mutations
+  profiles, plus four-tile streams with local `COD/QCD` and component-specific
+  `COC/QCC` decomposition/block/band-table overrides. Nine mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
 - Each entry selects the real legacy-planar, generic-native, or interleaved RGB
@@ -386,8 +386,18 @@ consume the effective tile header. All six full/reduction-1 PGX references are
 exact and one/eight-thread output agrees. A second-marker transform mutation
 fails closed before packet reconstruction.
 
-The next G2 slices add tile-header `COC/QCC`, legal multi-part and packed-header
-combinations, then broader component-local transform/quantization choices.
+The fifth G2 slice is complete: another four-tile reversible no-MCT Kakadu
+stream keeps the main NL=2/4x4/seven-band profile everywhere except tile 1
+component 1, whose first tile-part carries NL=1/8x8 `COC` plus a matching
+four-band `QCC`. The tile-and-component-local packet schedule, precinct state,
+T1 geometry, catalog compaction, and inverse 5/3 synthesis all consume the
+effective two-dimensional override table. All six full/reduction-1 PGX
+references are exact and one/eight-thread output agrees. Reduction above the
+overridden component level, a divergent COC transform, and reserved QCC style
+bits fail closed.
+
+The next G2 slices add legal multi-part and packed-header combinations, then
+broader component-local transform/quantization choices.
 General B.7 code-block clamping remains a separate prerequisite for precinct
 spans smaller than the nominal code block.
 

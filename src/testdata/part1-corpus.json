@@ -806,6 +806,55 @@
       ]
     },
     {
+      "id": "kakadu-tile-coc-qcc-override",
+      "path": "src/testdata/kakadu-tile-coc-qcc-override.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "864f2faea33d0d1f7f8ca5873aceb7546b8fbc8da482cf879f9c8d279b6e51cf",
+      "source": {
+        "producer": "Kakadu demo applications from three copies of the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "four-tile reversible no-MCT stream whose tile 1 component 1 replaces the inherited NL=2/4x4/seven-band profile with tile-header NL=1/8x8 COC and four-band QCC",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm repeated three times -o src/testdata/kakadu-tile-coc-qcc-override.j2c Creversible=yes Cycc=no Stiles={16,16} Clevels=2 Corder=RPCL Cprecincts={16,16},{16,16},{16,16} Cblk={4,4} Clevels:T1C1=1 Cblk:T1C1={8,8} Clayers=1 ORGgen_plt=yes -rate - -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX payloads; all three native components are exact at full resolution and reduction 1 across the tile-and-component-local decomposition boundary",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53", "packet-header-placement"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-tile-coc-qcc-override-c0.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 0 },
+        { "path": "src/testdata/kakadu-tile-coc-qcc-override-c1.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 1 },
+        { "path": "src/testdata/kakadu-tile-coc-qcc-override-c2.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 2 },
+        { "path": "src/testdata/kakadu-tile-coc-qcc-override-r1-c0.pgx", "sha256": "cf36f81e544ef147e785a18463dde65956787f5591289ace6005ec85177c6a2e", "format": "pgx", "component": 0, "resolution_reduction": 1 },
+        { "path": "src/testdata/kakadu-tile-coc-qcc-override-r1-c1.pgx", "sha256": "cf36f81e544ef147e785a18463dde65956787f5591289ace6005ec85177c6a2e", "format": "pgx", "component": 1, "resolution_reduction": 1 },
+        { "path": "src/testdata/kakadu-tile-coc-qcc-override-r1-c2.pgx", "sha256": "cf36f81e544ef147e785a18463dde65956787f5591289ace6005ec85177c6a2e", "format": "pgx", "component": 2, "resolution_reduction": 1 }
+      ]
+    },
+    {
+      "id": "synthetic-tile-qcc-reserved-style",
+      "path": "src/testdata/kakadu-tile-coc-qcc-override.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "864f2faea33d0d1f7f8ca5873aceb7546b8fbc8da482cf879f9c8d279b6e51cf",
+      "source": {
+        "producer": "z2000 boundary mutation over the Kakadu 8.4.1 tile-component override fixture",
+        "version": "schema 1",
+        "origin": "tile-header QCC Sqcc reserved low bits changed from zero to three after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "reserved tile-header QCC quantization-style bits are structurally invalid and must fail before packet reconstruction",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream",
+      "patches": [
+        { "marker": "qcc", "marker_offset": 5, "value": 35 }
+      ]
+    },
+    {
       "id": "synthetic-tile-cod-transform-override",
       "path": "src/testdata/kakadu-tile-cod-qcd-override.j2c",
       "availability": "committed",

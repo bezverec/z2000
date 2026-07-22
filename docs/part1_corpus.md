@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-21 gate contains 45 entries: 29 committed entries plus all 16
+The 2026-07-22 gate contains 47 entries: 31 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-30 decode passes, 15 expected fail-closed cases, zero mismatches, and zero skips
+31 decode passes, 16 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -141,6 +141,14 @@ coding/quantization tables, full synthesis, and reduced assembly consume the
 effective state; all six PGX references are exact. A manifested mutation uses
 the second COD occurrence to make the tile transform divergent and must fail
 closed before packet reconstruction.
+
+The fifth G2 entry keeps that four-tile main profile but changes only tile 1
+component 1 through a first-tile-part NL=1/8x8 COC and matching four-band QCC.
+The packet schedule, precinct state, T1 geometry, reduced catalog compaction,
+and inverse 5/3 synthesis use the effective tile-by-component tables; all six
+full/reduction-1 PGX references match Kakadu exactly. A manifested reserved-
+Sqcc mutation is structurally invalid, while unit tests also pin excessive
+reduction and component-local transform divergence.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT
