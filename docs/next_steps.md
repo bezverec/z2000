@@ -405,10 +405,20 @@ T1/DWT reconstruction. Full and reduction-1 output remains exact against the
 same six Kakadu PGX references. A corpus mutation duplicates the fifth SOT's
 `TPsot` and fails before inherited state can be reused.
 
-The next G2 slice adds packed-header combinations, followed by broader
-component-local transform/quantization choices.
+The seventh G2 slice is complete: two additional Kakadu PLT-less streams keep
+the fifth slice's tile/component COC/QCC divergence in one-part and RPCL
+resolution-part layouts. A deterministic test repacker moves only the foreign
+T2 headers: the multipart stream decodes through tile-part PPT+PLT and the
+one-part-per-tile stream through main-header PPM. Both match the same six
+Kakadu full/reduction-1 PGX references exactly, agree at one/eight threads,
+retain the COC/QCC markers, and reject truncated packed-marker payloads. The
+packed framing is structural evidence, not claimed as Kakadu-produced.
+
+The next G2 slice broadens component-local transform/quantization choices.
 General B.7 code-block clamping remains a separate prerequisite for precinct
-spans smaller than the nominal code block.
+spans smaller than the nominal code block. Arbitrary PLT-less multipart PPM,
+PPM+POC, and packed-header/TLM combinations remain G3 rather than being
+silently included in this bounded profile.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,
@@ -429,8 +439,8 @@ Implement in small marker-to-raster slices:
 2. `PLM` packet lengths and applicable `CAP`/`PRF` profile signalling with
    checked consistency against `Rsiz` and actual payload behavior.
 3. General legal tile-part ordering and repetition beyond the landed inline
-   PLT-less multipart state machine, including packed-header combinations and
-   checked `TLM` variations.
+   PLT-less state machine and bounded COC/QCC PPT-resolution-part profile,
+   including arbitrary PLT-less multipart PPM and checked `TLM` variations.
 4. Legal `POC` schedules across inline, `PPT`, and `PPM` headers, removing the
    current sampled `PPM` + `POC` fail-closed boundary only after packet identity
    is unambiguous.

@@ -158,6 +158,19 @@ references. The manifest's marker patch vocabulary now includes SOT, and a
 paired mutation duplicates the fifth part's `TPsot` to pin checked per-tile
 continuation ordering.
 
+The seventh G2 decode gate deliberately remains a unit-test structural gate
+rather than a new manifest entry. Kakadu supplies separate PLT-less one-part
+and resolution-part COC/QCC codestreams; the test repacker moves only their T2
+packet headers into one-part-per-tile PPM or multipart PPT+PLT. The unchanged
+foreign T1 bodies match the same six full/reduction-1 PGX references exactly,
+one/eight-thread output agrees, and shortened PPT/PPM segments fail closed.
+Because Kakadu did not emit the packed framing, it is not counted among the
+manifest's independent packed-header streams or the 49-entry corpus totals.
+Both sources use Kakadu 8.4.1 with `Creversible=yes`, `Cycc=no`,
+`Stiles={16,16}`, `Clevels=2`, `Corder=RPCL`, three 16x16 precinct levels,
+4x4 main code blocks, `Clevels:T1C1=1`, `Cblk:T1C1={8,8}`, and one layer;
+the multipart source adds `ORGtparts=R`. Neither source requests PLT or TLM.
+
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT
 level, with precision saturation and checked reduced dimensions. The runner

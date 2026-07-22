@@ -51,8 +51,11 @@ certification.
   exactly at both resolutions. A second four-tile fixture changes only tile 1
   component 1 through local `COC/QCC` levels, block geometry, and band tables,
   also exact at both resolutions and when divided into RPCL resolution parts
-  with empty Kakadu padding parts. Component-local transform, general B.7 block
-  clamping, and packed-header override combinations remain fail-closed.
+  with empty Kakadu padding parts. PLT-less Kakadu variants additionally pass
+  deterministic packed-header repacks as multipart PPT+PLT or one-part-per-
+  tile PPM, including full/reduced PGX, 1/8-thread, and malformed-marker gates.
+  Component-local transform, general B.7 block clamping, arbitrary PLT-less
+  multipart PPM, and packed POC/TLM combinations remain fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,

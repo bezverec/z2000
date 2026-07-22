@@ -238,7 +238,7 @@ non-recursive batch CLI syntax, with reduction and byte order kept explicit.
 The second surface writes all native components to exact ZRAW through the same
 dispatch forms and round-trips its self-describing metadata and payload.
 
-G2 now has six independently pinned slices. Genuinely component-specific
+G2 now has seven pinned slices. Genuinely component-specific
 scalar-expounded QCC works in the bounded three-component ICT/9-7 profile at
 full and reduced resolution. A reversible single-tile no-MCT Kakadu stream also
 decodes component-local decomposition counts 3/2/1, component-sized precinct
@@ -256,9 +256,14 @@ tile-and-component-local packet/T1/DWT state is exact at both resolutions, and
 reserved QCC style remains malformed. Common transform/quantization plus
 RPCL resolution parts now preserve that first-part state across non-empty and
 empty padding parts, with exact full/reduced output and a malformed repeated-
-`TPsot` counterpart. Packed-header override combinations remain the boundary.
-The next slices add those combinations and broader legal component-local
-transform/quantization.
+`TPsot` counterpart. Two additional Kakadu PLT-less sources retain the same
+tile/component divergence while a deterministic structural repack moves only
+their T2 headers: multipart PPT+PLT and one-part-per-tile PPM both match the
+same six full/reduced PGX references and one/eight-thread output, with packed-
+marker corruption failing closed. The packed framing itself is not claimed as
+foreign-encoder output. Broader legal component-local transform/quantization,
+general B.7 clamping, arbitrary PLT-less multipart PPM, and packed TLM/POC
+combinations remain the next boundaries.
 Together with G3 they replace the
 remaining byte-redundant/uniform shortcuts with real component- and tile-local
 semantics. Unknown or profile-inapplicable

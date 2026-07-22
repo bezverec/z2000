@@ -250,14 +250,18 @@ The public strict packet diagnostic follows the same per-tile sampled catalogs
 and rebases only their normalized byte storage when returning a whole-stream
 view, so it does not maintain a second geometry or T2 parser.
 
-The bounded G2 tile-override path records a complete `COD` and matching `QCD`
-from `TPsot=0` into per-tile effective state. The Stage B packet-plan walk and
-Stage C catalog/T1/DWT reconstruction use allocator-owned component coding and
-quantization tables for that tile; the marker replay must equal those tables.
-The current envelope is reversible no-MCT RPCL, one part per tile, inline
-packet headers, common layers/transform, and a tile decomposition count no
-larger than the main header. Tile `COC/QCC`, packed headers, multipart
-overrides, and local transform changes fail closed.
+The bounded G2 tile-override path records first-part `COD/QCD` and component-
+specific `COC/QCC` into per-tile effective state. The Stage B packet-plan walk
+and Stage C catalog/T1/DWT reconstruction use allocator-owned coding and
+quantization tables for every tile/component; marker replay must equal those
+tables. The current envelope is reversible no-MCT RPCL with common layers and
+transform, and no effective decomposition count may exceed the main header.
+It accepts one part per tile, PLT-backed RPCL resolution/padding parts, and the
+same divergent COC/QCC state through bounded packed layouts: multipart PPT
+with PLT or one-part-per-tile PPM. Inline PLT-less multipart state is likewise
+component-local. Component-local transform changes, general B.7 clamping,
+arbitrary PLT-less multipart PPM, PPM+POC, and packed-header/TLM combinations
+remain fail-closed.
 
 Inline PLT-less multipart streams carry no packet count at the Stage B frame
 scan. Their spans therefore retain an explicit deferred-count state and exact
@@ -301,6 +305,12 @@ independent Kakadu PLT-less codestream and moves only the T2 headers into PPT
 or PPM framing; the foreign T1 packet bodies remain byte-identical. All three
 layouts share the same full/reduction-1 PGX bounds and corruption checks, but
 the repacked PPT/PPM framing is not claimed as independently encoded.
+
+The G2 packed-override gate uses the same separation of evidence. Kakadu
+supplies independent PLT-less one-part and resolution-part COC/QCC streams;
+the test repacker preserves their tile headers and T1 bodies while moving only
+packet headers into PPM or PPT. This pins packed-header consumption without
+mislabeling the structural framing as independent encoder interoperability.
 
 ## JP2 And Metadata
 

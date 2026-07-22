@@ -11166,7 +11166,9 @@ fn collectStrictInlineMultiTileSpans(
                 null
             else
                 effective_records.items;
-            const sequence = if (headerHasComponentSubsampling(tile_header)) blk: {
+            const component_local = headerHasComponentSubsampling(tile_header) or
+                headerHasComponentCodingDivergence(tile_header);
+            const sequence = if (component_local) blk: {
                 break :blk try buildSampledStrictPacketSequence(
                     allocator,
                     tile_plan,
@@ -11175,7 +11177,7 @@ fn collectStrictInlineMultiTileSpans(
                     header.layers,
                     tile_header.component_xrsiz,
                     tile_header.component_yrsiz,
-                    null,
+                    componentCodingSliceForHeader(tile_header),
                     main_records,
                     context.tile_poc_records[tile_index].items,
                 );
@@ -11205,6 +11207,8 @@ fn collectStrictInlineMultiTileSpans(
         var packed_headers: std.ArrayList(u8) = .empty;
         defer packed_headers.deinit(allocator);
         var expected_ppt_index: u16 = 0;
+        var replay_override = StrictTileCodingOverride{};
+        defer replay_override.deinit(allocator);
         const sod = try readTilePartHeaderMarkers(
             allocator,
             bytes,
@@ -11214,8 +11218,42 @@ fn collectStrictInlineMultiTileSpans(
             &packed_headers,
             &expected_ppt_index,
             null,
-            null,
+            .{
+                .override = &replay_override,
+                .allowed = span.tile_part_index == 0,
+                .bit_depth = state.header.bit_depth,
+                .levels = state.header.levels,
+                .layers = header.layers,
+                .progression = header.progression,
+                .mct = state.header.mct,
+                .transform = state.header.transform,
+                .component_count = state.header.component_count,
+            },
         );
+        if (replay_override.saw_cod and
+            !std.meta.eql(replay_override.coding, state.header.component_coding[0]))
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (replay_override.saw_qcd and
+            !std.meta.eql(replay_override.qcd, state.header.component_qcd[0]))
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        for (replay_override.components.items) |component_override| {
+            const component = @as(usize, component_override.component);
+            if (component >= state.header.component_count) return CodestreamError.InvalidCodestream;
+            if (component_override.saw_coc and
+                !std.meta.eql(component_override.coding, state.header.component_coding[component]))
+            {
+                return CodestreamError.InvalidCodestream;
+            }
+            if (component_override.saw_qcc and
+                !std.meta.eql(component_override.qcd, state.header.component_qcd[component]))
+            {
+                return CodestreamError.InvalidCodestream;
+            }
+        }
         if (sod != span.sod) return CodestreamError.InvalidCodestream;
         if (packet_lengths.items.len != 0 or packed_headers.items.len != 0) {
             return CodestreamError.UnsupportedPayload;
@@ -11883,8 +11921,7 @@ fn readStrictMultiTileTilePartSpans(
         const has_coding_override = coding_override.saw_cod or coding_override.saw_qcd or
             coding_override.components.items.len != 0;
         if (has_coding_override and
-            (packed_headers.items.len != 0 or external_headers != null or
-                tile_poc_records[tile_index].items.len != 0 or transform != .reversible_5_3 or
+            (tile_poc_records[tile_index].items.len != 0 or transform != .reversible_5_3 or
                 mct != .none or options.progression != .rpcl))
         {
             return CodestreamError.UnsupportedPayload;

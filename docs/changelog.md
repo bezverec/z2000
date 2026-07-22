@@ -162,6 +162,14 @@ entries are grouped by development milestone rather than semantic version.
   state persist until tile completion. Full/reduction-1 PGX remains exact and
   1/8-thread deterministic. The corpus patch schema now addresses SOT, and a
   repeated-`TPsot` mutation fails before continuation state is reused.
+- Extended that bounded COC/QCC profile through packed packet headers. Two
+  independent Kakadu PLT-less sources retain the foreign T1 bodies while the
+  test repacker moves only T2 headers into multipart PPT+PLT or one-part-per-
+  tile PPM. Both layouts match all six existing full/reduction-1 PGX references
+  exactly, remain deterministic at one/eight threads, and reject truncated
+  PPT/PPM segments. The structural packed framing is not presented as Kakadu
+  encoder output; arbitrary PLT-less multipart PPM and packed TLM/POC remain
+  closed.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
   `p0_01` moved from `InvalidCodestream` to an exact PGX pass, with a committed

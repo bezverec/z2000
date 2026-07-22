@@ -29618,7 +29618,15 @@ fn repackInlineHeadersToPacked(
             var lppt_be: [2]u8 = undefined;
             std.mem.writeInt(u16, &lppt_be, @intCast(3 + headers_len + packed_eph_bytes), .big);
             try out.appendSlice(allocator, &lppt_be);
-            try out.append(allocator, 0);
+            const tile_index = readU16BeTest(bytes, tile_part.sot_offset + 4);
+            var ppt_marker_index: u8 = 0;
+            for (report.tile_parts[0..part_index]) |previous_part| {
+                if (readU16BeTest(bytes, previous_part.sot_offset + 4) == tile_index) {
+                    ppt_marker_index = std.math.add(u8, ppt_marker_index, 1) catch
+                        return error.TestUnexpectedResult;
+                }
+            }
+            try out.append(allocator, ppt_marker_index);
             for (report.spans) |span| {
                 if (span.tile_part_index != part_index) continue;
                 try out.appendSlice(allocator, bytes[span.header_offset..][0..span.header_length]);
@@ -29874,6 +29882,110 @@ test "sampled multi-tile 9/7 reduction decodes across inline PPT and PPM headers
                 ),
             ));
         }
+    }
+}
+
+test "tile COC and QCC resolution parts decode across PPT and PPM headers" {
+    const allocator = std.testing.allocator;
+    // Kakadu 8.4.1 produced independent PLT-less one-part and resolution-part
+    // codestreams. The test repacker moves only their T2 packet headers; the
+    // foreign T1 code-block bodies and tile COC/QCC markers stay untouched.
+    const one_part_source = @embedFile("testdata/kakadu-tile-coc-qcc-pltless.j2c");
+    const multipart_source = @embedFile("testdata/kakadu-tile-coc-qcc-rparts-pltless.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-c0.pgx"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-c1.pgx"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override-r1-c2.pgx"),
+    };
+    try std.testing.expectEqual(@as(usize, 4), countMarker(one_part_source, codestream.markerValue("sot")));
+    // Three non-empty resolution parts per tile.
+    try std.testing.expectEqual(@as(usize, 12), countMarker(multipart_source, codestream.markerValue("sot")));
+
+    const placements = [_]RepackedHeaderPlacement{ .ppt, .ppm };
+    for (placements) |placement| {
+        const source = if (placement == .ppt) multipart_source else one_part_source;
+        const packed_stream = try repackInlineHeadersToPacked(allocator, source, placement, .{});
+        defer allocator.free(packed_stream);
+        try std.testing.expectEqual(@as(usize, 1), countMarker(packed_stream, codestream.markerValue("coc")));
+        try std.testing.expectEqual(@as(usize, 1), countMarker(packed_stream, codestream.markerValue("qcc")));
+        switch (placement) {
+            .ppt => try std.testing.expect(countMarker(packed_stream, codestream.markerValue("ppt")) > 1),
+            .ppm => try std.testing.expect(countMarker(packed_stream, codestream.markerValue("ppm")) >= 1),
+            .inline_headers => unreachable,
+        }
+
+        var catalog = try codestream.readStrictPacketCatalog(allocator, packed_stream);
+        defer catalog.deinit();
+        try std.testing.expect(catalog.entries.len > 0);
+
+        var full = try codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            packed_stream,
+            .{ .threads = 1 },
+            .{},
+        );
+        defer full.deinit();
+        for (full_references, 0..) |reference, component| {
+            const encoded = try full.encodePgx(allocator, component, .most_significant_first);
+            defer allocator.free(encoded);
+            const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+            const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+            try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+        }
+
+        var full_parallel = try codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            packed_stream,
+            .{ .threads = 8 },
+            .{},
+        );
+        defer full_parallel.deinit();
+        for (full.planes, full_parallel.planes) |serial, threaded| {
+            try std.testing.expectEqualSlices(i64, serial.samples, threaded.samples);
+        }
+
+        var reduced = try codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            packed_stream,
+            .{ .threads = 1, .resolution_reduction = 1 },
+            .{},
+        );
+        defer reduced.deinit();
+        for (reduced_references, 0..) |reference, component| {
+            const encoded = try reduced.encodePgx(allocator, component, .most_significant_first);
+            defer allocator.free(encoded);
+            const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+            const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+            try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+        }
+
+        var reduced_parallel = try codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            packed_stream,
+            .{ .threads = 8, .resolution_reduction = 1 },
+            .{},
+        );
+        defer reduced_parallel.deinit();
+        for (reduced.planes, reduced_parallel.planes) |serial, threaded| {
+            try std.testing.expectEqualSlices(i64, serial.samples, threaded.samples);
+        }
+
+        const corrupted = try allocator.dupe(u8, packed_stream);
+        defer allocator.free(corrupted);
+        const marker = if (placement == .ppt)
+            codestream.markerValue("ppt")
+        else
+            codestream.markerValue("ppm");
+        const marker_offset = findMarker(corrupted, marker) orelse return error.MissingMarker;
+        writeU16BeTest(corrupted, marker_offset + 2, 3);
+        try std.testing.expect(std.meta.isError(
+            codestream.decodeLosslessNative(allocator, corrupted, .{}),
+        ));
     }
 }
 
