@@ -3899,7 +3899,13 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
         timings,
     );
     defer catalog.deinit();
-    try compactStrictPacketBlockCatalogForReduction(&catalog, header.levels, options.resolution_reduction, timings);
+    try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
+        &catalog,
+        header.levels,
+        componentCodingSliceForHeader(header),
+        options.resolution_reduction,
+        timings,
+    );
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
     return decodeStrictPlanarFromBlockCatalogMeasured(
         allocator,
@@ -3922,7 +3928,7 @@ fn decodeMixedTransformPlanarFromBlockCatalogMeasured(
         return CodestreamError.UnsupportedPayload;
     if (header.mct != .none or catalog.component_count != header.component_count or
         header.component_qcd.len < header.component_count or
-        !strictComponentCodingDiffersOnlyByTransform(component_coding))
+        !headerHasMixedComponentTransforms(header))
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -5139,7 +5145,7 @@ fn readStrictCodestreamMetadataForProfile(
         parsed_grid_value.isSingleTile() and component_count == 3 and parsed_mct == .none and
         parsed_progression == .rpcl and !mixed_component_precision and !subsampled_components and
         parsed_transform == .reversible_5_3 and parsed_quantization == .none and
-        strictComponentCodingDiffersOnlyByTransform(component_coding[0..component_count]);
+        !component_transforms_match_main;
     const native_reversible_component_local = precision_profile == .native and
         parsed_grid_value.isSingleTile() and parsed_mct == .none and !subsampled_components and
         parsed_transform == .reversible_5_3 and parsed_quantization == .none and
@@ -5264,10 +5270,8 @@ fn readStrictCodestreamMetadataForProfile(
         .progression = parsed_progression,
     };
     const grid = parsed_grid orelse return CodestreamError.InvalidCodestream;
-    // General B.7 block-size clamping remains fail-closed. Strict decode also
-    // accepts the bounded edge case where the complete zero-origin image fits
-    // in one precinct band span, so its clipped block cannot cross a precinct
-    // boundary even when the nominal block dimension is larger.
+    // Strict decode derives the effective B.7 code-block partition per
+    // component, resolution, and subband after validating non-zero spans.
     try validateDecodePrecinctBlockSpans(
         options,
         width,
@@ -6129,25 +6133,6 @@ fn headerHasMixedComponentTransforms(header: TemporaryHeader) bool {
         if (component.transform != first) return true;
     }
     return false;
-}
-
-fn strictComponentCodingDiffersOnlyByTransform(coding: []const StrictComponentCoding) bool {
-    if (coding.len < 2) return false;
-    const first = coding[0];
-    var transform_differs = false;
-    for (coding[1..]) |component| {
-        if (component.levels != first.levels or component.precinct_count != first.precinct_count or
-            component.block_width != first.block_width or component.block_height != first.block_height or
-            !std.meta.eql(component.code_block_style, first.code_block_style))
-        {
-            return false;
-        }
-        for (component.precincts[0..component.precinct_count], first.precincts[0..first.precinct_count]) |a, b| {
-            if (a.width != b.width or a.height != b.height) return false;
-        }
-        transform_differs = transform_differs or component.transform != first.transform;
-    }
-    return transform_differs;
 }
 
 fn strictComponentCodingDiverges(coding: []const StrictComponentCoding) bool {

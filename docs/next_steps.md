@@ -154,7 +154,7 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Twenty-five foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Twenty-six foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
   component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
@@ -166,7 +166,7 @@ The foundation landed on 2026-07-17:
   `COC/QCC` decomposition/block/band-table overrides, including inherited
   state across RPCL resolution parts and empty padding parts, tile/component
   9/7 quantization, mixed component transforms, and B.7 effective block
-  clamping. Twelve mutations
+  clamping. Thirteen mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
 - Each entry selects the real legacy-planar, generic-native, or interleaved RGB
@@ -445,9 +445,18 @@ tag-tree grid. All six full/reduction-1 PGX references match exactly. A paired
 mutation that changes only COC while retaining packet headers and bodies for
 the former partition fails as `InvalidCodestream`.
 
-The next G2 slice broadens component-local transform geometry or tile scope.
-Encoder-side B.7 clamping, arbitrary PLT-less multipart PPM, PPM+POC, and
-packed-header/TLM combinations remain outside this bounded slice.
+The eleventh G2 slice is complete: another directly emitted single-tile
+Kakadu no-MCT RPCL stream keeps components 0 and 2 on reversible NL=3, 4x4
+blocks, and 32x32 precincts while component 1 simultaneously selects
+irreversible 9/7, NL=2, 8x8 blocks, 16x16 precincts, and its own seven-band
+scalar-expounded QCC. Per-component packet planning, reduced catalog
+compaction, T1 geometry, and inverse DWT reconstruct all six full/reduction-1
+PGX references exactly with identical one/eight-thread output. Reassigning
+the QCC to a reversible component fails before packet reconstruction.
+
+The next G2 slice addresses mixed-transform tile scope. Encoder-side B.7
+clamping, arbitrary PLT-less multipart PPM, PPM+POC, and packed-header/TLM
+combinations remain outside this bounded slice.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,

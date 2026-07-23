@@ -570,6 +570,88 @@ test "Kakadu component-local 5/3 and 9/7 transforms decode native planes" {
     );
 }
 
+test "Kakadu component-local transforms with divergent geometry decode native planes" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-mixed-transform-geometry.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-transform-geometry-full-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-geometry-full-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-geometry-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-transform-geometry-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-geometry-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-geometry-r1-c2.pgx"),
+    };
+
+    const coc = findMarker(bytes, codestream.markerValue("coc")) orelse return error.MissingCoc;
+    const qcc = findMarker(bytes, codestream.markerValue("qcc")) orelse return error.MissingQcc;
+    // Main components use reversible NL=3, 4x4 blocks, and 32x32 precincts.
+    // Component 1 switches to irreversible NL=2, 8x8 blocks, and 16x16
+    // precincts, with its own seven-band scalar-expounded QCC.
+    try std.testing.expectEqual(@as(u8, 1), bytes[coc + 4]);
+    try std.testing.expectEqual(@as(u8, 2), bytes[coc + 6]);
+    try std.testing.expectEqual(@as(u8, 1), bytes[coc + 7]);
+    try std.testing.expectEqual(@as(u8, 1), bytes[coc + 8]);
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(codestream.WaveletTransform.irreversible_9_7)),
+        bytes[coc + 10],
+    );
+    try std.testing.expectEqual(@as(u8, 1), bytes[qcc + 4]);
+
+    var full = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+    );
+    defer full.deinit();
+    for (full.planes, full_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.04);
+    }
+
+    var full_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+    );
+    defer full_parallel.deinit();
+    for (full.planes, full_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    var reduced = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+    );
+    defer reduced.deinit();
+    for (reduced.planes, reduced_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.07);
+    }
+
+    var reduced_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+    );
+    defer reduced_parallel.deinit();
+    for (reduced.planes, reduced_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    const mismatched_qcc = try allocator.dupe(u8, bytes);
+    defer allocator.free(mismatched_qcc);
+    mismatched_qcc[qcc + 4] = 0;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, mismatched_qcc),
+    );
+}
+
 test "Kakadu divergent COC block geometry and styles decode exactly" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-divergent-coc-block-style.j2c");

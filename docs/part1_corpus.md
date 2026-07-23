@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-23 gate contains 54 entries: 38 committed entries plus all 16
+The 2026-07-23 gate contains 56 entries: 40 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-35 decode passes, 19 expected fail-closed cases, zero mismatches, and zero skips
+36 decode passes, 20 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -166,7 +166,7 @@ packet headers into one-part-per-tile PPM or multipart PPT+PLT. The unchanged
 foreign T1 bodies match the same six full/reduction-1 PGX references exactly,
 one/eight-thread output agrees, and shortened PPT/PPM segments fail closed.
 Because Kakadu did not emit the packed framing, it is not counted among the
-manifest's independent packed-header streams or the 54-entry corpus totals.
+manifest's independent packed-header streams or the 56-entry corpus totals.
 Both sources use Kakadu 8.4.1 with `Creversible=yes`, `Cycc=no`,
 `Stiles={16,16}`, `Clevels=2`, `Corder=RPCL`, three 16x16 precinct levels,
 4x4 main code blocks, `Clevels:T1C1=1`, `Cblk:T1C1={8,8}`, and one layer;
@@ -196,6 +196,15 @@ full/reduction-1 PGX references match Kakadu exactly. The older manifest
 mutation now pins a different boundary: changing only COC without re-encoding
 the packet headers and bodies is structurally inconsistent and fails with
 `InvalidCodestream`.
+
+The eleventh G2 entry removes the equal-geometry limit from the bounded
+single-tile mixed-transform profile. Components 0 and 2 retain reversible
+NL=3, 4x4 blocks, and 32x32 precincts; component 1 simultaneously selects
+irreversible 9/7, NL=2, 8x8 blocks, 16x16 precincts, and a seven-band
+scalar-expounded QCC. Per-component packet planning, reduction compaction, T1,
+and inverse DWT match all six Kakadu full/reduction-1 PGX references exactly.
+A paired QCC reassignment to reversible component 0 fails with
+`UnsupportedPayload`.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT

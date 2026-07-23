@@ -42,8 +42,8 @@
       "encode": "bounded",
       "malformed": "complete",
       "interop": "bounded",
-      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style and B.7 clamping fixtures", "Kakadu multi-tile reversible COD/QCD/COC/QCC fixtures", "Kakadu multi-tile no-MCT 9/7 tile QCD and component QCC fixture", "Kakadu single-tile mixed 5/3/9/7 COC/QCC fixture plus malformed counterparts"],
-      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in bounded three-component 9/7 profiles, single-tile no-MCT reversible component-local decomposition/precinct/block/style, first-tile-part no-MCT tile/component coding or quantization overrides, and equal-geometry single-tile mixed 5/3/9/7 transforms are accepted within the documented RPCL envelopes; broader local-transform and tile-header combinations remain fail-closed."
+      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style and B.7 clamping fixtures", "Kakadu multi-tile reversible COD/QCD/COC/QCC fixtures", "Kakadu multi-tile no-MCT 9/7 tile QCD and component QCC fixture", "Kakadu single-tile mixed 5/3/9/7 COC/QCC fixtures with common and divergent geometry plus malformed counterparts"],
+      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in bounded three-component 9/7 profiles, single-tile no-MCT reversible component-local decomposition/precinct/block/style, first-tile-part no-MCT tile/component coding or quantization overrides, and single-tile mixed 5/3/9/7 transforms with component-local geometry are accepted within the documented RPCL envelopes; mixed-transform tile-header combinations remain fail-closed."
     },
     {
       "id": "progression-poc",
@@ -1021,6 +1021,55 @@
         "redistribution": "recipe committed; no additional binary"
       },
       "oracle": "a reversible 5/3 component cannot consume scalar-expounded QCC and the remaining 9/7 component cannot inherit the reversible main QCD",
+      "features": ["cod-qcd-component-overrides", "reversible-53", "irreversible-97"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "patches": [
+        { "marker": "qcc", "marker_offset": 4, "value": 0 }
+      ]
+    },
+    {
+      "id": "kakadu-mixed-transform-divergent-geometry",
+      "path": "src/testdata/kakadu-mixed-transform-geometry.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "ef1a41a98094a7db67cc2aa5b599c3e0571c4124686ffa106510c97c728034ad",
+      "source": {
+        "producer": "Kakadu demo applications from three copies of the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "single-tile no-MCT RPCL stream whose main components use reversible NL=3, 4x4 blocks, and 32x32 precincts while component 1 uses irreversible NL=2, 8x8 blocks, 16x16 precincts, and scalar-expounded Qstep 0.01",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm -o src/testdata/kakadu-mixed-transform-geometry.j2c Creversible=yes Creversible:C1=no Cycc=no Clevels=3 Clevels:C1=2 Corder=RPCL Cprecincts={32,32},{32,32},{32,32},{32,32} Cprecincts:C1={16,16},{16,16},{16,16} Cblk={4,4} Cblk:C1={8,8} Clayers=1 Qstep:C1=0.01 -rate - -num_threads 0; kdu_expand full and -reduce 1 to the six committed PGX paths"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand native PGX planes; reversible components remain exact and the divergent-geometry irreversible component stays within peak 1, MSE 0.04 full and MSE 0.07 at reduction 1",
+      "features": ["cod-qcd-component-overrides", "reversible-53", "irreversible-97", "selective-streaming-decode"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-mixed-transform-geometry-full-c0.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 0, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-geometry-full-c1.pgx", "sha256": "8007f1aca4d72b126cc27446beadf7be046a34e57772fa1ebd641dfcc132cce3", "format": "pgx", "component": 1, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-geometry-full-c2.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 2, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-geometry-r1-c0.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 },
+        { "path": "src/testdata/kakadu-mixed-transform-geometry-r1-c1.pgx", "sha256": "80828939bec38c1c5f67ac02540ee3120ff67aa44651c06c64f1d2deb58a7d89", "format": "pgx", "component": 1, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 },
+        { "path": "src/testdata/kakadu-mixed-transform-geometry-r1-c2.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 }
+      ]
+    },
+    {
+      "id": "synthetic-mixed-transform-geometry-qcc-mismatch",
+      "path": "src/testdata/kakadu-mixed-transform-geometry.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "ef1a41a98094a7db67cc2aa5b599c3e0571c4124686ffa106510c97c728034ad",
+      "source": {
+        "producer": "z2000 boundary mutation over the Kakadu 8.4.1 divergent-geometry mixed-transform fixture",
+        "version": "schema 1",
+        "origin": "the seven-band scalar-expounded QCC is reassigned from irreversible component 1 to reversible component 0 after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "a reversible 5/3 component cannot consume scalar-expounded QCC and the divergent-geometry 9/7 component cannot inherit the ten-band reversible main QCD",
       "features": ["cod-qcd-component-overrides", "reversible-53", "irreversible-97"],
       "expectation": "fail_closed",
       "expected_error": "UnsupportedPayload",

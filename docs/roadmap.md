@@ -152,12 +152,13 @@ CMYK, all T1 style bits, uniform COC/QCC, genuinely divergent ICT/9-7 QCC,
 reversible component-local COC decomposition/precinct geometry, divergent
 component block geometry/T1 style, reversible tile-local COD/QCD and COC/QCC
 including resolution-part continuation, irreversible tile/component QCD/QCC,
-mixed 5/3/9/7 component transforms, and padded multipart TLM; twelve mutations pin malformed and unsupported
+mixed 5/3/9/7 component transforms with common and divergent geometry, and
+padded multipart TLM; thirteen mutations pin malformed and unsupported
 fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 54-entry result of 35 decode passes and 19 expected fail-closed
+a complete 56-entry result of 36 decode passes and 20 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
 signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
@@ -239,7 +240,7 @@ non-recursive batch CLI syntax, with reduction and byte order kept explicit.
 The second surface writes all native components to exact ZRAW through the same
 dispatch forms and round-trips its self-describing metadata and payload.
 
-G2 now has ten pinned slices. Genuinely component-specific
+G2 now has eleven pinned slices. Genuinely component-specific
 scalar-expounded QCC works in the bounded three-component ICT/9-7 profile at
 full and reduced resolution. A reversible single-tile no-MCT Kakadu stream also
 decodes component-local decomposition counts 3/2/1, component-sized precinct
@@ -272,9 +273,13 @@ reserved-`Sqcc` mutation fails closed. A single-tile Kakadu no-MCT stream now
 keeps two components on reversible 5/3 while a COC/QCC pair selects
 scalar-expounded 9/7 for component 1. The reversible planes are exact, the 9/7
 plane stays within peak 1/MSE 0.0625 at full/reduced resolution, and a
-transform/QCC mismatch fails closed. Encoder-side B.7 clamping, broader local-
-transform geometry or tile scope, arbitrary PLT-less multipart PPM, and packed
-TLM/POC combinations remain the next boundaries.
+transform/QCC mismatch fails closed. A second mixed-transform stream removes
+the equal-geometry constraint: the 9/7 component also changes to NL=2, 8x8
+blocks, and 16x16 precincts while the 5/3 components retain NL=3, 4x4, and
+32x32. All six full/reduced planes are exact and a mismatched QCC remains
+closed. Encoder-side B.7 clamping, mixed-transform tile scope, arbitrary
+PLT-less multipart PPM, and packed TLM/POC combinations remain the next
+boundaries.
 Together with G3 they replace the
 remaining byte-redundant/uniform shortcuts with real component- and tile-local
 semantics. Unknown or profile-inapplicable

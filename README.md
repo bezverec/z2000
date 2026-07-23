@@ -58,10 +58,13 @@ certification.
   expounded QCD plus a component-specific QCC at full/reduced resolution with
   peak error at most one. A bounded single-tile no-MCT profile also mixes
   reversible 5/3 components with one COC-selected 9/7 component and its
-  scalar-expounded QCC, pinned at full/reduced resolution. Strict decode also
+  scalar-expounded QCC, pinned at full/reduced resolution. A second fixture
+  simultaneously changes that component to NL=2, 8x8 blocks, and 16x16
+  precincts while the reversible components retain NL=3, 4x4, and 32x32; all
+  full/reduced PGX planes are exact. Strict decode also
   applies the Part 1 B.7 effective code-block clamp per resolution/subband;
   a Kakadu component-local 64x8-vs-32x32 fixture is exact at full/reduced
-  resolution. Encoder-side clamping, broader local-transform geometry,
+  resolution. Encoder-side clamping, mixed-transform tile scope,
   arbitrary PLT-less multipart PPM, and packed POC/TLM combinations remain
   fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
