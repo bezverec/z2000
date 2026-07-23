@@ -143,10 +143,39 @@ pub fn makeCodeBlocks(
 ) ![]CodeBlock {
     if (block_width == 0 or block_height == 0) return SubbandError.InvalidDimensions;
 
+    var widths: [97]usize = undefined;
+    var heights: [97]usize = undefined;
+    if (bands.len > widths.len) return SubbandError.TooManyLevels;
+    @memset(widths[0..bands.len], block_width);
+    @memset(heights[0..bands.len], block_height);
+    return makeCodeBlocksForBandDimensions(
+        allocator,
+        bands,
+        widths[0..bands.len],
+        heights[0..bands.len],
+    );
+}
+
+/// Partitions each subband with its own effective code-block dimensions.
+/// JPEG 2000 Part 1 uses this when a nominal COD/COC code-block dimension is
+/// larger than the precinct-induced span at a particular resolution.
+pub fn makeCodeBlocksForBandDimensions(
+    allocator: std.mem.Allocator,
+    bands: []const Band,
+    block_widths: []const usize,
+    block_heights: []const usize,
+) ![]CodeBlock {
+    if (block_widths.len != bands.len or block_heights.len != bands.len) {
+        return SubbandError.InvalidDimensions;
+    }
+
     var list: std.ArrayList(CodeBlock) = .empty;
     errdefer list.deinit(allocator);
 
     for (bands, 0..) |band, band_index| {
+        const block_width = block_widths[band_index];
+        const block_height = block_heights[band_index];
+        if (block_width == 0 or block_height == 0) return SubbandError.InvalidDimensions;
         const band_x0: u64 = band.origin_x;
         const band_y0: u64 = band.origin_y;
         var y: usize = 0;

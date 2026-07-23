@@ -56,9 +56,14 @@ certification.
   tile PPM, including full/reduced PGX, 1/8-thread, and malformed-marker gates.
   A separate four-tile no-MCT 9/7 Kakadu profile consumes a tile-local scalar-
   expounded QCD plus a component-specific QCC at full/reduced resolution with
-  peak error at most one. Component-local transform, general B.7 block
-  clamping, arbitrary PLT-less multipart PPM, and packed POC/TLM combinations
-  remain fail-closed.
+  peak error at most one. A bounded single-tile no-MCT profile also mixes
+  reversible 5/3 components with one COC-selected 9/7 component and its
+  scalar-expounded QCC, pinned at full/reduced resolution. Strict decode also
+  applies the Part 1 B.7 effective code-block clamp per resolution/subband;
+  a Kakadu component-local 64x8-vs-32x32 fixture is exact at full/reduced
+  resolution. Encoder-side clamping, broader local-transform geometry,
+  arbitrary PLT-less multipart PPM, and packed POC/TLM combinations remain
+  fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,

@@ -261,9 +261,16 @@ same divergent reversible COC/QCC state through bounded packed layouts:
 multipart PPT with PLT or one-part-per-tile PPM. Inline PLT-less multipart state
 is likewise component-local. A separate one-part-per-tile no-MCT 9/7 profile consumes
 scalar-expounded main, tile, and component QCD/QCC tables through native planar
-full/reduced reconstruction. Component-local transform changes, general B.7 clamping,
-arbitrary PLT-less multipart PPM, PPM+POC, and packed-header/TLM combinations
-remain fail-closed.
+full/reduced reconstruction. A bounded single-tile equal-geometry profile
+dispatches each no-MCT component through its effective COC transform and QCC:
+reversible planes use checked integer 5/3 synthesis while irreversible planes
+use their scalar-expounded steps and float 9/7 synthesis. Strict component
+geometry derives an effective code-block dimension for every subband by
+clamping the nominal COD/COC dimension to the precinct-induced B.7 span; the
+same dimensions build both block catalogs and packet tag-tree grids. Broader
+local-transform geometry or tile scope, encoder-side B.7 clamping, arbitrary
+PLT-less multipart PPM, PPM+POC, and packed-header/TLM combinations remain
+fail-closed.
 
 Inline PLT-less multipart streams carry no packet count at the Stage B frame
 scan. Their spans therefore retain an explicit deferred-count state and exact

@@ -3862,9 +3862,12 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
     const irreversible = header.transform == .irreversible_9_7 and
         header.quantization != .none and
         (header.mct == .none or irreversible_codestream_components);
+    const mixed_component_transform = header.mct == .none and
+        headerHasMixedComponentTransforms(header);
     if (headerHasSignedComponent(header) or headerHasNonLegacyPrecision(header) or
         header.component_count < 1 or header.component_count > color.max_components or
-        (header.mct != .none and !rct_alpha and !sampled_rct) or (!reversible and !irreversible))
+        (header.mct != .none and !rct_alpha and !sampled_rct) or
+        (!reversible and !irreversible and !mixed_component_transform))
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -3908,6 +3911,204 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
     );
 }
 
+fn decodeMixedTransformPlanarFromBlockCatalogMeasured(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !color.SamplePlanes {
+    const component_coding = componentCodingSliceForHeader(header) orelse
+        return CodestreamError.UnsupportedPayload;
+    if (header.mct != .none or catalog.component_count != header.component_count or
+        header.component_qcd.len < header.component_count or
+        !strictComponentCodingDiffersOnlyByTransform(component_coding))
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+
+    var component_depths = [_]u8{0} ** max_codestream_components;
+    var output_widths = [_]usize{0} ** max_codestream_components;
+    var output_heights = [_]usize{0} ** max_codestream_components;
+    var max_component_dimension: usize = 0;
+    for (0..header.component_count) |component| {
+        const coding = component_coding[component];
+        if (options.resolution_reduction > coding.levels) return CodestreamError.InvalidCodestream;
+        component_depths[component] = componentBitDepthForHeader(header, component);
+        output_widths[component] = try reducedGridLength(
+            catalog.component_x0[component],
+            catalog.component_widths[component],
+            options.resolution_reduction,
+        );
+        output_heights[component] = try reducedGridLength(
+            catalog.component_y0[component],
+            catalog.component_heights[component],
+            options.resolution_reduction,
+        );
+        max_component_dimension = @max(max_component_dimension, catalog.component_widths[component]);
+        max_component_dimension = @max(max_component_dimension, catalog.component_heights[component]);
+    }
+    if (max_component_dimension == 0) return CodestreamError.InvalidCodestream;
+
+    const decoded_width = try reducedGridLength(
+        header.reference_x0,
+        header.width,
+        options.resolution_reduction,
+    );
+    const decoded_height = try reducedGridLength(
+        header.reference_y0,
+        header.height,
+        options.resolution_reduction,
+    );
+    var output = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        decoded_width,
+        decoded_height,
+        component_depths[0..header.component_count],
+        output_widths[0..header.component_count],
+        output_heights[0..header.component_count],
+    );
+    errdefer output.deinit();
+
+    var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
+    defer workspace.deinit();
+    for (0..header.component_count) |component| {
+        const coding = component_coding[component];
+        const component_width = catalog.component_widths[component];
+        const component_height = catalog.component_heights[component];
+        const payload_start = monotonicNs();
+        const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+            allocator,
+            component_width,
+            component_height,
+            coding.levels,
+            catalog,
+            component,
+            options,
+            timings,
+        );
+        defer allocator.free(coefficients);
+        if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
+
+        const component_depth = component_depths[component];
+        const max_sample = (@as(i32, 1) << @as(u5, @intCast(component_depth))) - 1;
+        const level_shift = @as(i32, 1) << @as(u5, @intCast(component_depth - 1));
+        const wavelet_start = monotonicNs();
+        switch (coding.transform) {
+            .reversible_5_3 => {
+                var actual_width = component_width;
+                var actual_height = component_height;
+                if (options.resolution_reduction == 0) {
+                    wavelet_int.inverse53CheckedWithWorkspaceOrigin(
+                        &workspace,
+                        coefficients,
+                        component_width,
+                        component_height,
+                        coding.levels,
+                        catalog.component_x0[component],
+                        catalog.component_y0[component],
+                    ) catch |err| switch (err) {
+                        wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                        else => return err,
+                    };
+                } else {
+                    const reduced = wavelet_int.inverse53ReducedCheckedWithWorkspaceOrigin(
+                        &workspace,
+                        coefficients,
+                        component_width,
+                        component_height,
+                        coding.levels,
+                        options.resolution_reduction,
+                        catalog.component_x0[component],
+                        catalog.component_y0[component],
+                    ) catch |err| switch (err) {
+                        wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                        else => return err,
+                    };
+                    actual_width = reduced.width;
+                    actual_height = reduced.height;
+                }
+                if (actual_width != output_widths[component] or actual_height != output_heights[component]) {
+                    return CodestreamError.InvalidCodestream;
+                }
+                for (0..actual_height) |row| {
+                    for (0..actual_width) |column| {
+                        const value = coefficients[row * component_width + column] + level_shift;
+                        output.planes[component][row * actual_width + column] = if (options.resolution_reduction == 0) value: {
+                            if (value < 0 or value > max_sample) return CodestreamError.InvalidCodestream;
+                            break :value @intCast(value);
+                        } else @intCast(std.math.clamp(value, 0, max_sample));
+                    }
+                }
+            },
+            .irreversible_9_7 => {
+                const width_u32 = std.math.cast(u32, component_width) orelse
+                    return CodestreamError.InvalidCodestream;
+                const height_u32 = std.math.cast(u32, component_height) orelse
+                    return CodestreamError.InvalidCodestream;
+                const x1 = std.math.add(u32, catalog.component_x0[component], width_u32) catch
+                    return CodestreamError.InvalidCodestream;
+                const y1 = std.math.add(u32, catalog.component_y0[component], height_u32) catch
+                    return CodestreamError.InvalidCodestream;
+                const bands = try subband.makeBandsForRegion(
+                    allocator,
+                    catalog.component_x0[component],
+                    catalog.component_y0[component],
+                    x1,
+                    y1,
+                    coding.levels,
+                );
+                defer allocator.free(bands);
+                const deltas = try allocator.alloc(f64, bands.len);
+                defer allocator.free(deltas);
+                const component_qcd = &header.component_qcd[component];
+                for (bands, deltas) |band, *delta| {
+                    const step = signalledQcdBandStep(
+                        component_qcd,
+                        coding.levels,
+                        band.kind,
+                        band.level,
+                    ) orelse return CodestreamError.UnsupportedPayload;
+                    delta.* = irreversibleBandDelta(component_depth, band.kind, step);
+                }
+                const reconstructed = try allocator.alloc(f32, try std.math.mul(usize, component_width, component_height));
+                defer allocator.free(reconstructed);
+                var job = IrreversibleInversePlaneJob{
+                    .quantized = coefficients,
+                    .plane = reconstructed,
+                    .width = component_width,
+                    .height = component_height,
+                    .levels = coding.levels,
+                    .x0 = catalog.component_x0[component],
+                    .y0 = catalog.component_y0[component],
+                    .bands = bands,
+                    .deltas = deltas,
+                    .reduction = options.resolution_reduction,
+                };
+                try irreversibleInversePlane(&job);
+                if (job.shape.width != output_widths[component] or
+                    job.shape.height != output_heights[component])
+                {
+                    return CodestreamError.InvalidCodestream;
+                }
+                const max_float: f32 = @floatFromInt(max_sample);
+                const level_shift_float: f32 = @floatFromInt(level_shift);
+                for (0..job.shape.height) |row| {
+                    for (0..job.shape.width) |column| {
+                        const value = reconstructed[row * component_width + column] + level_shift_float;
+                        output.planes[component][row * job.shape.width + column] = if (std.math.isNan(value))
+                            0
+                        else
+                            @intFromFloat(std.math.clamp(@round(value), 0.0, max_float));
+                    }
+                }
+            },
+        }
+        if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
+    }
+    return output;
+}
+
 fn decodeStrictPlanarFromBlockCatalogMeasured(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
@@ -3918,6 +4119,15 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
 ) !color.SamplePlanes {
     const rct_alpha = header.component_count == 4 and header.mct == .rct;
     if (catalog.component_count != header.component_count) return CodestreamError.InvalidCodestream;
+    if (headerHasMixedComponentTransforms(header)) {
+        return decodeMixedTransformPlanarFromBlockCatalogMeasured(
+            allocator,
+            header,
+            catalog,
+            options,
+            timings,
+        );
+    }
     if (header.transform == .irreversible_9_7) {
         if (header.quantization == .none or
             (header.mct != .none and output_mode != .codestream_components))
@@ -4123,6 +4333,7 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     if (header.component_count != 3) return CodestreamError.UnsupportedPayload;
     if (headerHasMixedComponentPrecision(header)) return CodestreamError.UnsupportedPayload;
     if (headerHasComponentSubsampling(header)) return CodestreamError.UnsupportedPayload;
+    if (headerHasMixedComponentTransforms(header)) return CodestreamError.UnsupportedPayload;
     // Multi-tile headers carry the real SIZ tile dimensions (single-tile
     // metadata leaves them zero); route them through the per-tile decode.
     if (header.tile_width != 0 or header.tile_height != 0) {
@@ -4776,10 +4987,10 @@ fn readStrictCodestreamMetadataForProfile(
                 for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
             }
         } else if (marker == @intFromEnum(Marker.coc)) {
-            // ISO 15444-1 A.6.2 component-specific coding style. The bounded
-            // native path accepts component-local decomposition counts and
-            // precinct geometry. Block geometry/style and transform remain
-            // common so the existing T1 contract cannot silently diverge. Layout:
+            // ISO 15444-1 A.6.2 component-specific coding style. Bounded
+            // profiles accept component-local decomposition, precinct,
+            // block/style, and single-tile transform choices; the profile
+            // gates below validate each effective coding/QCC pair. Layout:
             // Ccoc(1) Scoc(1) SPcoc(NL,xcb,ycb,cblk,transform,precincts).
             if (!saw_cod) return CodestreamError.InvalidCodestream;
             if (segment.len < 3) return CodestreamError.InvalidCodestream;
@@ -4829,7 +5040,7 @@ fn readStrictCodestreamMetadataForProfile(
                 segment[1..],
                 component_bit_depths[qcc_component],
                 component_coding[qcc_component].levels,
-                parsed_transform,
+                component_coding[qcc_component].transform,
             );
             if (qcc_component_seen[qcc_component]) return CodestreamError.InvalidCodestream;
             qcc_component_seen[qcc_component] = true;
@@ -4892,11 +5103,6 @@ fn readStrictCodestreamMetadataForProfile(
         for (coc_component_seen[0..component_count]) |seen| {
             all_components_overridden = all_components_overridden and seen;
         }
-        if (override_transform != parsed_transform and
-            (!coc_payloads_uniform or !all_components_overridden))
-        {
-            return CodestreamError.UnsupportedPayload;
-        }
         if (coc_payloads_uniform and all_components_overridden) {
             block_width = override_block_width;
             block_height = override_block_height;
@@ -4907,9 +5113,11 @@ fn readStrictCodestreamMetadataForProfile(
     const component_coding_divergent = strictComponentCodingDiverges(component_coding[0..component_count]);
     var max_levels: u8 = 0;
     var max_levels_component: usize = 0;
+    var component_transforms_match_main = true;
     for (component_coding[0..component_count], 0..) |coding, component| {
         if (coding.precinct_count != coding.levels + 1) return CodestreamError.InvalidCodestream;
-        if (coding.transform != parsed_transform) return CodestreamError.UnsupportedPayload;
+        component_transforms_match_main = component_transforms_match_main and
+            coding.transform == parsed_transform;
         if (coding.levels > max_levels) {
             max_levels = coding.levels;
             max_levels_component = component;
@@ -4927,9 +5135,17 @@ fn readStrictCodestreamMetadataForProfile(
         return CodestreamError.UnsupportedPayload;
     }
     const parsed_grid_value = parsed_grid orelse return CodestreamError.InvalidCodestream;
+    const component_local_mixed_transform = precision_profile == .legacy and
+        parsed_grid_value.isSingleTile() and component_count == 3 and parsed_mct == .none and
+        parsed_progression == .rpcl and !mixed_component_precision and !subsampled_components and
+        parsed_transform == .reversible_5_3 and parsed_quantization == .none and
+        strictComponentCodingDiffersOnlyByTransform(component_coding[0..component_count]);
+    const native_reversible_component_local = precision_profile == .native and
+        parsed_grid_value.isSingleTile() and parsed_mct == .none and !subsampled_components and
+        parsed_transform == .reversible_5_3 and parsed_quantization == .none and
+        component_transforms_match_main;
     if (component_coding_divergent and
-        (precision_profile != .native or !parsed_grid_value.isSingleTile() or parsed_mct != .none or subsampled_components or
-            parsed_transform != .reversible_5_3 or parsed_quantization != .none))
+        !component_local_mixed_transform and !native_reversible_component_local)
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -4971,10 +5187,15 @@ fn readStrictCodestreamMetadataForProfile(
         if (!std.mem.eql(u8, qcc_payload_first, qcd_payload)) {
             if (component_coding_divergent) {
                 for (component_qcd[0..component_count], component_coding[0..component_count]) |component_info, coding| {
-                    if (component_info.bands != 1 + 3 * @as(usize, coding.levels) or
-                        component_info.quantization != .none or component_info.exponent_count == 0)
-                    {
-                        return CodestreamError.InvalidCodestream;
+                    const expected_bands = 1 + 3 * @as(usize, coding.levels);
+                    const valid_quantization = switch (coding.transform) {
+                        .reversible_5_3 => component_info.quantization == .none and
+                            component_info.exponent_count == expected_bands,
+                        .irreversible_9_7 => component_info.quantization != .none and
+                            component_info.exponent_count != 0 and component_info.step_count != 0,
+                    };
+                    if (component_info.bands != expected_bands or !valid_quantization) {
+                        return CodestreamError.UnsupportedPayload;
                     }
                 }
             } else if (allowsComponentSpecificIrreversibleQcc(
@@ -5005,6 +5226,20 @@ fn readStrictCodestreamMetadataForProfile(
                 parsed_qcd_steps = qcc_override_info.steps;
                 parsed_qcd_step_count = qcc_override_info.step_count;
                 if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
+            }
+        }
+    }
+    if (component_local_mixed_transform) {
+        for (component_qcd[0..component_count], component_coding[0..component_count]) |component_info, coding| {
+            const expected_bands = 1 + 3 * @as(usize, coding.levels);
+            const valid_quantization = switch (coding.transform) {
+                .reversible_5_3 => component_info.quantization == .none and
+                    component_info.exponent_count == expected_bands,
+                .irreversible_9_7 => component_info.quantization != .none and
+                    component_info.exponent_count != 0 and component_info.step_count != 0,
+            };
+            if (component_info.bands != expected_bands or !valid_quantization) {
+                return CodestreamError.UnsupportedPayload;
             }
         }
     }
@@ -5884,6 +6119,35 @@ fn componentCodeBlockStyleForHeader(header: TemporaryHeader, component: usize) e
 fn headerHasComponentCodingDivergence(header: TemporaryHeader) bool {
     const coding = componentCodingSliceForHeader(header) orelse return false;
     return strictComponentCodingDiverges(coding);
+}
+
+fn headerHasMixedComponentTransforms(header: TemporaryHeader) bool {
+    const coding = componentCodingSliceForHeader(header) orelse return false;
+    if (coding.len < 2) return false;
+    const first = coding[0].transform;
+    for (coding[1..]) |component| {
+        if (component.transform != first) return true;
+    }
+    return false;
+}
+
+fn strictComponentCodingDiffersOnlyByTransform(coding: []const StrictComponentCoding) bool {
+    if (coding.len < 2) return false;
+    const first = coding[0];
+    var transform_differs = false;
+    for (coding[1..]) |component| {
+        if (component.levels != first.levels or component.precinct_count != first.precinct_count or
+            component.block_width != first.block_width or component.block_height != first.block_height or
+            !std.meta.eql(component.code_block_style, first.code_block_style))
+        {
+            return false;
+        }
+        for (component.precincts[0..component.precinct_count], first.precincts[0..first.precinct_count]) |a, b| {
+            if (a.width != b.width or a.height != b.height) return false;
+        }
+        transform_differs = transform_differs or component.transform != first.transform;
+    }
+    return transform_differs;
 }
 
 fn strictComponentCodingDiverges(coding: []const StrictComponentCoding) bool {
@@ -6827,6 +7091,7 @@ fn assembleStrictPacketCatalogHeaders(
             if (selected.len > 0) {
                 active_group_count = try buildStrictPacketAuditBandGroups(
                     group_allocator,
+                    geometry.plan,
                     geometry.bands,
                     geometry.blocks,
                     selected,
@@ -7239,6 +7504,7 @@ fn deinitStrictPacketAuditBandGroups(
 
 fn buildStrictPacketAuditBandGroups(
     allocator: std.mem.Allocator,
+    plan: packet_plan.Plan,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
     selected: []const usize,
@@ -7263,6 +7529,7 @@ fn buildStrictPacketAuditBandGroups(
         if (group_count == max_rpcl_packet_band_groups) return CodestreamError.InvalidCodestream;
         groups[group_count] = try buildStrictPacketAuditBandGroup(
             allocator,
+            plan,
             bands[band_index],
             blocks,
             selected[cursor..end],
@@ -7280,6 +7547,7 @@ fn buildStrictPacketAuditBandGroups(
 
 fn buildStrictPacketAuditBandGroup(
     allocator: std.mem.Allocator,
+    plan: packet_plan.Plan,
     band: subband.Band,
     blocks: []const subband.CodeBlock,
     selected: []const usize,
@@ -7289,18 +7557,27 @@ fn buildStrictPacketAuditBandGroup(
     component: usize,
 ) !StrictPacketAuditBandGroup {
     if (selected.len == 0) return CodestreamError.InvalidCodestream;
+    if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
+    const packet_levels = plan.resolution_count - 1;
     const block_width = componentBlockWidthForHeader(header, component);
     const block_height = componentBlockHeightForHeader(header, component);
+    const effective_block = try effectiveCodeBlockDimensions(
+        plan,
+        band,
+        packet_levels,
+        block_width,
+        block_height,
+    );
     const code_block_style = componentCodeBlockStyleForHeader(header, component);
     const grid = try t2.CodeBlockGrid.initAnchored(
         band.rect.x,
         band.rect.y,
         band.rect.width,
         band.rect.height,
-        block_width,
-        block_height,
-        @as(usize, band.origin_x) % block_width,
-        @as(usize, band.origin_y) % block_height,
+        effective_block.width,
+        effective_block.height,
+        @as(usize, band.origin_x) % effective_block.width,
+        @as(usize, band.origin_y) % effective_block.height,
     );
 
     var min_x: usize = std.math.maxInt(usize);
@@ -7818,6 +8095,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !image.RgbImage {
+    if (headerHasMixedComponentTransforms(header)) return CodestreamError.UnsupportedPayload;
     const payload_start = monotonicNs();
     var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog, options, timings);
     defer strict_planes.deinit();
@@ -10670,6 +10948,7 @@ const StrictStatefulPrecinctGroups = struct {
             if (selected.len > 0) {
                 slot.count = try buildStrictPacketAuditBandGroups(
                     self.allocator,
+                    geometry.plan,
                     geometry.bands,
                     geometry.blocks,
                     selected,
@@ -15584,7 +15863,61 @@ fn makeCodeBlocksForPacketPlan(
     plan: packet_plan.Plan,
 ) ![]subband.CodeBlock {
     if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
-    return subband.makeCodeBlocks(allocator, bands, block_width, block_height);
+    if (bands.len > max_qcd_bands) return CodestreamError.InvalidCodestream;
+    const levels = plan.resolution_count - 1;
+    var widths: [max_qcd_bands]usize = undefined;
+    var heights: [max_qcd_bands]usize = undefined;
+    for (bands, 0..) |band, index| {
+        const effective = try effectiveCodeBlockDimensions(
+            plan,
+            band,
+            levels,
+            block_width,
+            block_height,
+        );
+        widths[index] = effective.width;
+        heights[index] = effective.height;
+    }
+    return subband.makeCodeBlocksForBandDimensions(
+        allocator,
+        bands,
+        widths[0..bands.len],
+        heights[0..bands.len],
+    );
+}
+
+const EffectiveCodeBlockDimensions = struct {
+    width: usize,
+    height: usize,
+};
+
+/// ISO/IEC 15444-1 B.7: a code-block partition is bounded by the precinct
+/// partition. Resolution zero uses the full precinct span in LL coordinates;
+/// detail subbands use the corresponding half-span.
+fn effectiveCodeBlockDimensions(
+    plan: packet_plan.Plan,
+    band: subband.Band,
+    levels: u8,
+    nominal_width: usize,
+    nominal_height: usize,
+) !EffectiveCodeBlockDimensions {
+    if (nominal_width == 0 or nominal_height == 0) return CodestreamError.InvalidCodestream;
+    const resolution_index = try t2.bandResolutionIndex(levels, band);
+    if (resolution_index >= plan.resolution_count) return CodestreamError.InvalidCodestream;
+    const resolution = plan.resolutions[resolution_index];
+    const band_span_width = if (resolution_index == 0)
+        resolution.precinct_width
+    else
+        resolution.precinct_width / 2;
+    const band_span_height = if (resolution_index == 0)
+        resolution.precinct_height
+    else
+        resolution.precinct_height / 2;
+    if (band_span_width == 0 or band_span_height == 0) return CodestreamError.InvalidCodestream;
+    return .{
+        .width = @min(nominal_width, @as(usize, band_span_width)),
+        .height = @min(nominal_height, @as(usize, band_span_height)),
+    };
 }
 
 fn makeBandsForPacketPlan(
@@ -16235,13 +16568,9 @@ fn validateMultiTileProgression(progression: ProgressionOrder, layers: u16) !voi
     }
 }
 
-/// ISO 15444-1 B.7: the effective code-block size is bounded by the precinct
-/// span in band coordinates — the full precinct at resolution 0, half of it
-/// at higher resolutions. z2000 does not implement the block-size clamping
-/// the standard prescribes, so code blocks that would cross precinct
-/// boundaries fail closed on both encode and strict decode instead of
-/// producing (or misreading) an ambiguous packet/block layout. Expects the
-/// precinct list normalized to cover the coded resolutions.
+/// The encoder still requires the requested nominal block partition to fit
+/// every precinct-induced band span. Strict decode implements the B.7
+/// effective-size clamping independently.
 fn validatePrecinctBlockSpans(options: LosslessOptions) !void {
     for (options.precincts[0..options.precinct_count], 0..) |precinct, resolution| {
         const band_span_width = if (resolution == 0) precinct.width else precinct.width / 2;
@@ -16260,20 +16589,12 @@ fn validateDecodePrecinctBlockSpans(
     image_origin_y: u32,
 ) !void {
     if (image_width == 0 or image_height == 0) return CodestreamError.InvalidCodestream;
+    _ = image_origin_x;
+    _ = image_origin_y;
     for (options.precincts[0..options.precinct_count], 0..) |precinct, resolution| {
         const band_span_width = if (resolution == 0) precinct.width else precinct.width / 2;
         const band_span_height = if (resolution == 0) precinct.height else precinct.height / 2;
         if (band_span_width == 0 or band_span_height == 0) return CodestreamError.InvalidCodestream;
-        if (band_span_width < options.block_width and
-            (image_origin_x != 0 or image_width > band_span_width))
-        {
-            return CodestreamError.UnsupportedPayload;
-        }
-        if (band_span_height < options.block_height and
-            (image_origin_y != 0 or image_height > band_span_height))
-        {
-            return CodestreamError.UnsupportedPayload;
-        }
     }
 }
 
@@ -16294,7 +16615,7 @@ fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: Lossless
 /// Keep the profile bounds that are independent of that implementation
 /// detail: legal precinct/block spans and one global DWT level count.
 fn validateMultiTileDecodeGeometry(grid: tile_grid.Grid, levels: u8, options: LosslessOptions) !void {
-    try validatePrecinctBlockSpans(options);
+    try validateDecodePrecinctBlockSpans(options, 1, 1, 0, 0);
     if (levels > 32) return CodestreamError.UnsupportedPayload;
 
     var iterator = grid.iterator();

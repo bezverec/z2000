@@ -143,7 +143,7 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 G0 is active. Its 2026-07-17 foundation includes an unscored broad capability
 matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
-Twenty-three committed foreign-encoded streams cover sampled origins/POC and sampled
+Twenty-four committed foreign-encoded streams cover sampled origins/POC and sampled
 multi-tile no-MCT 9/7 reduction,
 signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
 8/16/20-bit, and independently sampled signed 7/13/23-bit
@@ -152,12 +152,12 @@ CMYK, all T1 style bits, uniform COC/QCC, genuinely divergent ICT/9-7 QCC,
 reversible component-local COC decomposition/precinct geometry, divergent
 component block geometry/T1 style, reversible tile-local COD/QCD and COC/QCC
 including resolution-part continuation, irreversible tile/component QCD/QCC,
-and padded multipart TLM; eleven mutations pin malformed and unsupported
+mixed 5/3/9/7 component transforms, and padded multipart TLM; twelve mutations pin malformed and unsupported
 fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 51-entry result of 33 decode passes and 18 expected fail-closed
+a complete 54-entry result of 35 decode passes and 19 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
 signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
@@ -239,7 +239,7 @@ non-recursive batch CLI syntax, with reduction and byte order kept explicit.
 The second surface writes all native components to exact ZRAW through the same
 dispatch forms and round-trips its self-describing metadata and payload.
 
-G2 now has eight pinned slices. Genuinely component-specific
+G2 now has ten pinned slices. Genuinely component-specific
 scalar-expounded QCC works in the bounded three-component ICT/9-7 profile at
 full and reduced resolution. A reversible single-tile no-MCT Kakadu stream also
 decodes component-local decomposition counts 3/2/1, component-sized precinct
@@ -247,8 +247,11 @@ lists, and matching QCD/QCC tables exactly at full resolution and reduction 1.
 Its packet scheduling, T1 geometry, reduced-catalog compaction, and inverse DWT
 all use effective component levels. A second reversible fixture combines
 component-local 4x4/default, 8x8/RESET, and 4x16/CAUSAL+SEGMARK block profiles;
-all six full/reduction references are exact, while a B.7-clamping mutation
-stays fail-closed. A four-tile reversible fixture additionally replaces main
+all six full/reduction references are exact. A separate Kakadu fixture
+advertises a nominal component-local 64x8 block against 32x32 precincts and
+pins exact B.7 effective clamping in both LL and detail subbands; changing only
+the older fixture's COC while retaining its original packets remains malformed.
+A four-tile reversible fixture additionally replaces main
 NL=2/4x4/seven-band QCD on tile 1 with tile-local NL=1/8x8/four-band COD/QCD;
 all six full/reduction references are exact and a divergent tile transform
 fails closed. A second four-tile fixture keeps that main profile but changes
@@ -265,9 +268,13 @@ marker corruption failing closed. The packed framing itself is not claimed as
 foreign-encoder output. A directly emitted four-tile no-MCT 9/7 stream now
 layers tile QCD and component QCC scalar-expounded steps over the main QCD;
 all six full/reduced Kakadu PGX references stay within peak 1/MSE 0.125 and a
-reserved-`Sqcc` mutation fails closed. Component-local transforms, general B.7
-clamping, arbitrary PLT-less multipart PPM, and packed TLM/POC combinations
-remain the next boundaries.
+reserved-`Sqcc` mutation fails closed. A single-tile Kakadu no-MCT stream now
+keeps two components on reversible 5/3 while a COC/QCC pair selects
+scalar-expounded 9/7 for component 1. The reversible planes are exact, the 9/7
+plane stays within peak 1/MSE 0.0625 at full/reduced resolution, and a
+transform/QCC mismatch fails closed. Encoder-side B.7 clamping, broader local-
+transform geometry or tile scope, arbitrary PLT-less multipart PPM, and packed
+TLM/POC combinations remain the next boundaries.
 Together with G3 they replace the
 remaining byte-redundant/uniform shortcuts with real component- and tile-local
 semantics. Unknown or profile-inapplicable

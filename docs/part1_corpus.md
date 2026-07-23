@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-22 gate contains 51 entries: 35 committed entries plus all 16
+The 2026-07-23 gate contains 54 entries: 38 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-33 decode passes, 18 expected fail-closed cases, zero mismatches, and zero skips
+35 decode passes, 19 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -124,15 +124,16 @@ The second G2 entry is a reversible single-tile no-MCT Kakadu stream with
 effective component decomposition counts 3/2/1, component-sized precinct
 lists, and matching QCD/QCC band tables. All six full/reduction-1 native PGX
 references match exactly and one/eight-thread output is identical. Reduction
-above the minimum component level, duplicate COC, and component-local transform
-divergence fail closed; the latter is also a manifested mutation.
+above the minimum component level and duplicate COC fail closed. A manifested
+transform mutation without the matching irreversible QCC also fails closed.
 
 The third G2 entry keeps the same reversible single-tile no-MCT transform and
 three decomposition levels while assigning component-local 4x4/default,
 8x8/RESET, and 4x16/CAUSAL+SEGMARK code-block profiles. All six
 full/reduction-1 PGX references match Kakadu exactly and one/eight-thread output
 is identical. A reserved style bit is malformed; a manifested 64-wide local
-block that would require general B.7 clamping remains fail-closed.
+block mutation whose packet headers/bodies still describe the former partition
+fails closed as an inconsistent codestream.
 
 The fourth G2 entry is a four-tile reversible no-MCT Kakadu stream. Tile 1
 replaces the main NL=2/4x4 COD and seven-band QCD with a first-tile-part
@@ -148,7 +149,7 @@ The packet schedule, precinct state, T1 geometry, reduced catalog compaction,
 and inverse 5/3 synthesis use the effective tile-by-component tables; all six
 full/reduction-1 PGX references match Kakadu exactly. A manifested reserved-
 Sqcc mutation is structurally invalid, while unit tests also pin excessive
-reduction and component-local transform divergence.
+reduction and a transform override without matching quantization.
 
 The sixth G2 entry divides that profile into Kakadu RPCL resolution tile-parts.
 Each tile has three non-empty PLT-backed parts followed by three empty padding
@@ -165,7 +166,7 @@ packet headers into one-part-per-tile PPM or multipart PPT+PLT. The unchanged
 foreign T1 bodies match the same six full/reduction-1 PGX references exactly,
 one/eight-thread output agrees, and shortened PPT/PPM segments fail closed.
 Because Kakadu did not emit the packed framing, it is not counted among the
-manifest's independent packed-header streams or the 51-entry corpus totals.
+manifest's independent packed-header streams or the 54-entry corpus totals.
 Both sources use Kakadu 8.4.1 with `Creversible=yes`, `Cycc=no`,
 `Stiles={16,16}`, `Clevels=2`, `Corder=RPCL`, three 16x16 precinct levels,
 4x4 main code blocks, `Clevels:T1C1=1`, `Cblk:T1C1={8,8}`, and one layer;
@@ -178,6 +179,23 @@ Qstep 0.02 through QCC. Six full/reduction-1 PGX references pin effective
 tile-by-component dequantization with peak error at most one and measured MSE
 at most 0.125. A paired manifest mutation changes the tile QCC from scalar-
 expounded style two to reserved style three and fails before packet decode.
+
+The ninth G2 entry is a directly emitted single-tile no-MCT Kakadu stream.
+Main COD/QCD keep components 0 and 2 reversible 5/3, while component 1 selects
+irreversible 9/7 through COC and scalar-expounded Qstep 0.01 through QCC.
+Components 0 and 2 match all full/reduction-1 PGX samples exactly; component 1
+stays within peak 1 with measured MSE 0.03125 full and 0.0625 reduced.
+One/eight-thread output agrees. A paired mutation reassigns the irreversible
+QCC to reversible component 0 and fails before packet reconstruction.
+
+The tenth G2 entry is a directly emitted reversible no-MCT Kakadu stream whose
+component 1 advertises nominal 64x8 blocks against 32x32 precincts. The Part 1
+B.7 effective partition uses 32-wide LL blocks and 16-wide detail blocks; the
+strict catalog and packet tag-tree geometry share those dimensions. All six
+full/reduction-1 PGX references match Kakadu exactly. The older manifest
+mutation now pins a different boundary: changing only COC without re-encoding
+the packet headers and bodies is structurally inconsistent and fails with
+`InvalidCodestream`.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT

@@ -112,7 +112,7 @@ entries are grouped by development milestone rather than semantic version.
   and distinguishes decode pass, expected
   fail-closed, unexpected acceptance, native-raster mismatch, and skipped
   optional local assets.
-- Expanded the seed to twenty-three foreign-encoded fixtures: sampled Kakadu
+- Expanded the seed to twenty-five foreign-encoded fixtures: sampled Kakadu
   multi-tile/POC/origin and sampled multi-tile no-MCT 9/7, Grok CMYK, Kakadu
   signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
   8/16/20-bit, and independently sampled signed 7/13/23-bit
@@ -120,7 +120,9 @@ entries are grouped by development milestone rather than semantic version.
   COC/QCC, divergent ICT/9-7 QCC, reversible component-local 3/2/1-level COC,
   divergent component-local code-block geometry/T1 style, reversible tile-local
   COD/QCD and COC/QCC including resolution-part inheritance, irreversible
-  tile/component QCD/QCC, and padded multipart TLM. Eleven
+  tile/component QCD/QCC, mixed component-local 5/3/9/7 transforms,
+  component-local B.7 block clamping, and padded
+  multipart TLM. Twelve
   input-hash-verified mutations pin invalid/divergent COC, QCC and TLM plus
   unsupported signed-SIZ fail-closed behavior.
 - Added a Kakadu 8.4.1 sampled multi-tile no-MCT 9/7 PLT-less fixture. Its
@@ -134,15 +136,22 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 51-entry gate
-  reports 33 decode passes, 18 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 54-entry gate
+  reports 35 decode passes, 19 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
+- Added strict Part 1 B.7 effective code-block clamping per resolution and
+  subband. A directly emitted Kakadu stream advertises a component-local
+  nominal 64x8 block against 32x32 precincts; catalog and tag-tree geometry
+  both use 32-wide LL and 16-wide detail partitions, and all six
+  full/reduction-1 PGX references match exactly. A COC-only mutation retains
+  mismatched packet bodies and now fails as `InvalidCodestream`; encoder-side
+  clamping remains deliberately closed. The gate now contains 54 entries.
 - Added bounded component-local code-block geometry and T1 style for the
   single-tile reversible no-MCT native profile. A Kakadu stream combines
   4x4/default, 8x8/RESET, and 4x16/CAUSAL+SEGMARK components and matches six
   full/reduction-1 PGX references exactly at one and eight threads. Reserved
-  style bits are malformed; local blocks requiring general B.7 clamping stay
-  fail-closed and are pinned by the corpus manifest.
+  style bits are malformed; inconsistent COC geometry versus already encoded
+  packet bodies stays fail-closed and is pinned by the corpus manifest.
 - Added bounded first-tile-part `COD/QCD` overrides for reversible no-MCT
   multi-tile decode. A Kakadu four-tile stream replaces main NL=2/4x4 and its
   seven-band QCD on tile 1 with NL=1/8x8 and a four-band QCD; all six
@@ -177,6 +186,13 @@ entries are grouped by development milestone rather than semantic version.
   full/reduction-1 PGX references stay within peak 1 and measured MSE 0.125,
   one/eight-thread output agrees, and a manifested reserved-`Sqcc` mutation
   fails before packet reconstruction.
+- Added bounded component-local transform selection for single-tile no-MCT
+  RPCL decode. A Kakadu stream keeps components 0 and 2 on reversible 5/3
+  while component 1 selects irreversible 9/7 plus scalar-expounded Qstep 0.01
+  through COC/QCC. Reversible PGX output is exact; the 9/7 plane stays within
+  peak 1 and MSE 0.03125 full/0.0625 reduced, with one/eight-thread agreement.
+  A manifested QCC reassignment to a reversible component fails closed before
+  packet reconstruction.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
   `p0_01` moved from `InvalidCodestream` to an exact PGX pass, with a committed
@@ -191,7 +207,8 @@ entries are grouped by development milestone rather than semantic version.
   style.
 - Accepted strict-decode edge clipping when a zero-origin image fits wholly
   inside one precinct band span even though its nominal code-block dimension
-  is larger. General B.7 block-size clamping remains fail-closed. Official
+  is larger. The later B.7 slice above generalizes strict decode to per-band
+  effective block dimensions. Official
   T.803 `p0_11` now matches its 128x1 class-0 PGX exactly, covering NL=0,
   LRCP, inline PLT-less EPH, reversible 5/3, and SEGMARK on a 64x1 clipped
   block inside a 128x2 precinct.

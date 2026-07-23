@@ -154,7 +154,7 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Twenty-two foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Twenty-five foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
   component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
@@ -164,7 +164,9 @@ The foundation landed on 2026-07-17:
   component-local 4x4/default, 8x8/RESET, and 4x16/CAUSAL+SEGMARK block
   profiles, plus four-tile streams with local `COD/QCD` and component-specific
   `COC/QCC` decomposition/block/band-table overrides, including inherited
-  state across RPCL resolution parts and empty padding parts. Ten mutations
+  state across RPCL resolution parts and empty padding parts, tile/component
+  9/7 quantization, mixed component transforms, and B.7 effective block
+  clamping. Twelve mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
 - Each entry selects the real legacy-planar, generic-native, or interleaved RGB
@@ -181,7 +183,9 @@ The foundation landed on 2026-07-17:
   uniform full COC, LRCP layers, SOP/EPH, T1 termination styles, and reserved
   segment-less marker handling move `p0_02` to an exact pass;
   bounded single-span edge clipping plus NL=0/EPH/SEGMARK move `p0_11` to an
-  exact 128x1 pass while general B.7 clamping stays fail-closed;
+  exact 128x1 pass; the later tenth G2 slice generalizes strict decode to
+  per-subband B.7 effective block dimensions while encoder clamping stays
+  fail-closed;
   component-specific irreversible QCC plus reduced ICT/9-7 codestream-component
   output covers `p0_04`; reduced no-MCT 9/7 and reversible saturation cover
   `p0_09`/`p0_14`; and legal zero
@@ -376,8 +380,9 @@ NL=3 and common 32x32 precincts while assigning component-local 4x4/default,
 8x8/RESET, and 4x16/CAUSAL+SEGMARK code-block profiles. Geometry construction,
 packet-header state, T1 metadata, and sequential/parallel reconstruction use
 the effective component block dimensions and style. All six full/reduction-1
-PGX references match exactly. A reserved style bit is malformed, and a
-component-local 64-wide block that requires B.7 clamping remains fail-closed.
+PGX references match exactly. A reserved style bit is malformed, and changing
+only COC to a 64-wide block while retaining packets for the old partition
+remains fail-closed as an inconsistent codestream.
 
 The fourth G2 slice is complete: a four-tile reversible no-MCT Kakadu stream
 keeps main NL=2, 4x4 blocks, and a seven-band QCD while tile 1 supplies a
@@ -423,11 +428,26 @@ within peak 1; measured MSE is at most 0.0381 full and 0.125 reduced, and
 one/eight-thread output agrees. A manifested reserved-`Sqcc` mutation fails
 before packet reconstruction.
 
-The next G2 slice addresses component-local transform choices.
-General B.7 code-block clamping remains a separate prerequisite for precinct
-spans smaller than the nominal code block. Arbitrary PLT-less multipart PPM,
-PPM+POC, and packed-header/TLM combinations remain G3 rather than being
-silently included in this bounded profile.
+The ninth G2 slice is complete: a directly emitted single-tile Kakadu no-MCT
+RPCL stream keeps components 0 and 2 on the main reversible 5/3 COD/QCD while
+component 1 selects irreversible 9/7 through COC and scalar-expounded Qstep
+0.01 through QCC. Per-component reconstruction dispatches the effective
+integer or float inverse DWT at full and reduction-1 resolution. Reversible
+planes match Kakadu exactly; the 9/7 plane stays within peak 1 and measured MSE
+0.03125 full/0.0625 reduced, with identical one/eight-thread output. Reassigning
+the QCC to a reversible component fails before packet reconstruction.
+
+The tenth G2 slice is complete: a directly emitted reversible no-MCT Kakadu
+stream gives component 1 a nominal 64x8 code block against 32x32 precincts.
+Strict geometry clamps the effective block width to 32 in LL and 16 in detail
+subbands, and uses that same partition for the block catalog and packet
+tag-tree grid. All six full/reduction-1 PGX references match exactly. A paired
+mutation that changes only COC while retaining packet headers and bodies for
+the former partition fails as `InvalidCodestream`.
+
+The next G2 slice broadens component-local transform geometry or tile scope.
+Encoder-side B.7 clamping, arbitrary PLT-less multipart PPM, PPM+POC, and
+packed-header/TLM combinations remain outside this bounded slice.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,

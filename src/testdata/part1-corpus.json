@@ -42,8 +42,8 @@
       "encode": "bounded",
       "malformed": "complete",
       "interop": "bounded",
-      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style fixture", "Kakadu multi-tile reversible COD/QCD/COC/QCC fixtures", "Kakadu multi-tile no-MCT 9/7 tile QCD and component QCC fixture plus malformed counterparts"],
-      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in bounded three-component 9/7 profiles, single-tile no-MCT reversible component-local decomposition/precinct/block/style, and first-tile-part no-MCT tile/component coding or quantization overrides are accepted within the documented RPCL envelopes; component-local transforms and broader tile-header combinations remain fail-closed."
+      "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style and B.7 clamping fixtures", "Kakadu multi-tile reversible COD/QCD/COC/QCC fixtures", "Kakadu multi-tile no-MCT 9/7 tile QCD and component QCC fixture", "Kakadu single-tile mixed 5/3/9/7 COC/QCC fixture plus malformed counterparts"],
+      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in bounded three-component 9/7 profiles, single-tile no-MCT reversible component-local decomposition/precinct/block/style, first-tile-part no-MCT tile/component coding or quantization overrides, and equal-geometry single-tile mixed 5/3/9/7 transforms are accepted within the documented RPCL envelopes; broader local-transform and tile-header combinations remain fail-closed."
     },
     {
       "id": "progression-poc",
@@ -757,6 +757,33 @@
       ]
     },
     {
+      "id": "kakadu-coc-block-clamping",
+      "path": "src/testdata/kakadu-coc-block-clamping.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "1f9f1b46b461e53edd51e69ca6fdae69f4c3e47131375fb95bb9edeac768a1b5",
+      "source": {
+        "producer": "Kakadu demo applications from three copies of the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "single-tile no-MCT reversible stream whose component 1 advertises nominal 64x8 blocks against 32x32 precincts, requiring B.7 effective-width clamping",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm -o src/testdata/kakadu-coc-block-clamping.j2c Creversible=yes Cycc=no Clevels=3 Corder=RPCL Cprecincts={32,32},{32,32},{32,32},{32,32} Cblk={4,4} Cblk:C1={8,64} Cblk:C2={16,4} Cmodes:C1=RESET Cmodes:C2=CAUSAL|SEGMARK Clayers=1 ORGgen_plt=yes -rate - -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX payloads; every native component is exact at full resolution and reduction 1",
+      "features": ["cod-qcd-component-overrides", "t1-code-block-styles", "reversible-53", "packet-header-placement"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-coc-block-clamping-c0.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 0 },
+        { "path": "src/testdata/kakadu-coc-block-clamping-c1.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 1 },
+        { "path": "src/testdata/kakadu-coc-block-clamping-c2.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 2 },
+        { "path": "src/testdata/kakadu-coc-block-clamping-r1-c0.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 0, "resolution_reduction": 1 },
+        { "path": "src/testdata/kakadu-coc-block-clamping-r1-c1.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 1, "resolution_reduction": 1 },
+        { "path": "src/testdata/kakadu-coc-block-clamping-r1-c2.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 2, "resolution_reduction": 1 }
+      ]
+    },
+    {
       "id": "synthetic-divergent-coc-block-clamping",
       "path": "src/testdata/kakadu-divergent-coc-block-style.j2c",
       "availability": "committed",
@@ -770,10 +797,10 @@
         "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
         "redistribution": "recipe committed; no additional binary"
       },
-      "oracle": "the mutated component requires general B.7 code-block clamping against its 32-wide precinct and must remain fail-closed until that geometry is implemented",
+      "oracle": "changing only the COC geometry leaves packet headers and bodies encoded for the original 8-wide partition, so the structurally inconsistent stream must fail closed",
       "features": ["cod-qcd-component-overrides", "t1-code-block-styles", "reversible-53"],
       "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "expected_error": "InvalidCodestream",
       "patches": [
         { "marker": "coc", "marker_offset": 7, "value": 4 }
       ]
@@ -953,6 +980,55 @@
       ]
     },
     {
+      "id": "kakadu-mixed-transform-coc-qcc",
+      "path": "src/testdata/kakadu-mixed-transform-coc-qcc.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "95fe503d8de8db57e617695907f99013fe9e954dcc687402a28d34957b930b4e",
+      "source": {
+        "producer": "Kakadu demo applications from three copies of the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "single-tile no-MCT RPCL stream whose main COD/QCD remain reversible 5/3 while component 1 selects irreversible 9/7 through COC and scalar-expounded Qstep 0.01 through QCC",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm -o src/testdata/kakadu-mixed-transform-coc-qcc.j2c Creversible=yes Creversible:C1=no Cycc=no Clevels=2 Corder=RPCL Cprecincts={16,16},{16,16},{16,16} Cblk={4,4} Clayers=1 Qstep:C1=0.01 -rate - -num_threads 0; kdu_expand full and -reduce 1 to the six committed PGX paths"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand native PGX planes; reversible components remain exact and the irreversible component stays within peak 1, MSE 0.04 full and MSE 0.07 at reduction 1",
+      "features": ["cod-qcd-component-overrides", "reversible-53", "irreversible-97", "selective-streaming-decode"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-mixed-transform-coc-qcc-full-c0.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 0, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-coc-qcc-full-c1.pgx", "sha256": "6b505179cd04cf1d182c1f5ce9b02432ccfc5456768d1192f7ff963a54c7d1af", "format": "pgx", "component": 1, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-coc-qcc-full-c2.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 2, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-coc-qcc-r1-c0.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 },
+        { "path": "src/testdata/kakadu-mixed-transform-coc-qcc-r1-c1.pgx", "sha256": "fadba2f3e5875409ca4ee09d133b968ff5925a00320ce8f6f86a338d0bd4e8fb", "format": "pgx", "component": 1, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 },
+        { "path": "src/testdata/kakadu-mixed-transform-coc-qcc-r1-c2.pgx", "sha256": "a837edea3c29db584bdc392c161ea1dc39768c9cd3b7da71ea81e36241d1c7c4", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 }
+      ]
+    },
+    {
+      "id": "synthetic-mixed-transform-qcc-component-mismatch",
+      "path": "src/testdata/kakadu-mixed-transform-coc-qcc.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "95fe503d8de8db57e617695907f99013fe9e954dcc687402a28d34957b930b4e",
+      "source": {
+        "producer": "z2000 boundary mutation over the Kakadu 8.4.1 mixed-transform fixture",
+        "version": "schema 1",
+        "origin": "the scalar-expounded QCC is reassigned from irreversible component 1 to reversible component 0 after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "a reversible 5/3 component cannot consume scalar-expounded QCC and the remaining 9/7 component cannot inherit the reversible main QCD",
+      "features": ["cod-qcd-component-overrides", "reversible-53", "irreversible-97"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "patches": [
+        { "marker": "qcc", "marker_offset": 4, "value": 0 }
+      ]
+    },
+    {
       "id": "synthetic-tile-cod-transform-override",
       "path": "src/testdata/kakadu-tile-cod-qcd-override.j2c",
       "availability": "committed",
@@ -988,7 +1064,7 @@
         "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
         "redistribution": "recipe committed; no additional binary"
       },
-      "oracle": "the bounded component-local profile requires one common transform; a divergent COC transform must fail closed before packet reconstruction",
+      "oracle": "a divergent COC transform without its matching irreversible QCC must fail closed before packet reconstruction",
       "features": ["cod-qcd-component-overrides", "reversible-53"],
       "expectation": "fail_closed",
       "expected_error": "UnsupportedPayload",

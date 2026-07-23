@@ -479,6 +479,97 @@ test "Kakadu divergent COC levels and precinct geometry decode exactly" {
     );
 }
 
+test "Kakadu component-local 5/3 and 9/7 transforms decode native planes" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-mixed-transform-coc-qcc.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-transform-coc-qcc-full-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-coc-qcc-full-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-coc-qcc-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-transform-coc-qcc-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-coc-qcc-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-coc-qcc-r1-c2.pgx"),
+    };
+
+    try std.testing.expectEqual(@as(usize, 1), countMarker(bytes, codestream.markerValue("coc")));
+    try std.testing.expectEqual(@as(usize, 1), countMarker(bytes, codestream.markerValue("qcc")));
+    const coc = findMarker(bytes, codestream.markerValue("coc")) orelse return error.MissingCoc;
+    const qcc = findMarker(bytes, codestream.markerValue("qcc")) orelse return error.MissingQcc;
+    try std.testing.expectEqual(@as(u8, 1), bytes[coc + 4]);
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(codestream.WaveletTransform.irreversible_9_7)),
+        bytes[coc + 10],
+    );
+    try std.testing.expectEqual(@as(u8, 1), bytes[qcc + 4]);
+    try std.testing.expectEqual(@as(u8, 2), bytes[qcc + 5] & 0x1f);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporary(allocator, bytes),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessNative(allocator, bytes, .{}),
+    );
+
+    var full = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+    );
+    defer full.deinit();
+    for (full.planes, full_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.04);
+    }
+
+    var full_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+    );
+    defer full_parallel.deinit();
+    for (full.planes, full_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    var timings = codestream.DecodeTimings{};
+    var reduced = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        &timings,
+    );
+    defer reduced.deinit();
+    try std.testing.expect(timings.t1_skipped_blocks > 0);
+    try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
+    for (reduced.planes, reduced_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.07);
+    }
+
+    var reduced_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+    );
+    defer reduced_parallel.deinit();
+    for (reduced.planes, reduced_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    const mismatched_qcc = try allocator.dupe(u8, bytes);
+    defer allocator.free(mismatched_qcc);
+    mismatched_qcc[qcc + 4] = 0;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, mismatched_qcc),
+    );
+}
+
 test "Kakadu divergent COC block geometry and styles decode exactly" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-divergent-coc-block-style.j2c");
@@ -564,9 +655,65 @@ test "Kakadu divergent COC block geometry and styles decode exactly" {
     defer allocator.free(requires_block_clamping);
     requires_block_clamping[first_coc + 7] = 4; // 64-wide block vs 32-wide precinct.
     try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
+        codestream.CodestreamError.InvalidCodestream,
         codestream.decodeLosslessNative(allocator, requires_block_clamping, .{}),
     );
+}
+
+test "Kakadu component-local B.7 code-block clamping decodes exactly" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-coc-block-clamping.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-coc-block-clamping-c0.pgx"),
+        @embedFile("testdata/kakadu-coc-block-clamping-c1.pgx"),
+        @embedFile("testdata/kakadu-coc-block-clamping-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-coc-block-clamping-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-coc-block-clamping-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-coc-block-clamping-r1-c2.pgx"),
+    };
+
+    const first_coc = findMarker(bytes, codestream.markerValue("coc")) orelse return error.MissingCoc;
+    // Component 1 advertises a nominal 64x8 block. Its 32-wide precinct
+    // induces 32-wide LL blocks and 16-wide detail blocks under Part 1 B.7.
+    try std.testing.expectEqual(@as(u8, 1), bytes[first_coc + 4]);
+    try std.testing.expectEqual(@as(u8, 4), bytes[first_coc + 7]);
+    try std.testing.expectEqual(@as(u8, 1), bytes[first_coc + 8]);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, bytes),
+    );
+
+    var full = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+        .{},
+    );
+    defer full.deinit();
+    for (full_references, 0..) |reference, component| {
+        const encoded = try full.encodePgx(allocator, component, .most_significant_first);
+        defer allocator.free(encoded);
+        const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+        const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+        try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+    }
+
+    var reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{},
+    );
+    defer reduced.deinit();
+    for (reduced_references, 0..) |reference, component| {
+        const encoded = try reduced.encodePgx(allocator, component, .most_significant_first);
+        defer allocator.free(encoded);
+        const actual_header = std.mem.indexOfScalar(u8, encoded, '\n') orelse return error.InvalidPgx;
+        const reference_header = std.mem.indexOfScalar(u8, reference, '\n') orelse return error.InvalidPgx;
+        try std.testing.expectEqualSlices(u8, reference[reference_header + 1 ..], encoded[actual_header + 1 ..]);
+    }
 }
 
 test "Kakadu tile-header COD and QCD overrides decode exactly" {
@@ -17310,7 +17457,7 @@ test "strict decode accepts an edge-clipped block inside one precinct span" {
     try std.testing.expectEqualSlices(u16, gray.samples, decoded.samples);
 }
 
-test "strict decode rejects COD whose blocks cross precinct spans" {
+test "strict decode applies B.7 code-block clamping" {
     const allocator = std.testing.allocator;
     const width = 32;
     const height = 32;
@@ -17340,8 +17487,8 @@ test "strict decode rejects COD whose blocks cross precinct spans" {
     defer allocator.free(bytes);
 
     // Shrink the signalled precincts to 32x32 (exponent byte 0x55): the band
-    // span above resolution 0 drops to 16 < the 32-sample block, which would
-    // require B.7 block clamping; the strict reader must fail closed.
+    // span above resolution 0 drops to 16 < the nominal 32-sample block, so
+    // the strict reader must apply the Part 1 B.7 effective dimensions.
     const corrupted = try allocator.dupe(u8, bytes);
     defer allocator.free(corrupted);
     const cod = findMarker(corrupted, codestream.markerValue("cod")) orelse return error.MissingCod;
@@ -17349,10 +17496,9 @@ test "strict decode rejects COD whose blocks cross precinct spans" {
     for (0..@as(usize, levels) + 1) |index| {
         corrupted[cod + 14 + index] = 0x55;
     }
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessTemporary(allocator, corrupted),
-    );
+    var decoded = try codestream.decodeLosslessTemporary(allocator, corrupted);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
 test "redundant COC/QCC that byte-replicate the main COD/QCD decode byte-exactly" {
