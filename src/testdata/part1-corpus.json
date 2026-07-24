@@ -1127,6 +1127,55 @@
       ]
     },
     {
+      "id": "kakadu-mixed-transform-tile-component",
+      "path": "src/testdata/kakadu-mixed-transform-tile-component.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "937fe12bfde6a3c82874ce9e3adbbca3995d20bd92e637ef7f147c9cbd032562",
+      "source": {
+        "producer": "Kakadu demo applications from three copies of the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "four-tile no-MCT RPCL stream whose main COD/QCD are reversible 5/3, tile 1 replaces both with irreversible 9/7 and scalar-expounded Qstep 0.01, then tile 1 component 1 replaces that tile state through reversible COC/QCC",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm -o src/testdata/kakadu-mixed-transform-tile-component.j2c Creversible=yes Creversible:T1=no Creversible:T1C1=yes Cycc=no Stiles={16,16} Clevels=2 Corder=RPCL Cprecincts={16,16},{16,16},{16,16} Cblk={4,4} Clayers=1 Qstep:T1=0.01 ORGgen_plt=yes -rate - -num_threads 0; kdu_expand full and -reduce 1 to the six committed PGX paths"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand native PGX planes; main 5/3 is overridden by tile 1 9/7, then tile 1 component 1 returns to 5/3, with all full/reduced planes within peak 1 and the declared MSE bounds",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53", "irreversible-97", "selective-streaming-decode"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-mixed-transform-tile-component-full-c0.pgx", "sha256": "5102f4cb2a69a3dacbb614cc5afbc9e401dfae68598716e71a562f717e140a73", "format": "pgx", "component": 0, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-component-full-c1.pgx", "sha256": "713f23db99b684e58521500ca89ff1546cf0d48ddcd3515f9f2bde9153421188", "format": "pgx", "component": 1, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-component-full-c2.pgx", "sha256": "5102f4cb2a69a3dacbb614cc5afbc9e401dfae68598716e71a562f717e140a73", "format": "pgx", "component": 2, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-component-r1-c0.pgx", "sha256": "04074c61f8ca05082a6949ac4d950c77eb05ad1e1d018d39d5974107d294db29", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-component-r1-c1.pgx", "sha256": "cf36f81e544ef147e785a18463dde65956787f5591289ace6005ec85177c6a2e", "format": "pgx", "component": 1, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-component-r1-c2.pgx", "sha256": "04074c61f8ca05082a6949ac4d950c77eb05ad1e1d018d39d5974107d294db29", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 }
+      ]
+    },
+    {
+      "id": "synthetic-mixed-transform-tile-component-qcc-mismatch",
+      "path": "src/testdata/kakadu-mixed-transform-tile-component.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "937fe12bfde6a3c82874ce9e3adbbca3995d20bd92e637ef7f147c9cbd032562",
+      "source": {
+        "producer": "z2000 boundary mutation over the Kakadu 8.4.1 mixed-transform tile-component fixture",
+        "version": "schema 1",
+        "origin": "tile 1 component 1's reversible no-quantization QCC is reassigned to irreversible component 0 after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "the irreversible component cannot consume the reversible QCC while the reversible COC component cannot inherit tile 1's scalar-expounded QCD",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53", "irreversible-97"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "patches": [
+        { "marker": "qcc", "marker_offset": 4, "value": 0 }
+      ]
+    },
+    {
       "id": "synthetic-tile-cod-transform-override",
       "path": "src/testdata/kakadu-tile-cod-qcd-override.j2c",
       "availability": "committed",

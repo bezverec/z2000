@@ -136,8 +136,8 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 58-entry gate
-  reports 37 decode passes, 21 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 60-entry gate
+  reports 38 decode passes, 22 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Added strict Part 1 B.7 effective code-block clamping per resolution and
   subband. A directly emitted Kakadu stream advertises a component-local
@@ -209,7 +209,15 @@ entries are grouped by development milestone rather than semantic version.
   six full/reduction-1 PGX references stay within peak 1 and measured MSE
   0.0049, with one/eight-thread agreement. Reverting only the tile COD
   transform while retaining its irreversible QCD fails before packet
-  reconstruction. The gate now contains 58 entries.
+  reconstruction. At that checkpoint the gate contained 58 entries.
+- Added a directly emitted Kakadu four-tile no-MCT stream that combines every
+  supported coding/quantization override level. Main COD/QCD select reversible
+  5/3, tile 1 COD/QCD replace them with irreversible 9/7 and
+  scalar-expounded Qstep 0.01, then tile 1 component 1 COC/QCC return that
+  component to reversible 5/3 with no quantization. All six full/reduction-1
+  PGX references pass at one and eight threads. Reassigning the reversible QCC
+  to an irreversible component fails before packet reconstruction. The corpus
+  now contains 60 entries: 38 decode passes and 22 expected fail-closed cases.
 - Added encoder-side Part 1 B.7 effective code-block clamping across bounded
   lossless RGB, planar, sampled, and multi-tile front ends. A shared T2 helper
   supplies per-subband dimensions to block construction and tag-tree

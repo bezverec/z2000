@@ -741,6 +741,106 @@ test "Kakadu tile-local 5/3 and 9/7 transforms decode native planes" {
     );
 }
 
+test "Kakadu tile-component transform precedence decodes native planes" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-mixed-transform-tile-component.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-transform-tile-component-full-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-tile-component-full-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-tile-component-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-transform-tile-component-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-tile-component-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-tile-component-r1-c2.pgx"),
+    };
+
+    const main_cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const tile_cod = findMarkerAfter(bytes, codestream.markerValue("cod"), main_cod + 2) orelse
+        return error.MissingCod;
+    const tile_coc = findMarker(bytes, codestream.markerValue("coc")) orelse return error.MissingCoc;
+    const main_qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const tile_qcd = findMarkerAfter(bytes, codestream.markerValue("qcd"), main_qcd + 2) orelse
+        return error.MissingQcd;
+    const tile_qcc = findMarker(bytes, codestream.markerValue("qcc")) orelse return error.MissingQcc;
+    try std.testing.expectEqual(@as(usize, 2), countMarker(bytes, codestream.markerValue("cod")));
+    try std.testing.expectEqual(@as(usize, 1), countMarker(bytes, codestream.markerValue("coc")));
+    try std.testing.expectEqual(@as(usize, 2), countMarker(bytes, codestream.markerValue("qcd")));
+    try std.testing.expectEqual(@as(usize, 1), countMarker(bytes, codestream.markerValue("qcc")));
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(codestream.WaveletTransform.reversible_5_3)),
+        bytes[main_cod + 13],
+    );
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(codestream.WaveletTransform.irreversible_9_7)),
+        bytes[tile_cod + 13],
+    );
+    try std.testing.expectEqual(@as(u8, 1), bytes[tile_coc + 4]);
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(codestream.WaveletTransform.reversible_5_3)),
+        bytes[tile_coc + 10],
+    );
+    try std.testing.expectEqual(@as(u8, 0), bytes[main_qcd + 4] & 0x1f);
+    try std.testing.expectEqual(@as(u8, 2), bytes[tile_qcd + 4] & 0x1f);
+    try std.testing.expectEqual(@as(u8, 1), bytes[tile_qcc + 4]);
+    try std.testing.expectEqual(@as(u8, 0), bytes[tile_qcc + 5] & 0x1f);
+
+    var full = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+    );
+    defer full.deinit();
+    for (full.planes, full_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.04);
+    }
+
+    var full_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+    );
+    defer full_parallel.deinit();
+    for (full.planes, full_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    var timings = codestream.DecodeTimings{};
+    var reduced = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        &timings,
+    );
+    defer reduced.deinit();
+    try std.testing.expect(timings.t1_skipped_blocks > 0);
+    for (reduced.planes, reduced_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.07);
+    }
+
+    var reduced_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+    );
+    defer reduced_parallel.deinit();
+    for (reduced.planes, reduced_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    const mismatched_qcc = try allocator.dupe(u8, bytes);
+    defer allocator.free(mismatched_qcc);
+    mismatched_qcc[tile_qcc + 4] = 0;
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, mismatched_qcc),
+    );
+}
+
 test "Kakadu divergent COC block geometry and styles decode exactly" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-divergent-coc-block-style.j2c");

@@ -160,7 +160,7 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Twenty-seven foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Twenty-eight foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
   component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
@@ -172,7 +172,8 @@ The foundation landed on 2026-07-17:
   `COC/QCC` decomposition/block/band-table overrides, including inherited
   state across RPCL resolution parts and empty padding parts, tile/component
   9/7 quantization, mixed component and tile transforms, and B.7 effective
-  block clamping. Fourteen mutations
+  block clamping and three-level main/tile/tile-component transform
+  precedence. Fifteen mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
 - Each entry selects the real legacy-planar, generic-native, or interleaved RGB
@@ -479,9 +480,18 @@ consume the shared T2 calculation. Single-/multi-tile and sampled regressions
 are exact, one/eight-thread multi-tile output is deterministic, and OpenJPEG,
 Grok, and Kakadu reproduce a live 32x32 JP2 pixel-exactly.
 
-The next G2 slice addresses mixed-transform tile-component breadth. Arbitrary
-PLT-less multipart PPM, PPM+POC, and packed-header/TLM combinations remain
-outside this bounded slice.
+The fourteenth G2 slice is complete: a directly emitted four-tile Kakadu
+no-MCT RPCL stream proves the complete effective precedence chain in one
+codestream. Main `COD/QCD` select reversible 5/3, tile 1 `COD/QCD` replace
+that state with irreversible 9/7 plus scalar-expounded Qstep 0.01, and tile 1
+component 1 `COC/QCC` replaces the tile state again with reversible 5/3 and
+no quantization. All six full/reduction-1 PGX references stay within peak 1
+and their declared MSE bounds, one/eight-thread output is identical, and
+reassigning the reversible QCC to an irreversible component fails before
+packet reconstruction.
+
+The next G2/G3 slice addresses arbitrary PLT-less multipart PPM without POC.
+PPM+POC and packed-header/TLM combinations remain outside that bounded slice.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,

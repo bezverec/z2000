@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-24 gate contains 58 entries: 42 committed entries plus all 16
+The 2026-07-24 gate contains 60 entries: 44 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-37 decode passes, 21 expected fail-closed cases, zero mismatches, and zero skips
+38 decode passes, 22 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -166,7 +166,7 @@ packet headers into one-part-per-tile PPM or multipart PPT+PLT. The unchanged
 foreign T1 bodies match the same six full/reduction-1 PGX references exactly,
 one/eight-thread output agrees, and shortened PPT/PPM segments fail closed.
 Because Kakadu did not emit the packed framing, it is not counted among the
-manifest's independent packed-header streams or the 58-entry corpus totals.
+manifest's independent packed-header streams or the 60-entry corpus totals.
 Both sources use Kakadu 8.4.1 with `Creversible=yes`, `Cycc=no`,
 `Stiles={16,16}`, `Clevels=2`, `Corder=RPCL`, three 16x16 precinct levels,
 4x4 main code blocks, `Clevels:T1C1=1`, `Cblk:T1C1={8,8}`, and one layer;
@@ -215,6 +215,16 @@ reduction-1 PGX references stay within peak 1; measured MSE is 0.0049 full and
 zero reduced, and one/eight-thread output agrees. A paired mutation changes
 only tile 1 COD back to reversible while retaining the irreversible QCD and
 fails with `UnsupportedPayload`.
+
+The thirteenth G2 entry proves all three Part 1 override levels together in a
+directly emitted four-tile no-MCT Kakadu stream. Main COD/QCD select reversible
+5/3, tile 1 COD/QCD replace that state with irreversible 9/7 and
+scalar-expounded Qstep 0.01, then tile 1 component 1 COC/QCC replace the tile
+state with reversible 5/3 and no quantization. All six full/reduction-1 PGX
+references remain within peak 1 and the declared MSE limits, and one/eight-
+thread output agrees. A paired mutation reassigns the reversible QCC to an
+irreversible component, leaving both affected components with incompatible
+quantization, and fails with `UnsupportedPayload`.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT

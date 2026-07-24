@@ -71,8 +71,11 @@ Neither figure is a formal ISO conformance certification.
   resolution. Lossless single-/multi-tile and sampled encoders now use the
   same effective geometry while retaining the nominal COD block size; a
   64x64-block/64x64-precinct stream is pixel-exact through z2000, OpenJPEG,
-  Grok, and Kakadu. Mixed-transform tile-component breadth, arbitrary PLT-less
-  multipart PPM, and packed POC/TLM combinations remain fail-closed.
+  Grok, and Kakadu. Another directly emitted four-tile Kakadu stream proves
+  full override precedence: reversible main `COD/QCD`, irreversible tile 1
+  `COD/QCD`, then reversible tile 1 component 1 `COC/QCC`; all six
+  full/reduced PGX planes pass and a mismatched QCC fails closed. Arbitrary
+  PLT-less multipart PPM and packed POC/TLM combinations remain fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,

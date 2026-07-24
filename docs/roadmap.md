@@ -153,9 +153,9 @@ method. Neither number changes the bounded 100/100 scorecards.
 
 | Phase | Estimate | Evidence already landed | Largest remaining work |
 | --- | ---: | --- | --- |
-| G0 | 75% | Manifest, differential runner, 58 cases, all profile-0 assets integrated, 9/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
+| G0 | 75% | Manifest, differential runner, 60 cases, all profile-0 assets integrated, 9/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
 | G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
-| G2 | 80% | Twelve independent decode override slices through component- and tile-local 5/3/9/7 plus shared encoder/decoder B.7 geometry | Mixed-transform tile-component breadth and broader packed combinations |
+| G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
 | G3 | 30% | Broad T1/T2 styles, progression, POC, TLM, and multipart foundations | `RGN`, `CRG`, `PLM`, applicable `CAP`/`PRF`, and general packed schedules |
 | G4 | 45% | Direct resolution reduction, T1 skipping, catalog compaction, borrowed packet spans | Layer/tile/region selection plus incremental input and bounded output |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
@@ -170,7 +170,7 @@ new conformance evidence materially changes the denominator.
 G0 evidence expansion and G1/G2/G4 implementation are active. The 2026-07-17
 G0 foundation includes an unscored broad capability
 matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
-Twenty-seven committed foreign-encoded streams cover sampled origins/POC and sampled
+Twenty-eight committed foreign-encoded streams cover sampled origins/POC and sampled
 multi-tile no-MCT 9/7 reduction,
 signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
 8/16/20-bit, and independently sampled signed 7/13/23-bit
@@ -180,12 +180,13 @@ reversible component-local COC decomposition/precinct geometry, divergent
 component block geometry/T1 style, reversible tile-local COD/QCD and COC/QCC
 including resolution-part continuation, irreversible tile/component QCD/QCC,
 mixed 5/3/9/7 component transforms with common and divergent geometry,
-tile-local mixed 5/3/9/7 COD/QCD, and padded multipart TLM; fourteen mutations pin malformed and unsupported
+tile-local mixed 5/3/9/7 COD/QCD, full main/tile/tile-component transform
+precedence, and padded multipart TLM; fifteen mutations pin malformed and unsupported
 fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 58-entry result of 37 decode passes and 21 expected fail-closed
+a complete 60-entry result of 38 decode passes and 22 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
 signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
@@ -269,7 +270,7 @@ non-recursive batch CLI syntax, with reduction and byte order kept explicit.
 The second surface writes all native components to exact ZRAW through the same
 dispatch forms and round-trips its self-describing metadata and payload.
 
-G2 now has thirteen pinned slices. Genuinely component-specific
+G2 now has fourteen pinned slices. Genuinely component-specific
 scalar-expounded QCC works in the bounded three-component ICT/9-7 profile at
 full and reduced resolution. A reversible single-tile no-MCT Kakadu stream also
 decodes component-local decomposition counts 3/2/1, component-sized precinct
@@ -316,8 +317,12 @@ multi-tile front ends: one T2-owned calculation derives each effective block
 partition for T1, packet selection, and tag-tree geometry while COD preserves
 the nominal size. Single-/multi-tile and sampled roundtrips are exact and a
 live 64x64-block/64x64-precinct JP2 is pixel-exact through OpenJPEG, Grok, and
-Kakadu. Mixed-transform tile-component breadth, arbitrary PLT-less multipart
-PPM, and packed TLM/POC combinations remain the next boundaries.
+Kakadu. The fourteenth slice proves all three override levels in one directly
+emitted four-tile Kakadu stream: reversible main COD/QCD, irreversible tile 1
+COD/QCD, then reversible tile 1 component 1 COC/QCC. All six full/reduced PGX
+planes pass, one/eight-thread output agrees, and QCC reassignment fails before
+packet reconstruction. Arbitrary PLT-less multipart PPM and packed TLM/POC
+combinations remain the next boundaries.
 Together with G3 they replace the
 remaining byte-redundant/uniform shortcuts with real component- and tile-local
 semantics. Unknown or profile-inapplicable

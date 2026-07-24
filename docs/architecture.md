@@ -275,9 +275,11 @@ reconstruction. Strict component geometry derives an effective code-block
 dimension for every subband by clamping the nominal COD/COC dimension to the
 precinct-induced B.7 span. Decode and all bounded lossless encode front ends
 share that T2-owned calculation; block catalogs and packet tag-tree grids use
-the effective dimensions while COD retains the requested nominal size. Mixed-
-transform tile-component breadth, arbitrary PLT-less multipart PPM, PPM+POC,
-and packed-header/TLM combinations remain fail-closed.
+the effective dimensions while COD retains the requested nominal size. The
+same effective table now proves all three override levels in one directly
+emitted four-tile stream: main reversible `COD/QCD`, tile 1 irreversible
+`COD/QCD`, and tile 1 component 1 reversible `COC/QCC`. Arbitrary PLT-less
+multipart PPM, PPM+POC, and packed-header/TLM combinations remain fail-closed.
 
 Inline PLT-less multipart streams carry no packet count at the Stage B frame
 scan. Their spans therefore retain an explicit deferred-count state and exact
