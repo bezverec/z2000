@@ -43,7 +43,7 @@
       "malformed": "complete",
       "interop": "bounded",
       "evidence": ["uniform COC/QCC tests", "mixed-precision QCC fixtures", "Kakadu divergent scalar-expounded ICT/9-7 QCC fixture", "Kakadu reversible component-local COC levels/precinct fixture", "Kakadu component-local block/style and B.7 clamping fixtures", "Kakadu multi-tile reversible COD/QCD/COC/QCC fixtures", "Kakadu multi-tile no-MCT 9/7 tile QCD and component QCC fixture", "Kakadu single-tile mixed 5/3/9/7 COC/QCC fixtures with common and divergent geometry plus malformed counterparts"],
-      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in bounded three-component 9/7 profiles, single-tile no-MCT reversible component-local decomposition/precinct/block/style, first-tile-part no-MCT tile/component coding or quantization overrides, and single-tile mixed 5/3/9/7 transforms with component-local geometry are accepted within the documented RPCL envelopes; mixed-transform tile-header combinations remain fail-closed."
+      "note": "Uniform or byte-redundant overrides, component-specific scalar-expounded QCC in bounded three-component 9/7 profiles, single-tile no-MCT reversible component-local decomposition/precinct/block/style, first-tile-part no-MCT tile/component coding or quantization overrides, single-tile mixed 5/3/9/7 transforms with component-local geometry, and tile-local 5/3/9/7 COD/QCD transforms are accepted within the documented RPCL envelopes."
     },
     {
       "id": "progression-poc",
@@ -1078,6 +1078,55 @@
       ]
     },
     {
+      "id": "kakadu-mixed-transform-tile",
+      "path": "src/testdata/kakadu-mixed-transform-tile.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "ced68048492f5f005ddca4561f30d220e8285e7a06019b238391b316eb77420e",
+      "source": {
+        "producer": "Kakadu demo applications from three copies of the committed 32x32 synthetic grayscale source",
+        "version": "Kakadu 8.4.1",
+        "origin": "four-tile no-MCT RPCL stream whose main COD/QCD remain reversible 5/3 while tile 1 replaces both through tile-header COD/QCD with irreversible 9/7 and scalar-expounded Qstep 0.01",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c0.pgm -o src/testdata/kakadu-mixed-transform-tile.j2c Creversible=yes Creversible:T1=no Cycc=no Stiles={16,16} Clevels=2 Corder=RPCL Cprecincts={16,16},{16,16},{16,16} Cblk={4,4} Clayers=1 Qstep:T1=0.01 ORGgen_plt=yes -rate - -num_threads 0; kdu_expand full and -reduce 1 to the six committed PGX paths"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand native PGX planes; the reversible and irreversible tile regions stay within peak 1, MSE 0.04 full and MSE 0.07 at reduction 1",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53", "irreversible-97", "selective-streaming-decode"],
+      "expectation": "decode_pass",
+      "references": [
+        { "path": "src/testdata/kakadu-mixed-transform-tile-full-c0.pgx", "sha256": "5102f4cb2a69a3dacbb614cc5afbc9e401dfae68598716e71a562f717e140a73", "format": "pgx", "component": 0, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-full-c1.pgx", "sha256": "5102f4cb2a69a3dacbb614cc5afbc9e401dfae68598716e71a562f717e140a73", "format": "pgx", "component": 1, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-full-c2.pgx", "sha256": "5102f4cb2a69a3dacbb614cc5afbc9e401dfae68598716e71a562f717e140a73", "format": "pgx", "component": 2, "max_peak_error": 1, "max_mse": 0.04 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-r1-c0.pgx", "sha256": "04074c61f8ca05082a6949ac4d950c77eb05ad1e1d018d39d5974107d294db29", "format": "pgx", "component": 0, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-r1-c1.pgx", "sha256": "04074c61f8ca05082a6949ac4d950c77eb05ad1e1d018d39d5974107d294db29", "format": "pgx", "component": 1, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 },
+        { "path": "src/testdata/kakadu-mixed-transform-tile-r1-c2.pgx", "sha256": "04074c61f8ca05082a6949ac4d950c77eb05ad1e1d018d39d5974107d294db29", "format": "pgx", "component": 2, "resolution_reduction": 1, "max_peak_error": 1, "max_mse": 0.07 }
+      ]
+    },
+    {
+      "id": "synthetic-mixed-transform-tile-qcd-mismatch",
+      "path": "src/testdata/kakadu-mixed-transform-tile.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "planar",
+      "sha256": "ced68048492f5f005ddca4561f30d220e8285e7a06019b238391b316eb77420e",
+      "source": {
+        "producer": "z2000 boundary mutation over the Kakadu 8.4.1 mixed-transform tile fixture",
+        "version": "schema 1",
+        "origin": "tile 1 COD changes back to reversible 5/3 while retaining its scalar-expounded QCD after input hash verification",
+        "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
+        "redistribution": "recipe committed; no additional binary"
+      },
+      "oracle": "a reversible tile cannot consume the scalar-expounded QCD emitted for its former irreversible 9/7 transform",
+      "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53", "irreversible-97"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload",
+      "patches": [
+        { "marker": "cod", "marker_occurrence": 1, "marker_offset": 13, "value": 1 }
+      ]
+    },
+    {
       "id": "synthetic-tile-cod-transform-override",
       "path": "src/testdata/kakadu-tile-cod-qcd-override.j2c",
       "availability": "committed",
@@ -1087,11 +1136,11 @@
       "source": {
         "producer": "z2000 boundary mutation over the Kakadu 8.4.1 tile-override fixture",
         "version": "schema 1",
-        "origin": "the second COD marker's transform changes from reversible 5/3 to irreversible 9/7 after input hash verification",
+        "origin": "the second COD marker's transform changes from reversible 5/3 to irreversible 9/7 while retaining the reversible tile QCD after input hash verification",
         "license": "mutation recipe and project-generated synthetic base fixture under the repository license",
         "redistribution": "recipe committed; no additional binary"
       },
-      "oracle": "the bounded tile-local profile keeps one common transform and must reject a divergent tile transform before packet reconstruction",
+      "oracle": "an irreversible tile cannot inherit the reversible tile QCD from this decomposition-only fixture",
       "features": ["cod-qcd-component-overrides", "tiles-and-tile-parts", "reversible-53"],
       "expectation": "fail_closed",
       "expected_error": "UnsupportedPayload",

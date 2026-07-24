@@ -45,7 +45,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-23 gate contains 56 entries: 40 committed entries plus all 16
+The 2026-07-24 gate contains 58 entries: 42 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
 PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
@@ -62,7 +62,7 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
 also pins legal QCD-before-COD ordering. The other seven optional profiles
 return their manifested fail-closed boundary. The complete result is therefore
-36 decode passes, 20 expected fail-closed cases, zero mismatches, and zero skips
+37 decode passes, 21 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -140,8 +140,8 @@ replaces the main NL=2/4x4 COD and seven-band QCD with a first-tile-part
 NL=1/8x8 COD plus its matching four-band QCD. Tile packet plans, component
 coding/quantization tables, full synthesis, and reduced assembly consume the
 effective state; all six PGX references are exact. A manifested mutation uses
-the second COD occurrence to make the tile transform divergent and must fail
-closed before packet reconstruction.
+the second COD occurrence to select 9/7 without replacing the reversible QCD
+and must fail closed before packet reconstruction.
 
 The fifth G2 entry keeps that four-tile main profile but changes only tile 1
 component 1 through a first-tile-part NL=1/8x8 COC and matching four-band QCC.
@@ -166,7 +166,7 @@ packet headers into one-part-per-tile PPM or multipart PPT+PLT. The unchanged
 foreign T1 bodies match the same six full/reduction-1 PGX references exactly,
 one/eight-thread output agrees, and shortened PPT/PPM segments fail closed.
 Because Kakadu did not emit the packed framing, it is not counted among the
-manifest's independent packed-header streams or the 56-entry corpus totals.
+manifest's independent packed-header streams or the 58-entry corpus totals.
 Both sources use Kakadu 8.4.1 with `Creversible=yes`, `Cycc=no`,
 `Stiles={16,16}`, `Clevels=2`, `Corder=RPCL`, three 16x16 precinct levels,
 4x4 main code blocks, `Clevels:T1C1=1`, `Cblk:T1C1={8,8}`, and one layer;
@@ -205,6 +205,16 @@ scalar-expounded QCC. Per-component packet planning, reduction compaction, T1,
 and inverse DWT match all six Kakadu full/reduction-1 PGX references exactly.
 A paired QCC reassignment to reversible component 0 fails with
 `UnsupportedPayload`.
+
+The twelfth G2 entry is a directly emitted four-tile no-MCT Kakadu stream.
+Main COD/QCD keep the image reversible 5/3, while tile 1 replaces both in its
+first tile-part header with irreversible 9/7 and scalar-expounded Qstep 0.01.
+Effective tile coding drives packet planning, reduced catalog compaction,
+integer or float inverse DWT, and absolute-grid assembly. All six full/
+reduction-1 PGX references stay within peak 1; measured MSE is 0.0049 full and
+zero reduced, and one/eight-thread output agrees. A paired mutation changes
+only tile 1 COD back to reversible while retaining the irreversible QCD and
+fails with `UnsupportedPayload`.
 
 The first reduced-resolution production slice now reconstructs bounded
 single-tile reversible 5/3 no-MCT streams directly from the requested DWT

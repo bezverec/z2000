@@ -652,6 +652,95 @@ test "Kakadu component-local transforms with divergent geometry decode native pl
     );
 }
 
+test "Kakadu tile-local 5/3 and 9/7 transforms decode native planes" {
+    const allocator = std.testing.allocator;
+    const bytes = @embedFile("testdata/kakadu-mixed-transform-tile.j2c");
+    const full_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-transform-tile-full-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-tile-full-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-tile-full-c2.pgx"),
+    };
+    const reduced_references = [_][]const u8{
+        @embedFile("testdata/kakadu-mixed-transform-tile-r1-c0.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-tile-r1-c1.pgx"),
+        @embedFile("testdata/kakadu-mixed-transform-tile-r1-c2.pgx"),
+    };
+
+    const main_cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+    const tile_cod = findMarkerAfter(bytes, codestream.markerValue("cod"), main_cod + 2) orelse
+        return error.MissingCod;
+    const main_qcd = findMarker(bytes, codestream.markerValue("qcd")) orelse return error.MissingQcd;
+    const tile_qcd = findMarkerAfter(bytes, codestream.markerValue("qcd"), main_qcd + 2) orelse
+        return error.MissingQcd;
+    try std.testing.expectEqual(@as(usize, 2), countMarker(bytes, codestream.markerValue("cod")));
+    try std.testing.expectEqual(@as(usize, 2), countMarker(bytes, codestream.markerValue("qcd")));
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(codestream.WaveletTransform.reversible_5_3)),
+        bytes[main_cod + 13],
+    );
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(codestream.WaveletTransform.irreversible_9_7)),
+        bytes[tile_cod + 13],
+    );
+    try std.testing.expectEqual(@as(u8, 0), bytes[main_qcd + 4] & 0x1f);
+    try std.testing.expectEqual(@as(u8, 2), bytes[tile_qcd + 4] & 0x1f);
+
+    var full = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1 },
+    );
+    defer full.deinit();
+    for (full.planes, full_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.04);
+    }
+
+    var full_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8 },
+    );
+    defer full_parallel.deinit();
+    for (full.planes, full_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    var timings = codestream.DecodeTimings{};
+    var reduced = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 1, .resolution_reduction = 1 },
+        &timings,
+    );
+    defer reduced.deinit();
+    try std.testing.expect(timings.t1_skipped_blocks > 0);
+    for (reduced.planes, reduced_references) |plane, reference| {
+        const difference = try compareUnsigned8Pgx(plane, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.07);
+    }
+
+    var reduced_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .resolution_reduction = 1 },
+    );
+    defer reduced_parallel.deinit();
+    for (reduced.planes, reduced_parallel.planes) |serial, parallel| {
+        try std.testing.expectEqualSlices(u16, serial, parallel);
+    }
+
+    const mismatched_qcd = try allocator.dupe(u8, bytes);
+    defer allocator.free(mismatched_qcd);
+    mismatched_qcd[tile_cod + 13] = @intFromEnum(codestream.WaveletTransform.reversible_5_3);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, mismatched_qcd),
+    );
+}
+
 test "Kakadu divergent COC block geometry and styles decode exactly" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-divergent-coc-block-style.j2c");

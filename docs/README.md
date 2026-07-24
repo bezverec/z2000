@@ -5,8 +5,8 @@ The active documentation is intentionally split by purpose. Only
 
 ## Start Here
 
-- [`roadmap.md`](roadmap.md) — strategic direction, supported baseline, and
-  promotion rules.
+- [`roadmap.md`](roadmap.md) — strategic direction, supported baseline,
+  promotion rules, and the current G0-G7 completion estimate.
 - [`next_steps.md`](next_steps.md) — the current ordered work queue and gates.
 - [`iso_coverage.md`](iso_coverage.md) — evidence-based coverage scorecard.
 - [`part1_corpus.md`](part1_corpus.md) — broad Part 1 capability manifest and

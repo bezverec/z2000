@@ -34,12 +34,16 @@ all-thread setting.
 
 ## Current Evidence
 
-- The 2026-07-16 Intel Core i5-14500 checkpoint is the active cross-codec
-  baseline. On the common z2000 lossless stream, z2000 decoded in
+- The 2026-07-16 Intel Core i5-14500 checkpoint is the active Windows/x86
+  optimization baseline. On the common z2000 lossless stream, z2000 decoded in
   831.5/135.3 ms at t1/t20 versus Grok 636.8/99.1 ms, OpenJPEG
   680.9/123.9 ms, and Kakadu 619.6/94.5 ms. The 1.31x t1 gap to Grok proves
   that serial decode work remains material; the 1.37x t20 gap also leaves a
   parallel-efficiency problem.
+- The newer 2026-07-17 Apple M4 run is the latest native four-codec
+  cross-platform checkpoint and includes Kakadu on macOS. It confirms the same
+  ordering, but battery power and a different architecture/thread count make
+  it trend evidence rather than a replacement for the Windows P1 thresholds.
 - Lossless encode is no longer the first target. At t20, z2000 encoded in
   135.9 ms, 1.15x faster than Grok and only 3.6% behind OpenJPEG; Kakadu
   remained 1.75x faster. Preserve that result while decode work proceeds.

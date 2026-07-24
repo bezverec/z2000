@@ -112,7 +112,7 @@ entries are grouped by development milestone rather than semantic version.
   and distinguishes decode pass, expected
   fail-closed, unexpected acceptance, native-raster mismatch, and skipped
   optional local assets.
-- Expanded the seed to twenty-six foreign-encoded fixtures: sampled Kakadu
+- Expanded the seed to twenty-seven foreign-encoded fixtures: sampled Kakadu
   multi-tile/POC/origin and sampled multi-tile no-MCT 9/7, Grok CMYK, Kakadu
   signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
   8/16/20-bit, and independently sampled signed 7/13/23-bit
@@ -121,8 +121,8 @@ entries are grouped by development milestone rather than semantic version.
   divergent component-local code-block geometry/T1 style, reversible tile-local
   COD/QCD and COC/QCC including resolution-part inheritance, irreversible
   tile/component QCD/QCC, mixed component-local 5/3/9/7 transforms,
-  component-local B.7 block clamping, and padded
-  multipart TLM. Thirteen
+  component-local B.7 block clamping, tile-local mixed 5/3/9/7 transforms,
+  and padded multipart TLM. Fourteen
   input-hash-verified mutations pin invalid/divergent COC, QCC and TLM plus
   unsupported signed-SIZ fail-closed behavior.
 - Added a Kakadu 8.4.1 sampled multi-tile no-MCT 9/7 PLT-less fixture. Its
@@ -136,8 +136,8 @@ entries are grouped by development milestone rather than semantic version.
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
   18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 56-entry gate
-  reports 36 decode passes, 20 expected fail-closed cases, no
+  and seven retain expected fail-closed boundaries. The full 58-entry gate
+  reports 37 decode passes, 21 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Added strict Part 1 B.7 effective code-block clamping per resolution and
   subband. A directly emitted Kakadu stream advertises a component-local
@@ -157,7 +157,8 @@ entries are grouped by development milestone rather than semantic version.
   seven-band QCD on tile 1 with NL=1/8x8 and a four-band QCD; all six
   full/reduction-1 PGX references match exactly and one/eight-thread output is
   identical. The corpus patch schema can select repeated marker occurrences,
-  and a divergent second-COD transform remains fail-closed.
+  and a second-COD transform change without matching 9/7 quantization remains
+  fail-closed.
 - Added bounded component-specific first-tile-part `COC/QCC` overrides to the
   same reversible no-MCT multi-tile profile. A second Kakadu four-tile stream
   changes only tile 1 component 1 from inherited NL=2/4x4/seven bands to
@@ -199,8 +200,16 @@ entries are grouped by development milestone rather than semantic version.
   NL=2, 8x8 blocks, 16x16 precincts, and its own seven-band QCC. Per-component
   packet planning, reduction compaction, T1 geometry, and inverse DWT match all
   six full/reduction-1 PGX references exactly at one and eight threads. A
-  paired QCC reassignment fails before packet reconstruction. The gate now
-  contains 56 entries.
+  paired QCC reassignment fails before packet reconstruction.
+- Added bounded tile-local transform selection for multi-tile no-MCT RPCL
+  decode. A directly emitted Kakadu four-tile stream keeps the main COD/QCD
+  reversible but replaces tile 1 through tile-header COD/QCD with irreversible
+  9/7 and scalar-expounded Qstep 0.01. Each tile reconstructs through its
+  effective integer or float inverse DWT before absolute-grid assembly; all
+  six full/reduction-1 PGX references stay within peak 1 and measured MSE
+  0.0049, with one/eight-thread agreement. Reverting only the tile COD
+  transform while retaining its irreversible QCD fails before packet
+  reconstruction. The gate now contains 58 entries.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
   `p0_01` moved from `InvalidCodestream` to an exact PGX pass, with a committed
@@ -361,6 +370,12 @@ entries are grouped by development milestone rather than semantic version.
   schedules, selective streaming decode, general encode, JP2 breadth, and a
   Part 4-backed 1.0 hardening gate. JPX/Part 2 and HTJ2K/Part 15 remain
   explicitly separate programs.
+- Reconciled the bounded scorecards with the separate G0-G7 roadmap after the
+  twelfth G2 slice. The bounded broad scorecard remains 100/100 only inside its
+  declared profiles; an equal-phase planning estimate now places the general
+  program at about 52% (+/- 8 points) and the decode-first G0-G4 foundation at
+  about 59%. README, API, release policy, optimization status, corpus totals,
+  and active/remaining boundaries now use the same definitions.
 
 ### Comparative Performance Checkpoint
 
@@ -374,8 +389,10 @@ entries are grouped by development milestone rather than semantic version.
   Grok at t20; lossy codec rankings now require rate-distortion matching.
 - Added portable Kakadu discovery to the POSIX harness and recorded a
   pixel-exact Kakadu 8.4.1 Linux x86-64 checkpoint against a native z2000 build
-  on Debian/WSL2 tmpfs. The macOS package is confirmed universal arm64+x86_64,
-  but remains explicitly unmeasured until it runs on a real macOS host.
+  on Debian/WSL2 tmpfs. The universal macOS package was subsequently measured
+  on an Apple M4 in the first native four-codec macOS run; that battery-powered
+  record is trend evidence, while the i5-14500 checkpoint remains the active
+  Windows/x86 optimization baseline.
 - Fixed the POSIX lossless benchmark's `z2000 t1` commands to pass
   `--threads 1` explicitly instead of inheriting the all-thread default.
   The reference encoders now also request MCT and PLT explicitly, matching the
@@ -389,12 +406,12 @@ entries are grouped by development milestone rather than semantic version.
   with the completed sampled-layout and bounded JPEG metadata work.
 - Moved the preferred prerelease procedure from hosted Actions to locally
   tested archives and selected `v0.2.0-rc.1` for the new formats and public
-  CLI/API breadth since rc.1.
+  CLI/API breadth since `v0.1.0-rc.1`.
 
 ### Release Readiness
 
 - Prepared the manual release workflow for the next candidate, added native
-  ReleaseFast test gates alongside Debug, and verify both installed CLI names
+  ReleaseFast test gates alongside Debug, and verified both installed CLI names
   report the exact provenance-bearing release version.
 - Workflow-produced release archives now contain both `z2000` and the
   documented short `z2k` alias on every platform.

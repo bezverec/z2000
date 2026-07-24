@@ -8,6 +8,11 @@ This is the only active implementation queue. Strategic policy is in
 
 - The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
+- The separate general-purpose G0-G7 program is estimated at about 52%
+  complete (+/- 8 points), with the decode-first G0-G4 foundation at about
+  59%. The phase method and remaining-work table live in
+  [`roadmap.md`](roadmap.md); these figures are not derived from the bounded
+  100/100 scorecards.
 - Sampled RPCL/no-MCT/reversible-5/3 strict decode supports native planes,
   PLT/PLT-less inline headers, PPT, PPM, SOP/EPH, matching shifted origins,
   single/multi-tile streams, canonical main/tile-header POC, and explicit
@@ -132,10 +137,11 @@ concise docs, and benchmark provenance green. See `versioning.md`.
 Linux x86-64 passed local Debug/ReleaseFast gates; the portable RISC-V
 ReleaseFast suite ran locally under QEMU; macOS arm64 passed its dedicated
 hosted Debug/ReleaseFast job. Every archive contains both CLI names and is
-covered by the published `SHA256SUMS`. The next release action is to collect
-candidate feedback and decide whether fixes require `v0.2.0-rc.2` or the same
-commit family is ready for a final `v0.2.0` gate. Release maintenance may run
-in parallel; general codec development resumes at item 4.
+covered by the published `SHA256SUMS`. Substantial codec and corpus work has
+landed since that candidate, so the next publication should be
+`v0.2.0-rc.2` from a new clean cross-platform candidate rather than promoting
+the rc.1 commit family directly to final. Release maintenance may run in
+parallel; general codec development resumes at item 4.
 
 ### 4. General Part 1 Decode Foundation — Next Active
 
@@ -154,7 +160,7 @@ The foundation landed on 2026-07-17:
   references.
 - `zig build part1-corpus` verifies inputs and reports decode pass, expected
   fail-closed, unexpected acceptance, mismatch, and skipped optional assets.
-- Twenty-six foreign-encoded streams now pin sampled multi-precinct/origin/POC,
+- Twenty-seven foreign-encoded streams now pin sampled multi-precinct/origin/POC,
   Grok four-component CMYK, all six T1 style bits, uniform `COC/QCC`, a
   24-part `TLM` layout, signed 8-bit single-/multi-tile native decode, five-
   component native assembly, signed 20-bit, mixed signed 5/12/19-bit plus
@@ -165,8 +171,8 @@ The foundation landed on 2026-07-17:
   profiles, plus four-tile streams with local `COD/QCD` and component-specific
   `COC/QCC` decomposition/block/band-table overrides, including inherited
   state across RPCL resolution parts and empty padding parts, tile/component
-  9/7 quantization, mixed component transforms, and B.7 effective block
-  clamping. Thirteen mutations
+  9/7 quantization, mixed component and tile transforms, and B.7 effective
+  block clamping. Fourteen mutations
   pin reserved COC/QCC values, TLM length accounting, and unsupported payload
   behavior.
 - Each entry selects the real legacy-planar, generic-native, or interleaved RGB
@@ -454,9 +460,19 @@ compaction, T1 geometry, and inverse DWT reconstruct all six full/reduction-1
 PGX references exactly with identical one/eight-thread output. Reassigning
 the QCC to a reversible component fails before packet reconstruction.
 
-The next G2 slice addresses mixed-transform tile scope. Encoder-side B.7
-clamping, arbitrary PLT-less multipart PPM, PPM+POC, and packed-header/TLM
-combinations remain outside this bounded slice.
+The twelfth G2 slice is complete: a directly emitted four-tile Kakadu no-MCT
+RPCL stream keeps the main COD/QCD reversible 5/3 while tile 1 replaces both
+through its first tile-part header with irreversible 9/7 and scalar-expounded
+Qstep 0.01. Effective tile coding and quantization now drive packet planning,
+reduced catalog compaction, integer/float inverse DWT dispatch, and absolute-
+grid assembly. All six full/reduction-1 PGX references stay within peak 1
+(measured MSE 0.0049 full and zero reduced), with identical one/eight-thread
+output. Reverting only the tile COD transform while retaining its irreversible
+QCD fails before packet reconstruction.
+
+The next G2 slice addresses encoder-side B.7 clamping. Mixed-transform tile-
+component breadth, arbitrary PLT-less multipart PPM, PPM+POC, and packed-
+header/TLM combinations remain outside this bounded slice.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,

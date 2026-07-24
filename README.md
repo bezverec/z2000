@@ -8,11 +8,12 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-17, both the narrow RGB lossless JP2 target and the broader
-JPEG2000 Part 1 engineering scorecard are estimated at **100/100**. The current
+of 2026-07-24, both the narrow RGB lossless JP2 target and the broader bounded
+Part 1 engineering scorecard are estimated at **100/100 within their declared
+profiles**. This is separate from the general-purpose G0-G7 plan, currently
+estimated at roughly 52% in [the roadmap](docs/roadmap.md). The current
 prerelease is [`v0.2.0-rc.1`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.1).
-This is a project-readiness estimate, not a formal ISO conformance
-certification.
+Neither figure is a formal ISO conformance certification.
 
 ## Features
 
@@ -61,10 +62,13 @@ certification.
   scalar-expounded QCC, pinned at full/reduced resolution. A second fixture
   simultaneously changes that component to NL=2, 8x8 blocks, and 16x16
   precincts while the reversible components retain NL=3, 4x4, and 32x32; all
-  full/reduced PGX planes are exact. Strict decode also
+  full/reduced PGX planes are exact. A four-tile Kakadu stream additionally
+  keeps the main profile reversible while tile 1 replaces its `COD/QCD` with
+  irreversible 9/7 and scalar-expounded quantization; all six full/reduced
+  native planes stay within peak error one. Strict decode also
   applies the Part 1 B.7 effective code-block clamp per resolution/subband;
   a Kakadu component-local 64x8-vs-32x32 fixture is exact at full/reduced
-  resolution. Encoder-side clamping, mixed-transform tile scope,
+  resolution. Encoder-side clamping, mixed-transform tile-component breadth,
   arbitrary PLT-less multipart PPM, and packed POC/TLM combinations remain
   fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
@@ -505,6 +509,12 @@ component precinct grids; component dimensions are available through
 `SamplePlanes.componentDimensions`. Matching or distinct image and
 tile-partition origins are supported for single- and multi-tile streams, which
 assemble native component planes tile by tile.
+Separate decode-only RPCL/no-MCT profiles cover scalar-quantized 9/7 native
+planes, component-local COC/QCC selection between 5/3 and 9/7, and a
+multi-tile stream whose first tile-part COD/QCD switches one tile from the
+reversible main profile to irreversible 9/7. Matching quantization is required
+for every effective component/tile transform; the public encoder does not yet
+expose these general override controls.
 `decodeLosslessPlanarUpsampled` provides explicit
 origin-anchored nearest-neighbour expansion to full reference-grid planes;
 the JP2-to-TIFF CLI interleaves those planes only after the JP2 wrapper has
@@ -591,8 +601,11 @@ interoperability, and improving performance inside the documented profile
 envelope. The score is for that bounded envelope, not a claim that every Part 1
 or JPX profile is implemented.
 
-Full codec target: broaden JPEG2000 Part 1 support across tiles, packet orders,
-profiles, quantization, code-block styles, and foreign decode surfaces.
+Full codec target: complete the G0-G7 plan across generic integer components,
+remaining Part 1 markers and ROI, selective/streaming decode, a general
+encoder, broader JP2 mappings, and the final conformance/hardening gate. The
+phase-by-phase estimate and its uncertainty are maintained in the roadmap;
+the bounded 100/100 scorecards are not used as a proxy for this progress.
 
 Later conversion-tool target: broaden the bounded DNG/OpenEXR front ends,
 add display conversion for the preserved extended YCC,

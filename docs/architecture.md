@@ -254,8 +254,8 @@ The bounded G2 tile-override path records first-part `COD/QCD` and component-
 specific `COC/QCC` into per-tile effective state. The Stage B packet-plan walk
 and Stage C catalog/T1/DWT reconstruction use allocator-owned coding and
 quantization tables for every tile/component; marker replay must equal those
-tables. The current envelope is reversible no-MCT RPCL with common layers and
-transform, and no effective decomposition count may exceed the main header.
+tables. The current envelope is no-MCT RPCL with common layers, and no
+effective decomposition count may exceed the main header.
 It accepts one part per tile, PLT-backed RPCL resolution/padding parts, and the
 same divergent reversible COC/QCC state through bounded packed layouts:
 multipart PPT with PLT or one-part-per-tile PPM. Inline PLT-less multipart state
@@ -267,11 +267,15 @@ reversible planes use checked integer 5/3 synthesis while irreversible planes
 use their scalar-expounded steps and float 9/7 synthesis. Components may also
 diverge in decomposition count, precincts, and block geometry; reduced catalog
 compaction and both inverse transforms consume the same effective component
-table. Strict component
+table. The same dispatch now applies after tile-header `COD/QCD`: a directly
+emitted four-tile stream keeps three tiles on reversible 5/3 and switches tile
+1 to scalar-expounded 9/7, with independent full/reduced synthesis before
+absolute-grid assembly. Transform/quantization mismatches fail before packet
+reconstruction. Strict component
 geometry derives an effective code-block dimension for every subband by
 clamping the nominal COD/COC dimension to the precinct-induced B.7 span; the
 same dimensions build both block catalogs and packet tag-tree grids. Mixed-
-transform tile scope, encoder-side B.7 clamping, arbitrary
+transform tile-component breadth, encoder-side B.7 clamping, arbitrary
 PLT-less multipart PPM, PPM+POC, and packed-header/TLM combinations remain
 fail-closed.
 

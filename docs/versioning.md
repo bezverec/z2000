@@ -95,7 +95,9 @@ should prefer a full clone so the default commit count remains meaningful.
 - Keep release tags in the form `vMAJOR.MINOR.PATCH`; the current line is
   `v0.2.0`.
 - Keep prerelease tags in the form `vMAJOR.MINOR.PATCH-rc.N`; the current
-  candidate line began with `v0.2.0-rc.1`.
+  candidate line began with `v0.2.0-rc.1`. Because substantial codec and corpus
+  breadth landed afterward, the next planned publication is `v0.2.0-rc.2`,
+  not a direct promotion of the rc.1 commit to final.
 - Do not reset or hand-edit `BUILD`; it is derived from repository history.
 
 The `VERSION` file names the next release line during development. After a

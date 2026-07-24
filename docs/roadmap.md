@@ -141,9 +141,36 @@ decoded, encoded, malformed-tested, and independently reproduced.
 | G6 | General JP2 tool surface | Raw codestream and JP2 workflows, legal palette/channel/colour/resolution mappings, and checked metadata preservation work without assuming sRGB |
 | G7 | 1.0 conformance and hardening gate | Part 4 evidence, fuzz/corruption campaigns, resource limits, deterministic cross-platform builds, stable API/CLI, and no unresolved claimed-row discrepancy |
 
-G0 is active. Its 2026-07-17 foundation includes an unscored broad capability
+### Current Completion Estimate
+
+As of 2026-07-24, the general-purpose G0-G7 program is estimated at **about
+52% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
+This is a planning estimate, not a conformance score. It gives every phase
+equal weight because the remaining effort is too uncertain for a more precise
+cost model; the headline is the rounded mean of the phase estimates below.
+The decode-first foundation G0-G4 is approximately **59% complete** by the same
+method. Neither number changes the bounded 100/100 scorecards.
+
+| Phase | Estimate | Evidence already landed | Largest remaining work |
+| --- | ---: | --- | --- |
+| G0 | 75% | Manifest, differential runner, 58 cases, all profile-0 assets integrated, 9/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
+| G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
+| G2 | 75% | Twelve independent coding/quantization override slices through component- and tile-local 5/3/9/7 | Encoder B.7 clamping and broader tile-component/packed combinations |
+| G3 | 30% | Broad T1/T2 styles, progression, POC, TLM, and multipart foundations | `RGN`, `CRG`, `PLM`, applicable `CAP`/`PRF`, and general packed schedules |
+| G4 | 45% | Direct resolution reduction, T1 skipping, catalog compaction, borrowed packet spans | Layer/tile/region selection plus incremental input and bounded output |
+| G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
+| G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
+| G7 | 35% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
+
+These values should move only when a phase promotion criterion changes state,
+not after every small fixture. Re-estimate after G2 encoder-side B.7 clamping,
+after the first complete G3 marker-to-raster slice, or when new conformance
+evidence materially changes the denominator.
+
+G0 evidence expansion and G1/G2/G4 implementation are active. The 2026-07-17
+G0 foundation includes an unscored broad capability
 matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
-Twenty-four committed foreign-encoded streams cover sampled origins/POC and sampled
+Twenty-seven committed foreign-encoded streams cover sampled origins/POC and sampled
 multi-tile no-MCT 9/7 reduction,
 signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
 8/16/20-bit, and independently sampled signed 7/13/23-bit
@@ -152,13 +179,13 @@ CMYK, all T1 style bits, uniform COC/QCC, genuinely divergent ICT/9-7 QCC,
 reversible component-local COC decomposition/precinct geometry, divergent
 component block geometry/T1 style, reversible tile-local COD/QCD and COC/QCC
 including resolution-part continuation, irreversible tile/component QCD/QCC,
-mixed 5/3/9/7 component transforms with common and divergent geometry, and
-padded multipart TLM; thirteen mutations pin malformed and unsupported
+mixed 5/3/9/7 component transforms with common and divergent geometry,
+tile-local mixed 5/3/9/7 COD/QCD, and padded multipart TLM; fourteen mutations pin malformed and unsupported
 fail-closed behavior. The
 official WG1 T.803 checkout is additionally pinned as a local-only corpus: all
 16 profile-0 streams and 18 class-0 PGX references are checksummed. Nine streams
 pass their class-0 references and seven pin expected fail-closed boundaries, for
-a complete 56-entry result of 36 decode passes and 20 expected fail-closed
+a complete 58-entry result of 37 decode passes and 21 expected fail-closed
 cases. The oracle represents component/reduction selectors, pre-/post-MCT
 reference space,
 signed 1..31-bit PGX data, peak error, and MSE. G0 remains open for independent
@@ -190,8 +217,8 @@ four-tile sampled no-MCT 9/7 stream now pins full and reduction-1 native
 planes against six PGX references. A second Kakadu PLT-less stream supplies
 the unchanged foreign packet bodies for inline/PPT/PPM full and reduced gates;
 the PPT/PPM framing is a deterministic structural repack, not independent
-encoder evidence. Sampled colour transforms remain the next G4 gate. Class-1
-all-component evaluation advances with G1/G2 decode breadth.
+encoder evidence. Remaining sampled colour-transform layouts are a later G4
+gate. Class-1 all-component evaluation advances with G1/G2 decode breadth.
 
 G1 now has its non-breaking carrier foundation plus the first payload slice: a
 caller-limited SIZ inspector and dynamic `i64` planes preserve 1..38-bit
@@ -214,9 +241,9 @@ reconstructs mixed signed 7/13/23-bit components on independent 1x1, 2x1, and
 2x2 grids across four tiles, with
 exact full/reduction-1 Kakadu PGX and ZRAW round-trip evidence. Caller limits and the
 legacy four-component, unsigned 8/16-bit `u16` surface remain intact.
-Precisions above 29 bits require a wider T1 coefficient carrier. Remaining
-dynamic strict structures come next. The first six dynamic strict-storage
-slices have landed: component assembly, the public block catalog, component
+Precisions above 29 bits require a wider T1 coefficient carrier. The first
+dynamic strict-storage campaign has reached its documented exit: component
+assembly, the public block catalog, component
 packet plans, geometry/index state, RPCL indexes, strict metadata, and
 persistent precinct groups, parallel job handles, and generic irreversible
 working tables now own exact-length allocator-backed slices.
@@ -226,6 +253,8 @@ native regressions. Reversible native decode is caller-limited through that
 metadata boundary; a direct 19-job regression also crosses the former runner
 limit. Legacy colour and encode carriers remain intentionally narrower, so the
 generic irreversible output is not yet a public high-component profile.
+Further fixed-array removal belongs to the continuing G1 audit rather than the
+next active implementation slice.
 Part 1 samples are integers;
 floating-point codestream samples and general multiple-component transforms
 belong to extension work rather than being smuggled into this milestone.
@@ -240,7 +269,7 @@ non-recursive batch CLI syntax, with reduction and byte order kept explicit.
 The second surface writes all native components to exact ZRAW through the same
 dispatch forms and round-trips its self-describing metadata and payload.
 
-G2 now has eleven pinned slices. Genuinely component-specific
+G2 now has twelve pinned slices. Genuinely component-specific
 scalar-expounded QCC works in the bounded three-component ICT/9-7 profile at
 full and reduced resolution. A reversible single-tile no-MCT Kakadu stream also
 decodes component-local decomposition counts 3/2/1, component-sized precinct
@@ -254,9 +283,10 @@ pins exact B.7 effective clamping in both LL and detail subbands; changing only
 the older fixture's COC while retaining its original packets remains malformed.
 A four-tile reversible fixture additionally replaces main
 NL=2/4x4/seven-band QCD on tile 1 with tile-local NL=1/8x8/four-band COD/QCD;
-all six full/reduction references are exact and a divergent tile transform
-fails closed. A second four-tile fixture keeps that main profile but changes
-only tile 1 component 1 through first-part NL=1/8x8 COC and four-band QCC;
+all six full/reduction references are exact and a transform change without
+matching quantization fails closed. A second four-tile fixture keeps that main
+profile but changes only tile 1 component 1 through first-part NL=1/8x8 COC
+and four-band QCC;
 tile-and-component-local packet/T1/DWT state is exact at both resolutions, and
 reserved QCC style remains malformed. Common transform/quantization plus
 RPCL resolution parts now preserve that first-part state across non-empty and
@@ -277,9 +307,12 @@ transform/QCC mismatch fails closed. A second mixed-transform stream removes
 the equal-geometry constraint: the 9/7 component also changes to NL=2, 8x8
 blocks, and 16x16 precincts while the 5/3 components retain NL=3, 4x4, and
 32x32. All six full/reduced planes are exact and a mismatched QCC remains
-closed. Encoder-side B.7 clamping, mixed-transform tile scope, arbitrary
-PLT-less multipart PPM, and packed TLM/POC combinations remain the next
-boundaries.
+closed. A directly emitted four-tile stream now retains reversible main
+COD/QCD while tile 1 switches through tile-header COD/QCD to
+scalar-expounded 9/7; all six full/reduced Kakadu planes stay within peak 1
+and a transform/QCD mismatch fails closed. Encoder-side B.7 clamping,
+mixed-transform tile-component breadth, arbitrary PLT-less multipart PPM, and
+packed TLM/POC combinations remain the next boundaries.
 Together with G3 they replace the
 remaining byte-redundant/uniform shortcuts with real component- and tile-local
 semantics. Unknown or profile-inapplicable
@@ -300,8 +333,9 @@ directly across single- and multi-tile inline, PPT, and PPM headers. Multi-tile
 assembly reduces each tile-component's absolute sampled bounds independently.
 Native-planar no-MCT 9/7 covers bounded single-tile and sampled multi-tile
 decode, with the latter independently reference-relative through Kakadu.
-Sampled colour transforms are the next functional gate; common-grid multi-tile
-RCT/ICT selection has landed. A large image
+Remaining sampled colour-transform layouts are a later functional gate;
+common-grid multi-tile RCT/ICT and bounded uniform sampled RCT selection have
+landed. A large image
 still must not require retaining every discarded layer, tile, or pixel when the
 caller requests a bounded subset.
 Performance work continues in parallel, but no throughput result substitutes
@@ -316,9 +350,9 @@ formal certification must remain distinct from internal test success.
 - precision above 29 bits in the T1/DWT payload path, generic irreversible
   high-component output, and encoder controls for the native component model,
   remaining under G1/G7;
-- divergent component/tile coding styles, remaining Part 1 ROI/registration
-  markers, broad tile-part schedules, and selective decode, planned under
-  G2-G4;
+- broader divergent component/tile coding-style combinations, remaining Part 1
+  ROI/registration markers, broad tile-part schedules, and selective decode,
+  planned under G2-G4;
 - automatic colour conversion beyond bounded sYCC 4:4:4/4:2:2/4:2:0;
 - tiled/compressed TIFF variants and broad camera-RAW workflows;
 - unchecked architecture-specific fast paths.

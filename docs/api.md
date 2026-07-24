@@ -14,8 +14,8 @@ zig build test
 
 The binary installs as both `z2000` and the `z2k` alias; conversions accept
 the extension-inferred shorthand (`z2k input.tif output.jp2`,
-`z2k input.bmp output.jp2`, `z2k input.png output.jp2`, or
-`z2k input.jpg output.jp2`, `z2k input.dng output.jp2`, or
+`z2k input.bmp output.jp2`, `z2k input.png output.jp2`,
+`z2k input.jpg output.jp2`, `z2k input.dng output.jp2`,
 `z2k input.exr output.jp2`, `z2k input.j2k output.pgx`, or
 `z2k input.j2k output.zraw`). The custom
 grayscale codec:
@@ -345,6 +345,13 @@ Primary public functions:
   variable plane shapes through `component_widths`, `component_heights`, and
   `componentDimensions(component)`. Uniform sampled RCT decode is additionally
   supported when all three transformed components share sampling and precision.
+  A bounded no-MCT RPCL decode profile may select 5/3 or 9/7 per component
+  through matching COC/QCC at single-tile scope, including component-local
+  levels, precincts, and block geometry. Multi-tile planar decode may likewise
+  replace a tile's reversible main COD/QCD with matching irreversible
+  scalar-expounded COD/QCD; each tile is reconstructed through its effective
+  transform before absolute-grid assembly. These are decode-only profile
+  extensions, not general encoder controls.
   `DecodeOptions.resolution_reduction`
   reconstructs a requested lower DWT resolution directly for bounded
   reversible 5/3 and irreversible no-MCT 9/7 streams, including component-
