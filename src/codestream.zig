@@ -529,7 +529,6 @@ pub fn encodeLosslessPlanarWithOptions(
 
     const levels = actualDwtLevels(planar.width, planar.height, options.levels);
     const encode_options = normalizedEncodePrecinctOptions(options, levels);
-    try validatePrecinctBlockSpans(encode_options);
 
     var scaffold_precincts: [33]packet_plan.Precinct = undefined;
     for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {
@@ -689,7 +688,6 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     if (!any_subsampled) return CodestreamError.UnsupportedPayload;
 
     const encode_options = normalizedEncodePrecinctOptions(options, reference_levels);
-    try validatePrecinctBlockSpans(encode_options);
     var scaffold_precincts: [33]packet_plan.Precinct = undefined;
     for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {
         scaffold_precincts[index] = .{ .width = precinct.width, .height = precinct.height };
@@ -3132,7 +3130,6 @@ fn encodeLosslessWithOptionsMeasured(
     }
 
     var encode_options = normalizedEncodePrecinctOptions(options, levels);
-    try validatePrecinctBlockSpans(encode_options);
     // Per-resolution tile-parts require resolution-contiguous packet ranges.
     // Multi-layer LRCP interleaves resolutions across layers, and the
     // position-major orders (PCRL/CPRL) interleave them across precinct
@@ -6600,7 +6597,14 @@ fn validateStrictPacketBlockCatalogMatchesTemporary(
     _ = try readRpclShadowStreamInfo(&cursor, header.version, header.packet_count);
     if (!cursor.finished()) return CodestreamError.InvalidCodestream;
 
-    const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
+    const plan = temporaryPacketPlan(header);
+    const blocks = try makeCodeBlocksForPacketPlan(
+        allocator,
+        bands,
+        header.block_width,
+        header.block_height,
+        plan,
+    );
     defer allocator.free(blocks);
     try validateTemporaryCatalogsMatchCodeBlocks(expected, blocks);
 
@@ -6739,7 +6743,13 @@ fn decodeStrictRpclImageFromPackets(
     const plan = temporaryPacketPlan(header);
     const bands = try subband.makeBands(allocator, header.width, header.height, header.levels);
     defer allocator.free(bands);
-    const blocks = try subband.makeCodeBlocks(allocator, bands, header.block_width, header.block_height);
+    const blocks = try makeCodeBlocksForPacketPlan(
+        allocator,
+        bands,
+        header.block_width,
+        header.block_height,
+        plan,
+    );
     defer allocator.free(blocks);
 
     var catalogs: [3]TemporaryComponentRpclCatalog = undefined;
@@ -7549,7 +7559,7 @@ fn buildStrictPacketAuditBandGroup(
     const packet_levels = plan.resolution_count - 1;
     const block_width = componentBlockWidthForHeader(header, component);
     const block_height = componentBlockHeightForHeader(header, component);
-    const effective_block = try effectiveCodeBlockDimensions(
+    const effective_block = try t2.effectiveCodeBlockDimensions(
         plan,
         band,
         packet_levels,
@@ -14404,7 +14414,14 @@ fn appendTemporaryPayload(
 
     const bands = try subband.makeBands(allocator, planes.width, planes.height, levels);
     defer allocator.free(bands);
-    const blocks = try subband.makeCodeBlocks(allocator, bands, options.block_width, options.block_height);
+    const plan = try makePacketPlan(planes.width, planes.height, levels, options);
+    const blocks = try makeCodeBlocksForPacketPlan(
+        allocator,
+        bands,
+        options.block_width,
+        options.block_height,
+        plan,
+    );
     defer allocator.free(blocks);
 
     const pass_stats = if (options.threads == 1)
@@ -14536,6 +14553,7 @@ fn appendRpclShadowStream(
                         &packet_header_lengths,
                         bands,
                         blocks,
+                        plan,
                         options,
                         &catalogs[@intCast(component)],
                         selected,
@@ -15428,6 +15446,7 @@ fn appendRpclShadowPacketsForSelection(
     packet_header_lengths: *std.ArrayList(u32),
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
+    plan: packet_plan.Plan,
     options: LosslessOptions,
     catalog: *const ComponentRpclShadowCatalog,
     selected: []const usize,
@@ -15450,7 +15469,16 @@ fn appendRpclShadowPacketsForSelection(
         return;
     }
 
-    const groups = try buildRpclPacketBandGroups(allocator, bands, blocks, options, catalog, selected, layer_count);
+    const groups = try buildRpclPacketBandGroups(
+        allocator,
+        bands,
+        blocks,
+        plan,
+        options,
+        catalog,
+        selected,
+        layer_count,
+    );
     defer {
         for (groups) |*group| group.deinit(allocator);
         allocator.free(groups);
@@ -15487,6 +15515,7 @@ fn buildRpclPacketBandGroups(
     allocator: std.mem.Allocator,
     bands: []const subband.Band,
     blocks: []const subband.CodeBlock,
+    plan: packet_plan.Plan,
     options: LosslessOptions,
     catalog: *const ComponentRpclShadowCatalog,
     selected: []const usize,
@@ -15514,6 +15543,7 @@ fn buildRpclPacketBandGroups(
             allocator,
             bands[band_index],
             blocks,
+            plan,
             options,
             catalog,
             selected[cursor..end],
@@ -15530,6 +15560,7 @@ fn buildRpclPacketBandGroup(
     allocator: std.mem.Allocator,
     band: subband.Band,
     blocks: []const subband.CodeBlock,
+    plan: packet_plan.Plan,
     options: LosslessOptions,
     catalog: *const ComponentRpclShadowCatalog,
     selected: []const usize,
@@ -15537,13 +15568,20 @@ fn buildRpclPacketBandGroup(
     layer_count: u16,
 ) !RpclPacketBandGroup {
     if (selected.len == 0) return CodestreamError.InvalidCodestream;
+    const effective_block = try t2.effectiveCodeBlockDimensions(
+        plan,
+        band,
+        plan.resolution_count - 1,
+        options.block_width,
+        options.block_height,
+    );
     const grid = try t2.CodeBlockGrid.init(
         band.rect.x,
         band.rect.y,
         band.rect.width,
         band.rect.height,
-        options.block_width,
-        options.block_height,
+        effective_block.width,
+        effective_block.height,
     );
 
     var min_x: usize = std.math.maxInt(usize);
@@ -15881,7 +15919,7 @@ fn makeCodeBlocksForPacketPlan(
     var widths: [max_qcd_bands]usize = undefined;
     var heights: [max_qcd_bands]usize = undefined;
     for (bands, 0..) |band, index| {
-        const effective = try effectiveCodeBlockDimensions(
+        const effective = try t2.effectiveCodeBlockDimensions(
             plan,
             band,
             levels,
@@ -15897,40 +15935,6 @@ fn makeCodeBlocksForPacketPlan(
         widths[0..bands.len],
         heights[0..bands.len],
     );
-}
-
-const EffectiveCodeBlockDimensions = struct {
-    width: usize,
-    height: usize,
-};
-
-/// ISO/IEC 15444-1 B.7: a code-block partition is bounded by the precinct
-/// partition. Resolution zero uses the full precinct span in LL coordinates;
-/// detail subbands use the corresponding half-span.
-fn effectiveCodeBlockDimensions(
-    plan: packet_plan.Plan,
-    band: subband.Band,
-    levels: u8,
-    nominal_width: usize,
-    nominal_height: usize,
-) !EffectiveCodeBlockDimensions {
-    if (nominal_width == 0 or nominal_height == 0) return CodestreamError.InvalidCodestream;
-    const resolution_index = try t2.bandResolutionIndex(levels, band);
-    if (resolution_index >= plan.resolution_count) return CodestreamError.InvalidCodestream;
-    const resolution = plan.resolutions[resolution_index];
-    const band_span_width = if (resolution_index == 0)
-        resolution.precinct_width
-    else
-        resolution.precinct_width / 2;
-    const band_span_height = if (resolution_index == 0)
-        resolution.precinct_height
-    else
-        resolution.precinct_height / 2;
-    if (band_span_width == 0 or band_span_height == 0) return CodestreamError.InvalidCodestream;
-    return .{
-        .width = @min(nominal_width, @as(usize, band_span_width)),
-        .height = @min(nominal_height, @as(usize, band_span_height)),
-    };
 }
 
 fn makeBandsForPacketPlan(
@@ -16581,19 +16585,8 @@ fn validateMultiTileProgression(progression: ProgressionOrder, layers: u16) !voi
     }
 }
 
-/// The encoder still requires the requested nominal block partition to fit
-/// every precinct-induced band span. Strict decode implements the B.7
-/// effective-size clamping independently.
-fn validatePrecinctBlockSpans(options: LosslessOptions) !void {
-    for (options.precincts[0..options.precinct_count], 0..) |precinct, resolution| {
-        const band_span_width = if (resolution == 0) precinct.width else precinct.width / 2;
-        const band_span_height = if (resolution == 0) precinct.height else precinct.height / 2;
-        if (band_span_width < options.block_width or band_span_height < options.block_height) {
-            return CodestreamError.UnsupportedPayload;
-        }
-    }
-}
-
+/// Precinct exponents are validated before this point. Effective B.7
+/// code-block dimensions are derived later for every resolution/subband.
 fn validateDecodePrecinctBlockSpans(
     options: LosslessOptions,
     image_width: usize,
@@ -16611,8 +16604,7 @@ fn validateDecodePrecinctBlockSpans(
     }
 }
 
-fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8, options: LosslessOptions) !void {
-    try validatePrecinctBlockSpans(options);
+fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8) !void {
     if (levels > 32) return CodestreamError.UnsupportedPayload;
 
     var iterator = grid.iterator();
@@ -17296,7 +17288,7 @@ fn encodeLosslessMultiTileMeasured(
 
     const levels = actualDwtLevels(rgb.width, rgb.height, options.levels);
     const encode_options = normalizedEncodePrecinctOptions(options, levels);
-    try validateMultiTileGeometry(grid, levels, encode_options);
+    try validateMultiTileGeometry(grid, levels);
 
     var scaffold_precincts: [33]packet_plan.Precinct = undefined;
     for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {

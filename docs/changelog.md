@@ -145,7 +145,7 @@ entries are grouped by development milestone rather than semantic version.
   both use 32-wide LL and 16-wide detail partitions, and all six
   full/reduction-1 PGX references match exactly. A COC-only mutation retains
   mismatched packet bodies and now fails as `InvalidCodestream`; encoder-side
-  clamping remains deliberately closed.
+  clamping was added in the later thirteenth G2 slice below.
 - Added bounded component-local code-block geometry and T1 style for the
   single-tile reversible no-MCT native profile. A Kakadu stream combines
   4x4/default, 8x8/RESET, and 4x16/CAUSAL+SEGMARK components and matches six
@@ -210,6 +210,12 @@ entries are grouped by development milestone rather than semantic version.
   0.0049, with one/eight-thread agreement. Reverting only the tile COD
   transform while retaining its irreversible QCD fails before packet
   reconstruction. The gate now contains 58 entries.
+- Added encoder-side Part 1 B.7 effective code-block clamping across bounded
+  lossless RGB, planar, sampled, and multi-tile front ends. A shared T2 helper
+  supplies per-subband dimensions to block construction and tag-tree
+  locations while COD retains the nominal size. Single-/multi-tile and sampled
+  tests are exact, one/eight-thread output is deterministic, and OpenJPEG,
+  Grok, and Kakadu reproduce a live nominal-64x64/precinct-64x64 JP2 exactly.
 - Accepted the Part 1-legal QCD-before-COD main-header order by retaining QCD
   until COD supplies the transform and decomposition context. Official T.803
   `p0_01` moved from `InvalidCodestream` to an exact PGX pass, with a committed
@@ -376,6 +382,10 @@ entries are grouped by development milestone rather than semantic version.
   program at about 52% (+/- 8 points) and the decode-first G0-G4 foundation at
   about 59%. README, API, release policy, optimization status, corpus totals,
   and active/remaining boundaries now use the same definitions.
+- Re-estimated after the thirteenth G2 encoder-clamping slice: G2 advances from
+  75% to 80%, the equal-phase G0-G7 estimate rounds to about 53%, and the
+  decode-first G0-G4 foundation reaches about 60%. The uncertainty remains
+  +/- 8 points.
 
 ### Comparative Performance Checkpoint
 

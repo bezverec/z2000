@@ -8,9 +8,9 @@ This is the only active implementation queue. Strategic policy is in
 
 - The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
-- The separate general-purpose G0-G7 program is estimated at about 52%
+- The separate general-purpose G0-G7 program is estimated at about 53%
   complete (+/- 8 points), with the decode-first G0-G4 foundation at about
-  59%. The phase method and remaining-work table live in
+  60%. The phase method and remaining-work table live in
   [`roadmap.md`](roadmap.md); these figures are not derived from the bounded
   100/100 scorecards.
 - Sampled RPCL/no-MCT/reversible-5/3 strict decode supports native planes,
@@ -190,8 +190,8 @@ The foundation landed on 2026-07-17:
   segment-less marker handling move `p0_02` to an exact pass;
   bounded single-span edge clipping plus NL=0/EPH/SEGMARK move `p0_11` to an
   exact 128x1 pass; the later tenth G2 slice generalizes strict decode to
-  per-subband B.7 effective block dimensions while encoder clamping stays
-  fail-closed;
+  per-subband B.7 effective block dimensions; the matching encoder clamp is
+  now covered by the thirteenth G2 slice;
   component-specific irreversible QCC plus reduced ICT/9-7 codestream-component
   output covers `p0_04`; reduced no-MCT 9/7 and reversible saturation cover
   `p0_09`/`p0_14`; and legal zero
@@ -470,9 +470,18 @@ grid assembly. All six full/reduction-1 PGX references stay within peak 1
 output. Reverting only the tile COD transform while retaining its irreversible
 QCD fails before packet reconstruction.
 
-The next G2 slice addresses encoder-side B.7 clamping. Mixed-transform tile-
-component breadth, arbitrary PLT-less multipart PPM, PPM+POC, and packed-
-header/TLM combinations remain outside this bounded slice.
+The thirteenth G2 slice is complete: the bounded lossless RGB, planar, sampled,
+and multi-tile encoders now apply the same Part 1 B.7 effective code-block
+geometry as strict decode. COD retains the requested nominal 64x64 block while
+64x64 precincts produce 32x32 detail-band blocks; block construction, packet
+selection, tag-tree locations, temporary audit catalogs, and strict decode all
+consume the shared T2 calculation. Single-/multi-tile and sampled regressions
+are exact, one/eight-thread multi-tile output is deterministic, and OpenJPEG,
+Grok, and Kakadu reproduce a live 32x32 JP2 pixel-exactly.
+
+The next G2 slice addresses mixed-transform tile-component breadth. Arbitrary
+PLT-less multipart PPM, PPM+POC, and packed-header/TLM combinations remain
+outside this bounded slice.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,

@@ -167,7 +167,8 @@ Important `tiff-to-jp2` options:
 - `--poc "RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;..."`
 - `--poc-location main|tile`
 - `--precincts "[256,256],[128,128]"`
-- `--block N`
+- `--block N` (nominal block edge; the effective per-band partition is clamped
+  to the Part 1 B.7 precinct span)
 - `--layers N`
 - `--rates R1,R2,...`
 - `--mct rct|ict|none`

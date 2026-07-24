@@ -88,6 +88,16 @@ pub const PacketScaffold = struct {
         return if (depth != 0) depth else fallback;
     }
 
+    fn effectiveBlockDimensions(self: PacketScaffold, band: subband.Band) !t2.CodeBlockDimensions {
+        return t2.effectiveCodeBlockDimensions(
+            self.plan,
+            band,
+            self.levels,
+            self.block_width,
+            self.block_height,
+        );
+    }
+
     pub fn componentBlock(self: PacketScaffold, index: usize) !ComponentBlock {
         const count = try self.componentBlockCount();
         if (index >= count) return PacketScaffoldError.InvalidComponentBlock;
@@ -184,15 +194,16 @@ pub const EncodedComponentBlock = struct {
 
         const band_x0: usize = self.job.band.origin_x;
         const band_y0: usize = self.job.band.origin_y;
+        const effective_block = try scaffold.effectiveBlockDimensions(self.job.band);
         const grid = try t2.CodeBlockGrid.initAnchored(
             self.job.band.rect.x,
             self.job.band.rect.y,
             self.job.band.rect.width,
             self.job.band.rect.height,
-            scaffold.block_width,
-            scaffold.block_height,
-            band_x0 % scaffold.block_width,
-            band_y0 % scaffold.block_height,
+            effective_block.width,
+            effective_block.height,
+            band_x0 % effective_block.width,
+            band_y0 % effective_block.height,
         );
         const location = try grid.locationForRect(.{
             .x = self.job.rect.x,
@@ -1528,7 +1539,27 @@ pub fn buildPacketScaffold(
         levels,
     );
     errdefer allocator.free(bands);
-    const blocks = try subband.makeCodeBlocks(allocator, bands, options.block_width, options.block_height);
+    const block_widths = try allocator.alloc(usize, bands.len);
+    defer allocator.free(block_widths);
+    const block_heights = try allocator.alloc(usize, bands.len);
+    defer allocator.free(block_heights);
+    for (bands, 0..) |band, index| {
+        const effective = try t2.effectiveCodeBlockDimensions(
+            plan,
+            band,
+            levels,
+            options.block_width,
+            options.block_height,
+        );
+        block_widths[index] = effective.width;
+        block_heights[index] = effective.height;
+    }
+    const blocks = try subband.makeCodeBlocksForBandDimensions(
+        allocator,
+        bands,
+        block_widths,
+        block_heights,
+    );
     errdefer allocator.free(blocks);
 
     return .{

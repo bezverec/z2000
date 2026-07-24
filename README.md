@@ -11,7 +11,7 @@ Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
 of 2026-07-24, both the narrow RGB lossless JP2 target and the broader bounded
 Part 1 engineering scorecard are estimated at **100/100 within their declared
 profiles**. This is separate from the general-purpose G0-G7 plan, currently
-estimated at roughly 52% in [the roadmap](docs/roadmap.md). The current
+estimated at roughly 53% in [the roadmap](docs/roadmap.md). The current
 prerelease is [`v0.2.0-rc.1`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.1).
 Neither figure is a formal ISO conformance certification.
 
@@ -68,9 +68,11 @@ Neither figure is a formal ISO conformance certification.
   native planes stay within peak error one. Strict decode also
   applies the Part 1 B.7 effective code-block clamp per resolution/subband;
   a Kakadu component-local 64x8-vs-32x32 fixture is exact at full/reduced
-  resolution. Encoder-side clamping, mixed-transform tile-component breadth,
-  arbitrary PLT-less multipart PPM, and packed POC/TLM combinations remain
-  fail-closed.
+  resolution. Lossless single-/multi-tile and sampled encoders now use the
+  same effective geometry while retaining the nominal COD block size; a
+  64x64-block/64x64-precinct stream is pixel-exact through z2000, OpenJPEG,
+  Grok, and Kakadu. Mixed-transform tile-component breadth, arbitrary PLT-less
+  multipart PPM, and packed POC/TLM combinations remain fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,
@@ -383,7 +385,9 @@ than silently changing the codestream profile.
 - **--levels N**: Number of wavelet decomposition levels.
 - **--resolutions N**: Alternative spelling where resolutions equal levels
   plus one.
-- **--block N**: Square code-block size.
+- **--block N**: Nominal square code-block size. When a precinct induces a
+  smaller Part 1 B.7 band span, the effective block partition is clamped while
+  `COD` retains this nominal value.
 - **--precincts LIST**: Per-resolution precinct sizes, for example
   **"[256,256],[128,128]"**.
 - **--tile W,H**: Tile dimensions. A tile smaller than the image enables the

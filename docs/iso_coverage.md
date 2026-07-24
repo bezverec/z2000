@@ -22,7 +22,7 @@ arbitrary-profile support, or completion of the roadmap's G0-G7 program.
 Remaining work includes generic component and encode breadth, ROI and marker
 semantics, selective/streaming decode, broader JP2 mappings, producer diversity,
 and performance outside those scored bounds. The separate roadmap estimate is
-roughly 52% and is intentionally not folded into either 100/100 score.
+roughly 53% and is intentionally not folded into either 100/100 score.
 
 ## Broad Part 1 Readiness Matrix
 
@@ -37,7 +37,7 @@ The machine-readable source and runnable evidence are documented in
 | --- | --- | --- | --- | --- | --- | --- |
 | Integer components and precision | SIZ-general | Bounded | Bounded | Bounded | Bounded | `inspectNativeCodestreamLayout` and the dynamic `i64` carrier preserve caller-bounded component counts plus signed/unsigned 1..38-bit layouts, origins, and sampling. `decodeLosslessNative` additionally reconstructs caller-limited single- and multi-tile reversible no-MCT signed/unsigned 1..29-bit payloads, including mixed component precision and independent component sampling, exactly at full and lower DWT resolutions through the 256-component metadata bound. Independent Kakadu fixtures pin 5/7/8/12/13/16/19/20/23/29-bit payloads and 19-component assembly. Checked `i64` inverse-lifting intermediates prevent malformed coefficients from overflowing the `i32` T1/DWT carrier. The legacy planar/JP2/TIFF surface remains 1..4 unsigned 8/16-bit; 30..38-bit payload reconstruction requires a wider T1 carrier and remains G1. |
 | Component sampling and origins | Bounded | Bounded | Bounded | Bounded | Bounded | Component-local sampling plus distinct image/tile origins in reversible no-MCT profiles. A signed mixed-precision Kakadu fixture pins independent 1x1, 2x1, and 2x2 grids across four tiles at full and reduced resolution. |
-| `COD`/`QCD` and `COC`/`QCC` overrides | Bounded | Bounded | Bounded | Bounded | Bounded | Uniform or byte-redundant overrides, mixed-precision reversible QCC, genuinely component-specific scalar-expounded QCC for bounded three-component 9/7 profiles, single-tile reversible no-MCT component-local decomposition/precinct/block/style with B.7 effective block clamping, first-tile-part no-MCT tile/component coding or quantization overrides, single-tile mixed 5/3/9/7 COC/QCC with component-local geometry, and tile-local mixed 5/3/9/7 COD/QCD are decoded. Kakadu full/reduced PGX plus malformed mutations pin twelve slices, including inherited reversible state across RPCL resolution/padding parts, deterministic PPT/PPM repacks, directly emitted irreversible tile QCD/component QCC, component- and tile-local transform dispatch, and nominal 64x8 blocks clamped against 32x32 precincts. Encoder-side B.7 clamping, mixed-transform tile-component breadth, arbitrary PLT-less multipart PPM, and packed POC/TLM combinations remain G2/G3. |
+| `COD`/`QCD` and `COC`/`QCC` overrides | Bounded | Bounded | Bounded | Bounded | Bounded | Uniform or byte-redundant overrides, mixed-precision reversible QCC, genuinely component-specific scalar-expounded QCC for bounded three-component 9/7 profiles, single-tile reversible no-MCT component-local decomposition/precinct/block/style with B.7 effective block clamping, first-tile-part no-MCT tile/component coding or quantization overrides, single-tile mixed 5/3/9/7 COC/QCC with component-local geometry, and tile-local mixed 5/3/9/7 COD/QCD are decoded. Kakadu full/reduced PGX plus malformed mutations pin twelve decode slices, including inherited reversible state across RPCL resolution/padding parts, deterministic PPT/PPM repacks, directly emitted irreversible tile QCD/component QCC, component- and tile-local transform dispatch, and nominal 64x8 blocks clamped against 32x32 precincts. A thirteenth slice applies the same B.7 geometry to bounded lossless encode with three independent pixel-exact decoders. Mixed-transform tile-component breadth, arbitrary PLT-less multipart PPM, and packed POC/TLM combinations remain G2/G3. |
 | Progression and `POC` | Bounded | Bounded | Bounded | Bounded | Bounded | All five orders in checked schedules; sampled PPM+POC remains closed. |
 | Packet headers and lengths | Bounded | Bounded | Bounded | Bounded | Bounded | Inline/PLT, PPT and PPM profiles are public; `PLM` is not implemented. |
 | Tiles and tile parts | Bounded | Bounded | Bounded | Bounded | Bounded | Practical single/multipart schedules are covered, including inline PLT-less parts whose packet counts are derived at checked `Psot` boundaries; broader packed-header/POC schedules remain G3. |
@@ -85,9 +85,9 @@ references exactly. `p0_02` pins a uniform full COC override, six LRCP layers,
 inline no-PLT SOP/EPH packets, TERMALL+ERTERM+SEGMARK, component sampling, and
 the reserved segment-less `FF30` marker. `p0_11` pins bounded 128x1 edge
 clipping inside one precinct band span with NL=0, LRCP, EPH, and SEGMARK.
-Strict decode now also clamps nominal block dimensions independently for each
-resolution/subband under B.7; encode requests that require this clamp remain
-fail-closed. Reduced `p0_04` (ICT/9-7
+Strict decode and bounded lossless encode now clamp nominal block dimensions
+independently for each resolution/subband under B.7 while retaining the
+nominal COD value. Reduced `p0_04` (ICT/9-7
 with component-specific QCC), `p0_09` (no-MCT 9/7), and `p0_14`
 (RCT codestream components) pass,
 and multipart sampled-RCT `p0_10` stays within its published class-0 bounds;

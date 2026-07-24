@@ -25313,13 +25313,6 @@ test "unsupported JP2 profile marker options fail closed" {
         .{ .label = "RLCP tiny multi-tile", .options = .{ .progression = .rlcp, .tile_width = 1, .tile_height = 2 } },
         .{ .label = "PCRL tiny multi-tile", .options = .{ .progression = .pcrl, .tile_width = 1, .tile_height = 2 } },
         .{ .label = "CPRL tiny multi-tile", .options = .{ .progression = .cprl, .tile_width = 1, .tile_height = 2 } },
-        // ISO B.7: 64x64 precincts leave a 32-sample band span above
-        // resolution 0, so the default 64x64 block would cross precinct
-        // boundaries; z2000 does not clamp block sizes, so this fails closed.
-        .{ .label = "block crosses precincts", .options = .{
-            .precincts = [_]codestream.PrecinctSize{.{ .width = 64, .height = 64 }} ** 33,
-            .precinct_count = 1,
-        } },
     };
 
     for (cases) |scenario| {
@@ -25329,6 +25322,79 @@ test "unsupported JP2 profile marker options fail closed" {
             codestream.encodeLosslessWithOptions(allocator, rgb, scenario.options),
         );
     }
+}
+
+test "lossless encoder applies B.7 effective code-block clamping" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const base_options = codestream.LosslessOptions{
+        .levels = 2,
+        .block_width = 64,
+        .block_height = 64,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 64, .height = 64 }} ** 33,
+        .precinct_count = 1,
+        .tile_part_divisions = null,
+    };
+    const single = try codestream.encodeLosslessWithOptions(allocator, rgb, base_options);
+    defer allocator.free(single);
+    const single_cod = findMarker(single, codestream.markerValue("cod")) orelse return error.MissingCod;
+    // COD keeps the nominal 64x64 block while B.7 derives 32x32 detail blocks
+    // from each 64x64 precinct.
+    try std.testing.expectEqual(@as(u8, 4), single[single_cod + 10]);
+    try std.testing.expectEqual(@as(u8, 4), single[single_cod + 11]);
+    try std.testing.expectEqual(@as(u8, 0x66), single[single_cod + 14]);
+    var single_decoded = try codestream.decodeLosslessTemporary(allocator, single);
+    defer single_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, single_decoded.samples);
+
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var sampled_planes = try sampledEncodeTestPlanes(allocator, width, height, &sampling);
+    defer sampled_planes.deinit();
+    var sampled_options = base_options;
+    sampled_options.mct = .none;
+    const sampled = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        sampled_planes,
+        &sampling,
+        sampled_options,
+    );
+    defer allocator.free(sampled);
+    var sampled_decoded = try codestream.decodeLosslessPlanar(allocator, sampled);
+    defer sampled_decoded.deinit();
+    for (sampled_planes.planes, sampled_decoded.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+
+    var multi_options = base_options;
+    multi_options.tile_width = 32;
+    multi_options.tile_height = 32;
+    multi_options.tile_part_divisions = 'R';
+    const multi = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_options);
+    defer allocator.free(multi);
+    try std.testing.expectEqual(@as(usize, 12), countMarker(multi, codestream.markerValue("sot")));
+    var multi_decoded = try codestream.decodeLosslessTemporary(allocator, multi);
+    defer multi_decoded.deinit();
+    try std.testing.expectEqualSlices(u16, rgb.samples, multi_decoded.samples);
+
+    multi_options.threads = 8;
+    const threaded = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_options);
+    defer allocator.free(threaded);
+    try std.testing.expectEqualSlices(u8, multi, threaded);
 }
 
 test "tile grid describes single full-image tile" {

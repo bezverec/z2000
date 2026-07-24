@@ -271,13 +271,13 @@ table. The same dispatch now applies after tile-header `COD/QCD`: a directly
 emitted four-tile stream keeps three tiles on reversible 5/3 and switches tile
 1 to scalar-expounded 9/7, with independent full/reduced synthesis before
 absolute-grid assembly. Transform/quantization mismatches fail before packet
-reconstruction. Strict component
-geometry derives an effective code-block dimension for every subband by
-clamping the nominal COD/COC dimension to the precinct-induced B.7 span; the
-same dimensions build both block catalogs and packet tag-tree grids. Mixed-
-transform tile-component breadth, encoder-side B.7 clamping, arbitrary
-PLT-less multipart PPM, PPM+POC, and packed-header/TLM combinations remain
-fail-closed.
+reconstruction. Strict component geometry derives an effective code-block
+dimension for every subband by clamping the nominal COD/COC dimension to the
+precinct-induced B.7 span. Decode and all bounded lossless encode front ends
+share that T2-owned calculation; block catalogs and packet tag-tree grids use
+the effective dimensions while COD retains the requested nominal size. Mixed-
+transform tile-component breadth, arbitrary PLT-less multipart PPM, PPM+POC,
+and packed-header/TLM combinations remain fail-closed.
 
 Inline PLT-less multipart streams carry no packet count at the Stage B frame
 scan. Their spans therefore retain an explicit deferred-count state and exact

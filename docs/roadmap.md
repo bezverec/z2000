@@ -144,18 +144,18 @@ decoded, encoded, malformed-tested, and independently reproduced.
 ### Current Completion Estimate
 
 As of 2026-07-24, the general-purpose G0-G7 program is estimated at **about
-52% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
+53% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
 This is a planning estimate, not a conformance score. It gives every phase
 equal weight because the remaining effort is too uncertain for a more precise
 cost model; the headline is the rounded mean of the phase estimates below.
-The decode-first foundation G0-G4 is approximately **59% complete** by the same
+The decode-first foundation G0-G4 is approximately **60% complete** by the same
 method. Neither number changes the bounded 100/100 scorecards.
 
 | Phase | Estimate | Evidence already landed | Largest remaining work |
 | --- | ---: | --- | --- |
 | G0 | 75% | Manifest, differential runner, 58 cases, all profile-0 assets integrated, 9/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
 | G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
-| G2 | 75% | Twelve independent coding/quantization override slices through component- and tile-local 5/3/9/7 | Encoder B.7 clamping and broader tile-component/packed combinations |
+| G2 | 80% | Twelve independent decode override slices through component- and tile-local 5/3/9/7 plus shared encoder/decoder B.7 geometry | Mixed-transform tile-component breadth and broader packed combinations |
 | G3 | 30% | Broad T1/T2 styles, progression, POC, TLM, and multipart foundations | `RGN`, `CRG`, `PLM`, applicable `CAP`/`PRF`, and general packed schedules |
 | G4 | 45% | Direct resolution reduction, T1 skipping, catalog compaction, borrowed packet spans | Layer/tile/region selection plus incremental input and bounded output |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
@@ -163,9 +163,9 @@ method. Neither number changes the bounded 100/100 scorecards.
 | G7 | 35% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
 
 These values should move only when a phase promotion criterion changes state,
-not after every small fixture. Re-estimate after G2 encoder-side B.7 clamping,
-after the first complete G3 marker-to-raster slice, or when new conformance
-evidence materially changes the denominator.
+not after every small fixture. This is the post-encoder-B.7 re-estimate;
+re-estimate again after the first complete G3 marker-to-raster slice or when
+new conformance evidence materially changes the denominator.
 
 G0 evidence expansion and G1/G2/G4 implementation are active. The 2026-07-17
 G0 foundation includes an unscored broad capability
@@ -269,7 +269,7 @@ non-recursive batch CLI syntax, with reduction and byte order kept explicit.
 The second surface writes all native components to exact ZRAW through the same
 dispatch forms and round-trips its self-describing metadata and payload.
 
-G2 now has twelve pinned slices. Genuinely component-specific
+G2 now has thirteen pinned slices. Genuinely component-specific
 scalar-expounded QCC works in the bounded three-component ICT/9-7 profile at
 full and reduced resolution. A reversible single-tile no-MCT Kakadu stream also
 decodes component-local decomposition counts 3/2/1, component-sized precinct
@@ -310,9 +310,14 @@ blocks, and 16x16 precincts while the 5/3 components retain NL=3, 4x4, and
 closed. A directly emitted four-tile stream now retains reversible main
 COD/QCD while tile 1 switches through tile-header COD/QCD to
 scalar-expounded 9/7; all six full/reduced Kakadu planes stay within peak 1
-and a transform/QCD mismatch fails closed. Encoder-side B.7 clamping,
-mixed-transform tile-component breadth, arbitrary PLT-less multipart PPM, and
-packed TLM/POC combinations remain the next boundaries.
+and a transform/QCD mismatch fails closed. The thirteenth slice opens
+encoder-side B.7 clamping across bounded lossless RGB, planar, sampled, and
+multi-tile front ends: one T2-owned calculation derives each effective block
+partition for T1, packet selection, and tag-tree geometry while COD preserves
+the nominal size. Single-/multi-tile and sampled roundtrips are exact and a
+live 64x64-block/64x64-precinct JP2 is pixel-exact through OpenJPEG, Grok, and
+Kakadu. Mixed-transform tile-component breadth, arbitrary PLT-less multipart
+PPM, and packed TLM/POC combinations remain the next boundaries.
 Together with G3 they replace the
 remaining byte-redundant/uniform shortcuts with real component- and tile-local
 semantics. Unknown or profile-inapplicable

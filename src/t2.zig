@@ -1109,6 +1109,39 @@ pub fn bandResolutionIndex(levels: u8, band: subband.Band) !u8 {
     return levels - band.level + 1;
 }
 
+pub const CodeBlockDimensions = struct {
+    width: usize,
+    height: usize,
+};
+
+/// ISO/IEC 15444-1 B.7 bounds the effective code-block partition by the
+/// precinct partition while COD/COC continue to signal the nominal block size.
+pub fn effectiveCodeBlockDimensions(
+    plan: packet_plan.Plan,
+    band: subband.Band,
+    levels: u8,
+    nominal_width: usize,
+    nominal_height: usize,
+) !CodeBlockDimensions {
+    if (nominal_width == 0 or nominal_height == 0) return PacketHeaderError.InvalidPacketHeader;
+    const resolution_index = try bandResolutionIndex(levels, band);
+    if (resolution_index >= plan.resolution_count) return PacketHeaderError.InvalidPacketHeader;
+    const resolution = plan.resolutions[resolution_index];
+    const band_span_width = if (resolution_index == 0)
+        resolution.precinct_width
+    else
+        resolution.precinct_width / 2;
+    const band_span_height = if (resolution_index == 0)
+        resolution.precinct_height
+    else
+        resolution.precinct_height / 2;
+    if (band_span_width == 0 or band_span_height == 0) return PacketHeaderError.InvalidPacketHeader;
+    return .{
+        .width = @min(nominal_width, @as(usize, band_span_width)),
+        .height = @min(nominal_height, @as(usize, band_span_height)),
+    };
+}
+
 pub fn codeBlockPacketRect(block: subband.CodeBlock) !packet_plan.Rect {
     return .{
         .x = std.math.cast(u32, block.rect.x) orelse return PacketHeaderError.InvalidPacketHeader,
