@@ -8,10 +8,10 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-24, both the narrow RGB lossless JP2 target and the broader bounded
+of 2026-07-26, both the narrow RGB lossless JP2 target and the broader bounded
 Part 1 engineering scorecard are estimated at **100/100 within their declared
 profiles**. This is separate from the general-purpose G0-G7 plan, currently
-estimated at roughly 53% in [the roadmap](docs/roadmap.md). The current
+estimated at roughly 54% in [the roadmap](docs/roadmap.md). The current
 prerelease is [`v0.2.0-rc.1`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.1).
 Neither figure is a formal ISO conformance certification.
 
@@ -113,8 +113,9 @@ Neither figure is a formal ISO conformance certification.
   counts up to 256 components at full or requested lower DWT resolutions
   without DC-bias ambiguity. Native
   inverse 5/3 lifting uses checked `i64` intermediates before storing `i32`
-  coefficients; 29 bits is the T1/HH boundary and 30 bits fails closed. The legacy `u16` API remains
-  unsigned-only. Checked PGX diagnostics cover one component up to 32-bit
+  coefficients; 29 bits is the T1/HH boundary and 30 bits fails closed. The
+  legacy `u16` planar API remains unsigned-only and now accepts component
+  precision across 1..16 bits. Checked PGX diagnostics cover one component up to 32-bit
   storage; canonical ZRAW preserves all components, signedness, 1..38-bit
   precision, sampling geometry, and origins without narrowing.
 - Bounded component-subsampling decode with per-component SIZ `XRsiz/YRsiz`,
@@ -135,6 +136,11 @@ Neither figure is a formal ISO conformance certification.
   bounded multi-tile sampled no-MCT 9/7 decode profile. The 9/7 gate covers a
   foreign Kakadu inline PLT/PLT-less payload plus deterministic PPT/PPM
   structural repacks at full and reduced resolution.
+- Bounded JPEG 2000 Part 1 `RGN` Maxshift ROI decode. Component-local
+  main-header shifts are inherited or replaced by first-tile-part RGN markers,
+  included in T1 bitplane accounting, and undone before dequantization/IDWT.
+  Official T.803 `p0_06` supplies independent reduced-raster evidence for a
+  four-component, subsampled, unsigned 12-bit mixed 9/7/5/3 stream.
 - Custom educational grayscale `.z2000` path for early wavelet experiments.
 - SIMD-aware kernels using Zig vectors for portable AVX2/AVX-512/NEON-style
   execution where supported by the target CPU.

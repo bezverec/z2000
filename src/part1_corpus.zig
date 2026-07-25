@@ -41,6 +41,9 @@ const Reference = struct {
     component: u16 = 0,
     resolution_reduction: u8 = 0,
     space: ReferenceSpace = .output_components,
+    /// Explicit high-bit extraction for a conformance reference that formats
+    /// a wider codestream component into a narrower PGX sample.
+    sample_shift: u8 = 0,
     max_peak_error: u32 = 0,
     max_mse: f64 = 0,
 };
@@ -246,7 +249,7 @@ fn validateManifest(manifest: Manifest, bless: bool) !void {
             if (reference.path.len == 0 or
                 std.fs.path.isAbsolute(reference.path) or hasParentTraversal(reference.path) or
                 !isLowerHexSha256(reference.sha256) or !std.math.isFinite(reference.max_mse) or
-                reference.max_mse < 0)
+                reference.max_mse < 0 or reference.sample_shift > 30)
             {
                 return CorpusError.InvalidManifest;
             }
@@ -927,17 +930,19 @@ fn pgxSample(reference: PgxImage, index: usize) !i32 {
 }
 
 fn comparePgxView(view: ComponentView, bytes: []const u8, limits: Reference) !ErrorMetrics {
-    const metrics = try measurePgxView(view, bytes);
+    const metrics = try measurePgxView(view, bytes, limits.sample_shift);
     if (metrics.peak > limits.max_peak_error or metrics.mse > limits.max_mse) {
         return CorpusError.CorpusMismatch;
     }
     return metrics;
 }
 
-fn measurePgxView(view: ComponentView, bytes: []const u8) !ErrorMetrics {
+fn measurePgxView(view: ComponentView, bytes: []const u8, sample_shift: u8) !ErrorMetrics {
     const reference = try parsePgx(bytes);
+    const expected_view_depth = std.math.add(u8, reference.bit_depth, sample_shift) catch
+        return CorpusError.InvalidReference;
     if (view.width != reference.width or view.height != reference.height or
-        view.bit_depth != reference.bit_depth or view.signed != reference.signed)
+        view.bit_depth != expected_view_depth or view.signed != reference.signed)
     {
         return CorpusError.InvalidReference;
     }
@@ -946,7 +951,7 @@ fn measurePgxView(view: ComponentView, bytes: []const u8) !ErrorMetrics {
     var peak: u64 = 0;
     var squared_error_sum: u128 = 0;
     for (0..sample_count) |index| {
-        const actual = try view.sample(index);
+        const actual = (try view.sample(index)) >> @as(u5, @intCast(sample_shift));
         const expected = try pgxSample(reference, index);
         const difference = @as(i64, actual) - @as(i64, expected);
         const magnitude: u64 = @intCast(if (difference < 0) -difference else difference);
@@ -960,7 +965,7 @@ fn measurePgxView(view: ComponentView, bytes: []const u8) !ErrorMetrics {
 }
 
 fn reportPgxMismatch(view: ComponentView, asset: ReferenceAsset) void {
-    const metrics = measurePgxView(view, asset.bytes) catch return;
+    const metrics = measurePgxView(view, asset.bytes, asset.metadata.sample_shift) catch return;
     const reference = parsePgx(asset.bytes) catch return;
     const sample_count = std.math.mul(usize, view.width, view.height) catch return;
     var actual_min: i32 = std.math.maxInt(i32);
@@ -969,7 +974,7 @@ fn reportPgxMismatch(view: ComponentView, asset: ReferenceAsset) void {
     var expected_max: i32 = std.math.minInt(i32);
     var first_mismatch: ?struct { index: usize, actual: i32, expected: i32 } = null;
     for (0..sample_count) |index| {
-        const actual = view.sample(index) catch return;
+        const actual = (view.sample(index) catch return) >> @as(u5, @intCast(asset.metadata.sample_shift));
         const expected = pgxSample(reference, index) catch return;
         actual_min = @min(actual_min, actual);
         actual_max = @max(actual_max, actual);
@@ -1159,6 +1164,24 @@ test "PGX comparison accepts big-endian and little-endian unsigned samples" {
     const little_metrics = try comparePgxView(view, little_endian, limits);
     try std.testing.expectEqual(@as(u32, 0), little_metrics.peak);
     try std.testing.expectEqual(@as(f64, 0), little_metrics.mse);
+}
+
+test "PGX comparison applies an explicit wider-component sample shift" {
+    const samples = [_]u16{ 0x123, 0xabc };
+    const metrics = try comparePgxView(.{
+        .width = 2,
+        .height = 1,
+        .bit_depth = 12,
+        .signed = false,
+        .samples = .{ .unsigned_contiguous = &samples },
+    }, "PG ML 8 2 1\n\x12\xab", .{
+        .path = "test",
+        .sha256 = "test",
+        .format = .pgx,
+        .sample_shift = 4,
+    });
+    try std.testing.expectEqual(@as(u32, 0), metrics.peak);
+    try std.testing.expectEqual(@as(f64, 0), metrics.mse);
 }
 
 test "PGX comparison enforces peak and MSE independently" {

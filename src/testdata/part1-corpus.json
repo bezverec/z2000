@@ -1489,16 +1489,17 @@
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
         "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "legal T.803 profile-0 codestream; 12-bit public sample transport and RGN remain unsupported",
+      "oracle": "T.803 class-0 c0p0_06.pgx at reduction 3, peak error <= 109, MSE <= 743",
       "features": ["siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "expectation": "decode_pass",
       "references": [{
         "path": "reference_class0_profile0/c0p0_06.pgx",
         "sha256": "2a2c37396620bc14f37c578c74b2894ecfeb5e20bd30dc67fc0e8db4bbfb592b",
         "format": "pgx",
         "component": 0,
         "resolution_reduction": 3,
+        "space": "codestream_components",
+        "sample_shift": 4,
         "max_peak_error": 109,
         "max_mse": 743
       }]

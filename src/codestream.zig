@@ -2122,9 +2122,27 @@ const StrictTileComponentOverride = struct {
     component: u16,
     saw_coc: bool = false,
     saw_qcc: bool = false,
+    saw_rgn: bool = false,
     coding: StrictComponentCoding = .{},
     qcd: StrictQcdInfo = empty_strict_qcd_info,
+    roi_shift: u8 = 0,
 };
+
+fn strictTileOverrideChangesCoding(tile_override: StrictTileCodingOverride) bool {
+    if (tile_override.saw_cod or tile_override.saw_qcd) return true;
+    for (tile_override.components.items) |component_override| {
+        if (component_override.saw_coc or component_override.saw_qcc) return true;
+    }
+    return false;
+}
+
+fn strictComponentCodingEqualIgnoringRoi(a: StrictComponentCoding, b: StrictComponentCoding) bool {
+    var left = a;
+    var right = b;
+    left.roi_shift = 0;
+    right.roi_shift = 0;
+    return std.meta.eql(left, right);
+}
 
 const TilePartCodingTarget = struct {
     override: *StrictTileCodingOverride,
@@ -2136,6 +2154,7 @@ const TilePartCodingTarget = struct {
     mct: MultipleComponentTransform,
     transform: WaveletTransform,
     component_count: u16,
+    allow_coding_markers: bool = true,
 };
 
 const StrictMainHeaderIndex = struct {
@@ -3488,7 +3507,7 @@ pub fn decodeLosslessNativeWithOptions(
         }
     }
     if (header.transform != .reversible_5_3 or header.quantization != .none or
-        header.mct != .none)
+        header.mct != .none or headerHasMixedComponentTransforms(header))
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -3546,6 +3565,7 @@ pub fn decodeLosslessNativeWithOptions(
             component_levels,
             catalog,
             component,
+            componentRoiShiftForHeader(header, component),
             options,
             null,
         );
@@ -3990,6 +4010,7 @@ fn decodeMixedTransformPlanarFromBlockCatalogMeasured(
             coding.levels,
             catalog,
             component,
+            coding.roi_shift,
             options,
             timings,
         );
@@ -4184,6 +4205,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
             header.levels,
             catalog,
             component,
+            componentRoiShiftForHeader(header, component),
             options,
             timings,
         );
@@ -4622,7 +4644,10 @@ fn readStrictPacketCatalogWithHeaderStorage(
 }
 
 pub fn auditStrictPacketHeaders(allocator: std.mem.Allocator, bytes: []const u8) !StrictPacketHeaderAudit {
-    var header = try readStrictCodestreamMetadata(allocator, bytes);
+    // Structural audits use the wider metadata profile so legal signed/native
+    // layouts can be inspected even when a narrower decode surface rejects
+    // their sample transport.
+    var header = try readStrictNativeCodestreamMetadata(allocator, bytes);
     defer header.deinit();
     if (header.tile_width != 0 or header.tile_height != 0) {
         return auditStrictMultiTilePacketHeaders(allocator, bytes, header, null, null);
@@ -4767,7 +4792,12 @@ fn readStrictCodestreamMetadataForProfile(
     var coc_payloads_uniform = true;
     var qcc_component_seen: []bool = &.{};
     defer if (qcc_component_seen.len != 0) allocator.free(qcc_component_seen);
+    var qcc_component_payloads: [][]const u8 = &.{};
+    defer if (qcc_component_payloads.len != 0) allocator.free(qcc_component_payloads);
+    var rgn_component_seen: []bool = &.{};
+    defer if (rgn_component_seen.len != 0) allocator.free(rgn_component_seen);
     var qcc_payload_first: []const u8 = &.{};
+    var qcc_payloads_uniform = true;
     var qcc_override_info: StrictQcdInfo = undefined;
     var qcd_band_count: usize = 0;
     var tlm_entries: std.ArrayList(TlmEntry) = .empty;
@@ -4825,6 +4855,8 @@ fn readStrictCodestreamMetadataForProfile(
             component_coding = try allocator.alloc(StrictComponentCoding, component_count);
             coc_component_seen = try allocator.alloc(bool, component_count);
             qcc_component_seen = try allocator.alloc(bool, component_count);
+            qcc_component_payloads = try allocator.alloc([]const u8, component_count);
+            rgn_component_seen = try allocator.alloc(bool, component_count);
             @memset(component_bit_depths, 0);
             @memset(component_signed, false);
             @memset(component_xrsiz, 1);
@@ -4833,6 +4865,8 @@ fn readStrictCodestreamMetadataForProfile(
             @memset(component_coding, .{});
             @memset(coc_component_seen, false);
             @memset(qcc_component_seen, false);
+            @memset(qcc_component_payloads, &.{});
+            @memset(rgn_component_seen, false);
             width = xsiz - xosiz;
             height = ysiz - yosiz;
             if (xtsiz == 0 or ytsiz == 0) return CodestreamError.InvalidCodestream;
@@ -4870,6 +4904,11 @@ fn readStrictCodestreamMetadataForProfile(
                 component_xrsiz[component_index] = xrsiz;
                 component_yrsiz[component_index] = yrsiz;
                 subsampled_components = subsampled_components or xrsiz != 1 or yrsiz != 1;
+            }
+            if (precision_profile == .legacy) {
+                for (component_signed[0..component_count]) |signed| {
+                    if (signed) return CodestreamError.UnsupportedPayload;
+                }
             }
             saw_siz = true;
         } else if (marker == @intFromEnum(Marker.cod)) {
@@ -5042,34 +5081,27 @@ fn readStrictCodestreamMetadataForProfile(
             if (segment.len < 1) return CodestreamError.InvalidCodestream;
             if (segment[0] >= component_count) return CodestreamError.UnsupportedPayload;
             const qcc_component = segment[0];
-            const qcc_info = try validateStrictQcdSegment(
-                segment[1..],
-                component_bit_depths[qcc_component],
-                component_coding[qcc_component].levels,
-                component_coding[qcc_component].transform,
-            );
             if (qcc_component_seen[qcc_component]) return CodestreamError.InvalidCodestream;
             qcc_component_seen[qcc_component] = true;
-            component_qcd[qcc_component] = qcc_info;
+            qcc_component_payloads[qcc_component] = segment[1..];
             if (mixed_component_precision) {
                 // Mixed reversible components legitimately carry different
                 // QCC exponents. Keep each override instead of collapsing it
                 // into the historical uniform-QCC policy below.
             } else if (qcc_payload_first.len == 0) {
                 qcc_payload_first = segment[1..];
-                qcc_override_info = qcc_info;
-            } else if (!std.mem.eql(u8, segment[1..], qcc_payload_first) and
-                !strictComponentCodingDiverges(component_coding[0..component_count]) and
-                !allowsComponentSpecificIrreversibleQcc(
-                    component_count,
-                    parsed_transform,
-                    parsed_mct,
-                    mixed_component_precision,
-                    subsampled_components,
-                ))
-            {
-                return CodestreamError.UnsupportedPayload;
+            } else if (!std.mem.eql(u8, segment[1..], qcc_payload_first)) {
+                // COC may legally follow QCC in the main header (T.803 p0_06
+                // does this). Defer the divergent-QCC profile decision until
+                // every component coding override is known.
+                qcc_payloads_uniform = false;
             }
+        } else if (marker == @intFromEnum(Marker.rgn)) {
+            if (!saw_siz) return CodestreamError.InvalidCodestream;
+            const rgn = try parseStrictRgnSegment(segment, component_count);
+            if (rgn_component_seen[rgn.component]) return CodestreamError.InvalidCodestream;
+            rgn_component_seen[rgn.component] = true;
+            component_coding[rgn.component].roi_shift = rgn.shift;
         } else if (marker == @intFromEnum(Marker.tlm)) {
             if (!saw_cod or !saw_qcd) return CodestreamError.InvalidCodestream;
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
@@ -5099,6 +5131,21 @@ fn readStrictCodestreamMetadataForProfile(
     if (!saw_siz or !saw_cod or !saw_qcd or width == 0 or height == 0 or layers == 0) {
         return CodestreamError.InvalidCodestream;
     }
+    var captured_first_qcc_info = false;
+    for (qcc_component_seen[0..component_count], 0..) |seen, component| {
+        if (!seen) continue;
+        const qcc_info = try validateStrictQcdSegment(
+            qcc_component_payloads[component],
+            component_bit_depths[component],
+            component_coding[component].levels,
+            component_coding[component].transform,
+        );
+        component_qcd[component] = qcc_info;
+        if (!captured_first_qcc_info) {
+            qcc_override_info = qcc_info;
+            captured_first_qcc_info = true;
+        }
+    }
     if (coc_payload_first.len != 0) {
         const spcoc = coc_payload_first[1..];
         const override_block_width = try codeBlockSizeFromCodExponent(spcoc[1]);
@@ -5117,6 +5164,17 @@ fn readStrictCodestreamMetadataForProfile(
         }
     }
     const component_coding_divergent = strictComponentCodingDiverges(component_coding[0..component_count]);
+    if (!qcc_payloads_uniform and !component_coding_divergent and
+        !allowsComponentSpecificIrreversibleQcc(
+            component_count,
+            parsed_transform,
+            parsed_mct,
+            mixed_component_precision,
+            subsampled_components,
+        ))
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
     var max_levels: u8 = 0;
     var max_levels_component: usize = 0;
     var component_transforms_match_main = true;
@@ -5150,8 +5208,12 @@ fn readStrictCodestreamMetadataForProfile(
         parsed_grid_value.isSingleTile() and parsed_mct == .none and !subsampled_components and
         parsed_transform == .reversible_5_3 and parsed_quantization == .none and
         component_transforms_match_main;
+    const general_component_local_mixed_transform = parsed_grid_value.isSingleTile() and
+        parsed_mct == .none and
+        !component_transforms_match_main;
     if (component_coding_divergent and
-        !component_local_mixed_transform and !native_reversible_component_local)
+        !component_local_mixed_transform and !native_reversible_component_local and
+        !general_component_local_mixed_transform)
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -5235,7 +5297,7 @@ fn readStrictCodestreamMetadataForProfile(
             }
         }
     }
-    if (component_local_mixed_transform) {
+    if (component_local_mixed_transform or general_component_local_mixed_transform) {
         for (component_qcd[0..component_count], component_coding[0..component_count]) |component_info, coding| {
             const expected_bands = 1 + 3 * @as(usize, coding.levels);
             const valid_quantization = switch (coding.transform) {
@@ -5360,8 +5422,8 @@ fn readStrictCodestreamMetadataForProfile(
         for (tile_poc_records) |records| has_tile_poc = has_tile_poc or records.items.len != 0;
         var has_tile_coding_override = false;
         for (tile_coding_overrides) |coding_override| {
-            has_tile_coding_override = has_tile_coding_override or coding_override.saw_cod or
-                coding_override.saw_qcd or coding_override.components.items.len != 0;
+            has_tile_coding_override = has_tile_coding_override or
+                strictTileOverrideChangesCoding(coding_override);
         }
         if (has_tile_coding_override and (mixed_component_precision or subsampled_components)) {
             return CodestreamError.UnsupportedPayload;
@@ -5570,6 +5632,8 @@ fn readStrictCodestreamMetadataForProfile(
     for (plan.resolutions[0..plan.resolution_count], 0..) |*resolution, index| {
         resolution.packets = component_plans.resolution_packets[index];
     }
+    var single_tile_override = StrictTileCodingOverride{};
+    defer single_tile_override.deinit(allocator);
     const tile_part_packets = try readStrictTilePartPacketPlan(
         allocator,
         bytes,
@@ -5581,7 +5645,24 @@ fn readStrictCodestreamMetadataForProfile(
             .resolution_count = levels + 1,
             .layer_count = layers,
         },
+        .{
+            .override = &single_tile_override,
+            .allowed = true,
+            .bit_depth = bit_depth,
+            .levels = levels,
+            .layers = layers,
+            .progression = parsed_progression,
+            .mct = parsed_mct,
+            .transform = parsed_transform,
+            .component_count = component_count,
+            .allow_coding_markers = false,
+        },
     );
+    for (single_tile_override.components.items) |component_override| {
+        if (component_override.saw_rgn) {
+            component_coding[component_override.component].roi_shift = component_override.roi_shift;
+        }
+    }
     const tile_part_plan = try validateStrictTilePartPacketPlan(tile_part_packets, plan, levels);
 
     return .{
@@ -5628,11 +5709,60 @@ fn isUnsupportedMainHeaderMarker(marker: u16) bool {
     return switch (marker) {
         @intFromEnum(Marker.cap),
         @intFromEnum(Marker.plm),
-        @intFromEnum(Marker.rgn),
         @intFromEnum(Marker.crg),
         => true,
         else => false,
     };
+}
+
+const StrictRgnInfo = struct {
+    component: u8,
+    shift: u8,
+};
+
+/// Parses the Part 1 RGN layout used while Csiz <= 256. Only the Maxshift
+/// implicit ROI style (Srgn=0) belongs to the bounded native decode profile.
+fn parseStrictRgnSegment(segment: []const u8, component_count: u16) !StrictRgnInfo {
+    if (segment.len != 3) return CodestreamError.InvalidCodestream;
+    const component = segment[0];
+    if (component >= component_count) return CodestreamError.InvalidCodestream;
+    if (segment[1] != 0) return CodestreamError.UnsupportedPayload;
+    return .{ .component = component, .shift = segment[2] };
+}
+
+test "strict RGN parser accepts Maxshift and rejects malformed styles" {
+    const parsed = try parseStrictRgnSegment(&.{ 0, 0, 9 }, 3);
+    try std.testing.expectEqual(@as(u8, 0), parsed.component);
+    try std.testing.expectEqual(@as(u8, 9), parsed.shift);
+    try std.testing.expectError(CodestreamError.InvalidCodestream, parseStrictRgnSegment(&.{ 0, 0 }, 3));
+    try std.testing.expectError(CodestreamError.InvalidCodestream, parseStrictRgnSegment(&.{ 3, 0, 9 }, 3));
+    try std.testing.expectError(CodestreamError.UnsupportedPayload, parseStrictRgnSegment(&.{ 0, 1, 9 }, 3));
+}
+
+test "tile RGN overrides inherited main-header Maxshift" {
+    var tile_override = StrictTileCodingOverride{};
+    defer tile_override.deinit(std.testing.allocator);
+    try tile_override.components.append(std.testing.allocator, .{
+        .component = 0,
+        .saw_rgn = true,
+        .roi_shift = 9,
+    });
+    const main_coding = [_]StrictComponentCoding{
+        .{ .roi_shift = 11 },
+        .{ .roi_shift = 0 },
+    };
+    const main_qcd = [_]StrictQcdInfo{ empty_strict_qcd_info, empty_strict_qcd_info };
+    var coding: [2]StrictComponentCoding = undefined;
+    var qcd: [2]StrictQcdInfo = undefined;
+    try fillStrictTileEffectiveComponents(&coding, &qcd, &main_coding, &main_qcd, tile_override);
+    try std.testing.expectEqual(@as(u8, 9), coding[0].roi_shift);
+    try std.testing.expectEqual(@as(u8, 0), coding[1].roi_shift);
+}
+
+test "Maxshift reconstruction restores ROI coefficients only" {
+    var coefficients = [_]i32{ -4096, -512, 0, 511, 512, 1536 };
+    undoMaxshiftRoi(&coefficients, 9);
+    try std.testing.expectEqualSlices(i32, &.{ -8, -1, 0, 511, 1, 3 }, &coefficients);
 }
 
 fn isReservedSegmentlessMarker(marker: u16) bool {
@@ -5656,7 +5786,6 @@ fn isUnsupportedTilePartHeaderMarker(marker: u16) bool {
         @intFromEnum(Marker.coc),
         @intFromEnum(Marker.qcd),
         @intFromEnum(Marker.qcc),
-        @intFromEnum(Marker.rgn),
         => true,
         else => false,
     };
@@ -5961,9 +6090,7 @@ fn bandNominalBitplanesForHeader(
         ) orelse return CodestreamError.InvalidCodestream;
         const sum = @as(u16, epsilon) + component_info.guard_bits;
         if (sum == 0) return CodestreamError.InvalidCodestream;
-        const total = sum - 1;
-        if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
-        return @intCast(total);
+        return addRoiShiftToNominalBitplanes(sum - 1, componentRoiShiftForHeader(header, component));
     }
     if (header.qcd_exponent_count != 0) {
         // The QCD entry count follows the signalled NL (header.levels); the
@@ -5973,11 +6100,9 @@ fn bandNominalBitplanesForHeader(
             return CodestreamError.InvalidCodestream;
         const sum = @as(u16, epsilon) + header.guard_bits;
         if (sum == 0) return CodestreamError.InvalidCodestream;
-        const total = sum - 1;
-        if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
-        return @intCast(total);
+        return addRoiShiftToNominalBitplanes(sum - 1, componentRoiShiftForHeader(header, component));
     }
-    return bandNominalBitplanesForTransform(
+    const nominal = try bandNominalBitplanesForTransform(
         componentBitDepthForHeader(header, component),
         kind,
         band_level,
@@ -5986,6 +6111,21 @@ fn bandNominalBitplanesForHeader(
         header.quantization,
         levels,
     );
+    return addRoiShiftToNominalBitplanes(nominal, componentRoiShiftForHeader(header, component));
+}
+
+fn componentRoiShiftForHeader(header: TemporaryHeader, component: usize) u8 {
+    if (component < header.component_count and component < header.component_coding.len) {
+        return header.component_coding[component].roi_shift;
+    }
+    return 0;
+}
+
+fn addRoiShiftToNominalBitplanes(nominal: u16, roi_shift: u8) !u8 {
+    if (nominal == 0) return CodestreamError.InvalidCodestream;
+    const total = std.math.add(u16, nominal, roi_shift) catch return CodestreamError.InvalidCodestream;
+    if (total > 31) return CodestreamError.InvalidCodestream;
+    return @intCast(total);
 }
 
 fn componentBitDepthForHeader(header: TemporaryHeader, component: usize) u8 {
@@ -6044,7 +6184,7 @@ fn headerHasSignedComponent(header: TemporaryHeader) bool {
 }
 
 fn isSupportedStrictPayloadPrecision(precision: u8) bool {
-    return precision == 8 or precision == 16 or precision == max_native_payload_precision;
+    return (precision >= 1 and precision <= 16) or precision == max_native_payload_precision;
 }
 
 fn isSupportedStrictPayloadPrecisionForProfile(
@@ -6060,7 +6200,7 @@ fn isSupportedStrictPayloadPrecisionForProfile(
 fn headerHasNonLegacyPrecision(header: TemporaryHeader) bool {
     for (0..header.component_count) |component| {
         const precision = componentBitDepthForHeader(header, component);
-        if (precision != 8 and precision != 16) return true;
+        if (precision < 1 or precision > 16) return true;
     }
     return false;
 }
@@ -6333,7 +6473,7 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
 
@@ -6454,7 +6594,7 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
             if (tile_part.packet_lengths.items.len > 0) {
@@ -8215,7 +8355,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
         },
     );
     if (replay_override.saw_cod and
-        !std.meta.eql(replay_override.coding, tile_header.component_coding[0]))
+        !strictComponentCodingEqualIgnoringRoi(replay_override.coding, tile_header.component_coding[0]))
     {
         return CodestreamError.InvalidCodestream;
     }
@@ -8228,12 +8368,17 @@ fn readStrictMultiTileTilePartPacketCatalog(
         const component = @as(usize, component_override.component);
         if (component >= tile_header.component_count) return CodestreamError.InvalidCodestream;
         if (component_override.saw_coc and
-            !std.meta.eql(component_override.coding, tile_header.component_coding[component]))
+            !strictComponentCodingEqualIgnoringRoi(component_override.coding, tile_header.component_coding[component]))
         {
             return CodestreamError.InvalidCodestream;
         }
         if (component_override.saw_qcc and
             !std.meta.eql(component_override.qcd, tile_header.component_qcd[component]))
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (component_override.saw_rgn and
+            component_override.roi_shift != tile_header.component_coding[component].roi_shift)
         {
             return CodestreamError.InvalidCodestream;
         }
@@ -8772,31 +8917,13 @@ fn readStrictMultiTileContext(
     errdefer allocator.free(tile_component_qcd);
     for (0..tile_count) |tile_index| {
         const component_start = tile_index * component_count;
-        for (0..component_count) |component| {
-            tile_component_coding[component_start + component] = header.component_coding[component];
-            tile_component_qcd[component_start + component] = header.component_qcd[component];
-        }
-        const coding_override = tile_coding_overrides[tile_index];
-        if (coding_override.saw_cod) {
-            for (tile_component_coding[component_start..][0..component_count]) |*coding| {
-                coding.* = coding_override.coding;
-            }
-        }
-        if (coding_override.saw_qcd) {
-            for (tile_component_qcd[component_start..][0..component_count]) |*qcd| {
-                qcd.* = coding_override.qcd;
-            }
-        }
-        for (coding_override.components.items) |component_override| {
-            const component = @as(usize, component_override.component);
-            if (component >= component_count) return CodestreamError.InvalidCodestream;
-            if (component_override.saw_coc) {
-                tile_component_coding[component_start + component] = component_override.coding;
-            }
-            if (component_override.saw_qcc) {
-                tile_component_qcd[component_start + component] = component_override.qcd;
-            }
-        }
+        try fillStrictTileEffectiveComponents(
+            tile_component_coding[component_start..][0..component_count],
+            tile_component_qcd[component_start..][0..component_count],
+            header.component_coding[0..component_count],
+            header.component_qcd[0..component_count],
+            tile_coding_overrides[tile_index],
+        );
     }
 
     return .{
@@ -9131,6 +9258,7 @@ fn decodeStrictMultiTileNative(
                 component_levels,
                 block_catalog,
                 component,
+                componentRoiShiftForHeader(tile_header, component),
                 options,
                 null,
             );
@@ -9577,6 +9705,7 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
             header.levels,
             catalog,
             component,
+            componentRoiShiftForHeader(header, component),
             options,
             quantized.planes[component],
             if (timings) |t| &t.t1_pass_stats else null,
@@ -9940,6 +10069,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
             header.levels,
             catalog,
             reconstructed,
+            componentRoiShiftForHeader(header, reconstructed),
             options,
             timings,
         );
@@ -9961,6 +10091,7 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
     levels: u8,
     catalog: StrictPacketBlockCatalog,
     component: usize,
+    roi_shift: u8,
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) ![]i32 {
@@ -9975,6 +10106,7 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
         levels,
         catalog,
         component,
+        roi_shift,
         options,
         plane,
         if (timings) |t| &t.t1_pass_stats else null,
@@ -9990,6 +10122,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     levels: u8,
     catalog: StrictPacketBlockCatalog,
     component: usize,
+    roi_shift: u8,
     options: DecodeOptions,
     plane: []i32,
     t1_stats: ?*ebcot.DecodePassStats,
@@ -10047,6 +10180,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
             t1_stats,
             timings,
         );
+        undoMaxshiftRoi(plane, roi_shift);
         return;
     }
 
@@ -10152,6 +10286,22 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         for (covered[row * width ..][0..required_width]) |is_covered| {
             if (!is_covered) return CodestreamError.InvalidCodestream;
         }
+    }
+    undoMaxshiftRoi(plane, roi_shift);
+}
+
+/// ISO/IEC 15444-1 E.3.3 Maxshift reconstruction. Coefficients whose
+/// magnitude reaches the ROI threshold are shifted back before dequantization
+/// and inverse DWT; background coefficients retain their decoded magnitude.
+fn undoMaxshiftRoi(coefficients: []i32, roi_shift: u8) void {
+    if (roi_shift == 0) return;
+    const threshold = @as(i64, 1) << @as(u6, @intCast(roi_shift));
+    for (coefficients) |*coefficient| {
+        const wide = @as(i64, coefficient.*);
+        const magnitude = if (wide < 0) -wide else wide;
+        if (magnitude < threshold) continue;
+        const restored = magnitude >> @as(u6, @intCast(roi_shift));
+        coefficient.* = @intCast(if (wide < 0) -restored else restored);
     }
 }
 
@@ -10771,7 +10921,7 @@ fn readStrictSodRpclPacketStream(
                 try strictPpmGroupAt(headers, tile_part_index)
             else
                 null;
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries, &expected_ppt_index, external_headers, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries, &expected_ppt_index, external_headers, null, null);
             defer tile_part.deinit(allocator);
             if (tile_part.packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
             if (tile_part.packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
@@ -11228,6 +11378,7 @@ fn readStrictFirstTilePartPocRecords(
         &expected_ppt_index,
         null,
         limits,
+        null,
     );
     defer tile_part.deinit(allocator);
     const records = tile_part.poc_records;
@@ -11360,6 +11511,7 @@ pub fn collectStrictInlinePacketSpans(
             &expected_ppt_index,
             null,
             poc_limits,
+            null,
         );
         defer tile_part.deinit(allocator);
         cursor = tile_part.sod + 2;
@@ -11533,7 +11685,7 @@ fn collectStrictInlineMultiTileSpans(
             },
         );
         if (replay_override.saw_cod and
-            !std.meta.eql(replay_override.coding, state.header.component_coding[0]))
+            !strictComponentCodingEqualIgnoringRoi(replay_override.coding, state.header.component_coding[0]))
         {
             return CodestreamError.InvalidCodestream;
         }
@@ -11546,12 +11698,17 @@ fn collectStrictInlineMultiTileSpans(
             const component = @as(usize, component_override.component);
             if (component >= state.header.component_count) return CodestreamError.InvalidCodestream;
             if (component_override.saw_coc and
-                !std.meta.eql(component_override.coding, state.header.component_coding[component]))
+                !strictComponentCodingEqualIgnoringRoi(component_override.coding, state.header.component_coding[component]))
             {
                 return CodestreamError.InvalidCodestream;
             }
             if (component_override.saw_qcc and
                 !std.meta.eql(component_override.qcd, state.header.component_qcd[component]))
+            {
+                return CodestreamError.InvalidCodestream;
+            }
+            if (component_override.saw_rgn and
+                component_override.roi_shift != state.header.component_coding[component].roi_shift)
             {
                 return CodestreamError.InvalidCodestream;
             }
@@ -11734,7 +11891,7 @@ fn readStrictSodPacketCatalog(
                 try strictPpmGroupAt(headers, tile_part_index)
             else
                 null;
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index, external_headers, poc_limits);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index, external_headers, poc_limits, null);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
             if (tile_part.packet_lengths.items.len == 0) {
@@ -11946,6 +12103,7 @@ fn readStrictTilePartPacketPlan(
     tlm_entries: ?[]const TlmEntry,
     ppm_headers: ?ppm.PackedHeaders,
     poc_limits: TilePartPocLimits,
+    coding_target: ?TilePartCodingTarget,
 ) !StrictTilePartPacketPlan {
     var result = StrictTilePartPacketPlan{};
     var expected_tile_part_count: ?u8 = null;
@@ -11977,6 +12135,8 @@ fn readStrictTilePartPacketPlan(
                 try strictPpmGroupAt(headers, result.count)
             else
                 null;
+            var part_coding_target = coding_target;
+            if (part_coding_target) |*target| target.allowed = result.count == 0;
             var tile_part = try readStrictTilePartHeader(
                 allocator,
                 bytes,
@@ -11987,6 +12147,7 @@ fn readStrictTilePartPacketPlan(
                 &expected_ppt_index,
                 external_headers,
                 poc_limits,
+                part_coding_target,
             );
             defer tile_part.deinit(allocator);
             if (tile_part.packet_lengths.items.len == 0) {
@@ -12039,13 +12200,24 @@ fn fillStrictTileEffectiveComponents(
     }
     @memcpy(coding, main_coding);
     @memcpy(qcd, main_qcd);
-    if (tile_override.saw_cod) @memset(coding, tile_override.coding);
+    if (tile_override.saw_cod) {
+        for (coding) |*component_coding| {
+            const inherited_roi_shift = component_coding.roi_shift;
+            component_coding.* = tile_override.coding;
+            component_coding.roi_shift = inherited_roi_shift;
+        }
+    }
     if (tile_override.saw_qcd) @memset(qcd, tile_override.qcd);
     for (tile_override.components.items) |component_override| {
         const component = @as(usize, component_override.component);
         if (component >= coding.len) return CodestreamError.InvalidCodestream;
-        if (component_override.saw_coc) coding[component] = component_override.coding;
+        if (component_override.saw_coc) {
+            const inherited_roi_shift = coding[component].roi_shift;
+            coding[component] = component_override.coding;
+            coding[component].roi_shift = inherited_roi_shift;
+        }
         if (component_override.saw_qcc) qcd[component] = component_override.qcd;
+        if (component_override.saw_rgn) coding[component].roi_shift = component_override.roi_shift;
     }
 }
 
@@ -12220,8 +12392,7 @@ fn readStrictMultiTileTilePartSpans(
 
         const tile = grid.tile(sot.tile_index) catch return CodestreamError.InvalidCodestream;
         const coding_override = if (tile_coding_overrides) |overrides| overrides[tile_index] else StrictTileCodingOverride{};
-        const has_coding_override = coding_override.saw_cod or coding_override.saw_qcd or
-            coding_override.components.items.len != 0;
+        const has_coding_override = strictTileOverrideChangesCoding(coding_override);
         if (has_coding_override and
             (tile_poc_records[tile_index].items.len != 0 or
                 mct != .none or options.progression != .rpcl))
@@ -12383,6 +12554,7 @@ fn readStrictTilePartHeader(
     expected_ppt_index: *u16,
     external_packed_headers: ?[]const u8,
     poc_limits: ?TilePartPocLimits,
+    coding_target: ?TilePartCodingTarget,
 ) !StrictTilePartHeader {
     const sot = try readStrictSotInfo(bytes, marker_start);
     try validateStrictSotSequence(sot, tile_part_index, expected_tile_part_count);
@@ -12414,7 +12586,7 @@ fn readStrictTilePartHeader(
             .limits = limits,
             .allowed = sot.tile_part_index == 0,
         } else null,
-        null,
+        coding_target,
     );
     if (external_packed_headers) |headers| {
         if (packed_headers.items.len != 0 or headers.len == 0) return CodestreamError.InvalidCodestream;
@@ -13012,6 +13184,9 @@ const StrictComponentCoding = struct {
     block_height: u16 = 0,
     code_block_style: ebcot.CodeBlockStyle = .{},
     transform: WaveletTransform = .reversible_5_3,
+    /// Maxshift ROI upshift signalled by the effective RGN marker for this
+    /// component. It affects T1 nominal bitplanes and is undone before IDWT.
+    roi_shift: u8 = 0,
 };
 
 const temporary_component_coding = [_]StrictComponentCoding{.{}} ** max_codestream_components;
@@ -13768,6 +13943,7 @@ fn readTilePartHeaderMarkers(
             }
         } else if (marker == @intFromEnum(Marker.cod)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
+            if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
             if (target.override.saw_cod) return CodestreamError.InvalidCodestream;
             const segment = bytes[cursor + 2 .. cursor + segment_length];
@@ -13775,6 +13951,7 @@ fn readTilePartHeaderMarkers(
             target.override.saw_cod = true;
         } else if (marker == @intFromEnum(Marker.qcd)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
+            if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
             if (target.override.saw_qcd) return CodestreamError.InvalidCodestream;
             const levels = if (target.override.saw_cod) target.override.coding.levels else target.levels;
@@ -13788,6 +13965,7 @@ fn readTilePartHeaderMarkers(
             target.override.saw_qcd = true;
         } else if (marker == @intFromEnum(Marker.coc)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
+            if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
             const segment = bytes[cursor + 2 .. cursor + segment_length];
             if (segment.len < 3) return CodestreamError.InvalidCodestream;
@@ -13801,6 +13979,7 @@ fn readTilePartHeaderMarkers(
             component_override.saw_coc = true;
         } else if (marker == @intFromEnum(Marker.qcc)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
+            if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
             const segment = bytes[cursor + 2 .. cursor + segment_length];
             if (segment.len < 2) return CodestreamError.InvalidCodestream;
@@ -13827,6 +14006,20 @@ fn readTilePartHeaderMarkers(
                 transform,
             );
             component_override.saw_qcc = true;
+        } else if (marker == @intFromEnum(Marker.rgn)) {
+            const segment = bytes[cursor + 2 .. cursor + segment_length];
+            if (coding_target) |target| {
+                if (!target.allowed) return CodestreamError.InvalidCodestream;
+                const rgn = try parseStrictRgnSegment(segment, target.component_count);
+                const component_override = try strictTileComponentOverride(allocator, target.override, rgn.component);
+                if (component_override.saw_rgn) return CodestreamError.InvalidCodestream;
+                component_override.saw_rgn = true;
+                component_override.roi_shift = rgn.shift;
+            } else {
+                // Replay walks consume the already validated effective header;
+                // retain structural/style validation without rebuilding state.
+                _ = try parseStrictRgnSegment(segment, @intCast(max_strict_metadata_components));
+            }
         } else if (isUnsupportedTilePartHeaderMarker(marker)) {
             return CodestreamError.UnsupportedPayload;
         } else {

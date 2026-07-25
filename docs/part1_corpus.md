@@ -242,10 +242,13 @@ bounded reduction path now also covers sampled reversible 5/3 across
 single- and multi-tile streams plus native-planar no-MCT 9/7 for bounded
 single- and sampled multi-tile streams. The committed Kakadu four-tile 9/7
 entry compares every component at full and reduction-1 output against six PGX
-references with peak <= 1 and MSE <= 0.12. T.803 `p0_04`, `p0_09`, and
-`p0_14` exercise those reduced paths;
-the remaining reduced references still require signedness, RGN, or divergent
-component coding styles.
+references with peak <= 1 and MSE <= 0.12. T.803 `p0_04`, `p0_06`, `p0_09`,
+and `p0_14` exercise those reduced paths. `p0_06` is the first complete G3
+RGN Maxshift oracle: its main shift 11 is replaced by tile shift 9, and the
+12-bit component-0 result is explicitly high-bit formatted to the published
+8-bit reduction-3 PGX before measuring peak 28/MSE 46.654299. The remaining
+reduced references still require signedness or broader divergent component
+coding styles.
 Class-1 all-component comparison can reuse the reference-list oracle as G1 and
 G2 remove those boundaries.
 
@@ -257,7 +260,10 @@ capability rows, input format, strict decoder, and expected result. A decode
 pass may pin either the canonical native hash or a list of PGX `references`,
 each with its own checksum, component index, resolution reduction, peak-error
 limit, MSE limit, and explicit `space`: normal output components after MCT or
-codestream components before inverse MCT. The PGX reader accepts big- or little-endian signed and
+codestream components before inverse MCT. An optional explicit `sample_shift`
+describes conformance references that high-bit-format a wider decoded component
+to a narrower PGX; no automatic precision conversion is inferred. The PGX
+reader accepts big- or little-endian signed and
 unsigned integer samples from 1 through 31 bits, and evaluates peak error and
 MSE independently. Multiple component and reduction records are represented
 without ambiguity. The runner decodes each reference at its declared

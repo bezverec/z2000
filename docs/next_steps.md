@@ -8,9 +8,9 @@ This is the only active implementation queue. Strategic policy is in
 
 - The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
-- The separate general-purpose G0-G7 program is estimated at about 53%
+- The separate general-purpose G0-G7 program is estimated at about 54%
   complete (+/- 8 points), with the decode-first G0-G4 foundation at about
-  60%. The phase method and remaining-work table live in
+  62%. The phase method and remaining-work table live in
   [`roadmap.md`](roadmap.md); these figures are not derived from the bounded
   100/100 scorecards.
 - Sampled RPCL/no-MCT/reversible-5/3 strict decode supports native planes,
@@ -499,8 +499,17 @@ COC/QCC source preserves its foreign T1 bodies and matches all six full/
 reduction-1 PGX references at one and eight threads; malformed PPM framing
 fails closed. Kakadu did not emit the PPM framing, so this is not claimed as an
 independent packed-header stream. PPM+POC and packed-header/TLM combinations
-remain outside this bounded slice. The next G3 correctness slice starts `RGN`
-Maxshift ROI under item 5.
+remain outside this bounded slice.
+
+The first complete G3 marker-to-raster slice is now landed. Main-header `RGN`
+Maxshift state is inherited per component and a first tile-part `RGN` can
+replace it; the effective shift expands the T1 nominal-bitplane budget and is
+undone before dequantization/IDWT. The official T.803 `p0_06` stream exercises
+main shift 11, tile shift 9, four differently sampled unsigned 12-bit
+components, and late COC/QCC mixed 9/7/5/3 state. At reduction 3 its formatted
+component-0 reference passes at peak 28/MSE 46.654299 against limits 109/743.
+Malformed RGN lengths/components/styles and state inheritance are unit-gated.
+`CRG` is the next correctness slice under item 5.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,
@@ -516,8 +525,11 @@ a malformed counterpart.
 
 Implement in small marker-to-raster slices:
 
-1. `RGN` Maxshift ROI and `CRG` component registration, including their effect
-   on sample reconstruction rather than parser-only acceptance.
+1. **`RGN` Maxshift ROI decode — complete; `CRG` next.** Main/tile inheritance,
+   T1 bitplane accounting, coefficient reconstruction, malformed syntax, and
+   independent T.803 raster evidence are landed. Add `CRG` component
+   registration with the same marker-to-raster standard; RGN encode remains
+   item 7.
 2. `PLM` packet lengths and applicable `CAP`/`PRF` profile signalling with
    checked consistency against `Rsiz` and actual payload behavior.
 3. General legal tile-part ordering and repetition beyond the landed inline

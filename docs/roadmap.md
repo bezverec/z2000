@@ -143,29 +143,29 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 ### Current Completion Estimate
 
-As of 2026-07-24, the general-purpose G0-G7 program is estimated at **about
-53% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
+As of 2026-07-26, the general-purpose G0-G7 program is estimated at **about
+54% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
 This is a planning estimate, not a conformance score. It gives every phase
 equal weight because the remaining effort is too uncertain for a more precise
 cost model; the headline is the rounded mean of the phase estimates below.
-The decode-first foundation G0-G4 is approximately **60% complete** by the same
+The decode-first foundation G0-G4 is approximately **62% complete** by the same
 method. Neither number changes the bounded 100/100 scorecards.
 
 | Phase | Estimate | Evidence already landed | Largest remaining work |
 | --- | ---: | --- | --- |
-| G0 | 75% | Manifest, differential runner, 60 cases, all profile-0 assets integrated, 9/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
+| G0 | 75% | Manifest, differential runner, 60 cases, all profile-0 assets integrated, 10/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
 | G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
-| G3 | 30% | Broad T1/T2 styles, progression, POC, TLM, and multipart foundations | `RGN`, `CRG`, `PLM`, applicable `CAP`/`PRF`, and general packed schedules |
+| G3 | 38% | Broad T1/T2 styles, progression, POC, TLM, multipart foundations, and a complete main/tile `RGN` Maxshift marker-to-raster slice with T.803 evidence | `CRG`, `PLM`, applicable `CAP`/`PRF`, ROI encode, and general packed schedules |
 | G4 | 45% | Direct resolution reduction, T1 skipping, catalog compaction, borrowed packet spans | Layer/tile/region selection plus incremental input and bounded output |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
 | G7 | 35% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
 
 These values should move only when a phase promotion criterion changes state,
-not after every small fixture. This is the post-encoder-B.7 re-estimate;
-re-estimate again after the first complete G3 marker-to-raster slice or when
-new conformance evidence materially changes the denominator.
+not after every small fixture. This is the first-G3-marker-to-raster
+re-estimate; re-estimate again after `CRG` plus a packet-length/profile marker
+slice, or when new conformance evidence materially changes the denominator.
 
 G0 evidence expansion and G1/G2/G4 implementation are active. The 2026-07-17
 G0 foundation includes an unscored broad capability

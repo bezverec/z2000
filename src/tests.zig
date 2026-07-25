@@ -21599,7 +21599,7 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
     const cases = [_]UnsupportedMarkerCase{
         .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
         .{ .label = "PLM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("plm") },
-        .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
+        .{ .label = "malformed RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
         .{
             .label = "malformed PPT tile-part marker",
@@ -21609,7 +21609,7 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         },
         .{ .label = "COC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("coc") },
         .{ .label = "QCC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("qcc") },
-        .{ .label = "RGN tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("rgn") },
+        .{ .label = "malformed RGN tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("rgn"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{
             .label = "malformed POC tile-part marker",
             .source = codestream.markerValue("plt"),
