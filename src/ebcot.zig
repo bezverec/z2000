@@ -1883,7 +1883,7 @@ pub fn encodeBlockScratchWithStyle(
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
-    const stats = blockStats(plane, stride, rect);
+    const stats = try blockStats(plane, stride, rect);
     const bitplanes = stats.bitplanes;
     if (bitplanes == 0) {
         return .{
@@ -2146,7 +2146,7 @@ pub fn encodeCodeBlockSegmentDirectScratchWithStyle(
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
-    const stats = blockStats(plane, stride, rect);
+    const stats = try blockStats(plane, stride, rect);
     if (stats.bitplanes == 0) {
         return ownedSegmentFromDirectScratch(scratch, 0, 0);
     }
@@ -5712,7 +5712,7 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
-    const stats = blockStats(plane, stride, rect);
+    const stats = try blockStats(plane, stride, rect);
     if (stats.bitplanes == 0) {
         return ownedSegmentFromDirectIsoScratch(scratch, 0, 0, style.bypass);
     }
@@ -6612,7 +6612,7 @@ const BlockStats = struct {
     non_zero_count: u32,
 };
 
-fn blockStats(plane: []const i32, stride: usize, rect: subband.Rect) BlockStats {
+fn blockStats(plane: []const i32, stride: usize, rect: subband.Rect) !BlockStats {
     var max_mag: u32 = 0;
     var non_zero_count: u32 = 0;
     var y: usize = 0;
@@ -6620,12 +6620,14 @@ fn blockStats(plane: []const i32, stride: usize, rect: subband.Rect) BlockStats 
         const row = (rect.y + y) * stride + rect.x;
         var x: usize = 0;
         while (x + stats_lanes <= rect.width) : (x += stats_lanes) {
-            const chunk = blockStatsChunk(plane[row + x ..][0..stats_lanes]);
+            const chunk = try blockStatsChunk(plane[row + x ..][0..stats_lanes]);
             max_mag = @max(max_mag, chunk.max_mag);
             non_zero_count += @popCount(chunk.mask);
         }
         while (x < rect.width) : (x += 1) {
-            const mag = magnitude(plane[row + x]);
+            const value = plane[row + x];
+            if (value == std.math.minInt(i32)) return EbcotError.InvalidBlock;
+            const mag = magnitude(value);
             max_mag = @max(max_mag, mag);
             if (mag != 0) non_zero_count += 1;
         }
@@ -6641,9 +6643,11 @@ const BlockStatsChunk = struct {
     max_mag: u32,
 };
 
-fn blockStatsChunk(values: *const [stats_lanes]i32) BlockStatsChunk {
+fn blockStatsChunk(values: *const [stats_lanes]i32) !BlockStatsChunk {
     const coeffs: StatsVector = values.*;
     const zero: StatsVector = @splat(0);
+    const minimum: StatsVector = @splat(std.math.minInt(i32));
+    if (@reduce(.Or, coeffs == minimum)) return EbcotError.InvalidBlock;
     const abs_values = @select(i32, coeffs < zero, -coeffs, coeffs);
     const max_mag = @as(u32, @intCast(@reduce(.Max, abs_values)));
     const non_zero = coeffs != zero;

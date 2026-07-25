@@ -5505,6 +5505,7 @@ fn readStrictCodestreamMetadataForProfile(
         if (packet_counts_complete and plan.packets != total_packets) {
             return CodestreamError.InvalidCodestream;
         }
+        const verified_packet_count = if (packet_counts_complete) total_packets else plan.packets;
         return .{
             .component_allocator = allocator,
             .version = 8,
@@ -5550,7 +5551,7 @@ fn readStrictCodestreamMetadataForProfile(
             .tile_part_plan = [_]u8{0} ** 33,
             .packet_plan_count = plan.resolution_count,
             .packet_plan = plan.resolutions,
-            .packet_count = total_packets,
+            .packet_count = verified_packet_count,
         };
     }
     const single_tile = grid.tile(0) catch return CodestreamError.InvalidCodestream;
@@ -8238,10 +8239,12 @@ fn readStrictMultiTileTilePartPacketCatalog(
         }
     }
     if (sod != span.sod) return CodestreamError.InvalidCodestream;
+    const has_external_packed_headers = external_packed_headers != null;
     if (external_packed_headers) |headers| {
-        if (packed_headers.items.len != 0 or headers.len == 0) return CodestreamError.InvalidCodestream;
+        if (packed_headers.items.len != 0) return CodestreamError.InvalidCodestream;
         try packed_headers.appendSlice(allocator, headers);
     }
+    const has_packed_headers = has_external_packed_headers or packed_headers.items.len != 0;
     if (span.missing_plt) {
         if (packet_lengths.items.len != 0) return CodestreamError.InvalidCodestream;
     } else if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
@@ -8279,9 +8282,13 @@ fn readStrictMultiTileTilePartPacketCatalog(
     var cursor = span.sod + 2;
     var packet_sequence: u16 = @truncate(span.first_packet);
     if (span.missing_plt) {
-        if (packed_headers.items.len != 0) {
+        if (has_packed_headers) {
             var packed_header_cursor: usize = 0;
-            for (sequence) |packet| {
+            var sequence_index: usize = 0;
+            while (packed_header_cursor < packed_headers.items.len and
+                sequence_index < sequence.len) : (sequence_index += 1)
+            {
+                const packet = sequence[sequence_index];
                 const groups = try stateful.groupsFor(packet);
                 const byte_offset = packet_bytes.items.len;
                 const packed_span = try appendStrictPackedPacketPayload(
@@ -12299,27 +12306,19 @@ fn readStrictMultiTileTilePartSpans(
         // total (z2000's own per-resolution `R` divisions are one instance
         // of this rule). Empty padding parts (SOT+SOD only, zero packets —
         // Kakadu pads tiles to a fixed TNsot this way) need no PLT.
-        // Inline PLT-less multi-part packet counts are derived later by the
-        // open-ended T2 header walk. Stage B records only the exact Psot body
-        // boundary here; Stage C preserves per-tile packet state across parts
-        // and verifies the final count against the complete tile plan.
-        const deferred_packet_count = missing_plt and
-            sot.tile_part_count != 1 and external_headers == null;
+        // PLT-less multi-part packet counts are derived later by the open-ended
+        // T2 header walk. Inline packets stop at the Psot body boundary; PPM
+        // packets additionally stop at their Nppm group boundary. Stage B
+        // records those exact spans here; Stage C preserves per-tile packet
+        // state across parts and verifies the final count against the complete
+        // tile plan.
+        const deferred_packet_count = missing_plt and sot.tile_part_count != 1;
         if (deferred_packet_count) deferred_packet_counts[tile_index] = true;
         var first_packet: usize = 0;
         var expected_packet_count = plan_packets;
         if (sot.tile_part_count != 1) {
             first_packet = tile_next_packet[tile_index];
-            expected_packet_count = if (deferred_packet_count)
-                0
-            else if (missing_plt and external_headers != null) blk: {
-                if (options.progression != .rpcl or sot.tile_part_count != @as(u8, @intCast(levels + 1))) {
-                    return CodestreamError.UnsupportedPayload;
-                }
-                if (sot.tile_part_index >= tile_plan.resolution_count) return CodestreamError.InvalidCodestream;
-                break :blk std.math.cast(usize, tile_plan.resolutions[sot.tile_part_index].packets) orelse
-                    return CodestreamError.InvalidCodestream;
-            } else packet_lengths.items.len;
+            expected_packet_count = if (deferred_packet_count) 0 else packet_lengths.items.len;
             if (!deferred_packet_count) {
                 const end_packet = try std.math.add(usize, first_packet, expected_packet_count);
                 if (end_packet > plan_packets) return CodestreamError.InvalidCodestream;

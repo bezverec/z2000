@@ -258,8 +258,9 @@ tables. The current envelope is no-MCT RPCL with common layers, and no
 effective decomposition count may exceed the main header.
 It accepts one part per tile, PLT-backed RPCL resolution/padding parts, and the
 same divergent reversible COC/QCC state through bounded packed layouts:
-multipart PPT with PLT or one-part-per-tile PPM. Inline PLT-less multipart state
-is likewise component-local. A separate one-part-per-tile no-MCT 9/7 profile consumes
+multipart PPT with PLT or PLT-less PPM without POC, including multiple parts
+per tile. Inline PLT-less multipart state is likewise component-local. A
+separate one-part-per-tile no-MCT 9/7 profile consumes
 scalar-expounded main, tile, and component QCD/QCC tables through native planar
 full/reduced reconstruction. A bounded single-tile profile
 dispatches each no-MCT component through its effective COC transform and QCC:
@@ -278,14 +279,18 @@ share that T2-owned calculation; block catalogs and packet tag-tree grids use
 the effective dimensions while COD retains the requested nominal size. The
 same effective table now proves all three override levels in one directly
 emitted four-tile stream: main reversible `COD/QCD`, tile 1 irreversible
-`COD/QCD`, and tile 1 component 1 reversible `COC/QCC`. Arbitrary PLT-less
-multipart PPM, PPM+POC, and packed-header/TLM combinations remain fail-closed.
+`COD/QCD`, and tile 1 component 1 reversible `COC/QCC`. PLT-less multipart PPM
+without POC is supported; PPM+POC and packed-header/TLM combinations remain
+fail-closed.
 
 Inline PLT-less multipart streams carry no packet count at the Stage B frame
 scan. Their spans therefore retain an explicit deferred-count state and exact
 `Psot` boundary. Stage C resumes the tile-local packet sequence and persistent
 inclusion/zero-bitplane tag trees plus `numlenbits` state, decodes headers until
 that boundary, and validates the accumulated count against the full tile plan.
+PLT-less multipart PPM uses the same deferred state: the corresponding `Nppm`
+group bounds packed headers while `Psot` bounds packet bodies, and the joined
+tile still must consume its complete effective packet sequence exactly.
 This also handles interleaved tiles, `TNsot == 0`, and empty padding parts;
 hybrid or inconsistent PLT accounting is malformed.
 

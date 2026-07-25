@@ -5,6 +5,14 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### EBCOT Robustness
+
+- Made the shared symbol/direct block-statistics pass reject `minInt(i32)` as
+  an unsupported 32-bitplane coefficient before scalar or SIMD signed
+  magnitude formation. Scalar-tail and full-vector regressions pin identical
+  `InvalidBlock` behavior while retaining the current 31-magnitude-bitplane
+  `i32` T1 boundary and the single-pass hot path.
+
 ### Generic Native Sample Foundation
 
 - Added an independent Kakadu signed 7/13/23-bit fixture with 1x1, 2x1, and
@@ -179,8 +187,14 @@ entries are grouped by development milestone rather than semantic version.
   tile PPM. Both layouts match all six existing full/reduction-1 PGX references
   exactly, remain deterministic at one/eight threads, and reject truncated
   PPT/PPM segments. The structural packed framing is not presented as Kakadu
-  encoder output; arbitrary PLT-less multipart PPM and packed TLM/POC remain
-  closed.
+  encoder output; packed TLM/POC remains closed.
+- Generalized the same deferred-count state machine to PLT-less multipart PPM
+  without POC. Each part consumes exactly one checked `Nppm` group and its
+  `Psot`-bounded body; the joined tile must consume its complete effective
+  packet plan. A 12-part structural PPM repack preserves the Kakadu COC/QCC
+  source's T1 bodies and matches all six full/reduction-1 PGX references at
+  one/eight threads; malformed PPM framing fails closed. The packed framing is
+  test-produced and is not claimed as independent Kakadu PPM output.
 - Added bounded tile/component-local scalar-expounded quantization for the
   multi-tile no-MCT 9/7 planar path. A Kakadu stream layers tile 1 Qstep 0.01
   over main Qstep 1/256 and component 1 Qstep 0.02 over that tile value. Six

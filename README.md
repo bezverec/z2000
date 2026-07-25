@@ -74,8 +74,9 @@ Neither figure is a formal ISO conformance certification.
   Grok, and Kakadu. Another directly emitted four-tile Kakadu stream proves
   full override precedence: reversible main `COD/QCD`, irreversible tile 1
   `COD/QCD`, then reversible tile 1 component 1 `COC/QCC`; all six
-  full/reduced PGX planes pass and a mismatched QCC fails closed. Arbitrary
-  PLT-less multipart PPM and packed POC/TLM combinations remain fail-closed.
+  full/reduced PGX planes pass and a mismatched QCC fails closed. PLT-less
+  multipart PPM without POC now derives per-part packet counts from checked
+  `Nppm` and `Psot` boundaries. Packed POC/TLM combinations remain fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,

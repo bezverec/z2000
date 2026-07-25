@@ -490,8 +490,17 @@ and their declared MSE bounds, one/eight-thread output is identical, and
 reassigning the reversible QCC to an irreversible component fails before
 packet reconstruction.
 
-The next G2/G3 slice addresses arbitrary PLT-less multipart PPM without POC.
-PPM+POC and packed-header/TLM combinations remain outside that bounded slice.
+The fifteenth G2/G3 slice is complete: PLT-less multipart PPM without POC now
+defers each part's packet count to the checked `Nppm` header-group and `Psot`
+body boundaries instead of inferring an RPCL resolution count from `TPsot`.
+Tile-local T2 state persists across parts, and the joined count must equal the
+complete effective packet plan. A structural repack of the 12-part Kakadu
+COC/QCC source preserves its foreign T1 bodies and matches all six full/
+reduction-1 PGX references at one and eight threads; malformed PPM framing
+fails closed. Kakadu did not emit the PPM framing, so this is not claimed as an
+independent packed-header stream. PPM+POC and packed-header/TLM combinations
+remain outside this bounded slice. The next G3 correctness slice starts `RGN`
+Maxshift ROI under item 5.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,
@@ -513,7 +522,8 @@ Implement in small marker-to-raster slices:
    checked consistency against `Rsiz` and actual payload behavior.
 3. General legal tile-part ordering and repetition beyond the landed inline
    PLT-less state machine and bounded COC/QCC PPT-resolution-part profile,
-   including arbitrary PLT-less multipart PPM and checked `TLM` variations.
+   including checked `TLM` variations. PLT-less multipart PPM without POC is
+   complete through the shared deferred-count state machine.
 4. Legal `POC` schedules across inline, `PPT`, and `PPM` headers, removing the
    current sampled `PPM` + `POC` fail-closed boundary only after packet identity
    is unambiguous.
@@ -582,6 +592,26 @@ Before `1.0.0`, freeze the public API/CLI for one release-candidate cycle,
 publish the broad capability matrix, verify every claimed row from clean
 archives, and close or explicitly unclaim every discrepancy. Internal success
 must not be described as formal third-party certification.
+
+The reviewed maintenance backlog is deliberately subordinate to codec
+correctness slices:
+
+1. **Complete:** direct EBCOT regressions cover `minInt(i32)` in both the
+   scalar tail and a full SIMD-width block. The shared symbol/direct statistics
+   pass rejects that unsupported 32-bitplane coefficient as `InvalidBlock`
+   before signed vector negation, preserving the current 31-magnitude-bitplane
+   `i32` carrier boundary without adding a second hot-path scan.
+2. Before the API/CLI freeze, decide whether the legacy private `.z2000`
+   PGM codec and its float 5/3 path are deprecated, removed, or explicitly
+   retained outside the JPEG 2000 Part 1 surface.
+3. Split `main.zig` command/option parsing and extract low-coupling EBCOT
+   types, lookup tables, and scan helpers only in behavior-neutral steps.
+   Do not merge the specialized inferred/plain T1 paths without an A/B
+   performance gate.
+4. Treat T2 rollback-buffer reuse and hybrid spin/OS-wait DWT barriers as
+   measured candidates, not assumed improvements. The current rollback
+   helpers are not on the production decode path, and the persistent DWT pool
+   already has positive benchmark evidence.
 
 After this gate, scope JPX/Part 2, HTJ2K/Part 15, MJ2/JPM, or JPIP as separate
 programs rather than silently broadening the Part 1 claim.

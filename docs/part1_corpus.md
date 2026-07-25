@@ -172,6 +172,14 @@ Both sources use Kakadu 8.4.1 with `Creversible=yes`, `Cycc=no`,
 4x4 main code blocks, `Clevels:T1C1=1`, `Cblk:T1C1={8,8}`, and one layer;
 the multipart source adds `ORGtparts=R`. Neither source requests PLT or TLM.
 
+A follow-up structural G2/G3 gate repacks all twelve non-empty resolution
+parts of the multipart source into main-header PPM without PLT or POC. Checked
+`Nppm` groups and `Psot` bodies derive each deferred packet count; the joined
+tile must consume the complete effective packet plan. Full/reduction-1 output
+still matches the six Kakadu PGX references exactly at one/eight threads, and
+shortened PPM framing fails closed. The PPM marker placement remains
+test-produced rather than independent-encoder evidence.
+
 The eighth G2 entry is independently emitted by Kakadu rather than structurally
 repacked. Its four-tile no-MCT 9/7 stream starts with main Qstep 1/256, replaces
 tile 1 with Qstep 0.01 through QCD, and replaces component 1 in that tile with

@@ -321,8 +321,9 @@ Kakadu. The fourteenth slice proves all three override levels in one directly
 emitted four-tile Kakadu stream: reversible main COD/QCD, irreversible tile 1
 COD/QCD, then reversible tile 1 component 1 COC/QCC. All six full/reduced PGX
 planes pass, one/eight-thread output agrees, and QCC reassignment fails before
-packet reconstruction. Arbitrary PLT-less multipart PPM and packed TLM/POC
-combinations remain the next boundaries.
+packet reconstruction. A follow-up G2/G3 slice now derives PLT-less multipart
+PPM packet counts from checked `Nppm`/`Psot` boundaries and final tile-plan
+accounting without POC; packed TLM/POC combinations remain G3.
 Together with G3 they replace the
 remaining byte-redundant/uniform shortcuts with real component- and tile-local
 semantics. Unknown or profile-inapplicable

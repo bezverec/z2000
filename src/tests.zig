@@ -15260,6 +15260,50 @@ test "EBCOT symbol oracle scans block stats across vector tails" {
     try std.testing.expect(encoded.symbols.len > 0);
 }
 
+test "EBCOT rejects 32-bitplane coefficients in scalar and SIMD stats paths" {
+    const allocator = std.testing.allocator;
+    const rect_scalar = subband.Rect{ .x = 0, .y = 0, .width = 1, .height = 1 };
+    const scalar_plane = [_]i32{std.math.minInt(i32)};
+
+    try std.testing.expectError(
+        ebcot.EbcotError.InvalidBlock,
+        ebcot.encodeBlock(allocator, &scalar_plane, 1, rect_scalar),
+    );
+
+    var direct_scratch = ebcot.DirectBlockScratch.init(allocator);
+    defer direct_scratch.deinit();
+    try std.testing.expectError(
+        ebcot.EbcotError.InvalidBlock,
+        ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
+            &direct_scratch,
+            &scalar_plane,
+            1,
+            rect_scalar,
+            .{},
+        ),
+    );
+
+    const width = simd.i32_lanes;
+    var vector_plane = [_]i32{0} ** width;
+    vector_plane[width - 1] = std.math.minInt(i32);
+    const rect_vector = subband.Rect{ .x = 0, .y = 0, .width = width, .height = 1 };
+
+    try std.testing.expectError(
+        ebcot.EbcotError.InvalidBlock,
+        ebcot.encodeBlock(allocator, &vector_plane, width, rect_vector),
+    );
+    try std.testing.expectError(
+        ebcot.EbcotError.InvalidBlock,
+        ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
+            &direct_scratch,
+            &vector_plane,
+            width,
+            rect_vector,
+            .{},
+        ),
+    );
+}
+
 test "EBCOT scratch encoder reuses block state buffers" {
     const allocator = std.testing.allocator;
     const first_plane = [_]i32{
@@ -30476,11 +30520,12 @@ test "tile COC and QCC resolution parts decode across PPT and PPM headers" {
 
     const placements = [_]RepackedHeaderPlacement{ .ppt, .ppm };
     for (placements) |placement| {
-        const source = if (placement == .ppt) multipart_source else one_part_source;
+        const source = multipart_source;
         const packed_stream = try repackInlineHeadersToPacked(allocator, source, placement, .{});
         defer allocator.free(packed_stream);
         try std.testing.expectEqual(@as(usize, 1), countMarker(packed_stream, codestream.markerValue("coc")));
         try std.testing.expectEqual(@as(usize, 1), countMarker(packed_stream, codestream.markerValue("qcc")));
+        try std.testing.expectEqual(@as(usize, 12), countMarker(packed_stream, codestream.markerValue("sot")));
         switch (placement) {
             .ppt => try std.testing.expect(countMarker(packed_stream, codestream.markerValue("ppt")) > 1),
             .ppm => try std.testing.expect(countMarker(packed_stream, codestream.markerValue("ppm")) >= 1),
