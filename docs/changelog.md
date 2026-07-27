@@ -15,6 +15,10 @@ entries are grouped by development milestone rather than semantic version.
 
 ### Generic Native Sample Foundation
 
+- Added checked Part 1 CRG X/Y registration metadata to each native component
+  layout. Canonical ZRAW now writes a flag-gated 32-byte component record with
+  both values while retaining backward-compatible reads of the original
+  flag-zero 28-byte records.
 - Added an independent Kakadu signed 7/13/23-bit fixture with 1x1, 2x1, and
   2x2 component sampling across four tiles. Native full/reduction-1 decode
   matches all six PGX references exactly, is deterministic at one/eight
@@ -109,6 +113,14 @@ entries are grouped by development milestone rather than semantic version.
 
 ### Part 1 Corpus Gate
 
+- Added bounded main-header CRG parsing with exact per-component cardinality,
+  duplicate/malformed/misplacement rejection, native-layout exposure, and
+  ZRAW preservation. Official T.803 `p0_03` now matches the published upper-
+  left 128x128 full-resolution crop and complete reduction-1 signed 4-bit PGX
+  exactly; the reduced native 5/3 path saturates reconstructed samples to the
+  declared component range. POC wire endpoints are normalized to the actual
+  layer/resolution/component domain, and fully overriding COC/QCC state keeps
+  otherwise irrelevant COD/QCD defaults from rejecting legal streams.
 - Added an unscored broad Part 1 readiness matrix, separate from the completed
   bounded 100/100 scorecards, with explicit parser/decode/encode/malformed/
   independent-interop status.
@@ -130,7 +142,7 @@ entries are grouped by development milestone rather than semantic version.
   COD/QCD and COC/QCC including resolution-part inheritance, irreversible
   tile/component QCD/QCC, mixed component-local 5/3/9/7 transforms,
   component-local B.7 block clamping, tile-local mixed 5/3/9/7 transforms,
-  and padded multipart TLM. Fourteen
+  and padded multipart TLM. Fifteen
   input-hash-verified mutations pin invalid/divergent COC, QCC and TLM plus
   unsupported signed-SIZ fail-closed behavior.
 - Added a Kakadu 8.4.1 sampled multi-tile no-MCT 9/7 PLT-less fixture. Its
@@ -143,9 +155,9 @@ entries are grouped by development milestone rather than semantic version.
   component/reduction selectors, signed or unsigned 1..31-bit ML/LM samples,
   exact peak limits, independent MSE limits, and explicit output- versus
   codestream-component reference space. All 16 optional profile-0 inputs and
-  18 class-0 references are checksummed; nine cases now pass their references
-  and seven retain expected fail-closed boundaries. The full 60-entry gate
-  reports 38 decode passes, 22 expected fail-closed cases, no
+  18 class-0 references are checksummed; eleven cases now pass their references
+  and five retain expected fail-closed boundaries. The full 60-entry gate
+  reports 40 decode passes, 20 expected fail-closed cases, no
   mismatch, and no skip when optional assets are required.
 - Added strict Part 1 B.7 effective code-block clamping per resolution and
   subband. A directly emitted Kakadu stream advertises a component-local
@@ -230,8 +242,9 @@ entries are grouped by development milestone rather than semantic version.
   scalar-expounded Qstep 0.01, then tile 1 component 1 COC/QCC return that
   component to reversible 5/3 with no quantization. All six full/reduction-1
   PGX references pass at one and eight threads. Reassigning the reversible QCC
-  to an irreversible component fails before packet reconstruction. The corpus
-  now contains 60 entries: 38 decode passes and 22 expected fail-closed cases.
+  to an irreversible component fails before packet reconstruction. At that
+  checkpoint the corpus contained 60 entries: 38 decode passes and 22 expected
+  fail-closed cases.
 - Added encoder-side Part 1 B.7 effective code-block clamping across bounded
   lossless RGB, planar, sampled, and multi-tile front ends. A shared T2 helper
   supplies per-subband dimensions to block construction and tag-tree

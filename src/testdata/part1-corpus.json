@@ -114,24 +114,24 @@
     {
       "id": "roi-rgn-maxshift",
       "title": "RGN Maxshift ROI",
-      "parser": "fail_closed",
-      "strict_decode": "not_implemented",
+      "parser": "bounded",
+      "strict_decode": "bounded",
       "encode": "not_implemented",
-      "malformed": "not_implemented",
-      "interop": "not_applicable",
-      "evidence": ["next_steps.md item 5.1"],
-      "note": "Planned after the generic component/coding-style foundation."
+      "malformed": "bounded",
+      "interop": "complete",
+      "evidence": ["T.803 p0_06 reduction-3 PGX oracle", "main/tile inheritance and malformed unit tests"],
+      "note": "Bounded Maxshift state feeds T1 bitplane accounting and coefficient restoration; encode remains open."
     },
     {
       "id": "component-registration-crg",
       "title": "CRG component registration",
-      "parser": "fail_closed",
-      "strict_decode": "not_implemented",
+      "parser": "bounded",
+      "strict_decode": "bounded",
       "encode": "not_implemented",
-      "malformed": "not_implemented",
-      "interop": "not_applicable",
-      "evidence": ["next_steps.md item 5.1"],
-      "note": "Current sampled placement uses SIZ origins and sampling only."
+      "malformed": "bounded",
+      "interop": "complete",
+      "evidence": ["T.803 p0_03 full/reduction-1 exact PGX oracles", "duplicate and malformed-length unit tests"],
+      "note": "Main-header CRG pairs are exposed and preserved as rendering metadata; Part 1 defines no effect on codestream decoding."
     },
     {
       "id": "plm-cap-prf",
@@ -1450,10 +1450,10 @@
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
         "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "legal T.803 profile-0 codestream; signed sample transport remains outside the current strict decoder contract",
+      "oracle": "T.803 class-0 c0p0_03 PGX references at reductions 0 and 1, pixel-exact",
       "features": ["siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "tiles-and-tile-parts", "roi-rgn-maxshift", "component-registration-crg"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "expectation": "decode_pass",
+      "decoder": "native",
       "references": [
         {
           "path": "reference_class0_profile0/c0p0_03r0.pgx",
@@ -1461,6 +1461,7 @@
           "format": "pgx",
           "component": 0,
           "resolution_reduction": 0,
+          "crop": { "x": 0, "y": 0 },
           "max_peak_error": 0,
           "max_mse": 0
         },

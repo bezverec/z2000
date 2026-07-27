@@ -61,6 +61,18 @@ test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
         0x80,      1, 2,
         37,        4, 4,
     });
+    // Reserved FF30..FF3F markers are segment-less and may appear in the
+    // main header without disrupting the following CRG scan.
+    try appendU16BeTest(allocator, &stream, 0xff30);
+    try appendU16BeTest(allocator, &stream, codestream.markerValue("crg"));
+    try appendU16BeTest(allocator, &stream, 2 + 5 * 4);
+    try stream.appendSlice(allocator, &.{
+        0xff, 0x90, 0x7f, 0x2e,
+        0,    0,    0,    0,
+        0,    1,    0,    2,
+        0x80, 0,    0x40, 0,
+        0xff, 0xff, 0xff, 0xff,
+    });
     try appendU16BeTest(allocator, &stream, 0xffd9);
 
     var layout = try codestream.inspectNativeCodestreamLayout(
@@ -80,6 +92,13 @@ test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
     try std.testing.expect(!layout.components[4].signed);
     try std.testing.expectEqual(@as(usize, 8), layout.components[4].width);
     try std.testing.expectEqual(@as(usize, 4), layout.components[4].height);
+    try std.testing.expectEqual(@as(u16, 0xff90), layout.components[0].registration_x);
+    try std.testing.expectEqual(@as(u16, 0x7f2e), layout.components[0].registration_y);
+    try std.testing.expectEqual(@as(u16, 0), layout.components[1].registration_x);
+    try std.testing.expectEqual(@as(u16, 1), layout.components[2].registration_x);
+    try std.testing.expectEqual(@as(u16, 2), layout.components[2].registration_y);
+    try std.testing.expectEqual(@as(u16, 0xffff), layout.components[4].registration_x);
+    try std.testing.expectEqual(@as(u16, 0xffff), layout.components[4].registration_y);
 
     var planes = try native_samples.SamplePlanes.initFromLayout(
         allocator,
@@ -129,11 +148,68 @@ test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
         try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
     }
 
+    // The registration extension keeps the Z2KRAW1 magic and accepts the
+    // original flag-zero 28-byte records with implicit zero CRG values.
+    var legacy_zraw: std.ArrayList(u8) = .empty;
+    defer legacy_zraw.deinit(allocator);
+    try legacy_zraw.appendSlice(allocator, zraw[0..26]);
+    try legacy_zraw.appendSlice(allocator, &.{ 0, 0 });
+    const current_records_start: usize = 28;
+    const current_payload_start = current_records_start + planes.componentCount() * 32;
+    for (0..planes.componentCount()) |component| {
+        const record_start = current_records_start + component * 32;
+        try legacy_zraw.appendSlice(allocator, zraw[record_start .. record_start + 20]);
+        try legacy_zraw.appendSlice(allocator, zraw[record_start + 24 .. record_start + 32]);
+    }
+    try legacy_zraw.appendSlice(allocator, zraw[current_payload_start..]);
+    var legacy_round_trip = try codestream.decodeNativeRawPlanar(
+        allocator,
+        legacy_zraw.items,
+        .{ .max_components = 8, .max_reference_pixels = 1024, .max_total_component_samples = 4096 },
+    );
+    defer legacy_round_trip.deinit();
+    for (planes.planes, legacy_round_trip.planes) |expected, actual| {
+        try std.testing.expectEqual(@as(u16, 0), actual.layout.registration_x);
+        try std.testing.expectEqual(@as(u16, 0), actual.layout.registration_y);
+        try std.testing.expectEqual(expected.layout.precision, actual.layout.precision);
+        try std.testing.expectEqual(expected.layout.signed, actual.layout.signed);
+        try std.testing.expectEqual(expected.layout.x_step, actual.layout.x_step);
+        try std.testing.expectEqual(expected.layout.y_step, actual.layout.y_step);
+        try std.testing.expectEqual(expected.layout.x0, actual.layout.x0);
+        try std.testing.expectEqual(expected.layout.y0, actual.layout.y0);
+        try std.testing.expectEqual(expected.layout.width, actual.layout.width);
+        try std.testing.expectEqual(expected.layout.height, actual.layout.height);
+        try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+    }
+
     planes.planes[1].samples[0] = -2049;
     try std.testing.expectError(native_samples.NativeSampleError.SampleOutOfRange, planes.validateSamples());
     try std.testing.expectError(
         native_samples.NativeSampleError.ResourceLimitExceeded,
         codestream.inspectNativeCodestreamLayout(allocator, stream.items, .{ .max_components = 4 }),
+    );
+
+    const crg_offset = findMarker(stream.items, codestream.markerValue("crg")) orelse
+        return error.MissingMarker;
+    const malformed_crg = try allocator.dupe(u8, stream.items);
+    defer allocator.free(malformed_crg);
+    malformed_crg[crg_offset + 3] -= 1;
+    try std.testing.expectError(
+        native_samples.NativeSampleError.InvalidCodestream,
+        codestream.inspectNativeCodestreamLayout(allocator, malformed_crg, .{}),
+    );
+
+    const crg_end = crg_offset + 2 + readU16BeTest(stream.items, crg_offset + 2);
+    const eoc_offset = findMarker(stream.items, codestream.markerValue("eoc")) orelse
+        return error.MissingMarker;
+    var duplicate_crg: std.ArrayList(u8) = .empty;
+    defer duplicate_crg.deinit(allocator);
+    try duplicate_crg.appendSlice(allocator, stream.items[0..eoc_offset]);
+    try duplicate_crg.appendSlice(allocator, stream.items[crg_offset..crg_end]);
+    try duplicate_crg.appendSlice(allocator, stream.items[eoc_offset..]);
+    try std.testing.expectError(
+        native_samples.NativeSampleError.InvalidCodestream,
+        codestream.inspectNativeCodestreamLayout(allocator, duplicate_crg.items, .{}),
     );
 
     const reserved_precision = try allocator.dupe(u8, stream.items);
@@ -258,7 +334,7 @@ test "ZRAW parser rejects malformed metadata payload boundaries and noncanonical
 
     const mutations = [_]struct { offset: usize, value: u8 }{
         .{ .offset = 0, .value = 'X' },
-        .{ .offset = 27, .value = 1 },
+        .{ .offset = 27, .value = 2 },
         .{ .offset = 29, .value = 0x80 },
         .{ .offset = 55, .value = 0xff },
     };
@@ -274,7 +350,7 @@ test "ZRAW parser rejects malformed metadata payload boundaries and noncanonical
 
     const noncanonical = try allocator.dupe(u8, zraw);
     defer allocator.free(noncanonical);
-    const payload_start = 28 + planes.componentCount() * 28;
+    const payload_start = 28 + planes.componentCount() * 32;
     noncanonical[payload_start] = 0x10;
     try std.testing.expectError(
         native_samples.NativeSampleError.InvalidCodestream,
@@ -2700,6 +2776,14 @@ test "POC parser and scheduler compose overlapping progression intervals" {
     try poc.appendSegmentPayload(allocator, &encoded_payload, records.items, 3, 3, 2);
     try std.testing.expectEqualSlices(u8, &payload, encoded_payload.items);
 
+    var normalized: std.ArrayList(poc.Record) = .empty;
+    defer normalized.deinit(allocator);
+    try poc.appendSegment(allocator, &normalized, &.{ 0, 0, 0, 8, 33, 255, 0 }, 1, 2, 8);
+    try std.testing.expectEqual(@as(usize, 1), normalized.items.len);
+    try std.testing.expectEqual(@as(u8, 2), normalized.items[0].resolution_end);
+    try std.testing.expectEqual(@as(u16, 1), normalized.items[0].component_end);
+    try std.testing.expectEqual(@as(u16, 8), normalized.items[0].layer_end);
+
     var resolutions = [_]packet_plan.Resolution{.{
         .width = 4,
         .height = 2,
@@ -2831,7 +2915,9 @@ test "strict decode consumes single- and multi-tile main-header POC schedules" {
     const malformed = try allocator.dupe(u8, with_poc);
     defer allocator.free(malformed);
     const poc_marker = findMarker(malformed, codestream.markerValue("poc")) orelse return error.MissingMarker;
-    malformed[poc_marker + 6] = 3;
+    // Overbroad wire-domain end values are legal and normalized; an RSpoc
+    // start at the actual resolution count remains invalid.
+    malformed[poc_marker + 4] = 3;
     try std.testing.expectError(
         codestream.CodestreamError.InvalidCodestream,
         codestream.decodeLosslessTemporary(allocator, malformed),
@@ -7890,6 +7976,34 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
     try std.testing.expectEqual(codestream_bytes.len, info.codestream_bytes);
     try std.testing.expectEqualSlices(u8, codestream_bytes, try jp2.extractCodestream(wrapped));
 
+    {
+        const sot = findMarker(codestream_bytes, codestream.markerValue("sot")) orelse
+            return error.MissingSot;
+        const crg_payload = [_]u8{
+            0xff, 0x90, 0x7f, 0x2e,
+            0,    0,    0,    0,
+            0,    1,    0,    2,
+        };
+        const with_crg = try spliceMarkerSegmentForTest(
+            allocator,
+            codestream_bytes,
+            sot,
+            codestream.markerValue("crg"),
+            &crg_payload,
+        );
+        defer allocator.free(with_crg);
+        const crg_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, with_crg);
+        defer allocator.free(crg_wrapped);
+        const crg_info = try jp2.parseInfo(crg_wrapped);
+        try std.testing.expectEqual(with_crg.len, crg_info.codestream_bytes);
+        var crg_layout = try codestream.inspectNativeCodestreamLayout(allocator, with_crg, .{});
+        defer crg_layout.deinit();
+        try std.testing.expectEqual(@as(u16, 0xff90), crg_layout.components[0].registration_x);
+        try std.testing.expectEqual(@as(u16, 0x7f2e), crg_layout.components[0].registration_y);
+        try std.testing.expectEqual(@as(u16, 1), crg_layout.components[2].registration_x);
+        try std.testing.expectEqual(@as(u16, 2), crg_layout.components[2].registration_y);
+    }
+
     const corrupted = try allocator.dupe(u8, wrapped);
     defer allocator.free(corrupted);
     const jp2h_payload = try findJp2BoxPayload(corrupted, "jp2h");
@@ -8011,12 +8125,13 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             label: []const u8,
             source: u16,
             replacement: u16,
+            expected: anyerror = jp2.Jp2Error.UnsupportedProfile,
         };
         const unsupported_main_marker_cases = [_]UnsupportedMainMarkerCase{
             .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
             .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
             .{ .label = "PPT main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppt") },
-            .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
+            .{ .label = "malformed CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg"), .expected = jp2.Jp2Error.InvalidCodestream },
         };
         for (unsupported_main_marker_cases) |scenario| {
             errdefer std.debug.print("JP2 main-header unsupported marker case failed: {s}\n", .{scenario.label});
@@ -8026,14 +8141,14 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             defer allocator.free(bad_codestream);
             writeU16BeTest(bad_codestream, marker_offset, scenario.replacement);
             try std.testing.expectError(
-                jp2.Jp2Error.UnsupportedProfile,
+                scenario.expected,
                 jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
             );
 
             const bad_wrapped = try allocator.dupe(u8, wrapped);
             defer allocator.free(bad_wrapped);
             writeU16BeTest(bad_wrapped, jp2c_payload.start + marker_offset, scenario.replacement);
-            try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(bad_wrapped));
+            try std.testing.expectError(scenario.expected, jp2.parseInfo(bad_wrapped));
         }
     }
 
@@ -21600,7 +21715,7 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
         .{ .label = "PLM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("plm") },
         .{ .label = "malformed RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn"), .expected = codestream.CodestreamError.InvalidCodestream },
-        .{ .label = "CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg") },
+        .{ .label = "malformed CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{
             .label = "malformed PPT tile-part marker",
             .source = codestream.markerValue("plt"),
@@ -21610,6 +21725,7 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         .{ .label = "COC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("coc") },
         .{ .label = "QCC tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("qcc") },
         .{ .label = "malformed RGN tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("rgn"), .expected = codestream.CodestreamError.InvalidCodestream },
+        .{ .label = "misplaced CRG tile-part marker", .source = codestream.markerValue("plt"), .replacement = codestream.markerValue("crg"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{
             .label = "malformed POC tile-part marker",
             .source = codestream.markerValue("plt"),

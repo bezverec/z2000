@@ -1585,6 +1585,7 @@ fn validateMainHeaderMarkers(
     var tlm_state = TlmState{};
     var ppm_state = PpmState{};
     var override_state = ComponentOverrideState{};
+    var saw_crg = false;
     while (cursor < payload.len - 2) {
         const marker = try readU16Be(payload, cursor);
         if ((marker >> 8) != 0xff) return Jp2Error.InvalidCodestream;
@@ -1637,7 +1638,8 @@ fn validateMainHeaderMarkers(
             marker_poc => {
                 if (!saw_qcd) return Jp2Error.InvalidCodestream;
             },
-            marker_cap, marker_rgn, marker_ppt, marker_crg => {
+            marker_crg => {},
+            marker_cap, marker_rgn, marker_ppt => {
                 return Jp2Error.UnsupportedProfile;
             },
             marker_soc, marker_siz, marker_sod, marker_eoc => return Jp2Error.InvalidCodestream,
@@ -1660,6 +1662,13 @@ fn validateMainHeaderMarkers(
             },
             marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, components, &override_state),
             marker_qcc => try validateUniformQccSegment(payload, length_offset, marker_length, cod_info.?, components, &override_state, allow_component_qcc),
+            marker_crg => {
+                const expected_length = 2 + @as(usize, components) * 4;
+                if (saw_crg or @as(usize, marker_length) != expected_length) {
+                    return Jp2Error.InvalidCodestream;
+                }
+                saw_crg = true;
+            },
             else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state, &ppm_state, cod_info, components),
         }
         cursor = next;

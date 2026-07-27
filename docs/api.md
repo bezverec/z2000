@@ -84,12 +84,14 @@ fail before an output file is written.
 
 `j2k-to-zraw` uses the same raw-codestream decode boundary but writes every
 native component. ZRAW begins with the eight-byte `Z2KRAW1\n` magic, four
-big-endian `u32` reference-grid coordinates, a `u16` component count and zero
-reserved `u16`. Each fixed 28-byte component record stores precision,
-signedness, sampling steps, origin, dimensions, and a checked `u64` sample
-count. Component-major sample payloads use canonical big-endian two's-
-complement/unsigned words of 1, 2, 4, or 8 bytes as required by the declared
-1..38-bit precision. The parser rejects reserved flags, inconsistent counts,
+big-endian `u32` reference-grid coordinates, a `u16` component count, and a
+`u16` format-flags field. Flag bit 0 selects the current 32-byte component
+record, which stores precision, signedness, sampling steps, origin, dimensions,
+the Part 1 CRG X/Y registration pair, and a checked `u64` sample count. The
+reader remains backward-compatible with flag-zero 28-byte records, assigning
+zero registration to them. Component-major sample payloads use canonical big-
+endian two's-complement/unsigned words of 1, 2, 4, or 8 bytes as required by
+the declared 1..38-bit precision. The parser rejects reserved flags, inconsistent counts,
 out-of-range/noncanonical sample words, truncation, trailing bytes, and caller
 limit violations. ZRAW is a private exact diagnostic interchange format, not
 an ISO JPEG 2000 box or a display-oriented raster standard.

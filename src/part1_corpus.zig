@@ -34,6 +34,11 @@ const Expectation = enum { decode_pass, fail_closed };
 const ReferenceSpace = enum { output_components, codestream_components };
 const Marker = enum { siz, cod, coc, qcd, qcc, tlm, poc, sot };
 
+const ReferenceCrop = struct {
+    x: usize,
+    y: usize,
+};
+
 const Reference = struct {
     path: []const u8,
     sha256: []const u8,
@@ -44,6 +49,9 @@ const Reference = struct {
     /// Explicit high-bit extraction for a conformance reference that formats
     /// a wider codestream component into a narrower PGX sample.
     sample_shift: u8 = 0,
+    /// Optional source-view origin when Part 4 publishes a cropped PGX
+    /// reference. The PGX dimensions define the crop extent.
+    crop: ?ReferenceCrop = null,
     max_peak_error: u32 = 0,
     max_mse: f64 = 0,
 };
@@ -930,28 +938,55 @@ fn pgxSample(reference: PgxImage, index: usize) !i32 {
 }
 
 fn comparePgxView(view: ComponentView, bytes: []const u8, limits: Reference) !ErrorMetrics {
-    const metrics = try measurePgxView(view, bytes, limits.sample_shift);
+    const metrics = try measurePgxView(view, bytes, limits.sample_shift, limits.crop);
     if (metrics.peak > limits.max_peak_error or metrics.mse > limits.max_mse) {
         return CorpusError.CorpusMismatch;
     }
     return metrics;
 }
 
-fn measurePgxView(view: ComponentView, bytes: []const u8, sample_shift: u8) !ErrorMetrics {
+fn measurePgxView(
+    view: ComponentView,
+    bytes: []const u8,
+    sample_shift: u8,
+    crop: ?ReferenceCrop,
+) !ErrorMetrics {
     const reference = try parsePgx(bytes);
     const expected_view_depth = std.math.add(u8, reference.bit_depth, sample_shift) catch
         return CorpusError.InvalidReference;
-    if (view.width != reference.width or view.height != reference.height or
-        view.bit_depth != expected_view_depth or view.signed != reference.signed)
-    {
+    if (view.bit_depth != expected_view_depth or view.signed != reference.signed) {
         return CorpusError.InvalidReference;
     }
-    const sample_count = std.math.mul(usize, view.width, view.height) catch
+    const origin = crop orelse ReferenceCrop{ .x = 0, .y = 0 };
+    if (crop == null) {
+        if (view.width != reference.width or view.height != reference.height) {
+            return CorpusError.InvalidReference;
+        }
+    } else {
+        const crop_end_x = std.math.add(usize, origin.x, reference.width) catch
+            return CorpusError.InvalidReference;
+        const crop_end_y = std.math.add(usize, origin.y, reference.height) catch
+            return CorpusError.InvalidReference;
+        if (crop_end_x > view.width or crop_end_y > view.height) {
+            return CorpusError.InvalidReference;
+        }
+    }
+    const sample_count = std.math.mul(usize, reference.width, reference.height) catch
         return CorpusError.ImageTooLarge;
     var peak: u64 = 0;
     var squared_error_sum: u128 = 0;
     for (0..sample_count) |index| {
-        const actual = (try view.sample(index)) >> @as(u5, @intCast(sample_shift));
+        const x = index % reference.width;
+        const y = index / reference.width;
+        const source_y = std.math.add(usize, origin.y, y) catch
+            return CorpusError.ImageTooLarge;
+        const source_row = std.math.mul(usize, source_y, view.width) catch
+            return CorpusError.ImageTooLarge;
+        const source_x = std.math.add(usize, origin.x, x) catch
+            return CorpusError.ImageTooLarge;
+        const source_index = std.math.add(usize, source_row, source_x) catch
+            return CorpusError.ImageTooLarge;
+        const actual = (try view.sample(source_index)) >> @as(u5, @intCast(sample_shift));
         const expected = try pgxSample(reference, index);
         const difference = @as(i64, actual) - @as(i64, expected);
         const magnitude: u64 = @intCast(if (difference < 0) -difference else difference);
@@ -965,16 +1000,28 @@ fn measurePgxView(view: ComponentView, bytes: []const u8, sample_shift: u8) !Err
 }
 
 fn reportPgxMismatch(view: ComponentView, asset: ReferenceAsset) void {
-    const metrics = measurePgxView(view, asset.bytes, asset.metadata.sample_shift) catch return;
+    const metrics = measurePgxView(
+        view,
+        asset.bytes,
+        asset.metadata.sample_shift,
+        asset.metadata.crop,
+    ) catch return;
     const reference = parsePgx(asset.bytes) catch return;
-    const sample_count = std.math.mul(usize, view.width, view.height) catch return;
+    const origin = asset.metadata.crop orelse ReferenceCrop{ .x = 0, .y = 0 };
+    const sample_count = std.math.mul(usize, reference.width, reference.height) catch return;
     var actual_min: i32 = std.math.maxInt(i32);
     var actual_max: i32 = std.math.minInt(i32);
     var expected_min: i32 = std.math.maxInt(i32);
     var expected_max: i32 = std.math.minInt(i32);
     var first_mismatch: ?struct { index: usize, actual: i32, expected: i32 } = null;
     for (0..sample_count) |index| {
-        const actual = (view.sample(index) catch return) >> @as(u5, @intCast(asset.metadata.sample_shift));
+        const x = index % reference.width;
+        const y = index / reference.width;
+        const source_y = std.math.add(usize, origin.y, y) catch return;
+        const source_row = std.math.mul(usize, source_y, view.width) catch return;
+        const source_x = std.math.add(usize, origin.x, x) catch return;
+        const source_index = std.math.add(usize, source_row, source_x) catch return;
+        const actual = (view.sample(source_index) catch return) >> @as(u5, @intCast(asset.metadata.sample_shift));
         const expected = pgxSample(reference, index) catch return;
         actual_min = @min(actual_min, actual);
         actual_max = @max(actual_max, actual);
@@ -1003,7 +1050,12 @@ fn reportPgxMismatch(view: ComponentView, asset: ReferenceAsset) void {
     if (first_mismatch) |mismatch| {
         std.debug.print(
             " first=({},{}):{}/{}\n",
-            .{ mismatch.index % view.width, mismatch.index / view.width, mismatch.actual, mismatch.expected },
+            .{
+                origin.x + mismatch.index % reference.width,
+                origin.y + mismatch.index / reference.width,
+                mismatch.actual,
+                mismatch.expected,
+            },
         );
     } else {
         std.debug.print("\n", .{});
@@ -1182,6 +1234,47 @@ test "PGX comparison applies an explicit wider-component sample shift" {
     });
     try std.testing.expectEqual(@as(u32, 0), metrics.peak);
     try std.testing.expectEqual(@as(f64, 0), metrics.mse);
+}
+
+test "PGX comparison applies an explicit source-view crop" {
+    const samples = [_]u16{
+        0, 0, 0, 0,
+        0, 1, 2, 0,
+        0, 3, 4, 0,
+    };
+    const view = ComponentView{
+        .width = 4,
+        .height = 3,
+        .bit_depth = 8,
+        .signed = false,
+        .samples = .{ .unsigned_contiguous = &samples },
+    };
+    const pgx = "PG ML + 8 2 2\n\x01\x02\x03\x04";
+    const metrics = try comparePgxView(view, pgx, .{
+        .path = "test",
+        .sha256 = "test",
+        .format = .pgx,
+        .crop = .{ .x = 1, .y = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 0), metrics.peak);
+    try std.testing.expectEqual(@as(f64, 0), metrics.mse);
+    try std.testing.expectError(
+        CorpusError.InvalidReference,
+        comparePgxView(view, pgx, .{
+            .path = "test",
+            .sha256 = "test",
+            .format = .pgx,
+        }),
+    );
+    try std.testing.expectError(
+        CorpusError.InvalidReference,
+        comparePgxView(view, pgx, .{
+            .path = "test",
+            .sha256 = "test",
+            .format = .pgx,
+            .crop = .{ .x = 3, .y = 2 },
+        }),
+    );
 }
 
 test "PGX comparison enforces peak and MSE independently" {

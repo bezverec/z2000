@@ -4,7 +4,9 @@ pub const max_precision: u8 = 38;
 pub const raw_planar_magic = "Z2KRAW1\n";
 
 const raw_planar_header_size: usize = raw_planar_magic.len + 20;
-const raw_planar_component_size: usize = 28;
+const raw_planar_component_size_v1: usize = 28;
+const raw_planar_component_size_v2: usize = 32;
+const raw_planar_registration_flag: u16 = 1;
 
 pub const NativeSampleError = error{
     InvalidCodestream,
@@ -27,6 +29,11 @@ pub const ComponentLayout = struct {
     y0: u32,
     x_step: u8,
     y_step: u8,
+    /// Part 1 CRG horizontal registration in 1/65536 of `x_step`. This is
+    /// rendering metadata and does not move the decoded component sample grid.
+    registration_x: u16 = 0,
+    /// Part 1 CRG vertical registration in 1/65536 of `y_step`.
+    registration_y: u16 = 0,
     width: usize,
     height: usize,
 
@@ -227,7 +234,7 @@ pub const SamplePlanes = struct {
         }
         try self.validateSamples();
 
-        const records_size = std.math.mul(usize, self.planes.len, raw_planar_component_size) catch
+        const records_size = std.math.mul(usize, self.planes.len, raw_planar_component_size_v2) catch
             return NativeSampleError.ResourceLimitExceeded;
         var output_size = std.math.add(usize, raw_planar_header_size, records_size) catch
             return NativeSampleError.ResourceLimitExceeded;
@@ -253,7 +260,7 @@ pub const SamplePlanes = struct {
         try appendU32Be(allocator, &out, self.reference_x1);
         try appendU32Be(allocator, &out, self.reference_y1);
         try appendU16Be(allocator, &out, @intCast(self.planes.len));
-        try appendU16Be(allocator, &out, 0);
+        try appendU16Be(allocator, &out, raw_planar_registration_flag);
 
         for (self.planes) |plane| {
             try out.append(allocator, plane.layout.precision);
@@ -264,6 +271,8 @@ pub const SamplePlanes = struct {
             try appendU32Be(allocator, &out, plane.layout.y0);
             try appendU32Be(allocator, &out, @intCast(plane.layout.width));
             try appendU32Be(allocator, &out, @intCast(plane.layout.height));
+            try appendU16Be(allocator, &out, plane.layout.registration_x);
+            try appendU16Be(allocator, &out, plane.layout.registration_y);
             try appendU64Be(allocator, &out, plane.samples.len);
         }
         for (self.planes) |plane| {
@@ -311,13 +320,19 @@ pub fn decodeRawPlanar(
     const reference_x1 = readU32Be(bytes, 16);
     const reference_y1 = readU32Be(bytes, 20);
     const component_count = readU16Be(bytes, 24);
-    if (readU16Be(bytes, 26) != 0 or component_count == 0) {
+    const format_flags = readU16Be(bytes, 26);
+    if ((format_flags & ~raw_planar_registration_flag) != 0 or component_count == 0) {
         return NativeSampleError.InvalidCodestream;
     }
     if (component_count > limits.max_components) {
         return NativeSampleError.ResourceLimitExceeded;
     }
-    const records_size = std.math.mul(usize, component_count, raw_planar_component_size) catch
+    const has_registration = (format_flags & raw_planar_registration_flag) != 0;
+    const component_record_size = if (has_registration)
+        raw_planar_component_size_v2
+    else
+        raw_planar_component_size_v1;
+    const records_size = std.math.mul(usize, component_count, component_record_size) catch
         return NativeSampleError.ResourceLimitExceeded;
     const payload_start = std.math.add(usize, raw_planar_header_size, records_size) catch
         return NativeSampleError.ResourceLimitExceeded;
@@ -326,7 +341,7 @@ pub fn decodeRawPlanar(
     const layouts = try allocator.alloc(ComponentLayout, component_count);
     defer allocator.free(layouts);
     for (layouts, 0..) |*layout, component| {
-        const offset = raw_planar_header_size + component * raw_planar_component_size;
+        const offset = raw_planar_header_size + component * component_record_size;
         const flags = bytes[offset + 1];
         if ((flags & ~@as(u8, 1)) != 0) return NativeSampleError.InvalidCodestream;
         const width = readU32Be(bytes, offset + 12);
@@ -336,6 +351,8 @@ pub fn decodeRawPlanar(
             .signed = (flags & 1) != 0,
             .x_step = bytes[offset + 2],
             .y_step = bytes[offset + 3],
+            .registration_x = if (has_registration) readU16Be(bytes, offset + 20) else 0,
+            .registration_y = if (has_registration) readU16Be(bytes, offset + 22) else 0,
             .x0 = readU32Be(bytes, offset + 4),
             .y0 = readU32Be(bytes, offset + 8),
             .width = width,
@@ -344,7 +361,8 @@ pub fn decodeRawPlanar(
         validateComponentLayout(layout.*) catch return NativeSampleError.InvalidCodestream;
         const sample_count = layout.sampleCount() catch
             return NativeSampleError.ResourceLimitExceeded;
-        if (readU64Be(bytes, offset + 20) != sample_count) {
+        const sample_count_offset: usize = if (has_registration) 24 else 20;
+        if (readU64Be(bytes, offset + sample_count_offset) != sample_count) {
             return NativeSampleError.InvalidCodestream;
         }
     }
@@ -471,6 +489,7 @@ pub fn inspectCodestreamLayout(
             .height = height,
         };
     }
+    try readMainHeaderComponentRegistration(bytes, 4 + @as(usize, lsiz), components);
     return .{
         .allocator = allocator,
         .capabilities = capabilities,
@@ -484,6 +503,48 @@ pub fn inspectCodestreamLayout(
         .tile_origin_y = ytosiz,
         .components = components,
     };
+}
+
+/// Scans only main-header marker segments. CRG is optional, main-header-only,
+/// non-repeatable, and has exactly one X/Y pair for every SIZ component.
+fn readMainHeaderComponentRegistration(
+    bytes: []const u8,
+    start: usize,
+    components: []ComponentLayout,
+) !void {
+    var cursor = start;
+    var saw_crg = false;
+    while (cursor + 2 <= bytes.len) {
+        const marker = readU16Be(bytes, cursor);
+        if (marker == 0xff90 or marker == 0xffd9) return;
+        if (marker >= 0xff30 and marker <= 0xff3f) {
+            cursor += 2;
+            continue;
+        }
+        if (marker == 0xff4f or marker == 0xff93) {
+            return NativeSampleError.InvalidCodestream;
+        }
+        cursor += 2;
+        if (bytes.len - cursor < 2) return NativeSampleError.InvalidCodestream;
+        const segment_length = readU16Be(bytes, cursor);
+        if (segment_length < 2 or bytes.len - cursor < segment_length) {
+            return NativeSampleError.InvalidCodestream;
+        }
+        if (marker == 0xff63) {
+            if (saw_crg) return NativeSampleError.InvalidCodestream;
+            saw_crg = true;
+            const payload = bytes[cursor + 2 .. cursor + segment_length];
+            const expected_size = std.math.mul(usize, components.len, 4) catch
+                return NativeSampleError.ResourceLimitExceeded;
+            if (payload.len != expected_size) return NativeSampleError.InvalidCodestream;
+            for (components, 0..) |*component, index| {
+                component.registration_x = readU16Be(payload, index * 4);
+                component.registration_y = readU16Be(payload, index * 4 + 2);
+            }
+        }
+        cursor += segment_length;
+    }
+    return;
 }
 
 fn validateComponentLayout(component: ComponentLayout) !void {

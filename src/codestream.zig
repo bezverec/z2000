@@ -3621,8 +3621,14 @@ pub fn decodeLosslessNativeWithOptions(
             0
         else
             @as(i64, 1) << @as(u6, @intCast(plane_layout.precision - 1));
+        const minimum = try plane_layout.minimumSample();
+        const maximum = try plane_layout.maximumSample();
         for (coefficients, output.planes[component].samples) |coefficient, *sample| {
-            sample.* = @as(i64, coefficient) + level_shift;
+            const value = @as(i64, coefficient) + level_shift;
+            sample.* = if (options.resolution_reduction == 0)
+                value
+            else
+                std.math.clamp(value, minimum, maximum);
         }
     }
     try output.validateSamples();
@@ -4782,6 +4788,7 @@ fn readStrictCodestreamMetadataForProfile(
     var saw_siz = false;
     var saw_cod = false;
     var saw_qcd = false;
+    var saw_crg = false;
     // Captured COD/QCD payload slices (into `bytes`) let the bounded reader
     // distinguish redundant markers from uniform all-component overrides.
     var cod_scod: u8 = 0;
@@ -4983,54 +4990,10 @@ fn readStrictCodestreamMetadataForProfile(
                 coding.transform = parsed_transform;
             }
             saw_cod = true;
-            // Part 1 permits QCD before COD in the main header (the T.803
-            // profile-0 p0_01 stream uses that order). Keep the QCD payload
-            // until COD supplies the transform and decomposition count, then
-            // validate it with the same strict rules as the usual order.
-            if (saw_qcd) {
-                const qcd_info = try validateStrictQcdSegment(qcd_payload, bit_depth, levels, parsed_transform);
-                qcd_band_count = qcd_info.bands;
-                parsed_quantization = qcd_info.quantization;
-                parsed_guard_bits = qcd_info.guard_bits;
-                parsed_qcd_exponents = qcd_info.exponents;
-                parsed_qcd_exponent_count = qcd_info.exponent_count;
-                parsed_qcd_steps = qcd_info.steps;
-                parsed_qcd_step_count = qcd_info.step_count;
-                for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
-            }
         } else if (marker == @intFromEnum(Marker.qcd)) {
             if (saw_qcd) return CodestreamError.InvalidCodestream;
             qcd_payload = segment;
             saw_qcd = true;
-            if (saw_cod) {
-                var effective_levels = levels;
-                var effective_transform = parsed_transform;
-                if (coc_payload_first.len != 0) {
-                    var all_components_overridden = true;
-                    for (coc_component_seen[0..component_count]) |seen| {
-                        all_components_overridden = all_components_overridden and seen;
-                    }
-                    if (all_components_overridden) {
-                        const spcoc = coc_payload_first[1..];
-                        effective_levels = spcoc[0];
-                        effective_transform = @enumFromInt(spcoc[4]);
-                    }
-                }
-                const qcd_info = try validateStrictQcdSegment(
-                    segment,
-                    bit_depth,
-                    effective_levels,
-                    effective_transform,
-                );
-                qcd_band_count = qcd_info.bands;
-                parsed_quantization = qcd_info.quantization;
-                parsed_guard_bits = qcd_info.guard_bits;
-                parsed_qcd_exponents = qcd_info.exponents;
-                parsed_qcd_exponent_count = qcd_info.exponent_count;
-                parsed_qcd_steps = qcd_info.steps;
-                parsed_qcd_step_count = qcd_info.step_count;
-                for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
-            }
         } else if (marker == @intFromEnum(Marker.coc)) {
             // ISO 15444-1 A.6.2 component-specific coding style. Bounded
             // profiles accept component-local decomposition, precinct,
@@ -5102,6 +5065,10 @@ fn readStrictCodestreamMetadataForProfile(
             if (rgn_component_seen[rgn.component]) return CodestreamError.InvalidCodestream;
             rgn_component_seen[rgn.component] = true;
             component_coding[rgn.component].roi_shift = rgn.shift;
+        } else if (marker == @intFromEnum(Marker.crg)) {
+            if (!saw_siz or saw_crg) return CodestreamError.InvalidCodestream;
+            try validateStrictCrgSegment(segment, component_count);
+            saw_crg = true;
         } else if (marker == @intFromEnum(Marker.tlm)) {
             if (!saw_cod or !saw_qcd) return CodestreamError.InvalidCodestream;
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
@@ -5130,6 +5097,50 @@ fn readStrictCodestreamMetadataForProfile(
     }
     if (!saw_siz or !saw_cod or !saw_qcd or width == 0 or height == 0 or layers == 0) {
         return CodestreamError.InvalidCodestream;
+    }
+    var all_components_have_qcc = true;
+    for (qcc_component_seen[0..component_count]) |seen| {
+        all_components_have_qcc = all_components_have_qcc and seen;
+    }
+    var default_qcd_levels = levels;
+    var default_qcd_transform = parsed_transform;
+    var all_components_have_coc = true;
+    for (coc_component_seen[0..component_count]) |seen| {
+        all_components_have_coc = all_components_have_coc and seen;
+    }
+    // When every component has a COC override, QCD describes that effective
+    // all-component coding style rather than an otherwise unused COD default.
+    // T.803 p0_02 exercises a 9/7 COD followed by an all-component 5/3 COC.
+    if (all_components_have_coc) {
+        default_qcd_levels = component_coding[0].levels;
+        default_qcd_transform = component_coding[0].transform;
+    }
+    const default_qcd = validateStrictQcdSegment(
+        qcd_payload,
+        bit_depth,
+        default_qcd_levels,
+        default_qcd_transform,
+    ) catch |err| switch (err) {
+        // A syntactically legal but unsupported default is irrelevant when
+        // every component replaces it with QCC. T.803 p0_03 uses scalar-
+        // derived QCD with 5/3 followed by a no-quantization QCC for its only
+        // component. Validate the deferred default's style-independent wire
+        // shape before accepting the complete override.
+        CodestreamError.UnsupportedPayload => if (all_components_have_qcc) blk: {
+            try validateStrictQcdWireShape(qcd_payload, default_qcd_levels);
+            break :blk null;
+        } else return err,
+        else => return err,
+    };
+    if (default_qcd) |qcd_info| {
+        qcd_band_count = qcd_info.bands;
+        parsed_quantization = qcd_info.quantization;
+        parsed_guard_bits = qcd_info.guard_bits;
+        parsed_qcd_exponents = qcd_info.exponents;
+        parsed_qcd_exponent_count = qcd_info.exponent_count;
+        parsed_qcd_steps = qcd_info.steps;
+        parsed_qcd_step_count = qcd_info.step_count;
+        for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
     }
     var captured_first_qcc_info = false;
     for (qcc_component_seen[0..component_count], 0..) |seen, component| {
@@ -5245,8 +5256,6 @@ fn readStrictCodestreamMetadataForProfile(
             return CodestreamError.UnsupportedPayload;
         }
     }
-    if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
-
     if (!mixed_component_precision and qcc_payload_first.len != 0) {
         // A QCC that byte-replicates the QCD is redundant and fine on its own.
         // The bounded ICT/9-7 profile validates every effective component step
@@ -5297,6 +5306,7 @@ fn readStrictCodestreamMetadataForProfile(
             }
         }
     }
+    if (qcd_band_count != 1 + 3 * @as(usize, levels)) return CodestreamError.InvalidCodestream;
     if (component_local_mixed_transform or general_component_local_mixed_transform) {
         for (component_qcd[0..component_count], component_coding[0..component_count]) |component_info, coding| {
             const expected_bands = 1 + 3 * @as(usize, coding.levels);
@@ -5459,7 +5469,7 @@ fn readStrictCodestreamMetadataForProfile(
                         null,
                     )
                 else
-                    try makePacketPlanForTile(tile, levels, options);
+                    try makePacketPlanForTileComponents(tile, levels, component_count, options);
                 const sequence = if (subsampled_components)
                     try buildSampledStrictPacketSequence(
                         allocator,
@@ -5709,7 +5719,6 @@ fn isUnsupportedMainHeaderMarker(marker: u16) bool {
     return switch (marker) {
         @intFromEnum(Marker.cap),
         @intFromEnum(Marker.plm),
-        @intFromEnum(Marker.crg),
         => true,
         else => false,
     };
@@ -5763,6 +5772,27 @@ test "Maxshift reconstruction restores ROI coefficients only" {
     var coefficients = [_]i32{ -4096, -512, 0, 511, 512, 1536 };
     undoMaxshiftRoi(&coefficients, 9);
     try std.testing.expectEqualSlices(i32, &.{ -8, -1, 0, 511, 1, 3 }, &coefficients);
+}
+
+/// ISO/IEC 15444-1 A.9.1 CRG has one unsigned 16-bit X/Y registration pair
+/// per SIZ component. The values are rendering metadata in 1/65536 of the
+/// component separation and deliberately do not change codestream decoding.
+fn validateStrictCrgSegment(segment: []const u8, component_count: u16) !void {
+    const expected_size = std.math.mul(usize, component_count, 4) catch
+        return CodestreamError.InvalidCodestream;
+    if (segment.len != expected_size) return CodestreamError.InvalidCodestream;
+}
+
+test "strict CRG parser requires one registration pair per component" {
+    try validateStrictCrgSegment(&.{ 0xff, 0x90, 0x7f, 0x2e, 0, 0, 0, 0 }, 2);
+    try std.testing.expectError(
+        CodestreamError.InvalidCodestream,
+        validateStrictCrgSegment(&.{ 0xff, 0x90, 0x7f, 0x2e }, 2),
+    );
+    try std.testing.expectError(
+        CodestreamError.InvalidCodestream,
+        validateStrictCrgSegment(&.{ 0xff, 0x90, 0x7f, 0x2e, 0 }, 1),
+    );
 }
 
 fn isReservedSegmentlessMarker(marker: u16) bool {
@@ -5849,6 +5879,20 @@ const StrictQcdInfo = struct {
     steps: [max_qcd_bands]BandStepSize = [_]BandStepSize{.{ .exponent = 0, .mantissa = 0 }} ** max_qcd_bands,
     step_count: u8 = 0,
 };
+
+fn validateStrictQcdWireShape(segment: []const u8, levels: u8) !void {
+    if (segment.len < 2) return CodestreamError.InvalidCodestream;
+    const bands = 1 + 3 * @as(usize, levels);
+    if (bands > max_qcd_bands) return CodestreamError.InvalidCodestream;
+    const quantization_value = segment[0] & 0x1f;
+    const expected_size: usize = switch (quantization_value) {
+        @intFromEnum(QuantizationStyle.none) => 1 + bands,
+        @intFromEnum(QuantizationStyle.scalar_derived) => 3,
+        @intFromEnum(QuantizationStyle.scalar_expounded) => 1 + 2 * bands,
+        else => return CodestreamError.InvalidCodestream,
+    };
+    if (segment.len != expected_size) return CodestreamError.InvalidCodestream;
+}
 
 fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, transform: WaveletTransform) !StrictQcdInfo {
     _ = bit_depth;
@@ -9327,10 +9371,15 @@ fn decodeStrictMultiTileNative(
                 const destination_row = plane.samples[destination_start..][0..tile_width];
                 for (source_row, destination_row) |coefficient, *sample| {
                     const value = @as(i64, coefficient) + level_shift;
-                    if (value < minimum or value > maximum) {
+                    if (options.resolution_reduction == 0 and
+                        (value < minimum or value > maximum))
+                    {
                         return native_samples.NativeSampleError.SampleOutOfRange;
                     }
-                    sample.* = value;
+                    sample.* = if (options.resolution_reduction == 0)
+                        value
+                    else
+                        std.math.clamp(value, minimum, maximum);
                 }
             }
         }

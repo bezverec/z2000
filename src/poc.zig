@@ -75,17 +75,26 @@ pub fn appendSegment(
         const resolution_start = payload[cursor];
         const component_start = readComponent(payload, cursor + 1, component_bytes);
         const layer_offset = cursor + 1 + component_bytes;
-        const layer_end = readU16Be(payload, layer_offset);
-        const resolution_end = payload[layer_offset + 2];
-        const component_end = readComponent(payload, layer_offset + 3, component_bytes);
+        const wire_layer_end = readU16Be(payload, layer_offset);
+        const wire_resolution_end = payload[layer_offset + 2];
+        const wire_component_end = readComponent(payload, layer_offset + 3, component_bytes);
         const progression_byte = payload[layer_offset + 3 + component_bytes];
         if (progression_byte > @intFromEnum(Progression.cprl)) return PocError.InvalidSegment;
+        // Part 1 gives REpoc/CEpoc/LYEpoc their full wire-domain ranges rather
+        // than requiring producers to write the exact codestream bounds.
+        // Normalize legal oversized ends to the effective packet dimensions,
+        // matching the conformance streams and independent decoders. For the
+        // one-byte CEpoc representation, zero denotes the upper value 256.
+        const component_end_unclamped: u16 = if (component_bytes == 1 and wire_component_end == 0)
+            256
+        else
+            wire_component_end;
         const record = Record{
             .resolution_start = resolution_start,
             .component_start = component_start,
-            .layer_end = layer_end,
-            .resolution_end = resolution_end,
-            .component_end = component_end,
+            .layer_end = @min(wire_layer_end, layer_count),
+            .resolution_end = @min(wire_resolution_end, resolution_count),
+            .component_end = @min(component_end_unclamped, component_count),
             .progression = @enumFromInt(progression_byte),
         };
         try validateRecord(record, component_count, resolution_count, layer_count);

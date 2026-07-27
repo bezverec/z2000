@@ -45,11 +45,14 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-24 gate contains 60 entries: 44 committed entries plus all 16
+The 2026-07-26 gate contains 60 entries: 44 committed entries plus all 16
 optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
-PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_11`,
+PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_03`, `p0_11`,
 `p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
-references. The first five are exact reduction-0 cases; `p0_02` additionally
+references. `p0_03` is exact both for the published upper-left 128x128 crop of
+the 256x256 full output and for the complete 128x128 reduction-1 output. It
+pins signed 4-bit native decode, QCC, POC, TLM, RGN, and CRG across four tiles.
+The other original reduction-0 cases are exact; `p0_02` additionally
 covers a
 uniform full COC override, six LRCP layers, no-PLT inline SOP/EPH packets,
 TERMALL+ERTERM+SEGMARK, component sampling, and reserved segment-less `FF30`;
@@ -60,9 +63,9 @@ scalar-expounded QCC steps in pre-ICT codestream-component space,
 `p0_09` covers reduced irreversible 9/7,
 `p0_10` covers uniform 4x4-sampled RCT across interleaved PLT-less tile-parts,
 and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
-also pins legal QCD-before-COD ordering. The other seven optional profiles
-return their manifested fail-closed boundary. The complete result is therefore
-38 decode passes, 22 expected fail-closed cases, zero mismatches, and zero skips
+also pins legal QCD-before-COD ordering. The other five optional profiles
+remain at their declared fail-closed boundary. The complete result is therefore
+40 decode passes, 20 expected fail-closed cases, zero mismatches, and zero skips
 when the optional root is present.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
@@ -243,12 +246,14 @@ single- and multi-tile streams plus native-planar no-MCT 9/7 for bounded
 single- and sampled multi-tile streams. The committed Kakadu four-tile 9/7
 entry compares every component at full and reduction-1 output against six PGX
 references with peak <= 1 and MSE <= 0.12. T.803 `p0_04`, `p0_06`, `p0_09`,
-and `p0_14` exercise those reduced paths. `p0_06` is the first complete G3
-RGN Maxshift oracle: its main shift 11 is replaced by tile shift 9, and the
+`p0_14`, and exact signed `p0_03` exercise those reduced paths. `p0_06` is the
+first complete G3 RGN Maxshift oracle: its main shift 11 is replaced by tile
+shift 9, and the
 12-bit component-0 result is explicitly high-bit formatted to the published
-8-bit reduction-3 PGX before measuring peak 28/MSE 46.654299. The remaining
-reduced references still require signedness or broader divergent component
-coding styles.
+8-bit reduction-3 PGX before measuring peak 28/MSE 46.654299. `p0_03` adds the
+second bounded G3 marker slice: CRG registration is retained as metadata while
+the signed 4-bit reduction-1 image saturates to its declared sample range and
+matches the Part 4 PGX exactly.
 Class-1 all-component comparison can reuse the reference-list oracle as G1 and
 G2 remove those boundaries.
 
@@ -262,7 +267,10 @@ each with its own checksum, component index, resolution reduction, peak-error
 limit, MSE limit, and explicit `space`: normal output components after MCT or
 codestream components before inverse MCT. An optional explicit `sample_shift`
 describes conformance references that high-bit-format a wider decoded component
-to a narrower PGX; no automatic precision conversion is inferred. The PGX
+to a narrower PGX; no automatic precision conversion is inferred. An optional
+`crop` object selects an explicit source-view X/Y origin when Part 4 publishes
+a cropped PGX; its dimensions still come from the PGX header and bounds are
+checked against the decoded plane. The PGX
 reader accepts big- or little-endian signed and
 unsigned integer samples from 1 through 31 bits, and evaluates peak error and
 MSE independently. Multiple component and reduction records are represented
