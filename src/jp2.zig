@@ -1,6 +1,7 @@
 const std = @import("std");
 const color = @import("color.zig");
 const image = @import("image.zig");
+const profile_signaling = @import("profile_signaling.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const tiff_ifd = @import("formats/tiff_ifd.zig");
 
@@ -201,6 +202,7 @@ const marker_siz = 0xff51;
 const marker_cod = 0xff52;
 const marker_coc = 0xff53;
 const marker_tlm = 0xff55;
+const marker_prf = 0xff56;
 const marker_plm = 0xff57;
 const marker_plt = 0xff58;
 const marker_qcd = 0xff5c;
@@ -1500,7 +1502,6 @@ fn validateCodestreamPayload(
     }
     const segment = payload[6..segment_end];
     const rsiz = try readU16Be(segment, 0);
-    if (rsiz != 0) return Jp2Error.UnsupportedProfile;
     const components = try readU16Be(segment, 34);
     if (components == 0 or segment.len != 36 + @as(usize, components) * 3) {
         return Jp2Error.InvalidCodestream;
@@ -1568,7 +1569,7 @@ fn validateCodestreamPayload(
             geometry.yrsiz[component_index] = yrsiz;
         }
     }
-    try validateMainHeaderMarkers(payload, segment_end, tile_count, components, expected.bits_per_component == 0);
+    try validateMainHeaderMarkers(payload, segment_end, tile_count, components, expected.bits_per_component == 0, rsiz);
 }
 
 fn validateMainHeaderMarkers(
@@ -1577,6 +1578,7 @@ fn validateMainHeaderMarkers(
     tile_count: u32,
     components: u16,
     allow_component_qcc: bool,
+    rsiz: u16,
 ) !void {
     var cursor = cursor_after_siz;
     var cod_info: ?CodSegmentInfo = null;
@@ -1588,15 +1590,18 @@ fn validateMainHeaderMarkers(
     var expected_plm_index: u16 = 0;
     var override_state = ComponentOverrideState{};
     var saw_crg = false;
+    var profile_state = profile_signaling.State.init(rsiz);
     while (cursor < payload.len - 2) {
         const marker = try readU16Be(payload, cursor);
         if ((marker >> 8) != 0xff) return Jp2Error.InvalidCodestream;
+        observeProfileMarker(&profile_state, marker) catch |err| return mapProfileSignalingError(err);
         if (marker >= 0xff30 and marker <= 0xff3f) {
             cursor += 2;
             continue;
         }
         switch (marker) {
             marker_sot => {
+                profile_state.finish() catch |err| return mapProfileSignalingError(err);
                 if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
                 const effective_cod = try validateUniformComponentOverrides(
                     &override_state,
@@ -1644,7 +1649,8 @@ fn validateMainHeaderMarkers(
                 if (!saw_qcd) return Jp2Error.InvalidCodestream;
             },
             marker_crg => {},
-            marker_cap, marker_rgn, marker_ppt => {
+            marker_cap, marker_prf => {},
+            marker_rgn, marker_ppt => {
                 return Jp2Error.UnsupportedProfile;
             },
             marker_soc, marker_siz, marker_sod, marker_eoc => return Jp2Error.InvalidCodestream,
@@ -1674,6 +1680,10 @@ fn validateMainHeaderMarkers(
                 }
                 saw_crg = true;
             },
+            marker_cap => profile_signaling.validateCap(payload[length_offset + 2 .. length_offset + marker_length]) catch |err|
+                return mapProfileSignalingError(err),
+            marker_prf => profile_signaling.validatePrf(payload[length_offset + 2 .. length_offset + marker_length]) catch |err|
+                return mapProfileSignalingError(err),
             marker_plm => {
                 if (expected_plm_index > std.math.maxInt(u8) or
                     payload[length_offset + 2] != @as(u8, @intCast(expected_plm_index)))
@@ -1686,6 +1696,18 @@ fn validateMainHeaderMarkers(
         }
         cursor = next;
     }
+    profile_state.finish() catch |err| return mapProfileSignalingError(err);
+}
+
+fn observeProfileMarker(state: *profile_signaling.State, marker: u16) profile_signaling.Error!void {
+    try state.observeMarker(marker);
+}
+
+fn mapProfileSignalingError(err: profile_signaling.Error) Jp2Error {
+    return switch (err) {
+        error.InvalidCodestream => Jp2Error.InvalidCodestream,
+        error.UnsupportedPayload => Jp2Error.UnsupportedProfile,
+    };
 }
 
 fn validateTilePartSequence(
@@ -1926,6 +1948,8 @@ fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
         marker_qcc => 4, // Lqcc(2) Cqcc(1) Sqcc(1)
         marker_poc => 9,
         marker_tlm => 9,
+        marker_cap => 8,
+        marker_prf => 4,
         marker_plm => 4,
         marker_plt => 4,
         marker_ppm => 4,

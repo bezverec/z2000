@@ -8067,6 +8067,45 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
 
     {
         const siz_len = readU16BeTest(codestream_bytes, 4);
+        const after_siz = @as(usize, siz_len) + 4;
+        const with_cap = try spliceMarkerSegmentForTest(
+            allocator,
+            codestream_bytes,
+            after_siz,
+            codestream.markerValue("cap"),
+            &.{ 0x80, 0x00, 0x00, 0x00, 0x00, 0x01 },
+        );
+        defer allocator.free(with_cap);
+        try std.testing.expectError(
+            jp2.Jp2Error.UnsupportedProfile,
+            jp2.wrapRgbCodestream(allocator, rgb, with_cap),
+        );
+
+        const missing_cap = try allocator.dupe(u8, codestream_bytes);
+        defer allocator.free(missing_cap);
+        writeU16BeTest(missing_cap, 6, 0x4000);
+        try std.testing.expectError(
+            jp2.Jp2Error.InvalidCodestream,
+            jp2.wrapRgbCodestream(allocator, rgb, missing_cap),
+        );
+
+        const with_prf = try spliceMarkerSegmentForTest(
+            allocator,
+            codestream_bytes,
+            after_siz,
+            codestream.markerValue("prf"),
+            &.{ 0x00, 0x01 },
+        );
+        defer allocator.free(with_prf);
+        writeU16BeTest(with_prf, 6, 4095);
+        try std.testing.expectError(
+            jp2.Jp2Error.UnsupportedProfile,
+            jp2.wrapRgbCodestream(allocator, rgb, with_prf),
+        );
+    }
+
+    {
+        const siz_len = readU16BeTest(codestream_bytes, 4);
         const next_marker_offset = @as(usize, siz_len) + 4;
         var duplicated_siz_codestream: std.ArrayList(u8) = .empty;
         defer duplicated_siz_codestream.deinit(allocator);
@@ -8128,7 +8167,7 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             expected: anyerror = jp2.Jp2Error.UnsupportedProfile,
         };
         const unsupported_main_marker_cases = [_]UnsupportedMainMarkerCase{
-            .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
+            .{ .label = "malformed CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap"), .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
             .{ .label = "PPT main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppt") },
             .{ .label = "malformed CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg"), .expected = jp2.Jp2Error.InvalidCodestream },
@@ -21712,7 +21751,7 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
         expected: anyerror = codestream.CodestreamError.UnsupportedPayload,
     };
     const cases = [_]UnsupportedMarkerCase{
-        .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
+        .{ .label = "malformed CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "malformed RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "malformed CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{

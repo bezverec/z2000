@@ -10,6 +10,7 @@ const packet_plan = @import("packet_plan.zig");
 const plm = @import("plm.zig");
 const poc = @import("poc.zig");
 const ppm = @import("ppm.zig");
+const profile_signaling = @import("profile_signaling.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
@@ -60,6 +61,7 @@ const Marker = enum(u16) {
     coc = 0xff53,
     com = 0xff64,
     tlm = 0xff55,
+    prf = 0xff56,
     plm = 0xff57,
     plt = 0xff58,
     qcd = 0xff5c,
@@ -4793,6 +4795,7 @@ fn readStrictCodestreamMetadataForProfile(
     var saw_cod = false;
     var saw_qcd = false;
     var saw_crg = false;
+    var profile_state: ?profile_signaling.State = null;
     // Captured COD/QCD payload slices (into `bytes`) let the bounded reader
     // distinguish redundant markers from uniform all-component overrides.
     var cod_scod: u8 = 0;
@@ -4834,6 +4837,7 @@ fn readStrictCodestreamMetadataForProfile(
         // Conformance streams may place them between main-header segments;
         // they carry no Lxxx field and have no payload semantics to apply.
         if (isReservedSegmentlessMarker(marker)) {
+            if (profile_state) |*state| try state.observeMarker(marker);
             cursor += 2;
             continue;
         }
@@ -4845,9 +4849,13 @@ fn readStrictCodestreamMetadataForProfile(
         }
         const segment = bytes[cursor + 2 .. cursor + segment_length];
         if (!saw_siz and marker != @intFromEnum(Marker.siz)) return CodestreamError.InvalidCodestream;
+        if (saw_siz) {
+            if (profile_state) |*state| try state.observeMarker(marker);
+        }
         if (marker == @intFromEnum(Marker.siz)) {
             if (saw_siz) return CodestreamError.InvalidCodestream;
             if (segment.len < 36) return CodestreamError.InvalidCodestream;
+            profile_state = profile_signaling.State.init(readU16Be(segment, 0));
             const xsiz = readU32Be(segment, 2);
             const ysiz = readU32Be(segment, 6);
             const xosiz = readU32Be(segment, 10);
@@ -4924,6 +4932,10 @@ fn readStrictCodestreamMetadataForProfile(
                 }
             }
             saw_siz = true;
+        } else if (marker == @intFromEnum(Marker.cap)) {
+            try profile_signaling.validateCap(segment);
+        } else if (marker == @intFromEnum(Marker.prf)) {
+            try profile_signaling.validatePrf(segment);
         } else if (marker == @intFromEnum(Marker.cod)) {
             if (!saw_siz or saw_cod) return CodestreamError.InvalidCodestream;
             if (segment.len < 10) return CodestreamError.InvalidCodestream;
@@ -5100,8 +5112,6 @@ fn readStrictCodestreamMetadataForProfile(
             };
         } else if (marker == @intFromEnum(Marker.com)) {
             // COM is ignored by the restricted decoder profile.
-        } else if (isUnsupportedMainHeaderMarker(marker)) {
-            return CodestreamError.UnsupportedPayload;
         } else {
             return CodestreamError.InvalidCodestream;
         }
@@ -5110,6 +5120,7 @@ fn readStrictCodestreamMetadataForProfile(
     if (!saw_siz or !saw_cod or !saw_qcd or width == 0 or height == 0 or layers == 0) {
         return CodestreamError.InvalidCodestream;
     }
+    try profile_state.?.finish();
     var all_components_have_qcc = true;
     for (qcc_component_seen[0..component_count]) |seen| {
         all_components_have_qcc = all_components_have_qcc and seen;
@@ -5737,12 +5748,107 @@ fn readStrictCodestreamMetadataForProfile(
     };
 }
 
-fn isUnsupportedMainHeaderMarker(marker: u16) bool {
-    return switch (marker) {
-        @intFromEnum(Marker.cap),
-        => true,
-        else => false,
-    };
+fn strictProfileSignalingFixture(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    rsiz: u16,
+    prefix: []const u8,
+) ![]u8 {
+    if (base.len < 8 or readU16Be(base, 2) != @intFromEnum(Marker.siz)) {
+        return CodestreamError.InvalidCodestream;
+    }
+    const after_siz = std.math.add(usize, 4, readU16Be(base, 4)) catch
+        return CodestreamError.InvalidCodestream;
+    if (after_siz > base.len) return CodestreamError.InvalidCodestream;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, base[0..after_siz]);
+    out.items[6] = @intCast(rsiz >> 8);
+    out.items[7] = @truncate(rsiz);
+    try out.appendSlice(allocator, prefix);
+    try out.appendSlice(allocator, base[after_siz..]);
+    return out.toOwnedSlice(allocator);
+}
+
+test "strict main-header profile signaling validates CAP PRF and Rsiz" {
+    const allocator = std.testing.allocator;
+    var samples = [_]u16{ 0, 17, 255, 91 };
+    const base = try encodeLosslessGrayWithOptions(allocator, .{
+        .allocator = allocator,
+        .width = 2,
+        .height = 2,
+        .bit_depth = 8,
+        .samples = &samples,
+    }, .{
+        .levels = 0,
+        .mct = .none,
+        .sop = false,
+        .tlm = false,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(base);
+
+    var baseline = try readStrictCodestreamMetadata(allocator, base);
+    baseline.deinit();
+
+    const profile_one = try strictProfileSignalingFixture(allocator, base, 1, &.{});
+    defer allocator.free(profile_one);
+    try std.testing.expectError(
+        CodestreamError.UnsupportedPayload,
+        readStrictCodestreamMetadata(allocator, profile_one),
+    );
+
+    const missing_cap = try strictProfileSignalingFixture(
+        allocator,
+        base,
+        profile_signaling.rsiz_cap_present,
+        &.{},
+    );
+    defer allocator.free(missing_cap);
+    try std.testing.expectError(
+        CodestreamError.InvalidCodestream,
+        readStrictCodestreamMetadata(allocator, missing_cap),
+    );
+
+    const valid_cap = try strictProfileSignalingFixture(allocator, base, 0, &.{
+        0xff, 0x50, 0x00, 0x08,
+        0x80, 0x00, 0x00, 0x00,
+        0x00, 0x01,
+    });
+    defer allocator.free(valid_cap);
+    try std.testing.expectError(
+        CodestreamError.UnsupportedPayload,
+        readStrictCodestreamMetadata(allocator, valid_cap),
+    );
+
+    const malformed_cap = try strictProfileSignalingFixture(allocator, base, 0, &.{
+        0xff, 0x50, 0x00, 0x08,
+        0x80, 0x00, 0x00, 0x01,
+        0x00, 0x01,
+    });
+    defer allocator.free(malformed_cap);
+    try std.testing.expectError(
+        CodestreamError.InvalidCodestream,
+        readStrictCodestreamMetadata(allocator, malformed_cap),
+    );
+
+    const low_prf = try strictProfileSignalingFixture(allocator, base, 0, &.{
+        0xff, 0x56, 0x00, 0x04, 0x00, 0x01,
+    });
+    defer allocator.free(low_prf);
+    try std.testing.expectError(
+        CodestreamError.InvalidCodestream,
+        readStrictCodestreamMetadata(allocator, low_prf),
+    );
+
+    const extended_prf = try strictProfileSignalingFixture(allocator, base, 4095, &.{
+        0xff, 0x56, 0x00, 0x04, 0x00, 0x01,
+    });
+    defer allocator.free(extended_prf);
+    try std.testing.expectError(
+        CodestreamError.UnsupportedPayload,
+        readStrictCodestreamMetadata(allocator, extended_prf),
+    );
 }
 
 const StrictRgnInfo = struct {

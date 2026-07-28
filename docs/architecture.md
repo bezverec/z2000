@@ -16,6 +16,12 @@ z2000 has two deliberately separate codec surfaces:
 The ISO path is fail-closed. Marker parsing may recognize more syntax than the
 payload pipeline supports, but a profile is accepted only when its transform,
 quantization, T1, T2, tile, and container behavior agree end to end.
+`src/profile_signaling.zig` centralizes the main-header `Rsiz`/`CAP`/`PRF`
+prefix used by both raw codestream and JP2 validation. It enforces marker
+ordering, exact capability-word cardinality, canonical extended-profile words,
+and the `Rsiz` bit-14 CAP requirement. Only unrestricted Part 1 `Rsiz == 0`
+currently reaches payload decode; all structurally valid extension/profile
+declarations fail closed before reconstruction.
 
 `src/main.zig` owns CLI routing and conversion policy, while
 `src/cli_dispatch.zig` keeps extension inference independently testable.

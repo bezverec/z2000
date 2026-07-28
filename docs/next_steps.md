@@ -272,8 +272,10 @@ The active G0/G4 corpus expansion is:
 2. Add class-1 all-component reference lists as G1/G2 make those profiles
    decodable, retaining the published peak and MSE bounds per component.
 3. Expand the landed signed mixed-precision evidence beyond the pinned
-   5/7/8/12/13/16/19/20/23/29-bit payloads; add explicit `PLM`, `CAP`, and
-   `PRF` handling where applicable. Broaden the
+   5/7/8/12/13/16/19/20/23/29-bit payloads. `PLM` decode and the fail-closed
+   `Rsiz`/`CAP`/`PRF` syntax-consistency gate are explicit now; add actual CAP
+   capabilities or extended PRF profiles only where their payload semantics
+   apply. Broaden the
    seeded `TLM` case as G3 requires. Inline PLT-less multipart packet-count
    derivation is complete; packed-header/POC combinations remain.
 4. Record OpenJPEG, Grok, and Kakadu disagreement instead of selecting a
@@ -530,7 +532,15 @@ PLM-framed single- and multi-tile Kakadu streams retain their foreign packet/T1
 payloads and decode pixel-exactly; corruption and PLM+PLT disagreement fail
 closed. The valid PLM marker placement is test-produced, however, so formal
 slice promotion still needs one valid independently emitted PLM stream. PLM
-emission and applicable `CAP`/`PRF` signalling remain open.
+emission remains open.
+
+The following G3 profile-signalling gate is complete without broadening the
+decoded profile: raw codestream and JP2 paths share strict SIZ/CAP/PRF order,
+exact `Pcap`/`Ccap` cardinality, canonical PRF word framing, the `Rsiz` bit-14
+CAP requirement, and the PRF extended-profile range. Only `Rsiz == 0` reaches
+the current Part 1 payload decoder. Structurally valid nonzero profiles and
+external capabilities return unsupported because their payload semantics are
+not implemented; syntax recognition alone is not a raster capability.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,
@@ -558,17 +568,21 @@ Implement in small marker-to-raster slices:
    equality, malformed syntax, raw codestream, and JP2 wrapper validation are
    landed over unchanged foreign Kakadu packet/T1 bytes. Add one valid stream
    whose PLM marker was emitted independently before closing the slice. PLM
-   encode remains item 7. Applicable `CAP`/`PRF` profile signalling with
-   checked consistency against `Rsiz` and actual payload behavior may proceed
-   in parallel as the next marker implementation.
-3. General legal tile-part ordering and repetition beyond the landed inline
+   encode remains item 7.
+3. **Applicable `CAP`/`PRF` profile signalling — syntax/consistency gate
+   complete.** Both raw and JP2 readers enforce the ordered prefix, exact CAP
+   capability-word count, canonical PRF words, and `Rsiz` consistency. No CAP
+   capability or extended PRF profile is accepted for reconstruction until
+   its external specification and actual payload behavior are implemented and
+   independently evidenced.
+4. General legal tile-part ordering and repetition beyond the landed inline
    PLT-less state machine and bounded COC/QCC PPT-resolution-part profile,
    including checked `TLM` variations. PLT-less multipart PPM without POC is
    complete through the shared deferred-count state machine.
-4. Legal `POC` schedules across inline, `PPT`, and `PPM` headers, removing the
+5. Legal `POC` schedules across inline, `PPT`, and `PPM` headers, removing the
    current sampled `PPM` + `POC` fail-closed boundary only after packet identity
    is unambiguous.
-5. A single normalized packet index shared by strict decode, diagnostics, and
+6. A single normalized packet index shared by strict decode, diagnostics, and
    later selective decode. Do not add a second permissive packet parser.
 
 Each marker slice needs parser/state-machine corruption cases, exact sample

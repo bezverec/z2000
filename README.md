@@ -87,7 +87,9 @@ Neither figure is a formal ISO conformance certification.
   PPM, and PPT packet headers on their documented profiles. Bounded main-
   header PLM decode cross-checks ordered tile-part packet lengths against
   `Psot`, decoded packet framing, and any coexisting PLT; PLM emission remains
-  future work.
+  future work. `CAP`/`PRF` and nonzero `Rsiz` declarations are structurally
+  validated, ordered, and kept fail-closed until their declared extension or
+  profile is implemented end to end.
 - Bounded grayscale and palette JP2 profiles, plus bounded 1..4-component
   planar layouts, alpha-aware JP2 `cdef` signalling, and reversible RGBA RCT
   over the RGB triplet only, with strict malformed-input handling and

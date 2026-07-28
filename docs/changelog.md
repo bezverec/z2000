@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### CAP, PRF, And Rsiz Profile Gate
+
+- Added a shared raw-codestream/JP2 main-header profile state machine for the
+  strictly ordered SIZ, optional CAP, optional PRF prefix. CAP now checks its
+  32-bit `Pcap` population against the exact number of 16-bit `Ccap` words;
+  PRF checks a nonempty even-length little-word sequence with a nonzero final
+  word. Duplicate, late, reversed, truncated, and non-canonical declarations
+  fail as malformed.
+- Retained unrestricted Part 1 `Rsiz == 0` as the only decoded profile.
+  `Rsiz` bit 14 now requires CAP, PRF is rejected for `Rsiz` 0..4094, and all
+  structurally consistent nonzero profiles/extensions fail closed as
+  unsupported in both raw and JP2 paths. No external extension capability is
+  claimed by syntax recognition alone.
+
 ### PLM Packet-Length Decode
 
 - Added ordered main-header PLM collection with checked `Nplm` tile-part
@@ -15,7 +29,7 @@ entries are grouped by development milestone rather than semantic version.
 - Structurally PLM-framed single- and multi-tile Kakadu streams preserve their
   foreign packet/T1 bytes and decode pixel-exactly. Segment, group, payload,
   PLM+PLT mismatch, raw-codestream, and JP2-wrapper regressions fail closed.
-  PLM emission and applicable CAP/PRF signalling remain open roadmap work.
+  PLM emission remains open roadmap work.
 
 ### EBCOT Robustness
 
