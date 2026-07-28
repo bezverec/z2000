@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### PLM Packet-Length Decode
+
+- Added ordered main-header PLM collection with checked `Nplm` tile-part
+  groups, continued groups across marker segments, complete `Iplm` varints,
+  and bounded length arithmetic. PLM now feeds the shared single-/multi-tile
+  packet catalog for inline and packed headers, is reconciled with `Psot` and
+  decoded packet bodies, and must exactly match any coexisting PLT.
+- Structurally PLM-framed single- and multi-tile Kakadu streams preserve their
+  foreign packet/T1 bytes and decode pixel-exactly. Segment, group, payload,
+  PLM+PLT mismatch, raw-codestream, and JP2-wrapper regressions fail closed.
+  PLM emission and applicable CAP/PRF signalling remain open roadmap work.
+
 ### EBCOT Robustness
 
 - Made the shared symbol/direct block-statistics pass reject `minInt(i32)` as

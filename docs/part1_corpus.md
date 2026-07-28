@@ -183,6 +183,15 @@ still matches the six Kakadu PGX references exactly at one/eight threads, and
 shortened PPM framing fails closed. The PPM marker placement remains
 test-produced rather than independent-encoder evidence.
 
+A parallel G3 unit-test gate adds main-header PLM groups to independent Kakadu
+single- and multi-tile inline streams without changing their packet headers or
+T1 code-block bodies. The PLM-framed streams decode pixel-exactly, including
+through a rebuilt JP2 `jp2c` box. A second gate copies z2000 PLT length bytes
+into coexisting PLM groups and proves that a one-bit PLM disagreement fails
+before reconstruction. PLM syntax/payload corruption is therefore runnable
+evidence, but the PLM marker placement remains test-produced and is not
+counted as an independently emitted corpus asset.
+
 The eighth G2 entry is independently emitted by Kakadu rather than structurally
 repacked. Its four-tile no-MCT 9/7 stream starts with main Qstep 1/256, replaces
 tile 1 with Qstep 0.01 through QCD, and replaces component 1 in that tile with

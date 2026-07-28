@@ -7,6 +7,7 @@ const entropy = @import("entropy.zig");
 const image = @import("image.zig");
 const native_samples = @import("native_samples.zig");
 const packet_plan = @import("packet_plan.zig");
+const plm = @import("plm.zig");
 const poc = @import("poc.zig");
 const ppm = @import("ppm.zig");
 const rate_alloc = @import("rate_alloc.zig");
@@ -2077,6 +2078,7 @@ const StrictTilePartHeader = struct {
     sod: usize,
     end: usize,
     packet_payload_bytes: usize,
+    has_packet_lengths: bool,
     packet_lengths: std.ArrayList(usize),
     packed_headers: std.ArrayList(u8),
     poc_records: std.ArrayList(poc.Record),
@@ -2162,11 +2164,13 @@ const StrictMainHeaderIndex = struct {
     first_sot: usize,
     packet_markers: MainHeaderPacketMarkers,
     tlm_entries: ?[]TlmEntry = null,
+    plm_lengths: ?plm.PacketLengths = null,
     ppm_headers: ?ppm.PackedHeaders = null,
     poc_records: ?[]poc.Record = null,
 
     fn deinit(self: *StrictMainHeaderIndex) void {
         if (self.tlm_entries) |entries| self.allocator.free(entries);
+        if (self.plm_lengths) |*lengths| lengths.deinit();
         if (self.ppm_headers) |*headers| headers.deinit();
         if (self.poc_records) |records| self.allocator.free(records);
         self.* = undefined;
@@ -4813,6 +4817,8 @@ fn readStrictCodestreamMetadataForProfile(
     var next_tlm_index: usize = 0;
     var ppm_collector = ppm.SegmentCollector.init(allocator);
     defer ppm_collector.deinit();
+    var plm_collector = plm.SegmentCollector.init(allocator);
+    defer plm_collector.deinit();
     var poc_records: std.ArrayList(poc.Record) = .empty;
     defer poc_records.deinit(allocator);
 
@@ -5077,6 +5083,12 @@ fn readStrictCodestreamMetadataForProfile(
         } else if (marker == @intFromEnum(Marker.ppm)) {
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
             ppm_collector.append(segment) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return CodestreamError.InvalidCodestream,
+            };
+        } else if (marker == @intFromEnum(Marker.plm)) {
+            if (!saw_qcd) return CodestreamError.InvalidCodestream;
+            plm_collector.append(segment) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
@@ -5379,6 +5391,14 @@ fn readStrictCodestreamMetadataForProfile(
     else
         null;
     defer if (ppm_headers) |*headers| headers.deinit();
+    var plm_lengths: ?plm.PacketLengths = if (plm_collector.expected_index != 0)
+        plm_collector.finish() catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return CodestreamError.InvalidCodestream,
+        }
+    else
+        null;
+    defer if (plm_lengths) |*lengths| lengths.deinit();
     if (!grid.isSingleTile()) {
         // Multi-tile metadata and packet spans are component-count agnostic;
         // individual public decode surfaces apply their narrower output/MCT
@@ -5412,6 +5432,7 @@ fn readStrictCodestreamMetadataForProfile(
             component_coding,
             component_qcd,
             if (saw_tlm) tlm_entries.items else null,
+            if (plm_lengths) |lengths| lengths else null,
             if (ppm_headers) |headers| headers else null,
             tile_poc_records,
             tile_coding_overrides,
@@ -5649,6 +5670,7 @@ fn readStrictCodestreamMetadataForProfile(
         bytes,
         cursor,
         if (saw_tlm) tlm_entries.items else null,
+        if (plm_lengths) |lengths| lengths else null,
         if (ppm_headers) |headers| headers else null,
         .{
             .component_count = component_count,
@@ -5718,7 +5740,6 @@ fn readStrictCodestreamMetadataForProfile(
 fn isUnsupportedMainHeaderMarker(marker: u16) bool {
     return switch (marker) {
         @intFromEnum(Marker.cap),
-        @intFromEnum(Marker.plm),
         => true,
         else => false,
     };
@@ -6517,7 +6538,7 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null, null);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
 
@@ -6638,7 +6659,7 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null, null);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
             if (tile_part.packet_lengths.items.len > 0) {
@@ -8358,6 +8379,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
     marker_policy: MainHeaderPacketMarkers,
     expected_ppt_index: *u16,
     stateful: *StrictStatefulPrecinctGroups,
+    external_packet_lengths: ?[]const usize,
     external_packed_headers: ?[]const u8,
 ) !StrictPacketCatalog {
     var entries: std.ArrayList(StrictPacketEntry) = .empty;
@@ -8433,9 +8455,10 @@ fn readStrictMultiTileTilePartPacketCatalog(
         if (packed_headers.items.len != 0) return CodestreamError.InvalidCodestream;
         try packed_headers.appendSlice(allocator, headers);
     }
+    const has_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_packet_lengths);
     const has_packed_headers = has_external_packed_headers or packed_headers.items.len != 0;
     if (span.missing_plt) {
-        if (packet_lengths.items.len != 0) return CodestreamError.InvalidCodestream;
+        if (has_packet_lengths) return CodestreamError.InvalidCodestream;
     } else if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
 
     const component_local = headerHasComponentSubsampling(tile_header) or
@@ -8618,6 +8641,7 @@ fn readStrictMultiTilePacketCatalogForTile(
     progression: ProgressionOrder,
     poc_records: ?[]const poc.Record,
     marker_policy: MainHeaderPacketMarkers,
+    plm_lengths: ?plm.PacketLengths,
     ppm_headers: ?ppm.PackedHeaders,
 ) !StrictPacketCatalog {
     var entries: std.ArrayList(StrictPacketEntry) = .empty;
@@ -8641,6 +8665,10 @@ fn readStrictMultiTilePacketCatalogForTile(
             try strictPpmGroupAt(headers, span.stream_index)
         else
             null;
+        const external_lengths = if (plm_lengths) |lengths|
+            try strictPlmGroupAt(lengths, span.stream_index)
+        else
+            null;
         var part = try readStrictMultiTileTilePartPacketCatalog(
             allocator,
             bytes,
@@ -8653,6 +8681,7 @@ fn readStrictMultiTilePacketCatalogForTile(
             marker_policy,
             &expected_ppt_index,
             &stateful,
+            external_lengths,
             external_headers,
         );
         defer part.deinit();
@@ -8734,6 +8763,7 @@ fn readStrictMultiTilePacketCatalog(
                 header.progression,
                 tile_poc_records,
                 context.main_header.packet_markers,
+                context.main_header.plm_lengths,
                 context.main_header.ppm_headers,
             );
             defer tile_catalog.deinit();
@@ -8944,6 +8974,7 @@ fn readStrictMultiTileContext(
         header.component_coding,
         header.component_qcd,
         if (main_header.tlm_entries) |tlm_slice| tlm_slice else null,
+        if (main_header.plm_lengths) |lengths| lengths else null,
         if (main_header.ppm_headers) |headers| headers else null,
         tile_poc_records,
         tile_coding_overrides,
@@ -9089,6 +9120,7 @@ fn decodeStrictMultiTilePlanarMeasured(
             header.progression,
             tile_poc_records,
             context.main_header.packet_markers,
+            context.main_header.plm_lengths,
             context.main_header.ppm_headers,
         );
         defer catalog.deinit();
@@ -9251,6 +9283,7 @@ fn decodeStrictMultiTileNative(
             header.progression,
             tile_poc_records,
             context.main_header.packet_markers,
+            context.main_header.plm_lengths,
             context.main_header.ppm_headers,
         );
         defer catalog.deinit();
@@ -9443,6 +9476,7 @@ fn decodeStrictMultiTileImageMeasured(
             header.progression,
             tile_poc_records,
             context.main_header.packet_markers,
+            if (context.main_header.plm_lengths) |lengths| lengths else null,
             if (context.main_header.ppm_headers) |headers| headers else null,
         );
         defer catalog.deinit();
@@ -9534,6 +9568,7 @@ fn auditStrictMultiTilePacketHeaders(
             header.progression,
             tile_poc_records,
             context.main_header.packet_markers,
+            if (context.main_header.plm_lengths) |lengths| lengths else null,
             if (context.main_header.ppm_headers) |headers| headers else null,
         );
         defer catalog.deinit();
@@ -10953,6 +10988,9 @@ fn readStrictSodRpclPacketStream(
             if (main_header.tlm_entries) |tlm_slice| {
                 if (tile_part_index != tlm_slice.len) return CodestreamError.InvalidCodestream;
             }
+            if (main_header.plm_lengths) |plm_packet_lengths| {
+                if (tile_part_index != plm_packet_lengths.group_ends.len) return CodestreamError.InvalidCodestream;
+            }
             const owned_lengths = try lengths.toOwnedSlice(allocator);
             errdefer allocator.free(owned_lengths);
             const owned_packet_bytes = try packet_bytes.toOwnedSlice(allocator);
@@ -10970,9 +11008,13 @@ fn readStrictSodRpclPacketStream(
                 try strictPpmGroupAt(headers, tile_part_index)
             else
                 null;
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries, &expected_ppt_index, external_headers, null, null);
+            const external_lengths = if (main_header.plm_lengths) |plm_packet_lengths|
+                try strictPlmGroupAt(plm_packet_lengths, tile_part_index)
+            else
+                null;
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries, &expected_ppt_index, external_lengths, external_headers, null, null);
             defer tile_part.deinit(allocator);
-            if (tile_part.packet_lengths.items.len == 0) return CodestreamError.UnsupportedPayload;
+            if (!tile_part.has_packet_lengths) return CodestreamError.UnsupportedPayload;
             if (tile_part.packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
             cursor = tile_part.sod + 2;
             try appendStrictSodPackets(
@@ -11426,6 +11468,7 @@ fn readStrictFirstTilePartPocRecords(
         null,
         &expected_ppt_index,
         null,
+        null,
         limits,
         null,
     );
@@ -11464,7 +11507,7 @@ pub const StrictInlineSpanReport = struct {
 };
 
 /// Diagnostic/test-support walk of a strict single-tile codestream with
-/// inline packet headers and no PLT/PPT/PPM/SOP/EPH: reports every packet's
+/// inline packet headers and no PLT/PLM/PPT/PPM/SOP/EPH: reports every packet's
 /// header and body byte spans in stream order plus the tile-part frame
 /// offsets. This is the splitting oracle used to repack inline headers into
 /// packed (PPT) form for layouts the encoder cannot produce yet, e.g.
@@ -11483,7 +11526,9 @@ pub fn collectStrictInlinePacketSpans(
 
     var main_header = try readStrictMainHeaderIndex(allocator, bytes, header.component_count);
     defer main_header.deinit();
-    if (main_header.packet_markers.sop or main_header.packet_markers.eph) {
+    if (main_header.packet_markers.sop or main_header.packet_markers.eph or
+        main_header.plm_lengths != null)
+    {
         return CodestreamError.UnsupportedPayload;
     }
     const poc_limits = TilePartPocLimits{
@@ -11558,6 +11603,7 @@ pub fn collectStrictInlinePacketSpans(
             &expected_tile_part_count,
             null,
             &expected_ppt_index,
+            null,
             null,
             poc_limits,
             null,
@@ -11910,6 +11956,9 @@ fn readStrictSodPacketCatalog(
             if (main_header.tlm_entries) |tlm_slice| {
                 if (tile_part_index != tlm_slice.len) return CodestreamError.InvalidCodestream;
             }
+            if (main_header.plm_lengths) |lengths| {
+                if (tile_part_index != lengths.group_ends.len) return CodestreamError.InvalidCodestream;
+            }
             if (entries.items.len != sequence.len or sequence_index != sequence.len) return CodestreamError.InvalidCodestream;
 
             const owned_entries = try entries.toOwnedSlice(allocator);
@@ -11940,10 +11989,14 @@ fn readStrictSodPacketCatalog(
                 try strictPpmGroupAt(headers, tile_part_index)
             else
                 null;
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index, external_headers, poc_limits, null);
+            const external_lengths = if (main_header.plm_lengths) |lengths|
+                try strictPlmGroupAt(lengths, tile_part_index)
+            else
+                null;
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index, external_lengths, external_headers, poc_limits, null);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
-            if (tile_part.packet_lengths.items.len == 0) {
+            if (!tile_part.has_packet_lengths) {
                 if (tile_part.packed_headers.items.len != 0) {
                     if (stateful == null) stateful = try StrictStatefulPrecinctGroups.init(allocator, header);
                     var packed_header_cursor: usize = 0;
@@ -12150,6 +12203,7 @@ fn readStrictTilePartPacketPlan(
     bytes: []const u8,
     first_sot: usize,
     tlm_entries: ?[]const TlmEntry,
+    plm_lengths: ?plm.PacketLengths,
     ppm_headers: ?ppm.PackedHeaders,
     poc_limits: TilePartPocLimits,
     coding_target: ?TilePartCodingTarget,
@@ -12174,6 +12228,9 @@ fn readStrictTilePartPacketPlan(
                 const group_count = headers.validate() catch return CodestreamError.InvalidCodestream;
                 if (group_count != result.count) return CodestreamError.InvalidCodestream;
             }
+            if (plm_lengths) |lengths| {
+                if (lengths.group_ends.len != result.count) return CodestreamError.InvalidCodestream;
+            }
             return result;
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
@@ -12182,6 +12239,10 @@ fn readStrictTilePartPacketPlan(
         {
             const external_headers = if (ppm_headers) |headers|
                 try strictPpmGroupAt(headers, result.count)
+            else
+                null;
+            const external_lengths = if (plm_lengths) |lengths|
+                try strictPlmGroupAt(lengths, result.count)
             else
                 null;
             var part_coding_target = coding_target;
@@ -12194,12 +12255,13 @@ fn readStrictTilePartPacketPlan(
                 &expected_tile_part_count,
                 tlm_entries,
                 &expected_ppt_index,
+                external_lengths,
                 external_headers,
                 poc_limits,
                 part_coding_target,
             );
             defer tile_part.deinit(allocator);
-            if (tile_part.packet_lengths.items.len == 0) {
+            if (!tile_part.has_packet_lengths) {
                 result.missing_plt = true;
             }
             result.packet_counts[result.count] = tile_part.packet_lengths.items.len;
@@ -12214,6 +12276,29 @@ fn readStrictTilePartPacketPlan(
 fn strictPpmGroupAt(headers: ppm.PackedHeaders, index: usize) ![]const u8 {
     return (headers.groupAt(index) catch return CodestreamError.InvalidCodestream) orelse
         return CodestreamError.InvalidCodestream;
+}
+
+fn strictPlmGroupAt(lengths: plm.PacketLengths, index: usize) ![]const usize {
+    return lengths.groupAt(index) orelse CodestreamError.InvalidCodestream;
+}
+
+fn applyExternalPacketLengths(
+    allocator: std.mem.Allocator,
+    packet_lengths: *std.ArrayList(usize),
+    external_lengths: ?[]const usize,
+) !bool {
+    const has_plt = packet_lengths.items.len != 0;
+    if (external_lengths) |lengths| {
+        if (has_plt) {
+            if (!std.mem.eql(usize, packet_lengths.items, lengths)) {
+                return CodestreamError.InvalidCodestream;
+            }
+        } else {
+            try packet_lengths.appendSlice(allocator, lengths);
+        }
+        return true;
+    }
+    return has_plt;
 }
 
 /// One tile-part of a multi-tile stream, located by the Stage B SOT walk
@@ -12291,6 +12376,7 @@ fn readStrictMultiTileTilePartSpans(
     main_component_coding: []const StrictComponentCoding,
     main_component_qcd: []const StrictQcdInfo,
     tlm_entries: ?[]const TlmEntry,
+    plm_lengths: ?plm.PacketLengths,
     ppm_headers: ?ppm.PackedHeaders,
     tile_poc_records: []std.ArrayList(poc.Record),
     tile_coding_overrides: ?[]StrictTileCodingOverride,
@@ -12367,6 +12453,9 @@ fn readStrictMultiTileTilePartSpans(
                 const group_count = headers.validate() catch return CodestreamError.InvalidCodestream;
                 if (group_count != tile_part_index) return CodestreamError.InvalidCodestream;
             }
+            if (plm_lengths) |lengths| {
+                if (lengths.group_ends.len != tile_part_index) return CodestreamError.InvalidCodestream;
+            }
             return spans;
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
@@ -12435,9 +12524,14 @@ fn readStrictMultiTileTilePartSpans(
             try strictPpmGroupAt(headers, tile_part_index)
         else
             null;
+        const external_lengths = if (plm_lengths) |lengths|
+            try strictPlmGroupAt(lengths, tile_part_index)
+        else
+            null;
         if (external_headers != null and packed_headers.items.len != 0) {
             return CodestreamError.InvalidCodestream;
         }
+        const has_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_lengths);
 
         const tile = grid.tile(sot.tile_index) catch return CodestreamError.InvalidCodestream;
         const coding_override = if (tile_coding_overrides) |overrides| overrides[tile_index] else StrictTileCodingOverride{};
@@ -12518,7 +12612,7 @@ fn readStrictMultiTileTilePartSpans(
         );
         const plan_packets = std.math.cast(usize, tile_plan.packets) orelse return CodestreamError.InvalidCodestream;
         tile_plan_totals[tile_index] = plan_packets;
-        const missing_plt = packet_lengths.items.len == 0;
+        const missing_plt = !has_packet_lengths;
         // Multi-part tiles are accepted in any progression when every
         // non-empty part carries PLT: each part's packet count comes from
         // its own PLT, the parts consume the tile's packet sequence in TPsot
@@ -12554,6 +12648,7 @@ fn readStrictMultiTileTilePartSpans(
             sod,
             tile_part_end,
             packet_lengths.items,
+            true,
             external_headers != null or packed_headers.items.len != 0,
         );
         const packet_count = if (deferred_packet_count)
@@ -12601,6 +12696,7 @@ fn readStrictTilePartHeader(
     expected_tile_part_count: *?u8,
     tlm_entries: ?[]const TlmEntry,
     expected_ppt_index: *u16,
+    external_packet_lengths: ?[]const usize,
     external_packed_headers: ?[]const u8,
     poc_limits: ?TilePartPocLimits,
     coding_target: ?TilePartCodingTarget,
@@ -12641,10 +12737,12 @@ fn readStrictTilePartHeader(
         if (packed_headers.items.len != 0 or headers.len == 0) return CodestreamError.InvalidCodestream;
         try packed_headers.appendSlice(allocator, headers);
     }
+    const has_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_packet_lengths);
     const packet_payload_bytes = try validateStrictTilePartPacketSpan(
         sod,
         tile_part_end,
         packet_lengths.items,
+        has_packet_lengths,
         external_packed_headers != null or packed_headers.items.len != 0,
     );
 
@@ -12653,6 +12751,7 @@ fn readStrictTilePartHeader(
         .sod = sod,
         .end = tile_part_end,
         .packet_payload_bytes = packet_payload_bytes,
+        .has_packet_lengths = has_packet_lengths,
         .packet_lengths = packet_lengths,
         .packed_headers = packed_headers,
         .poc_records = poc_records,
@@ -12663,11 +12762,15 @@ fn validateStrictTilePartPacketSpan(
     sod: usize,
     tile_part_end: usize,
     packet_lengths: []const usize,
+    lengths_present: bool,
     allow_zero_lengths: bool,
 ) !usize {
-    if (packet_lengths.len == 0) return 0;
     const payload_start = try std.math.add(usize, sod, 2);
     if (payload_start > tile_part_end) return CodestreamError.TruncatedData;
+    if (packet_lengths.len == 0) {
+        if (lengths_present and payload_start != tile_part_end) return CodestreamError.InvalidCodestream;
+        return 0;
+    }
 
     var payload_bytes: usize = 0;
     for (packet_lengths) |packet_length| {
@@ -12763,6 +12866,8 @@ fn readStrictMainHeaderIndex(
     var cod_layers: ?u16 = null;
     var ppm_collector = ppm.SegmentCollector.init(allocator);
     defer ppm_collector.deinit();
+    var plm_collector = plm.SegmentCollector.init(allocator);
+    defer plm_collector.deinit();
     var poc_records: std.ArrayList(poc.Record) = .empty;
     defer poc_records.deinit(allocator);
 
@@ -12784,11 +12889,20 @@ fn readStrictMainHeaderIndex(
                 }
             else
                 null;
+            const plm_lengths = if (plm_collector.expected_index != 0)
+                plm_collector.finish() catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => return CodestreamError.InvalidCodestream,
+                }
+            else
+                null;
+            errdefer if (plm_lengths) |*lengths| lengths.deinit();
             return .{
                 .allocator = allocator,
                 .first_sot = cursor - 2,
                 .packet_markers = markers,
                 .tlm_entries = owned_entries,
+                .plm_lengths = plm_lengths,
                 .ppm_headers = ppm_headers,
                 .poc_records = owned_poc,
             };
@@ -12820,6 +12934,11 @@ fn readStrictMainHeaderIndex(
             next_tlm_index += 1;
         } else if (marker == @intFromEnum(Marker.ppm)) {
             ppm_collector.append(segment) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return CodestreamError.InvalidCodestream,
+            };
+        } else if (marker == @intFromEnum(Marker.plm)) {
+            plm_collector.append(segment) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };

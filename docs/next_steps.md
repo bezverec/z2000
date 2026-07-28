@@ -519,8 +519,18 @@ rendering metadata in units of 1/65536 of the component sampling step, so Part
 Official T.803 `p0_03` now decodes exactly against both references: the
 upper-left 128x128 crop of full output and the complete reduction-1 output.
 That stream also closes a bounded combination of signed 4-bit samples, eight
-layers, four tiles, QCC, POC, TLM, RGN, and CRG. `PLM` plus applicable
-`CAP`/`PRF` signalling is the next item-5 slice.
+layers, four tiles, QCC, POC, TLM, RGN, and CRG.
+
+The third G3 marker implementation is complete for bounded `PLM` decode.
+Ordered main-header segments preserve tile-part `Nplm` groups across segment
+boundaries, reject unfinished `Iplm` values, and drive the same checked packet
+catalog as PLT. Every group is reconciled with `Psot`, inline or packed packet-
+header semantics, decoded body lengths, and any coexisting PLT. Structurally
+PLM-framed single- and multi-tile Kakadu streams retain their foreign packet/T1
+payloads and decode pixel-exactly; corruption and PLM+PLT disagreement fail
+closed. The valid PLM marker placement is test-produced, however, so formal
+slice promotion still needs one valid independently emitted PLM stream. PLM
+emission and applicable `CAP`/`PRF` signalling remain open.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,
@@ -542,8 +552,15 @@ Implement in small marker-to-raster slices:
    evidence are landed. CRG main-header cardinality, component metadata, ZRAW
    preservation, and T.803 `p0_03` exact full/reduced evidence are landed;
    CRG has no codestream-decoding effect. RGN/CRG encode remains item 7.
-2. `PLM` packet lengths and applicable `CAP`/`PRF` profile signalling with
-   checked consistency against `Rsiz` and actual payload behavior.
+2. **`PLM` packet-length decode — implementation complete, independent valid-
+   marker promotion evidence pending.** Ordered and continued groups,
+   inline/packed length semantics, `Psot`/packet-body accounting, PLM+PLT
+   equality, malformed syntax, raw codestream, and JP2 wrapper validation are
+   landed over unchanged foreign Kakadu packet/T1 bytes. Add one valid stream
+   whose PLM marker was emitted independently before closing the slice. PLM
+   encode remains item 7. Applicable `CAP`/`PRF` profile signalling with
+   checked consistency against `Rsiz` and actual payload behavior may proceed
+   in parallel as the next marker implementation.
 3. General legal tile-part ordering and repetition beyond the landed inline
    PLT-less state machine and bounded COC/QCC PPT-resolution-part profile,
    including checked `TLM` variations. PLT-less multipart PPM without POC is

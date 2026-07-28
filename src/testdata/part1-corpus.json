@@ -64,8 +64,8 @@
       "encode": "bounded",
       "malformed": "complete",
       "interop": "complete",
-      "evidence": ["inline/PPT/PPM sampled matrix", "PLT and PLT-less packet catalog tests"],
-      "note": "PLT, inline, PPT and PPM are covered in bounded layouts; PLM is not implemented."
+      "evidence": ["inline/PPT/PPM sampled matrix", "PLT and PLT-less packet catalog tests", "PLM-framed Kakadu single-/multi-tile streams", "PLM+PLT mismatch gate"],
+      "note": "PLT, inline, PPT and PPM are covered in bounded layouts. Main-header PLM decode validates ordered Nplm/Iplm groups against Psot, decoded packet headers, and any coexisting PLT; PLM encode is not implemented."
     },
     {
       "id": "tiles-and-tile-parts",
@@ -136,13 +136,13 @@
     {
       "id": "plm-cap-prf",
       "title": "PLM and CAP/PRF signalling",
-      "parser": "fail_closed",
-      "strict_decode": "not_implemented",
+      "parser": "bounded",
+      "strict_decode": "bounded",
       "encode": "not_implemented",
-      "malformed": "not_implemented",
-      "interop": "not_applicable",
-      "evidence": ["next_steps.md item 5.2"],
-      "note": "Profile signalling and main-header packet length support remain explicit future work."
+      "malformed": "bounded",
+      "interop": "bounded",
+      "evidence": ["PLM-framed Kakadu single-/multi-tile streams", "PLM+PLT payload cross-check", "ordered/continued/corrupt PLM tests"],
+      "note": "Bounded PLM decode is implemented for inline, PLT-coexisting, and existing packed-header paths over foreign Kakadu packet/T1 bytes. Valid PLM placement is test-produced, so independent valid-marker promotion evidence, PLM emission, and applicable CAP/PRF signalling remain future work."
     },
     {
       "id": "jp2-core-container",

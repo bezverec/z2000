@@ -8,7 +8,7 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-26, both the narrow RGB lossless JP2 target and the broader bounded
+of 2026-07-28, both the narrow RGB lossless JP2 target and the broader bounded
 Part 1 engineering scorecard are estimated at **100/100 within their declared
 profiles**. This is separate from the general-purpose G0-G7 plan, currently
 estimated at roughly 55% in [the roadmap](docs/roadmap.md). The current
@@ -84,7 +84,10 @@ Neither figure is a formal ISO conformance certification.
   multi-tile RCT/5/3 and ICT/9/7 plus sampled multi-tile no-MCT 5/3 and 9/7
   are assembled directly at the requested reduced resolution.
 - ISO-MQ T1 coding with all six Part 1 code-block style bits, plus in-band,
-  PPM, and PPT packet headers on their documented profiles.
+  PPM, and PPT packet headers on their documented profiles. Bounded main-
+  header PLM decode cross-checks ordered tile-part packet lengths against
+  `Psot`, decoded packet framing, and any coexisting PLT; PLM emission remains
+  future work.
 - Bounded grayscale and palette JP2 profiles, plus bounded 1..4-component
   planar layouts, alpha-aware JP2 `cdef` signalling, and reversible RGBA RCT
   over the RGB triplet only, with strict malformed-input handling and

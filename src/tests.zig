@@ -21713,7 +21713,6 @@ test "strict marker reader rejects unsupported main and tile-part marker segment
     };
     const cases = [_]UnsupportedMarkerCase{
         .{ .label = "CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap") },
-        .{ .label = "PLM main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("plm") },
         .{ .label = "malformed RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{ .label = "malformed CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg"), .expected = codestream.CodestreamError.InvalidCodestream },
         .{
@@ -30224,6 +30223,177 @@ fn splitPltlessSinglePartsForTest(allocator: std.mem.Allocator, source: []const 
 /// inline original exactly.
 fn repackInlineHeadersToPpt(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return repackInlineHeadersToPacked(allocator, bytes, .ppt, .{});
+}
+
+fn appendTestPacketLength(allocator: std.mem.Allocator, out: *std.ArrayList(u8), packet_length: usize) !void {
+    var value = packet_length;
+    var groups: [10]u8 = undefined;
+    var count: usize = 0;
+    while (true) {
+        groups[count] = @intCast(value & 0x7f);
+        count += 1;
+        value >>= 7;
+        if (value == 0) break;
+    }
+    while (count > 0) {
+        count -= 1;
+        try out.append(allocator, groups[count] | if (count != 0) @as(u8, 0x80) else 0);
+    }
+}
+
+fn insertTestPlmMarker(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    first_sot: usize,
+    group_bytes: []const u8,
+) ![]u8 {
+    const lplm = std.math.add(usize, 3, group_bytes.len) catch return error.TestUnexpectedResult;
+    if (lplm > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, source[0..first_sot]);
+    try out.appendSlice(allocator, &.{ 0xff, 0x57 });
+    var lplm_be: [2]u8 = undefined;
+    std.mem.writeInt(u16, &lplm_be, @intCast(lplm), .big);
+    try out.appendSlice(allocator, &lplm_be);
+    try out.append(allocator, 0);
+    try out.appendSlice(allocator, group_bytes);
+    try out.appendSlice(allocator, source[first_sot..]);
+    return out.toOwnedSlice(allocator);
+}
+
+/// Adds one main-header PLM group per tile-part to an independently encoded
+/// inline Kakadu stream. Only the marker metadata is synthesized; packet
+/// headers and code-block bodies remain byte-identical to the foreign input.
+fn repackInlineWithPlm(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var report = try codestream.collectStrictInlinePacketSpans(allocator, source);
+    defer report.deinit();
+    var groups: std.ArrayList(u8) = .empty;
+    defer groups.deinit(allocator);
+    for (report.tile_parts, 0..) |_, part_index| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        for (report.spans) |span| {
+            if (span.tile_part_index != part_index) continue;
+            try appendTestPacketLength(allocator, &encoded, span.header_length + span.body_length);
+        }
+        if (encoded.items.len > std.math.maxInt(u8)) return error.TestUnexpectedResult;
+        try groups.append(allocator, @intCast(encoded.items.len));
+        try groups.appendSlice(allocator, encoded.items);
+    }
+    return insertTestPlmMarker(allocator, source, report.first_sot, groups.items);
+}
+
+/// Copies each tile-part's already encoded PLT Iplt byte sequence into a PLM
+/// group, retaining PLT so the decoder must cross-check both declarations.
+fn insertMatchingPlmFromPlt(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    const first_sot = findMarker(source, codestream.markerValue("sot")) orelse return error.MissingSot;
+    var groups: std.ArrayList(u8) = .empty;
+    defer groups.deinit(allocator);
+    var cursor = first_sot;
+    while (cursor < source.len and readU16BeTest(source, cursor) == codestream.markerValue("sot")) {
+        const psot = readU32BeTest(source, cursor + 6);
+        const part_end = std.math.add(usize, cursor, psot) catch return error.TestUnexpectedResult;
+        if (part_end > source.len) return error.TestUnexpectedResult;
+        var header = cursor + 12;
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        var expected_zplt: u8 = 0;
+        while (header < part_end) {
+            const marker = readU16BeTest(source, header);
+            if (marker == codestream.markerValue("sod")) break;
+            const length = readU16BeTest(source, header + 2);
+            if (marker == codestream.markerValue("plt")) {
+                if (length < 4 or source[header + 4] != expected_zplt) return error.TestUnexpectedResult;
+                try encoded.appendSlice(allocator, source[header + 5 .. header + 2 + length]);
+                expected_zplt +%= 1;
+            }
+            header += 2 + length;
+        }
+        if (encoded.items.len == 0 or encoded.items.len > std.math.maxInt(u8)) {
+            return error.TestUnexpectedResult;
+        }
+        try groups.append(allocator, @intCast(encoded.items.len));
+        try groups.appendSlice(allocator, encoded.items);
+        cursor = part_end;
+    }
+    return insertTestPlmMarker(allocator, source, first_sot, groups.items);
+}
+
+test "PLM packet lengths decode independent Kakadu inline streams" {
+    const allocator = std.testing.allocator;
+    const fixtures = [_][]const u8{
+        @embedFile("testdata/kakadu-rpcl-420-multi-precinct-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-multitile-pltless.jp2"),
+    };
+    for (fixtures) |fixture| {
+        const source = try jp2.extractCodestream(fixture);
+        const framed = try repackInlineWithPlm(allocator, source);
+        defer allocator.free(framed);
+        try std.testing.expect(codestream.hasMarker(framed, codestream.markerValue("plm")));
+
+        var expected = try codestream.decodeLosslessPlanar(allocator, source);
+        defer expected.deinit();
+        var actual = try codestream.decodeLosslessPlanar(allocator, framed);
+        defer actual.deinit();
+        for (expected.planes, actual.planes) |expected_plane, actual_plane| {
+            try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+        }
+        const jp2c_type = std.mem.indexOf(u8, fixture, "jp2c") orelse return error.MissingJp2Box;
+        const jp2c_payload = Jp2BoxPayload{ .start = jp2c_type + 4, .end = fixture.len };
+        const wrapped = try replaceJp2BoxForTest(allocator, fixture, jp2c_payload, "jp2c", framed);
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(wrapped);
+        try std.testing.expectEqual(@as(u16, @intCast(actual.planes.len)), info.components);
+
+        const corrupted = try allocator.dupe(u8, framed);
+        defer allocator.free(corrupted);
+        const marker = findMarker(corrupted, codestream.markerValue("plm")) orelse return error.MissingMarker;
+        corrupted[marker + 6] ^= 0x01;
+        try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, corrupted)));
+    }
+}
+
+test "matching PLM and PLT are cross-checked against packet payloads" {
+    const allocator = std.testing.allocator;
+    const width = 16;
+    const height = 16;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (samples, 0..) |*sample, index| sample.* = @intCast((index * 37 + 11) & 0xff);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const source = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 1,
+        .block_width = 4,
+        .block_height = 4,
+        .tile_part_divisions = 'R',
+    });
+    defer allocator.free(source);
+    const framed = try insertMatchingPlmFromPlt(allocator, source);
+    defer allocator.free(framed);
+    var decoded = try codestream.decodeLosslessPlanar(allocator, framed);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 3), decoded.planes.len);
+    for (0..width * height) |pixel| {
+        for (0..3) |component| {
+            try std.testing.expectEqual(samples[pixel * 3 + component], decoded.planes[component][pixel]);
+        }
+    }
+
+    const mismatched = try allocator.dupe(u8, framed);
+    defer allocator.free(mismatched);
+    const marker = findMarker(mismatched, codestream.markerValue("plm")) orelse return error.MissingMarker;
+    mismatched[marker + 6] ^= 0x01;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanar(allocator, mismatched),
+    );
 }
 
 fn repackInlineHeadersToPacked(

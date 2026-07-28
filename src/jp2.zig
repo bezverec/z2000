@@ -201,6 +201,7 @@ const marker_siz = 0xff51;
 const marker_cod = 0xff52;
 const marker_coc = 0xff53;
 const marker_tlm = 0xff55;
+const marker_plm = 0xff57;
 const marker_plt = 0xff58;
 const marker_qcd = 0xff5c;
 const marker_qcc = 0xff5d;
@@ -1584,6 +1585,7 @@ fn validateMainHeaderMarkers(
     var qcd_payload: []const u8 = &.{};
     var tlm_state = TlmState{};
     var ppm_state = PpmState{};
+    var expected_plm_index: u16 = 0;
     var override_state = ComponentOverrideState{};
     var saw_crg = false;
     while (cursor < payload.len - 2) {
@@ -1635,6 +1637,9 @@ fn validateMainHeaderMarkers(
             marker_ppm => {
                 if (!saw_qcd) return Jp2Error.InvalidCodestream;
             },
+            marker_plm => {
+                if (!saw_qcd) return Jp2Error.InvalidCodestream;
+            },
             marker_poc => {
                 if (!saw_qcd) return Jp2Error.InvalidCodestream;
             },
@@ -1668,6 +1673,14 @@ fn validateMainHeaderMarkers(
                     return Jp2Error.InvalidCodestream;
                 }
                 saw_crg = true;
+            },
+            marker_plm => {
+                if (expected_plm_index > std.math.maxInt(u8) or
+                    payload[length_offset + 2] != @as(u8, @intCast(expected_plm_index)))
+                {
+                    return Jp2Error.InvalidCodestream;
+                }
+                expected_plm_index += 1;
             },
             else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state, &ppm_state, cod_info, components),
         }
@@ -1913,6 +1926,7 @@ fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
         marker_qcc => 4, // Lqcc(2) Cqcc(1) Sqcc(1)
         marker_poc => 9,
         marker_tlm => 9,
+        marker_plm => 4,
         marker_plt => 4,
         marker_ppm => 4,
         marker_ppt => 4,
