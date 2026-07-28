@@ -4,6 +4,7 @@ const image = @import("image.zig");
 const profile_signaling = @import("profile_signaling.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const tiff_ifd = @import("formats/tiff_ifd.zig");
+const tlm = @import("tlm.zig");
 
 pub const Jp2Error = error{
     ImageTooLarge,
@@ -252,7 +253,7 @@ const CodSegmentInfo = struct {
 const max_tlm_entries = 4096;
 
 const TlmState = struct {
-    next_segment_index: u8 = 0,
+    next_segment_index: u16 = 0,
     lengths: [max_tlm_entries]u32 = [_]u32{0} ** max_tlm_entries,
     tile_indices: [max_tlm_entries]u16 = [_]u16{0} ** max_tlm_entries,
     count: u16 = 0,
@@ -1947,7 +1948,7 @@ fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
         marker_coc => 5, // Lcoc(2) Ccoc(1) Scoc(1) + >=1 SPcoc byte
         marker_qcc => 4, // Lqcc(2) Cqcc(1) Sqcc(1)
         marker_poc => 9,
-        marker_tlm => 9,
+        marker_tlm => 6,
         marker_cap => 8,
         marker_prf => 4,
         marker_plm => 4,
@@ -2279,36 +2280,17 @@ fn reversibleQcdExponentByte(bit_depth: u8, kind: SubbandKind) !u8 {
 }
 
 fn validateTlmSegment(payload: []const u8, length_offset: usize, marker_length: u16, state: *TlmState) !void {
-    if (payload[length_offset + 2] != state.next_segment_index) return Jp2Error.UnsupportedProfile;
-    // Stlm 0x50: ST=1/SP=1 (u8 tile index + u32 length), the single-tile
-    // resolution-part layout. Stlm 0x60: ST=2/SP=1 (u16 tile index + u32
-    // length), the multi-tile one-part-per-tile layout.
-    const stlm = payload[length_offset + 3];
-    const entry_bytes: usize = switch (stlm) {
-        0x50 => 5,
-        0x60 => 6,
-        else => return Jp2Error.UnsupportedProfile,
-    };
-    if ((marker_length - 4) % entry_bytes != 0) return Jp2Error.InvalidCodestream;
-    state.next_segment_index = std.math.add(u8, state.next_segment_index, 1) catch return Jp2Error.InvalidCodestream;
-    var cursor = length_offset + 4;
-    const end = length_offset + @as(usize, marker_length);
-    while (cursor < end) : (cursor += entry_bytes) {
-        if (state.count >= state.lengths.len) return Jp2Error.UnsupportedProfile;
-        const tile_index: u16 = switch (stlm) {
-            0x50 => blk: {
-                if (payload[cursor] != 0) return Jp2Error.UnsupportedProfile;
-                break :blk 0;
-            },
-            0x60 => try readU16Be(payload, cursor),
-            else => unreachable,
-        };
-        const tile_part_length = try readU32Be(payload, cursor + (entry_bytes - 4));
-        if (tile_part_length == 0) return Jp2Error.InvalidCodestream;
-        state.tile_indices[state.count] = tile_index;
-        state.lengths[state.count] = tile_part_length;
-        state.count = std.math.add(u16, state.count, 1) catch return Jp2Error.InvalidCodestream;
+    const segment_payload = payload[length_offset + 2 .. length_offset + @as(usize, marker_length)];
+    const parsed = tlm.parse(segment_payload, state.next_segment_index, state.count) catch
+        return Jp2Error.InvalidCodestream;
+    if (parsed.count > state.lengths.len - state.count) return Jp2Error.UnsupportedProfile;
+    for (0..parsed.count) |index| {
+        const entry = parsed.entry(index) catch return Jp2Error.InvalidCodestream;
+        state.tile_indices[state.count] = entry.tile_index;
+        state.lengths[state.count] = entry.psot;
+        state.count += 1;
     }
+    state.next_segment_index += 1;
     state.saw = true;
 }
 

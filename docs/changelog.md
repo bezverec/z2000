@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Complete Part 1 TLM Width Matrix
+
+- Added a shared allocation-free TLM parser for raw codestream and JP2 paths.
+  All six legal `ST=0/1/2` and `SP=0/1` layouts now decode 16-/32-bit tile-part
+  lengths and absent/8-/16-bit tile indexes, including implicit index
+  continuation across ordered `Ztlm` segments. Reserved ST values, 255/65535
+  explicit tile indexes, lengths below the 14-byte SOT/SOD minimum, partial
+  entries, and bad segment indexes fail closed.
+- Corrected raw `ST=0` handling: entries now receive implicit indexes from the
+  concatenated TLM position instead of all being assigned tile 0. The SOT walk
+  enforces the required one-part-per-tile raster order. All six layouts are
+  raw/JP2 exact on a live one-part-per-tile stream; four explicit layouts
+  preserve the independent Kakadu 24-part packet/T1 payload pixel-exactly,
+  while an illegal implicit rewrite of that multipart source is rejected.
+
 ### CAP, PRF, And Rsiz Profile Gate
 
 - Added a shared raw-codestream/JP2 main-header profile state machine for the

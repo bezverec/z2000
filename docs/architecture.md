@@ -180,6 +180,13 @@ JP2 box audit and jp2c extraction
   -> optional explicit upsampling/colour/container conversion
 ```
 
+`src/tlm.zig` supplies the allocation-free TLM segment view shared by raw and
+JP2 validation. It decodes all Part 1 ST/SP widths, concatenates implicit
+`ST=0` tile indexes across increasing `Ztlm`, and rejects reserved fields,
+non-canonical tile indexes, short lengths, and partial entries before the SOT
+walk proves exact tile/`Psot` agreement. The SOT reconciliation is what
+enforces the `ST=0` one-part-per-tile, raster-order restriction.
+
 SOP and EPH are validated at their signalled locations. PPT and PPM headers are
 normalized into the same unframed packet view as inline headers. PLT-less
 single-part streams derive payload spans from decoded packet headers; supported

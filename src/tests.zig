@@ -28,6 +28,7 @@ const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
 const tile_grid = @import("tile_grid.zig");
 const tile_pipeline = @import("tile_pipeline.zig");
+const tlm_parser = @import("tlm.zig");
 const tiff = @import("tiff.zig");
 const version = @import("version.zig");
 const wavelet = @import("wavelet.zig");
@@ -8722,21 +8723,26 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             expected: anyerror,
         };
         const tlm_cases = [_]TlmCase{
-            .{ .label = "unsupported Stlm", .mutate = struct {
+            .{ .label = "ST0 with stale explicit tile byte", .mutate = struct {
                 fn mutate(bytes: []u8, tlm: usize) void {
                     bytes[tlm + 5] = 0x40;
                 }
-            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
+            .{ .label = "reserved ST3", .mutate = struct {
+                fn mutate(bytes: []u8, tlm: usize) void {
+                    bytes[tlm + 5] = 0x70;
+                }
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "bad entry byte count", .mutate = struct {
                 fn mutate(bytes: []u8, tlm: usize) void {
                     writeU16BeTest(bytes, tlm + 2, readU16BeTest(bytes, tlm + 2) + 1);
                 }
             }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
-            .{ .label = "nonzero tile index", .mutate = struct {
+            .{ .label = "SOT disagrees with explicit tile index", .mutate = struct {
                 fn mutate(bytes: []u8, tlm: usize) void {
                     bytes[tlm + 6] = 1;
                 }
-            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "zero Psot", .mutate = struct {
                 fn mutate(bytes: []u8, tlm: usize) void {
                     writeU32BeTest(bytes, tlm + 7, 0);
@@ -25144,6 +25150,32 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
         try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
     }
 
+    // A one-part-per-tile stream can express the same TLM list with every
+    // legal ST/SP combination. Exercise both the raw strict reader and the JP2
+    // wrapper while leaving all SOT, packet, and T1 bytes unchanged.
+    for ([_]u8{ 0, 1, 2 }) |tile_index_bytes| {
+        for ([_]u8{ 2, 4 }) |length_bytes| {
+            errdefer std.debug.print(
+                "TLM layout roundtrip failed: ST={d} SP={d}\n",
+                .{ tile_index_bytes, if (length_bytes == 2) @as(u8, 0) else 1 },
+            );
+            const variant = try rewriteTlmLayoutForTest(
+                allocator,
+                bytes,
+                tile_index_bytes,
+                length_bytes,
+            );
+            defer allocator.free(variant);
+            var decoded = try codestream.decodeLosslessTemporary(allocator, variant);
+            defer decoded.deinit();
+            try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+            const variant_jp2 = try jp2.wrapRgbCodestream(allocator, rgb, variant);
+            defer allocator.free(variant_jp2);
+            const info = try jp2.parseInfo(variant_jp2);
+            try std.testing.expectEqual(variant.len, info.codestream_bytes);
+        }
+    }
+
     const first_sot = findMarker(bytes, codestream.markerValue("sot")) orelse return error.MissingSot;
     const second_sot = findMarkerAfter(bytes, codestream.markerValue("sot"), first_sot + 2) orelse return error.MissingSot;
     const tlm = findMarker(bytes, codestream.markerValue("tlm")) orelse return error.MissingTlm;
@@ -25237,6 +25269,50 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
     try std.testing.expectError(
         codestream.CodestreamError.TruncatedData,
         codestream.decodeLosslessTemporary(allocator, bytes[0 .. bytes.len - 8]),
+    );
+}
+
+test "foreign Kakadu multipart TLM accepts explicit ST SP width variants" {
+    const allocator = std.testing.allocator;
+    const container = @embedFile("testdata/kakadu-multipart-tlm.jp2");
+    const source = try jp2.extractCodestream(container);
+    var reference = try codestream.decodeLosslessTemporary(allocator, source);
+    defer reference.deinit();
+
+    for ([_]u8{ 1, 2 }) |tile_index_bytes| {
+        for ([_]u8{ 2, 4 }) |length_bytes| {
+            errdefer std.debug.print(
+                "foreign TLM layout failed: ST={d} SP={d}\n",
+                .{ tile_index_bytes, if (length_bytes == 2) @as(u8, 0) else 1 },
+            );
+            const variant = try rewriteTlmLayoutForTest(
+                allocator,
+                source,
+                tile_index_bytes,
+                length_bytes,
+            );
+            defer allocator.free(variant);
+            var decoded = try codestream.decodeLosslessTemporary(allocator, variant);
+            defer decoded.deinit();
+            try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+            const wrapped = try jp2.wrapRgbCodestream(allocator, reference, variant);
+            defer allocator.free(wrapped);
+            _ = try jp2.parseInfo(wrapped);
+        }
+    }
+
+    // ST=0 omits tile indices and is legal only for one part per tile in
+    // 0..N-1 order. The independent Kakadu source has six parts per tile, so
+    // its unchanged SOT sequence must contradict an ST=0 rewrite.
+    const illegal_implicit = try rewriteTlmLayoutForTest(allocator, source, 0, 4);
+    defer allocator.free(illegal_implicit);
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporary(allocator, illegal_implicit),
+    );
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidCodestream,
+        jp2.wrapRgbCodestream(allocator, reference, illegal_implicit),
     );
 }
 
@@ -29648,6 +29724,61 @@ fn countNonZeroI32Test(values: []const i32) u32 {
         if (value != 0) count += 1;
     }
     return count;
+}
+
+fn rewriteTlmLayoutForTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    tile_index_bytes: u8,
+    length_bytes: u8,
+) ![]u8 {
+    if (tile_index_bytes > 2 or (length_bytes != 2 and length_bytes != 4)) {
+        return error.InvalidTlmLayout;
+    }
+    const marker_offset = findMarker(bytes, codestream.markerValue("tlm")) orelse
+        return error.MissingTlm;
+    if (marker_offset + 6 > bytes.len) return error.InvalidTlmLayout;
+    const marker_length = readU16BeTest(bytes, marker_offset + 2);
+    const marker_end = marker_offset + 2 + @as(usize, marker_length);
+    if (marker_end > bytes.len) return error.InvalidTlmLayout;
+    const source = try tlm_parser.parse(bytes[marker_offset + 4 .. marker_end], 0, 0);
+    const entry_bytes = @as(usize, tile_index_bytes) + length_bytes;
+    const payload_bytes = std.math.mul(usize, source.count, entry_bytes) catch
+        return error.InvalidTlmLayout;
+    const output_length = std.math.add(usize, 4, payload_bytes) catch
+        return error.InvalidTlmLayout;
+    const ltlm = std.math.cast(u16, output_length) orelse return error.InvalidTlmLayout;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, bytes[0..marker_offset]);
+    try appendU16BeTest(allocator, &out, codestream.markerValue("tlm"));
+    try appendU16BeTest(allocator, &out, ltlm);
+    try out.append(allocator, 0);
+    const stlm = (tile_index_bytes << 4) | (if (length_bytes == 4) @as(u8, 0x40) else 0);
+    try out.append(allocator, stlm);
+    for (0..source.count) |index| {
+        const entry = try source.entry(index);
+        switch (tile_index_bytes) {
+            0 => {},
+            1 => {
+                if (entry.tile_index > 254) return error.InvalidTlmLayout;
+                try out.append(allocator, @intCast(entry.tile_index));
+            },
+            2 => try appendU16BeTest(allocator, &out, entry.tile_index),
+            else => unreachable,
+        }
+        switch (length_bytes) {
+            2 => {
+                const psot = std.math.cast(u16, entry.psot) orelse return error.InvalidTlmLayout;
+                try appendU16BeTest(allocator, &out, psot);
+            },
+            4 => try appendU32BeTest(allocator, &out, entry.psot),
+            else => unreachable,
+        }
+    }
+    try out.appendSlice(allocator, bytes[marker_end..]);
+    return out.toOwnedSlice(allocator);
 }
 
 fn readU16BeTest(bytes: []const u8, offset: usize) u16 {

@@ -192,6 +192,15 @@ before reconstruction. PLM syntax/payload corruption is therefore runnable
 evidence, but the PLM marker placement remains test-produced and is not
 counted as an independently emitted corpus asset.
 
+The G3 TLM width gate reuses the independently emitted 24-part Kakadu TLM
+asset without changing any SOT, packet-header, or T1 bytes. Its explicit tile
+indexes and lengths are losslessly re-expressed as `ST=1/2` and `SP=0/1`; all
+four variants decode pixel-exactly through raw and JP2 validation. A separate
+one-part-per-tile stream covers `ST=0` with both length widths, while applying
+`ST=0` to the multipart Kakadu sequence fails at exact TLM/SOT reconciliation.
+The alternate marker widths are test-produced, so an independently emitted
+`ST=0`, `ST=1`, or `SP=0` stream remains useful promotion evidence.
+
 The eighth G2 entry is independently emitted by Kakadu rather than structurally
 repacked. Its four-tile no-MCT 9/7 stream starts with main Qstep 1/256, replaces
 tile 1 with Qstep 0.01 through QCD, and replaces component 1 in that tile with

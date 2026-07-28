@@ -16,6 +16,7 @@ const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
 const tile_grid = @import("tile_grid.zig");
 const tile_pipeline = @import("tile_pipeline.zig");
+const tlm = @import("tlm.zig");
 const wavelet_int = @import("wavelet_int.zig");
 const wavelet = @import("wavelet.zig");
 
@@ -2049,10 +2050,7 @@ pub const StrictPacketBlockCatalog = struct {
     }
 };
 
-const TlmEntry = struct {
-    tile_index: u16,
-    psot: u32,
-};
+const TlmEntry = tlm.Entry;
 
 const MainHeaderPacketMarkers = struct {
     sop: bool,
@@ -13067,38 +13065,11 @@ fn appendStrictTlmEntries(
     segment: []const u8,
     expected_index: usize,
 ) !void {
-    if (segment.len < 2) return CodestreamError.InvalidCodestream;
-    const ztlm = segment[0];
-    if (expected_index > std.math.maxInt(u8) or ztlm != @as(u8, @intCast(expected_index))) {
+    const parsed = tlm.parse(segment, expected_index, entries.items.len) catch
         return CodestreamError.InvalidCodestream;
-    }
-    const stlm = segment[1];
-    if ((stlm & 0x0f) != 0) return CodestreamError.InvalidCodestream;
-    const tile_index_size = (stlm >> 4) & 0x03;
-    if (tile_index_size == 3) return CodestreamError.InvalidCodestream;
-    const length_size: usize = if (((stlm >> 6) & 0x01) == 0) 2 else 4;
-    const entry_size = @as(usize, tile_index_size) + length_size;
-    const payload = segment[2..];
-    if (entry_size == 0 or payload.len == 0 or payload.len % entry_size != 0) {
-        return CodestreamError.InvalidCodestream;
-    }
-
-    var cursor: usize = 0;
-    while (cursor < payload.len) : (cursor += entry_size) {
-        const tile_index: u16 = switch (tile_index_size) {
-            0 => 0,
-            1 => payload[cursor],
-            2 => readU16Be(payload, cursor),
-            else => unreachable,
-        };
-        const ptlm_offset = cursor + @as(usize, tile_index_size);
-        const psot: u32 = switch (length_size) {
-            2 => readU16Be(payload, ptlm_offset),
-            4 => readU32Be(payload, ptlm_offset),
-            else => unreachable,
-        };
-        if (psot == 0) return CodestreamError.UnsupportedPayload;
-        try entries.append(allocator, .{ .tile_index = tile_index, .psot = psot });
+    try entries.ensureUnusedCapacity(allocator, parsed.count);
+    for (0..parsed.count) |index| {
+        entries.appendAssumeCapacity(try parsed.entry(index));
     }
 }
 

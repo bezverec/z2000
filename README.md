@@ -36,7 +36,9 @@ Neither figure is a formal ISO conformance certification.
   resource. Progressive, arithmetic/lossless, CMYK/YCCK, multi-scan, extended
   XMP, ICC APP2, and arbitrary Photoshop resources fail closed.
 - Lossless JP2 encoding with RCT, reversible 5/3 DWT, quality layers, all five
-  progression orders, PLT/TLM, and strict no-sidecar decode.
+  progression orders, PLT/TLM, and strict no-sidecar decode. Raw and JP2
+  readers accept all six legal TLM `ST=0/1/2` x `SP=0/1` entry widths and
+  reconcile every listed tile index/length with the actual SOT sequence.
 - Lossy JP2 encoding with irreversible 9/7 DWT, ICT or bounded single-tile
   no-MCT component coding, scalar-derived or scalar-expounded quantization,
   and rate allocation. Single-tile no-MCT or transform-appropriate RCT/ICT

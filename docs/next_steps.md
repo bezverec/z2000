@@ -576,9 +576,14 @@ Implement in small marker-to-raster slices:
    its external specification and actual payload behavior are implemented and
    independently evidenced.
 4. General legal tile-part ordering and repetition beyond the landed inline
-   PLT-less state machine and bounded COC/QCC PPT-resolution-part profile,
-   including checked `TLM` variations. PLT-less multipart PPM without POC is
-   complete through the shared deferred-count state machine.
+   PLT-less state machine and bounded COC/QCC PPT-resolution-part profile.
+   The TLM width sub-slice is implementation-complete: raw and JP2 paths share
+   all six `ST=0/1/2` x `SP=0/1` layouts, implicit-index continuation, strict
+   syntax, and exact SOT/`Psot` reconciliation. Independent Kakadu packet/T1
+   bytes remain exact under four explicit-width rewrites; obtain one
+   independently emitted alternate-width TLM before formal promotion.
+   PLT-less multipart PPM without POC is complete through the shared deferred-
+   count state machine.
 5. Legal `POC` schedules across inline, `PPT`, and `PPM` headers, removing the
    current sampled `PPM` + `POC` fail-closed boundary only after packet identity
    is unambiguous.

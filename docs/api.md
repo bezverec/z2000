@@ -501,7 +501,8 @@ Notes:
   and EBCOT scratch buffers are reused while packet emission still reads stable
   per-component catalog indexes.
 - Strict packet catalog parsing validates SOT/TLM/PLT marker accounting,
-  ordered multi-segment TLM/PLT indexes, SOP/EPH marker policy, packet-header
+  ordered multi-segment TLM/PLT indexes, every legal TLM `ST=0/1/2` and
+  `SP=0/1` width, SOP/EPH marker policy, packet-header
   marker stuffing, and terminal `0xff` packet-header padding. It also has a
   PLT-less catalog branch that derives packet spans from packet headers; the
   current foreign-stream gate covers OpenJPEG/Grok/Kakadu default lossless
