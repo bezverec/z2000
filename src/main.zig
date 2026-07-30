@@ -898,6 +898,10 @@ fn j2kToPgxCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.resolution_reduction = try std.fmt.parseInt(u8, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--layers")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.quality_layer_limit = try std.fmt.parseInt(u16, args[index], 10);
         } else if (std.mem.eql(u8, args[index], "--threads")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -985,6 +989,10 @@ fn j2kToZrawCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.resolution_reduction = try std.fmt.parseInt(u8, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--layers")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.quality_layer_limit = try std.fmt.parseInt(u16, args[index], 10);
         } else if (std.mem.eql(u8, args[index], "--threads")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -1053,6 +1061,10 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.t1_backend = try parseT1Backend(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--layers")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.quality_layer_limit = try std.fmt.parseInt(u16, args[index], 10);
         } else if (std.mem.eql(u8, args[index], "--timings")) {
             show_timings = true;
         } else if (std.mem.eql(u8, args[index], "--convert-to-srgb")) {
@@ -1880,9 +1892,9 @@ fn usage() void {
         \\  z2000 exr-to-jp2 <input.exr> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
-        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
-        \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
-        \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
+        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--layers N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
+        \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
+        \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.

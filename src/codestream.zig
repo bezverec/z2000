@@ -361,6 +361,9 @@ fn normalizedEncodePrecinctOptions(options: LosslessOptions, levels: u8) Lossles
 pub const DecodeOptions = struct {
     threads: u8 = 1,
     t1_backend: T1Backend = .iso_mq,
+    /// Reconstruct only the first N quality layers while still validating the
+    /// complete codestream. Zero selects every signalled layer.
+    quality_layer_limit: u16 = 0,
     /// Discard this many finest DWT resolution levels during synthesis.
     /// Zero reconstructs the full image; the value must not exceed COD/NL.
     resolution_reduction: u8 = 0,
@@ -640,7 +643,6 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         return CodestreamError.InvalidCodestream;
     }
     if (options.ppm and options.ppt) return CodestreamError.UnsupportedPayload;
-    if (options.ppm and options.poc_records.len != 0) return CodestreamError.UnsupportedPayload;
     // PPT tile-parts retain body-length PLT accounting. PPM owns packet-header
     // grouping in the main header and intentionally omits PLT.
     if (options.ppt and !options.plt) return CodestreamError.UnsupportedPayload;
@@ -1961,6 +1963,7 @@ pub const StrictPacketHeaderAudit = struct {
     header_decoded_packets: u64 = 0,
     header_bytes: u64 = 0,
     payload_bytes: u64 = 0,
+    retained_payload_bytes: u64 = 0,
     included_blocks: u64 = 0,
     assembled_blocks: u64 = 0,
     assembled_bytes: u64 = 0,
@@ -3531,6 +3534,7 @@ pub fn decodeLosslessNativeWithOptions(
         bytes,
         header,
         options.resolution_reduction,
+        options.quality_layer_limit,
         null,
     );
     defer catalog.deinit();
@@ -3629,7 +3633,7 @@ pub fn decodeLosslessNativeWithOptions(
         const maximum = try plane_layout.maximumSample();
         for (coefficients, output.planes[component].samples) |coefficient, *sample| {
             const value = @as(i64, coefficient) + level_shift;
-            sample.* = if (options.resolution_reduction == 0)
+            sample.* = if (options.resolution_reduction == 0 and options.quality_layer_limit == 0)
                 value
             else
                 std.math.clamp(value, minimum, maximum);
@@ -3926,6 +3930,7 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
         bytes,
         header,
         options.resolution_reduction,
+        options.quality_layer_limit,
         timings,
     );
     defer catalog.deinit();
@@ -4071,7 +4076,7 @@ fn decodeMixedTransformPlanarFromBlockCatalogMeasured(
                 for (0..actual_height) |row| {
                     for (0..actual_width) |column| {
                         const value = coefficients[row * component_width + column] + level_shift;
-                        output.planes[component][row * actual_width + column] = if (options.resolution_reduction == 0) value: {
+                        output.planes[component][row * actual_width + column] = if (options.resolution_reduction == 0 and options.quality_layer_limit == 0) value: {
                             if (value < 0 or value > max_sample) return CodestreamError.InvalidCodestream;
                             break :value @intCast(value);
                         } else @intCast(std.math.clamp(value, 0, max_sample));
@@ -4293,7 +4298,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
         }
         transformed.width = decoded_component_widths[0];
         transformed.height = decoded_component_heights[0];
-        return if (options.resolution_reduction == 0)
+        return if (options.resolution_reduction == 0 and options.quality_layer_limit == 0)
             color.inverseRctPlanar(allocator, transformed)
         else
             color.inverseRctPlanarSaturated(allocator, transformed);
@@ -4322,6 +4327,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
         const max_sample = (@as(i32, 1) << @as(u5, @intCast(component_depth))) - 1;
         const level_shift = @as(i32, 1) << @as(u5, @intCast(component_depth - 1));
         const format_with_saturation = options.resolution_reduction != 0 or
+            options.quality_layer_limit != 0 or
             (output_mode == .codestream_components and header.mct != .none);
         for (coefficients, samples) |coefficient, *sample| {
             const value = coefficient + level_shift;
@@ -4348,7 +4354,7 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     }
 
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
-    if (options.resolution_reduction == 0) {
+    if (options.resolution_reduction == 0 and options.quality_layer_limit == 0) {
         if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
             defer allocator.free(payload);
             const sidecar_start = monotonicNs();
@@ -4384,6 +4390,7 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
         bytes,
         header,
         options.resolution_reduction,
+        options.quality_layer_limit,
         timings,
     );
     defer strict_catalog.deinit();
@@ -4678,7 +4685,7 @@ fn readStrictPacketBlockCatalogWithHeader(
     bytes: []const u8,
     header: TemporaryHeader,
 ) !StrictPacketBlockCatalog {
-    return readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, 0, null);
+    return readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, 0, 0, null);
 }
 
 fn readStrictPacketBlockCatalogWithHeaderProfiled(
@@ -4686,6 +4693,7 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
     bytes: []const u8,
     header: TemporaryHeader,
     resolution_reduction: u8,
+    quality_layer_limit: u16,
     timings: ?*DecodeTimings,
 ) !StrictPacketBlockCatalog {
     const scan_start = monotonicNs();
@@ -4713,6 +4721,7 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
         header,
         catalog,
         resolution_reduction,
+        quality_layer_limit,
         &audit,
     );
     defer assemblies.deinit();
@@ -4724,8 +4733,11 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
         assemblies.assemblies[0..assemblies.initialized],
     );
     errdefer build.catalog.deinit();
-    if (build.stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
-    if (timings) |t| t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
+    if (build.stats.bytes != audit.retained_payload_bytes) return CodestreamError.InvalidCodestream;
+    if (timings) |t| {
+        t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
+        t.packet_catalog_payload_bytes_discarded += audit.payload_bytes - audit.retained_payload_bytes;
+    }
     if (timings) |t| t.packet_catalog_finalize_ns += elapsedNs(finalize_start);
     return build.catalog;
 }
@@ -5474,7 +5486,6 @@ fn readStrictCodestreamMetadataForProfile(
             }
         }
         if (poc_records.items.len != 0 or has_tile_poc) {
-            if (ppm_headers != null) return CodestreamError.UnsupportedPayload;
             if (subsampled_components and has_multiple_tile_parts) {
                 return CodestreamError.UnsupportedPayload;
             }
@@ -7309,7 +7320,7 @@ fn auditStrictPacketCatalogHeaders(
     catalog: StrictPacketCatalog,
 ) !StrictPacketHeaderAudit {
     var audit = StrictPacketHeaderAudit{};
-    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, 0, &audit);
+    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, 0, 0, &audit);
     defer assemblies.deinit();
 
     const assembly_stats = try strictAssemblyStats(assemblies.assemblies[0..assemblies.initialized]);
@@ -7326,9 +7337,16 @@ fn assembleStrictPacketCatalogHeaders(
     header: TemporaryHeader,
     catalog: StrictPacketCatalog,
     resolution_reduction: u8,
+    quality_layer_limit: u16,
     audit: *StrictPacketHeaderAudit,
 ) !StrictComponentAssemblySet {
     if (resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
+    const retained_layer_count = if (quality_layer_limit == 0)
+        header.layers
+    else if (quality_layer_limit <= header.layers)
+        quality_layer_limit
+    else
+        return CodestreamError.InvalidCodestream;
     var geometries = try StrictComponentGeometrySet.init(allocator, header);
     defer geometries.deinit();
 
@@ -7429,16 +7447,18 @@ fn assembleStrictPacketCatalogHeaders(
             continue;
         }
 
+        const retain_payload = entry.packet.layer < retained_layer_count;
         const read = try readStrictPacketHeaderForAudit(
             packet_view,
             entry.packet,
             active_groups,
-            &assemblies.assemblies[entry.packet.component],
+            if (retain_payload) &assemblies.assemblies[entry.packet.component] else null,
             geometry.blocks,
         );
         audit.header_decoded_packets += 1;
         audit.header_bytes += read.header_length;
         audit.payload_bytes += read.payload_length;
+        if (retain_payload) audit.retained_payload_bytes += read.payload_length;
         audit.included_blocks += read.included_blocks;
         if (read.present) {
             audit.present_packets += 1;
@@ -8450,7 +8470,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     defer {
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
-    if (options.resolution_reduction != 0 and header.mct == .none) {
+    if ((options.resolution_reduction != 0 or options.quality_layer_limit != 0) and header.mct == .none) {
         const max_sample = (@as(i32, 1) << @as(u5, @intCast(header.bit_depth))) - 1;
         const level_shift = @as(i32, 1) << @as(u5, @intCast(header.bit_depth - 1));
         for (strict_planes.planes) |plane| {
@@ -8461,7 +8481,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     }
     return if (header.mct == .none)
         color.inverseNoTransform(allocator, strict_planes)
-    else if (options.resolution_reduction != 0)
+    else if (options.resolution_reduction != 0 or options.quality_layer_limit != 0)
         color.inverseRctSaturatedThreaded(allocator, strict_planes, options.threads)
     else
         color.inverseRctThreaded(allocator, strict_planes, options.threads);
@@ -8852,10 +8872,6 @@ fn readStrictMultiTilePacketCatalog(
                 tile_index,
                 &effective_poc_records,
             );
-            if (context.main_header.ppm_headers != null and tile_poc_records != null) {
-                return CodestreamError.UnsupportedPayload;
-            }
-
             var tile_catalog = try readStrictMultiTilePacketCatalogForTile(
                 allocator,
                 bytes,
@@ -9206,12 +9222,6 @@ fn decodeStrictMultiTilePlanarMeasured(
             tile_index,
             &effective_poc_records,
         );
-        // PPM cannot combine with progression-order changes in the current
-        // envelope (mirrors the non-sampled restriction).
-        if (context.main_header.ppm_headers != null and tile_poc_records != null) {
-            return CodestreamError.UnsupportedPayload;
-        }
-
         const catalog_start = monotonicNs();
         var catalog = try readStrictMultiTilePacketCatalogForTile(
             allocator,
@@ -9235,6 +9245,7 @@ fn decodeStrictMultiTilePlanarMeasured(
             tile_header,
             catalog,
             options.resolution_reduction,
+            options.quality_layer_limit,
             &audit,
         );
         defer assemblies.deinit();
@@ -9244,8 +9255,11 @@ fn decodeStrictMultiTilePlanarMeasured(
         );
         var block_catalog = build.catalog;
         defer block_catalog.deinit();
-        if (build.stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
-        if (timings) |t| t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
+        if (build.stats.bytes != audit.retained_payload_bytes) return CodestreamError.InvalidCodestream;
+        if (timings) |t| {
+            t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
+            t.packet_catalog_payload_bytes_discarded += audit.payload_bytes - audit.retained_payload_bytes;
+        }
         try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
             &block_catalog,
             tile_header.levels,
@@ -9372,10 +9386,6 @@ fn decodeStrictMultiTileNative(
             tile_index,
             &effective_poc_records,
         );
-        if (context.main_header.ppm_headers != null and tile_poc_records != null) {
-            return CodestreamError.UnsupportedPayload;
-        }
-
         var catalog = try readStrictMultiTilePacketCatalogForTile(
             allocator,
             bytes,
@@ -9397,6 +9407,7 @@ fn decodeStrictMultiTileNative(
             tile_header,
             catalog,
             options.resolution_reduction,
+            options.quality_layer_limit,
             &audit,
         );
         defer assemblies.deinit();
@@ -9406,7 +9417,7 @@ fn decodeStrictMultiTileNative(
         );
         var block_catalog = build.catalog;
         defer block_catalog.deinit();
-        if (build.stats.bytes != audit.payload_bytes or
+        if (build.stats.bytes != audit.retained_payload_bytes or
             block_catalog.component_count != header.component_count)
         {
             return CodestreamError.InvalidCodestream;
@@ -9508,12 +9519,12 @@ fn decodeStrictMultiTileNative(
                 const destination_row = plane.samples[destination_start..][0..tile_width];
                 for (source_row, destination_row) |coefficient, *sample| {
                     const value = @as(i64, coefficient) + level_shift;
-                    if (options.resolution_reduction == 0 and
+                    if (options.resolution_reduction == 0 and options.quality_layer_limit == 0 and
                         (value < minimum or value > maximum))
                     {
                         return native_samples.NativeSampleError.SampleOutOfRange;
                     }
-                    sample.* = if (options.resolution_reduction == 0)
+                    sample.* = if (options.resolution_reduction == 0 and options.quality_layer_limit == 0)
                         value
                     else
                         std.math.clamp(value, minimum, maximum);
@@ -9591,6 +9602,7 @@ fn decodeStrictMultiTileImageMeasured(
             tile_header,
             catalog,
             options.resolution_reduction,
+            options.quality_layer_limit,
             &audit,
         );
         defer assemblies.deinit();
@@ -9600,8 +9612,11 @@ fn decodeStrictMultiTileImageMeasured(
         );
         var block_catalog = build.catalog;
         defer block_catalog.deinit();
-        if (build.stats.bytes != audit.payload_bytes) return CodestreamError.InvalidCodestream;
-        if (timings) |t| t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
+        if (build.stats.bytes != audit.retained_payload_bytes) return CodestreamError.InvalidCodestream;
+        if (timings) |t| {
+            t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
+            t.packet_catalog_payload_bytes_discarded += audit.payload_bytes - audit.retained_payload_bytes;
+        }
         try compactStrictPacketBlockCatalogForReduction(
             &block_catalog,
             tile_header.levels,
@@ -9687,6 +9702,7 @@ fn auditStrictMultiTilePacketHeaders(
         total.header_decoded_packets += audit.header_decoded_packets;
         total.header_bytes += audit.header_bytes;
         total.payload_bytes += audit.payload_bytes;
+        total.retained_payload_bytes += audit.retained_payload_bytes;
         total.included_blocks += audit.included_blocks;
         total.assembled_blocks += audit.assembled_blocks;
         total.assembled_bytes += audit.assembled_bytes;

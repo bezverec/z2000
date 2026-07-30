@@ -78,7 +78,9 @@ Neither figure is a formal ISO conformance certification.
   `COD/QCD`, then reversible tile 1 component 1 `COC/QCC`; all six
   full/reduced PGX planes pass and a mismatched QCC fails closed. PLT-less
   multipart PPM without POC now derives per-part packet counts from checked
-  `Nppm` and `Psot` boundaries. Packed POC/TLM combinations remain fail-closed.
+  `Nppm` and `Psot` boundaries. Bounded sampled PPM+POC is supported with one
+  part per tile; general multipart POC and packed-header/TLM combinations
+  remain fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,
@@ -138,7 +140,10 @@ Neither figure is a formal ISO conformance certification.
   three-component sRGB output. Inline, PPT, and PPM headers plus SOP/EPH are
   covered. The sampled reversible API emits single- and multi-tile RPCL with
   inline PLT/PLT-less, PPT, or PPM packet headers; all layouts carry one or
-  more quality layers. Requested resolution reduction is performed directly
+  more quality layers. `DecodeOptions.quality_layer_limit` reconstructs a
+  validated leading layer prefix without materializing later packet bodies;
+  zero retains all layers and a limit above COD/Layers fails closed. Requested
+  resolution reduction is performed directly
   per native component for single- and multi-tile sampled 5/3 streams and the
   bounded multi-tile sampled no-MCT 9/7 decode profile. The 9/7 gate covers a
   foreign Kakadu inline PLT/PLT-less payload plus deterministic PPT/PPM
@@ -308,12 +313,12 @@ z2k jp2-stats output.jp2
 ```
 
 Decode one native component from a raw codestream to checked PGX. Component 0
-and big-endian `ML` output are the defaults; `--reduce` selects a lower DWT
-resolution directly:
+  and big-endian `ML` output are the defaults; `--layers` selects a leading
+  quality-layer prefix and `--reduce` selects a lower DWT resolution directly:
 
 ```sh
 z2k input.j2k component0.pgx
-z2k input.j2c component2-r1.pgx --component 2 --reduce 1 --pgx-order LM
+z2k input.j2c component2-r1.pgx --component 2 --layers 2 --reduce 1 --pgx-order LM
 z2k *.j2k .pgx --component 0
 ```
 
@@ -359,9 +364,9 @@ z2000 input.dng output.jp2 [options]
 z2000 dng-to-jp2 input.dng output.jp2 [options]
 z2000 input.exr output.jp2 [options]
 z2000 exr-to-jp2 input.exr output.jp2 [options]
-z2000 input.j2k output.pgx [--component N] [--reduce N] [--threads N] [--t1-backend BACKEND] [--pgx-order ML|LM]
+z2000 input.j2k output.pgx [--component N] [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND] [--pgx-order ML|LM]
 z2000 j2k-to-pgx input.j2c output.pgx [options]
-z2000 input.j2k output.zraw [--reduce N] [--threads N] [--t1-backend BACKEND]
+z2000 input.j2k output.zraw [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND]
 z2000 j2k-to-zraw input.j2c output.zraw [options]
 ```
 
@@ -399,7 +404,8 @@ than silently changing the codestream profile.
 - **--qstyle STYLE**: Quantization: **none**, **scalar-derived**, or
   **scalar-expounded**. Use none with 5-3 and a scalar style with 9-7.
 - **--guard-bits N**: Number of QCD guard bits.
-- **--layers N**: Number of untargeted quality layers.
+- **--layers N**: On encode, number of untargeted quality layers. On decode,
+  reconstruct only the leading N layers; zero means all signalled layers.
 - **--rates LIST**: Comma-separated compression-ratio targets, for example
   **16,8,1**. The list sets the layer count; a final 1 requests a complete
   final layer.
@@ -424,7 +430,8 @@ than silently changing the codestream profile.
   form **RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER**. Separate records with a
   semicolon.
 - **--poc-location PLACE**: Write POC in the **main** header or first **tile**
-  header. Tile-header POC cannot be combined with PPM or PPT.
+  header. The current RGB CLI path does not combine POC with PPM or PPT; the
+  sampled library API has a bounded one-part-per-tile packed-header profile.
 
 ### Markers And T1 Resilience
 
@@ -457,17 +464,18 @@ Other commands:
 - **jp2-info INPUT**: Show the JP2 container and codestream summary.
 - **jp2-stats INPUT**: Audit packet headers, block catalogs, and payload sizes.
 - **decode-temp-jp2 INPUT OUTPUT**: Strict-decode JP2 into TIFF. The command
-  keeps its historical name for compatibility and accepts --threads,
+  keeps its historical name for compatibility and accepts --layers, --threads,
   --t1-backend, --convert-to-srgb, and --timings. ICC conversion is opt-in;
   without the flag, profile bytes and samples are preserved unchanged.
 - **j2k-to-pgx INPUT OUTPUT**: Decode one selected component from a raw `.j2k`
   or `.j2c` codestream through the native reversible path. `--component`
-  defaults to 0, `--reduce` to 0, and `--pgx-order` to big-endian `ML`.
+  defaults to 0, `--layers` and `--reduce` to 0 (all layers/full resolution),
+  and `--pgx-order` to big-endian `ML`.
   Extension shorthand and non-recursive unquoted batch syntax are supported.
 - **j2k-to-zraw INPUT OUTPUT**: Decode all components from a raw `.j2k` or
   `.j2c` codestream into canonical big-endian ZRAW. Precision, signedness,
   component-local dimensions, sampling steps, and origins are retained.
-  `--reduce`, `--threads`, and `--t1-backend` work in explicit, shorthand,
+  `--layers`, `--reduce`, `--threads`, and `--t1-backend` work in explicit, shorthand,
   and non-recursive batch forms.
 
 The full profile matrix and internal API surface are documented in
@@ -549,7 +557,8 @@ the JP2-to-TIFF CLI interleaves those planes only after the JP2 wrapper has
 established bounded sRGB semantics. Sampled PPT/PPM and SOP/EPH decode are
 covered; the sampled writer emits single- and multi-tile RPCL with inline PLT,
 inline PLT-less, PPT, or PPM packet headers, untargeted layers, and SOP/EPH
-framing. Reordered sampled POC is supported except with PPM. The sampled
+  framing. Reordered sampled POC is supported with inline, PPT, or PPM headers
+  for the bounded one-part-per-tile profile. The sampled
 library encoder accepts absolute SIZ origins through
 `LosslessOptions.image_origin_x/y` and `tile_origin_x/y`; the TIFF CLI
 continues to emit zero-origin images.
@@ -630,7 +639,7 @@ envelope. The score is for that bounded envelope, not a claim that every Part 1
 or JPX profile is implemented.
 
 Full codec target: complete the G0-G7 plan across generic integer components,
-remaining Part 1 markers and ROI, selective/streaming decode, a general
+remaining Part 1 markers and ROI, tile/region-selective and streaming decode, a general
 encoder, broader JP2 mappings, and the final conformance/hardening gate. The
 phase-by-phase estimate and its uncertainty are maintained in the roadmap;
 the bounded 100/100 scorecards are not used as a proxy for this progress.

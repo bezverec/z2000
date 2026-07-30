@@ -39,7 +39,7 @@ zig build run -- dng-to-jp2 input.dng output.jp2 [options]
 zig build run -- exr-to-jp2 input.exr output.jp2 [options]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
-zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--threads N] [--convert-to-srgb]
+zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--layers N] [--threads N] [--convert-to-srgb]
 zig build run -- *.tif .jp2 [tiff-to-jp2 options]
 zig build run -- *.bmp .jp2 [tiff-to-jp2 options]
 zig build run -- *.png .jp2 [tiff-to-jp2 options]
@@ -47,9 +47,9 @@ zig build run -- *.jpg .jp2 [tiff-to-jp2 options]
 zig build run -- *.dng .jp2 [tiff-to-jp2 options]
 zig build run -- *.exr .jp2 [tiff-to-jp2 options]
 zig build run -- *.jp2 .tif [decode-temp-jp2 options]
-zig build run -- j2k-to-pgx input.j2k component.pgx [--component N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq] [--pgx-order ML|LM]
+zig build run -- j2k-to-pgx input.j2k component.pgx [--component N] [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq] [--pgx-order ML|LM]
 zig build run -- *.j2c .pgx [j2k-to-pgx options]
-zig build run -- j2k-to-zraw input.j2k components.zraw [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq]
+zig build run -- j2k-to-zraw input.j2k components.zraw [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq]
 zig build run -- *.j2c .zraw [j2k-to-zraw options]
 ```
 
@@ -77,7 +77,7 @@ expanded to RGB first.
 `.j2c` without a JP2 wrapper, decodes through `decodeLosslessNativeWithOptions`,
 and writes exactly one caller-selected component. Component 0, full resolution,
 all logical CPUs, the ISO MQ backend, and big-endian `ML` PGX are defaults.
-`--component N`, `--reduce N`, `--threads N`, `--t1-backend`, and
+`--component N`, `--layers N`, `--reduce N`, `--threads N`, `--t1-backend`, and
 `--pgx-order ML|LM` are available in explicit, shorthand, and batch forms.
 Invalid component indexes and profiles outside the native reversible contract
 fail before an output file is written.
@@ -239,9 +239,11 @@ Supported public JP2 profiles are still narrow:
 
 Unsupported combinations still fail closed. Examples include tile-part
 division/progression mismatches, JPX features, unsupported component layouts,
-and profile mixes outside the bounded envelope. In
-multi-tile mode, BYPASS without TERMALL and broader sampled PPM/PPT plus POC
-combinations remain unsupported. Inline PLT-less multipart streams derive
+and profile mixes outside the bounded envelope. In multi-tile mode, BYPASS
+without TERMALL remains unsupported. The sampled library API combines inline,
+PPT, or PPM headers with complete main- or first-tile-header POC schedules for
+one part per tile; the generic RGB CLI path and broader multipart packed POC
+combinations remain closed. Inline PLT-less multipart streams derive
 packet counts from stateful T2 headers at each checked `Psot` boundary. PPM/PPT are
 mutually exclusive and multi-tile PPT
 additionally rejects non-`R` layouts.
@@ -355,6 +357,14 @@ Primary public functions:
   scalar-expounded COD/QCD; each tile is reconstructed through its effective
   transform before absolute-grid assembly. These are decode-only profile
   extensions, not general encoder controls.
+  `DecodeOptions.quality_layer_limit` selects the first N quality layers on the
+  shared strict packet catalog; zero keeps all layers. Values above COD/Layers
+  fail closed. Every later packet header and payload span is still parsed and
+  validated, but its body is not appended to the block assembly or sent to T1.
+  The bounded single- and multi-tile planar, gray, native, and interleaved paths
+  share this behavior. Partial output is precision-saturated. An explicit limit
+  equal to COD/Layers is sample-identical to the default full decode, and the
+  selected prefix is deterministic across worker counts.
   `DecodeOptions.resolution_reduction`
   reconstructs a requested lower DWT resolution directly for bounded
   reversible 5/3 and irreversible no-MCT 9/7 streams, including component-
@@ -487,8 +497,9 @@ Notes:
 - `DecodeTimings` reports the strict decode split for metadata, packet catalog,
   T1 block payload, inverse DWT, and inverse MCT. The packet catalog timing is
   further split into SOD/PLT scan, packet-header assembly, and final block
-  catalog materialization; reduced-resolution calls additionally report bytes
-  materialized during assembly plus bytes retained and discarded by selection.
+  catalog materialization; quality-layer- or reduced-resolution calls
+  additionally report bytes materialized during assembly plus bytes retained
+  and discarded by selection.
   `packet_catalog_input_bytes_borrowed` and
   `packet_catalog_input_bytes_materialized` distinguish the internal zero-copy
   packet/body view from inline or packed-header bytes that must be owned.
@@ -547,7 +558,9 @@ inverse DWT. Image and tile-partition origins are retained independently in
 single- and multi-tile component plans; absolute tile rectangles are translated
 into native-size image-local output planes per component. PPM combined with sampled
 POC and MCT over subsampled planes remain fail-closed. The explicit
-`DecodeOptions.resolution_reduction` applies to sampled no-MCT reversible 5/3
+  `DecodeOptions.quality_layer_limit` applies before T1 reconstruction on the
+  same sampled packet catalog and may be combined with resolution reduction.
+  `DecodeOptions.resolution_reduction` applies to sampled no-MCT reversible 5/3
 on single- and multi-tile streams and bounded irreversible 9/7 with inline PLT.
 It returns each component at its independently
 reduced native dimensions while retaining complete packet-header validation

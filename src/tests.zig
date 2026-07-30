@@ -17051,6 +17051,149 @@ test "rate-targeted no-sidecar layers decode from strict T2 packet state" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "quality-layer selective decode retains a validated packet prefix" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 24;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (0..width * height) |i| {
+        samples[i * 3 + 0] = @intCast((i * 37 + 11) % 256);
+        samples[i * 3 + 1] = @intCast((i * 19 + 53) % 256);
+        samples[i * 3 + 2] = @intCast((i * 7 + 101) % 256);
+    }
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var encode_options = codestream.LosslessOptions{
+        .levels = 2,
+        .block_width = 8,
+        .block_height = 8,
+        .layers = 3,
+        .rate_count = 2,
+        .mct = .none,
+        .sop = false,
+        .tile_part_divisions = null,
+    };
+    encode_options.rates[0] = 12.0;
+    encode_options.rates[1] = 4.0;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, encode_options);
+    defer allocator.free(bytes);
+
+    var first_timings = codestream.DecodeTimings{};
+    var first = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 1, .quality_layer_limit = 1 },
+        &first_timings,
+    );
+    defer first.deinit();
+    var first_parallel = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .quality_layer_limit = 1 },
+    );
+    defer first_parallel.deinit();
+    try std.testing.expectEqualSlices(u16, first.samples, first_parallel.samples);
+
+    var combined = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 1, .quality_layer_limit = 1, .resolution_reduction = 1 },
+    );
+    defer combined.deinit();
+    var combined_parallel = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .quality_layer_limit = 1, .resolution_reduction = 1 },
+    );
+    defer combined_parallel.deinit();
+    try std.testing.expectEqual(@as(usize, width / 2), combined.width);
+    try std.testing.expectEqual(@as(usize, height / 2), combined.height);
+    try std.testing.expectEqualSlices(u16, combined.samples, combined_parallel.samples);
+
+    var second = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .quality_layer_limit = 2 },
+    );
+    defer second.deinit();
+    var full_timings = codestream.DecodeTimings{};
+    var full = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{},
+        &full_timings,
+    );
+    defer full.deinit();
+    var explicit_full = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .quality_layer_limit = 3 },
+    );
+    defer explicit_full.deinit();
+    try std.testing.expectEqualSlices(u16, samples, full.samples);
+    try std.testing.expectEqualSlices(u16, full.samples, explicit_full.samples);
+
+    var first_error: u64 = 0;
+    var second_error: u64 = 0;
+    for (samples, first.samples, second.samples) |expected, first_sample, second_sample| {
+        const first_delta = @as(i32, expected) - @as(i32, first_sample);
+        const second_delta = @as(i32, expected) - @as(i32, second_sample);
+        first_error += @intCast(first_delta * first_delta);
+        second_error += @intCast(second_delta * second_delta);
+    }
+    try std.testing.expect(first_error > 0);
+    try std.testing.expect(second_error <= first_error);
+    try std.testing.expect(first_timings.packet_catalog_payload_bytes_materialized > 0);
+    try std.testing.expect(first_timings.packet_catalog_payload_bytes_discarded > 0);
+    try std.testing.expect(
+        first_timings.packet_catalog_payload_bytes_materialized <
+            full_timings.packet_catalog_payload_bytes_materialized,
+    );
+    try std.testing.expectEqual(
+        full_timings.packet_catalog_payload_bytes_materialized,
+        first_timings.packet_catalog_payload_bytes_materialized +
+            first_timings.packet_catalog_payload_bytes_discarded,
+    );
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            bytes,
+            .{ .quality_layer_limit = 4 },
+        ),
+    );
+
+    const packet_lengths = try collectCodestreamPltLengthsForTest(allocator, bytes);
+    defer allocator.free(packet_lengths);
+    try std.testing.expectEqual(@as(usize, 0), packet_lengths.len % 3);
+    const later_layer = packet_lengths.len / 3 * 2;
+    try std.testing.expect(later_layer < packet_lengths.len);
+    const sod = findMarker(bytes, codestream.markerValue("sod")) orelse return error.MissingSod;
+    var later_layer_offset = sod + 2;
+    for (packet_lengths[0..later_layer]) |packet_length| {
+        later_layer_offset = try std.math.add(usize, later_layer_offset, @intCast(packet_length));
+    }
+    const truncated = bytes[0..later_layer_offset];
+    const corrupt_result = codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        truncated,
+        .{ .quality_layer_limit = 1 },
+    );
+    if (corrupt_result) |decoded_corrupt| {
+        var owned = decoded_corrupt;
+        defer owned.deinit();
+        return error.ExpectedCorruptCodestreamFailure;
+    } else |_| {}
+}
+
 test "rate-targeted no-sidecar truncation fails after consistent PLT shortening" {
     const allocator = std.testing.allocator;
     const width = 24;
@@ -23503,6 +23646,25 @@ test "multi-tile RPCL quality layers roundtrip losslessly" {
     var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+
+    var layer_timings = codestream.DecodeTimings{};
+    var first_layer = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 1, .quality_layer_limit = 1 },
+        &layer_timings,
+    );
+    defer first_layer.deinit();
+    var first_layer_parallel = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .quality_layer_limit = 1 },
+    );
+    defer first_layer_parallel.deinit();
+    try std.testing.expectEqualSlices(u16, first_layer.samples, first_layer_parallel.samples);
+    try std.testing.expect(layer_timings.packet_catalog_payload_bytes_materialized > 0);
+    try std.testing.expect(layer_timings.packet_catalog_payload_bytes_discarded > 0);
+    try std.testing.expect(!std.mem.eql(u16, decoded.samples, first_layer.samples));
 
     var threaded_options = options;
     threaded_options.threads = 3;
@@ -30817,13 +30979,14 @@ test "sampled multi-tile PPT streams decode identically to their inline original
 
 test "sampled PPM streams decode identically to their inline originals" {
     const allocator = std.testing.allocator;
-    // PPM cannot combine with POC in the current envelope, so the POC
-    // fixtures stay with the PPT tests.
     const fixtures = [_][]const u8{
         @embedFile("testdata/kakadu-rpcl-420-multi-precinct-pltless.jp2"),
         @embedFile("testdata/kakadu-rpcl-420-origin-multi-precinct-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-poc-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-tile-poc-pltless.jp2"),
         @embedFile("testdata/kakadu-rpcl-420-multitile-pltless.jp2"),
         @embedFile("testdata/kakadu-rpcl-420-origin-multitile-pltless.jp2"),
+        @embedFile("testdata/kakadu-rpcl-420-origin-multitile-poc-pltless.jp2"),
     };
     for (fixtures) |fixture| {
         const inline_stream = try jp2.extractCodestream(fixture);
@@ -30854,13 +31017,6 @@ test "sampled PPM streams decode identically to their inline originals" {
         writeU16BeTest(truncated, first_ppm + 2, 3);
         try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, truncated)));
     }
-
-    // PPM combined with POC stays fail-closed.
-    const poc_fixture = @embedFile("testdata/kakadu-rpcl-420-origin-multitile-poc-pltless.jp2");
-    const poc_inline = try jp2.extractCodestream(poc_fixture);
-    const poc_ppm = try repackInlineHeadersToPacked(allocator, poc_inline, .ppm, .{});
-    defer allocator.free(poc_ppm);
-    try std.testing.expect(std.meta.isError(codestream.decodeLosslessPlanar(allocator, poc_ppm)));
 }
 
 test "sampled multi-tile 9/7 reduction decodes across inline PPT and PPM headers" {
@@ -31937,7 +32093,7 @@ test "sampled reversible multi-tile packet layouts roundtrip across marker modes
     }
 }
 
-test "sampled reversible reordered POC roundtrips all progression orders" {
+test "sampled reversible PPM POC roundtrips all progression orders" {
     const allocator = std.testing.allocator;
     const sampling = [_]codestream.ComponentSampling{
         .{ .xrsiz = 1, .yrsiz = 1 },
@@ -31992,13 +32148,15 @@ test "sampled reversible reordered POC roundtrips all progression orders" {
             .block_height = 8,
             .tile_part_divisions = null,
             .poc_records = &records,
+            .ppm = true,
             .sop = true,
             .eph = true,
         });
         defer allocator.free(encoded);
         const poc_offset = findMarker(encoded, codestream.markerValue("poc")) orelse return error.MissingPoc;
+        const ppm_offset = findMarker(encoded, codestream.markerValue("ppm")) orelse return error.MissingPpm;
         const sot_offset = findMarker(encoded, codestream.markerValue("sot")) orelse return error.MissingSot;
-        try std.testing.expect(poc_offset < sot_offset);
+        try std.testing.expect(poc_offset < ppm_offset and ppm_offset < sot_offset);
         try std.testing.expectEqual(@as(usize, 9), countMarker(encoded, codestream.markerValue("sot")));
 
         var catalog = try codestream.readStrictPacketCatalog(allocator, encoded);
@@ -32028,7 +32186,7 @@ test "sampled reversible reordered POC roundtrips all progression orders" {
     }
 }
 
-test "sampled reversible tile-header POC supports PPT and deterministic threads" {
+test "sampled reversible tile-header POC supports PPT PPM and deterministic threads" {
     const allocator = std.testing.allocator;
     const sampling = [_]codestream.ComponentSampling{
         .{ .xrsiz = 1, .yrsiz = 1 },
@@ -32076,6 +32234,29 @@ test "sampled reversible tile-header POC supports PPT and deterministic threads"
     const many = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
     defer allocator.free(many);
     try std.testing.expectEqualSlices(u8, single, many);
+
+    options.ppt = false;
+    options.ppm = true;
+    options.threads = 1;
+    const ppm_single = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
+    defer allocator.free(ppm_single);
+    try std.testing.expectEqual(@as(usize, 9), countMarker(ppm_single, codestream.markerValue("poc")));
+    const ppm_offset = findMarker(ppm_single, codestream.markerValue("ppm")) orelse return error.MissingPpm;
+    const ppm_sot = findMarker(ppm_single, codestream.markerValue("sot")) orelse return error.MissingSot;
+    const ppm_poc = findMarker(ppm_single, codestream.markerValue("poc")) orelse return error.MissingPoc;
+    const ppm_sod = findMarkerAfter(ppm_single, codestream.markerValue("sod"), ppm_sot) orelse return error.MissingSod;
+    try std.testing.expect(ppm_offset < ppm_sot and ppm_sot < ppm_poc and ppm_poc < ppm_sod);
+
+    var ppm_decoded = try codestream.decodeLosslessPlanar(allocator, ppm_single);
+    defer ppm_decoded.deinit();
+    for (planes.planes, ppm_decoded.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+
+    options.threads = 8;
+    const ppm_many = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, options);
+    defer allocator.free(ppm_many);
+    try std.testing.expectEqualSlices(u8, ppm_single, ppm_many);
 }
 
 test "sampled reversible multi-tile packed headers and SOP fail closed on corruption" {
@@ -32356,7 +32537,7 @@ test "sampled reversible encode fails closed outside its envelope" {
     var ppm_poc = base;
     ppm_poc.poc_records = &incomplete_records;
     ppm_poc.ppm = true;
-    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, ppm_poc));
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, ppm_poc));
     var tile_origin_after_image = base;
     tile_origin_after_image.image_origin_x = 5;
     tile_origin_after_image.tile_origin_x = 6;

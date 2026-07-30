@@ -53,8 +53,8 @@
       "encode": "bounded",
       "malformed": "complete",
       "interop": "bounded",
-      "evidence": ["all-five-order encode matrix", "Kakadu sampled POC fixtures"],
-      "note": "Complete bounded schedules are supported; sampled PPM+POC and broader combinations remain closed."
+      "evidence": ["all-five-order sampled PPM+POC encode matrix", "main- and tile-header POC packed-header corruption tests", "Kakadu sampled POC fixtures structurally repacked to PPM"],
+      "note": "Complete bounded schedules are supported, including sampled PPM+POC with one part per tile; general multipart POC combinations remain closed."
     },
     {
       "id": "packet-header-placement",
@@ -64,8 +64,8 @@
       "encode": "bounded",
       "malformed": "complete",
       "interop": "complete",
-      "evidence": ["inline/PPT/PPM sampled matrix", "PLT and PLT-less packet catalog tests", "PLM-framed Kakadu single-/multi-tile streams", "PLM+PLT mismatch gate"],
-      "note": "PLT, inline, PPT and PPM are covered in bounded layouts. Main-header PLM decode validates ordered Nplm/Iplm groups against Psot, decoded packet headers, and any coexisting PLT; PLM encode is not implemented."
+      "evidence": ["inline/PPT/PPM sampled matrix", "sampled main- and tile-header PPM+POC matrix", "PLT and PLT-less packet catalog tests", "PLM-framed Kakadu single-/multi-tile streams", "PLM+PLT mismatch gate"],
+      "note": "PLT, inline, PPT and PPM are covered in bounded layouts, including sampled PPM+POC with one part per tile. Main-header PLM decode validates ordered Nplm/Iplm groups against Psot, decoded packet headers, and any coexisting PLT; PLM encode is not implemented."
     },
     {
       "id": "tiles-and-tile-parts",
@@ -163,8 +163,8 @@
       "encode": "not_applicable",
       "malformed": "bounded",
       "interop": "not_applicable",
-      "evidence": ["DecodeOptions.resolution_reduction tests", "next_steps.md items 4.1 and 6"],
-      "note": "Bounded resolution reduction skips discarded T1 blocks and performs partial 5/3 or 9/7 synthesis; layer, tile, region, and incremental input selection remain open."
+      "evidence": ["DecodeOptions.quality_layer_limit tests", "DecodeOptions.resolution_reduction tests", "next_steps.md items 4.1 and 6"],
+      "note": "Bounded leading quality-layer selection validates the full T2 stream while avoiding materialization and T1 decode of later bodies; bounded resolution reduction skips discarded T1 blocks and performs partial 5/3 or 9/7 synthesis. Tile, region, and incremental input selection remain open."
     }
   ],
   "entries": [

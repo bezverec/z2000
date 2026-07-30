@@ -8,9 +8,9 @@ This is the only active implementation queue. Strategic policy is in
 
 - The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
-- The separate general-purpose G0-G7 program is estimated at about 55%
+- The separate general-purpose G0-G7 program is estimated at about 56%
   complete (+/- 8 points), with the decode-first G0-G4 foundation at about
-  64%. The phase method and remaining-work table live in
+  66%. The phase method and remaining-work table live in
   [`roadmap.md`](roadmap.md); these figures are not derived from the bounded
   100/100 scorecards.
 - Sampled RPCL/no-MCT/reversible-5/3 strict decode supports native planes,
@@ -45,8 +45,9 @@ This is the only active implementation queue. Strategic policy is in
   tile-header markers, PPT, malformed/incomplete schedules, and deterministic
   threading are covered. Kakadu 8.4.1 reconstructs live output for every order
   exactly; OpenJPEG/Grok accept it but disagree on sampled POC raster output,
-  so that combination remains an explicit reference-decoder caveat. PPM+POC
-  stays fail-closed.
+  so that combination remains an explicit reference-decoder caveat. Bounded
+  sampled PPM+POC now has unambiguous packet identity for one-part-per-tile
+  main- and first-tile-header schedules.
 - Sampled strict decode and encode retain `XOsiz/YOsiz` independently from
   `XTOsiz/YTOsiz`. An odd clipped 3x3 4:2:0 grid is plane-exact and
   deterministic; an independent Kakadu 8.4.1 fixture decodes exactly through
@@ -247,6 +248,13 @@ The foundation landed on 2026-07-17:
   borrowing SOD body spans. Timings report borrowed versus materialized input
   bytes; the internal single-tile production path no longer normalizes a full
   packet-byte stream for inline, PPT, or PPM headers.
+- `DecodeOptions.quality_layer_limit` now selects a leading quality-layer
+  prefix through that same strict catalog on single- and multi-tile decode.
+  Zero retains every layer; limits above COD/Layers fail closed. T2 still walks
+  and validates the complete packet schedule, but later bodies are not appended
+  to block assemblies or sent to T1. Profile counters prove the retained and
+  discarded payload split, explicit full-layer selection equals default decode,
+  and selected prefixes are deterministic with 1 or 8 workers.
 
 The active G0/G4 corpus expansion is:
 
@@ -277,7 +285,8 @@ The active G0/G4 corpus expansion is:
    capabilities or extended PRF profiles only where their payload semantics
    apply. Broaden the
    seeded `TLM` case as G3 requires. Inline PLT-less multipart packet-count
-   derivation is complete; packed-header/POC combinations remain.
+   derivation and bounded one-part-per-tile sampled PPM+POC are complete;
+   general multipart packed-header/POC combinations remain.
 4. Record OpenJPEG, Grok, and Kakadu disagreement instead of selecting a
    convenient oracle. Part 4 expected results and exact samples take priority
    when available.
@@ -500,8 +509,9 @@ complete effective packet plan. A structural repack of the 12-part Kakadu
 COC/QCC source preserves its foreign T1 bodies and matches all six full/
 reduction-1 PGX references at one and eight threads; malformed PPM framing
 fails closed. Kakadu did not emit the PPM framing, so this is not claimed as an
-independent packed-header stream. PPM+POC and packed-header/TLM combinations
-remain outside this bounded slice.
+independent packed-header stream. The following bounded sampled PPM+POC slice
+now covers one part per tile; multipart POC and packed-header/TLM combinations
+remain outside this slice.
 
 The first complete G3 marker-to-raster slice is now landed. Main-header `RGN`
 Maxshift state is inherited per component and a first tile-part `RGN` can
@@ -584,11 +594,19 @@ Implement in small marker-to-raster slices:
    independently emitted alternate-width TLM before formal promotion.
    PLT-less multipart PPM without POC is complete through the shared deferred-
    count state machine.
-5. Legal `POC` schedules across inline, `PPT`, and `PPM` headers, removing the
-   current sampled `PPM` + `POC` fail-closed boundary only after packet identity
-   is unambiguous.
-6. A single normalized packet index shared by strict decode, diagnostics, and
-   later selective decode. Do not add a second permissive packet parser.
+5. **Legal `POC` schedules across inline, `PPT`, and `PPM` headers — complete
+   for the bounded sampled one-part-per-tile profile.** Main-header schedules
+   exercise all five progression orders; first-tile-header POC, single- and
+   multi-tile decode, SOP/EPH, exact packet-catalog identity, corruption, and
+   1/8-thread deterministic PPM emission are pinned. Structural PPM repacks
+   retain independent Kakadu POC packet/T1 bytes and decode plane-exactly.
+   A natively emitted PPM+POC fixture from an independent producer and general
+   multipart POC schedules remain useful G3 breadth.
+6. **Single normalized packet index — bounded foundation landed.** Strict
+   decode, diagnostics, resolution selection, and quality-layer selection share
+   the same fail-closed packet walk and stateful T2 headers. Preserve that
+   boundary while adding tile/region/incremental selection; do not add a second
+   permissive packet parser.
 
 Each marker slice needs parser/state-machine corruption cases, exact sample
 evidence, and at least one independently produced stream. Syntax recognition
@@ -596,9 +614,9 @@ alone does not complete an item.
 
 ### 6. Scalable And Bounded-Memory Decode
 
-Expose explicit limits for quality layers, resolution reduction, tiles, and
-reference-grid regions. Build the requests on the normalized packet index and
-schedule only the required packet/code-block/DWT work. Add incremental
+Quality-layer-prefix and resolution-reduction limits are now public on the
+shared normalized packet index. Next expose explicit tile and reference-grid
+region limits and schedule only their required packet/code-block/DWT work. Add incremental
 codestream input and row/tile-oriented output so peak memory scales with the
 requested working set rather than the complete raster.
 

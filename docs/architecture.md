@@ -245,8 +245,10 @@ tiles, inline/PPT/PPM packet headers, all SOP/EPH combinations, independent
 image and tile-partition origins, and checked POC in the main or first
 tile-part header.
 POC intervals may use any Part 1 progression and must cover every packet once.
-PLT-less and packed-header state is component-local. Sampled PPM+POC remains
-fail-closed.
+PLT-less and packed-header state is component-local. Bounded sampled PPM+POC
+uses one checked `Nppm` group per codestream-order tile-part while the complete
+main- or first-tile-header POC schedule supplies packet identity; single- and
+multi-tile one-part-per-tile streams are covered.
 
 The sampled writer emits single- and multi-tile canonical RPCL with inline
 PLT/PLT-less, PPT, or PPM packet headers, SOP/EPH framing, and one or more
@@ -293,8 +295,9 @@ the effective dimensions while COD retains the requested nominal size. The
 same effective table now proves all three override levels in one directly
 emitted four-tile stream: main reversible `COD/QCD`, tile 1 irreversible
 `COD/QCD`, and tile 1 component 1 reversible `COC/QCC`. PLT-less multipart PPM
-without POC is supported; PPM+POC and packed-header/TLM combinations remain
-fail-closed.
+without POC is supported. PPM+POC is additionally supported for the bounded
+sampled one-part-per-tile profile; general multipart POC and packed-header/TLM
+combinations remain fail-closed.
 
 Inline PLT-less multipart streams carry no packet count at the Stage B frame
 scan. Their spans therefore retain an explicit deferred-count state and exact
@@ -322,6 +325,15 @@ path additionally dequantizes only retained bands. Assembly
 first maps the clipped reference tile through `XRsiz/YRsiz`, then reduces those
 component coordinates; this preserves odd image, tile, and sampling phases
 without synthesizing or upsampling a full raster.
+
+Quality-layer selection is an earlier filter on the same strict catalog rather
+than a second packet parser. T2 walks the complete progression schedule and
+updates inclusion, zero-bitplane, pass-count, and length state for every packet,
+so malformed later layers still fail closed. Only bodies from the requested
+leading layer prefix are appended to each block assembly and scheduled for T1;
+the later checked spans are counted as discarded. This applies per tile before
+the existing transform and absolute-grid assembly paths, and composes with
+resolution selection. A zero limit means the complete signalled layer set.
 
 The irreversible planar backend reuses the same strict block
 catalog without interleaving through a temporary RGB image. Each component owns

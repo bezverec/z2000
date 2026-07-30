@@ -183,6 +183,14 @@ still matches the six Kakadu PGX references exactly at one/eight threads, and
 shortened PPM framing fails closed. The PPM marker placement remains
 test-produced rather than independent-encoder evidence.
 
+The next bounded G3 gate composes PPM with complete sampled POC schedules for
+one part per tile. Main-header writer tests cover LRCP, RLCP, RPCL, PCRL, and
+CPRL intervals; first-tile-header POC, SOP/EPH, exact packet-catalog identity,
+and one/eight-thread determinism are also pinned. Structural PPM repacks of the
+single- and multi-tile Kakadu sampled POC fixtures preserve their foreign T1
+bodies and decode plane-exactly. The packed framing is still test-produced, so
+a natively emitted independent PPM+POC stream remains promotion evidence.
+
 A parallel G3 unit-test gate adds main-header PLM groups to independent Kakadu
 single- and multi-tile inline streams without changing their packet headers or
 T1 code-block bodies. The PLM-framed streams decode pixel-exactly, including

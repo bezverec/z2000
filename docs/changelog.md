@@ -5,6 +5,34 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Quality-Layer-Selective Decode
+
+- Added `DecodeOptions.quality_layer_limit` to the strict single- and multi-tile
+  planar, gray, native, and interleaved decode paths. Zero retains all signalled
+  layers; a positive value reconstructs that leading prefix, and values above
+  COD/Layers fail closed. Partial reconstruction saturates to the declared
+  sample range and bypasses the legacy temporary sidecar path. Decode CLI
+  commands expose the same limit as `--layers N`.
+- Layer selection reuses the stateful strict packet catalog. All later packet
+  headers and payload spans remain validated, while their bodies are not
+  appended to block assemblies or T1-decoded. Profile counters expose the
+  materialized/discarded split; rate-targeted single- and multi-tile tests pin
+  full-layer equivalence, monotone refinement, late truncation rejection, and
+  1/8-thread determinism.
+
+### Sampled PPM And POC Composition
+
+- Removed the bounded sampled `PPM` + `POC` fail-closed boundary for single-
+  and multi-tile one-part-per-tile streams. Main- and first-tile-header POC
+  schedules now supply exact packet identity while each codestream-order tile-
+  part consumes its checked `Nppm` header group and `Psot`-bounded bodies.
+- The sampled writer emits deterministic PPM+POC for all five progression
+  orders, including tile-header POC and SOP/EPH framing. Strict packet catalogs
+  and decoded planes match inline Kakadu POC sources after structural PPM
+  repacking; truncated groups, corrupt headers, and incomplete schedules still
+  fail closed. General multipart POC and packed-header/TLM combinations remain
+  open.
+
 ### Complete Part 1 TLM Width Matrix
 
 - Added a shared allocation-free TLM parser for raw codestream and JP2 paths.
@@ -693,7 +721,7 @@ entries are grouped by development milestone rather than semantic version.
 - Added main- and first-tile-part-header POC emission for single- and
   multi-tile sampled output, including `Psot`/TLM accounting, PPT, SOP/EPH,
   all five progression orders, odd 3x3 tile grids, and 1/8-thread determinism.
-  PPM+POC remains fail-closed.
+  PPM+POC remained fail-closed at this stage.
 - Strict T2 now detects non-contiguous precinct revisits. Canonical streams keep
   the existing one-active-precinct fast path; reordered schedules preserve
   inclusion tag-tree, zero-bitplane tag-tree, and block state per precinct.
@@ -821,16 +849,17 @@ entries are grouped by development milestone rather than semantic version.
 - Subsampled streams now accept main-header PPM packed headers: the strict
   metadata gate and the per-tile-part reader drop their sampled PPM terms,
   and the sampled multi-tile driver forwards the collected PPM groups into
-  the per-tile catalog reader. PPM combined with progression-order changes
-  stays fail-closed (an explicit guard mirrors the non-sampled rule).
+  the per-tile catalog reader. At this stage PPM combined with progression-
+  order changes stayed fail-closed (an explicit guard mirrored the non-sampled
+  rule).
 - The test repacker gained a `.ppm` placement mode: packet headers move
   into main-header PPM markers with one group per tile-part (via the
   encoder's own `ppm.buildMarkerPayloads` framing) and the tile-parts stay
   PLT-less, mirroring the encoder's PPM layout.
 - Four 4:2:0 Kakadu fixtures (single- and four-tile, aligned and shifted
   origin) repack into PPM form and must decode plane-exact against their
-  inline originals with matching audit counts; truncated PPM payloads and
-  PPM+POC combinations fail closed.
+  inline originals with matching audit counts; truncated PPM payloads and,
+  at this stage, PPM+POC combinations failed closed.
 
 ### Sampled Multi-Tile PPT Decode
 
