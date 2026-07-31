@@ -269,9 +269,16 @@ The foundation landed on 2026-07-17:
   T1/DWT/MCT; output allocation and copies are limited to the requested reduced
   intersections. Exact RGB and 12-tile sampled/nonzero-origin oracles cover
   reduction, native component phase, 1/8-thread determinism, invalid selector
-  combinations, and corruption in a skipped tile. Single-tile crop plumbing,
-  intra-tile precinct/code-block selection, and selected reference-grid
-  upsampling remain open.
+  combinations, and corruption in a skipped tile.
+- The same selector now reaches bounded single-tile RGB, component-local
+  planar, and reversible native decode through one shared validation and
+  component-local crop. Exact crop oracles cover reduction, a 4:2:0 stream at a
+  nonzero image origin, whole-image equivalence with the default decode,
+  1/8-thread determinism, and rejected empty, out-of-image, reduction-emptied,
+  and combined tile/region selectors; an independent Kakadu signed 8-bit stream
+  matches its full-decode crop byte-for-byte. A single tile is still
+  reconstructed completely, so intra-tile precinct/code-block selection and
+  selected reference-grid upsampling remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -633,10 +640,11 @@ alone does not complete an item.
 ### 6. Scalable And Bounded-Memory Decode
 
 Quality-layer-prefix, resolution-reduction, bounded tile-index selection, and
-the first explicit multi-tile reference-grid region slice are now public on the
-shared normalized packet index. Next extend region selection to single-tile
-streams, prune unneeded precincts/code-blocks inside intersecting tiles, and
-broaden selection through the remaining upsampling/colour layouts. Add incremental
+reference-grid region selection on single- and multi-tile streams are now public
+on the shared normalized packet index. Next prune unneeded precincts and
+code-blocks inside intersecting tiles — the step that makes a single-tile region
+cheaper and not only smaller — then broaden selection through the remaining
+upsampling/colour layouts. Add incremental
 codestream input and row/tile-oriented output so peak memory scales with the
 requested working set rather than the complete raster.
 

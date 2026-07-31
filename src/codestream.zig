@@ -3539,10 +3539,7 @@ pub fn decodeLosslessNativeWithOptions(
     if (header.tile_width != 0 or header.tile_height != 0) {
         return decodeStrictMultiTileNative(allocator, bytes, header, options, limits);
     }
-    if (options.reference_region != null) {
-        if (options.tile_index != null) return CodestreamError.InvalidCodestream;
-        return CodestreamError.UnsupportedPayload;
-    }
+    const requested_region = try strictSingleTileReferenceRect(header, options);
     if (options.tile_index) |selected| {
         if (selected != 0) return CodestreamError.InvalidCodestream;
     }
@@ -3550,6 +3547,9 @@ pub fn decodeLosslessNativeWithOptions(
     var layout = try inspectNativeCodestreamLayout(allocator, bytes, limits);
     defer layout.deinit();
     if (layout.components.len != header.component_count) return CodestreamError.InvalidCodestream;
+    if (requested_region) |requested| {
+        try cropNativeCodestreamLayoutToReferenceRect(&layout, requested);
+    }
     try reduceNativeCodestreamLayout(&layout, options.resolution_reduction);
     var output = try NativeSamplePlanes.initFromLayout(allocator, layout, limits);
     errdefer output.deinit();
@@ -3645,8 +3645,31 @@ pub fn decodeLosslessNativeWithOptions(
             decoded_width = reduced.width;
             decoded_height = reduced.height;
         }
-        if (plane_layout.width != decoded_width or plane_layout.height != decoded_height or
-            coefficients.len != output.planes[component].samples.len)
+        if (requested_region == null and
+            (plane_layout.width != decoded_width or plane_layout.height != decoded_height or
+                coefficients.len != output.planes[component].samples.len))
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        // The complete tile is still reconstructed; a selected reference region
+        // only narrows the retained output window on the reduced component grid.
+        const reduced_source_x0 = reducedGridCoordinate(
+            catalog.component_x0[component],
+            options.resolution_reduction,
+        );
+        const reduced_source_y0 = reducedGridCoordinate(
+            catalog.component_y0[component],
+            options.resolution_reduction,
+        );
+        if (plane_layout.x0 < reduced_source_x0 or plane_layout.y0 < reduced_source_y0) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const source_x = @as(usize, plane_layout.x0 - reduced_source_x0);
+        const source_y = @as(usize, plane_layout.y0 - reduced_source_y0);
+        if (source_x + plane_layout.width > decoded_width or
+            source_y + plane_layout.height > decoded_height or
+            output.planes[component].samples.len !=
+                try std.math.mul(usize, plane_layout.width, plane_layout.height))
         {
             return CodestreamError.InvalidCodestream;
         }
@@ -3656,12 +3679,16 @@ pub fn decodeLosslessNativeWithOptions(
             @as(i64, 1) << @as(u6, @intCast(plane_layout.precision - 1));
         const minimum = try plane_layout.minimumSample();
         const maximum = try plane_layout.maximumSample();
-        for (coefficients, output.planes[component].samples) |coefficient, *sample| {
-            const value = @as(i64, coefficient) + level_shift;
-            sample.* = if (options.resolution_reduction == 0 and options.quality_layer_limit == 0)
-                value
-            else
-                std.math.clamp(value, minimum, maximum);
+        for (0..plane_layout.height) |row| {
+            const source_row = coefficients[(source_y + row) * decoded_width + source_x ..][0..plane_layout.width];
+            const destination_row = output.planes[component].samples[row * plane_layout.width ..][0..plane_layout.width];
+            for (source_row, destination_row) |coefficient, *sample| {
+                const value = @as(i64, coefficient) + level_shift;
+                sample.* = if (options.resolution_reduction == 0 and options.quality_layer_limit == 0)
+                    value
+                else
+                    std.math.clamp(value, minimum, maximum);
+            }
         }
     }
     try output.validateSamples();
@@ -3951,10 +3978,7 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
             timings,
         );
     }
-    if (options.reference_region != null) {
-        if (options.tile_index != null) return CodestreamError.InvalidCodestream;
-        return CodestreamError.UnsupportedPayload;
-    }
+    const requested_region = try strictSingleTileReferenceRect(header, options);
     if (options.tile_index) |selected| {
         if (selected != 0) return CodestreamError.InvalidCodestream;
     }
@@ -3977,7 +4001,7 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
         timings,
     );
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
-    return decodeStrictPlanarFromBlockCatalogMeasured(
+    var decoded = try decodeStrictPlanarFromBlockCatalogMeasured(
         allocator,
         header,
         catalog,
@@ -3985,6 +4009,19 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
         output_mode,
         timings,
     );
+    if (requested_region) |requested| {
+        defer decoded.deinit();
+        recordStrictSingleTileDecodeWindow(timings);
+        return cropStrictSamplePlanesToReferenceRect(
+            allocator,
+            decoded,
+            header,
+            try strictImageReferenceRect(header),
+            requested,
+            options.resolution_reduction,
+        );
+    }
+    return decoded;
 }
 
 fn decodeMixedTransformPlanarFromBlockCatalogMeasured(
@@ -4422,10 +4459,7 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     if (header.tile_width != 0 or header.tile_height != 0) {
         return decodeStrictMultiTileImageMeasured(allocator, bytes, header, options, timings);
     }
-    if (options.reference_region != null) {
-        if (options.tile_index != null) return CodestreamError.InvalidCodestream;
-        return CodestreamError.UnsupportedPayload;
-    }
+    const requested_region = try strictSingleTileReferenceRect(header, options);
     if (options.tile_index) |selected| {
         if (selected != 0) return CodestreamError.InvalidCodestream;
     }
@@ -4443,7 +4477,19 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     try compactStrictPacketBlockCatalogForReduction(&strict_catalog, header.levels, options.resolution_reduction, timings);
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
 
-    return decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, strict_catalog, options, timings);
+    var decoded = try decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, strict_catalog, options, timings);
+    if (requested_region) |requested| {
+        defer decoded.deinit();
+        recordStrictSingleTileDecodeWindow(timings);
+        return cropStrictRgbImageToReferenceRect(
+            allocator,
+            decoded,
+            try strictImageReferenceRect(header),
+            requested,
+            options.resolution_reduction,
+        );
+    }
+    return decoded;
 }
 
 fn decodeTemporaryPayloadWithOptions(
@@ -9194,6 +9240,202 @@ fn referenceRectIntersection(a: tile_grid.Rect, b: tile_grid.Rect) ?tile_grid.Re
         .x1 = @min(a.x1, b.x1),
         .y1 = @min(a.y1, b.y1),
     };
+}
+
+/// Single-tile continuation of the shared reference-region selector. Returns
+/// the validated absolute rectangle, or null when the caller wants the
+/// complete image. A region stays mutually exclusive with `tile_index`, and the
+/// rectangle must be non-empty and contained in the SIZ image area.
+fn strictSingleTileReferenceRect(
+    header: TemporaryHeader,
+    options: DecodeOptions,
+) !?tile_grid.Rect {
+    const region = options.reference_region orelse return null;
+    if (options.tile_index != null) return CodestreamError.InvalidCodestream;
+    return try strictRequestedReferenceRect(header, region);
+}
+
+fn recordStrictSingleTileDecodeWindow(timings: ?*DecodeTimings) void {
+    if (timings) |value| {
+        value.tiles_total += 1;
+        value.tiles_decoded += 1;
+    }
+}
+
+/// Copies the requested reduced reference-grid window out of a fully
+/// reconstructed single-tile raster. The tile itself is still entropy-decoded
+/// and synthesized completely; only the returned raster is limited to the
+/// selected region. Intra-tile precinct/code-block pruning remains G4 work.
+fn cropStrictRgbImageToReferenceRect(
+    allocator: std.mem.Allocator,
+    source: image.RgbImage,
+    image_rect: tile_grid.Rect,
+    requested: tile_grid.Rect,
+    reduction: u8,
+) !image.RgbImage {
+    const source_width = try reducedGridLength(image_rect.x0, image_rect.width(), reduction);
+    const source_height = try reducedGridLength(image_rect.y0, image_rect.height(), reduction);
+    if (source.width != source_width or source.height != source_height or
+        source.samples.len != try std.math.mul(usize, try std.math.mul(usize, source_width, source_height), 3))
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    const crop_width = try reducedGridLength(requested.x0, requested.width(), reduction);
+    const crop_height = try reducedGridLength(requested.y0, requested.height(), reduction);
+    const reduced_image_x0 = reducedGridCoordinate(image_rect.x0, reduction);
+    const reduced_image_y0 = reducedGridCoordinate(image_rect.y0, reduction);
+    const reduced_crop_x0 = reducedGridCoordinate(requested.x0, reduction);
+    const reduced_crop_y0 = reducedGridCoordinate(requested.y0, reduction);
+    if (reduced_crop_x0 < reduced_image_x0 or reduced_crop_y0 < reduced_image_y0) {
+        return CodestreamError.InvalidCodestream;
+    }
+    const source_x = @as(usize, reduced_crop_x0 - reduced_image_x0);
+    const source_y = @as(usize, reduced_crop_y0 - reduced_image_y0);
+    if (source_x + crop_width > source_width or source_y + crop_height > source_height) {
+        return CodestreamError.InvalidCodestream;
+    }
+    const row_samples = try std.math.mul(usize, crop_width, 3);
+    const samples = try allocator.alloc(u16, try std.math.mul(usize, row_samples, crop_height));
+    errdefer allocator.free(samples);
+    for (0..crop_height) |row| {
+        const source_start = ((source_y + row) * source_width + source_x) * 3;
+        @memcpy(
+            samples[row * row_samples ..][0..row_samples],
+            source.samples[source_start..][0..row_samples],
+        );
+    }
+    return .{
+        .allocator = allocator,
+        .width = crop_width,
+        .height = crop_height,
+        .bit_depth = source.bit_depth,
+        .samples = samples,
+    };
+}
+
+/// Component-local variant of `cropStrictRgbImageToReferenceRect`. Each plane
+/// keeps its own ceil-div component intersection so nonzero image origins and
+/// subsampling phase survive the crop.
+fn cropStrictSamplePlanesToReferenceRect(
+    allocator: std.mem.Allocator,
+    source: color.SamplePlanes,
+    header: TemporaryHeader,
+    image_rect: tile_grid.Rect,
+    requested: tile_grid.Rect,
+    reduction: u8,
+) !color.SamplePlanes {
+    const component_count = source.planes.len;
+    if (component_count == 0 or component_count != header.component_count) {
+        return CodestreamError.InvalidCodestream;
+    }
+    const component_depths = try allocator.alloc(u8, component_count);
+    defer allocator.free(component_depths);
+    const component_widths = try allocator.alloc(usize, component_count);
+    defer allocator.free(component_widths);
+    const component_heights = try allocator.alloc(usize, component_count);
+    defer allocator.free(component_heights);
+    const component_source_x = try allocator.alloc(usize, component_count);
+    defer allocator.free(component_source_x);
+    const component_source_y = try allocator.alloc(usize, component_count);
+    defer allocator.free(component_source_y);
+
+    for (0..component_count) |component| {
+        const xrsiz = header.component_xrsiz[component];
+        const yrsiz = header.component_yrsiz[component];
+        const image_component_x0 = ceilDivU32(image_rect.x0, xrsiz);
+        const image_component_y0 = ceilDivU32(image_rect.y0, yrsiz);
+        const image_component_x1 = ceilDivU32(image_rect.x1, xrsiz);
+        const image_component_y1 = ceilDivU32(image_rect.y1, yrsiz);
+        const crop_component_x0 = ceilDivU32(requested.x0, xrsiz);
+        const crop_component_y0 = ceilDivU32(requested.y0, yrsiz);
+        const crop_component_x1 = ceilDivU32(requested.x1, xrsiz);
+        const crop_component_y1 = ceilDivU32(requested.y1, yrsiz);
+        if (crop_component_x1 <= crop_component_x0 or crop_component_y1 <= crop_component_y0 or
+            crop_component_x0 < image_component_x0 or crop_component_y0 < image_component_y0 or
+            crop_component_x1 > image_component_x1 or crop_component_y1 > image_component_y1)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        const source_component_width = try reducedGridLength(
+            image_component_x0,
+            @as(usize, image_component_x1 - image_component_x0),
+            reduction,
+        );
+        const source_component_height = try reducedGridLength(
+            image_component_y0,
+            @as(usize, image_component_y1 - image_component_y0),
+            reduction,
+        );
+        const dimensions = source.componentDimensions(component) orelse
+            return CodestreamError.InvalidCodestream;
+        if (dimensions[0] != source_component_width or dimensions[1] != source_component_height or
+            source.planes[component].len != try std.math.mul(usize, dimensions[0], dimensions[1]))
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        component_depths[component] = source.component_bit_depths[component];
+        component_widths[component] = try reducedGridLength(
+            crop_component_x0,
+            @as(usize, crop_component_x1 - crop_component_x0),
+            reduction,
+        );
+        component_heights[component] = try reducedGridLength(
+            crop_component_y0,
+            @as(usize, crop_component_y1 - crop_component_y0),
+            reduction,
+        );
+        component_source_x[component] = @as(usize, reducedGridCoordinate(crop_component_x0, reduction) -
+            reducedGridCoordinate(image_component_x0, reduction));
+        component_source_y[component] = @as(usize, reducedGridCoordinate(crop_component_y0, reduction) -
+            reducedGridCoordinate(image_component_y0, reduction));
+        if (component_source_x[component] + component_widths[component] > source_component_width or
+            component_source_y[component] + component_heights[component] > source_component_height)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
+
+    // The planar carrier reports either reference-grid or component-0
+    // dimensions depending on the decoded layout; keep the same convention.
+    const reference_source_width = try reducedGridLength(image_rect.x0, image_rect.width(), reduction);
+    const reference_source_height = try reducedGridLength(image_rect.y0, image_rect.height(), reduction);
+    const first_dimensions = source.componentDimensions(0) orelse
+        return CodestreamError.InvalidCodestream;
+    const output_width = if (source.width == reference_source_width)
+        try reducedGridLength(requested.x0, requested.width(), reduction)
+    else if (source.width == first_dimensions[0])
+        component_widths[0]
+    else
+        return CodestreamError.InvalidCodestream;
+    const output_height = if (source.height == reference_source_height)
+        try reducedGridLength(requested.y0, requested.height(), reduction)
+    else if (source.height == first_dimensions[1])
+        component_heights[0]
+    else
+        return CodestreamError.InvalidCodestream;
+
+    var cropped = try color.SamplePlanes.initWithComponentLayouts(
+        allocator,
+        output_width,
+        output_height,
+        component_depths,
+        component_widths,
+        component_heights,
+    );
+    errdefer cropped.deinit();
+    for (0..component_count) |component| {
+        const source_width = source.componentDimensions(component).?[0];
+        const width = component_widths[component];
+        for (0..component_heights[component]) |row| {
+            const source_start = (component_source_y[component] + row) * source_width +
+                component_source_x[component];
+            @memcpy(
+                cropped.planes[component][row * width ..][0..width],
+                source.planes[component][source_start..][0..width],
+            );
+        }
+    }
+    return cropped;
 }
 
 fn strictTileDecodeWindow(

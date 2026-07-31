@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Single-Tile Reference-Region Decode
+
+- `DecodeOptions.reference_region` now also applies to bounded single-tile
+  streams on the interleaved RGB, component-local planar, and reversible native
+  paths. The rectangle is validated by the same shared selector: non-empty,
+  contained in the SIZ image area, mutually exclusive with `tile_index`, and
+  fail-closed when it reduces to an empty window. `--region X,Y,W,H` therefore
+  works for single- and multi-tile input alike.
+- Only the requested reduced window is returned. Native planes keep their
+  absolute component origins, and each component crop uses its own ceil-div
+  intersection, so nonzero image origins and subsampling phase survive. The one
+  tile is still entropy-decoded and synthesized completely, so this narrows the
+  returned output rather than peak working memory; intra-tile precinct and
+  code-block pruning remains open G4 work.
+- Exact full-decode crop oracles cover an RGB single tile with and without
+  resolution reduction, a 4:2:0 sampled stream at a nonzero image origin
+  through planar and native output, whole-image region equivalence with the
+  default decode, 1/8-worker determinism, and rejected empty, out-of-image,
+  reduction-emptied, and combined tile/region selectors. A Kakadu signed 8-bit
+  stream decodes byte-identically to the crop of its full PGX output through
+  the CLI.
+
 ### Bounded Reference-Region Decode
 
 - Added `DecodeOptions.reference_region` with absolute SIZ

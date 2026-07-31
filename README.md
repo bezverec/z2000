@@ -146,9 +146,10 @@ Neither figure is a formal ISO conformance certification.
   `DecodeOptions.tile_index` selects one row-major SIZ tile, allocates only its
   clipped output region, and skips T1/DWT work for the remaining validated
   tiles. `DecodeOptions.reference_region` selects an absolute
-  `x0,y0,width,height` rectangle on bounded multi-tile RGB, planar, and native
-  paths; only intersecting tiles are reconstructed and only the requested crop
-  is allocated. Requested
+  `x0,y0,width,height` rectangle on bounded single- and multi-tile RGB, planar,
+  and native paths; only intersecting tiles are reconstructed and only the
+  requested crop is returned. A single tile is still reconstructed completely
+  before the window is cut. Requested
   resolution reduction is performed directly
   per native component for single- and multi-tile sampled 5/3 streams and the
   bounded multi-tile sampled no-MCT 9/7 decode profile. The 9/7 gate covers a
@@ -429,8 +430,8 @@ than silently changing the codestream profile.
 - **--tile W,H**: Tile dimensions. A tile smaller than the image enables the
   bounded multi-tile path.
 - **--tile-index N**: On decode, return one row-major SIZ tile.
-- **--region X,Y,W,H**: On bounded multi-tile decode, return the contained
-  absolute SIZ reference-grid rectangle. It is mutually exclusive with
+- **--region X,Y,W,H**: On bounded single- and multi-tile decode, return the
+  contained absolute SIZ reference-grid rectangle. It is mutually exclusive with
   `--tile-index`; tiles outside the rectangle are validated but not
   reconstructed.
 - **--progression ORDER**: Packet order: **RPCL**, **LRCP**, **RLCP**,

@@ -157,7 +157,7 @@ method. Neither number changes the bounded 100/100 scorecards.
 | G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
 | G3 | 50% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, and a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate | Independently emitted PLM, alternate-width TLM, and native PPM+POC marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, and general multipart packed schedules |
-| G4 | 60% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, and the first cross-tile reference-region slice, plus T1 skipping, catalog compaction, and borrowed packet spans | Single-tile/intra-tile region pruning, remaining tile/colour layouts, incremental input, and row-oriented output |
+| G4 | 60% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, and single-/multi-tile reference-region selection, plus T1 skipping, catalog compaction, and borrowed packet spans | Intra-tile precinct/code-block pruning, remaining tile/colour layouts, incremental input, and row-oriented output |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
 | G7 | 35% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
@@ -175,8 +175,10 @@ through actual payload behavior.
 G4 advances again because absolute reference-region selection now changes both
 work scheduling and peak output allocation across multiple tiles, with exact
 RGB/sampled/native reduced-crop oracles and fail-closed skipped-tile
-validation. Single-tile/intra-tile pruning and incremental I/O remain
-substantial, so this is still a bounded promotion.
+validation. Extending the same selector to single-tile streams does not move
+the estimate again: it completes the public selector surface but decodes the
+whole tile, so intra-tile pruning and incremental I/O remain substantial and
+this is still a bounded promotion.
 
 G0 evidence expansion and G1/G2/G4 implementation are active. The 2026-07-17
 G0 foundation includes an unscored broad capability
@@ -372,8 +374,11 @@ decode, with the latter independently reference-relative through Kakadu.
 Remaining sampled colour-transform layouts are a later functional gate;
 common-grid multi-tile RCT/ICT and bounded uniform sampled RCT selection have
 landed. Cross-tile reference-region output now retains only intersecting tile
-bodies and allocates only the requested reduced crop. A large single tile still
-requires full-tile T1/DWT work, and input/output are not incremental yet.
+bodies and allocates only the requested reduced crop, and single-tile streams
+accept the same absolute selector through a shared component-local crop. A
+large single tile still requires full-tile T1/DWT work, so that case narrows the
+returned window rather than the working set, and input/output are not
+incremental yet.
 Performance work continues in parallel, but no throughput result substitutes
 for the phase evidence above.
 

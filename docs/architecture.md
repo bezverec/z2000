@@ -201,6 +201,11 @@ copied into the bounded RGB, planar, or native output. Component intersections
 use `ceil(reference/XRsiz)` followed by the requested DWT reduction, so
 nonzero origins and subsampling retain their absolute phase.
 
+Single-tile streams share that validation and the same component intersection
+arithmetic, but their one tile is reconstructed completely before the window is
+cut out. The selector therefore bounds the returned raster, not the reconstruction
+work; the two differ only until intra-tile pruning lands.
+
 The former BP8 COM sidecar is not part of normal output. It remains an optional
 debug/compatibility oracle for tests and old fixtures.
 
@@ -440,7 +445,8 @@ markers, packet headers, tag trees, segment lengths, and T1 payloads in Debug,
 ReleaseSafe, and ReleaseFast configurations.
 
 Tile and region selection bound final raster allocation and avoid T1/DWT work
-for non-intersecting tiles. They do not yet prune precincts or code-blocks
+for non-intersecting tiles; on a single-tile stream a region bounds only the
+returned raster. They do not yet prune precincts or code-blocks
 inside an intersecting tile, stream codestream input, or provide row-oriented
 output; those are the remaining G4 memory-scaling boundaries.
 
