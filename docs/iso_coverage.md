@@ -56,11 +56,16 @@ The selective-decode row also includes the bounded
 `x0,y0,width,height` rectangle allocates only its reduced RGB/planar/native
 crop, reconstructs only intersecting tiles, and preserves sampled component
 phase while the complete tile/T2 grid remains validated. Single-tile streams
-now accept the same selector on the RGB, component-local planar, and reversible
-native paths; there the complete tile is still entropy-decoded and synthesized,
-so only the returned window — not peak working memory — is narrowed. Its
-remaining “region selection” work means intra-tile precinct/code-block pruning,
-selected reference-grid upsampling, and incremental I/O.
+accept the same selector on the RGB, component-local planar, and reversible
+native paths. Inside every decoded tile, code blocks that cannot influence the
+window are validated and covered but skipped before T1, using per-resolution
+windows derived from the subband recursion with a conservative synthesis
+margin; an offset sweep over reversible 5/3 and irreversible ICT/9-7 streams
+pins each result against the matching full-decode crop. Payload is still
+materialized for pruned blocks, so a region currently bounds decode work and
+returned output rather than peak memory. Its remaining “region selection” work
+means pruned-payload assembly, selected reference-grid upsampling, and
+incremental I/O.
 
 The committed corpus now pins twenty-seven independently encoded streams: four
 sampled Kakadu profiles, Grok four-component CMYK, Kakadu all-six-bit T1,

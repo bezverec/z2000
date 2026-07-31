@@ -23491,6 +23491,10 @@ test "multi-tile strict decode selects a bounded cross-tile reference region" {
     try std.testing.expectEqual(@as(u64, 2), timings.tiles_skipped);
     try std.testing.expect(timings.packet_catalog_payload_bytes_materialized > 0);
     try std.testing.expect(timings.packet_catalog_payload_bytes_discarded > 0);
+    // Inside the four intersecting tiles, blocks the window cannot reach are
+    // pruned as well; at full resolution nothing else can skip T1.
+    try std.testing.expect(timings.t1_skipped_blocks > 0);
+    try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
 
     var full_reduced = try codestream.decodeLosslessTemporaryWithOptions(
         allocator,
@@ -23615,6 +23619,9 @@ test "single-tile strict decode selects a bounded reference region" {
     try std.testing.expectEqual(@as(u64, 1), timings.tiles_total);
     try std.testing.expectEqual(@as(u64, 1), timings.tiles_decoded);
     try std.testing.expectEqual(@as(u64, 0), timings.tiles_skipped);
+    // Full resolution, so every skipped block was pruned by the region window.
+    try std.testing.expect(timings.t1_skipped_blocks > 0);
+    try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
 
     var full_reduced = try codestream.decodeLosslessTemporaryWithOptions(
         allocator,
@@ -23692,6 +23699,145 @@ test "single-tile strict decode selects a bounded reference region" {
             },
         ),
     );
+}
+
+test "reference-region block pruning matches the full decode at every offset" {
+    const allocator = std.testing.allocator;
+    const width = 53;
+    const height = 41;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    var encode_options = multi_tile_test_options;
+    encode_options.levels = 3;
+    encode_options.tile_width = 4096;
+    encode_options.tile_height = 4096;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, encode_options);
+    defer allocator.free(bytes);
+
+    // A pruned block must never influence the requested window, whatever the
+    // parity of its origin. Sweeping every offset inside one code-block
+    // period at both resolutions pins the conservative synthesis margin.
+    for ([_]u8{ 0, 1 }) |reduction| {
+        var full = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            bytes,
+            .{ .resolution_reduction = reduction },
+        );
+        defer full.deinit();
+
+        for (0..8) |offset_x| {
+            for (0..8) |offset_y| {
+                const region = codestream.DecodeRegion{
+                    .x0 = @intCast(offset_x),
+                    .y0 = @intCast(offset_y),
+                    .width = 9,
+                    .height = 7,
+                };
+                var selected = try codestream.decodeLosslessTemporaryWithOptions(
+                    allocator,
+                    bytes,
+                    .{ .reference_region = region, .resolution_reduction = reduction },
+                );
+                defer selected.deinit();
+
+                var expected_rect = tile_grid.Rect{
+                    .x0 = region.x0,
+                    .y0 = region.y0,
+                    .x1 = region.x0 + region.width,
+                    .y1 = region.y0 + region.height,
+                };
+                for (0..reduction) |_| {
+                    expected_rect = .{
+                        .x0 = (expected_rect.x0 + 1) / 2,
+                        .y0 = (expected_rect.y0 + 1) / 2,
+                        .x1 = (expected_rect.x1 + 1) / 2,
+                        .y1 = (expected_rect.y1 + 1) / 2,
+                    };
+                }
+                var expected = try tile_grid.extractRgbTile(allocator, full, expected_rect);
+                defer expected.deinit();
+                try std.testing.expectEqual(expected.width, selected.width);
+                try std.testing.expectEqual(expected.height, selected.height);
+                try std.testing.expectEqualSlices(u16, expected.samples, selected.samples);
+            }
+        }
+    }
+
+    // The irreversible 9/7 synthesis reaches further than 5/3, so the same
+    // sweep runs over an ICT/9-7 stream where any missing coefficient would
+    // change the reconstructed floating-point samples.
+    const irreversible_bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 3,
+        .transform = .irreversible_9_7,
+        .mct = .ict,
+        .quantization = .scalar_expounded,
+        .block_width = 8,
+        .block_height = 8,
+        .precincts = [_]codestream.PrecinctSize{.{ .width = 16, .height = 16 }} ** 33,
+        .precinct_count = 1,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(irreversible_bytes);
+    var irreversible_full = try codestream.decodeLosslessTemporary(allocator, irreversible_bytes);
+    defer irreversible_full.deinit();
+    for (0..8) |offset_x| {
+        for (0..8) |offset_y| {
+            const region = codestream.DecodeRegion{
+                .x0 = @intCast(offset_x),
+                .y0 = @intCast(offset_y),
+                .width = 11,
+                .height = 9,
+            };
+            var selected = try codestream.decodeLosslessTemporaryWithOptions(
+                allocator,
+                irreversible_bytes,
+                .{ .reference_region = region },
+            );
+            defer selected.deinit();
+            var expected = try tile_grid.extractRgbTile(allocator, irreversible_full, .{
+                .x0 = region.x0,
+                .y0 = region.y0,
+                .x1 = region.x0 + region.width,
+                .y1 = region.y0 + region.height,
+            });
+            defer expected.deinit();
+            try std.testing.expectEqualSlices(u16, expected.samples, selected.samples);
+        }
+    }
+
+    // One-sample and full-width windows exercise the extremes of the same
+    // window recursion.
+    const edge_regions = [_]codestream.DecodeRegion{
+        .{ .x0 = 0, .y0 = 0, .width = 1, .height = 1 },
+        .{ .x0 = width - 1, .y0 = height - 1, .width = 1, .height = 1 },
+        .{ .x0 = 0, .y0 = 17, .width = width, .height = 1 },
+        .{ .x0 = 26, .y0 = 0, .width = 1, .height = height },
+    };
+    var full = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer full.deinit();
+    for (edge_regions) |region| {
+        var selected = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            bytes,
+            .{ .threads = 8, .reference_region = region },
+        );
+        defer selected.deinit();
+        var expected = try tile_grid.extractRgbTile(allocator, full, .{
+            .x0 = region.x0,
+            .y0 = region.y0,
+            .x1 = region.x0 + region.width,
+            .y1 = region.y0 + region.height,
+        });
+        defer expected.deinit();
+        try std.testing.expectEqualSlices(u16, expected.samples, selected.samples);
+    }
 }
 
 test "multi-tile RPCL resolution tile-parts roundtrip with continuous T2 state" {
@@ -32055,6 +32201,9 @@ test "sampled single-tile decode selects a bounded reference region" {
         try std.testing.expectEqual(@as(u64, 1), region_timings.tiles_total);
         try std.testing.expectEqual(@as(u64, 1), region_timings.tiles_decoded);
         try std.testing.expectEqual(@as(u64, 0), region_timings.tiles_skipped);
+        // Code blocks outside the window's synthesis support never reach T1.
+        try std.testing.expect(region_timings.t1_skipped_blocks > 0);
+        try std.testing.expect(region_timings.t1_skipped_payload_bytes > 0);
         try std.testing.expectEqual(
             @as(usize, reduceCoordinate(region.x0 + region.width, reduction) - reduceCoordinate(region.x0, reduction)),
             region_planar.width,

@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Intra-Tile Reference-Region Block Pruning
+
+- A selected `DecodeOptions.reference_region` now prunes code blocks inside
+  every decoded tile on the bounded single- and multi-tile RGB, planar, and
+  reversible native paths. Required coefficient windows are derived one
+  resolution at a time from the component-local intersection, mirroring the
+  subband recursion, so subsampling and nonzero origins keep their absolute
+  phase.
+- Pruned blocks keep their geometry, lengths, and segmentation for the catalog
+  audit and coverage validation but never reach T1; their coefficients stay
+  zero, which is exact because the inverse DWT is linear with finite synthesis
+  support. `DecodeTimings.t1_skipped_blocks` and `t1_skipped_payload_bytes`
+  report the pruned share. Payload materialization is unchanged, so this is a
+  decode-work reduction rather than a peak-memory one.
+- Region decode now saturates intermediate samples to the declared range like
+  the resolution and quality-layer selectors, because coefficients outside the
+  requested window are deliberately incomplete. Only the returned window is
+  guaranteed exact.
+- The retained window uses a conservative synthesis margin of eight samples per
+  resolution, at least twice the 9/7 reach. An offset sweep decodes every
+  origin inside one code-block period, at full and reduced resolution, over
+  reversible 5/3 and irreversible ICT/9-7 streams and compares each result with
+  the corresponding crop of a full decode; a smaller margin fails that sweep.
+
 ### Single-Tile Reference-Region Decode
 
 - `DecodeOptions.reference_region` now also applies to bounded single-tile

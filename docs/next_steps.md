@@ -276,9 +276,16 @@ The foundation landed on 2026-07-17:
   nonzero image origin, whole-image equivalence with the default decode,
   1/8-thread determinism, and rejected empty, out-of-image, reduction-emptied,
   and combined tile/region selectors; an independent Kakadu signed 8-bit stream
-  matches its full-decode crop byte-for-byte. A single tile is still
-  reconstructed completely, so intra-tile precinct/code-block selection and
-  selected reference-grid upsampling remain open.
+  matches its full-decode crop byte-for-byte.
+- Region selection now also prunes code blocks inside every decoded tile.
+  Per-resolution coefficient windows follow the subband recursion from the
+  component-local intersection with a conservative synthesis margin; pruned
+  blocks stay validated and covered but never reach T1, and
+  `t1_skipped_blocks`/`t1_skipped_payload_bytes` report the share. An offset
+  sweep over reversible 5/3 and irreversible ICT/9-7 streams pins every result
+  against the matching full-decode crop at full and reduced resolution.
+  Payload materialization and selected reference-grid upsampling remain open,
+  so peak memory does not yet follow the requested window.
 
 The active G0/G4 corpus expansion is:
 
@@ -639,12 +646,12 @@ alone does not complete an item.
 
 ### 6. Scalable And Bounded-Memory Decode
 
-Quality-layer-prefix, resolution-reduction, bounded tile-index selection, and
-reference-grid region selection on single- and multi-tile streams are now public
-on the shared normalized packet index. Next prune unneeded precincts and
-code-blocks inside intersecting tiles — the step that makes a single-tile region
-cheaper and not only smaller — then broaden selection through the remaining
-upsampling/colour layouts. Add incremental
+Quality-layer-prefix, resolution-reduction, bounded tile-index selection,
+reference-grid region selection on single- and multi-tile streams, and
+intra-tile code-block pruning for a selected region are now public on the shared
+normalized packet index. Next stop materializing pruned payload during packet
+assembly, so a region bounds working memory and not only T1 work, and broaden
+selection through the remaining upsampling/colour layouts. Add incremental
 codestream input and row/tile-oriented output so peak memory scales with the
 requested working set rather than the complete raster.
 

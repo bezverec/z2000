@@ -202,9 +202,17 @@ use `ceil(reference/XRsiz)` followed by the requested DWT reduction, so
 nonzero origins and subsampling retain their absolute phase.
 
 Single-tile streams share that validation and the same component intersection
-arithmetic, but their one tile is reconstructed completely before the window is
-cut out. The selector therefore bounds the returned raster, not the reconstruction
-work; the two differ only until intra-tile pruning lands.
+arithmetic. Inside every decoded tile, the catalog derives per-resolution
+coefficient windows by following the subband recursion from the component-local
+intersection and expanding each step by a conservative inverse-DWT synthesis
+margin. Code blocks outside those windows keep their geometry, lengths, and
+segmentation — the coverage audit still requires a complete partition — but are
+never entropy-decoded, and their zero coefficients are exact because the inverse
+DWT is linear with finite support. Their payload is still materialized, so a
+region currently bounds decode work and returned output rather than peak memory.
+Because coefficients outside the window are deliberately incomplete, region
+decode saturates intermediate samples to the declared range exactly like the
+resolution and quality-layer selectors.
 
 The former BP8 COM sidecar is not part of normal output. It remains an optional
 debug/compatibility oracle for tests and old fixtures.
@@ -444,10 +452,10 @@ before use. Corruption tests cover truncation and byte mutations across JP2,
 markers, packet headers, tag trees, segment lengths, and T1 payloads in Debug,
 ReleaseSafe, and ReleaseFast configurations.
 
-Tile and region selection bound final raster allocation and avoid T1/DWT work
-for non-intersecting tiles; on a single-tile stream a region bounds only the
-returned raster. They do not yet prune precincts or code-blocks
-inside an intersecting tile, stream codestream input, or provide row-oriented
+Tile and region selection bound final raster allocation, avoid T1/DWT work for
+non-intersecting tiles, and skip T1 for code blocks a selected region cannot
+reach inside the tiles that are decoded. They do not yet drop the pruned blocks'
+payload during packet assembly, stream codestream input, or provide row-oriented
 output; those are the remaining G4 memory-scaling boundaries.
 
 ## Verification Ownership

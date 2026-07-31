@@ -379,12 +379,15 @@ Primary public functions:
   subsampling phase and native plane origins. Tiles outside the rectangle still
   undergo the complete tile-part and stateful T2 audit. The CLI spelling is
   `--region X,Y,W,H`. Single-tile streams accept the same selector on the RGB,
-  component-local planar, and reversible native paths. There the one tile is
-  still entropy-decoded and synthesized completely, so the selector narrows the
-  returned window rather than the working set, and `tiles_total`/`tiles_decoded`
-  report one decoded tile. Selected subsampled reference-grid upsampling and
-  precinct/code-block pruning inside an intersecting tile remain unsupported
-  rather than silently falling back to an unbounded path.
+  component-local planar, and reversible native paths, where
+  `tiles_total`/`tiles_decoded` report one decoded tile. Inside every decoded
+  tile, code blocks that cannot influence the window skip T1 and are reported
+  through `t1_skipped_blocks`/`t1_skipped_payload_bytes`; their payload is still
+  materialized, so a region bounds decode work and returned output rather than
+  peak memory. Like the resolution and quality-layer selectors, region decode
+  saturates intermediate samples to the declared range, and only the returned
+  window is guaranteed exact. Selected subsampled reference-grid upsampling
+  remains unsupported rather than silently falling back to an unbounded path.
   `DecodeOptions.quality_layer_limit` selects the first N quality layers on the
   shared strict packet catalog; zero keeps all layers. Values above COD/Layers
   fail closed. Every later packet header and payload span is still parsed and
