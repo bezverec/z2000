@@ -143,12 +143,12 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 ### Current Completion Estimate
 
-As of 2026-07-30, the general-purpose G0-G7 program is estimated at **about
-56% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
+As of 2026-07-31, the general-purpose G0-G7 program is estimated at **about
+57% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
 This is a planning estimate, not a conformance score. It gives every phase
 equal weight because the remaining effort is too uncertain for a more precise
 cost model; the headline is the rounded mean of the phase estimates below.
-The decode-first foundation G0-G4 is approximately **66% complete** by the same
+The decode-first foundation G0-G4 is approximately **68% complete** by the same
 method. Neither number changes the bounded 100/100 scorecards.
 
 | Phase | Estimate | Evidence already landed | Largest remaining work |
@@ -157,7 +157,7 @@ method. Neither number changes the bounded 100/100 scorecards.
 | G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
 | G3 | 50% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, and a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate | Independently emitted PLM, alternate-width TLM, and native PPM+POC marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, and general multipart packed schedules |
-| G4 | 50% | Direct resolution reduction, quality-layer-prefix selection, T1 skipping, catalog compaction, borrowed packet spans | Tile/region selection plus incremental input and bounded output |
+| G4 | 60% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, and the first cross-tile reference-region slice, plus T1 skipping, catalog compaction, and borrowed packet spans | Single-tile/intra-tile region pruning, remaining tile/colour layouts, incremental input, and row-oriented output |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
 | G7 | 35% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
@@ -172,6 +172,11 @@ and deterministic-output gates. It withholds broader promotion until valid
 independently emitted PLM, alternate-width TLM, and native PPM+POC evidence
 lands, or an externally specified profile-signalling capability is implemented
 through actual payload behavior.
+G4 advances again because absolute reference-region selection now changes both
+work scheduling and peak output allocation across multiple tiles, with exact
+RGB/sampled/native reduced-crop oracles and fail-closed skipped-tile
+validation. Single-tile/intra-tile pruning and incremental I/O remain
+substantial, so this is still a bounded promotion.
 
 G0 evidence expansion and G1/G2/G4 implementation are active. The 2026-07-17
 G0 foundation includes an unscored broad capability
@@ -203,6 +208,14 @@ materializes and T1-decodes only the requested leading prefix; zero selects all
 layers, an excessive limit fails closed, and explicit full-layer output equals
 the default decode. Single- and multi-tile prefix results are deterministic
 across worker counts, with retained/discarded payload accounting. Resolution
+selection composes with `DecodeOptions.tile_index` and
+`DecodeOptions.reference_region`: the bounded multi-tile RGB, planar, and
+native paths allocate only the selected row-major tile or absolute reference
+rectangle and schedule T1/DWT/MCT only for intersecting tiles, while Stage B
+and stateful T2 audit the full tile-part grid. Edge-tile, cross-tile RGB, and
+12-tile sampled/nonzero-origin oracles are exact at full and reduced
+resolution, including native absolute component coordinates and 1/8-thread
+determinism. Resolution
 selection supports single-tile reversible 5/3 and
 irreversible 9/7 decode stop synthesis at the requested DWT level and compact
 the reduced grid. Interleaved RGB supports no MCT plus the transform-appropriate
@@ -358,9 +371,9 @@ Native-planar no-MCT 9/7 covers bounded single-tile and sampled multi-tile
 decode, with the latter independently reference-relative through Kakadu.
 Remaining sampled colour-transform layouts are a later functional gate;
 common-grid multi-tile RCT/ICT and bounded uniform sampled RCT selection have
-landed. A large image
-still must not require retaining every discarded layer, tile, or pixel when the
-caller requests a bounded subset.
+landed. Cross-tile reference-region output now retains only intersecting tile
+bodies and allocates only the requested reduced crop. A large single tile still
+requires full-tile T1/DWT work, and input/output are not incremental yet.
 Performance work continues in parallel, but no throughput result substitutes
 for the phase evidence above.
 

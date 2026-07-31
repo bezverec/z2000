@@ -23342,6 +23342,221 @@ test "multi-tile encode emits row-major single-part tiles with TLM" {
     try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
 }
 
+test "multi-tile strict decode selects one validated tile without full raster assembly" {
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 48;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+    var full = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer full.deinit();
+    const grid = try tile_grid.Grid.fromImageSize(width, height, 32, 32);
+
+    for (0..4) |tile_index| {
+        const tile = try grid.tile(tile_index);
+        var expected = try tile_grid.extractRgbTile(allocator, full, tile.rect);
+        defer expected.deinit();
+        var timings = codestream.DecodeTimings{};
+        var selected = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+            allocator,
+            bytes,
+            .{ .threads = 1, .tile_index = @intCast(tile_index) },
+            &timings,
+        );
+        defer selected.deinit();
+        var parallel = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            bytes,
+            .{ .threads = 8, .tile_index = @intCast(tile_index) },
+        );
+        defer parallel.deinit();
+        try std.testing.expectEqual(expected.width, selected.width);
+        try std.testing.expectEqual(expected.height, selected.height);
+        try std.testing.expectEqualSlices(u16, expected.samples, selected.samples);
+        try std.testing.expectEqualSlices(u16, selected.samples, parallel.samples);
+        try std.testing.expectEqual(@as(u64, 4), timings.tiles_total);
+        try std.testing.expectEqual(@as(u64, 1), timings.tiles_decoded);
+        try std.testing.expectEqual(@as(u64, 3), timings.tiles_skipped);
+        try std.testing.expect(timings.packet_catalog_payload_bytes_materialized > 0);
+        try std.testing.expect(timings.packet_catalog_payload_bytes_discarded > 0);
+    }
+
+    var full_reduced = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .resolution_reduction = 1 },
+    );
+    defer full_reduced.deinit();
+    const source_tile = try grid.tile(3);
+    const reduced_rect = tile_grid.Rect{
+        .x0 = (source_tile.rect.x0 + 1) / 2,
+        .y0 = (source_tile.rect.y0 + 1) / 2,
+        .x1 = (source_tile.rect.x1 + 1) / 2,
+        .y1 = (source_tile.rect.y1 + 1) / 2,
+    };
+    var expected_reduced = try tile_grid.extractRgbTile(allocator, full_reduced, reduced_rect);
+    defer expected_reduced.deinit();
+    var selected_reduced = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .tile_index = 3, .resolution_reduction = 1 },
+    );
+    defer selected_reduced.deinit();
+    try std.testing.expectEqualSlices(u16, expected_reduced.samples, selected_reduced.samples);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            bytes,
+            .{ .tile_index = 4 },
+        ),
+    );
+
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const first_sot = findMarker(corrupted, codestream.markerValue("sot")) orelse return error.MissingSot;
+    writeU32BeTest(corrupted, first_sot + 6, readU32BeTest(corrupted, first_sot + 6) + 1);
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            corrupted,
+            .{ .tile_index = 3 },
+        ),
+    );
+}
+
+test "multi-tile strict decode selects a bounded cross-tile reference region" {
+    const allocator = std.testing.allocator;
+    const width = 96;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+    var full = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer full.deinit();
+
+    const region = codestream.DecodeRegion{
+        .x0 = 36,
+        .y0 = 12,
+        .width = 44,
+        .height = 40,
+    };
+    const region_rect = tile_grid.Rect{
+        .x0 = region.x0,
+        .y0 = region.y0,
+        .x1 = region.x0 + region.width,
+        .y1 = region.y0 + region.height,
+    };
+    var expected = try tile_grid.extractRgbTile(allocator, full, region_rect);
+    defer expected.deinit();
+    var timings = codestream.DecodeTimings{};
+    var selected = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{ .threads = 1, .reference_region = region },
+        &timings,
+    );
+    defer selected.deinit();
+    var parallel = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .threads = 8, .reference_region = region },
+    );
+    defer parallel.deinit();
+    try std.testing.expectEqual(expected.width, selected.width);
+    try std.testing.expectEqual(expected.height, selected.height);
+    try std.testing.expectEqualSlices(u16, expected.samples, selected.samples);
+    try std.testing.expectEqualSlices(u16, selected.samples, parallel.samples);
+    try std.testing.expectEqual(@as(u64, 6), timings.tiles_total);
+    try std.testing.expectEqual(@as(u64, 4), timings.tiles_decoded);
+    try std.testing.expectEqual(@as(u64, 2), timings.tiles_skipped);
+    try std.testing.expect(timings.packet_catalog_payload_bytes_materialized > 0);
+    try std.testing.expect(timings.packet_catalog_payload_bytes_discarded > 0);
+
+    var full_reduced = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{ .resolution_reduction = 1 },
+    );
+    defer full_reduced.deinit();
+    const reduced_rect = tile_grid.Rect{
+        .x0 = (region_rect.x0 + 1) / 2,
+        .y0 = (region_rect.y0 + 1) / 2,
+        .x1 = (region_rect.x1 + 1) / 2,
+        .y1 = (region_rect.y1 + 1) / 2,
+    };
+    var expected_reduced = try tile_grid.extractRgbTile(allocator, full_reduced, reduced_rect);
+    defer expected_reduced.deinit();
+    var selected_reduced = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        bytes,
+        .{
+            .threads = 8,
+            .reference_region = region,
+            .resolution_reduction = 1,
+        },
+    );
+    defer selected_reduced.deinit();
+    try std.testing.expectEqualSlices(u16, expected_reduced.samples, selected_reduced.samples);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            bytes,
+            .{ .reference_region = .{ .x0 = 0, .y0 = 0, .width = 0, .height = 8 } },
+        ),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            bytes,
+            .{ .reference_region = .{ .x0 = 95, .y0 = 0, .width = 2, .height = 8 } },
+        ),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            bytes,
+            .{ .tile_index = 1, .reference_region = region },
+        ),
+    );
+
+    const corrupted = try allocator.dupe(u8, bytes);
+    defer allocator.free(corrupted);
+    const first_sot = findMarker(corrupted, codestream.markerValue("sot")) orelse return error.MissingSot;
+    writeU32BeTest(corrupted, first_sot + 6, readU32BeTest(corrupted, first_sot + 6) + 1);
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            corrupted,
+            .{ .reference_region = region },
+        ),
+    );
+}
+
 test "multi-tile RPCL resolution tile-parts roundtrip with continuous T2 state" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -31796,6 +32011,167 @@ test "sampled reversible multi-tile decode reconstructs requested native resolut
     defer parallel.deinit();
     for (reduced.planes, parallel.planes) |serial_plane, parallel_plane| {
         try std.testing.expectEqualSlices(u16, serial_plane, parallel_plane);
+    }
+
+    const selected_tile_index: u32 = 7;
+    const selected_tile = try grid.tile(selected_tile_index);
+    var selected_timings = codestream.DecodeTimings{};
+    var selected = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        encoded,
+        .{
+            .threads = 1,
+            .tile_index = selected_tile_index,
+            .resolution_reduction = reduction,
+        },
+        &selected_timings,
+    );
+    defer selected.deinit();
+    var selected_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        encoded,
+        .{
+            .threads = 8,
+            .tile_index = selected_tile_index,
+            .resolution_reduction = reduction,
+        },
+    );
+    defer selected_parallel.deinit();
+    try std.testing.expectEqual(@as(u64, 12), selected_timings.tiles_total);
+    try std.testing.expectEqual(@as(u64, 1), selected_timings.tiles_decoded);
+    try std.testing.expectEqual(@as(u64, 11), selected_timings.tiles_skipped);
+    try std.testing.expect(selected_timings.packet_catalog_payload_bytes_discarded > 0);
+
+    var native_selected = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        encoded,
+        .{
+            .threads = 8,
+            .tile_index = selected_tile_index,
+            .resolution_reduction = reduction,
+        },
+        .{},
+    );
+    defer native_selected.deinit();
+    try std.testing.expectEqual(reduceCoordinate(selected_tile.rect.x0, reduction), native_selected.reference_x0);
+    try std.testing.expectEqual(reduceCoordinate(selected_tile.rect.y0, reduction), native_selected.reference_y0);
+    try std.testing.expectEqual(reduceCoordinate(selected_tile.rect.x1, reduction), native_selected.reference_x1);
+    try std.testing.expectEqual(reduceCoordinate(selected_tile.rect.y1, reduction), native_selected.reference_y1);
+
+    for (sampling, 0..) |factor, component| {
+        const image_component_x0 = ceilDivide(image_origin_x, factor.xrsiz);
+        const image_component_y0 = ceilDivide(image_origin_y, factor.yrsiz);
+        const tile_component_x0 = ceilDivide(selected_tile.rect.x0, factor.xrsiz);
+        const tile_component_y0 = ceilDivide(selected_tile.rect.y0, factor.yrsiz);
+        const tile_component_x1 = ceilDivide(selected_tile.rect.x1, factor.xrsiz);
+        const tile_component_y1 = ceilDivide(selected_tile.rect.y1, factor.yrsiz);
+        const reduced_tile_x0 = reduceCoordinate(tile_component_x0, reduction);
+        const reduced_tile_y0 = reduceCoordinate(tile_component_y0, reduction);
+        const selected_width: usize = reduceCoordinate(tile_component_x1, reduction) - reduced_tile_x0;
+        const selected_height: usize = reduceCoordinate(tile_component_y1, reduction) - reduced_tile_y0;
+        const source_x: usize = reduced_tile_x0 - reduceCoordinate(image_component_x0, reduction);
+        const source_y: usize = reduced_tile_y0 - reduceCoordinate(image_component_y0, reduction);
+        try std.testing.expectEqual([2]usize{ selected_width, selected_height }, selected.componentDimensions(component).?);
+        try std.testing.expectEqualSlices(u16, selected.planes[component], selected_parallel.planes[component]);
+        try std.testing.expectEqual(reduced_tile_x0, native_selected.planes[component].layout.x0);
+        try std.testing.expectEqual(reduced_tile_y0, native_selected.planes[component].layout.y0);
+        try std.testing.expectEqual(selected_width, native_selected.planes[component].layout.width);
+        try std.testing.expectEqual(selected_height, native_selected.planes[component].layout.height);
+        for (0..selected_height) |row| {
+            const expected_row = reduced.planes[component][(source_y + row) * reduced.component_widths[component] + source_x ..][0..selected_width];
+            const selected_row = selected.planes[component][row * selected_width ..][0..selected_width];
+            try std.testing.expectEqualSlices(u16, expected_row, selected_row);
+            const native_row = native_selected.planes[component].samples[row * selected_width ..][0..selected_width];
+            for (selected_row, native_row) |expected_sample, native_sample| {
+                try std.testing.expectEqual(@as(i64, expected_sample), native_sample);
+            }
+        }
+    }
+
+    const region = codestream.DecodeRegion{
+        .x0 = 20,
+        .y0 = 16,
+        .width = 32,
+        .height = 29,
+    };
+    var region_timings = codestream.DecodeTimings{};
+    var region_planar = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+        allocator,
+        encoded,
+        .{
+            .threads = 1,
+            .reference_region = region,
+            .resolution_reduction = reduction,
+        },
+        &region_timings,
+    );
+    defer region_planar.deinit();
+    var region_parallel = try codestream.decodeLosslessPlanarWithOptions(
+        allocator,
+        encoded,
+        .{
+            .threads = 8,
+            .reference_region = region,
+            .resolution_reduction = reduction,
+        },
+    );
+    defer region_parallel.deinit();
+    var region_native = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        encoded,
+        .{
+            .threads = 8,
+            .reference_region = region,
+            .resolution_reduction = reduction,
+        },
+        .{},
+    );
+    defer region_native.deinit();
+    try std.testing.expectEqual(@as(u64, 12), region_timings.tiles_total);
+    try std.testing.expectEqual(@as(u64, 9), region_timings.tiles_decoded);
+    try std.testing.expectEqual(@as(u64, 3), region_timings.tiles_skipped);
+    try std.testing.expect(region_timings.packet_catalog_payload_bytes_discarded > 0);
+    try std.testing.expectEqual(
+        @as(usize, reduceCoordinate(region.x0 + region.width, reduction) - reduceCoordinate(region.x0, reduction)),
+        region_planar.width,
+    );
+    try std.testing.expectEqual(
+        @as(usize, reduceCoordinate(region.y0 + region.height, reduction) - reduceCoordinate(region.y0, reduction)),
+        region_planar.height,
+    );
+    try std.testing.expectEqual(reduceCoordinate(region.x0, reduction), region_native.reference_x0);
+    try std.testing.expectEqual(reduceCoordinate(region.y0, reduction), region_native.reference_y0);
+    try std.testing.expectEqual(reduceCoordinate(region.x0 + region.width, reduction), region_native.reference_x1);
+    try std.testing.expectEqual(reduceCoordinate(region.y0 + region.height, reduction), region_native.reference_y1);
+
+    for (sampling, 0..) |factor, component| {
+        const image_component_x0 = ceilDivide(image_origin_x, factor.xrsiz);
+        const image_component_y0 = ceilDivide(image_origin_y, factor.yrsiz);
+        const region_component_x0 = ceilDivide(region.x0, factor.xrsiz);
+        const region_component_y0 = ceilDivide(region.y0, factor.yrsiz);
+        const region_component_x1 = ceilDivide(region.x0 + region.width, factor.xrsiz);
+        const region_component_y1 = ceilDivide(region.y0 + region.height, factor.yrsiz);
+        const reduced_region_x0 = reduceCoordinate(region_component_x0, reduction);
+        const reduced_region_y0 = reduceCoordinate(region_component_y0, reduction);
+        const region_width: usize = reduceCoordinate(region_component_x1, reduction) - reduced_region_x0;
+        const region_height: usize = reduceCoordinate(region_component_y1, reduction) - reduced_region_y0;
+        const source_x: usize = reduced_region_x0 - reduceCoordinate(image_component_x0, reduction);
+        const source_y: usize = reduced_region_y0 - reduceCoordinate(image_component_y0, reduction);
+        try std.testing.expectEqual([2]usize{ region_width, region_height }, region_planar.componentDimensions(component).?);
+        try std.testing.expectEqualSlices(u16, region_planar.planes[component], region_parallel.planes[component]);
+        try std.testing.expectEqual(reduced_region_x0, region_native.planes[component].layout.x0);
+        try std.testing.expectEqual(reduced_region_y0, region_native.planes[component].layout.y0);
+        try std.testing.expectEqual(region_width, region_native.planes[component].layout.width);
+        try std.testing.expectEqual(region_height, region_native.planes[component].layout.height);
+        for (0..region_height) |row| {
+            const expected_row = reduced.planes[component][(source_y + row) * reduced.component_widths[component] + source_x ..][0..region_width];
+            const region_row = region_planar.planes[component][row * region_width ..][0..region_width];
+            try std.testing.expectEqualSlices(u16, expected_row, region_row);
+            const native_row = region_native.planes[component].samples[row * region_width ..][0..region_width];
+            for (region_row, native_row) |expected_sample, native_sample| {
+                try std.testing.expectEqual(@as(i64, expected_sample), native_sample);
+            }
+        }
     }
 
     for (0..2) |packed_mode| {

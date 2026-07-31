@@ -8,9 +8,9 @@ This is the only active implementation queue. Strategic policy is in
 
 - The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
-- The separate general-purpose G0-G7 program is estimated at about 56%
+- The separate general-purpose G0-G7 program is estimated at about 57%
   complete (+/- 8 points), with the decode-first G0-G4 foundation at about
-  66%. The phase method and remaining-work table live in
+  68%. The phase method and remaining-work table live in
   [`roadmap.md`](roadmap.md); these figures are not derived from the bounded
   100/100 scorecards.
 - Sampled RPCL/no-MCT/reversible-5/3 strict decode supports native planes,
@@ -255,6 +255,23 @@ The foundation landed on 2026-07-17:
   to block assemblies or sent to T1. Profile counters prove the retained and
   discarded payload split, explicit full-layer selection equals default decode,
   and selected prefixes are deterministic with 1 or 8 workers.
+- `DecodeOptions.tile_index` now selects one row-major SIZ tile on bounded
+  multi-tile RGB, planar, and native decode. Output allocation is limited to the
+  clipped tile rectangle; only that tile reaches T1/DWT/MCT. Stage B and the
+  stateful T2 audit still validate all tile-parts and skipped tile headers.
+  Exact crop oracles cover edge tiles, a 12-tile sampled/nonzero-origin layout,
+  native absolute component coordinates, resolution composition, skipped-part
+  corruption, and 1/8-thread determinism. Profiled decode reports total,
+  decoded, and skipped tile counts.
+- `DecodeOptions.reference_region` now selects a contained absolute SIZ
+  `x0,y0,width,height` rectangle across bounded multi-tile RGB, planar, and
+  reversible native decode. Only intersecting tiles retain bodies or enter
+  T1/DWT/MCT; output allocation and copies are limited to the requested reduced
+  intersections. Exact RGB and 12-tile sampled/nonzero-origin oracles cover
+  reduction, native component phase, 1/8-thread determinism, invalid selector
+  combinations, and corruption in a skipped tile. Single-tile crop plumbing,
+  intra-tile precinct/code-block selection, and selected reference-grid
+  upsampling remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -605,7 +622,8 @@ Implement in small marker-to-raster slices:
 6. **Single normalized packet index — bounded foundation landed.** Strict
    decode, diagnostics, resolution selection, and quality-layer selection share
    the same fail-closed packet walk and stateful T2 headers. Preserve that
-   boundary while adding tile/region/incremental selection; do not add a second
+   boundary while adding remaining tile layouts, region, and incremental
+   selection; do not add a second
    permissive packet parser.
 
 Each marker slice needs parser/state-machine corruption cases, exact sample
@@ -614,9 +632,11 @@ alone does not complete an item.
 
 ### 6. Scalable And Bounded-Memory Decode
 
-Quality-layer-prefix and resolution-reduction limits are now public on the
-shared normalized packet index. Next expose explicit tile and reference-grid
-region limits and schedule only their required packet/code-block/DWT work. Add incremental
+Quality-layer-prefix, resolution-reduction, bounded tile-index selection, and
+the first explicit multi-tile reference-grid region slice are now public on the
+shared normalized packet index. Next extend region selection to single-tile
+streams, prune unneeded precincts/code-blocks inside intersecting tiles, and
+broaden selection through the remaining upsampling/colour layouts. Add incremental
 codestream input and row/tile-oriented output so peak memory scales with the
 requested working set rather than the complete raster.
 

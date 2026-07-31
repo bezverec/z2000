@@ -142,7 +142,13 @@ Neither figure is a formal ISO conformance certification.
   inline PLT/PLT-less, PPT, or PPM packet headers; all layouts carry one or
   more quality layers. `DecodeOptions.quality_layer_limit` reconstructs a
   validated leading layer prefix without materializing later packet bodies;
-  zero retains all layers and a limit above COD/Layers fails closed. Requested
+  zero retains all layers and a limit above COD/Layers fails closed.
+  `DecodeOptions.tile_index` selects one row-major SIZ tile, allocates only its
+  clipped output region, and skips T1/DWT work for the remaining validated
+  tiles. `DecodeOptions.reference_region` selects an absolute
+  `x0,y0,width,height` rectangle on bounded multi-tile RGB, planar, and native
+  paths; only intersecting tiles are reconstructed and only the requested crop
+  is allocated. Requested
   resolution reduction is performed directly
   per native component for single- and multi-tile sampled 5/3 streams and the
   bounded multi-tile sampled no-MCT 9/7 decode profile. The 9/7 gate covers a
@@ -364,9 +370,9 @@ z2000 input.dng output.jp2 [options]
 z2000 dng-to-jp2 input.dng output.jp2 [options]
 z2000 input.exr output.jp2 [options]
 z2000 exr-to-jp2 input.exr output.jp2 [options]
-z2000 input.j2k output.pgx [--component N] [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND] [--pgx-order ML|LM]
+z2000 input.j2k output.pgx [--component N] [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND] [--pgx-order ML|LM]
 z2000 j2k-to-pgx input.j2c output.pgx [options]
-z2000 input.j2k output.zraw [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND]
+z2000 input.j2k output.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND]
 z2000 j2k-to-zraw input.j2c output.zraw [options]
 ```
 
@@ -422,6 +428,11 @@ than silently changing the codestream profile.
   **"[256,256],[128,128]"**.
 - **--tile W,H**: Tile dimensions. A tile smaller than the image enables the
   bounded multi-tile path.
+- **--tile-index N**: On decode, return one row-major SIZ tile.
+- **--region X,Y,W,H**: On bounded multi-tile decode, return the contained
+  absolute SIZ reference-grid rectangle. It is mutually exclusive with
+  `--tile-index`; tiles outside the rectangle are validated but not
+  reconstructed.
 - **--progression ORDER**: Packet order: **RPCL**, **LRCP**, **RLCP**,
   **PCRL**, or **CPRL**.
 - **--tile-parts MODE**: Tile-part division: **none**, **R**, **L**, **C**,
@@ -464,18 +475,20 @@ Other commands:
 - **jp2-info INPUT**: Show the JP2 container and codestream summary.
 - **jp2-stats INPUT**: Audit packet headers, block catalogs, and payload sizes.
 - **decode-temp-jp2 INPUT OUTPUT**: Strict-decode JP2 into TIFF. The command
-  keeps its historical name for compatibility and accepts --layers, --threads,
-  --t1-backend, --convert-to-srgb, and --timings. ICC conversion is opt-in;
+  keeps its historical name for compatibility and accepts --tile-index or
+  --region,
+  --layers, --threads, --t1-backend, --convert-to-srgb, and --timings. ICC conversion is opt-in;
   without the flag, profile bytes and samples are preserved unchanged.
 - **j2k-to-pgx INPUT OUTPUT**: Decode one selected component from a raw `.j2k`
   or `.j2c` codestream through the native reversible path. `--component`
-  defaults to 0, `--layers` and `--reduce` to 0 (all layers/full resolution),
+  defaults to 0, `--tile-index`/`--region` default to the complete image, and `--layers`
+  and `--reduce` to 0 (all layers/full resolution),
   and `--pgx-order` to big-endian `ML`.
   Extension shorthand and non-recursive unquoted batch syntax are supported.
 - **j2k-to-zraw INPUT OUTPUT**: Decode all components from a raw `.j2k` or
   `.j2c` codestream into canonical big-endian ZRAW. Precision, signedness,
   component-local dimensions, sampling steps, and origins are retained.
-  `--layers`, `--reduce`, `--threads`, and `--t1-backend` work in explicit, shorthand,
+  `--tile-index`, `--region`, `--layers`, `--reduce`, `--threads`, and `--t1-backend` work in explicit, shorthand,
   and non-recursive batch forms.
 
 The full profile matrix and internal API surface are documented in

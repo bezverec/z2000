@@ -358,9 +358,24 @@ fn normalizedEncodePrecinctOptions(options: LosslessOptions, levels: u8) Lossles
     return normalized;
 }
 
+pub const DecodeRegion = struct {
+    /// Absolute SIZ reference-grid origin of the requested half-open region.
+    x0: u32,
+    y0: u32,
+    width: u32,
+    height: u32,
+};
+
 pub const DecodeOptions = struct {
     threads: u8 = 1,
     t1_backend: T1Backend = .iso_mq,
+    /// Decode one row-major SIZ tile and return only its clipped image region.
+    /// Null selects the complete tile grid.
+    tile_index: ?u32 = null,
+    /// Decode the absolute SIZ reference-grid rectangle x0/y0/width/height.
+    /// The rectangle must be non-empty, contained in the image, and is
+    /// mutually exclusive with tile_index.
+    reference_region: ?DecodeRegion = null,
     /// Reconstruct only the first N quality layers while still validating the
     /// complete codestream. Zero selects every signalled layer.
     quality_layer_limit: u16 = 0,
@@ -392,6 +407,9 @@ pub const DecodeTimings = struct {
     packet_catalog_payload_bytes_discarded: u64 = 0,
     t1_skipped_blocks: u64 = 0,
     t1_skipped_payload_bytes: u64 = 0,
+    tiles_total: u64 = 0,
+    tiles_decoded: u64 = 0,
+    tiles_skipped: u64 = 0,
     wavelet_ns: u64 = 0,
     color_transform_ns: u64 = 0,
     t1_pass_stats: ebcot.DecodePassStats = .{},
@@ -3521,6 +3539,13 @@ pub fn decodeLosslessNativeWithOptions(
     if (header.tile_width != 0 or header.tile_height != 0) {
         return decodeStrictMultiTileNative(allocator, bytes, header, options, limits);
     }
+    if (options.reference_region != null) {
+        if (options.tile_index != null) return CodestreamError.InvalidCodestream;
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (options.tile_index) |selected| {
+        if (selected != 0) return CodestreamError.InvalidCodestream;
+    }
 
     var layout = try inspectNativeCodestreamLayout(allocator, bytes, limits);
     defer layout.deinit();
@@ -3699,6 +3724,9 @@ fn decodeLosslessPlanarUpsampledWithOptionsMeasured(
     timings: ?*DecodeTimings,
 ) !color.SamplePlanes {
     if (options.resolution_reduction != 0) return CodestreamError.UnsupportedPayload;
+    if (options.tile_index != null or options.reference_region != null) {
+        return CodestreamError.UnsupportedPayload;
+    }
     const total_start = monotonicNs();
     defer {
         if (timings) |value| value.total_ns = elapsedNs(total_start);
@@ -3922,6 +3950,13 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
             output_mode,
             timings,
         );
+    }
+    if (options.reference_region != null) {
+        if (options.tile_index != null) return CodestreamError.InvalidCodestream;
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (options.tile_index) |selected| {
+        if (selected != 0) return CodestreamError.InvalidCodestream;
     }
 
     const catalog_start = monotonicNs();
@@ -4354,7 +4389,11 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     }
 
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
-    if (options.resolution_reduction == 0 and options.quality_layer_limit == 0) {
+    if (options.resolution_reduction == 0 and
+        options.quality_layer_limit == 0 and
+        options.tile_index == null and
+        options.reference_region == null)
+    {
         if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
             defer allocator.free(payload);
             const sidecar_start = monotonicNs();
@@ -4382,6 +4421,13 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     // metadata leaves them zero); route them through the per-tile decode.
     if (header.tile_width != 0 or header.tile_height != 0) {
         return decodeStrictMultiTileImageMeasured(allocator, bytes, header, options, timings);
+    }
+    if (options.reference_region != null) {
+        if (options.tile_index != null) return CodestreamError.InvalidCodestream;
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (options.tile_index) |selected| {
+        if (selected != 0) return CodestreamError.InvalidCodestream;
     }
 
     const catalog_start = monotonicNs();
@@ -4722,6 +4768,7 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
         catalog,
         resolution_reduction,
         quality_layer_limit,
+        true,
         &audit,
     );
     defer assemblies.deinit();
@@ -6356,6 +6403,33 @@ fn reduceNativeCodestreamLayout(layout: *NativeCodestreamLayout, reduction: u8) 
     }
 }
 
+fn cropNativeCodestreamLayoutToReferenceRect(
+    layout: *NativeCodestreamLayout,
+    rect: tile_grid.Rect,
+) !void {
+    if (rect.x1 <= rect.x0 or rect.y1 <= rect.y0 or
+        rect.x0 < layout.reference_x0 or rect.y0 < layout.reference_y0 or
+        rect.x1 > layout.reference_x1 or rect.y1 > layout.reference_y1)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    layout.reference_x0 = rect.x0;
+    layout.reference_y0 = rect.y0;
+    layout.reference_x1 = rect.x1;
+    layout.reference_y1 = rect.y1;
+    for (layout.components) |*component| {
+        const x0 = ceilDivU32(rect.x0, component.x_step);
+        const y0 = ceilDivU32(rect.y0, component.y_step);
+        const x1 = ceilDivU32(rect.x1, component.x_step);
+        const y1 = ceilDivU32(rect.y1, component.y_step);
+        if (x1 <= x0 or y1 <= y0) return CodestreamError.InvalidCodestream;
+        component.x0 = x0;
+        component.y0 = y0;
+        component.width = x1 - x0;
+        component.height = y1 - y0;
+    }
+}
+
 fn headerHasSignedComponent(header: TemporaryHeader) bool {
     for (header.component_signed[0..header.component_count]) |signed| {
         if (signed) return true;
@@ -7320,7 +7394,7 @@ fn auditStrictPacketCatalogHeaders(
     catalog: StrictPacketCatalog,
 ) !StrictPacketHeaderAudit {
     var audit = StrictPacketHeaderAudit{};
-    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, 0, 0, &audit);
+    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, 0, 0, true, &audit);
     defer assemblies.deinit();
 
     const assembly_stats = try strictAssemblyStats(assemblies.assemblies[0..assemblies.initialized]);
@@ -7332,12 +7406,38 @@ fn auditStrictPacketCatalogHeaders(
     return audit;
 }
 
+fn auditStrictPacketCatalogHeadersDiscardingPayload(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketCatalog,
+    resolution_reduction: u8,
+    quality_layer_limit: u16,
+) !StrictPacketHeaderAudit {
+    var audit = StrictPacketHeaderAudit{};
+    var assemblies = try assembleStrictPacketCatalogHeaders(
+        allocator,
+        header,
+        catalog,
+        resolution_reduction,
+        quality_layer_limit,
+        false,
+        &audit,
+    );
+    defer assemblies.deinit();
+    const assembly_stats = try strictAssemblyStats(assemblies.assemblies[0..assemblies.initialized]);
+    if (assembly_stats.bytes != 0 or audit.retained_payload_bytes != 0) {
+        return CodestreamError.InvalidCodestream;
+    }
+    return audit;
+}
+
 fn assembleStrictPacketCatalogHeaders(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     catalog: StrictPacketCatalog,
     resolution_reduction: u8,
     quality_layer_limit: u16,
+    retain_payloads: bool,
     audit: *StrictPacketHeaderAudit,
 ) !StrictComponentAssemblySet {
     if (resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
@@ -7447,7 +7547,7 @@ fn assembleStrictPacketCatalogHeaders(
             continue;
         }
 
-        const retain_payload = entry.packet.layer < retained_layer_count;
+        const retain_payload = retain_payloads and entry.packet.layer < retained_layer_count;
         const read = try readStrictPacketHeaderForAudit(
             packet_view,
             entry.packet,
@@ -9022,6 +9122,132 @@ const StrictMultiTileContext = struct {
     }
 };
 
+const StrictTileDecodeWindow = struct {
+    reference_rect: tile_grid.Rect,
+    selection: Selection,
+    tile_count: u64,
+    decoded_tile_count: u64,
+
+    const Selection = union(enum) {
+        all,
+        tile: u32,
+        region,
+    };
+
+    fn includes(self: StrictTileDecodeWindow, tile_index: u32, rect: tile_grid.Rect) bool {
+        return switch (self.selection) {
+            .all => true,
+            .tile => |selected| selected == tile_index,
+            .region => referenceRectsIntersect(self.reference_rect, rect),
+        };
+    }
+
+    fn selectsAll(self: StrictTileDecodeWindow) bool {
+        return switch (self.selection) {
+            .all => true,
+            else => false,
+        };
+    }
+};
+
+fn strictImageReferenceRect(header: TemporaryHeader) !tile_grid.Rect {
+    const width = std.math.cast(u32, header.width) orelse return CodestreamError.InvalidCodestream;
+    const height = std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream;
+    return .{
+        .x0 = header.reference_x0,
+        .y0 = header.reference_y0,
+        .x1 = std.math.add(u32, header.reference_x0, width) catch
+            return CodestreamError.InvalidCodestream,
+        .y1 = std.math.add(u32, header.reference_y0, height) catch
+            return CodestreamError.InvalidCodestream,
+    };
+}
+
+fn strictRequestedReferenceRect(header: TemporaryHeader, region: DecodeRegion) !tile_grid.Rect {
+    if (region.width == 0 or region.height == 0) return CodestreamError.InvalidCodestream;
+    const image_rect = try strictImageReferenceRect(header);
+    const requested = tile_grid.Rect{
+        .x0 = region.x0,
+        .y0 = region.y0,
+        .x1 = std.math.add(u32, region.x0, region.width) catch
+            return CodestreamError.InvalidCodestream,
+        .y1 = std.math.add(u32, region.y0, region.height) catch
+            return CodestreamError.InvalidCodestream,
+    };
+    if (requested.x0 < image_rect.x0 or requested.y0 < image_rect.y0 or
+        requested.x1 > image_rect.x1 or requested.y1 > image_rect.y1)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    return requested;
+}
+
+fn referenceRectsIntersect(a: tile_grid.Rect, b: tile_grid.Rect) bool {
+    return a.x0 < b.x1 and b.x0 < a.x1 and a.y0 < b.y1 and b.y0 < a.y1;
+}
+
+fn referenceRectIntersection(a: tile_grid.Rect, b: tile_grid.Rect) ?tile_grid.Rect {
+    if (!referenceRectsIntersect(a, b)) return null;
+    return .{
+        .x0 = @max(a.x0, b.x0),
+        .y0 = @max(a.y0, b.y0),
+        .x1 = @min(a.x1, b.x1),
+        .y1 = @min(a.y1, b.y1),
+    };
+}
+
+fn strictTileDecodeWindow(
+    context: StrictMultiTileContext,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+) !StrictTileDecodeWindow {
+    const tile_count = context.grid.tileCount();
+    if (tile_count == 0) return CodestreamError.InvalidCodestream;
+    if (options.tile_index != null and options.reference_region != null) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (options.tile_index) |selected| {
+        if (@as(u64, selected) >= tile_count) return CodestreamError.InvalidCodestream;
+        const tile = context.grid.tile(selected) catch return CodestreamError.InvalidCodestream;
+        return .{
+            .reference_rect = tile.rect,
+            .selection = .{ .tile = selected },
+            .tile_count = tile_count,
+            .decoded_tile_count = 1,
+        };
+    }
+    if (options.reference_region) |region| {
+        const requested = try strictRequestedReferenceRect(header, region);
+        var decoded_tile_count: u64 = 0;
+        var tile_index: u64 = 0;
+        while (tile_index < tile_count) : (tile_index += 1) {
+            const tile = context.grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
+            if (referenceRectsIntersect(requested, tile.rect)) decoded_tile_count += 1;
+        }
+        if (decoded_tile_count == 0) return CodestreamError.InvalidCodestream;
+        return .{
+            .reference_rect = requested,
+            .selection = .region,
+            .tile_count = tile_count,
+            .decoded_tile_count = decoded_tile_count,
+        };
+    }
+    return .{
+        .reference_rect = try strictImageReferenceRect(header),
+        .selection = .all,
+        .tile_count = tile_count,
+        .decoded_tile_count = tile_count,
+    };
+}
+
+fn recordStrictTileDecodeWindow(timings: ?*DecodeTimings, window: StrictTileDecodeWindow) void {
+    if (timings) |value| {
+        value.tiles_total += window.tile_count;
+        value.tiles_decoded += window.decoded_tile_count;
+        value.tiles_skipped += window.tile_count - window.decoded_tile_count;
+    }
+}
+
 fn readStrictMultiTileContext(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -9161,6 +9387,8 @@ fn decodeStrictMultiTilePlanarMeasured(
 
     var context = try readStrictMultiTileContext(allocator, bytes, header);
     defer context.deinit();
+    const window = try strictTileDecodeWindow(context, header, options);
+    recordStrictTileDecodeWindow(timings, window);
     if (mixed_tile_transform_candidate) {
         var has_tile_transform_override = false;
         const component_count = @as(usize, header.component_count);
@@ -9171,10 +9399,6 @@ fn decodeStrictMultiTilePlanarMeasured(
         if (!has_tile_transform_override) return CodestreamError.UnsupportedPayload;
     }
 
-    const reference_width = std.math.cast(u32, header.width) orelse return CodestreamError.InvalidCodestream;
-    const reference_height = std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream;
-    const reference_x1 = std.math.add(u32, header.reference_x0, reference_width) catch return CodestreamError.InvalidCodestream;
-    const reference_y1 = std.math.add(u32, header.reference_y0, reference_height) catch return CodestreamError.InvalidCodestream;
     const component_depths = try allocator.alloc(u8, header.component_count);
     defer allocator.free(component_depths);
     const component_widths = try allocator.alloc(usize, header.component_count);
@@ -9183,10 +9407,10 @@ fn decodeStrictMultiTilePlanarMeasured(
     defer allocator.free(component_heights);
     for (0..header.component_count) |component| {
         component_depths[component] = componentBitDepthForHeader(header, component);
-        const component_x0 = ceilDivU32(header.reference_x0, header.component_xrsiz[component]);
-        const component_y0 = ceilDivU32(header.reference_y0, header.component_yrsiz[component]);
-        const component_x1 = ceilDivU32(reference_x1, header.component_xrsiz[component]);
-        const component_y1 = ceilDivU32(reference_y1, header.component_yrsiz[component]);
+        const component_x0 = ceilDivU32(window.reference_rect.x0, header.component_xrsiz[component]);
+        const component_y0 = ceilDivU32(window.reference_rect.y0, header.component_yrsiz[component]);
+        const component_x1 = ceilDivU32(window.reference_rect.x1, header.component_xrsiz[component]);
+        const component_y1 = ceilDivU32(window.reference_rect.y1, header.component_yrsiz[component]);
         component_widths[component] = try reducedGridLength(
             component_x0,
             @as(usize, component_x1 - component_x0),
@@ -9198,8 +9422,16 @@ fn decodeStrictMultiTilePlanarMeasured(
             options.resolution_reduction,
         );
     }
-    const decoded_width = try reducedGridLength(header.reference_x0, header.width, options.resolution_reduction);
-    const decoded_height = try reducedGridLength(header.reference_y0, header.height, options.resolution_reduction);
+    const decoded_width = try reducedGridLength(
+        window.reference_rect.x0,
+        window.reference_rect.width(),
+        options.resolution_reduction,
+    );
+    const decoded_height = try reducedGridLength(
+        window.reference_rect.y0,
+        window.reference_rect.height(),
+        options.resolution_reduction,
+    );
     var assembled = try color.SamplePlanes.initWithComponentLayouts(
         allocator,
         if (sampled_rct) component_widths[0] else decoded_width,
@@ -9239,6 +9471,21 @@ fn decodeStrictMultiTilePlanarMeasured(
         );
         defer catalog.deinit();
 
+        if (!window.includes(tile_index, tile.rect)) {
+            const audit = try auditStrictPacketCatalogHeadersDiscardingPayload(
+                allocator,
+                tile_header,
+                catalog,
+                options.resolution_reduction,
+                options.quality_layer_limit,
+            );
+            if (timings) |value| {
+                value.packet_catalog_payload_bytes_discarded += audit.payload_bytes;
+                value.packet_catalog_ns += elapsedNs(catalog_start);
+            }
+            continue;
+        }
+
         var audit = StrictPacketHeaderAudit{};
         var assemblies = try assembleStrictPacketCatalogHeaders(
             allocator,
@@ -9246,6 +9493,7 @@ fn decodeStrictMultiTilePlanarMeasured(
             catalog,
             options.resolution_reduction,
             options.quality_layer_limit,
+            true,
             &audit,
         );
         defer assemblies.deinit();
@@ -9279,6 +9527,8 @@ fn decodeStrictMultiTilePlanarMeasured(
         );
         defer tile_planes.deinit();
 
+        const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
+            return CodestreamError.InvalidCodestream;
         for (0..header.component_count) |component| {
             const xrsiz = header.component_xrsiz[component];
             const yrsiz = header.component_yrsiz[component];
@@ -9286,14 +9536,22 @@ fn decodeStrictMultiTilePlanarMeasured(
             const component_y0 = ceilDivU32(tile.rect.y0, yrsiz);
             const component_x1 = ceilDivU32(tile.rect.x1, xrsiz);
             const component_y1 = ceilDivU32(tile.rect.y1, yrsiz);
-            const image_component_x0 = ceilDivU32(header.reference_x0, xrsiz);
-            const image_component_y0 = ceilDivU32(header.reference_y0, yrsiz);
+            const output_component_x0 = ceilDivU32(window.reference_rect.x0, xrsiz);
+            const output_component_y0 = ceilDivU32(window.reference_rect.y0, yrsiz);
+            const overlap_component_x0 = ceilDivU32(overlap.x0, xrsiz);
+            const overlap_component_y0 = ceilDivU32(overlap.y0, yrsiz);
+            const overlap_component_x1 = ceilDivU32(overlap.x1, xrsiz);
+            const overlap_component_y1 = ceilDivU32(overlap.y1, yrsiz);
             const reduced_component_x0 = reducedGridCoordinate(component_x0, options.resolution_reduction);
             const reduced_component_y0 = reducedGridCoordinate(component_y0, options.resolution_reduction);
             const reduced_component_x1 = reducedGridCoordinate(component_x1, options.resolution_reduction);
             const reduced_component_y1 = reducedGridCoordinate(component_y1, options.resolution_reduction);
-            const reduced_image_component_x0 = reducedGridCoordinate(image_component_x0, options.resolution_reduction);
-            const reduced_image_component_y0 = reducedGridCoordinate(image_component_y0, options.resolution_reduction);
+            const reduced_output_component_x0 = reducedGridCoordinate(output_component_x0, options.resolution_reduction);
+            const reduced_output_component_y0 = reducedGridCoordinate(output_component_y0, options.resolution_reduction);
+            const reduced_overlap_component_x0 = reducedGridCoordinate(overlap_component_x0, options.resolution_reduction);
+            const reduced_overlap_component_y0 = reducedGridCoordinate(overlap_component_y0, options.resolution_reduction);
+            const reduced_overlap_component_x1 = reducedGridCoordinate(overlap_component_x1, options.resolution_reduction);
+            const reduced_overlap_component_y1 = reducedGridCoordinate(overlap_component_y1, options.resolution_reduction);
             const tile_width = @as(usize, reduced_component_x1 - reduced_component_x0);
             const tile_height = @as(usize, reduced_component_y1 - reduced_component_y0);
             if (tile_planes.component_widths[component] != tile_width or
@@ -9302,26 +9560,33 @@ fn decodeStrictMultiTilePlanarMeasured(
                 return CodestreamError.InvalidCodestream;
             }
 
-            const destination_stride = component_widths[component];
-            if (reduced_component_x0 < reduced_image_component_x0 or
-                reduced_component_y0 < reduced_image_component_y0)
+            if (reduced_overlap_component_x0 < reduced_component_x0 or
+                reduced_overlap_component_y0 < reduced_component_y0 or
+                reduced_overlap_component_x0 < reduced_output_component_x0 or
+                reduced_overlap_component_y0 < reduced_output_component_y0)
             {
                 return CodestreamError.InvalidCodestream;
             }
-            const destination_x = @as(usize, reduced_component_x0 - reduced_image_component_x0);
-            const destination_y = @as(usize, reduced_component_y0 - reduced_image_component_y0);
-            if (destination_x + tile_width > component_widths[component] or
-                destination_y + tile_height > component_heights[component])
+            const source_x = @as(usize, reduced_overlap_component_x0 - reduced_component_x0);
+            const source_y = @as(usize, reduced_overlap_component_y0 - reduced_component_y0);
+            const destination_stride = component_widths[component];
+            const destination_x = @as(usize, reduced_overlap_component_x0 - reduced_output_component_x0);
+            const destination_y = @as(usize, reduced_overlap_component_y0 - reduced_output_component_y0);
+            const copy_width = @as(usize, reduced_overlap_component_x1 - reduced_overlap_component_x0);
+            const copy_height = @as(usize, reduced_overlap_component_y1 - reduced_overlap_component_y0);
+            if (source_x + copy_width > tile_width or source_y + copy_height > tile_height or
+                destination_x + copy_width > component_widths[component] or
+                destination_y + copy_height > component_heights[component])
             {
                 return CodestreamError.InvalidCodestream;
             }
             var row: usize = 0;
-            while (row < tile_height) : (row += 1) {
-                const source_start = row * tile_width;
+            while (row < copy_height) : (row += 1) {
+                const source_start = (source_y + row) * tile_width + source_x;
                 const destination_start = (destination_y + row) * destination_stride + destination_x;
                 @memcpy(
-                    assembled.planes[component][destination_start .. destination_start + tile_width],
-                    tile_planes.planes[component][source_start .. source_start + tile_width],
+                    assembled.planes[component][destination_start .. destination_start + copy_width],
+                    tile_planes.planes[component][source_start .. source_start + copy_width],
                 );
             }
         }
@@ -9346,9 +9611,16 @@ fn decodeStrictMultiTileNative(
         return CodestreamError.UnsupportedPayload;
     }
 
+    var context = try readStrictMultiTileContext(allocator, bytes, header);
+    defer context.deinit();
+    const window = try strictTileDecodeWindow(context, header, options);
+
     var layout = try inspectNativeCodestreamLayout(allocator, bytes, limits);
     defer layout.deinit();
     if (layout.components.len != header.component_count) return CodestreamError.InvalidCodestream;
+    if (!window.selectsAll()) {
+        try cropNativeCodestreamLayoutToReferenceRect(&layout, window.reference_rect);
+    }
     try reduceNativeCodestreamLayout(&layout, options.resolution_reduction);
     var output = try NativeSamplePlanes.initFromLayout(allocator, layout, limits);
     errdefer output.deinit();
@@ -9360,8 +9632,6 @@ fn decodeStrictMultiTileNative(
         }
     }
 
-    var context = try readStrictMultiTileContext(allocator, bytes, header);
-    defer context.deinit();
     var tile_index: u32 = 0;
     while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
         const tile = context.grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
@@ -9401,6 +9671,16 @@ fn decodeStrictMultiTileNative(
             context.main_header.ppm_headers,
         );
         defer catalog.deinit();
+        if (!window.includes(tile_index, tile.rect)) {
+            _ = try auditStrictPacketCatalogHeadersDiscardingPayload(
+                allocator,
+                tile_header,
+                catalog,
+                options.resolution_reduction,
+                options.quality_layer_limit,
+            );
+            continue;
+        }
         var audit = StrictPacketHeaderAudit{};
         var assemblies = try assembleStrictPacketCatalogHeaders(
             allocator,
@@ -9408,6 +9688,7 @@ fn decodeStrictMultiTileNative(
             catalog,
             options.resolution_reduction,
             options.quality_layer_limit,
+            true,
             &audit,
         );
         defer assemblies.deinit();
@@ -9439,6 +9720,8 @@ fn decodeStrictMultiTileNative(
         var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
         defer workspace.deinit();
 
+        const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
+            return CodestreamError.InvalidCodestream;
         for (0..header.component_count) |component| {
             const component_levels = componentLevelsForHeader(tile_header, component);
             const source_width = block_catalog.component_widths[component];
@@ -9497,13 +9780,40 @@ fn decodeStrictMultiTileNative(
                 block_catalog.component_y0[component],
                 options.resolution_reduction,
             );
-            if (reduced_x0 < plane.layout.x0 or reduced_y0 < plane.layout.y0) {
+            const overlap_component_x0 = ceilDivU32(overlap.x0, header.component_xrsiz[component]);
+            const overlap_component_y0 = ceilDivU32(overlap.y0, header.component_yrsiz[component]);
+            const overlap_component_x1 = ceilDivU32(overlap.x1, header.component_xrsiz[component]);
+            const overlap_component_y1 = ceilDivU32(overlap.y1, header.component_yrsiz[component]);
+            const reduced_overlap_x0 = reducedGridCoordinate(
+                overlap_component_x0,
+                options.resolution_reduction,
+            );
+            const reduced_overlap_y0 = reducedGridCoordinate(
+                overlap_component_y0,
+                options.resolution_reduction,
+            );
+            const reduced_overlap_x1 = reducedGridCoordinate(
+                overlap_component_x1,
+                options.resolution_reduction,
+            );
+            const reduced_overlap_y1 = reducedGridCoordinate(
+                overlap_component_y1,
+                options.resolution_reduction,
+            );
+            if (reduced_overlap_x0 < reduced_x0 or reduced_overlap_y0 < reduced_y0 or
+                reduced_overlap_x0 < plane.layout.x0 or reduced_overlap_y0 < plane.layout.y0)
+            {
                 return CodestreamError.InvalidCodestream;
             }
-            const destination_x = @as(usize, reduced_x0 - plane.layout.x0);
-            const destination_y = @as(usize, reduced_y0 - plane.layout.y0);
-            if (destination_x + tile_width > plane.layout.width or
-                destination_y + tile_height > plane.layout.height)
+            const source_x = @as(usize, reduced_overlap_x0 - reduced_x0);
+            const source_y = @as(usize, reduced_overlap_y0 - reduced_y0);
+            const destination_x = @as(usize, reduced_overlap_x0 - plane.layout.x0);
+            const destination_y = @as(usize, reduced_overlap_y0 - plane.layout.y0);
+            const copy_width = @as(usize, reduced_overlap_x1 - reduced_overlap_x0);
+            const copy_height = @as(usize, reduced_overlap_y1 - reduced_overlap_y0);
+            if (source_x + copy_width > tile_width or source_y + copy_height > tile_height or
+                destination_x + copy_width > plane.layout.width or
+                destination_y + copy_height > plane.layout.height)
             {
                 return CodestreamError.InvalidCodestream;
             }
@@ -9513,10 +9823,11 @@ fn decodeStrictMultiTileNative(
                 @as(i64, 1) << @as(u6, @intCast(plane.layout.precision - 1));
             const minimum = try plane.layout.minimumSample();
             const maximum = try plane.layout.maximumSample();
-            for (0..tile_height) |row| {
-                const source_row = coefficients[row * source_width ..][0..tile_width];
+            for (0..copy_height) |row| {
+                const source_start = (source_y + row) * source_width + source_x;
+                const source_row = coefficients[source_start..][0..copy_width];
                 const destination_start = (destination_y + row) * plane.layout.width + destination_x;
-                const destination_row = plane.samples[destination_start..][0..tile_width];
+                const destination_row = plane.samples[destination_start..][0..copy_width];
                 for (source_row, destination_row) |coefficient, *sample| {
                     const value = @as(i64, coefficient) + level_shift;
                     if (options.resolution_reduction == 0 and options.quality_layer_limit == 0 and
@@ -9552,9 +9863,19 @@ fn decodeStrictMultiTileImageMeasured(
 ) !image.RgbImage {
     var context = try readStrictMultiTileContext(allocator, bytes, header);
     defer context.deinit();
+    const window = try strictTileDecodeWindow(context, header, options);
+    recordStrictTileDecodeWindow(timings, window);
 
-    const decoded_width = try reducedGridLength(header.reference_x0, header.width, options.resolution_reduction);
-    const decoded_height = try reducedGridLength(header.reference_y0, header.height, options.resolution_reduction);
+    const decoded_width = try reducedGridLength(
+        window.reference_rect.x0,
+        window.reference_rect.width(),
+        options.resolution_reduction,
+    );
+    const decoded_height = try reducedGridLength(
+        window.reference_rect.y0,
+        window.reference_rect.height(),
+        options.resolution_reduction,
+    );
     const pixels = try std.math.mul(usize, decoded_width, decoded_height);
     const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
     errdefer allocator.free(samples);
@@ -9596,6 +9917,21 @@ fn decodeStrictMultiTileImageMeasured(
         );
         defer catalog.deinit();
 
+        if (!window.includes(tile_index, tile.rect)) {
+            const audit = try auditStrictPacketCatalogHeadersDiscardingPayload(
+                allocator,
+                tile_header,
+                catalog,
+                options.resolution_reduction,
+                options.quality_layer_limit,
+            );
+            if (timings) |value| {
+                value.packet_catalog_payload_bytes_discarded += audit.payload_bytes;
+                value.packet_catalog_ns += elapsedNs(catalog_start);
+            }
+            continue;
+        }
+
         var audit = StrictPacketHeaderAudit{};
         var assemblies = try assembleStrictPacketCatalogHeaders(
             allocator,
@@ -9603,6 +9939,7 @@ fn decodeStrictMultiTileImageMeasured(
             catalog,
             options.resolution_reduction,
             options.quality_layer_limit,
+            true,
             &audit,
         );
         defer assemblies.deinit();
@@ -9630,22 +9967,47 @@ fn decodeStrictMultiTileImageMeasured(
         if (tile.rect.x0 < header.reference_x0 or tile.rect.y0 < header.reference_y0) {
             return CodestreamError.InvalidCodestream;
         }
-        const reduced_image_x0 = reducedGridCoordinate(header.reference_x0, options.resolution_reduction);
-        const reduced_image_y0 = reducedGridCoordinate(header.reference_y0, options.resolution_reduction);
+        const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
+            return CodestreamError.InvalidCodestream;
+        const reduced_output_x0 = reducedGridCoordinate(window.reference_rect.x0, options.resolution_reduction);
+        const reduced_output_y0 = reducedGridCoordinate(window.reference_rect.y0, options.resolution_reduction);
         const reduced_tile_x0 = reducedGridCoordinate(tile.rect.x0, options.resolution_reduction);
         const reduced_tile_y0 = reducedGridCoordinate(tile.rect.y0, options.resolution_reduction);
         const reduced_tile_x1 = reducedGridCoordinate(tile.rect.x1, options.resolution_reduction);
         const reduced_tile_y1 = reducedGridCoordinate(tile.rect.y1, options.resolution_reduction);
-        if (reduced_tile_x0 < reduced_image_x0 or reduced_tile_y0 < reduced_image_y0) {
+        const reduced_overlap_x0 = reducedGridCoordinate(overlap.x0, options.resolution_reduction);
+        const reduced_overlap_y0 = reducedGridCoordinate(overlap.y0, options.resolution_reduction);
+        const reduced_overlap_x1 = reducedGridCoordinate(overlap.x1, options.resolution_reduction);
+        const reduced_overlap_y1 = reducedGridCoordinate(overlap.y1, options.resolution_reduction);
+        if (reduced_overlap_x0 < reduced_tile_x0 or reduced_overlap_y0 < reduced_tile_y0 or
+            reduced_overlap_x0 < reduced_output_x0 or reduced_overlap_y0 < reduced_output_y0)
+        {
             return CodestreamError.InvalidCodestream;
         }
-        const local_rect = tile_grid.Rect{
-            .x0 = reduced_tile_x0 - reduced_image_x0,
-            .y0 = reduced_tile_y0 - reduced_image_y0,
-            .x1 = reduced_tile_x1 - reduced_image_x0,
-            .y1 = reduced_tile_y1 - reduced_image_y0,
-        };
-        tile_grid.copyRgbTileInto(assembled, local_rect, tile_image) catch return CodestreamError.InvalidCodestream;
+        const tile_width = @as(usize, reduced_tile_x1 - reduced_tile_x0);
+        const tile_height = @as(usize, reduced_tile_y1 - reduced_tile_y0);
+        if (tile_image.width != tile_width or tile_image.height != tile_height) {
+            return CodestreamError.InvalidCodestream;
+        }
+        const source_x = @as(usize, reduced_overlap_x0 - reduced_tile_x0);
+        const source_y = @as(usize, reduced_overlap_y0 - reduced_tile_y0);
+        const destination_x = @as(usize, reduced_overlap_x0 - reduced_output_x0);
+        const destination_y = @as(usize, reduced_overlap_y0 - reduced_output_y0);
+        const copy_width = @as(usize, reduced_overlap_x1 - reduced_overlap_x0);
+        const copy_height = @as(usize, reduced_overlap_y1 - reduced_overlap_y0);
+        if (source_x + copy_width > tile_width or source_y + copy_height > tile_height or
+            destination_x + copy_width > assembled.width or destination_y + copy_height > assembled.height)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        for (0..copy_height) |row| {
+            const source_start = ((source_y + row) * tile_width + source_x) * 3;
+            const destination_start = ((destination_y + row) * assembled.width + destination_x) * 3;
+            @memcpy(
+                assembled.samples[destination_start..][0 .. copy_width * 3],
+                tile_image.samples[source_start..][0 .. copy_width * 3],
+            );
+        }
     }
 
     return assembled;

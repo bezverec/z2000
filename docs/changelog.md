@@ -5,6 +5,37 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bounded Reference-Region Decode
+
+- Added `DecodeOptions.reference_region` with absolute SIZ
+  `x0,y0,width,height` coordinates for the bounded multi-tile RGB, planar, and
+  reversible native paths. The non-empty contained rectangle is mutually
+  exclusive with `tile_index`; the CLI exposes it as `--region X,Y,W,H`.
+- Output allocation is limited to the requested reduced rectangle. Only
+  intersecting tiles retain block bodies or enter T1/DWT/MCT, while every
+  skipped tile-part and stateful T2 header remains fail-closed validated.
+  Absolute component intersections preserve nonzero origins and subsampling
+  phase.
+- Exact full-decode crop oracles cover a four-of-six-tile RGB region, a
+  nine-of-twelve-tile sampled/nonzero-origin region, resolution reduction,
+  native component layouts, 1/8-worker determinism, invalid/overflowing
+  rectangles, mutually exclusive selectors, and corruption in a skipped tile.
+  Single-tile region cropping and intra-tile code-block pruning remain G4 work.
+
+### Bounded Tile-Selective Decode
+
+- Added `DecodeOptions.tile_index` for row-major SIZ tile selection across the
+  bounded strict multi-tile RGB, planar, and native paths. Selected output is a
+  clipped tile crop rather than a full raster with empty regions; sampled native
+  planes preserve absolute component origins. Single-tile index zero is valid
+  and out-of-range indexes fail closed.
+- The complete tile-part layout and every tile's stateful T2 headers remain
+  validated. Only the selected tile retains block bodies or enters T1/DWT/MCT,
+  with `tiles_total`, `tiles_decoded`, and `tiles_skipped` profile counters.
+  Exact full-decode crop oracles cover edge tiles, nonzero origins, subsampling,
+  combined resolution reduction, corruption in a skipped tile-part, and 1/8
+  worker determinism. Decode CLI commands expose `--tile-index N`.
+
 ### Quality-Layer-Selective Decode
 
 - Added `DecodeOptions.quality_layer_limit` to the strict single- and multi-tile

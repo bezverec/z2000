@@ -894,6 +894,14 @@ fn j2kToPgxCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
             index += 1;
             if (index >= args.len) return error.MissingValue;
             component = try std.fmt.parseInt(usize, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--tile-index")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.tile_index = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--region")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.reference_region = try parseDecodeRegion(args[index]);
         } else if (std.mem.eql(u8, args[index], "--reduce")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -989,6 +997,14 @@ fn j2kToZrawCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.resolution_reduction = try std.fmt.parseInt(u8, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--tile-index")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.tile_index = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--region")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.reference_region = try parseDecodeRegion(args[index]);
         } else if (std.mem.eql(u8, args[index], "--layers")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -1061,6 +1077,14 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.t1_backend = try parseT1Backend(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--tile-index")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.tile_index = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--region")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.reference_region = try parseDecodeRegion(args[index]);
         } else if (std.mem.eql(u8, args[index], "--layers")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -1132,6 +1156,11 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             if (info.color_space == .sycc) {
                 const chroma_sampling = info.componentSampling(1) orelse
                     return error.UnsupportedComponentCount;
+                if ((options.tile_index != null or options.reference_region != null) and
+                    (chroma_sampling[0] != 1 or chroma_sampling[1] != 1))
+                {
+                    return codestream.CodestreamError.UnsupportedPayload;
+                }
                 var planes = if (show_timings)
                     try codestream.decodeLosslessPlanarWithOptionsProfiled(
                         allocator,
@@ -1231,13 +1260,18 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         command_timings.icc_extract_ns +
         command_timings.tiff_write_ns;
 
+    const output_dimensions = switch (decoded) {
+        .rgb => |rgb| [2]usize{ rgb.width, rgb.height },
+        .grayscale => |gray| [2]usize{ gray.width, gray.height },
+        .alpha => |alpha| [2]usize{ alpha.width, alpha.height },
+    };
     std.debug.print(
         "decoded JP2 {s} -> {s} ({}x{}, {} output component{s}, {} bits/component, threads {})\n",
         .{
             args[0],
             args[1],
-            info.width,
-            info.height,
+            output_dimensions[0],
+            output_dimensions[1],
             info.output_components,
             if (info.output_components == 1) "" else "s",
             if (info.has_palette) info.palette_bits_per_component else info.bits_per_component,
@@ -1496,6 +1530,12 @@ fn printDecodeTempJp2Timings(command: DecodeTempJp2Timings, decode: codestream.D
     printTiming("  metadata", decode.metadata_ns, total);
     printTiming("  packet catalog", decode.packet_catalog_ns, total);
     printDecodePacketCatalogProfile(decode, total);
+    if (decode.tiles_total > 0) {
+        std.debug.print(
+            "    tiles total/decoded/skipped {}/{}/{}\n",
+            .{ decode.tiles_total, decode.tiles_decoded, decode.tiles_skipped },
+        );
+    }
     printTiming("  block payload", decode.block_payload_ns, total);
     printDecodeBlockWorkerProfile(decode);
     printTiming("  inverse DWT", decode.wavelet_ns, total);
@@ -1744,6 +1784,16 @@ fn parseThreadCount(value: []const u8) !u8 {
     return defaultThreadCount();
 }
 
+fn parseDecodeRegion(value: []const u8) !codestream.DecodeRegion {
+    var parts = std.mem.splitScalar(u8, value, ',');
+    const x0 = try std.fmt.parseInt(u32, parts.next() orelse return error.InvalidValue, 10);
+    const y0 = try std.fmt.parseInt(u32, parts.next() orelse return error.InvalidValue, 10);
+    const width = try std.fmt.parseInt(u32, parts.next() orelse return error.InvalidValue, 10);
+    const height = try std.fmt.parseInt(u32, parts.next() orelse return error.InvalidValue, 10);
+    if (parts.next() != null or width == 0 or height == 0) return error.InvalidValue;
+    return .{ .x0 = x0, .y0 = y0, .width = width, .height = height };
+}
+
 fn parseT1Backend(value: []const u8) !codestream.T1Backend {
     if (std.ascii.eqlIgnoreCase(value, "legacy") or
         std.ascii.eqlIgnoreCase(value, "legacy-mq") or
@@ -1892,9 +1942,9 @@ fn usage() void {
         \\  z2000 exr-to-jp2 <input.exr> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jp2-info <input.jp2>
         \\  z2000 jp2-stats <input.jp2> [--t1-backend legacy-mq|iso-mq]
-        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--layers N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
-        \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
-        \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
+        \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--tile-index N|--region X,Y,W,H] [--layers N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
+        \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
+        \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.

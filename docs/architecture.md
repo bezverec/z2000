@@ -192,6 +192,15 @@ normalized into the same unframed packet view as inline headers. PLT-less
 single-part streams derive payload spans from decoded packet headers; supported
 multi-part layouts maintain tile-local packet state across parts.
 
+The shared multi-tile selection window maps either one row-major tile or an
+absolute SIZ `x0,y0,width,height` region onto the tile grid. Stage B and the
+stateful T2 walk still visit every tile-part. Tiles outside the window retain no
+code-block bodies and do not enter T1, inverse DWT, or inverse MCT; intersecting
+tiles are reconstructed independently and only their reduced intersection is
+copied into the bounded RGB, planar, or native output. Component intersections
+use `ceil(reference/XRsiz)` followed by the requested DWT reduction, so
+nonzero origins and subsampling retain their absolute phase.
+
 The former BP8 COM sidecar is not part of normal output. It remains an optional
 debug/compatibility oracle for tests and old fixtures.
 
@@ -335,6 +344,15 @@ the later checked spans are counted as discarded. This applies per tile before
 the existing transform and absolute-grid assembly paths, and composes with
 resolution selection. A zero limit means the complete signalled layer set.
 
+Tile selection moves the output boundary to one clipped row-major SIZ tile.
+The shared multi-tile Stage B state machine still scans every SOT/`Psot`, TLM,
+PLT/PLM, PPM/PPT group, and tile-part override. Stage C builds and audits each
+tile's stateful T2 catalog in turn, but only the selected tile retains code-block
+bodies and enters T1, inverse DWT, and inverse MCT. RGB and planar outputs use
+the selected reference rectangle as local output origin; native planes retain
+its absolute reduced component coordinates. This avoids full-raster allocation
+and composes with layer-prefix and resolution selection.
+
 The irreversible planar backend reuses the same strict block
 catalog without interleaving through a temporary RGB image. Each component owns
 its quantized coefficient plane, effective QCD/QCC-derived subband steps, float
@@ -420,6 +438,11 @@ All lengths, offsets, component counts, tile counts, and allocations are checked
 before use. Corruption tests cover truncation and byte mutations across JP2,
 markers, packet headers, tag trees, segment lengths, and T1 payloads in Debug,
 ReleaseSafe, and ReleaseFast configurations.
+
+Tile and region selection bound final raster allocation and avoid T1/DWT work
+for non-intersecting tiles. They do not yet prune precincts or code-blocks
+inside an intersecting tile, stream codestream input, or provide row-oriented
+output; those are the remaining G4 memory-scaling boundaries.
 
 ## Verification Ownership
 

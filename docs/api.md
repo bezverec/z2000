@@ -39,7 +39,7 @@ zig build run -- dng-to-jp2 input.dng output.jp2 [options]
 zig build run -- exr-to-jp2 input.exr output.jp2 [options]
 zig build run -- jp2-info output.jp2
 zig build run -- jp2-stats output.jp2
-zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--layers N] [--threads N] [--convert-to-srgb]
+zig build run -- decode-temp-jp2 output.jp2 reconstructed.tif [--tile-index N|--region X,Y,W,H] [--layers N] [--threads N] [--convert-to-srgb]
 zig build run -- *.tif .jp2 [tiff-to-jp2 options]
 zig build run -- *.bmp .jp2 [tiff-to-jp2 options]
 zig build run -- *.png .jp2 [tiff-to-jp2 options]
@@ -47,9 +47,9 @@ zig build run -- *.jpg .jp2 [tiff-to-jp2 options]
 zig build run -- *.dng .jp2 [tiff-to-jp2 options]
 zig build run -- *.exr .jp2 [tiff-to-jp2 options]
 zig build run -- *.jp2 .tif [decode-temp-jp2 options]
-zig build run -- j2k-to-pgx input.j2k component.pgx [--component N] [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq] [--pgx-order ML|LM]
+zig build run -- j2k-to-pgx input.j2k component.pgx [--component N] [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq] [--pgx-order ML|LM]
 zig build run -- *.j2c .pgx [j2k-to-pgx options]
-zig build run -- j2k-to-zraw input.j2k components.zraw [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq]
+zig build run -- j2k-to-zraw input.j2k components.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq]
 zig build run -- *.j2c .zraw [j2k-to-zraw options]
 ```
 
@@ -77,7 +77,8 @@ expanded to RGB first.
 `.j2c` without a JP2 wrapper, decodes through `decodeLosslessNativeWithOptions`,
 and writes exactly one caller-selected component. Component 0, full resolution,
 all logical CPUs, the ISO MQ backend, and big-endian `ML` PGX are defaults.
-`--component N`, `--layers N`, `--reduce N`, `--threads N`, `--t1-backend`, and
+`--component N`, `--tile-index N`, `--region X,Y,W,H`, `--layers N`,
+`--reduce N`, `--threads N`, `--t1-backend`, and
 `--pgx-order ML|LM` are available in explicit, shorthand, and batch forms.
 Invalid component indexes and profiles outside the native reversible contract
 fail before an output file is written.
@@ -357,6 +358,29 @@ Primary public functions:
   scalar-expounded COD/QCD; each tile is reconstructed through its effective
   transform before absolute-grid assembly. These are decode-only profile
   extensions, not general encoder controls.
+  `DecodeOptions.tile_index` selects one row-major SIZ tile. Null decodes the
+  complete grid; index zero also names the only tile in a single-tile stream,
+  and an out-of-range index fails closed. Multi-tile RGB, planar, and native
+  paths allocate only the selected clipped output rectangle and schedule T1,
+  inverse DWT, and inverse MCT only for that tile. Stage B still validates the
+  complete tile-part sequence, and skipped tiles run the same stateful T2 header
+  audit without retaining block bodies. Tile selection composes with layer and
+  resolution selection; sampled native output preserves the selected tile's
+  absolute component origins. `DecodeTimings.tiles_total`, `tiles_decoded`, and
+  `tiles_skipped` expose the split. Reference-grid upsampling of selected
+  subsampled tiles is not yet public.
+  `DecodeOptions.reference_region` accepts an absolute SIZ reference-grid
+  `x0`, `y0`, `width`, and `height` through `DecodeRegion`. The rectangle must
+  be non-empty and fully contained in the image, and cannot be combined with
+  `tile_index`. On the bounded multi-tile RGB, component-local planar, and
+  reversible native paths, output allocation is limited to the requested
+  rectangle and only intersecting tiles retain bodies or enter T1/DWT/MCT.
+  Intersection copies use absolute reduced component coordinates, preserving
+  subsampling phase and native plane origins. Tiles outside the rectangle still
+  undergo the complete tile-part and stateful T2 audit. The CLI spelling is
+  `--region X,Y,W,H`. Single-tile region cropping, selected subsampled
+  reference-grid upsampling, and code-block pruning inside an intersecting tile
+  remain unsupported rather than silently falling back to an unbounded path.
   `DecodeOptions.quality_layer_limit` selects the first N quality layers on the
   shared strict packet catalog; zero keeps all layers. Values above COD/Layers
   fail closed. Every later packet header and payload span is still parsed and
