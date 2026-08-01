@@ -3769,43 +3769,129 @@ fn decodeLosslessPlanarUpsampledWithOptionsMeasured(
     timings: ?*DecodeTimings,
 ) !color.SamplePlanes {
     if (options.resolution_reduction != 0) return CodestreamError.UnsupportedPayload;
-    if (options.tile_index != null or options.reference_region != null) {
-        return CodestreamError.UnsupportedPayload;
-    }
     const total_start = monotonicNs();
     defer {
         if (timings) |value| value.total_ns = elapsedNs(total_start);
     }
     var header = try readStrictCodestreamMetadata(allocator, bytes);
     defer header.deinit();
-    var native = try decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, timings);
+    const image_rect = try strictImageReferenceRect(header);
+    const requested = try upsampledSelectionRect(header, image_rect, options) orelse {
+        var native = try decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, timings);
+        defer native.deinit();
+        return upsamplePlanarNearestToReferenceGrid(allocator, header, native, image_rect, image_rect);
+    };
+
+    // Nearest-neighbour replication reads the component sample at
+    // floor(reference/XRsiz), which can sit one sample left of the selected
+    // rectangle's own ceil-div component intersection. The native decode
+    // therefore covers a slightly wider source window, clamped to the image.
+    const source_rect = try upsampledSourceRect(header, image_rect, requested);
+    var native_options = options;
+    native_options.tile_index = null;
+    native_options.reference_region = .{
+        .x0 = source_rect.x0,
+        .y0 = source_rect.y0,
+        .width = source_rect.x1 - source_rect.x0,
+        .height = source_rect.y1 - source_rect.y0,
+    };
+    var native = try decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, native_options, timings);
     defer native.deinit();
-    return upsamplePlanarNearestToReferenceGrid(allocator, header, native);
+    return upsamplePlanarNearestToReferenceGrid(allocator, header, native, source_rect, requested);
 }
 
+/// Absolute reference-grid rectangle an upsampled decode must return, or null
+/// for the complete image. A selected tile is resolved to its clipped rect so
+/// both selectors share one output path.
+fn upsampledSelectionRect(
+    header: TemporaryHeader,
+    image_rect: tile_grid.Rect,
+    options: DecodeOptions,
+) !?tile_grid.Rect {
+    if (options.tile_index != null and options.reference_region != null) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (options.reference_region) |region| {
+        return try strictRequestedReferenceRect(header, region);
+    }
+    const selected = options.tile_index orelse return null;
+    if (header.tile_width == 0 and header.tile_height == 0) {
+        if (selected != 0) return CodestreamError.InvalidCodestream;
+        return image_rect;
+    }
+    const grid = tile_grid.Grid.init(.{
+        .xsiz = image_rect.x1,
+        .ysiz = image_rect.y1,
+        .xosiz = image_rect.x0,
+        .yosiz = image_rect.y0,
+        .xtsiz = header.tile_width,
+        .ytsiz = header.tile_height,
+        .xtosiz = header.tile_origin_x,
+        .ytosiz = header.tile_origin_y,
+    }) catch return CodestreamError.InvalidCodestream;
+    if (@as(u64, selected) >= grid.tileCount()) return CodestreamError.InvalidCodestream;
+    const tile = grid.tile(selected) catch return CodestreamError.InvalidCodestream;
+    return tile.rect;
+}
+
+fn upsampledSourceRect(
+    header: TemporaryHeader,
+    image_rect: tile_grid.Rect,
+    requested: tile_grid.Rect,
+) !tile_grid.Rect {
+    var margin_x: u32 = 0;
+    var margin_y: u32 = 0;
+    for (0..header.component_count) |component| {
+        const xrsiz = header.component_xrsiz[component];
+        const yrsiz = header.component_yrsiz[component];
+        if (xrsiz == 0 or yrsiz == 0) return CodestreamError.InvalidCodestream;
+        margin_x = @max(margin_x, @as(u32, xrsiz) - 1);
+        margin_y = @max(margin_y, @as(u32, yrsiz) - 1);
+    }
+    return .{
+        .x0 = @max(image_rect.x0, requested.x0 -| margin_x),
+        .y0 = @max(image_rect.y0, requested.y0 -| margin_y),
+        .x1 = requested.x1,
+        .y1 = requested.y1,
+    };
+}
+
+/// Replicates `native`, decoded over `source_rect`, onto the reference grid
+/// covered by `output_rect`. Both rectangles are absolute, so component phase
+/// comes from `floor(reference/XRsiz)` rather than from the window's own
+/// origin; positions before the first available component sample clamp to it
+/// exactly as they do for a complete image.
 fn upsamplePlanarNearestToReferenceGrid(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     native: color.SamplePlanes,
+    source_rect: tile_grid.Rect,
+    output_rect: tile_grid.Rect,
 ) !color.SamplePlanes {
-    if (native.planes.len != header.component_count or
-        native.width != header.width or native.height != header.height)
+    if (native.planes.len != header.component_count) return CodestreamError.InvalidCodestream;
+    if (source_rect.x1 <= source_rect.x0 or source_rect.y1 <= source_rect.y0 or
+        output_rect.x1 <= output_rect.x0 or output_rect.y1 <= output_rect.y0 or
+        output_rect.x0 < source_rect.x0 or output_rect.y0 < source_rect.y0 or
+        output_rect.x1 > source_rect.x1 or output_rect.y1 > source_rect.y1)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    const output_width = @as(usize, output_rect.x1 - output_rect.x0);
+    const output_height = @as(usize, output_rect.y1 - output_rect.y0);
+    if (native.width != @as(usize, source_rect.x1 - source_rect.x0) or
+        native.height != @as(usize, source_rect.y1 - source_rect.y0))
     {
         return CodestreamError.InvalidCodestream;
     }
 
-    const reference_width = std.math.cast(u32, header.width) orelse return CodestreamError.InvalidCodestream;
-    const reference_height = std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream;
-    const reference_x1 = std.math.add(u32, header.reference_x0, reference_width) catch return CodestreamError.InvalidCodestream;
-    const reference_y1 = std.math.add(u32, header.reference_y0, reference_height) catch return CodestreamError.InvalidCodestream;
     const component_depths = try allocator.alloc(u8, header.component_count);
     defer allocator.free(component_depths);
     const output_widths = try allocator.alloc(usize, header.component_count);
     defer allocator.free(output_widths);
     const output_heights = try allocator.alloc(usize, header.component_count);
     defer allocator.free(output_heights);
-    @memset(output_widths, header.width);
-    @memset(output_heights, header.height);
+    @memset(output_widths, output_width);
+    @memset(output_heights, output_height);
     for (0..header.component_count) |component| {
         component_depths[component] = native.componentBitDepth(component) orelse
             return CodestreamError.InvalidCodestream;
@@ -3813,24 +3899,24 @@ fn upsamplePlanarNearestToReferenceGrid(
 
     var output = try color.SamplePlanes.initWithComponentLayouts(
         allocator,
-        header.width,
-        header.height,
+        output_width,
+        output_height,
         component_depths,
         output_widths,
         output_heights,
     );
     errdefer output.deinit();
-    const source_x_by_destination = try allocator.alloc(usize, header.width);
+    const source_x_by_destination = try allocator.alloc(usize, output_width);
     defer allocator.free(source_x_by_destination);
 
     for (0..header.component_count) |component| {
         const xrsiz = header.component_xrsiz[component];
         const yrsiz = header.component_yrsiz[component];
         if (xrsiz == 0 or yrsiz == 0) return CodestreamError.InvalidCodestream;
-        const component_x0 = ceilDivU32(header.reference_x0, xrsiz);
-        const component_y0 = ceilDivU32(header.reference_y0, yrsiz);
-        const component_x1 = ceilDivU32(reference_x1, xrsiz);
-        const component_y1 = ceilDivU32(reference_y1, yrsiz);
+        const component_x0 = ceilDivU32(source_rect.x0, xrsiz);
+        const component_y0 = ceilDivU32(source_rect.y0, yrsiz);
+        const component_x1 = ceilDivU32(source_rect.x1, xrsiz);
+        const component_y1 = ceilDivU32(source_rect.y1, yrsiz);
         const source_width = @as(usize, component_x1 - component_x0);
         const source_height = @as(usize, component_y1 - component_y0);
         if (source_width == 0 or source_height == 0) return CodestreamError.InvalidCodestream;
@@ -3844,27 +3930,29 @@ fn upsamplePlanarNearestToReferenceGrid(
 
         const source = native.planes[component];
         const destination = output.planes[component];
-        if (xrsiz == 1 and yrsiz == 1) {
+        if (xrsiz == 1 and yrsiz == 1 and source_width == output_width and
+            source_height == output_height)
+        {
             @memcpy(destination, source);
             continue;
         }
         for (source_x_by_destination, 0..) |*source_x, x| {
-            const reference_x = @as(u64, header.reference_x0) + @as(u64, @intCast(x));
+            const reference_x = @as(u64, output_rect.x0) + @as(u64, @intCast(x));
             const absolute_component_x = reference_x / xrsiz;
             source_x.* = if (absolute_component_x <= component_x0)
                 0
             else
                 @min(@as(usize, @intCast(absolute_component_x - component_x0)), source_width - 1);
         }
-        for (0..header.height) |y| {
-            const reference_y = @as(u64, header.reference_y0) + @as(u64, @intCast(y));
+        for (0..output_height) |y| {
+            const reference_y = @as(u64, output_rect.y0) + @as(u64, @intCast(y));
             const absolute_component_y = reference_y / yrsiz;
             const source_y = if (absolute_component_y <= component_y0)
                 0
             else
                 @min(@as(usize, @intCast(absolute_component_y - component_y0)), source_height - 1);
             const source_row = source[source_y * source_width ..][0..source_width];
-            const destination_row = destination[y * header.width ..][0..header.width];
+            const destination_row = destination[y * output_width ..][0..output_width];
             for (destination_row, source_x_by_destination) |*sample, source_x| {
                 sample.* = source_row[source_x];
             }

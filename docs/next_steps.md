@@ -287,9 +287,14 @@ The foundation landed on 2026-07-17:
 - Packet assembly shares those windows, so a pruned block's payload is never
   materialized into its component buffer.
   `packet_catalog_payload_bytes_materialized` is pinned strictly below the
-  matching full decode. Codestream input is still read whole and a large tile
-  still runs a full inverse DWT, so incremental input, row-oriented output, and
-  selected reference-grid upsampling remain open.
+  matching full decode.
+- Reference-grid upsampling accepts both selectors. A selected tile resolves to
+  its clipped rectangle, the native source window widens by `XRsiz-1`/`YRsiz-1`
+  so nearest-neighbour replication keeps its absolute phase, and a 4:2:0
+  twelve-tile stream at a nonzero origin pins every chroma phase against the
+  full upsampled decode. Reduced upsampling stays fail-closed. Codestream input
+  is still read whole and a large tile still runs a full inverse DWT, so
+  incremental input and row-oriented output remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -653,12 +658,16 @@ alone does not complete an item.
 Quality-layer-prefix, resolution-reduction, bounded tile-index selection,
 reference-grid region selection on single- and multi-tile streams, and
 intra-tile code-block pruning that reaches packet assembly are now public on the
-shared normalized packet index. What remains is the input and output ends: a
+shared normalized packet index, and reference-grid upsampling accepts the same
+selectors. What remains is the input and output ends: a
 large selected tile still runs a full inverse DWT into a full-tile plane, and
 the codestream is still read whole. Add incremental
 codestream input and row/tile-oriented output so peak memory scales with the
-requested working set rather than the complete raster, then broaden selection
-through the remaining upsampling/colour layouts.
+requested working set rather than the complete raster. Both change the public
+decode API shape, so agree the reader/sink contract before implementing either.
+The remaining colour layouts — sampled sYCC display conversion under a
+selector, and reduced upsampling — follow the same window arithmetic and stay
+fail-closed until then.
 
 For every selection mode, compare the result with the corresponding crop or
 reduction of a full strict decode. Cover odd origins, subsampling, ROI, tile

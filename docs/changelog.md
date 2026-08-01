@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Selected Reference-Grid Upsampling
+
+- `decodeLosslessPlanarUpsampled*` now accepts `DecodeOptions.tile_index` and
+  `reference_region` instead of failing closed. A selected tile resolves to its
+  clipped reference rectangle, so both selectors share one output path, and the
+  result is exactly the corresponding crop of a full upsampled decode.
+- Nearest-neighbour replication reads the component sample at
+  `floor(reference/XRsiz)`, which can sit one sample outside a selected
+  rectangle's own ceil-div component intersection. The native decode therefore
+  covers a source window widened by `XRsiz-1`/`YRsiz-1` and clamped to the
+  image, while replication stays anchored to absolute reference coordinates.
+  Positions before the first available component sample clamp to it exactly as
+  they do for a complete image.
+- A 4:2:0 twelve-tile stream at a nonzero image origin pins every chroma phase:
+  sixteen requested origins, all twelve tile indexes, whole-image equivalence
+  with the default decode, and rejected combined, out-of-range, out-of-image,
+  and reduced selectors. Dropping the source-window widening fails that sweep.
+  Reduced upsampling remains an explicit later boundary.
+
 ### Region-Pruned Packet Assembly
 
 - Packet assembly now derives the same per-resolution region windows the block

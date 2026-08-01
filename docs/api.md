@@ -388,8 +388,14 @@ Primary public functions:
   read whole and a selected tile still synthesizes its full plane.
   Like the resolution and quality-layer selectors, region decode
   saturates intermediate samples to the declared range, and only the returned
-  window is guaranteed exact. Selected subsampled reference-grid upsampling
-  remains unsupported rather than silently falling back to an unbounded path.
+  window is guaranteed exact.
+  `decodeLosslessPlanarUpsampled*` accepts both selectors and returns exactly
+  the matching crop of a full upsampled decode. A selected tile resolves to its
+  clipped reference rectangle; the native source window widens by `XRsiz-1` and
+  `YRsiz-1`, clamped to the image, because nearest-neighbour replication reads
+  `floor(reference/XRsiz)` and stays anchored to absolute coordinates. Reduced
+  upsampling, and a selector combined with sampled sYCC display conversion,
+  remain unsupported rather than silently falling back to an unbounded path.
   `DecodeOptions.quality_layer_limit` selects the first N quality layers on the
   shared strict packet catalog; zero keeps all layers. Values above COD/Layers
   fail closed. Every later packet header and payload span is still parsed and

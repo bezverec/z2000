@@ -110,7 +110,11 @@ greater-than-four-component profile.
 Native component geometry is the strict decode boundary. Component upsampling
 is a separate operation: `decodeLosslessPlanarUpsampled` performs
 nearest-neighbour expansion anchored to absolute SIZ `XOsiz/YOsiz` and
-`XRsiz/YRsiz`. It does not infer YCC or perform colour conversion.
+`XRsiz/YRsiz`. It does not infer YCC or perform colour conversion. A selected
+tile or reference region shares that anchoring: the selection resolves to one
+absolute output rectangle, and the native decode covers a source window widened
+by `XRsiz-1`/`YRsiz-1` and clamped to the image, because replication reads
+`floor(reference/XRsiz)` rather than the window's own ceil-div origin.
 `color.interleaveRgb` is called only after the JP2 container has established a
 bounded three-component sRGB interpretation.
 Enumerated sYCC is equally explicit: `jp2.Info.color_space` records the selected

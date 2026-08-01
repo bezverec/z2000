@@ -32310,6 +32310,180 @@ test "sampled single-tile decode selects a bounded reference region" {
     );
 }
 
+test "selected reference-grid upsampling matches the full upsampled decode" {
+    const allocator = std.testing.allocator;
+    const width = 63;
+    const height = 64;
+    const image_origin_x: u32 = 5;
+    const image_origin_y: u32 = 3;
+    const tile_width: u32 = 23;
+    const tile_height: u32 = 19;
+    const tile_origin_x: u32 = 1;
+    const tile_origin_y: u32 = 0;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+        .levels = 2,
+        .layers = 1,
+        .mct = .none,
+        .image_origin_x = image_origin_x,
+        .image_origin_y = image_origin_y,
+        .tile_origin_x = tile_origin_x,
+        .tile_origin_y = tile_origin_y,
+        .tile_width = tile_width,
+        .tile_height = tile_height,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+    try std.testing.expectEqual(@as(usize, 12), countMarker(encoded, codestream.markerValue("sot")));
+
+    var full = try codestream.decodeLosslessPlanarUpsampled(allocator, encoded);
+    defer full.deinit();
+    try std.testing.expectEqual(@as(usize, width), full.width);
+    try std.testing.expectEqual(@as(usize, height), full.height);
+
+    const expectCropMatches = struct {
+        fn call(
+            reference: color.SamplePlanes,
+            selected: color.SamplePlanes,
+            origin_x: u32,
+            origin_y: u32,
+            rect: tile_grid.Rect,
+        ) !void {
+            const crop_width: usize = rect.x1 - rect.x0;
+            const crop_height: usize = rect.y1 - rect.y0;
+            try std.testing.expectEqual(crop_width, selected.width);
+            try std.testing.expectEqual(crop_height, selected.height);
+            const source_x: usize = rect.x0 - origin_x;
+            const source_y: usize = rect.y0 - origin_y;
+            for (reference.planes, selected.planes) |reference_plane, selected_plane| {
+                for (0..crop_height) |row| {
+                    const expected = reference_plane[(source_y + row) * reference.width + source_x ..][0..crop_width];
+                    const actual = selected_plane[row * crop_width ..][0..crop_width];
+                    try std.testing.expectEqualSlices(u16, expected, actual);
+                }
+            }
+        }
+    }.call;
+
+    // Every chroma phase relative to the odd image origin: when the requested
+    // origin is not on a chroma boundary the source window has to widen by one
+    // chroma sample, otherwise the replicated edge column would be wrong.
+    for (0..4) |offset_x| {
+        for (0..4) |offset_y| {
+            const rect = tile_grid.Rect{
+                .x0 = image_origin_x + @as(u32, @intCast(offset_x)),
+                .y0 = image_origin_y + @as(u32, @intCast(offset_y)),
+                .x1 = image_origin_x + @as(u32, @intCast(offset_x)) + 21,
+                .y1 = image_origin_y + @as(u32, @intCast(offset_y)) + 17,
+            };
+            var selected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+                allocator,
+                encoded,
+                .{ .reference_region = .{
+                    .x0 = rect.x0,
+                    .y0 = rect.y0,
+                    .width = rect.x1 - rect.x0,
+                    .height = rect.y1 - rect.y0,
+                } },
+            );
+            defer selected.deinit();
+            try expectCropMatches(full, selected, image_origin_x, image_origin_y, rect);
+        }
+    }
+
+    // Tile selection resolves to the same clipped rect through one path.
+    const image_x1 = image_origin_x + width;
+    const image_y1 = image_origin_y + height;
+    const tiles_across = (image_x1 - tile_origin_x + tile_width - 1) / tile_width;
+    const tiles_down = (image_y1 - tile_origin_y + tile_height - 1) / tile_height;
+    try std.testing.expectEqual(@as(u32, 12), tiles_across * tiles_down);
+    var tile_index: u32 = 0;
+    while (tile_index < tiles_across * tiles_down) : (tile_index += 1) {
+        const column = tile_index % tiles_across;
+        const row = tile_index / tiles_across;
+        const rect = tile_grid.Rect{
+            .x0 = @max(tile_origin_x + column * tile_width, image_origin_x),
+            .y0 = @max(tile_origin_y + row * tile_height, image_origin_y),
+            .x1 = @min(tile_origin_x + (column + 1) * tile_width, image_x1),
+            .y1 = @min(tile_origin_y + (row + 1) * tile_height, image_y1),
+        };
+        var selected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            encoded,
+            .{ .threads = 4, .tile_index = tile_index },
+        );
+        defer selected.deinit();
+        try expectCropMatches(full, selected, image_origin_x, image_origin_y, rect);
+    }
+
+    // The whole image stays available through both selectors and the default.
+    var whole = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+        allocator,
+        encoded,
+        .{ .reference_region = .{
+            .x0 = image_origin_x,
+            .y0 = image_origin_y,
+            .width = width,
+            .height = height,
+        } },
+    );
+    defer whole.deinit();
+    for (full.planes, whole.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(u16, expected, actual);
+    }
+
+    const region = codestream.DecodeRegion{ .x0 = 10, .y0 = 10, .width = 8, .height = 8 };
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            encoded,
+            .{ .tile_index = 0, .reference_region = region },
+        ),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            encoded,
+            .{ .tile_index = 12 },
+        ),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            encoded,
+            .{ .reference_region = .{ .x0 = 0, .y0 = 10, .width = 8, .height = 8 } },
+        ),
+    );
+    // Reduced upsampling remains an explicit later boundary.
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            encoded,
+            .{ .reference_region = region, .resolution_reduction = 1 },
+        ),
+    );
+}
+
 test "sampled reversible multi-tile decode reconstructs requested native resolution" {
     const allocator = std.testing.allocator;
     const width = 63;
