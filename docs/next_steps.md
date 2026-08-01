@@ -284,8 +284,12 @@ The foundation landed on 2026-07-17:
   `t1_skipped_blocks`/`t1_skipped_payload_bytes` report the share. An offset
   sweep over reversible 5/3 and irreversible ICT/9-7 streams pins every result
   against the matching full-decode crop at full and reduced resolution.
-  Payload materialization and selected reference-grid upsampling remain open,
-  so peak memory does not yet follow the requested window.
+- Packet assembly shares those windows, so a pruned block's payload is never
+  materialized into its component buffer.
+  `packet_catalog_payload_bytes_materialized` is pinned strictly below the
+  matching full decode. Codestream input is still read whole and a large tile
+  still runs a full inverse DWT, so incremental input, row-oriented output, and
+  selected reference-grid upsampling remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -648,12 +652,13 @@ alone does not complete an item.
 
 Quality-layer-prefix, resolution-reduction, bounded tile-index selection,
 reference-grid region selection on single- and multi-tile streams, and
-intra-tile code-block pruning for a selected region are now public on the shared
-normalized packet index. Next stop materializing pruned payload during packet
-assembly, so a region bounds working memory and not only T1 work, and broaden
-selection through the remaining upsampling/colour layouts. Add incremental
+intra-tile code-block pruning that reaches packet assembly are now public on the
+shared normalized packet index. What remains is the input and output ends: a
+large selected tile still runs a full inverse DWT into a full-tile plane, and
+the codestream is still read whole. Add incremental
 codestream input and row/tile-oriented output so peak memory scales with the
-requested working set rather than the complete raster.
+requested working set rather than the complete raster, then broaden selection
+through the remaining upsampling/colour layouts.
 
 For every selection mode, compare the result with the corresponding crop or
 reduction of a full strict decode. Cover odd origins, subsampling, ROI, tile

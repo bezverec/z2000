@@ -164,7 +164,7 @@
       "malformed": "bounded",
       "interop": "not_applicable",
       "evidence": ["DecodeOptions.tile_index tests", "DecodeOptions.reference_region tests", "DecodeOptions.quality_layer_limit tests", "DecodeOptions.resolution_reduction tests", "next_steps.md items 4.1 and 6"],
-      "note": "Bounded row-major tile and reference-region selection validate all tile-part framing and T2 headers while returning only the requested output and reconstructing only selected/intersecting tiles; single-tile streams accept the same region selector, and code blocks that cannot influence a selected region skip T1 inside every decoded tile while remaining validated and covered; bounded leading quality-layer selection validates the full T2 stream while avoiding materialization and T1 decode of later bodies; bounded resolution reduction skips discarded T1 blocks and performs partial 5/3 or 9/7 synthesis. Pruned-payload assembly and incremental input selection remain open."
+      "note": "Bounded row-major tile and reference-region selection validate all tile-part framing and T2 headers while returning only the requested output and reconstructing only selected/intersecting tiles; single-tile streams accept the same region selector, and code blocks that cannot influence a selected region skip both T1 and payload materialization inside every decoded tile while remaining validated and covered; bounded leading quality-layer selection validates the full T2 stream while avoiding materialization and T1 decode of later bodies; bounded resolution reduction skips discarded T1 blocks and performs partial 5/3 or 9/7 synthesis. Incremental input selection and row-oriented output remain open."
     }
   ],
   "entries": [

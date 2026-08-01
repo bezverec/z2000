@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Region-Pruned Packet Assembly
+
+- Packet assembly now derives the same per-resolution region windows the block
+  catalog uses, so a pruned code block's payload is never appended to its
+  component-owned buffer. A selected `DecodeOptions.reference_region` therefore
+  bounds materialized payload as well as T1 work.
+- The window derivation moved into one shared `StrictRegionBandWindows` used by
+  both assembly and catalog restriction, so the two can only agree; a
+  disagreement would leave a required block without payload and fail closed.
+  Catalog compaction now evaluates retained resolutions and region pruning
+  through a single predicate and reports the pruned bytes as discarded.
+- Single-tile RGB and sampled planar regressions pin
+  `packet_catalog_payload_bytes_materialized` strictly below the matching full
+  decode at full and reduced resolution, with unchanged exact output.
+
 ### Intra-Tile Reference-Region Block Pruning
 
 - A selected `DecodeOptions.reference_region` now prunes code blocks inside

@@ -208,8 +208,12 @@ intersection and expanding each step by a conservative inverse-DWT synthesis
 margin. Code blocks outside those windows keep their geometry, lengths, and
 segmentation — the coverage audit still requires a complete partition — but are
 never entropy-decoded, and their zero coefficients are exact because the inverse
-DWT is linear with finite support. Their payload is still materialized, so a
-region currently bounds decode work and returned output rather than peak memory.
+DWT is linear with finite support. Packet assembly derives the same windows
+through the shared `StrictRegionBandWindows`, so a pruned block's payload is
+never appended to its component-owned buffer either; a disagreement between the
+two would leave a required block without payload and fail closed. Codestream
+input is still read whole and a selected tile still runs a full inverse DWT into
+a full-tile plane, so those are the remaining memory boundaries.
 Because coefficients outside the window are deliberately incomplete, region
 decode saturates intermediate samples to the declared range exactly like the
 resolution and quality-layer selectors.
@@ -453,10 +457,11 @@ markers, packet headers, tag trees, segment lengths, and T1 payloads in Debug,
 ReleaseSafe, and ReleaseFast configurations.
 
 Tile and region selection bound final raster allocation, avoid T1/DWT work for
-non-intersecting tiles, and skip T1 for code blocks a selected region cannot
-reach inside the tiles that are decoded. They do not yet drop the pruned blocks'
-payload during packet assembly, stream codestream input, or provide row-oriented
-output; those are the remaining G4 memory-scaling boundaries.
+non-intersecting tiles, and skip both T1 and payload materialization for code
+blocks a selected region cannot reach inside the tiles that are decoded. They do
+not yet stream codestream input, reduce a selected tile's full-tile synthesis
+plane, or provide row-oriented output; those are the remaining G4 memory-scaling
+boundaries.
 
 ## Verification Ownership
 

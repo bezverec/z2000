@@ -382,9 +382,11 @@ Primary public functions:
   component-local planar, and reversible native paths, where
   `tiles_total`/`tiles_decoded` report one decoded tile. Inside every decoded
   tile, code blocks that cannot influence the window skip T1 and are reported
-  through `t1_skipped_blocks`/`t1_skipped_payload_bytes`; their payload is still
-  materialized, so a region bounds decode work and returned output rather than
-  peak memory. Like the resolution and quality-layer selectors, region decode
+  through `t1_skipped_blocks`/`t1_skipped_payload_bytes`; packet assembly also
+  stops materializing their payload, which
+  `packet_catalog_payload_bytes_materialized` reports. Codestream input is still
+  read whole and a selected tile still synthesizes its full plane.
+  Like the resolution and quality-layer selectors, region decode
   saturates intermediate samples to the declared range, and only the returned
   window is guaranteed exact. Selected subsampled reference-grid upsampling
   remains unsupported rather than silently falling back to an unbounded path.

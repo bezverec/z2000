@@ -3566,16 +3566,10 @@ pub fn decodeLosslessNativeWithOptions(
         header,
         options.resolution_reduction,
         options.quality_layer_limit,
+        requested_region,
         null,
     );
     defer catalog.deinit();
-    try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
-        &catalog,
-        header.levels,
-        componentCodingSliceForHeader(header),
-        options.resolution_reduction,
-        null,
-    );
     if (catalog.component_count != header.component_count) return CodestreamError.InvalidCodestream;
     if (requested_region) |requested| {
         try restrictStrictPacketBlockCatalogToRegion(
@@ -3588,6 +3582,13 @@ pub fn decodeLosslessNativeWithOptions(
             header.component_yrsiz[0..header.component_count],
         );
     }
+    try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
+        &catalog,
+        header.levels,
+        componentCodingSliceForHeader(header),
+        options.resolution_reduction,
+        null,
+    );
 
     var max_component_dimension: usize = 0;
     for (0..header.component_count) |component| {
@@ -4007,16 +4008,10 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
         header,
         options.resolution_reduction,
         options.quality_layer_limit,
+        requested_region,
         timings,
     );
     defer catalog.deinit();
-    try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
-        &catalog,
-        header.levels,
-        componentCodingSliceForHeader(header),
-        options.resolution_reduction,
-        timings,
-    );
     if (requested_region) |requested| {
         try restrictStrictPacketBlockCatalogToRegion(
             &catalog,
@@ -4028,6 +4023,13 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
             header.component_yrsiz[0..header.component_count],
         );
     }
+    try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
+        &catalog,
+        header.levels,
+        componentCodingSliceForHeader(header),
+        options.resolution_reduction,
+        timings,
+    );
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
     var decoded = try decodeStrictPlanarFromBlockCatalogMeasured(
         allocator,
@@ -4498,10 +4500,10 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
         header,
         options.resolution_reduction,
         options.quality_layer_limit,
+        requested_region,
         timings,
     );
     defer strict_catalog.deinit();
-    try compactStrictPacketBlockCatalogForReduction(&strict_catalog, header.levels, options.resolution_reduction, timings);
     if (requested_region) |requested| {
         try restrictStrictPacketBlockCatalogToRegion(
             &strict_catalog,
@@ -4513,6 +4515,7 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
             header.component_yrsiz[0..header.component_count],
         );
     }
+    try compactStrictPacketBlockCatalogForReduction(&strict_catalog, header.levels, options.resolution_reduction, timings);
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
 
     var decoded = try decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, strict_catalog, options, timings);
@@ -4815,7 +4818,7 @@ fn readStrictPacketBlockCatalogWithHeader(
     bytes: []const u8,
     header: TemporaryHeader,
 ) !StrictPacketBlockCatalog {
-    return readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, 0, 0, null);
+    return readStrictPacketBlockCatalogWithHeaderProfiled(allocator, bytes, header, 0, 0, null, null);
 }
 
 fn readStrictPacketBlockCatalogWithHeaderProfiled(
@@ -4824,6 +4827,7 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
     header: TemporaryHeader,
     resolution_reduction: u8,
     quality_layer_limit: u16,
+    region: ?tile_grid.Rect,
     timings: ?*DecodeTimings,
 ) !StrictPacketBlockCatalog {
     const scan_start = monotonicNs();
@@ -4853,6 +4857,7 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
         resolution_reduction,
         quality_layer_limit,
         true,
+        region,
         &audit,
     );
     defer assemblies.deinit();
@@ -7478,7 +7483,7 @@ fn auditStrictPacketCatalogHeaders(
     catalog: StrictPacketCatalog,
 ) !StrictPacketHeaderAudit {
     var audit = StrictPacketHeaderAudit{};
-    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, 0, 0, true, &audit);
+    var assemblies = try assembleStrictPacketCatalogHeaders(allocator, header, catalog, 0, 0, true, null, &audit);
     defer assemblies.deinit();
 
     const assembly_stats = try strictAssemblyStats(assemblies.assemblies[0..assemblies.initialized]);
@@ -7505,6 +7510,7 @@ fn auditStrictPacketCatalogHeadersDiscardingPayload(
         resolution_reduction,
         quality_layer_limit,
         false,
+        null,
         &audit,
     );
     defer assemblies.deinit();
@@ -7522,6 +7528,7 @@ fn assembleStrictPacketCatalogHeaders(
     resolution_reduction: u8,
     quality_layer_limit: u16,
     retain_payloads: bool,
+    region: ?tile_grid.Rect,
     audit: *StrictPacketHeaderAudit,
 ) !StrictComponentAssemblySet {
     if (resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
@@ -7561,6 +7568,7 @@ fn assembleStrictPacketCatalogHeaders(
             header,
             component,
             resolution_reduction,
+            region,
         );
     }
 
@@ -7813,6 +7821,7 @@ fn initializeStrictAssemblyGeometry(
     header: TemporaryHeader,
     component: usize,
     resolution_reduction: u8,
+    region: ?tile_grid.Rect,
 ) !void {
     if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
     if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
@@ -7820,6 +7829,24 @@ fn initializeStrictAssemblyGeometry(
     assembly.height = height;
     assembly.x0 = x0;
     assembly.y0 = y0;
+    // A selected region derives the same per-resolution windows the block
+    // catalog uses later, so payload for blocks it cannot reach is never
+    // appended to this component's owned buffer.
+    const windows = if (region) |rect| windows: {
+        const width_u32 = std.math.cast(u32, width) orelse return CodestreamError.InvalidCodestream;
+        const height_u32 = std.math.cast(u32, height) orelse return CodestreamError.InvalidCodestream;
+        break :windows try StrictRegionBandWindows.init(
+            bands,
+            x0,
+            y0,
+            std.math.add(u32, x0, width_u32) catch return CodestreamError.InvalidCodestream,
+            std.math.add(u32, y0, height_u32) catch return CodestreamError.InvalidCodestream,
+            resolution_reduction,
+            rect,
+            header.component_xrsiz[component],
+            header.component_yrsiz[component],
+        );
+    } else StrictRegionBandWindows.inactive;
     for (assembly.blocks, source_blocks) |*block, source| {
         if (source.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         block.band_index = source.band_index;
@@ -7827,7 +7854,7 @@ fn initializeStrictAssemblyGeometry(
         block.payload_retained = strictBandRequiredForReduction(
             bands[source.band_index],
             resolution_reduction,
-        );
+        ) and try windows.retainsBlock(bands[source.band_index], source.rect);
         block.nominal_bitplanes = try bandNominalBitplanesForHeader(
             header,
             component,
@@ -9783,6 +9810,7 @@ fn decodeStrictMultiTilePlanarMeasured(
             options.resolution_reduction,
             options.quality_layer_limit,
             true,
+            window.pruningRect(),
             &audit,
         );
         defer assemblies.deinit();
@@ -9797,13 +9825,6 @@ fn decodeStrictMultiTilePlanarMeasured(
             t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
             t.packet_catalog_payload_bytes_discarded += audit.payload_bytes - audit.retained_payload_bytes;
         }
-        try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
-            &block_catalog,
-            tile_header.levels,
-            componentCodingSliceForHeader(tile_header),
-            options.resolution_reduction,
-            timings,
-        );
         if (window.pruningRect()) |requested| {
             try restrictStrictPacketBlockCatalogToRegion(
                 &block_catalog,
@@ -9815,6 +9836,13 @@ fn decodeStrictMultiTilePlanarMeasured(
                 header.component_yrsiz[0..header.component_count],
             );
         }
+        try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
+            &block_catalog,
+            tile_header.levels,
+            componentCodingSliceForHeader(tile_header),
+            options.resolution_reduction,
+            timings,
+        );
         if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
 
         var tile_planes = try decodeStrictPlanarFromBlockCatalogMeasured(
@@ -9989,6 +10017,7 @@ fn decodeStrictMultiTileNative(
             options.resolution_reduction,
             options.quality_layer_limit,
             true,
+            window.pruningRect(),
             &audit,
         );
         defer assemblies.deinit();
@@ -10003,13 +10032,6 @@ fn decodeStrictMultiTileNative(
         {
             return CodestreamError.InvalidCodestream;
         }
-        try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
-            &block_catalog,
-            tile_header.levels,
-            componentCodingSliceForHeader(tile_header),
-            options.resolution_reduction,
-            null,
-        );
         if (window.pruningRect()) |requested| {
             try restrictStrictPacketBlockCatalogToRegion(
                 &block_catalog,
@@ -10021,6 +10043,13 @@ fn decodeStrictMultiTileNative(
                 header.component_yrsiz[0..header.component_count],
             );
         }
+        try compactStrictPacketBlockCatalogForReductionWithComponentCoding(
+            &block_catalog,
+            tile_header.levels,
+            componentCodingSliceForHeader(tile_header),
+            options.resolution_reduction,
+            null,
+        );
 
         var max_component_dimension: usize = 0;
         for (0..header.component_count) |component| {
@@ -10251,6 +10280,7 @@ fn decodeStrictMultiTileImageMeasured(
             options.resolution_reduction,
             options.quality_layer_limit,
             true,
+            window.pruningRect(),
             &audit,
         );
         defer assemblies.deinit();
@@ -10265,12 +10295,6 @@ fn decodeStrictMultiTileImageMeasured(
             t.packet_catalog_payload_bytes_materialized += build.stats.retained_bytes;
             t.packet_catalog_payload_bytes_discarded += audit.payload_bytes - audit.retained_payload_bytes;
         }
-        try compactStrictPacketBlockCatalogForReduction(
-            &block_catalog,
-            tile_header.levels,
-            options.resolution_reduction,
-            timings,
-        );
         if (window.pruningRect()) |requested| {
             try restrictStrictPacketBlockCatalogToRegion(
                 &block_catalog,
@@ -10282,6 +10306,12 @@ fn decodeStrictMultiTileImageMeasured(
                 header.component_yrsiz[0..header.component_count],
             );
         }
+        try compactStrictPacketBlockCatalogForReduction(
+            &block_catalog,
+            tile_header.levels,
+            options.resolution_reduction,
+            timings,
+        );
         if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
 
         var tile_image = try decodeStrictRpclImageFromBlockCatalogMeasured(allocator, tile_header, block_catalog, options, timings);
@@ -11250,7 +11280,7 @@ fn compactStrictPacketBlockCatalogForReductionWithComponentCoding(
         const payload = catalog.payloads[component];
         var payload_total: usize = 0;
 
-        if (reduction == 0) {
+        if (reduction == 0 and !strictBlocksHaveRegionPruning(blocks)) {
             for (blocks) |*block| {
                 if (!block.payload_retained or block.payload_length != block.cumulative_bytes) {
                     return CodestreamError.InvalidCodestream;
@@ -11290,7 +11320,7 @@ fn compactStrictPacketBlockCatalogForReductionWithComponentCoding(
         var needs_compaction = false;
         for (blocks) |block| {
             if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
-            const required = try strictBlockRequiredForReduction(block, bands, reduction);
+            const required = try strictBlockRequiredForDecode(block, bands, reduction);
             if (required and !block.payload_retained) return CodestreamError.InvalidCodestream;
             if (block.payload_retained) {
                 const payload_end = std.math.add(usize, block.payload_offset, block.payload_length) catch
@@ -11327,7 +11357,7 @@ fn compactStrictPacketBlockCatalogForReductionWithComponentCoding(
             &.{};
         var write_offset: usize = 0;
         for (blocks) |*block| {
-            const required = strictBlockRequiredForReduction(block.*, bands, reduction) catch unreachable;
+            const required = strictBlockRequiredForDecode(block.*, bands, reduction) catch unreachable;
             if (!required) {
                 block.payload_offset = 0;
                 block.payload_retained = false;
@@ -11366,6 +11396,18 @@ fn strictBlockRequiredForReduction(
 ) !bool {
     if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
     return strictBandRequiredForReduction(bands[block.band_index], reduction);
+}
+
+/// Retained resolutions minus the blocks a selected reference region pruned.
+/// This is the payload-retention predicate; `strictBlockRequiredForReduction`
+/// alone still describes which blocks the coverage audit must account for.
+fn strictBlockRequiredForDecode(
+    block: StrictPacketBlock,
+    bands: []const subband.Band,
+    reduction: u8,
+) !bool {
+    if (!block.region_required) return false;
+    return strictBlockRequiredForReduction(block, bands, reduction);
 }
 
 fn strictBandRequiredForReduction(band: subband.Band, reduction: u8) bool {
@@ -11426,13 +11468,104 @@ const StrictRegionSpan = struct {
     }
 };
 
+/// Per-resolution coefficient windows a selected reference region needs from
+/// one tile-component. The windows are derived one resolution at a time from
+/// the component-local intersection, so subsampling and nonzero origins keep
+/// their absolute phase. `inactive` means the component keeps every block:
+/// either no region was requested, or its sampled grid does not meet the
+/// rectangle, and guessing an empty window there would not be conservative.
+const StrictRegionBandWindows = struct {
+    horizontal: [34]StrictRegionSpan = undefined,
+    vertical: [34]StrictRegionSpan = undefined,
+    reduction: u8 = 0,
+    max_level: u8 = 0,
+    active: bool = false,
+
+    const inactive = StrictRegionBandWindows{};
+
+    fn init(
+        bands: []const subband.Band,
+        component_x0: u32,
+        component_y0: u32,
+        component_x1: u32,
+        component_y1: u32,
+        reduction: u8,
+        region: tile_grid.Rect,
+        xrsiz: u8,
+        yrsiz: u8,
+    ) !StrictRegionBandWindows {
+        if (bands.len == 0 or component_x1 <= component_x0 or component_y1 <= component_y0) {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (region.x1 <= region.x0 or region.y1 <= region.y0) return CodestreamError.InvalidCodestream;
+        const region_x0 = @max(ceilDivU32(region.x0, xrsiz), component_x0);
+        const region_y0 = @max(ceilDivU32(region.y0, yrsiz), component_y0);
+        const region_x1 = @min(ceilDivU32(region.x1, xrsiz), component_x1);
+        const region_y1 = @min(ceilDivU32(region.y1, yrsiz), component_y1);
+        if (region_x1 <= region_x0 or region_y1 <= region_y0) return inactive;
+
+        const max_level = bands[0].level;
+        if (reduction >= max_level) return inactive;
+        var windows = StrictRegionBandWindows{
+            .reduction = reduction,
+            .max_level = max_level,
+            .active = true,
+        };
+        if (@as(usize, max_level) >= windows.horizontal.len) return CodestreamError.InvalidCodestream;
+        windows.horizontal[reduction] = .{
+            .lo = reducedGridCoordinate(region_x0, reduction),
+            .hi = reducedGridCoordinate(region_x1, reduction),
+        };
+        windows.vertical[reduction] = .{
+            .lo = reducedGridCoordinate(region_y0, reduction),
+            .hi = reducedGridCoordinate(region_y1, reduction),
+        };
+        var level: u8 = reduction + 1;
+        while (level <= max_level) : (level += 1) {
+            windows.horizontal[level] = windows.horizontal[level - 1].parent();
+            windows.vertical[level] = windows.vertical[level - 1].parent();
+        }
+        return windows;
+    }
+
+    fn retainsBlock(
+        self: StrictRegionBandWindows,
+        band: subband.Band,
+        rect: subband.Rect,
+    ) !bool {
+        if (!self.active) return true;
+        // Bands below the retained resolutions are already discarded by the
+        // reduction selector and carry no window of their own.
+        if (band.level <= self.reduction) return true;
+        if (band.level > self.max_level) return CodestreamError.InvalidCodestream;
+        if (rect.x < band.rect.x or rect.y < band.rect.y) return CodestreamError.InvalidCodestream;
+        const offset_x = std.math.cast(u32, rect.x - band.rect.x) orelse
+            return CodestreamError.InvalidCodestream;
+        const offset_y = std.math.cast(u32, rect.y - band.rect.y) orelse
+            return CodestreamError.InvalidCodestream;
+        const block_width = std.math.cast(u32, rect.width) orelse
+            return CodestreamError.InvalidCodestream;
+        const block_height = std.math.cast(u32, rect.height) orelse
+            return CodestreamError.InvalidCodestream;
+        const x0 = std.math.add(u32, band.origin_x, offset_x) catch
+            return CodestreamError.InvalidCodestream;
+        const y0 = std.math.add(u32, band.origin_y, offset_y) catch
+            return CodestreamError.InvalidCodestream;
+        const x1 = std.math.add(u32, x0, block_width) catch
+            return CodestreamError.InvalidCodestream;
+        const y1 = std.math.add(u32, y0, block_height) catch
+            return CodestreamError.InvalidCodestream;
+        return self.horizontal[band.level].intersects(x0, x1) and
+            self.vertical[band.level].intersects(y0, y1);
+    }
+};
+
 /// Clears `region_required` on every code block that cannot influence the
-/// requested absolute reference-grid rectangle. Windows are derived one
-/// resolution at a time from the component-local intersection, so subsampling
-/// and nonzero origins keep their absolute phase. Pruned blocks keep their
+/// requested absolute reference-grid rectangle. Pruned blocks keep their
 /// geometry, lengths, and segmentation for the catalog audit; leaving their
 /// coefficients zero is exact because the inverse DWT is linear and its
-/// synthesis support is finite.
+/// synthesis support is finite. Packet assembly derives the same windows, so a
+/// pruned block's payload is normally never materialized either.
 fn restrictStrictPacketBlockCatalogToRegion(
     catalog: *StrictPacketBlockCatalog,
     levels: u8,
@@ -11471,14 +11604,6 @@ fn restrictStrictPacketBlockCatalogToRegion(
         const component_y1 = std.math.add(u32, component_y0, height_u32) catch
             return CodestreamError.InvalidCodestream;
 
-        const region_x0 = @max(ceilDivU32(region.x0, component_xrsiz[component]), component_x0);
-        const region_y0 = @max(ceilDivU32(region.y0, component_yrsiz[component]), component_y0);
-        const region_x1 = @min(ceilDivU32(region.x1, component_xrsiz[component]), component_x1);
-        const region_y1 = @min(ceilDivU32(region.y1, component_yrsiz[component]), component_y1);
-        // A sampled component whose grid does not meet the requested rectangle
-        // keeps its complete block set rather than guessing an empty window.
-        if (region_x1 <= region_x0 or region_y1 <= region_y0) continue;
-
         const bands = try subband.makeBandsForRegion(
             catalog.allocator,
             component_x0,
@@ -11488,54 +11613,22 @@ fn restrictStrictPacketBlockCatalogToRegion(
             component_levels,
         );
         defer catalog.allocator.free(bands);
-        if (bands.len == 0) return CodestreamError.InvalidCodestream;
-        const actual_levels = bands[0].level;
-        if (reduction >= actual_levels) continue;
-
-        var horizontal: [34]StrictRegionSpan = undefined;
-        var vertical: [34]StrictRegionSpan = undefined;
-        if (@as(usize, actual_levels) >= horizontal.len) return CodestreamError.InvalidCodestream;
-        horizontal[reduction] = .{
-            .lo = reducedGridCoordinate(region_x0, reduction),
-            .hi = reducedGridCoordinate(region_x1, reduction),
-        };
-        vertical[reduction] = .{
-            .lo = reducedGridCoordinate(region_y0, reduction),
-            .hi = reducedGridCoordinate(region_y1, reduction),
-        };
-        var level: u8 = reduction + 1;
-        while (level <= actual_levels) : (level += 1) {
-            horizontal[level] = horizontal[level - 1].parent();
-            vertical[level] = vertical[level - 1].parent();
-        }
+        const windows = try StrictRegionBandWindows.init(
+            bands,
+            component_x0,
+            component_y0,
+            component_x1,
+            component_y1,
+            reduction,
+            region,
+            component_xrsiz[component],
+            component_yrsiz[component],
+        );
+        if (!windows.active) continue;
 
         for (catalog.components[component]) |*block| {
             if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
-            const band = bands[block.band_index];
-            if (band.level <= reduction) continue;
-            if (band.level > actual_levels) return CodestreamError.InvalidCodestream;
-            if (block.rect.x < band.rect.x or block.rect.y < band.rect.y) {
-                return CodestreamError.InvalidCodestream;
-            }
-            const offset_x = std.math.cast(u32, block.rect.x - band.rect.x) orelse
-                return CodestreamError.InvalidCodestream;
-            const offset_y = std.math.cast(u32, block.rect.y - band.rect.y) orelse
-                return CodestreamError.InvalidCodestream;
-            const block_width = std.math.cast(u32, block.rect.width) orelse
-                return CodestreamError.InvalidCodestream;
-            const block_height = std.math.cast(u32, block.rect.height) orelse
-                return CodestreamError.InvalidCodestream;
-            const block_x0 = std.math.add(u32, band.origin_x, offset_x) catch
-                return CodestreamError.InvalidCodestream;
-            const block_y0 = std.math.add(u32, band.origin_y, offset_y) catch
-                return CodestreamError.InvalidCodestream;
-            const block_x1 = std.math.add(u32, block_x0, block_width) catch
-                return CodestreamError.InvalidCodestream;
-            const block_y1 = std.math.add(u32, block_y0, block_height) catch
-                return CodestreamError.InvalidCodestream;
-            if (!horizontal[band.level].intersects(block_x0, block_x1) or
-                !vertical[band.level].intersects(block_y0, block_y1))
-            {
+            if (!try windows.retainsBlock(bands[block.band_index], block.rect)) {
                 block.region_required = false;
             }
         }

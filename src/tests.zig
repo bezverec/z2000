@@ -23622,6 +23622,25 @@ test "single-tile strict decode selects a bounded reference region" {
     // Full resolution, so every skipped block was pruned by the region window.
     try std.testing.expect(timings.t1_skipped_blocks > 0);
     try std.testing.expect(timings.t1_skipped_payload_bytes > 0);
+    // Pruned blocks are not appended to the component-owned payload buffer, so
+    // the selector bounds materialized bytes and not only T1 work.
+    var full_timings = codestream.DecodeTimings{};
+    var full_profiled = try codestream.decodeLosslessTemporaryWithOptionsProfiled(
+        allocator,
+        bytes,
+        .{},
+        &full_timings,
+    );
+    defer full_profiled.deinit();
+    try std.testing.expect(
+        timings.packet_catalog_payload_bytes_materialized <
+            full_timings.packet_catalog_payload_bytes_materialized,
+    );
+    try std.testing.expect(timings.packet_catalog_payload_bytes_discarded > 0);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        full_timings.packet_catalog_payload_bytes_discarded,
+    );
 
     var full_reduced = try codestream.decodeLosslessTemporaryWithOptions(
         allocator,
@@ -32201,9 +32220,22 @@ test "sampled single-tile decode selects a bounded reference region" {
         try std.testing.expectEqual(@as(u64, 1), region_timings.tiles_total);
         try std.testing.expectEqual(@as(u64, 1), region_timings.tiles_decoded);
         try std.testing.expectEqual(@as(u64, 0), region_timings.tiles_skipped);
-        // Code blocks outside the window's synthesis support never reach T1.
+        // Code blocks outside the window's synthesis support never reach T1,
+        // and their payload is never materialized either.
         try std.testing.expect(region_timings.t1_skipped_blocks > 0);
         try std.testing.expect(region_timings.t1_skipped_payload_bytes > 0);
+        var reference_timings = codestream.DecodeTimings{};
+        var reference_profiled = try codestream.decodeLosslessPlanarWithOptionsProfiled(
+            allocator,
+            encoded,
+            .{ .resolution_reduction = reduction },
+            &reference_timings,
+        );
+        defer reference_profiled.deinit();
+        try std.testing.expect(
+            region_timings.packet_catalog_payload_bytes_materialized <
+                reference_timings.packet_catalog_payload_bytes_materialized,
+        );
         try std.testing.expectEqual(
             @as(usize, reduceCoordinate(region.x0 + region.width, reduction) - reduceCoordinate(region.x0, reduction)),
             region_planar.width,

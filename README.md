@@ -148,8 +148,8 @@ Neither figure is a formal ISO conformance certification.
   tiles. `DecodeOptions.reference_region` selects an absolute
   `x0,y0,width,height` rectangle on bounded single- and multi-tile RGB, planar,
   and native paths; only intersecting tiles are reconstructed, code blocks that
-  cannot influence the window skip T1 inside them, and only the requested crop
-  is returned. Requested
+  cannot influence the window skip both T1 and payload materialization inside
+  them, and only the requested crop is returned. Requested
   resolution reduction is performed directly
   per native component for single- and multi-tile sampled 5/3 streams and the
   bounded multi-tile sampled no-MCT 9/7 decode profile. The 9/7 gate covers a
@@ -434,7 +434,7 @@ than silently changing the codestream profile.
   contained absolute SIZ reference-grid rectangle. It is mutually exclusive with
   `--tile-index`; tiles outside the rectangle are validated but not
   reconstructed, and code blocks that cannot influence the rectangle are
-  validated but not entropy-decoded.
+  validated but neither entropy-decoded nor materialized.
 - **--progression ORDER**: Packet order: **RPCL**, **LRCP**, **RLCP**,
   **PCRL**, or **CPRL**.
 - **--tile-parts MODE**: Tile-part division: **none**, **R**, **L**, **C**,
