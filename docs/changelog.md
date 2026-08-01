@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Reduced Upsampling And Selected Sampled sYCC Conversion
+
+- `decodeLosslessPlanarUpsampled*` now accepts `resolution_reduction`, alone or
+  combined with a tile/region selector. Reduction commutes with the component
+  ceil-div, so a reduced component grid is still the ceil-div of the reduced
+  reference grid and replication runs unchanged in reduced coordinates; the
+  source-window widening is scaled by the reduction factor. A reduction above
+  COD/NL still fails closed.
+- The bounded sampled sYCC display conversion accepts `--tile-index` and
+  `--region` instead of failing closed when chroma is subsampled. Chroma phase
+  follows the absolute image origin, so `codestream.chromaAlignedSelection`
+  resolves the selector to a window whose origin is aligned down to a chroma
+  boundary — clamped to the image origin, where the real edge phase already
+  applies — and `cropConvertedChromaAlignedSelection` cuts the requested
+  rectangle out after conversion.
+- A 4:2:0 twelve-tile stream at a nonzero image origin pins both: the reduced
+  upsampling sweep covers every chroma phase and all twelve tile indexes at
+  reduction 0 and 1, and the sYCC sweep compares four requested origins and all
+  twelve tiles against crops of a full conversion. Removing either the
+  reduction-scaled widening or the chroma alignment fails those sweeps.
+
 ### Selected Reference-Grid Upsampling
 
 - `decodeLosslessPlanarUpsampled*` now accepts `DecodeOptions.tile_index` and

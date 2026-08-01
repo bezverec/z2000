@@ -1156,10 +1156,44 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
             if (info.color_space == .sycc) {
                 const chroma_sampling = info.componentSampling(1) orelse
                     return error.UnsupportedComponentCount;
-                if ((options.tile_index != null or options.reference_region != null) and
-                    (chroma_sampling[0] != 1 or chroma_sampling[1] != 1))
-                {
-                    return codestream.CodestreamError.UnsupportedPayload;
+                // Chroma phase follows the absolute image origin, so a selected
+                // window is decoded from a chroma-aligned rectangle and cropped
+                // after conversion. That keeps the result identical to the
+                // corresponding crop of a full conversion.
+                if (try codestream.chromaAlignedSelection(
+                    allocator,
+                    j2k,
+                    options,
+                    chroma_sampling[0],
+                    chroma_sampling[1],
+                )) |selection| {
+                    var window_options = options;
+                    window_options.tile_index = null;
+                    window_options.reference_region = selection.source;
+                    var window_planes = if (show_timings)
+                        try codestream.decodeLosslessPlanarWithOptionsProfiled(
+                            allocator,
+                            j2k,
+                            window_options,
+                            &decode_timings,
+                        )
+                    else
+                        try codestream.decodeLosslessPlanarWithOptions(allocator, j2k, window_options);
+                    defer window_planes.deinit();
+                    var converted = try color.syccToSrgb(allocator, window_planes, .{
+                        .image_origin_x = selection.source.x0,
+                        .image_origin_y = selection.source.y0,
+                        .chroma_x = chroma_sampling[0],
+                        .chroma_y = chroma_sampling[1],
+                    });
+                    defer converted.deinit();
+                    break :rgb .{
+                        .rgb = try codestream.cropConvertedChromaAlignedSelection(
+                            allocator,
+                            converted,
+                            selection,
+                        ),
+                    };
                 }
                 var planes = if (show_timings)
                     try codestream.decodeLosslessPlanarWithOptionsProfiled(

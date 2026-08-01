@@ -63,11 +63,12 @@ windows derived from the subband recursion with a conservative synthesis
 margin; an offset sweep over reversible 5/3 and irreversible ICT/9-7 streams
 pins each result against the matching full-decode crop. Packet assembly shares
 those windows, so pruned payload is never materialized either. Reference-grid
-upsampling accepts the same selectors and returns the matching crop, widening
-its native source window so nearest-neighbour replication keeps absolute
-component phase. Its remaining “region selection” work means incremental
-codestream input, row-oriented output, reducing a selected tile's full-tile
-synthesis plane, reduced upsampling, and selected sampled sYCC conversion.
+upsampling accepts the same selectors and resolution reduction, and the bounded
+sampled sYCC display conversion accepts them through a chroma-aligned decode
+window; both widen their source window so absolute component phase survives and
+both return exactly the matching crop. Its remaining “region selection” work
+means incremental codestream input, row-oriented output, and reducing a
+selected tile's full-tile synthesis plane.
 
 The committed corpus now pins twenty-seven independently encoded streams: four
 sampled Kakadu profiles, Grok four-component CMYK, Kakadu all-six-bit T1,

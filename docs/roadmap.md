@@ -157,7 +157,7 @@ method. Neither number changes the bounded 100/100 scorecards.
 | G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
 | G3 | 50% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, and a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate | Independently emitted PLM, alternate-width TLM, and native PPM+POC marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, and general multipart packed schedules |
-| G4 | 68% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, single-/multi-tile reference-region selection whose intra-tile pruning reaches packet assembly, selected reference-grid upsampling, plus T1 skipping, catalog compaction, and borrowed packet spans | Incremental codestream input, row-oriented output, tile-local synthesis planes, reduced upsampling, and selected sampled sYCC conversion |
+| G4 | 70% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, single-/multi-tile reference-region selection whose intra-tile pruning reaches packet assembly, selected and reduced reference-grid upsampling, selected sampled sYCC conversion, plus T1 skipping, catalog compaction, and borrowed packet spans | Incremental codestream input, row-oriented output, and tile-local synthesis planes |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
 | G7 | 35% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
@@ -181,7 +181,8 @@ changing the work. Intra-tile code-block pruning does move it: a region now
 changes which code blocks are entropy-decoded and which payload is
 materialized, with exact full-decode-crop oracles for both transforms and
 pinned materialized-byte reductions. Extending both selectors to reference-grid
-upsampling closes the last named output-layout gap in that slice. Incremental
+upsampling, reduced upsampling, and the bounded sampled sYCC conversion closes
+the output-layout gaps in that slice. Incremental
 input, row-oriented output, and tile-local synthesis planes remain substantial,
 so this is still a bounded promotion.
 
@@ -384,8 +385,9 @@ accept the same absolute selector through a shared component-local crop. Inside
 every decoded tile, code blocks outside the window's synthesis support skip both
 T1 and payload materialization, under a conservative margin pinned by an offset
 sweep over 5/3 and ICT/9-7 streams. Reference-grid upsampling accepts the same
-selectors and returns the matching crop, widening its native source window so
-nearest-neighbour replication keeps absolute component phase. A large tile still
+selectors and resolution reduction, and the bounded sampled sYCC display
+conversion accepts them through a chroma-aligned decode window; both widen their
+source window so absolute component phase survives. A large tile still
 runs a full inverse DWT into a full-tile plane and codestream input is still
 read whole, so input and output are not incremental yet.
 Performance work continues in parallel, but no throughput result substitutes

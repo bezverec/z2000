@@ -103,7 +103,9 @@ Neither figure is a formal ISO conformance certification.
   four are lossless signalling/native-plane preservation boundaries and are
   never silently treated as RGB. The JP2-to-TIFF path converts unsigned
   8/16-bit sYCC 4:4:4,
-  4:2:2, and 4:2:0 to sRGB, including the explicit odd-origin edge phase;
+  4:2:2, and 4:2:0 to sRGB, including the explicit odd-origin edge phase, and
+  `--tile-index`/`--region` return the matching crop by decoding a
+  chroma-aligned window first;
   `--convert-to-srgb` separately converts bounded ICC v2/v4 RGB matrix/TRC
   PCSXYZ profiles. General/LUT ICC transforms remain fail-closed.
 - Byte-preserving EXIF, XMP, and IPTC-IIM metadata carriers in checked JP2 UUID

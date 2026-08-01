@@ -115,6 +115,11 @@ tile or reference region shares that anchoring: the selection resolves to one
 absolute output rectangle, and the native decode covers a source window widened
 by `XRsiz-1`/`YRsiz-1` and clamped to the image, because replication reads
 `floor(reference/XRsiz)` rather than the window's own ceil-div origin.
+Resolution reduction composes with it: ceil-div composition is associative, so a
+reduced component grid is still the ceil-div of the reduced reference grid and
+only the widening is scaled. The bounded sYCC display conversion uses the same
+idea in `chromaAlignedSelection`, aligning the decoded window down to a chroma
+boundary so the conversion sees the absolute phase of a complete image.
 `color.interleaveRgb` is called only after the JP2 container has established a
 bounded three-component sRGB interpretation.
 Enumerated sYCC is equally explicit: `jp2.Info.color_space` records the selected

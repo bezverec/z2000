@@ -32310,6 +32310,135 @@ test "sampled single-tile decode selects a bounded reference region" {
     );
 }
 
+test "chroma-aligned selection converts sampled sYCC like the full conversion" {
+    const allocator = std.testing.allocator;
+    const width = 63;
+    const height = 64;
+    const image_origin_x: u32 = 5;
+    const image_origin_y: u32 = 3;
+    const tile_width: u32 = 23;
+    const tile_height: u32 = 19;
+    const tile_origin_x: u32 = 1;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &sampling, .{
+        .levels = 2,
+        .layers = 1,
+        .mct = .none,
+        .image_origin_x = image_origin_x,
+        .image_origin_y = image_origin_y,
+        .tile_origin_x = tile_origin_x,
+        .tile_origin_y = 0,
+        .tile_width = tile_width,
+        .tile_height = tile_height,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+
+    const sycc_sampling = color.SyccSampling{
+        .image_origin_x = image_origin_x,
+        .image_origin_y = image_origin_y,
+        .chroma_x = 2,
+        .chroma_y = 2,
+    };
+    var full_planes = try codestream.decodeLosslessPlanar(allocator, encoded);
+    defer full_planes.deinit();
+    var full_rgb = try color.syccToSrgb(allocator, full_planes, sycc_sampling);
+    defer full_rgb.deinit();
+    try std.testing.expectEqual(@as(usize, width), full_rgb.width);
+
+    try std.testing.expectEqual(
+        @as(?codestream.ChromaAlignedSelection, null),
+        try codestream.chromaAlignedSelection(allocator, encoded, .{}, 2, 2),
+    );
+
+    const image_x1 = image_origin_x + width;
+    const image_y1 = image_origin_y + height;
+    const selectors = 4 + 12;
+    for (0..selectors) |index| {
+        var options = codestream.DecodeOptions{};
+        var rect: tile_grid.Rect = undefined;
+        if (index < 4) {
+            // Both chroma parities on each axis, against an odd image origin.
+            rect = .{
+                .x0 = image_origin_x + @as(u32, @intCast(index % 2)),
+                .y0 = image_origin_y + @as(u32, @intCast(index / 2)),
+                .x1 = image_origin_x + @as(u32, @intCast(index % 2)) + 25,
+                .y1 = image_origin_y + @as(u32, @intCast(index / 2)) + 21,
+            };
+            options.reference_region = .{
+                .x0 = rect.x0,
+                .y0 = rect.y0,
+                .width = rect.x1 - rect.x0,
+                .height = rect.y1 - rect.y0,
+            };
+        } else {
+            const tile_index: u32 = @intCast(index - 4);
+            const column = tile_index % 3;
+            const row = tile_index / 3;
+            rect = .{
+                .x0 = @max(tile_origin_x + column * tile_width, image_origin_x),
+                .y0 = @max(row * tile_height, image_origin_y),
+                .x1 = @min(tile_origin_x + (column + 1) * tile_width, image_x1),
+                .y1 = @min((row + 1) * tile_height, image_y1),
+            };
+            options.tile_index = tile_index;
+        }
+
+        const selection = (try codestream.chromaAlignedSelection(allocator, encoded, options, 2, 2)).?;
+        // The window starts on a chroma boundary unless it is clamped to the
+        // image origin, where the real edge phase already applies.
+        try std.testing.expect(selection.source.x0 == image_origin_x or selection.source.x0 % 2 == 0);
+        try std.testing.expect(selection.source.y0 == image_origin_y or selection.source.y0 % 2 == 0);
+        try std.testing.expectEqual(rect.x0 - selection.source.x0, selection.offset_x);
+        try std.testing.expectEqual(rect.y0 - selection.source.y0, selection.offset_y);
+
+        var window_options = options;
+        window_options.tile_index = null;
+        window_options.reference_region = selection.source;
+        var window_planes = try codestream.decodeLosslessPlanarWithOptions(
+            allocator,
+            encoded,
+            window_options,
+        );
+        defer window_planes.deinit();
+        var converted = try color.syccToSrgb(allocator, window_planes, .{
+            .image_origin_x = selection.source.x0,
+            .image_origin_y = selection.source.y0,
+            .chroma_x = 2,
+            .chroma_y = 2,
+        });
+        defer converted.deinit();
+        var cropped = try codestream.cropConvertedChromaAlignedSelection(allocator, converted, selection);
+        defer cropped.deinit();
+
+        var expected = try tile_grid.extractRgbTile(allocator, full_rgb, .{
+            .x0 = rect.x0 - image_origin_x,
+            .y0 = rect.y0 - image_origin_y,
+            .x1 = rect.x1 - image_origin_x,
+            .y1 = rect.y1 - image_origin_y,
+        });
+        defer expected.deinit();
+        try std.testing.expectEqual(expected.width, cropped.width);
+        try std.testing.expectEqual(expected.height, cropped.height);
+        try std.testing.expectEqualSlices(u16, expected.samples, cropped.samples);
+    }
+}
+
 test "selected reference-grid upsampling matches the full upsampled decode" {
     const allocator = std.testing.allocator;
     const width = 63;
@@ -32357,6 +32486,14 @@ test "selected reference-grid upsampling matches the full upsampled decode" {
     try std.testing.expectEqual(@as(usize, width), full.width);
     try std.testing.expectEqual(@as(usize, height), full.height);
 
+    const reduceCoordinate = struct {
+        fn call(value: u32, count: u8) u32 {
+            var result = value;
+            for (0..count) |_| result = (result + 1) / 2;
+            return result;
+        }
+    }.call;
+
     const expectCropMatches = struct {
         fn call(
             reference: color.SamplePlanes,
@@ -32381,55 +32518,97 @@ test "selected reference-grid upsampling matches the full upsampled decode" {
         }
     }.call;
 
-    // Every chroma phase relative to the odd image origin: when the requested
-    // origin is not on a chroma boundary the source window has to widen by one
-    // chroma sample, otherwise the replicated edge column would be wrong.
-    for (0..4) |offset_x| {
-        for (0..4) |offset_y| {
-            const rect = tile_grid.Rect{
-                .x0 = image_origin_x + @as(u32, @intCast(offset_x)),
-                .y0 = image_origin_y + @as(u32, @intCast(offset_y)),
-                .x1 = image_origin_x + @as(u32, @intCast(offset_x)) + 21,
-                .y1 = image_origin_y + @as(u32, @intCast(offset_y)) + 17,
-            };
-            var selected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
-                allocator,
-                encoded,
-                .{ .reference_region = .{
-                    .x0 = rect.x0,
-                    .y0 = rect.y0,
-                    .width = rect.x1 - rect.x0,
-                    .height = rect.y1 - rect.y0,
-                } },
-            );
-            defer selected.deinit();
-            try expectCropMatches(full, selected, image_origin_x, image_origin_y, rect);
-        }
-    }
-
-    // Tile selection resolves to the same clipped rect through one path.
     const image_x1 = image_origin_x + width;
     const image_y1 = image_origin_y + height;
     const tiles_across = (image_x1 - tile_origin_x + tile_width - 1) / tile_width;
     const tiles_down = (image_y1 - tile_origin_y + tile_height - 1) / tile_height;
     try std.testing.expectEqual(@as(u32, 12), tiles_across * tiles_down);
-    var tile_index: u32 = 0;
-    while (tile_index < tiles_across * tiles_down) : (tile_index += 1) {
-        const column = tile_index % tiles_across;
-        const row = tile_index / tiles_across;
-        const rect = tile_grid.Rect{
-            .x0 = @max(tile_origin_x + column * tile_width, image_origin_x),
-            .y0 = @max(tile_origin_y + row * tile_height, image_origin_y),
-            .x1 = @min(tile_origin_x + (column + 1) * tile_width, image_x1),
-            .y1 = @min(tile_origin_y + (row + 1) * tile_height, image_y1),
-        };
-        var selected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+
+    for ([_]u8{ 0, 1 }) |reduction| {
+        var reference = try codestream.decodeLosslessPlanarUpsampledWithOptions(
             allocator,
             encoded,
-            .{ .threads = 4, .tile_index = tile_index },
+            .{ .resolution_reduction = reduction },
         );
-        defer selected.deinit();
-        try expectCropMatches(full, selected, image_origin_x, image_origin_y, rect);
+        defer reference.deinit();
+        const reduced_origin_x = reduceCoordinate(image_origin_x, reduction);
+        const reduced_origin_y = reduceCoordinate(image_origin_y, reduction);
+        try std.testing.expectEqual(
+            @as(usize, reduceCoordinate(image_x1, reduction) - reduced_origin_x),
+            reference.width,
+        );
+
+        // Every chroma phase relative to the odd image origin: when the
+        // requested origin is not on a chroma boundary the source window has to
+        // widen by one chroma sample, otherwise the replicated edge column
+        // would be wrong. Reduction scales that widening.
+        for (0..4) |offset_x| {
+            for (0..4) |offset_y| {
+                const rect = tile_grid.Rect{
+                    .x0 = image_origin_x + @as(u32, @intCast(offset_x)),
+                    .y0 = image_origin_y + @as(u32, @intCast(offset_y)),
+                    .x1 = image_origin_x + @as(u32, @intCast(offset_x)) + 21,
+                    .y1 = image_origin_y + @as(u32, @intCast(offset_y)) + 17,
+                };
+                var selected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+                    allocator,
+                    encoded,
+                    .{
+                        .reference_region = .{
+                            .x0 = rect.x0,
+                            .y0 = rect.y0,
+                            .width = rect.x1 - rect.x0,
+                            .height = rect.y1 - rect.y0,
+                        },
+                        .resolution_reduction = reduction,
+                    },
+                );
+                defer selected.deinit();
+                try expectCropMatches(
+                    reference,
+                    selected,
+                    reduced_origin_x,
+                    reduced_origin_y,
+                    .{
+                        .x0 = reduceCoordinate(rect.x0, reduction),
+                        .y0 = reduceCoordinate(rect.y0, reduction),
+                        .x1 = reduceCoordinate(rect.x1, reduction),
+                        .y1 = reduceCoordinate(rect.y1, reduction),
+                    },
+                );
+            }
+        }
+
+        // Tile selection resolves to the same clipped rect through one path.
+        var tile_index: u32 = 0;
+        while (tile_index < tiles_across * tiles_down) : (tile_index += 1) {
+            const column = tile_index % tiles_across;
+            const row = tile_index / tiles_across;
+            const rect = tile_grid.Rect{
+                .x0 = @max(tile_origin_x + column * tile_width, image_origin_x),
+                .y0 = @max(tile_origin_y + row * tile_height, image_origin_y),
+                .x1 = @min(tile_origin_x + (column + 1) * tile_width, image_x1),
+                .y1 = @min(tile_origin_y + (row + 1) * tile_height, image_y1),
+            };
+            var selected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+                allocator,
+                encoded,
+                .{ .threads = 4, .tile_index = tile_index, .resolution_reduction = reduction },
+            );
+            defer selected.deinit();
+            try expectCropMatches(
+                reference,
+                selected,
+                reduced_origin_x,
+                reduced_origin_y,
+                .{
+                    .x0 = reduceCoordinate(rect.x0, reduction),
+                    .y0 = reduceCoordinate(rect.y0, reduction),
+                    .x1 = reduceCoordinate(rect.x1, reduction),
+                    .y1 = reduceCoordinate(rect.y1, reduction),
+                },
+            );
+        }
     }
 
     // The whole image stays available through both selectors and the default.
@@ -32473,13 +32652,13 @@ test "selected reference-grid upsampling matches the full upsampled decode" {
             .{ .reference_region = .{ .x0 = 0, .y0 = 10, .width = 8, .height = 8 } },
         ),
     );
-    // Reduced upsampling remains an explicit later boundary.
+    // A reduction above COD/NL still fails closed.
     try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
+        codestream.CodestreamError.InvalidCodestream,
         codestream.decodeLosslessPlanarUpsampledWithOptions(
             allocator,
             encoded,
-            .{ .reference_region = region, .resolution_reduction = 1 },
+            .{ .reference_region = region, .resolution_reduction = 3 },
         ),
     );
 }

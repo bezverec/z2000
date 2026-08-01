@@ -389,13 +389,24 @@ Primary public functions:
   Like the resolution and quality-layer selectors, region decode
   saturates intermediate samples to the declared range, and only the returned
   window is guaranteed exact.
-  `decodeLosslessPlanarUpsampled*` accepts both selectors and returns exactly
-  the matching crop of a full upsampled decode. A selected tile resolves to its
-  clipped reference rectangle; the native source window widens by `XRsiz-1` and
-  `YRsiz-1`, clamped to the image, because nearest-neighbour replication reads
-  `floor(reference/XRsiz)` and stays anchored to absolute coordinates. Reduced
-  upsampling, and a selector combined with sampled sYCC display conversion,
-  remain unsupported rather than silently falling back to an unbounded path.
+  `decodeLosslessPlanarUpsampled*` accepts both selectors plus
+  `resolution_reduction`, and returns exactly the matching crop of a full
+  upsampled decode. A selected tile resolves to its clipped reference
+  rectangle; the native source window widens by `XRsiz-1` and `YRsiz-1` scaled
+  by the reduction factor, clamped to the image, because nearest-neighbour
+  replication reads `floor(reference/XRsiz)` and stays anchored to absolute
+  coordinates. Reduction commutes with the component ceil-div, so replication
+  runs unchanged in reduced coordinates.
+- `chromaAlignedSelection` and `cropConvertedChromaAlignedSelection` carry the
+  same selectors through a colour conversion whose chroma phase depends on the
+  absolute image origin. The first resolves `tile_index`/`reference_region` to
+  a decode window whose origin is aligned down to a chroma boundary — clamped
+  to the image origin, where the real edge phase already applies — and reports
+  the requested rectangle's offset inside it; the second cuts that rectangle
+  out of the converted window. The bounded sampled sYCC-to-sRGB CLI path uses
+  them, so `--tile-index` and `--region` return exactly the corresponding crop
+  of a full conversion. Reduced conversion is not reachable from the current
+  front ends and stays fail-closed.
   `DecodeOptions.quality_layer_limit` selects the first N quality layers on the
   shared strict packet catalog; zero keeps all layers. Values above COD/Layers
   fail closed. Every later packet header and payload span is still parsed and

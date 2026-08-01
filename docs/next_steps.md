@@ -288,13 +288,18 @@ The foundation landed on 2026-07-17:
   materialized into its component buffer.
   `packet_catalog_payload_bytes_materialized` is pinned strictly below the
   matching full decode.
-- Reference-grid upsampling accepts both selectors. A selected tile resolves to
-  its clipped rectangle, the native source window widens by `XRsiz-1`/`YRsiz-1`
-  so nearest-neighbour replication keeps its absolute phase, and a 4:2:0
+- Reference-grid upsampling accepts both selectors and resolution reduction. A
+  selected tile resolves to its clipped rectangle, the native source window
+  widens by `XRsiz-1`/`YRsiz-1` scaled by the reduction factor so
+  nearest-neighbour replication keeps its absolute phase, and a 4:2:0
   twelve-tile stream at a nonzero origin pins every chroma phase against the
-  full upsampled decode. Reduced upsampling stays fail-closed. Codestream input
-  is still read whole and a large tile still runs a full inverse DWT, so
-  incremental input and row-oriented output remain open.
+  full upsampled decode at reduction 0 and 1.
+- The bounded sampled sYCC display conversion accepts both selectors through
+  `chromaAlignedSelection`, which aligns the decoded window down to a chroma
+  boundary so the conversion sees the same absolute phase as a full image, and
+  `cropConvertedChromaAlignedSelection`, which cuts the requested rectangle out
+  afterwards. Codestream input is still read whole and a large tile still runs
+  a full inverse DWT, so incremental input and row-oriented output remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -665,9 +670,9 @@ the codestream is still read whole. Add incremental
 codestream input and row/tile-oriented output so peak memory scales with the
 requested working set rather than the complete raster. Both change the public
 decode API shape, so agree the reader/sink contract before implementing either.
-The remaining colour layouts — sampled sYCC display conversion under a
-selector, and reduced upsampling — follow the same window arithmetic and stay
-fail-closed until then.
+The bounded colour layouts are done: selected and reduced reference-grid
+upsampling and selected sampled sYCC conversion all share the same absolute
+window arithmetic.
 
 For every selection mode, compare the result with the corresponding crop or
 reduction of a full strict decode. Cover odd origins, subsampling, ROI, tile

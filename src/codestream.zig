@@ -3768,25 +3768,36 @@ fn decodeLosslessPlanarUpsampledWithOptionsMeasured(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !color.SamplePlanes {
-    if (options.resolution_reduction != 0) return CodestreamError.UnsupportedPayload;
     const total_start = monotonicNs();
     defer {
         if (timings) |value| value.total_ns = elapsedNs(total_start);
     }
     var header = try readStrictCodestreamMetadata(allocator, bytes);
     defer header.deinit();
+    if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
+    const reduction = options.resolution_reduction;
     const image_rect = try strictImageReferenceRect(header);
+    // Reduction commutes with the component ceil-div, so a reduced component
+    // grid is still the ceil-div of the reduced reference grid: replication can
+    // run unchanged in reduced coordinates.
     const requested = try upsampledSelectionRect(header, image_rect, options) orelse {
         var native = try decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, timings);
         defer native.deinit();
-        return upsamplePlanarNearestToReferenceGrid(allocator, header, native, image_rect, image_rect);
+        const reduced_image = reducedReferenceRect(image_rect, reduction);
+        return upsamplePlanarNearestToReferenceGrid(
+            allocator,
+            header,
+            native,
+            reduced_image,
+            reduced_image,
+        );
     };
 
     // Nearest-neighbour replication reads the component sample at
     // floor(reference/XRsiz), which can sit one sample left of the selected
     // rectangle's own ceil-div component intersection. The native decode
     // therefore covers a slightly wider source window, clamped to the image.
-    const source_rect = try upsampledSourceRect(header, image_rect, requested);
+    const source_rect = try upsampledSourceRect(header, image_rect, requested, reduction);
     var native_options = options;
     native_options.tile_index = null;
     native_options.reference_region = .{
@@ -3797,7 +3808,91 @@ fn decodeLosslessPlanarUpsampledWithOptionsMeasured(
     };
     var native = try decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, native_options, timings);
     defer native.deinit();
-    return upsamplePlanarNearestToReferenceGrid(allocator, header, native, source_rect, requested);
+    return upsamplePlanarNearestToReferenceGrid(
+        allocator,
+        header,
+        native,
+        reducedReferenceRect(source_rect, reduction),
+        reducedReferenceRect(requested, reduction),
+    );
+}
+
+/// Window a chroma-phase-sensitive colour conversion must decode before it can
+/// return a selected rectangle. Conversions such as sYCC-to-sRGB derive their
+/// chroma phase from the absolute image origin, so a window whose origin is not
+/// on a chroma boundary would see a different phase than the complete image.
+/// Aligning the window origin down to a chroma boundary — clamped to the image,
+/// where the real edge phase applies — makes the converted window agree with
+/// the full conversion, and `offset_x`/`offset_y` locate the requested
+/// rectangle inside it.
+pub const ChromaAlignedSelection = struct {
+    source: DecodeRegion,
+    offset_x: u32,
+    offset_y: u32,
+    width: u32,
+    height: u32,
+};
+
+/// Resolves `tile_index`/`reference_region` to a chroma-aligned decode window,
+/// or null when the caller selected the complete image.
+pub fn chromaAlignedSelection(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    chroma_x: u8,
+    chroma_y: u8,
+) !?ChromaAlignedSelection {
+    if (chroma_x == 0 or chroma_y == 0) return CodestreamError.InvalidCodestream;
+    // Reduced conversion would have to align in reduced coordinates and is not
+    // reachable from the current conversion front ends.
+    if (options.resolution_reduction != 0) return CodestreamError.UnsupportedPayload;
+    var header = try readStrictCodestreamMetadata(allocator, bytes);
+    defer header.deinit();
+    const image_rect = try strictImageReferenceRect(header);
+    const requested = try upsampledSelectionRect(header, image_rect, options) orelse return null;
+    const source_x0 = @max(image_rect.x0, requested.x0 - (requested.x0 % chroma_x));
+    const source_y0 = @max(image_rect.y0, requested.y0 - (requested.y0 % chroma_y));
+    return .{
+        .source = .{
+            .x0 = source_x0,
+            .y0 = source_y0,
+            .width = requested.x1 - source_x0,
+            .height = requested.y1 - source_y0,
+        },
+        .offset_x = requested.x0 - source_x0,
+        .offset_y = requested.y0 - source_y0,
+        .width = requested.x1 - requested.x0,
+        .height = requested.y1 - requested.y0,
+    };
+}
+
+/// Cuts the requested rectangle out of a window converted through
+/// `chromaAlignedSelection`.
+pub fn cropConvertedChromaAlignedSelection(
+    allocator: std.mem.Allocator,
+    converted: image.RgbImage,
+    selection: ChromaAlignedSelection,
+) !image.RgbImage {
+    if (converted.width != @as(usize, selection.offset_x) + @as(usize, selection.width) or
+        converted.height != @as(usize, selection.offset_y) + @as(usize, selection.height))
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    return tile_grid.extractRgbTile(allocator, converted, .{
+        .x0 = selection.offset_x,
+        .y0 = selection.offset_y,
+        .x1 = selection.offset_x + selection.width,
+        .y1 = selection.offset_y + selection.height,
+    });
+}
+
+fn reducedReferenceRect(rect: tile_grid.Rect, reduction: u8) tile_grid.Rect {
+    return .{
+        .x0 = reducedGridCoordinate(rect.x0, reduction),
+        .y0 = reducedGridCoordinate(rect.y0, reduction),
+        .x1 = reducedGridCoordinate(rect.x1, reduction),
+        .y1 = reducedGridCoordinate(rect.y1, reduction),
+    };
 }
 
 /// Absolute reference-grid rectangle an upsampled decode must return, or null
@@ -3834,23 +3929,31 @@ fn upsampledSelectionRect(
     return tile.rect;
 }
 
+/// Widens the native source window so replication always has the component
+/// sample left of and above the requested rectangle. `ceil((x - k*2^r)/2^r)`
+/// equals `ceil(x/2^r) - k`, so scaling the margin by the reduction factor
+/// widens the reduced window by exactly `XRsiz-1` samples.
 fn upsampledSourceRect(
     header: TemporaryHeader,
     image_rect: tile_grid.Rect,
     requested: tile_grid.Rect,
+    reduction: u8,
 ) !tile_grid.Rect {
-    var margin_x: u32 = 0;
-    var margin_y: u32 = 0;
+    var margin_x: u64 = 0;
+    var margin_y: u64 = 0;
     for (0..header.component_count) |component| {
         const xrsiz = header.component_xrsiz[component];
         const yrsiz = header.component_yrsiz[component];
         if (xrsiz == 0 or yrsiz == 0) return CodestreamError.InvalidCodestream;
-        margin_x = @max(margin_x, @as(u32, xrsiz) - 1);
-        margin_y = @max(margin_y, @as(u32, yrsiz) - 1);
+        margin_x = @max(margin_x, @as(u64, xrsiz) - 1);
+        margin_y = @max(margin_y, @as(u64, yrsiz) - 1);
     }
+    const scale = @as(u64, 1) << @as(u6, @intCast(@min(reduction, 32)));
+    const scaled_x = std.math.cast(u32, margin_x * scale) orelse std.math.maxInt(u32);
+    const scaled_y = std.math.cast(u32, margin_y * scale) orelse std.math.maxInt(u32);
     return .{
-        .x0 = @max(image_rect.x0, requested.x0 -| margin_x),
-        .y0 = @max(image_rect.y0, requested.y0 -| margin_y),
+        .x0 = @max(image_rect.x0, requested.x0 -| scaled_x),
+        .y0 = @max(image_rect.y0, requested.y0 -| scaled_y),
         .x1 = requested.x1,
         .y1 = requested.y1,
     };
