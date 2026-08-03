@@ -283,6 +283,9 @@ Primary public types:
 - `TileSinkComponent`
 - `RgbTileSinkInfo`
 - `RgbTileSinkRegion`
+- `NativeTileSinkInfo`
+- `NativeTileSinkRegion`
+- `NativeTileSinkComponent`
 - `TemporaryStats`
 - `ComponentStats`
 - `QualityLayerStats`
@@ -291,6 +294,7 @@ Primary public types:
 - `StrictPacketBlockCatalog`
 - `NativeSampleLimits`
 - `NativeCodestreamLayout`
+- `NativeComponentLayout`
 - `NativeSamplePlanes`
 - `NativePgxByteOrder`
 
@@ -320,6 +324,27 @@ Primary public functions:
   allocates dynamic `i64` planes, validates every sample against its declared
   signed range, exports checked PGX for precisions with 8/16/32-bit PGX
   storage, and exports canonical all-component ZRAW without precision loss
+- `decodeLosslessNativeToSink(allocator, bytes, options, limits, sink)` —
+  push-based native decode over the same bounded profile, selectors, limits,
+  and strict validation as `decodeLosslessNativeWithOptions`. `sink` is a
+  pointer whose pointee exposes
+  `pub fn begin(self, info: NativeTileSinkInfo) !void` and
+  `pub fn writeTile(self, region: NativeTileSinkRegion) !void`. The contract
+  matches `decodeLosslessPlanarToSink`: `begin` runs once with the requested
+  reduced reference-grid window plus one `NativeComponentLayout` per component,
+  then one `writeTile` per non-empty selected tile in codestream tile order,
+  with disjoint regions that together cover that window exactly. Every
+  `NativeTileSinkComponent` carries the component's own precision, signedness,
+  sampling step, and CRG registration, with `layout.x0/y0/width/height`
+  describing the window on the absolute reduced component grid; a window
+  collapsed by subsampling or reduction reports `width` and `height` as zero
+  together. Native decode converts `i32` coefficients into level-shifted,
+  range-checked `i64` samples on the way out, so windows are materialized per
+  tile rather than borrowed from a tile raster; the buffers are tile-sized. That
+  conversion also enforces the declared sample range — an exact decode fails
+  closed, a reduced or layer-limited decode clamps — so each window carries the
+  guarantee `validateSamples` gives the whole-plane shape. A single-tile stream
+  is reported as one region
 - `NativeSamplePlanes.encodeRawPlanar(allocator)` /
   `decodeNativeRawPlanar(allocator, bytes, limits)` — serialize or parse the
   exact ZRAW diagnostic carrier with allocation limits and exact payload-

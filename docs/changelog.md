@@ -5,6 +5,36 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile-Oriented Native Output Sink
+
+- `decodeLosslessNativeToSink` completes the tile-sink contract across the three
+  bounded decode output shapes, with `NativeTileSinkInfo`,
+  `NativeTileSinkRegion`, `NativeTileSinkComponent`, and the newly exported
+  `NativeComponentLayout`. Each emitted component window carries the
+  component's own precision, signedness, sampling step, and CRG registration,
+  so signed and mixed-precision layouts survive the split unchanged.
+- The multi-tile native loop no longer allocates the complete planes;
+  `decodeLosslessNativeWithOptions` is now one sink over that loop through
+  `AssemblingNativeTileSink`. The profile gate moved into
+  `checkStrictNativeProfile` and the single-tile body into
+  `decodeStrictSingleTileNative`, so both output shapes accept exactly the same
+  codestreams and honour the same `NativeSampleLimits`.
+- Unlike the planar and RGB paths, native decode converts `i32` coefficients
+  into level-shifted, range-checked `i64` samples as it writes them out, so a
+  streaming sink needs that conversion materialized per tile rather than written
+  straight into a whole-image plane. `NativeTileWindows` holds those tile-sized
+  buffers, which costs the whole-plane path one extra tile-sized copy per
+  component and keeps peak memory scaling with one tile. That conversion is
+  also where the declared sample range is enforced, so every emitted window
+  carries the guarantee `validateSamples` gives the whole-plane shape.
+- The same 4:2:0 twelve-tile stream at a nonzero image origin pins the contract
+  against the whole-plane decode over full, reduced, tile-selected, and
+  region-selected combinations at 1 and 8 threads, with a reassembling sink
+  counting writes per output sample and checking that per-component metadata is
+  preserved. A tracking allocator pins the reduced peak, a rejecting sink pins
+  error propagation, and selector plus `max_components` limit validation is
+  pinned identical across both shapes.
+
 ### Tile-Oriented Interleaved RGB Output Sink
 
 - `decodeLosslessTemporaryToSink` / `decodeLosslessTemporaryToSinkProfiled`

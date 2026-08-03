@@ -33457,6 +33457,338 @@ const CountingRgbTileSink = struct {
     }
 };
 
+/// Reassembles every emitted native window into whole planes and counts how
+/// often each output sample was written, so one comparison proves that the
+/// regions are exact, disjoint, and complete.
+const ReassemblingNativeTileSink = struct {
+    allocator: std.mem.Allocator,
+    begun: bool = false,
+    x0: u32 = 0,
+    y0: u32 = 0,
+    width: usize = 0,
+    height: usize = 0,
+    tiles_total: u64 = 0,
+    tiles_selected: u64 = 0,
+    tiles_written: u64 = 0,
+    reject_at_tile: ?u64 = null,
+    layouts: []codestream.NativeComponentLayout = &.{},
+    planes: [][]i64 = &.{},
+    writes: [][]u8 = &.{},
+
+    const SinkError = error{SinkRejected};
+
+    pub fn begin(self: *ReassemblingNativeTileSink, info: codestream.NativeTileSinkInfo) !void {
+        try std.testing.expect(!self.begun);
+        self.begun = true;
+        self.x0 = info.x0;
+        self.y0 = info.y0;
+        self.width = info.width;
+        self.height = info.height;
+        self.tiles_total = info.tiles_total;
+        self.tiles_selected = info.tiles_selected;
+        self.layouts = try self.allocator.alloc(codestream.NativeComponentLayout, info.components.len);
+        @memcpy(self.layouts, info.components);
+        self.planes = try self.allocator.alloc([]i64, info.components.len);
+        for (self.planes) |*plane| plane.* = &.{};
+        self.writes = try self.allocator.alloc([]u8, info.components.len);
+        for (self.writes) |*written| written.* = &.{};
+        for (info.components, 0..) |layout, index| {
+            const count = layout.width * layout.height;
+            self.planes[index] = try self.allocator.alloc(i64, count);
+            @memset(self.planes[index], 0);
+            self.writes[index] = try self.allocator.alloc(u8, count);
+            @memset(self.writes[index], 0);
+        }
+    }
+
+    pub fn writeTile(self: *ReassemblingNativeTileSink, region: codestream.NativeTileSinkRegion) !void {
+        try std.testing.expect(self.begun);
+        if (self.reject_at_tile) |index| {
+            if (self.tiles_written == index) return SinkError.SinkRejected;
+        }
+        try std.testing.expectEqual(self.layouts.len, region.components.len);
+        try std.testing.expect(region.width > 0 and region.height > 0);
+        try std.testing.expect(region.x0 >= self.x0 and region.y0 >= self.y0);
+        try std.testing.expect(@as(usize, region.x0 - self.x0) + region.width <= self.width);
+        try std.testing.expect(@as(usize, region.y0 - self.y0) + region.height <= self.height);
+        for (region.components, 0..) |component, index| {
+            const layout = self.layouts[index];
+            // Precision, signedness, sampling step, and registration are the
+            // component's own and must survive the window split unchanged.
+            try std.testing.expectEqual(layout.precision, component.layout.precision);
+            try std.testing.expectEqual(layout.signed, component.layout.signed);
+            try std.testing.expectEqual(layout.x_step, component.layout.x_step);
+            try std.testing.expectEqual(layout.y_step, component.layout.y_step);
+            try std.testing.expectEqual(layout.registration_x, component.layout.registration_x);
+            try std.testing.expectEqual(layout.registration_y, component.layout.registration_y);
+            if (component.layout.width == 0 or component.layout.height == 0) {
+                try std.testing.expectEqual(@as(usize, 0), component.layout.width);
+                try std.testing.expectEqual(@as(usize, 0), component.layout.height);
+                continue;
+            }
+            try std.testing.expect(component.layout.x0 >= layout.x0 and component.layout.y0 >= layout.y0);
+            const destination_x = @as(usize, component.layout.x0 - layout.x0);
+            const destination_y = @as(usize, component.layout.y0 - layout.y0);
+            try std.testing.expect(destination_x + component.layout.width <= layout.width);
+            try std.testing.expect(destination_y + component.layout.height <= layout.height);
+            for (0..component.layout.height) |row| {
+                const start = (destination_y + row) * layout.width + destination_x;
+                @memcpy(self.planes[index][start..][0..component.layout.width], component.row(row));
+                for (self.writes[index][start..][0..component.layout.width]) |*written| written.* += 1;
+            }
+        }
+        self.tiles_written += 1;
+    }
+
+    fn expectMatches(self: *ReassemblingNativeTileSink, expected: codestream.NativeSamplePlanes) !void {
+        try std.testing.expect(self.begun);
+        try std.testing.expectEqual(self.tiles_selected, self.tiles_written);
+        try std.testing.expectEqual(expected.planes.len, self.layouts.len);
+        try std.testing.expectEqual(expected.reference_x0, self.x0);
+        try std.testing.expectEqual(expected.reference_y0, self.y0);
+        for (expected.planes, 0..) |plane, index| {
+            const layout = self.layouts[index];
+            try std.testing.expectEqual(plane.layout.x0, layout.x0);
+            try std.testing.expectEqual(plane.layout.y0, layout.y0);
+            try std.testing.expectEqual(plane.layout.width, layout.width);
+            try std.testing.expectEqual(plane.layout.height, layout.height);
+            try std.testing.expectEqual(plane.layout.precision, layout.precision);
+            try std.testing.expectEqual(plane.layout.signed, layout.signed);
+            try std.testing.expectEqualSlices(i64, plane.samples, self.planes[index]);
+            for (self.writes[index]) |written| try std.testing.expectEqual(@as(u8, 1), written);
+        }
+    }
+
+    fn deinit(self: *ReassemblingNativeTileSink) void {
+        for (self.planes) |plane| {
+            if (plane.len != 0) self.allocator.free(plane);
+        }
+        for (self.writes) |written| {
+            if (written.len != 0) self.allocator.free(written);
+        }
+        if (self.planes.len != 0) self.allocator.free(self.planes);
+        if (self.writes.len != 0) self.allocator.free(self.writes);
+        if (self.layouts.len != 0) self.allocator.free(self.layouts);
+        self.planes = &.{};
+        self.writes = &.{};
+        self.layouts = &.{};
+    }
+};
+
+/// Minimal native sink that keeps nothing, so a peak-allocation measurement
+/// reflects the decoder rather than the consumer.
+const CountingNativeTileSink = struct {
+    tiles_written: u64 = 0,
+    samples_seen: u64 = 0,
+
+    pub fn begin(self: *CountingNativeTileSink, info: codestream.NativeTileSinkInfo) !void {
+        _ = self;
+        _ = info;
+    }
+
+    pub fn writeTile(self: *CountingNativeTileSink, region: codestream.NativeTileSinkRegion) !void {
+        for (region.components) |component| {
+            self.samples_seen += @as(u64, component.layout.width) * @as(u64, component.layout.height);
+        }
+        self.tiles_written += 1;
+    }
+};
+
+test "sampled multi-tile native decode streams tiles through an output sink" {
+    const allocator = std.testing.allocator;
+    const width = 63;
+    const height = 64;
+    const image_origin_x: u32 = 5;
+    const image_origin_y: u32 = 3;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+
+    const encode_options = codestream.LosslessOptions{
+        .levels = 2,
+        .layers = 3,
+        .mct = .none,
+        .image_origin_x = image_origin_x,
+        .image_origin_y = image_origin_y,
+        .tile_origin_x = 1,
+        .tile_origin_y = 0,
+        .tile_width = 23,
+        .tile_height = 19,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+        .sop = true,
+        .eph = true,
+    };
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planes,
+        &sampling,
+        encode_options,
+    );
+    defer allocator.free(encoded);
+    try std.testing.expectEqual(@as(usize, 12), countMarker(encoded, codestream.markerValue("sot")));
+
+    const region = codestream.DecodeRegion{ .x0 = 20, .y0 = 16, .width = 32, .height = 29 };
+    const cases = [_]struct {
+        options: codestream.DecodeOptions,
+        tiles_written: u64,
+    }{
+        .{ .options = .{ .threads = 1 }, .tiles_written = 12 },
+        .{ .options = .{ .threads = 8 }, .tiles_written = 12 },
+        .{ .options = .{ .threads = 1, .resolution_reduction = 1 }, .tiles_written = 12 },
+        .{ .options = .{ .threads = 8, .resolution_reduction = 2 }, .tiles_written = 12 },
+        .{ .options = .{ .threads = 1, .tile_index = 7 }, .tiles_written = 1 },
+        .{ .options = .{ .threads = 8, .tile_index = 7, .resolution_reduction = 1 }, .tiles_written = 1 },
+        .{ .options = .{ .threads = 1, .reference_region = region }, .tiles_written = 9 },
+        .{
+            .options = .{ .threads = 8, .reference_region = region, .resolution_reduction = 1 },
+            .tiles_written = 9,
+        },
+    };
+
+    for (cases) |case| {
+        var expected = try codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            encoded,
+            case.options,
+            .{},
+        );
+        defer expected.deinit();
+
+        var sink = ReassemblingNativeTileSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessNativeToSink(allocator, encoded, case.options, .{}, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(@as(u64, 12), sink.tiles_total);
+        try std.testing.expectEqual(case.tiles_written, sink.tiles_written);
+    }
+
+    // The sink path must not allocate the complete planes. Both runs share the
+    // same tile work, so the difference is the output allocation itself.
+    var plane_tracker = PeakAllocator{ .parent = allocator };
+    var whole = try codestream.decodeLosslessNativeWithOptions(
+        plane_tracker.allocator(),
+        encoded,
+        .{ .threads = 1 },
+        .{},
+    );
+    const whole_peak = plane_tracker.peak;
+    var whole_samples: usize = 0;
+    for (whole.planes) |plane| whole_samples += plane.samples.len;
+    whole.deinit();
+    try std.testing.expectEqual(@as(usize, 0), plane_tracker.live);
+
+    var sink_tracker = PeakAllocator{ .parent = allocator };
+    var counting = CountingNativeTileSink{};
+    try codestream.decodeLosslessNativeToSink(
+        sink_tracker.allocator(),
+        encoded,
+        .{ .threads = 1 },
+        .{},
+        &counting,
+    );
+    try std.testing.expectEqual(@as(u64, 12), counting.tiles_written);
+    try std.testing.expectEqual(@as(u64, whole_samples), counting.samples_seen);
+    try std.testing.expectEqual(@as(usize, 0), sink_tracker.live);
+    try std.testing.expect(sink_tracker.peak + whole_samples * @sizeOf(i64) <= whole_peak);
+
+    // A sink error aborts the decode and propagates unchanged.
+    var rejecting = ReassemblingNativeTileSink{ .allocator = allocator, .reject_at_tile = 5 };
+    defer rejecting.deinit();
+    try std.testing.expectError(
+        ReassemblingNativeTileSink.SinkError.SinkRejected,
+        codestream.decodeLosslessNativeToSink(allocator, encoded, .{ .threads = 1 }, .{}, &rejecting),
+    );
+    try std.testing.expectEqual(@as(u64, 5), rejecting.tiles_written);
+
+    // The same selector and limit validation applies to both output shapes.
+    var unused = CountingNativeTileSink{};
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessNativeToSink(
+            allocator,
+            encoded,
+            .{ .tile_index = 0, .reference_region = region },
+            .{},
+            &unused,
+        ),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessNativeToSink(
+            allocator,
+            encoded,
+            .{ .resolution_reduction = encode_options.levels + 1 },
+            .{},
+            &unused,
+        ),
+    );
+    try std.testing.expectError(
+        codestream.NativeSampleError.ResourceLimitExceeded,
+        codestream.decodeLosslessNativeToSink(
+            allocator,
+            encoded,
+            .{},
+            .{ .max_components = 2 },
+            &unused,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), unused.tiles_written);
+}
+
+test "single-tile native decode reports one sink region for the requested window" {
+    const allocator = std.testing.allocator;
+    const width = 61;
+    const height = 47;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .mct = .none,
+    });
+    defer allocator.free(bytes);
+
+    const region = codestream.DecodeRegion{ .x0 = 7, .y0 = 5, .width = 24, .height = 19 };
+    const cases = [_]codestream.DecodeOptions{
+        .{ .threads = 1 },
+        .{ .threads = 8 },
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{ .threads = 8, .reference_region = region },
+        .{ .threads = 1, .reference_region = region, .resolution_reduction = 1 },
+        .{ .threads = 8, .tile_index = 0 },
+    };
+    for (cases) |options| {
+        var expected = try codestream.decodeLosslessNativeWithOptions(allocator, bytes, options, .{});
+        defer expected.deinit();
+
+        var sink = ReassemblingNativeTileSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessNativeToSink(allocator, bytes, options, .{}, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(@as(u64, 1), sink.tiles_total);
+        try std.testing.expectEqual(@as(u64, 1), sink.tiles_written);
+    }
+}
+
 test "multi-tile RGB decode streams tiles through an output sink" {
     const allocator = std.testing.allocator;
     const width = 96;

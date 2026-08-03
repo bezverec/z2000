@@ -33,6 +33,7 @@ pub const CodestreamError = error{
 /// component-local geometry without changing the legacy u16 decode surface.
 pub const NativeSampleLimits = native_samples.Limits;
 pub const NativeCodestreamLayout = native_samples.CodestreamLayout;
+pub const NativeComponentLayout = native_samples.ComponentLayout;
 pub const NativeSamplePlanes = native_samples.SamplePlanes;
 pub const NativePgxByteOrder = native_samples.PgxByteOrder;
 pub const NativeSampleError = native_samples.NativeSampleError;
@@ -475,6 +476,51 @@ pub const RgbTileSinkRegion = struct {
         const start = index * self.stride;
         return self.samples[start .. start + self.width * 3];
     }
+};
+
+/// One component window inside a `NativeTileSinkRegion`. `layout` is the
+/// component's own precision, signedness, sampling step, and CRG registration,
+/// with `x0`/`y0`/`width`/`height` describing this window on the absolute
+/// reduced component grid. `samples` borrows decoder-owned memory: row `index`
+/// starts at `index * stride` and is `layout.width` samples long. Subsampling
+/// and resolution reduction can collapse a window even when the tile itself is
+/// not empty; such a window reports `width` and `height` as zero together.
+pub const NativeTileSinkComponent = struct {
+    layout: NativeComponentLayout,
+    stride: usize,
+    samples: []const i64,
+
+    pub fn row(self: NativeTileSinkComponent, index: usize) []const i64 {
+        const start = index * self.stride;
+        return self.samples[start .. start + self.layout.width];
+    }
+};
+
+/// One decoded tile handed to a native tile sink, already intersected with the
+/// requested output window and expressed in absolute reduced reference-grid
+/// coordinates.
+pub const NativeTileSinkRegion = struct {
+    tile_index: u32,
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    components: []const NativeTileSinkComponent,
+};
+
+/// Complete native output geometry, reported once before the first tile.
+/// `x0/y0/width/height` describe the requested reduced reference-grid window,
+/// and each component layout is that window's own reduced component grid with
+/// its declared precision and signedness. `tiles_selected` is exactly the
+/// number of `writeTile` calls that will follow.
+pub const NativeTileSinkInfo = struct {
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    tiles_total: u64,
+    tiles_selected: u64,
+    components: []const NativeComponentLayout,
 };
 
 pub const DecodeTimings = struct {
@@ -3891,6 +3937,97 @@ pub fn decodeLosslessNativeWithOptions(
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
     var header = try readStrictNativeCodestreamMetadata(allocator, bytes);
     defer header.deinit();
+    try checkStrictNativeProfile(header, options);
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return decodeStrictMultiTileNative(allocator, bytes, header, options, limits);
+    }
+    return decodeStrictSingleTileNative(allocator, bytes, header, options, limits);
+}
+
+/// Push-based native decode over the same bounded profile, selectors, limits,
+/// and strict validation as `decodeLosslessNativeWithOptions`. `sink` is a
+/// pointer whose pointee exposes
+///
+///     pub fn begin(self: *Sink, info: NativeTileSinkInfo) !void
+///     pub fn writeTile(self: *Sink, region: NativeTileSinkRegion) !void
+///
+/// The contract matches `decodeLosslessPlanarToSink`: `begin` runs once, then
+/// one `writeTile` per non-empty selected tile in codestream tile order, with
+/// disjoint regions that together cover the reported window exactly. Each
+/// component window carries its own precision, signedness, sampling step, and
+/// CRG registration, so signed and mixed-precision layouts survive unchanged.
+///
+/// Native decode converts `i32` coefficients into level-shifted, range-checked
+/// `i64` samples on the way out, so windows are materialized per tile rather
+/// than borrowed from a tile raster; the buffers are tile-sized, so peak memory
+/// still scales with one tile. That conversion is where the declared sample
+/// range is enforced — an exact decode fails closed on an out-of-range sample
+/// and a reduced or layer-limited decode clamps — so every emitted window
+/// carries the same guarantee `NativeSamplePlanes.validateSamples` gives the
+/// whole-plane shape. A single-tile stream has one tile by definition and is
+/// reported as one region.
+pub fn decodeLosslessNativeToSink(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    limits: NativeSampleLimits,
+    sink: anytype,
+) !void {
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
+    var header = try readStrictNativeCodestreamMetadata(allocator, bytes);
+    defer header.deinit();
+    try checkStrictNativeProfile(header, options);
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return decodeStrictMultiTileNativeToSink(allocator, bytes, header, options, limits, sink);
+    }
+
+    var decoded = try decodeStrictSingleTileNative(allocator, bytes, header, options, limits);
+    defer decoded.deinit();
+    try emitWholeNativePlanesRegion(allocator, decoded, sink);
+}
+
+/// Reports fully reconstructed native planes as the one region their stream can
+/// produce, using the same absolute reduced coordinates the multi-tile loop
+/// emits.
+fn emitWholeNativePlanesRegion(
+    allocator: std.mem.Allocator,
+    decoded: NativeSamplePlanes,
+    sink: anytype,
+) !void {
+    const layouts = try allocator.alloc(NativeComponentLayout, decoded.planes.len);
+    defer allocator.free(layouts);
+    const components = try allocator.alloc(NativeTileSinkComponent, decoded.planes.len);
+    defer allocator.free(components);
+    for (decoded.planes, 0..) |plane, index| {
+        layouts[index] = plane.layout;
+        components[index] = .{
+            .layout = plane.layout,
+            .stride = plane.layout.width,
+            .samples = plane.samples,
+        };
+    }
+    try sink.begin(.{
+        .x0 = decoded.reference_x0,
+        .y0 = decoded.reference_y0,
+        .width = @as(usize, decoded.reference_x1 - decoded.reference_x0),
+        .height = @as(usize, decoded.reference_y1 - decoded.reference_y0),
+        .tiles_total = 1,
+        .tiles_selected = 1,
+        .components = layouts,
+    });
+    try sink.writeTile(.{
+        .tile_index = 0,
+        .x0 = decoded.reference_x0,
+        .y0 = decoded.reference_y0,
+        .width = @as(usize, decoded.reference_x1 - decoded.reference_x0),
+        .height = @as(usize, decoded.reference_y1 - decoded.reference_y0),
+        .components = components,
+    });
+}
+
+/// Shared native profile gate for the whole-plane and tile-sink entry points,
+/// so both accept exactly the same codestreams.
+fn checkStrictNativeProfile(header: TemporaryHeader, options: DecodeOptions) !void {
     if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     if (componentCodingSliceForHeader(header)) |coding| {
         for (coding) |component| {
@@ -3902,9 +4039,15 @@ pub fn decodeLosslessNativeWithOptions(
     {
         return CodestreamError.UnsupportedPayload;
     }
-    if (header.tile_width != 0 or header.tile_height != 0) {
-        return decodeStrictMultiTileNative(allocator, bytes, header, options, limits);
-    }
+}
+
+fn decodeStrictSingleTileNative(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    limits: NativeSampleLimits,
+) !NativeSamplePlanes {
     const requested_region = try strictSingleTileReferenceRect(header, options);
     if (options.tile_index) |selected| {
         if (selected != 0) return CodestreamError.InvalidCodestream;
@@ -10710,6 +10853,139 @@ fn decodeStrictMultiTileNative(
     options: DecodeOptions,
     limits: NativeSampleLimits,
 ) !NativeSamplePlanes {
+    var assembling = AssemblingNativeTileSink{ .allocator = allocator, .limits = limits };
+    errdefer assembling.deinit();
+    try decodeStrictMultiTileNativeToSink(allocator, bytes, header, options, limits, &assembling);
+    var output = assembling.take();
+    errdefer output.deinit();
+    try output.validateSamples();
+    return output;
+}
+
+/// Whole-plane sink used by the legacy native API: it allocates the complete
+/// planes once from `begin` and copies each tile window into place, which is
+/// exactly what the assembling loop did before the sink contract existed.
+const AssemblingNativeTileSink = struct {
+    allocator: std.mem.Allocator,
+    limits: NativeSampleLimits,
+    planes: ?NativeSamplePlanes = null,
+
+    fn begin(self: *AssemblingNativeTileSink, info: NativeTileSinkInfo) !void {
+        const components = try self.allocator.alloc(NativeComponentLayout, info.components.len);
+        defer self.allocator.free(components);
+        @memcpy(components, info.components);
+        const width = std.math.cast(u32, info.width) orelse return CodestreamError.ImageTooLarge;
+        const height = std.math.cast(u32, info.height) orelse return CodestreamError.ImageTooLarge;
+        const layout = NativeCodestreamLayout{
+            .allocator = self.allocator,
+            .capabilities = 0,
+            .reference_x0 = info.x0,
+            .reference_y0 = info.y0,
+            .reference_x1 = std.math.add(u32, info.x0, width) catch
+                return CodestreamError.ImageTooLarge,
+            .reference_y1 = std.math.add(u32, info.y0, height) catch
+                return CodestreamError.ImageTooLarge,
+            .tile_width = 0,
+            .tile_height = 0,
+            .tile_origin_x = 0,
+            .tile_origin_y = 0,
+            .components = components,
+        };
+        self.planes = try NativeSamplePlanes.initFromLayout(self.allocator, layout, self.limits);
+    }
+
+    fn writeTile(self: *AssemblingNativeTileSink, region: NativeTileSinkRegion) !void {
+        if (self.planes == null) return CodestreamError.InvalidCodestream;
+        const planes = &self.planes.?;
+        if (region.components.len != planes.planes.len) return CodestreamError.InvalidCodestream;
+        for (region.components, 0..) |component, index| {
+            const plane = planes.planes[index];
+            if (component.layout.width == 0 or component.layout.height == 0) continue;
+            if (component.layout.x0 < plane.layout.x0 or component.layout.y0 < plane.layout.y0) {
+                return CodestreamError.InvalidCodestream;
+            }
+            const destination_x = @as(usize, component.layout.x0 - plane.layout.x0);
+            const destination_y = @as(usize, component.layout.y0 - plane.layout.y0);
+            for (0..component.layout.height) |row| {
+                const destination_start = (destination_y + row) * plane.layout.width + destination_x;
+                @memcpy(
+                    plane.samples[destination_start..][0..component.layout.width],
+                    component.row(row),
+                );
+            }
+        }
+    }
+
+    fn take(self: *AssemblingNativeTileSink) NativeSamplePlanes {
+        const planes = self.planes.?;
+        self.planes = null;
+        return planes;
+    }
+
+    fn deinit(self: *AssemblingNativeTileSink) void {
+        if (self.planes) |*planes| planes.deinit();
+        self.planes = null;
+    }
+};
+
+/// Tile-local converted sample windows handed to a native tile sink. Unlike the
+/// planar and RGB paths, native decode converts `i32` coefficients into
+/// level-shifted, range-checked `i64` samples as it writes them out, so a
+/// streaming sink needs that conversion materialized per tile instead of going
+/// straight into a whole-image plane. The buffers are tile-sized, so peak
+/// memory still scales with one tile.
+const NativeTileWindows = struct {
+    allocator: std.mem.Allocator,
+    components: []NativeTileSinkComponent,
+    buffers: [][]i64,
+
+    fn init(allocator: std.mem.Allocator, count: usize) !NativeTileWindows {
+        const components = try allocator.alloc(NativeTileSinkComponent, count);
+        errdefer allocator.free(components);
+        const buffers = try allocator.alloc([]i64, count);
+        for (buffers) |*buffer| buffer.* = &.{};
+        return .{ .allocator = allocator, .components = components, .buffers = buffers };
+    }
+
+    /// Reserves the window for one component and returns its writable samples.
+    fn reserve(
+        self: *NativeTileWindows,
+        index: usize,
+        layout: NativeComponentLayout,
+    ) ![]i64 {
+        const count = try std.math.mul(usize, layout.width, layout.height);
+        const buffer: []i64 = if (count == 0) &.{} else try self.allocator.alloc(i64, count);
+        self.buffers[index] = buffer;
+        self.components[index] = .{
+            .layout = layout,
+            .stride = layout.width,
+            .samples = buffer,
+        };
+        return buffer;
+    }
+
+    fn release(self: *NativeTileWindows) void {
+        for (self.buffers) |*buffer| {
+            if (buffer.len != 0) self.allocator.free(buffer.*);
+            buffer.* = &.{};
+        }
+    }
+
+    fn deinit(self: *NativeTileWindows) void {
+        self.release();
+        self.allocator.free(self.buffers);
+        self.allocator.free(self.components);
+    }
+};
+
+fn decodeStrictMultiTileNativeToSink(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    limits: NativeSampleLimits,
+    sink: anytype,
+) !void {
     if (header.transform != .reversible_5_3 or header.quantization != .none or
         header.mct != .none or options.resolution_reduction > header.levels)
     {
@@ -10727,15 +11003,42 @@ fn decodeStrictMultiTileNative(
         try cropNativeCodestreamLayoutToReferenceRect(&layout, window.reference_rect);
     }
     try reduceNativeCodestreamLayout(&layout, options.resolution_reduction);
-    var output = try NativeSamplePlanes.initFromLayout(allocator, layout, limits);
-    errdefer output.deinit();
     for (0..header.component_count) |component| {
-        if (output.planes[component].layout.precision != componentBitDepthForHeader(header, component) or
-            output.planes[component].layout.signed != header.component_signed[component])
+        if (layout.components[component].precision != componentBitDepthForHeader(header, component) or
+            layout.components[component].signed != header.component_signed[component])
         {
             return CodestreamError.InvalidCodestream;
         }
     }
+
+    var selected_tiles: u64 = 0;
+    {
+        var index: u32 = 0;
+        while (index < context.grid.tileCount()) : (index += 1) {
+            const tile = context.grid.tile(index) catch return CodestreamError.InvalidCodestream;
+            if (!window.includes(index, tile.rect)) continue;
+            const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
+                return CodestreamError.InvalidCodestream;
+            const reduced_x0 = reducedGridCoordinate(overlap.x0, options.resolution_reduction);
+            const reduced_y0 = reducedGridCoordinate(overlap.y0, options.resolution_reduction);
+            const reduced_x1 = reducedGridCoordinate(overlap.x1, options.resolution_reduction);
+            const reduced_y1 = reducedGridCoordinate(overlap.y1, options.resolution_reduction);
+            if (reduced_x1 == reduced_x0 or reduced_y1 == reduced_y0) continue;
+            selected_tiles += 1;
+        }
+    }
+    try sink.begin(.{
+        .x0 = layout.reference_x0,
+        .y0 = layout.reference_y0,
+        .width = layout.referenceWidth(),
+        .height = layout.referenceHeight(),
+        .tiles_total = context.grid.tileCount(),
+        .tiles_selected = selected_tiles,
+        .components = layout.components,
+    });
+
+    var windows = try NativeTileWindows.init(allocator, header.component_count);
+    defer windows.deinit();
 
     var tile_index: u32 = 0;
     while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
@@ -10839,6 +11142,7 @@ fn decodeStrictMultiTileNative(
 
         const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
             return CodestreamError.InvalidCodestream;
+        windows.release();
         for (0..header.component_count) |component| {
             const component_levels = componentLevelsForHeader(tile_header, component);
             const source_width = block_catalog.component_widths[component];
@@ -10888,7 +11192,7 @@ fn decodeStrictMultiTileNative(
                 tile_height = reduced.height;
             }
 
-            const plane = output.planes[component];
+            const plane_layout = layout.components[component];
             const reduced_x0 = reducedGridCoordinate(
                 block_catalog.component_x0[component],
                 options.resolution_reduction,
@@ -10918,33 +11222,47 @@ fn decodeStrictMultiTileNative(
                 options.resolution_reduction,
             );
             if (reduced_overlap_x0 < reduced_x0 or reduced_overlap_y0 < reduced_y0 or
-                reduced_overlap_x0 < plane.layout.x0 or reduced_overlap_y0 < plane.layout.y0)
+                reduced_overlap_x0 < plane_layout.x0 or reduced_overlap_y0 < plane_layout.y0)
             {
                 return CodestreamError.InvalidCodestream;
             }
             const source_x = @as(usize, reduced_overlap_x0 - reduced_x0);
             const source_y = @as(usize, reduced_overlap_y0 - reduced_y0);
-            const destination_x = @as(usize, reduced_overlap_x0 - plane.layout.x0);
-            const destination_y = @as(usize, reduced_overlap_y0 - plane.layout.y0);
+            const destination_x = @as(usize, reduced_overlap_x0 - plane_layout.x0);
+            const destination_y = @as(usize, reduced_overlap_y0 - plane_layout.y0);
             const copy_width = @as(usize, reduced_overlap_x1 - reduced_overlap_x0);
             const copy_height = @as(usize, reduced_overlap_y1 - reduced_overlap_y0);
             if (source_x + copy_width > tile_width or source_y + copy_height > tile_height or
-                destination_x + copy_width > plane.layout.width or
-                destination_y + copy_height > plane.layout.height)
+                destination_x + copy_width > plane_layout.width or
+                destination_y + copy_height > plane_layout.height)
             {
                 return CodestreamError.InvalidCodestream;
             }
-            const level_shift: i64 = if (plane.layout.signed)
+            // Subsampling and reduction can collapse a component window while
+            // the tile itself still contributes; that stays a legal no-op.
+            var window_layout = plane_layout;
+            window_layout.x0 = reduced_overlap_x0;
+            window_layout.y0 = reduced_overlap_y0;
+            window_layout.width = copy_width;
+            window_layout.height = copy_height;
+            if (copy_width == 0 or copy_height == 0) {
+                window_layout.width = 0;
+                window_layout.height = 0;
+                _ = try windows.reserve(component, window_layout);
+                continue;
+            }
+            const samples = try windows.reserve(component, window_layout);
+
+            const level_shift: i64 = if (plane_layout.signed)
                 0
             else
-                @as(i64, 1) << @as(u6, @intCast(plane.layout.precision - 1));
-            const minimum = try plane.layout.minimumSample();
-            const maximum = try plane.layout.maximumSample();
+                @as(i64, 1) << @as(u6, @intCast(plane_layout.precision - 1));
+            const minimum = try plane_layout.minimumSample();
+            const maximum = try plane_layout.maximumSample();
             for (0..copy_height) |row| {
                 const source_start = (source_y + row) * source_width + source_x;
                 const source_row = coefficients[source_start..][0..copy_width];
-                const destination_start = (destination_y + row) * plane.layout.width + destination_x;
-                const destination_row = plane.samples[destination_start..][0..copy_width];
+                const destination_row = samples[row * copy_width ..][0..copy_width];
                 for (source_row, destination_row) |coefficient, *sample| {
                     const value = @as(i64, coefficient) + level_shift;
                     if (options.resolution_reduction == 0 and options.quality_layer_limit == 0 and
@@ -10959,9 +11277,21 @@ fn decodeStrictMultiTileNative(
                 }
             }
         }
+
+        const reduced_overlap_x0 = reducedGridCoordinate(overlap.x0, options.resolution_reduction);
+        const reduced_overlap_y0 = reducedGridCoordinate(overlap.y0, options.resolution_reduction);
+        const reduced_overlap_x1 = reducedGridCoordinate(overlap.x1, options.resolution_reduction);
+        const reduced_overlap_y1 = reducedGridCoordinate(overlap.y1, options.resolution_reduction);
+        if (reduced_overlap_x1 == reduced_overlap_x0 or reduced_overlap_y1 == reduced_overlap_y0) continue;
+        try sink.writeTile(.{
+            .tile_index = tile_index,
+            .x0 = reduced_overlap_x0,
+            .y0 = reduced_overlap_y0,
+            .width = @as(usize, reduced_overlap_x1 - reduced_overlap_x0),
+            .height = @as(usize, reduced_overlap_y1 - reduced_overlap_y0),
+            .components = windows.components,
+        });
     }
-    try output.validateSamples();
-    return output;
 }
 
 /// Stage C multi-tile decode (docs/multi_tile_plan.md): every tile decodes as

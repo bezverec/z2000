@@ -299,14 +299,16 @@ The foundation landed on 2026-07-17:
   boundary so the conversion sees the same absolute phase as a full image, and
   `cropConvertedChromaAlignedSelection`, which cuts the requested rectangle out
   afterwards.
-- `decodeLosslessPlanarToSink` and `decodeLosslessTemporaryToSink` publish the
-  tile-oriented output contract for planar and interleaved RGB output: `begin`
-  reports the complete window once, `writeTile` then hands over one borrowed
-  strided window per non-empty selected tile in codestream tile order. Neither
-  multi-tile loop allocates the whole raster, and each legacy whole-raster API
-  is implemented as one sink over its loop. The native and upsampled paths, the
-  CLI TIFF writer, incremental codestream input, and row-oriented synthesis
-  inside a single large tile remain open.
+- `decodeLosslessPlanarToSink`, `decodeLosslessTemporaryToSink`, and
+  `decodeLosslessNativeToSink` publish the tile-oriented output contract for
+  planar, interleaved RGB, and native output: `begin` reports the complete
+  window once, `writeTile` then hands over one window per non-empty selected
+  tile in codestream tile order. No multi-tile loop allocates the whole output,
+  and each legacy whole-raster API is implemented as one sink over its loop.
+  Native windows carry their component's precision, signedness, sampling step,
+  and CRG registration. The upsampled path, the CLI TIFF writer, incremental
+  codestream input, and row-oriented synthesis inside a single large tile
+  remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -675,26 +677,29 @@ selectors. The bounded colour layouts are done: selected and reduced
 reference-grid upsampling and selected sampled sYCC conversion all share the
 same absolute window arithmetic.
 
-The output end now has an agreed contract on the planar and interleaved RGB
-paths. `decodeLosslessPlanarToSink` and `decodeLosslessTemporaryToSink` report
-the complete output geometry once through `begin` and then one `writeTile` per
-non-empty selected tile, in codestream tile order, in absolute reduced
-reference- and component-grid coordinates with borrowed strided sample spans.
-Neither multi-tile loop allocates the whole raster; each legacy whole-raster API
-is one sink over its own loop, so both shapes accept exactly the same
-codestreams through `checkStrictPlanarProfile` and `checkStrictRgbProfile`, and
-the RGB path shares its private BP8 sidecar shortcut through
-`legacyTemporaryRgbImage`. Peak decoder allocation on either sink path is one
-tile plus whatever the sink retains, pinned by a tracking allocator, and a
-reassembling sink pins that the regions are exact, disjoint, and complete
-across full, reduced, tile-selected, and region-selected combinations at 1 and
-8 threads.
+The output end now has an agreed contract on all three bounded decode output
+shapes. `decodeLosslessPlanarToSink`, `decodeLosslessTemporaryToSink`, and
+`decodeLosslessNativeToSink` report the complete output geometry once through
+`begin` and then one `writeTile` per non-empty selected tile, in codestream
+tile order, in absolute reduced reference- and component-grid coordinates. The
+planar and RGB windows borrow the tile raster with a stride; native windows are
+materialized per tile because native decode converts `i32` coefficients into
+level-shifted, range-checked `i64` samples on the way out. No multi-tile loop
+allocates the whole output; each legacy whole-raster API is one sink over its
+own loop, so both shapes accept exactly the same codestreams through
+`checkStrictPlanarProfile`, `checkStrictRgbProfile`, and
+`checkStrictNativeProfile`, and the RGB path shares its private BP8 sidecar
+shortcut through `legacyTemporaryRgbImage`. Peak decoder allocation on any sink
+path is one tile plus whatever the sink retains, pinned by a tracking
+allocator, and a reassembling sink pins that the regions are exact, disjoint,
+and complete across full, reduced, tile-selected, and region-selected
+combinations at 1 and 8 threads.
 
 What remains on this item:
 
-1. Promote the same sink contract to the reversible native and reference-grid-
-   upsampled output paths, and then to the CLI TIFF writer so a conversion
-   never materializes the whole raster either.
+1. Promote the same sink contract to the reference-grid-upsampled output path,
+   and then to the CLI TIFF writer so a conversion never materializes the whole
+   raster either.
 2. A large selected tile still runs a full inverse DWT into a full-tile plane.
    Row-oriented output inside one tile needs banded synthesis, not just a
    different sink shape.
