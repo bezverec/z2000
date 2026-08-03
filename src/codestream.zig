@@ -442,6 +442,41 @@ pub const TileSinkInfo = struct {
     components: []const TileSinkComponentLayout,
 };
 
+/// Complete geometry of an interleaved RGB output window, reported once before
+/// the first tile. The RGB path is fixed at three components on a common grid,
+/// so there is no per-component layout; `tiles_selected` is exactly the number
+/// of `writeTile` calls that will follow.
+pub const RgbTileSinkInfo = struct {
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    tiles_total: u64,
+    tiles_selected: u64,
+};
+
+/// One decoded tile of an interleaved RGB raster, already intersected with the
+/// requested output window and expressed in absolute reduced reference-grid
+/// coordinates. `samples` borrows decoder-owned memory and holds three
+/// interleaved samples per pixel; row `index` starts at `index * stride` and is
+/// `width * 3` samples long.
+pub const RgbTileSinkRegion = struct {
+    tile_index: u32,
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    stride: usize,
+    bit_depth: u8,
+    samples: []const u16,
+
+    pub fn row(self: RgbTileSinkRegion, index: usize) []const u16 {
+        const start = index * self.stride;
+        return self.samples[start .. start + self.width * 3];
+    }
+};
+
 pub const DecodeTimings = struct {
     total_ns: u64 = 0,
     sidecar_or_legacy_ns: u64 = 0,
@@ -3490,6 +3525,123 @@ pub fn decodeLosslessTemporaryWithOptionsProfiled(
     return decodeLosslessTemporaryWithOptionsMeasured(allocator, bytes, options, timings);
 }
 
+/// Push-based interleaved RGB decode over the same bounded profile, selectors,
+/// and strict validation as `decodeLosslessTemporaryWithOptions`. `sink` is a
+/// pointer whose pointee exposes
+///
+///     pub fn begin(self: *Sink, info: RgbTileSinkInfo) !void
+///     pub fn writeTile(self: *Sink, region: RgbTileSinkRegion) !void
+///
+/// The contract matches `decodeLosslessPlanarToSink`: `begin` runs once, then
+/// one `writeTile` per non-empty selected tile in codestream tile order, with
+/// disjoint regions that together cover the reported window exactly. Sample
+/// spans borrow tile-local memory and hold three interleaved samples per pixel.
+///
+/// Only a strict multi-tile stream streams tile by tile. A single-tile stream
+/// and the private BP8 sidecar shortcut have one tile by definition, so they
+/// are decoded once and reported as a single region; that keeps acceptance
+/// identical to the whole-raster entry point instead of introducing a second,
+/// narrower profile.
+pub fn decodeLosslessTemporaryToSink(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+) !void {
+    return decodeLosslessTemporaryToSinkMeasured(allocator, bytes, options, sink, null);
+}
+
+pub fn decodeLosslessTemporaryToSinkProfiled(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+    timings: *DecodeTimings,
+) !void {
+    timings.* = .{};
+    return decodeLosslessTemporaryToSinkMeasured(allocator, bytes, options, sink, timings);
+}
+
+fn decodeLosslessTemporaryToSinkMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+    timings: ?*DecodeTimings,
+) !void {
+    const total_start = monotonicNs();
+    defer {
+        if (timings) |t| t.total_ns = elapsedNs(total_start);
+    }
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
+    if (try legacyTemporaryRgbImage(allocator, bytes, options, timings)) |legacy| {
+        var decoded = legacy;
+        defer decoded.deinit();
+        // The shortcut only runs without selectors and without reduction, so
+        // this raster is the whole image and its absolute origin is the SIZ
+        // origin. A pure legacy payload has no SIZ to read and starts at zero.
+        var origin_x: u32 = 0;
+        var origin_y: u32 = 0;
+        if (readStrictCodestreamMetadata(allocator, bytes)) |parsed| {
+            var parsed_header = parsed;
+            defer parsed_header.deinit();
+            origin_x = parsed_header.reference_x0;
+            origin_y = parsed_header.reference_y0;
+        } else |_| {}
+        return emitWholeRgbImageRegion(decoded, origin_x, origin_y, sink);
+    }
+
+    const metadata_start = monotonicNs();
+    var header = try readStrictCodestreamMetadata(allocator, bytes);
+    defer header.deinit();
+    if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+    try checkStrictRgbProfile(header, options);
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return decodeStrictMultiTileImageToSink(allocator, bytes, header, options, timings, sink);
+    }
+
+    var decoded = try decodeStrictSingleTileImageMeasured(allocator, bytes, header, options, timings);
+    defer decoded.deinit();
+    const window = (try strictSingleTileReferenceRect(header, options)) orelse
+        try strictImageReferenceRect(header);
+    return emitWholeRgbImageRegion(
+        decoded,
+        reducedGridCoordinate(window.x0, options.resolution_reduction),
+        reducedGridCoordinate(window.y0, options.resolution_reduction),
+        sink,
+    );
+}
+
+/// Reports a fully reconstructed raster as the one region its stream can
+/// produce, using the same absolute reduced coordinates the multi-tile loop
+/// emits.
+fn emitWholeRgbImageRegion(
+    decoded: image.RgbImage,
+    x0: u32,
+    y0: u32,
+    sink: anytype,
+) !void {
+    try sink.begin(.{
+        .x0 = x0,
+        .y0 = y0,
+        .width = decoded.width,
+        .height = decoded.height,
+        .bit_depth = decoded.bit_depth,
+        .tiles_total = 1,
+        .tiles_selected = 1,
+    });
+    try sink.writeTile(.{
+        .tile_index = 0,
+        .x0 = x0,
+        .y0 = y0,
+        .width = decoded.width,
+        .height = decoded.height,
+        .stride = decoded.width * 3,
+        .bit_depth = decoded.bit_depth,
+        .samples = decoded.samples,
+    });
+}
+
 pub fn decodeLosslessGray(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -4885,39 +5037,67 @@ fn decodeLosslessTemporaryWithOptionsMeasured(
     }
 
     if (options.threads == 0) return CodestreamError.InvalidCodestream;
-    if (options.resolution_reduction == 0 and
-        options.quality_layer_limit == 0 and
-        options.tile_index == null and
-        options.reference_region == null)
-    {
-        if (try temporaryPayloadFromComments(allocator, bytes)) |payload| {
-            defer allocator.free(payload);
-            const sidecar_start = monotonicNs();
-            if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
-                if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
-                return strict;
-            }
-            _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload, options);
-            if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
-            return decodeTemporaryPayloadWithOptionsMeasured(allocator, payload, options, timings);
-        }
-    }
+    if (try legacyTemporaryRgbImage(allocator, bytes, options, timings)) |legacy| return legacy;
 
     const metadata_start = monotonicNs();
     var header = try readStrictCodestreamMetadata(allocator, bytes);
     defer header.deinit();
     if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+    try checkStrictRgbProfile(header, options);
+    // Multi-tile headers carry the real SIZ tile dimensions (single-tile
+    // metadata leaves them zero); route them through the per-tile decode.
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return decodeStrictMultiTileImageMeasured(allocator, bytes, header, options, timings);
+    }
+    return decodeStrictSingleTileImageMeasured(allocator, bytes, header, options, timings);
+}
+
+/// The private BP8 COM sidecar shortcut, shared by the whole-raster and sink
+/// entry points so both accept exactly the same inputs. Returns null when the
+/// stream carries no sidecar or a selector rules the shortcut out.
+fn legacyTemporaryRgbImage(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !?image.RgbImage {
+    if (options.resolution_reduction != 0 or
+        options.quality_layer_limit != 0 or
+        options.tile_index != null or
+        options.reference_region != null)
+    {
+        return null;
+    }
+    const payload = (try temporaryPayloadFromComments(allocator, bytes)) orelse return null;
+    defer allocator.free(payload);
+    const sidecar_start = monotonicNs();
+    if (try decodeStrictRpclImageWithTemporaryMetadata(allocator, bytes, payload, options)) |strict| {
+        if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
+        return strict;
+    }
+    _ = try validateStrictRpclPacketsMatchTemporary(allocator, bytes, payload, options);
+    if (timings) |t| t.sidecar_or_legacy_ns += elapsedNs(sidecar_start);
+    return try decodeTemporaryPayloadWithOptionsMeasured(allocator, payload, options, timings);
+}
+
+/// Shared interleaved-RGB profile gate for the whole-raster and tile-sink entry
+/// points, so both accept exactly the same codestreams.
+fn checkStrictRgbProfile(header: TemporaryHeader, options: DecodeOptions) !void {
     if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     if (headerHasSignedComponent(header)) return CodestreamError.UnsupportedPayload;
     if (header.component_count != 3) return CodestreamError.UnsupportedPayload;
     if (headerHasMixedComponentPrecision(header)) return CodestreamError.UnsupportedPayload;
     if (headerHasComponentSubsampling(header)) return CodestreamError.UnsupportedPayload;
     if (headerHasMixedComponentTransforms(header)) return CodestreamError.UnsupportedPayload;
-    // Multi-tile headers carry the real SIZ tile dimensions (single-tile
-    // metadata leaves them zero); route them through the per-tile decode.
-    if (header.tile_width != 0 or header.tile_height != 0) {
-        return decodeStrictMultiTileImageMeasured(allocator, bytes, header, options, timings);
-    }
+}
+
+fn decodeStrictSingleTileImageMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) !image.RgbImage {
     const requested_region = try strictSingleTileReferenceRect(header, options);
     if (options.tile_index) |selected| {
         if (selected != 0) return CodestreamError.InvalidCodestream;
@@ -10798,6 +10978,67 @@ fn decodeStrictMultiTileImageMeasured(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !image.RgbImage {
+    var assembling = AssemblingRgbTileSink{ .allocator = allocator };
+    errdefer assembling.deinit();
+    try decodeStrictMultiTileImageToSink(allocator, bytes, header, options, timings, &assembling);
+    return assembling.take();
+}
+
+/// Whole-raster sink used by the legacy interleaved RGB API: it allocates the
+/// complete output once from `begin` and copies each tile window into place,
+/// which is exactly what the assembling loop did before the sink contract
+/// existed.
+const AssemblingRgbTileSink = struct {
+    allocator: std.mem.Allocator,
+    decoded: ?image.RgbImage = null,
+    origin_x: u32 = 0,
+    origin_y: u32 = 0,
+
+    fn begin(self: *AssemblingRgbTileSink, info: RgbTileSinkInfo) !void {
+        const pixels = try std.math.mul(usize, info.width, info.height);
+        const samples = try self.allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
+        self.origin_x = info.x0;
+        self.origin_y = info.y0;
+        self.decoded = .{
+            .allocator = self.allocator,
+            .width = info.width,
+            .height = info.height,
+            .bit_depth = info.bit_depth,
+            .samples = samples,
+        };
+    }
+
+    fn writeTile(self: *AssemblingRgbTileSink, region: RgbTileSinkRegion) !void {
+        if (self.decoded == null) return CodestreamError.InvalidCodestream;
+        const decoded = &self.decoded.?;
+        const destination_x = @as(usize, region.x0 - self.origin_x);
+        const destination_y = @as(usize, region.y0 - self.origin_y);
+        for (0..region.height) |row| {
+            const destination_start = ((destination_y + row) * decoded.width + destination_x) * 3;
+            @memcpy(decoded.samples[destination_start..][0 .. region.width * 3], region.row(row));
+        }
+    }
+
+    fn take(self: *AssemblingRgbTileSink) image.RgbImage {
+        const decoded = self.decoded.?;
+        self.decoded = null;
+        return decoded;
+    }
+
+    fn deinit(self: *AssemblingRgbTileSink) void {
+        if (self.decoded) |*decoded| decoded.deinit();
+        self.decoded = null;
+    }
+};
+
+fn decodeStrictMultiTileImageToSink(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+    sink: anytype,
+) !void {
     var context = try readStrictMultiTileContext(allocator, bytes, header);
     defer context.deinit();
     const window = try strictTileDecodeWindow(context, header, options);
@@ -10813,16 +11054,31 @@ fn decodeStrictMultiTileImageMeasured(
         window.reference_rect.height(),
         options.resolution_reduction,
     );
-    const pixels = try std.math.mul(usize, decoded_width, decoded_height);
-    const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, 3));
-    errdefer allocator.free(samples);
-    const assembled = image.RgbImage{
-        .allocator = allocator,
+    var selected_tiles: u64 = 0;
+    {
+        var index: u32 = 0;
+        while (index < context.grid.tileCount()) : (index += 1) {
+            const tile = context.grid.tile(index) catch return CodestreamError.InvalidCodestream;
+            if (!window.includes(index, tile.rect)) continue;
+            const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
+                return CodestreamError.InvalidCodestream;
+            const reduced_x0 = reducedGridCoordinate(overlap.x0, options.resolution_reduction);
+            const reduced_y0 = reducedGridCoordinate(overlap.y0, options.resolution_reduction);
+            const reduced_x1 = reducedGridCoordinate(overlap.x1, options.resolution_reduction);
+            const reduced_y1 = reducedGridCoordinate(overlap.y1, options.resolution_reduction);
+            if (reduced_x1 == reduced_x0 or reduced_y1 == reduced_y0) continue;
+            selected_tiles += 1;
+        }
+    }
+    try sink.begin(.{
+        .x0 = reducedGridCoordinate(window.reference_rect.x0, options.resolution_reduction),
+        .y0 = reducedGridCoordinate(window.reference_rect.y0, options.resolution_reduction),
         .width = decoded_width,
         .height = decoded_height,
         .bit_depth = header.bit_depth,
-        .samples = samples,
-    };
+        .tiles_total = context.grid.tileCount(),
+        .tiles_selected = selected_tiles,
+    });
 
     var tile_index: u32 = 0;
     while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
@@ -10945,21 +11201,26 @@ fn decodeStrictMultiTileImageMeasured(
         const copy_width = @as(usize, reduced_overlap_x1 - reduced_overlap_x0);
         const copy_height = @as(usize, reduced_overlap_y1 - reduced_overlap_y0);
         if (source_x + copy_width > tile_width or source_y + copy_height > tile_height or
-            destination_x + copy_width > assembled.width or destination_y + copy_height > assembled.height)
+            destination_x + copy_width > decoded_width or destination_y + copy_height > decoded_height)
         {
             return CodestreamError.InvalidCodestream;
         }
-        for (0..copy_height) |row| {
-            const source_start = ((source_y + row) * tile_width + source_x) * 3;
-            const destination_start = ((destination_y + row) * assembled.width + destination_x) * 3;
-            @memcpy(
-                assembled.samples[destination_start..][0 .. copy_width * 3],
-                tile_image.samples[source_start..][0 .. copy_width * 3],
-            );
-        }
+        // Reduction can collapse a non-empty overlap; such a tile contributes
+        // nothing and is not reported, so tiles_selected stays exact.
+        if (copy_width == 0 or copy_height == 0) continue;
+        const source_start = ((source_y * tile_width) + source_x) * 3;
+        const source_end = (((source_y + copy_height - 1) * tile_width) + source_x + copy_width) * 3;
+        try sink.writeTile(.{
+            .tile_index = tile_index,
+            .x0 = reduced_overlap_x0,
+            .y0 = reduced_overlap_y0,
+            .width = copy_width,
+            .height = copy_height,
+            .stride = tile_width * 3,
+            .bit_depth = header.bit_depth,
+            .samples = tile_image.samples[source_start..source_end],
+        });
     }
-
-    return assembled;
 }
 
 /// Aggregated multi-tile packet/header audit for `jp2 stats`: the per-tile

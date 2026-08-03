@@ -281,6 +281,8 @@ Primary public types:
 - `TileSinkComponentLayout`
 - `TileSinkRegion`
 - `TileSinkComponent`
+- `RgbTileSinkInfo`
+- `RgbTileSinkRegion`
 - `TemporaryStats`
 - `ComponentStats`
 - `QualityLayerStats`
@@ -517,6 +519,21 @@ Primary public functions:
   applicable and saturated to the declared unsigned precision. Common-grid
   multi-tile RCT/5/3 and ICT/9/7 are reconstructed independently per tile and
   copied directly into their reduced absolute grid bounds
+- `decodeLosslessTemporaryToSink(allocator, bytes, options, sink)` /
+  `decodeLosslessTemporaryToSinkProfiled(allocator, bytes, options, sink, timings)`
+  — push-based interleaved RGB output over the same bounded profile, selectors,
+  and strict validation as `decodeLosslessTemporaryWithOptions`. `sink` is a
+  pointer whose pointee exposes `pub fn begin(self, info: RgbTileSinkInfo) !void`
+  and `pub fn writeTile(self, region: RgbTileSinkRegion) !void`. The contract
+  matches `decodeLosslessPlanarToSink`: `begin` runs once with the requested
+  reduced reference-grid window, then one `writeTile` per non-empty selected
+  tile in codestream tile order, with disjoint regions that together cover that
+  window exactly. `RgbTileSinkRegion.samples` borrows tile-local memory holding
+  three interleaved samples per pixel, and `row(index)` returns the
+  `width * 3` samples of one row. A multi-tile stream never materializes the
+  complete raster; a single-tile stream and the private BP8 sidecar shortcut
+  have one tile by definition and are reported as one region, so acceptance
+  stays identical to the whole-raster entry point
 - `analyzeLosslessTemporary(bytes)`
 - `hasMarker(bytes, marker)`
 - `markerValue(name)`

@@ -225,18 +225,23 @@ Because coefficients outside the window are deliberately incomplete, region
 decode saturates intermediate samples to the declared range exactly like the
 resolution and quality-layer selectors.
 
-The multi-tile planar loop hands each reconstructed tile to a tile sink instead
-of owning the output raster. A sink receives the complete window and
-per-component layouts once through `begin`, then one borrowed strided window per
-non-empty selected tile through `writeTile`, in codestream tile order and in
-absolute reduced coordinates. `decodeLosslessPlanarWithOptions` is one sink over
-that loop — `AssemblingPlanarTileSink` allocates the whole raster from `begin`
-and copies each window into place — so the whole-raster and streaming shapes
-cannot diverge in what they accept or produce; the profile gate itself is shared
-through `checkStrictPlanarProfile`. A single-tile stream reports one region, so
-the contract is total across tile layouts. Codestream input is still read whole
-and a selected tile still runs a full inverse DWT into a full-tile plane, so
-those are the remaining memory boundaries.
+The multi-tile planar and interleaved RGB loops hand each reconstructed tile to
+a tile sink instead of owning the output raster. A sink receives the complete
+window once through `begin` — with per-component layouts on the planar path,
+and a single common grid on the RGB path, which is fixed at three components —
+then one borrowed strided window per non-empty selected tile through
+`writeTile`, in codestream tile order and in absolute reduced coordinates.
+`decodeLosslessPlanarWithOptions` and `decodeLosslessTemporaryWithOptions` are
+each one sink over their loop: `AssemblingPlanarTileSink` and
+`AssemblingRgbTileSink` allocate the whole raster from `begin` and copy each
+window into place. The whole-raster and streaming shapes therefore cannot
+diverge in what they accept or produce; the profile gates themselves are shared
+through `checkStrictPlanarProfile` and `checkStrictRgbProfile`, and the RGB
+path additionally shares its private BP8 sidecar shortcut through
+`legacyTemporaryRgbImage`. A single-tile stream reports one region, so the
+contract is total across tile layouts. Codestream input is still read whole and
+a selected tile still runs a full inverse DWT into a full-tile plane, so those
+are the remaining memory boundaries.
 
 The former BP8 COM sidecar is not part of normal output. It remains an optional
 debug/compatibility oracle for tests and old fixtures.

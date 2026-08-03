@@ -5,6 +5,31 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile-Oriented Interleaved RGB Output Sink
+
+- `decodeLosslessTemporaryToSink` / `decodeLosslessTemporaryToSinkProfiled`
+  extend the tile-sink contract to the interleaved RGB path with
+  `RgbTileSinkInfo` and `RgbTileSinkRegion`. The RGB profile is fixed at three
+  components on a common grid, so a region carries one borrowed strided span of
+  three interleaved samples per pixel instead of per-component windows.
+- The multi-tile RGB loop no longer allocates the whole raster;
+  `decodeLosslessTemporaryWithOptions` is now one sink over that loop through
+  `AssemblingRgbTileSink`, matching what the planar path already does.
+- Acceptance is identical between both output shapes. The profile gate moved
+  into `checkStrictRgbProfile`, the single-tile body into
+  `decodeStrictSingleTileImageMeasured`, and the private BP8 COM sidecar
+  shortcut into `legacyTemporaryRgbImage`, which both entry points call in the
+  same order. A single-tile stream and a sidecar stream have one tile by
+  definition, so they decode once and are reported as a single region rather
+  than becoming a second, narrower profile; the sidecar region takes its
+  absolute origin from SIZ when the stream has one.
+- A six-tile 96x64 stream pins the contract against the whole-raster decode
+  over full, reduced, tile-selected, and region-selected combinations at 1 and
+  8 threads, with a reassembling sink counting writes per output pixel. A
+  tracking allocator pins the sink path's peak allocation strictly below the
+  whole-raster path, a rejecting sink pins error propagation, and the selector
+  validation is pinned identical across both shapes.
+
 ### Tile-Oriented Planar Output Sink
 
 - Added `decodeLosslessPlanarToSink` / `decodeLosslessPlanarToSinkProfiled`

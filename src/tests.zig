@@ -33365,6 +33365,240 @@ const CountingTileSink = struct {
     }
 };
 
+/// Reassembles every emitted interleaved RGB window and counts how often each
+/// output pixel was written, so one comparison proves that the regions are
+/// exact, disjoint, and complete.
+const ReassemblingRgbTileSink = struct {
+    allocator: std.mem.Allocator,
+    begun: bool = false,
+    x0: u32 = 0,
+    y0: u32 = 0,
+    width: usize = 0,
+    height: usize = 0,
+    bit_depth: u8 = 0,
+    tiles_total: u64 = 0,
+    tiles_selected: u64 = 0,
+    tiles_written: u64 = 0,
+    reject_at_tile: ?u64 = null,
+    samples: []u16 = &.{},
+    writes: []u8 = &.{},
+
+    const SinkError = error{SinkRejected};
+
+    pub fn begin(self: *ReassemblingRgbTileSink, info: codestream.RgbTileSinkInfo) !void {
+        try std.testing.expect(!self.begun);
+        self.begun = true;
+        self.x0 = info.x0;
+        self.y0 = info.y0;
+        self.width = info.width;
+        self.height = info.height;
+        self.bit_depth = info.bit_depth;
+        self.tiles_total = info.tiles_total;
+        self.tiles_selected = info.tiles_selected;
+        const pixels = info.width * info.height;
+        self.samples = try self.allocator.alloc(u16, pixels * 3);
+        @memset(self.samples, 0);
+        self.writes = try self.allocator.alloc(u8, pixels);
+        @memset(self.writes, 0);
+    }
+
+    pub fn writeTile(self: *ReassemblingRgbTileSink, region: codestream.RgbTileSinkRegion) !void {
+        try std.testing.expect(self.begun);
+        if (self.reject_at_tile) |index| {
+            if (self.tiles_written == index) return SinkError.SinkRejected;
+        }
+        try std.testing.expect(region.width > 0 and region.height > 0);
+        try std.testing.expectEqual(self.bit_depth, region.bit_depth);
+        try std.testing.expect(region.x0 >= self.x0 and region.y0 >= self.y0);
+        const destination_x = @as(usize, region.x0 - self.x0);
+        const destination_y = @as(usize, region.y0 - self.y0);
+        try std.testing.expect(destination_x + region.width <= self.width);
+        try std.testing.expect(destination_y + region.height <= self.height);
+        for (0..region.height) |row| {
+            const start = (destination_y + row) * self.width + destination_x;
+            @memcpy(self.samples[start * 3 ..][0 .. region.width * 3], region.row(row));
+            for (self.writes[start..][0..region.width]) |*written| written.* += 1;
+        }
+        self.tiles_written += 1;
+    }
+
+    fn expectMatches(self: *ReassemblingRgbTileSink, expected: image.RgbImage) !void {
+        try std.testing.expect(self.begun);
+        try std.testing.expectEqual(self.tiles_selected, self.tiles_written);
+        try std.testing.expectEqual(expected.width, self.width);
+        try std.testing.expectEqual(expected.height, self.height);
+        try std.testing.expectEqual(expected.bit_depth, self.bit_depth);
+        try std.testing.expectEqualSlices(u16, expected.samples, self.samples);
+        for (self.writes) |written| try std.testing.expectEqual(@as(u8, 1), written);
+    }
+
+    fn deinit(self: *ReassemblingRgbTileSink) void {
+        if (self.samples.len != 0) self.allocator.free(self.samples);
+        if (self.writes.len != 0) self.allocator.free(self.writes);
+        self.samples = &.{};
+        self.writes = &.{};
+    }
+};
+
+/// Minimal RGB sink that keeps nothing, so a peak-allocation measurement
+/// reflects the decoder rather than the consumer.
+const CountingRgbTileSink = struct {
+    tiles_written: u64 = 0,
+    pixels_seen: u64 = 0,
+
+    pub fn begin(self: *CountingRgbTileSink, info: codestream.RgbTileSinkInfo) !void {
+        _ = self;
+        _ = info;
+    }
+
+    pub fn writeTile(self: *CountingRgbTileSink, region: codestream.RgbTileSinkRegion) !void {
+        self.pixels_seen += @as(u64, region.width) * @as(u64, region.height);
+        self.tiles_written += 1;
+    }
+};
+
+test "multi-tile RGB decode streams tiles through an output sink" {
+    const allocator = std.testing.allocator;
+    const width = 96;
+    const height = 64;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+
+    const region = codestream.DecodeRegion{ .x0 = 36, .y0 = 12, .width = 44, .height = 40 };
+    const cases = [_]struct {
+        options: codestream.DecodeOptions,
+        tiles_written: u64,
+    }{
+        .{ .options = .{ .threads = 1 }, .tiles_written = 6 },
+        .{ .options = .{ .threads = 8 }, .tiles_written = 6 },
+        .{ .options = .{ .threads = 1, .resolution_reduction = 1 }, .tiles_written = 6 },
+        .{ .options = .{ .threads = 8, .resolution_reduction = 2 }, .tiles_written = 6 },
+        .{ .options = .{ .threads = 1, .tile_index = 4 }, .tiles_written = 1 },
+        .{ .options = .{ .threads = 8, .tile_index = 4, .resolution_reduction = 1 }, .tiles_written = 1 },
+        .{ .options = .{ .threads = 1, .reference_region = region }, .tiles_written = 4 },
+        .{
+            .options = .{ .threads = 8, .reference_region = region, .resolution_reduction = 1 },
+            .tiles_written = 4,
+        },
+    };
+
+    for (cases) |case| {
+        var expected = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, case.options);
+        defer expected.deinit();
+
+        var sink = ReassemblingRgbTileSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessTemporaryToSink(allocator, bytes, case.options, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(@as(u64, 6), sink.tiles_total);
+        try std.testing.expectEqual(case.tiles_written, sink.tiles_written);
+    }
+
+    // The sink path must not allocate the complete raster. Both runs share the
+    // same tile work, so the difference is the output allocation itself.
+    var raster_tracker = PeakAllocator{ .parent = allocator };
+    var raster = try codestream.decodeLosslessTemporaryWithOptions(
+        raster_tracker.allocator(),
+        bytes,
+        .{ .threads = 1 },
+    );
+    const raster_peak = raster_tracker.peak;
+    const raster_bytes = raster.samples.len * @sizeOf(u16);
+    raster.deinit();
+    try std.testing.expectEqual(@as(usize, 0), raster_tracker.live);
+
+    var sink_tracker = PeakAllocator{ .parent = allocator };
+    var counting = CountingRgbTileSink{};
+    try codestream.decodeLosslessTemporaryToSink(
+        sink_tracker.allocator(),
+        bytes,
+        .{ .threads = 1 },
+        &counting,
+    );
+    try std.testing.expectEqual(@as(u64, 6), counting.tiles_written);
+    try std.testing.expectEqual(@as(u64, width * height), counting.pixels_seen);
+    try std.testing.expectEqual(@as(usize, 0), sink_tracker.live);
+    try std.testing.expect(sink_tracker.peak + raster_bytes <= raster_peak);
+
+    // A sink error aborts the decode and propagates unchanged.
+    var rejecting = ReassemblingRgbTileSink{ .allocator = allocator, .reject_at_tile = 3 };
+    defer rejecting.deinit();
+    try std.testing.expectError(
+        ReassemblingRgbTileSink.SinkError.SinkRejected,
+        codestream.decodeLosslessTemporaryToSink(allocator, bytes, .{ .threads = 1 }, &rejecting),
+    );
+    try std.testing.expectEqual(@as(u64, 3), rejecting.tiles_written);
+
+    // The same selector validation applies to both output shapes.
+    var unused = CountingRgbTileSink{};
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryToSink(
+            allocator,
+            bytes,
+            .{ .tile_index = 1, .reference_region = region },
+            &unused,
+        ),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryToSink(
+            allocator,
+            bytes,
+            .{ .reference_region = .{ .x0 = 95, .y0 = 0, .width = 2, .height = 8 } },
+            &unused,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), unused.tiles_written);
+}
+
+test "single-tile RGB decode reports one sink region for the requested window" {
+    const allocator = std.testing.allocator;
+    const width = 61;
+    const height = 47;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 2 });
+    defer allocator.free(bytes);
+
+    const region = codestream.DecodeRegion{ .x0 = 7, .y0 = 5, .width = 24, .height = 19 };
+    const cases = [_]codestream.DecodeOptions{
+        .{ .threads = 1 },
+        .{ .threads = 8 },
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{ .threads = 8, .reference_region = region },
+        .{ .threads = 1, .reference_region = region, .resolution_reduction = 1 },
+        .{ .threads = 8, .tile_index = 0 },
+    };
+    for (cases) |options| {
+        var expected = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, options);
+        defer expected.deinit();
+
+        var sink = ReassemblingRgbTileSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessTemporaryToSink(allocator, bytes, options, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(@as(u64, 1), sink.tiles_total);
+        try std.testing.expectEqual(@as(u64, 1), sink.tiles_written);
+    }
+}
+
 test "single-tile planar decode reports one sink region for the requested window" {
     const allocator = std.testing.allocator;
     const width = 61;
