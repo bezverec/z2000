@@ -33043,6 +33043,369 @@ test "sampled reversible multi-tile decode reconstructs requested native resolut
     }
 }
 
+/// Tracks live and peak bytes so a test can prove that a decode path never
+/// allocates the complete raster.
+const PeakAllocator = struct {
+    parent: std.mem.Allocator,
+    live: usize = 0,
+    peak: usize = 0,
+
+    fn allocator(self: *PeakAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn note(self: *PeakAllocator) void {
+        if (self.live > self.peak) self.peak = self.live;
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *PeakAllocator = @ptrCast(@alignCast(context));
+        const result = self.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.live += len;
+        self.note();
+        return result;
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *PeakAllocator = @ptrCast(@alignCast(context));
+        if (!self.parent.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        self.live = self.live - memory.len + new_len;
+        self.note();
+        return true;
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *PeakAllocator = @ptrCast(@alignCast(context));
+        const result = self.parent.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        self.live = self.live - memory.len + new_len;
+        self.note();
+        return result;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *PeakAllocator = @ptrCast(@alignCast(context));
+        self.parent.rawFree(memory, alignment, ret_addr);
+        self.live -= memory.len;
+    }
+};
+
+/// Reassembles every emitted tile window into whole planes and counts how often
+/// each output sample was written, so one comparison proves that the regions
+/// are exact, disjoint, and complete.
+const ReassemblingTileSink = struct {
+    allocator: std.mem.Allocator,
+    begun: bool = false,
+    x0: u32 = 0,
+    y0: u32 = 0,
+    width: usize = 0,
+    height: usize = 0,
+    tiles_total: u64 = 0,
+    tiles_selected: u64 = 0,
+    tiles_written: u64 = 0,
+    reject_at_tile: ?u64 = null,
+    component_count: usize = 0,
+    layouts: [color.max_components]codestream.TileSinkComponentLayout = undefined,
+    planes: [color.max_components][]u16 = .{&.{}} ** color.max_components,
+    writes: [color.max_components][]u8 = .{&.{}} ** color.max_components,
+
+    const SinkError = error{SinkRejected};
+
+    pub fn begin(self: *ReassemblingTileSink, info: codestream.TileSinkInfo) !void {
+        try std.testing.expect(!self.begun);
+        self.begun = true;
+        self.x0 = info.x0;
+        self.y0 = info.y0;
+        self.width = info.width;
+        self.height = info.height;
+        self.tiles_total = info.tiles_total;
+        self.tiles_selected = info.tiles_selected;
+        self.component_count = info.components.len;
+        for (info.components, 0..) |layout, index| {
+            self.layouts[index] = layout;
+            const count = layout.width * layout.height;
+            self.planes[index] = try self.allocator.alloc(u16, count);
+            @memset(self.planes[index], 0);
+            self.writes[index] = try self.allocator.alloc(u8, count);
+            @memset(self.writes[index], 0);
+        }
+    }
+
+    pub fn writeTile(self: *ReassemblingTileSink, region: codestream.TileSinkRegion) !void {
+        try std.testing.expect(self.begun);
+        if (self.reject_at_tile) |index| {
+            if (self.tiles_written == index) return SinkError.SinkRejected;
+        }
+        try std.testing.expectEqual(self.component_count, region.components.len);
+        try std.testing.expect(region.width > 0 and region.height > 0);
+        try std.testing.expect(region.x0 >= self.x0 and region.y0 >= self.y0);
+        try std.testing.expect(@as(usize, region.x0 - self.x0) + region.width <= self.width);
+        try std.testing.expect(@as(usize, region.y0 - self.y0) + region.height <= self.height);
+        for (region.components, 0..) |component, index| {
+            const layout = self.layouts[index];
+            try std.testing.expectEqual(layout.bit_depth, component.bit_depth);
+            if (component.width == 0 or component.height == 0) {
+                try std.testing.expectEqual(@as(usize, 0), component.width);
+                try std.testing.expectEqual(@as(usize, 0), component.height);
+                continue;
+            }
+            try std.testing.expect(component.x0 >= layout.x0 and component.y0 >= layout.y0);
+            const destination_x = @as(usize, component.x0 - layout.x0);
+            const destination_y = @as(usize, component.y0 - layout.y0);
+            try std.testing.expect(destination_x + component.width <= layout.width);
+            try std.testing.expect(destination_y + component.height <= layout.height);
+            for (0..component.height) |row| {
+                const start = (destination_y + row) * layout.width + destination_x;
+                @memcpy(self.planes[index][start..][0..component.width], component.row(row));
+                for (self.writes[index][start..][0..component.width]) |*written| written.* += 1;
+            }
+        }
+        self.tiles_written += 1;
+    }
+
+    fn expectMatches(self: *ReassemblingTileSink, expected: color.SamplePlanes) !void {
+        try std.testing.expect(self.begun);
+        try std.testing.expectEqual(self.tiles_selected, self.tiles_written);
+        try std.testing.expectEqual(self.component_count, expected.planes.len);
+        for (0..self.component_count) |index| {
+            const dimensions = expected.componentDimensions(index).?;
+            try std.testing.expectEqual(dimensions[0], self.layouts[index].width);
+            try std.testing.expectEqual(dimensions[1], self.layouts[index].height);
+            try std.testing.expectEqual(
+                expected.componentBitDepth(index).?,
+                self.layouts[index].bit_depth,
+            );
+            try std.testing.expectEqualSlices(u16, expected.planes[index], self.planes[index]);
+            // Every output sample is written by exactly one region, which is
+            // what "disjoint and complete" means for this contract.
+            for (self.writes[index]) |written| try std.testing.expectEqual(@as(u8, 1), written);
+        }
+    }
+
+    fn deinit(self: *ReassemblingTileSink) void {
+        for (0..color.max_components) |index| {
+            if (self.planes[index].len != 0) self.allocator.free(self.planes[index]);
+            if (self.writes[index].len != 0) self.allocator.free(self.writes[index]);
+            self.planes[index] = &.{};
+            self.writes[index] = &.{};
+        }
+    }
+};
+
+test "sampled multi-tile planar decode streams tiles through an output sink" {
+    const allocator = std.testing.allocator;
+    const width = 63;
+    const height = 64;
+    const image_origin_x: u32 = 5;
+    const image_origin_y: u32 = 3;
+    const levels: u8 = 2;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+
+    const encode_options = codestream.LosslessOptions{
+        .levels = levels,
+        .layers = 3,
+        .mct = .none,
+        .image_origin_x = image_origin_x,
+        .image_origin_y = image_origin_y,
+        .tile_origin_x = 1,
+        .tile_origin_y = 0,
+        .tile_width = 23,
+        .tile_height = 19,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+        .sop = true,
+        .eph = true,
+    };
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planes,
+        &sampling,
+        encode_options,
+    );
+    defer allocator.free(encoded);
+    try std.testing.expectEqual(@as(usize, 12), countMarker(encoded, codestream.markerValue("sot")));
+
+    const region = codestream.DecodeRegion{ .x0 = 20, .y0 = 16, .width = 32, .height = 29 };
+    const cases = [_]struct {
+        options: codestream.DecodeOptions,
+        tiles_written: u64,
+    }{
+        .{ .options = .{ .threads = 1 }, .tiles_written = 12 },
+        .{ .options = .{ .threads = 8 }, .tiles_written = 12 },
+        .{ .options = .{ .threads = 1, .resolution_reduction = 1 }, .tiles_written = 12 },
+        .{ .options = .{ .threads = 8, .resolution_reduction = 2 }, .tiles_written = 12 },
+        .{ .options = .{ .threads = 1, .tile_index = 7 }, .tiles_written = 1 },
+        .{ .options = .{ .threads = 8, .tile_index = 7, .resolution_reduction = 1 }, .tiles_written = 1 },
+        .{ .options = .{ .threads = 1, .reference_region = region }, .tiles_written = 9 },
+        .{
+            .options = .{ .threads = 8, .reference_region = region, .resolution_reduction = 1 },
+            .tiles_written = 9,
+        },
+    };
+
+    for (cases) |case| {
+        var expected = try codestream.decodeLosslessPlanarWithOptions(allocator, encoded, case.options);
+        defer expected.deinit();
+
+        var sink = ReassemblingTileSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessPlanarToSink(allocator, encoded, case.options, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(@as(u64, 12), sink.tiles_total);
+        try std.testing.expectEqual(case.tiles_written, sink.tiles_written);
+    }
+
+    // The sink path must not allocate the complete raster. Both runs share the
+    // same tile work, so the difference is the output allocation itself.
+    var raster_tracker = PeakAllocator{ .parent = allocator };
+    var raster = try codestream.decodeLosslessPlanarWithOptions(
+        raster_tracker.allocator(),
+        encoded,
+        .{ .threads = 1 },
+    );
+    const raster_peak = raster_tracker.peak;
+    var raster_samples: usize = 0;
+    for (0..raster.planes.len) |index| raster_samples += raster.planes[index].len;
+    raster.deinit();
+    try std.testing.expectEqual(@as(usize, 0), raster_tracker.live);
+
+    var sink_tracker = PeakAllocator{ .parent = allocator };
+    var counting = CountingTileSink{};
+    try codestream.decodeLosslessPlanarToSink(
+        sink_tracker.allocator(),
+        encoded,
+        .{ .threads = 1 },
+        &counting,
+    );
+    try std.testing.expectEqual(@as(u64, 12), counting.tiles_written);
+    try std.testing.expectEqual(@as(usize, 0), sink_tracker.live);
+    try std.testing.expect(sink_tracker.peak + raster_samples * @sizeOf(u16) <= raster_peak);
+
+    // A sink error aborts the decode and propagates unchanged.
+    var rejecting = ReassemblingTileSink{ .allocator = allocator, .reject_at_tile = 2 };
+    defer rejecting.deinit();
+    try std.testing.expectError(
+        ReassemblingTileSink.SinkError.SinkRejected,
+        codestream.decodeLosslessPlanarToSink(allocator, encoded, .{ .threads = 1 }, &rejecting),
+    );
+    try std.testing.expectEqual(@as(u64, 2), rejecting.tiles_written);
+
+    // The same selector validation applies to both output shapes.
+    var unused = CountingTileSink{};
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarToSink(
+            allocator,
+            encoded,
+            .{ .tile_index = 0, .reference_region = region },
+            &unused,
+        ),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarToSink(
+            allocator,
+            encoded,
+            .{ .resolution_reduction = levels + 1 },
+            &unused,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), unused.tiles_written);
+}
+
+/// Minimal sink that keeps nothing, so a peak-allocation measurement reflects
+/// the decoder rather than the consumer.
+const CountingTileSink = struct {
+    tiles_written: u64 = 0,
+    samples_seen: u64 = 0,
+
+    pub fn begin(self: *CountingTileSink, info: codestream.TileSinkInfo) !void {
+        _ = self;
+        _ = info;
+    }
+
+    pub fn writeTile(self: *CountingTileSink, region: codestream.TileSinkRegion) !void {
+        for (region.components) |component| {
+            self.samples_seen += @as(u64, component.width) * @as(u64, component.height);
+        }
+        self.tiles_written += 1;
+    }
+};
+
+test "single-tile planar decode reports one sink region for the requested window" {
+    const allocator = std.testing.allocator;
+    const width = 61;
+    const height = 47;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
+        .levels = 2,
+        .mct = .none,
+    });
+    defer allocator.free(bytes);
+
+    const region = codestream.DecodeRegion{ .x0 = 7, .y0 = 5, .width = 24, .height = 19 };
+    const cases = [_]codestream.DecodeOptions{
+        .{ .threads = 1 },
+        .{ .threads = 8 },
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{ .threads = 8, .reference_region = region },
+        .{ .threads = 1, .reference_region = region, .resolution_reduction = 1 },
+        .{ .threads = 8, .tile_index = 0 },
+    };
+    for (cases) |options| {
+        var expected = try codestream.decodeLosslessPlanarWithOptions(allocator, bytes, options);
+        defer expected.deinit();
+
+        var sink = ReassemblingTileSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessPlanarToSink(allocator, bytes, options, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(@as(u64, 1), sink.tiles_total);
+        try std.testing.expectEqual(@as(u64, 1), sink.tiles_written);
+    }
+}
+
 test "sampled reversible encode carries untargeted quality layers" {
     const allocator = std.testing.allocator;
     const sampling = [_]codestream.ComponentSampling{

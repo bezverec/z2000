@@ -298,8 +298,14 @@ The foundation landed on 2026-07-17:
   `chromaAlignedSelection`, which aligns the decoded window down to a chroma
   boundary so the conversion sees the same absolute phase as a full image, and
   `cropConvertedChromaAlignedSelection`, which cuts the requested rectangle out
-  afterwards. Codestream input is still read whole and a large tile still runs
-  a full inverse DWT, so incremental input and row-oriented output remain open.
+  afterwards.
+- `decodeLosslessPlanarToSink` publishes the tile-oriented output contract:
+  `begin` reports the complete window and per-component layouts once,
+  `writeTile` then hands over one borrowed strided window per non-empty
+  selected tile in codestream tile order. The multi-tile planar loop no longer
+  allocates the whole raster, and the legacy whole-raster API is implemented as
+  one sink over that loop. Incremental codestream input and row-oriented
+  synthesis inside a single large tile remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -664,15 +670,34 @@ Quality-layer-prefix, resolution-reduction, bounded tile-index selection,
 reference-grid region selection on single- and multi-tile streams, and
 intra-tile code-block pruning that reaches packet assembly are now public on the
 shared normalized packet index, and reference-grid upsampling accepts the same
-selectors. What remains is the input and output ends: a
-large selected tile still runs a full inverse DWT into a full-tile plane, and
-the codestream is still read whole. Add incremental
-codestream input and row/tile-oriented output so peak memory scales with the
-requested working set rather than the complete raster. Both change the public
-decode API shape, so agree the reader/sink contract before implementing either.
-The bounded colour layouts are done: selected and reduced reference-grid
-upsampling and selected sampled sYCC conversion all share the same absolute
-window arithmetic.
+selectors. The bounded colour layouts are done: selected and reduced
+reference-grid upsampling and selected sampled sYCC conversion all share the
+same absolute window arithmetic.
+
+The output end now has an agreed contract. `decodeLosslessPlanarToSink` reports
+the complete output geometry once through `begin` and then one `writeTile` per
+non-empty selected tile, in codestream tile order, in absolute reduced
+reference- and component-grid coordinates with borrowed strided sample spans.
+The multi-tile planar loop no longer allocates the whole raster; the legacy
+whole-raster API is one sink over that same loop, so both shapes accept exactly
+the same codestreams through `checkStrictPlanarProfile`. Peak decoder
+allocation on the sink path is one tile plus whatever the sink retains, pinned
+by a tracking allocator, and a reassembling sink pins that the regions are
+exact, disjoint, and complete across full, reduced, tile-selected, and
+region-selected combinations at 1 and 8 threads.
+
+What remains on this item:
+
+1. Promote the same sink contract to the interleaved RGB, reversible native,
+   and reference-grid-upsampled output paths, and then to the CLI TIFF writer
+   so a conversion never materializes the whole raster either.
+2. A large selected tile still runs a full inverse DWT into a full-tile plane.
+   Row-oriented output inside one tile needs banded synthesis, not just a
+   different sink shape.
+3. The codestream is still read whole. Incremental input changes the reader
+   side of the public API and interacts with PLT/TLM random access and with the
+   borrowed spans the production single-tile reader already returns; agree that
+   reader contract before implementing it.
 
 For every selection mode, compare the result with the corresponding crop or
 reduction of a full strict decode. Cover odd origins, subsampling, ROI, tile

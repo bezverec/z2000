@@ -277,6 +277,10 @@ Primary public types:
 - `EncodeTimings`
 - `DecodeTimings`
 - `DecodeOptions`
+- `TileSinkInfo`
+- `TileSinkComponentLayout`
+- `TileSinkRegion`
+- `TileSinkComponent`
 - `TemporaryStats`
 - `ComponentStats`
 - `QualityLayerStats`
@@ -464,6 +468,26 @@ Primary public functions:
   grid by nearest-neighbour replication anchored to absolute image origin;
   no colour transform is implied. This full-grid helper currently requires
   `resolution_reduction == 0`
+- `decodeLosslessPlanarToSink(allocator, bytes, options, sink)` /
+  `decodeLosslessPlanarToSinkProfiled(allocator, bytes, options, sink, timings)`
+  — push-based output over the same bounded profile, selectors, and strict
+  validation as `decodeLosslessPlanarWithOptions`. `sink` is a pointer whose
+  pointee exposes `pub fn begin(self, info: TileSinkInfo) !void` and
+  `pub fn writeTile(self, region: TileSinkRegion) !void`. `begin` runs once and
+  reports the requested reduced reference-grid window plus one
+  `TileSinkComponentLayout` per component; `writeTile` then runs once per
+  non-empty selected tile in codestream tile order. Regions are disjoint,
+  contained in that window, and together cover it exactly, so
+  `info.tiles_selected` equals the number of `writeTile` calls.
+  `TileSinkComponent` carries absolute reduced component coordinates and a
+  borrowed strided span, so no copy happens inside the decoder; subsampling or
+  reduction may collapse a component window, which is reported with `width` and
+  `height` both zero. Sample spans are released when the callback returns, and
+  a sink error aborts the decode and propagates unchanged. On a multi-tile
+  stream the decoder never allocates the complete raster, so peak output memory
+  is one tile plus whatever the sink retains; a single-tile stream is reported
+  as one region so callers never branch on the tile grid. Codestream input is
+  still read whole, and a large tile still synthesizes its full plane.
 - `decodeLosslessPlanarWithOptionsProfiled(allocator, bytes, options, timings)`
   — native-size planar decode with the same timing breakdown as the upsampled
   entry point

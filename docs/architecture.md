@@ -220,12 +220,23 @@ never entropy-decoded, and their zero coefficients are exact because the inverse
 DWT is linear with finite support. Packet assembly derives the same windows
 through the shared `StrictRegionBandWindows`, so a pruned block's payload is
 never appended to its component-owned buffer either; a disagreement between the
-two would leave a required block without payload and fail closed. Codestream
-input is still read whole and a selected tile still runs a full inverse DWT into
-a full-tile plane, so those are the remaining memory boundaries.
+two would leave a required block without payload and fail closed.
 Because coefficients outside the window are deliberately incomplete, region
 decode saturates intermediate samples to the declared range exactly like the
 resolution and quality-layer selectors.
+
+The multi-tile planar loop hands each reconstructed tile to a tile sink instead
+of owning the output raster. A sink receives the complete window and
+per-component layouts once through `begin`, then one borrowed strided window per
+non-empty selected tile through `writeTile`, in codestream tile order and in
+absolute reduced coordinates. `decodeLosslessPlanarWithOptions` is one sink over
+that loop — `AssemblingPlanarTileSink` allocates the whole raster from `begin`
+and copies each window into place — so the whole-raster and streaming shapes
+cannot diverge in what they accept or produce; the profile gate itself is shared
+through `checkStrictPlanarProfile`. A single-tile stream reports one region, so
+the contract is total across tile layouts. Codestream input is still read whole
+and a selected tile still runs a full inverse DWT into a full-tile plane, so
+those are the remaining memory boundaries.
 
 The former BP8 COM sidecar is not part of normal output. It remains an optional
 debug/compatibility oracle for tests and old fixtures.

@@ -384,6 +384,64 @@ pub const DecodeOptions = struct {
     resolution_reduction: u8 = 0,
 };
 
+/// One component window inside a `TileSinkRegion`. Coordinates are absolute
+/// reduced component-grid positions, so a sink can place the window without
+/// knowing the tile grid, the component sampling factors, or the image origin.
+/// `samples` borrows decoder-owned memory: row `index` starts at
+/// `index * stride` and is `width` samples long. Subsampling and resolution
+/// reduction can collapse a component window even when the tile itself is not
+/// empty; such a window reports `width` and `height` as zero together.
+pub const TileSinkComponent = struct {
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    stride: usize,
+    bit_depth: u8,
+    samples: []const u16,
+
+    pub fn row(self: TileSinkComponent, index: usize) []const u16 {
+        const start = index * self.stride;
+        return self.samples[start .. start + self.width];
+    }
+};
+
+/// One decoded tile handed to a planar tile sink, already intersected with the
+/// requested output window and expressed in absolute reduced reference-grid
+/// coordinates.
+pub const TileSinkRegion = struct {
+    tile_index: u32,
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    components: []const TileSinkComponent,
+};
+
+/// Absolute reduced component-grid extent of one complete output component.
+pub const TileSinkComponentLayout = struct {
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+};
+
+/// Complete output geometry, reported once before the first tile so a sink can
+/// size its own storage. `x0/y0/width/height` describe the requested reduced
+/// reference-grid window; each component layout is that window's own ceil-div
+/// intersection. `tiles_selected` is exactly the number of `writeTile` calls
+/// that will follow, and `tiles_total` is the complete SIZ tile grid.
+pub const TileSinkInfo = struct {
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    tiles_total: u64,
+    tiles_selected: u64,
+    components: []const TileSinkComponentLayout,
+};
+
 pub const DecodeTimings = struct {
     total_ns: u64 = 0,
     sidecar_or_legacy_ns: u64 = 0,
@@ -3507,6 +3565,156 @@ pub fn decodeLosslessPlanarWithOptionsProfiled(
     return decodeLosslessPlanarWithOptionsMeasured(allocator, bytes, options, timings);
 }
 
+/// Push-based planar decode over the same bounded profile, selectors, and
+/// strict validation as `decodeLosslessPlanarWithOptions`. `sink` is a pointer
+/// whose pointee exposes
+///
+///     pub fn begin(self: *Sink, info: TileSinkInfo) !void
+///     pub fn writeTile(self: *Sink, region: TileSinkRegion) !void
+///
+/// Both must be `pub` when the sink lives in another module. `begin` runs
+/// exactly once before any tile. `writeTile` runs once per
+/// non-empty selected tile in codestream tile order; the regions are disjoint,
+/// each is contained in the window reported by `begin`, and together they cover
+/// it exactly. Sample slices borrow tile-local memory that is released when the
+/// callback returns, so a sink that keeps the data must copy it. A sink error
+/// aborts the decode and propagates unchanged.
+///
+/// On a multi-tile stream the decoder never allocates the complete raster, so
+/// peak output memory is one tile plus whatever the sink retains. A single-tile
+/// stream has one tile by definition and is reported as one region. The
+/// codestream is still read whole; incremental input remains separate work.
+pub fn decodeLosslessPlanarToSink(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+) !void {
+    return decodeLosslessPlanarToSinkMeasured(allocator, bytes, options, sink, null);
+}
+
+pub fn decodeLosslessPlanarToSinkProfiled(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+    timings: *DecodeTimings,
+) !void {
+    timings.* = .{};
+    return decodeLosslessPlanarToSinkMeasured(allocator, bytes, options, sink, timings);
+}
+
+fn decodeLosslessPlanarToSinkMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+    timings: ?*DecodeTimings,
+) !void {
+    const total_start = monotonicNs();
+    defer {
+        if (timings) |t| t.total_ns = elapsedNs(total_start);
+    }
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
+
+    const metadata_start = monotonicNs();
+    var header = try readStrictCodestreamMetadata(allocator, bytes);
+    defer header.deinit();
+    if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+    try checkStrictPlanarProfile(header, options, .output_components);
+    if (header.tile_width != 0 or header.tile_height != 0) {
+        return decodeStrictMultiTilePlanarToSink(
+            allocator,
+            bytes,
+            header,
+            options,
+            .output_components,
+            timings,
+            sink,
+        );
+    }
+
+    var decoded = try decodeStrictSingleTilePlanarMeasured(
+        allocator,
+        bytes,
+        header,
+        options,
+        .output_components,
+        timings,
+    );
+    defer decoded.deinit();
+    try emitStrictSingleTilePlanarRegion(header, options, decoded, sink);
+}
+
+/// Reports a fully reconstructed single-tile window as the one region its
+/// stream can produce, using the same absolute reduced coordinates the
+/// multi-tile loop emits.
+fn emitStrictSingleTilePlanarRegion(
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    decoded: color.SamplePlanes,
+    sink: anytype,
+) !void {
+    const image_rect = try strictImageReferenceRect(header);
+    const window = (try strictSingleTileReferenceRect(header, options)) orelse image_rect;
+    if (decoded.planes.len != header.component_count) return CodestreamError.InvalidCodestream;
+
+    var layouts: [color.max_components]TileSinkComponentLayout = undefined;
+    var components: [color.max_components]TileSinkComponent = undefined;
+    for (0..header.component_count) |component| {
+        const x0 = reducedGridCoordinate(
+            ceilDivU32(window.x0, header.component_xrsiz[component]),
+            options.resolution_reduction,
+        );
+        const y0 = reducedGridCoordinate(
+            ceilDivU32(window.y0, header.component_yrsiz[component]),
+            options.resolution_reduction,
+        );
+        const dimensions = decoded.componentDimensions(component) orelse
+            return CodestreamError.InvalidCodestream;
+        const depth = decoded.componentBitDepth(component) orelse
+            return CodestreamError.InvalidCodestream;
+        layouts[component] = .{
+            .x0 = x0,
+            .y0 = y0,
+            .width = dimensions[0],
+            .height = dimensions[1],
+            .bit_depth = depth,
+        };
+        components[component] = .{
+            .x0 = x0,
+            .y0 = y0,
+            .width = dimensions[0],
+            .height = dimensions[1],
+            .stride = dimensions[0],
+            .bit_depth = depth,
+            .samples = decoded.planes[component],
+        };
+    }
+
+    const reduced_x0 = reducedGridCoordinate(window.x0, options.resolution_reduction);
+    const reduced_y0 = reducedGridCoordinate(window.y0, options.resolution_reduction);
+    const width = try reducedGridLength(window.x0, window.width(), options.resolution_reduction);
+    const height = try reducedGridLength(window.y0, window.height(), options.resolution_reduction);
+    try sink.begin(.{
+        .x0 = reduced_x0,
+        .y0 = reduced_y0,
+        .width = width,
+        .height = height,
+        .tiles_total = 1,
+        .tiles_selected = 1,
+        .components = layouts[0..header.component_count],
+    });
+    try sink.writeTile(.{
+        .tile_index = 0,
+        .x0 = reduced_x0,
+        .y0 = reduced_y0,
+        .width = width,
+        .height = height,
+        .components = components[0..header.component_count],
+    });
+}
+
 /// Bounded G1 native-payload slice: reconstructs a single-tile reversible 5/3,
 /// no-MCT codestream directly into signed/unsigned i64 component planes.
 /// The strict packet/T1/DWT pipeline is shared with the legacy decoder, while
@@ -4128,23 +4336,14 @@ const PlanarOutputMode = enum {
     codestream_components,
 };
 
-fn decodeLosslessPlanarWithOptionsModeMeasured(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
+/// Shared planar profile gate for the whole-raster and tile-sink entry points.
+/// Both must accept exactly the same codestreams, so the checks live here
+/// rather than being duplicated per output shape.
+fn checkStrictPlanarProfile(
+    header: TemporaryHeader,
     options: DecodeOptions,
     output_mode: PlanarOutputMode,
-    timings: ?*DecodeTimings,
-) !color.SamplePlanes {
-    const total_start = monotonicNs();
-    defer {
-        if (timings) |t| t.total_ns = elapsedNs(total_start);
-    }
-    if (options.threads == 0) return CodestreamError.InvalidCodestream;
-
-    const metadata_start = monotonicNs();
-    var header = try readStrictCodestreamMetadata(allocator, bytes);
-    defer header.deinit();
-    if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+) !void {
     if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     const rct_alpha = header.component_count == 4 and header.mct == .rct;
     const sampled_rct = header.component_count == 3 and header.mct == .rct and
@@ -4178,6 +4377,28 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
         {
             return CodestreamError.UnsupportedPayload;
         }
+    }
+}
+
+fn decodeLosslessPlanarWithOptionsModeMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    output_mode: PlanarOutputMode,
+    timings: ?*DecodeTimings,
+) !color.SamplePlanes {
+    const total_start = monotonicNs();
+    defer {
+        if (timings) |t| t.total_ns = elapsedNs(total_start);
+    }
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
+
+    const metadata_start = monotonicNs();
+    var header = try readStrictCodestreamMetadata(allocator, bytes);
+    defer header.deinit();
+    if (timings) |t| t.metadata_ns += elapsedNs(metadata_start);
+    try checkStrictPlanarProfile(header, options, output_mode);
+    if (header.tile_width != 0 or header.tile_height != 0) {
         return decodeStrictMultiTilePlanarMeasured(
             allocator,
             bytes,
@@ -4187,6 +4408,24 @@ fn decodeLosslessPlanarWithOptionsModeMeasured(
             timings,
         );
     }
+    return decodeStrictSingleTilePlanarMeasured(
+        allocator,
+        bytes,
+        header,
+        options,
+        output_mode,
+        timings,
+    );
+}
+
+fn decodeStrictSingleTilePlanarMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    output_mode: PlanarOutputMode,
+    timings: ?*DecodeTimings,
+) !color.SamplePlanes {
     const requested_region = try strictSingleTileReferenceRect(header, options);
     if (options.tile_index) |selected| {
         if (selected != 0) return CodestreamError.InvalidCodestream;
@@ -9877,6 +10116,108 @@ fn decodeStrictMultiTilePlanarMeasured(
 ) !color.SamplePlanes {
     const sampled_rct = header.component_count == 3 and header.mct == .rct and
         headerHasUniformComponentSampling(header);
+    var assembling = AssemblingPlanarTileSink{
+        .allocator = allocator,
+        .raster_extent = if (sampled_rct) .first_component else .reference_grid,
+    };
+    errdefer assembling.deinit();
+    try decodeStrictMultiTilePlanarToSink(
+        allocator,
+        bytes,
+        header,
+        options,
+        output_mode,
+        timings,
+        &assembling,
+    );
+    return assembling.take();
+}
+
+/// Whole-raster sink used by the legacy planar API: it allocates the complete
+/// output once from `begin` and copies each tile window into place, which is
+/// exactly what the assembling loop did before the sink contract existed.
+const AssemblingPlanarTileSink = struct {
+    allocator: std.mem.Allocator,
+    /// `SamplePlanes.width/height` historically carry the first component's
+    /// dimensions on the sampled RCT profile and the reference-grid window
+    /// everywhere else. The sink reproduces that instead of exposing it.
+    raster_extent: enum { reference_grid, first_component },
+    planes: ?color.SamplePlanes = null,
+    origin_x: [color.max_components]u32 = [_]u32{0} ** color.max_components,
+    origin_y: [color.max_components]u32 = [_]u32{0} ** color.max_components,
+
+    fn begin(self: *AssemblingPlanarTileSink, info: TileSinkInfo) !void {
+        var depths = [_]u8{0} ** color.max_components;
+        var widths = [_]usize{0} ** color.max_components;
+        var heights = [_]usize{0} ** color.max_components;
+        if (info.components.len == 0 or info.components.len > color.max_components) {
+            return CodestreamError.InvalidCodestream;
+        }
+        for (info.components, 0..) |component, index| {
+            depths[index] = component.bit_depth;
+            widths[index] = component.width;
+            heights[index] = component.height;
+            self.origin_x[index] = component.x0;
+            self.origin_y[index] = component.y0;
+        }
+        const count = info.components.len;
+        self.planes = try color.SamplePlanes.initWithComponentLayouts(
+            self.allocator,
+            switch (self.raster_extent) {
+                .reference_grid => info.width,
+                .first_component => widths[0],
+            },
+            switch (self.raster_extent) {
+                .reference_grid => info.height,
+                .first_component => heights[0],
+            },
+            depths[0..count],
+            widths[0..count],
+            heights[0..count],
+        );
+    }
+
+    fn writeTile(self: *AssemblingPlanarTileSink, region: TileSinkRegion) !void {
+        if (self.planes == null) return CodestreamError.InvalidCodestream;
+        const planes = &self.planes.?;
+        for (region.components, 0..) |component, index| {
+            const destination_stride = planes.component_widths[index];
+            const destination_x = component.x0 - self.origin_x[index];
+            const destination_y = component.y0 - self.origin_y[index];
+            var row: usize = 0;
+            while (row < component.height) : (row += 1) {
+                const destination_start = (destination_y + row) * destination_stride + destination_x;
+                @memcpy(
+                    planes.planes[index][destination_start .. destination_start + component.width],
+                    component.row(row),
+                );
+            }
+        }
+    }
+
+    fn take(self: *AssemblingPlanarTileSink) color.SamplePlanes {
+        const planes = self.planes.?;
+        self.planes = null;
+        return planes;
+    }
+
+    fn deinit(self: *AssemblingPlanarTileSink) void {
+        if (self.planes) |*planes| planes.deinit();
+        self.planes = null;
+    }
+};
+
+fn decodeStrictMultiTilePlanarToSink(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+    output_mode: PlanarOutputMode,
+    timings: ?*DecodeTimings,
+    sink: anytype,
+) !void {
+    const sampled_rct = header.component_count == 3 and header.mct == .rct and
+        headerHasUniformComponentSampling(header);
     const reversible = header.transform == .reversible_5_3 and header.quantization == .none;
     const irreversible_no_mct = header.transform == .irreversible_9_7 and
         header.quantization != .none and header.mct == .none;
@@ -9939,15 +10280,48 @@ fn decodeStrictMultiTilePlanarMeasured(
         window.reference_rect.height(),
         options.resolution_reduction,
     );
-    var assembled = try color.SamplePlanes.initWithComponentLayouts(
-        allocator,
-        if (sampled_rct) component_widths[0] else decoded_width,
-        if (sampled_rct) component_heights[0] else decoded_height,
-        component_depths,
-        component_widths,
-        component_heights,
-    );
-    errdefer assembled.deinit();
+
+    var component_layouts: [color.max_components]TileSinkComponentLayout = undefined;
+    for (0..header.component_count) |component| {
+        component_layouts[component] = .{
+            .x0 = reducedGridCoordinate(
+                ceilDivU32(window.reference_rect.x0, header.component_xrsiz[component]),
+                options.resolution_reduction,
+            ),
+            .y0 = reducedGridCoordinate(
+                ceilDivU32(window.reference_rect.y0, header.component_yrsiz[component]),
+                options.resolution_reduction,
+            ),
+            .width = component_widths[component],
+            .height = component_heights[component],
+            .bit_depth = component_depths[component],
+        };
+    }
+    var selected_tiles: u64 = 0;
+    {
+        var index: u32 = 0;
+        while (index < context.grid.tileCount()) : (index += 1) {
+            const tile = context.grid.tile(index) catch return CodestreamError.InvalidCodestream;
+            if (!window.includes(index, tile.rect)) continue;
+            const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
+                return CodestreamError.InvalidCodestream;
+            const reduced_x0 = reducedGridCoordinate(overlap.x0, options.resolution_reduction);
+            const reduced_y0 = reducedGridCoordinate(overlap.y0, options.resolution_reduction);
+            const reduced_x1 = reducedGridCoordinate(overlap.x1, options.resolution_reduction);
+            const reduced_y1 = reducedGridCoordinate(overlap.y1, options.resolution_reduction);
+            if (reduced_x1 == reduced_x0 or reduced_y1 == reduced_y0) continue;
+            selected_tiles += 1;
+        }
+    }
+    try sink.begin(.{
+        .x0 = reducedGridCoordinate(window.reference_rect.x0, options.resolution_reduction),
+        .y0 = reducedGridCoordinate(window.reference_rect.y0, options.resolution_reduction),
+        .width = decoded_width,
+        .height = decoded_height,
+        .tiles_total = context.grid.tileCount(),
+        .tiles_selected = selected_tiles,
+        .components = component_layouts[0..header.component_count],
+    });
 
     var tile_index: u32 = 0;
     while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
@@ -10048,6 +10422,7 @@ fn decodeStrictMultiTilePlanarMeasured(
 
         const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
             return CodestreamError.InvalidCodestream;
+        var region_components: [color.max_components]TileSinkComponent = undefined;
         for (0..header.component_count) |component| {
             const xrsiz = header.component_xrsiz[component];
             const yrsiz = header.component_yrsiz[component];
@@ -10088,7 +10463,6 @@ fn decodeStrictMultiTilePlanarMeasured(
             }
             const source_x = @as(usize, reduced_overlap_component_x0 - reduced_component_x0);
             const source_y = @as(usize, reduced_overlap_component_y0 - reduced_component_y0);
-            const destination_stride = component_widths[component];
             const destination_x = @as(usize, reduced_overlap_component_x0 - reduced_output_component_x0);
             const destination_y = @as(usize, reduced_overlap_component_y0 - reduced_output_component_y0);
             const copy_width = @as(usize, reduced_overlap_component_x1 - reduced_overlap_component_x0);
@@ -10099,18 +10473,50 @@ fn decodeStrictMultiTilePlanarMeasured(
             {
                 return CodestreamError.InvalidCodestream;
             }
-            var row: usize = 0;
-            while (row < copy_height) : (row += 1) {
-                const source_start = (source_y + row) * tile_width + source_x;
-                const destination_start = (destination_y + row) * destination_stride + destination_x;
-                @memcpy(
-                    assembled.planes[component][destination_start .. destination_start + copy_width],
-                    tile_planes.planes[component][source_start .. source_start + copy_width],
-                );
+            // Subsampling and reduction can both collapse a non-empty reference
+            // overlap to an empty component window. That stays a legal no-op and
+            // is reported with both extents zero, so a sink never has to reason
+            // about a zero-width window that still has rows.
+            if (copy_width == 0 or copy_height == 0) {
+                region_components[component] = .{
+                    .x0 = reduced_overlap_component_x0,
+                    .y0 = reduced_overlap_component_y0,
+                    .width = 0,
+                    .height = 0,
+                    .stride = 0,
+                    .bit_depth = component_depths[component],
+                    .samples = &.{},
+                };
+                continue;
             }
+            const source_start = source_y * tile_width + source_x;
+            const source_end = (source_y + copy_height - 1) * tile_width + source_x + copy_width;
+            region_components[component] = .{
+                .x0 = reduced_overlap_component_x0,
+                .y0 = reduced_overlap_component_y0,
+                .width = copy_width,
+                .height = copy_height,
+                .stride = tile_width,
+                .bit_depth = component_depths[component],
+                .samples = tile_planes.planes[component][source_start..source_end],
+            };
         }
+
+        const reduced_overlap_x0 = reducedGridCoordinate(overlap.x0, options.resolution_reduction);
+        const reduced_overlap_y0 = reducedGridCoordinate(overlap.y0, options.resolution_reduction);
+        const reduced_overlap_x1 = reducedGridCoordinate(overlap.x1, options.resolution_reduction);
+        const reduced_overlap_y1 = reducedGridCoordinate(overlap.y1, options.resolution_reduction);
+        if (reduced_overlap_x1 == reduced_overlap_x0 or reduced_overlap_y1 == reduced_overlap_y0) continue;
+
+        try sink.writeTile(.{
+            .tile_index = tile_index,
+            .x0 = reduced_overlap_x0,
+            .y0 = reduced_overlap_y0,
+            .width = @as(usize, reduced_overlap_x1 - reduced_overlap_x0),
+            .height = @as(usize, reduced_overlap_y1 - reduced_overlap_y0),
+            .components = region_components[0..header.component_count],
+        });
     }
-    return assembled;
 }
 
 /// Bounded multi-tile continuation of the generic native-sample path. Each

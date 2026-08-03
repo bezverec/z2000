@@ -5,6 +5,41 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile-Oriented Planar Output Sink
+
+- Added `decodeLosslessPlanarToSink` / `decodeLosslessPlanarToSinkProfiled`
+  with `TileSinkInfo`, `TileSinkComponentLayout`, `TileSinkRegion`, and
+  `TileSinkComponent`. A sink receives the complete output geometry once
+  through `begin` and then one `writeTile` call per non-empty selected tile, in
+  codestream tile order, in absolute reduced reference- and component-grid
+  coordinates. Sample slices borrow tile-local memory with an explicit stride,
+  so no copy happens inside the decoder.
+- The multi-tile planar loop no longer allocates the whole raster itself. The
+  legacy `decodeLosslessPlanarWithOptions` shape is now one sink among others:
+  `AssemblingPlanarTileSink` allocates the complete planes from `begin` and
+  copies each window into place, which is byte-for-byte what the loop did
+  before. Peak decoder allocation on the sink path is therefore one tile plus
+  whatever the sink retains.
+- The contract is total across tile layouts: a single-tile stream reports one
+  region covering the requested window, so callers do not branch on the tile
+  grid. The planar profile gate and the single-tile decode body moved into
+  `checkStrictPlanarProfile` and `decodeStrictSingleTilePlanarMeasured` so the
+  whole-raster and sink entry points accept exactly the same codestreams.
+- Both selectors and resolution reduction pass through unchanged. Subsampling
+  and reduction may collapse a component window, or a whole reduced tile
+  window, to zero; an empty component window is emitted as a legal no-op and a
+  collapsed tile is skipped, so `tiles_selected` is exactly the number of
+  `writeTile` calls.
+- A 4:2:0 twelve-tile stream at a nonzero image origin pins the contract
+  against the whole-raster decode over full, reduced, tile-selected, and
+  region-selected combinations at 1 and 8 threads. A reassembling sink counts
+  writes per output sample, so one comparison proves the regions are exact,
+  disjoint, and complete. A tracking allocator pins the sink path's peak
+  allocation strictly below the whole-raster path, and a rejecting sink pins
+  that a callback error aborts the decode and propagates unchanged.
+- Incremental codestream input is unchanged: the stream is still read whole,
+  and a large single tile still runs a full inverse DWT.
+
 ### Reduced Upsampling And Selected Sampled sYCC Conversion
 
 - `decodeLosslessPlanarUpsampled*` now accepts `resolution_reduction`, alone or
