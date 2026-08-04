@@ -362,18 +362,13 @@ pub fn interleaveRgb(allocator: std.mem.Allocator, planes: SamplePlanes) !image.
     const sample_count = try std.math.mul(usize, pixels, 3);
     const samples = try allocator.alloc(u16, sample_count);
     errdefer allocator.free(samples);
-    const max_sample: u16 = @intCast((@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1);
-    for (0..pixels) |pixel| {
-        const red = planes.planes[0][pixel];
-        const green = planes.planes[1][pixel];
-        const blue = planes.planes[2][pixel];
-        if (red > max_sample or green > max_sample or blue > max_sample) {
-            return ColorError.SampleOutOfRange;
-        }
-        samples[pixel * 3] = red;
-        samples[pixel * 3 + 1] = green;
-        samples[pixel * 3 + 2] = blue;
-    }
+    try interleaveRgbSamples(
+        samples,
+        planes.planes[0],
+        planes.planes[1],
+        planes.planes[2],
+        bit_depth,
+    );
     return .{
         .allocator = allocator,
         .width = planes.width,
@@ -381,6 +376,36 @@ pub fn interleaveRgb(allocator: std.mem.Allocator, planes: SamplePlanes) !image.
         .bit_depth = bit_depth,
         .samples = samples,
     };
+}
+
+/// Interleaves three equal-length component slices into RGB triples, checking
+/// every sample against the declared precision. Shared by whole-image
+/// interleaving and the streaming band conversion so both reject the same
+/// out-of-range samples.
+pub fn interleaveRgbSamples(
+    destination: []u16,
+    red: []const u16,
+    green: []const u16,
+    blue: []const u16,
+    bit_depth: u8,
+) !void {
+    if (bit_depth == 0 or bit_depth > 16) return ColorError.InvalidImage;
+    const pixels = red.len;
+    if (green.len != pixels or blue.len != pixels or destination.len != pixels * 3) {
+        return ColorError.InvalidImage;
+    }
+    const max_sample: u16 = @intCast((@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1);
+    for (0..pixels) |pixel| {
+        const red_sample = red[pixel];
+        const green_sample = green[pixel];
+        const blue_sample = blue[pixel];
+        if (red_sample > max_sample or green_sample > max_sample or blue_sample > max_sample) {
+            return ColorError.SampleOutOfRange;
+        }
+        destination[pixel * 3] = red_sample;
+        destination[pixel * 3 + 1] = green_sample;
+        destination[pixel * 3 + 2] = blue_sample;
+    }
 }
 
 fn validatePixelPlanes(comptime Sample: type, planes: ComponentPlanesOf(Sample), expected_components: usize) !usize {

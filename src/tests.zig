@@ -33457,6 +33457,238 @@ const CountingRgbTileSink = struct {
     }
 };
 
+test "streaming RGB TIFF writer matches the whole-image writer byte for byte" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 13;
+    const height = 7;
+    const profile = [_]u8{ 0xAB, 0xCD, 0xEF, 0x01, 0x02 };
+    for ([_]u8{ 8, 16 }) |bit_depth| {
+        for ([_]bool{ false, true }) |with_icc| {
+            const samples = try allocator.alloc(u16, width * height * 3);
+            defer allocator.free(samples);
+            const max_sample: u16 = if (bit_depth == 8) 255 else 65535;
+            for (samples, 0..) |*sample, index| {
+                sample.* = @intCast((index * 7919) % (@as(usize, max_sample) + 1));
+            }
+
+            var path_buffers: [3][160]u8 = undefined;
+            const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+            const whole_path = try std.fmt.bufPrint(
+                &path_buffers[1],
+                "{s}/whole-{}-{}.tif",
+                .{ directory, bit_depth, @intFromBool(with_icc) },
+            );
+            const streamed_path = try std.fmt.bufPrint(
+                &path_buffers[2],
+                "{s}/streamed-{}-{}.tif",
+                .{ directory, bit_depth, @intFromBool(with_icc) },
+            );
+
+            const rgb = image.RgbImage{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = bit_depth,
+                .samples = samples,
+                .icc_profile = if (with_icc) @constCast(profile[0..]) else null,
+            };
+            try tiff.writeRgb(io, allocator, rgb, whole_path);
+
+            var writer = try tiff.RgbBandWriter.init(
+                io,
+                allocator,
+                streamed_path,
+                width,
+                height,
+                bit_depth,
+                if (with_icc) profile[0..] else null,
+            );
+            defer writer.deinit();
+            // Uneven chunks: the writer must not assume a fixed band height.
+            const chunks = [_]usize{ 1, 3, 2, 1 };
+            var row: usize = 0;
+            for (chunks) |rows| {
+                try writer.writeRows(samples[row * width * 3 ..][0 .. rows * width * 3]);
+                row += rows;
+            }
+            try std.testing.expectEqual(height, row);
+            try writer.finish();
+
+            const whole_bytes = try std.Io.Dir.cwd().readFileAlloc(
+                io,
+                whole_path,
+                allocator,
+                .limited(1 << 20),
+            );
+            defer allocator.free(whole_bytes);
+            const streamed_bytes = try std.Io.Dir.cwd().readFileAlloc(
+                io,
+                streamed_path,
+                allocator,
+                .limited(1 << 20),
+            );
+            defer allocator.free(streamed_bytes);
+            try std.testing.expectEqualSlices(u8, whole_bytes, streamed_bytes);
+        }
+    }
+}
+
+test "streaming RGB TIFF writer fails closed on an incomplete or overlong raster" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffers: [2][160]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fmt.bufPrint(&path_buffers[1], "{s}/partial.tif", .{directory});
+
+    const width = 4;
+    const height = 3;
+    const row = [_]u16{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+
+    {
+        var writer = try tiff.RgbBandWriter.init(io, allocator, path, width, height, 8, null);
+        defer writer.deinit();
+        try writer.writeRows(row[0..]);
+        // Two of three rows written: the image is incomplete.
+        try std.testing.expectError(tiff.TiffError.InvalidTagValue, writer.finish());
+    }
+    {
+        var writer = try tiff.RgbBandWriter.init(io, allocator, path, width, height, 8, null);
+        defer writer.deinit();
+        try writer.writeRows(row[0..]);
+        try writer.writeRows(row[0..]);
+        try writer.writeRows(row[0..]);
+        // A fourth row would run past the declared height.
+        try std.testing.expectError(tiff.TiffError.InvalidTagValue, writer.writeRows(row[0..]));
+    }
+    {
+        var writer = try tiff.RgbBandWriter.init(io, allocator, path, width, height, 8, null);
+        defer writer.deinit();
+        // A partial row is rejected outright.
+        try std.testing.expectError(tiff.TiffError.InvalidTagValue, writer.writeRows(row[0..5]));
+    }
+    {
+        // 8-bit output rejects samples the declared precision cannot carry.
+        var writer = try tiff.RgbBandWriter.init(io, allocator, path, width, height, 8, null);
+        defer writer.deinit();
+        var overflow = row;
+        overflow[0] = 256;
+        try std.testing.expectError(tiff.TiffError.InvalidTagValue, writer.writeRows(overflow[0..]));
+    }
+}
+
+test "streamed subsampled TIFF conversion matches the whole-raster conversion" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 63;
+    const height = 64;
+    const image_origin_x: u32 = 5;
+    const image_origin_y: u32 = 3;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planes,
+        &sampling,
+        .{
+            .levels = 2,
+            .mct = .none,
+            .image_origin_x = image_origin_x,
+            .image_origin_y = image_origin_y,
+            .tile_origin_x = 1,
+            .tile_origin_y = 0,
+            .tile_width = 23,
+            .tile_height = 19,
+            .block_width = 8,
+            .block_height = 8,
+            .tile_part_divisions = null,
+        },
+    );
+    defer allocator.free(encoded);
+
+    const profile = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const region = codestream.DecodeRegion{ .x0 = 20, .y0 = 16, .width = 32, .height = 29 };
+    const cases = [_]struct { options: codestream.DecodeOptions, icc: bool }{
+        .{ .options = .{ .threads = 1 }, .icc = false },
+        .{ .options = .{ .threads = 8 }, .icc = true },
+        .{ .options = .{ .threads = 1, .resolution_reduction = 1 }, .icc = false },
+        .{ .options = .{ .threads = 8, .tile_index = 7 }, .icc = true },
+        .{ .options = .{ .threads = 1, .reference_region = region }, .icc = false },
+    };
+
+    for (cases, 0..) |case, index| {
+        var path_buffers: [3][160]u8 = undefined;
+        const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        const whole_path = try std.fmt.bufPrint(&path_buffers[1], "{s}/whole-{}.tif", .{ directory, index });
+        const streamed_path = try std.fmt.bufPrint(&path_buffers[2], "{s}/streamed-{}.tif", .{ directory, index });
+
+        // Whole-raster reference: upsample everything, interleave, write.
+        var upsampled = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            encoded,
+            case.options,
+        );
+        defer upsampled.deinit();
+        var rgb = try color.interleaveRgb(allocator, upsampled);
+        defer rgb.deinit();
+        if (case.icc) rgb.icc_profile = @constCast(profile[0..]);
+        try tiff.writeRgb(io, allocator, rgb, whole_path);
+        // The fixture profile is not owned by the image.
+        rgb.icc_profile = null;
+
+        var sink = tiff.RgbBandSink{
+            .io = io,
+            .allocator = allocator,
+            .path = streamed_path,
+            .bit_depth = 8,
+            .icc_profile = if (case.icc) profile[0..] else null,
+        };
+        defer sink.deinit();
+        try codestream.decodeLosslessPlanarUpsampledToSink(allocator, encoded, case.options, &sink);
+        try sink.finish();
+        try std.testing.expectEqual(upsampled.width, sink.width);
+        try std.testing.expectEqual(upsampled.height, sink.height);
+
+        const whole_bytes = try std.Io.Dir.cwd().readFileAlloc(
+            io,
+            whole_path,
+            allocator,
+            .limited(1 << 22),
+        );
+        defer allocator.free(whole_bytes);
+        const streamed_bytes = try std.Io.Dir.cwd().readFileAlloc(
+            io,
+            streamed_path,
+            allocator,
+            .limited(1 << 22),
+        );
+        defer allocator.free(streamed_bytes);
+        try std.testing.expectEqualSlices(u8, whole_bytes, streamed_bytes);
+    }
+}
+
 /// Reassembles every emitted upsampled band into whole reference-grid planes
 /// and counts how often each output sample was written, so one comparison
 /// proves that the bands are exact, disjoint, and complete.

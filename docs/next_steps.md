@@ -307,9 +307,11 @@ The foundation landed on 2026-07-17:
   and each legacy whole-raster API is implemented as one sink over its loop.
   Native windows carry their component's precision, signedness, sampling step,
   and CRG registration. `decodeLosslessPlanarUpsampledToSink` adds the banded
-  variant for reference-grid upsampled output. The CLI TIFF writer, incremental
-  codestream input, and row-oriented synthesis inside a single large tile
-  remain open.
+  variant for reference-grid upsampled output, and `decode-temp-jp2` streams a
+  subsampled three-component conversion through `tiff.RgbBandWriter` without
+  holding the raster or the output file. The remaining conversion layouts,
+  incremental codestream input, and row-oriented synthesis inside a single
+  large tile remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -708,12 +710,24 @@ by the unchanged whole-image upsampling path with the band as its
 that the source widening reaches one reference row into the tile row above, so
 a subsampled multi-row grid reconstructs that tile row again for the next band.
 
+The CLI conversion boundary now consumes the banded contract.
+`tiff.RgbBandWriter` streams the bounded chunky RGB TIFF layout — every offset
+follows from dimensions, precision, and ICC length, so the header precedes any
+raster byte — and `tiff.RgbBandSink` interleaves each band onto it.
+`decode-temp-jp2` uses that pair for a subsampled three-component JP2 with no
+palette, no sYCC conversion, and no `--convert-to-srgb`, which is the one
+layout where both the upsampled raster and the whole output file would
+otherwise be held in memory. Output is byte-identical, checked in-tree and
+against a binary built from the previous commit over the committed Kakadu
+4:2:0 fixtures with and without selectors.
+
 What remains on this item:
 
-1. Promote these contracts to the CLI TIFF writer so a conversion never
-   materializes the whole raster either. The banded upsampled contract is the
-   shape a row-oriented TIFF writer wants; the tile sinks need the writer to
-   place windows rather than stream rows.
+1. Extend streaming output to the remaining conversion layouts. Grayscale,
+   alpha, and palette-expanded output still buffer their whole raster and file,
+   and the tile sinks would need a writer that places windows rather than
+   appending rows — a strip- or tile-based TIFF layout rather than the single
+   strip the bounded writer emits today.
 2. A large selected tile still runs a full inverse DWT into a full-tile plane.
    Row-oriented output inside one tile needs banded synthesis, not just a
    different sink shape.

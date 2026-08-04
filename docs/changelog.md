@@ -5,6 +5,35 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Streaming Subsampled JP2-To-TIFF Conversion
+
+- Added `tiff.RgbBandWriter`, a streaming chunky RGB TIFF writer. Every offset
+  in the bounded RGB layout follows from dimensions, precision, and ICC length
+  alone, so the header, IFD, and BitsPerSample array are emitted up front and
+  complete rows are appended as they arrive; the ICC profile is appended last.
+  `RgbLayout` and `serializeRasterLe` are shared with `writeRgb`, so the two
+  writers cannot produce different bytes. Fail-closed on a partial row, more
+  rows than declared, fewer rows at `finish`, and samples the declared precision
+  cannot carry.
+- Added `tiff.RgbBandSink`, which converts each upsampled reference-grid band
+  into interleaved RGB rows and appends them. The band types are taken as
+  `anytype`, so this stays a TIFF-layer concern and `tiff.zig` gains no
+  dependency on the codestream layer. `color.interleaveRgbSamples` is now shared
+  with `color.interleaveRgb`, so both reject the same out-of-range samples.
+- `decode-temp-jp2` uses that pair for the one layout where both the upsampled
+  raster and the whole TIFF file would otherwise be held in memory: a
+  subsampled three-component JP2 with no palette, no sYCC conversion, and no
+  `--convert-to-srgb`. Peak memory for that conversion is now one tile-row band
+  instead of the complete image plus the complete file. Every other layout keeps
+  the existing whole-raster path unchanged.
+- Output is byte-identical to the previous conversion. The in-tree gate compares
+  the streamed file with a whole-raster `interleaveRgb` + `writeRgb` of the same
+  decode across full, reduced, tile-selected, and region-selected options with
+  and without an ICC profile, at 1 and 8 threads. The committed Kakadu 4:2:0
+  fixtures were additionally compared against a binary built from the previous
+  commit: multitile, PLT-less, multi-precinct, and distinct-tile-origin streams,
+  plus `--region` and `--tile-index`, all produced identical bytes.
+
 ### Band-Oriented Upsampled Output Sink
 
 - `decodeLosslessPlanarUpsampledToSink` / `...Profiled` add

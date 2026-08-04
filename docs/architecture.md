@@ -261,6 +261,18 @@ produced by the unchanged whole-image upsampling path with the band as its
 the widening reaches one reference row into the tile row above, so a subsampled
 multi-row grid reconstructs that tile row again for the next band.
 
+The CLI conversion boundary consumes the banded contract for the one layout
+where both ends would otherwise be held whole. A subsampled three-component
+JP2 with no palette, no sYCC conversion, and no requested sRGB conversion is
+decoded band by band into `tiff.RgbBandSink`, which interleaves each band and
+appends it through the streaming `tiff.RgbBandWriter`. The bounded RGB TIFF
+layout makes that possible: every offset follows from dimensions, precision,
+and ICC length, so the header can be written before any raster byte exists.
+The streaming and buffered writers share `RgbLayout` and the raster
+serialization, and the interleave shares `color.interleaveRgbSamples` with the
+whole-image path, so the streamed file is byte-identical. Every other layout
+keeps the whole-raster path.
+
 Codestream input is still read whole and a selected tile still runs a full
 inverse DWT into a full-tile plane, so those are the remaining memory
 boundaries.

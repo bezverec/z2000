@@ -1136,6 +1136,61 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     }
 
     var decode_timings = codestream.DecodeTimings{};
+
+    // Bounded streaming conversion: a subsampled three-component JP2 with no
+    // colour conversion is the one path where both the upsampled raster and the
+    // TIFF file would otherwise be held whole. Decoding it band by band into a
+    // streaming TIFF writer keeps peak memory at one tile-row band. Every other
+    // layout keeps the whole-raster path below.
+    if (!info.has_palette and info.components == 3 and !convert_to_srgb and
+        info.color_space != .sycc and jp2InfoHasSubsampling(info))
+    {
+        const icc_start = monotonicNs();
+        const icc_profile = try jp2.extractIccProfile(allocator, bytes);
+        defer if (icc_profile) |profile| allocator.free(profile);
+        command_timings.icc_extract_ns = elapsedNs(icc_start);
+
+        const stream_start = monotonicNs();
+        var sink = tiff.RgbBandSink{
+            .io = io,
+            .allocator = allocator,
+            .path = args[1],
+            .bit_depth = info.bits_per_component,
+            .icc_profile = icc_profile,
+        };
+        defer sink.deinit();
+        if (show_timings) {
+            try codestream.decodeLosslessPlanarUpsampledToSinkProfiled(
+                allocator,
+                j2k,
+                options,
+                &sink,
+                &decode_timings,
+            );
+        } else {
+            try codestream.decodeLosslessPlanarUpsampledToSink(allocator, j2k, options, &sink);
+        }
+        try sink.finish();
+        // Decode and write interleave on this path, so they are reported as one
+        // streamed stage rather than split into a decode and a write phase.
+        command_timings.codestream_decode_ns = elapsedNs(stream_start);
+        command_timings.total_ns = command_timings.jp2_read_ns +
+            command_timings.codestream_extract_ns +
+            command_timings.codestream_decode_ns +
+            command_timings.icc_extract_ns;
+        reportDecodeTempJp2(
+            args[0],
+            args[1],
+            .{ sink.width, sink.height },
+            info,
+            options,
+            show_timings,
+            command_timings,
+            decode_timings,
+        );
+        return;
+    }
+
     const decode_start = monotonicNs();
     var decoded: tiff.DecodedImage = if (info.has_palette) palette: {
         var indexed = if (show_timings)
@@ -1299,11 +1354,33 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         .grayscale => |gray| [2]usize{ gray.width, gray.height },
         .alpha => |alpha| [2]usize{ alpha.width, alpha.height },
     };
+    reportDecodeTempJp2(
+        args[0],
+        args[1],
+        output_dimensions,
+        info,
+        options,
+        show_timings,
+        command_timings,
+        decode_timings,
+    );
+}
+
+fn reportDecodeTempJp2(
+    input_path: []const u8,
+    output_path: []const u8,
+    output_dimensions: [2]usize,
+    info: jp2.Info,
+    options: codestream.DecodeOptions,
+    show_timings: bool,
+    command_timings: DecodeTempJp2Timings,
+    decode_timings: codestream.DecodeTimings,
+) void {
     std.debug.print(
         "decoded JP2 {s} -> {s} ({}x{}, {} output component{s}, {} bits/component, threads {})\n",
         .{
-            args[0],
-            args[1],
+            input_path,
+            output_path,
             output_dimensions[0],
             output_dimensions[1],
             info.output_components,
@@ -1316,6 +1393,15 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         printDecodeTempJp2Timings(command_timings, decode_timings);
     }
 }
+
+fn jp2InfoHasSubsampling(info: jp2.Info) bool {
+    for (0..info.components) |component| {
+        const sampling = info.componentSampling(component) orelse return false;
+        if (sampling[0] != 1 or sampling[1] != 1) return true;
+    }
+    return false;
+}
+
 
 fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void {
     std.debug.print(

@@ -71,7 +71,24 @@ by default, transforming only RGB while alpha receives the ordinary unsigned
 DC level shift. Explicit `--mct none` keeps all four components independent.
 `decode-temp-jp2` dispatches one- through four-component bounded JP2 output to
 the matching TIFF writer; a supported one-component `pclr`/`cmap` stream is
-expanded to RGB first.
+expanded to RGB first. A subsampled three-component stream with no palette, no
+sYCC conversion, and no `--convert-to-srgb` is instead converted band by band:
+`decodeLosslessPlanarUpsampledToSink` feeds `tiff.RgbBandSink`, which
+interleaves each tile-row band and appends it through `tiff.RgbBandWriter`.
+Peak memory for that conversion is one band rather than the complete raster
+plus the complete output file, and the bytes written are identical to the
+whole-raster path.
+
+`tiff.RgbBandWriter` is the streaming chunky RGB TIFF writer. Every offset in
+the bounded RGB layout follows from dimensions, precision, and ICC length
+alone, so `init` emits the header, IFD, and BitsPerSample array, `writeRows`
+appends complete interleaved rows in top-to-bottom order, and `finish` appends
+the optional ICC profile and closes the file. It shares `RgbLayout` and the
+raster serialization with `writeRgb`, so the two cannot disagree. A partial
+row, more rows than declared, fewer rows at `finish`, and samples outside the
+declared precision all fail closed. `tiff.RgbBandSink` adapts upsampled band
+regions onto it and takes those regions as `anytype`, so the TIFF layer gains
+no dependency on the codestream layer.
 
 `j2k-to-pgx` is the raw-codestream diagnostic boundary. It accepts `.j2k` or
 `.j2c` without a JP2 wrapper, decodes through `decodeLosslessNativeWithOptions`,
