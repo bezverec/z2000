@@ -246,9 +246,24 @@ diverge in what they accept or produce; the profile gates themselves are shared
 through `checkStrictPlanarProfile`, `checkStrictRgbProfile`, and
 `checkStrictNativeProfile`, and the RGB path additionally shares its private
 BP8 sidecar shortcut through `legacyTemporaryRgbImage`. A single-tile stream
-reports one region, so the contract is total across tile layouts. Codestream
-input is still read whole and a selected tile still runs a full inverse DWT
-into a full-tile plane, so those are the remaining memory boundaries.
+reports one region, so the contract is total across tile layouts.
+
+The reference-grid upsampled path takes a banded contract instead, and the
+arithmetic forces it: replication reads the component sample at
+`floor(reference/XRsiz)`, which for a subsampled component sits one sample
+outside a tile's own ceil-div window, and the edge clamp would silently
+substitute the tile's first sample there. A per-tile contract would therefore
+disagree with a full decode at every internal tile boundary of a subsampled
+image. A band spans the full requested width and one complete SIZ tile row, so
+it can widen its source window the way a whole-image decode does; each band is
+produced by the unchanged whole-image upsampling path with the band as its
+`reference_region` and is by construction the matching crop. The cost is that
+the widening reaches one reference row into the tile row above, so a subsampled
+multi-row grid reconstructs that tile row again for the next band.
+
+Codestream input is still read whole and a selected tile still runs a full
+inverse DWT into a full-tile plane, so those are the remaining memory
+boundaries.
 
 The former BP8 COM sidecar is not part of normal output. It remains an optional
 debug/compatibility oracle for tests and old fixtures.

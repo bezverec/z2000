@@ -286,6 +286,8 @@ Primary public types:
 - `NativeTileSinkInfo`
 - `NativeTileSinkRegion`
 - `NativeTileSinkComponent`
+- `UpsampledBandSinkInfo`
+- `UpsampledBandSinkRegion`
 - `TemporaryStats`
 - `ComponentStats`
 - `QualityLayerStats`
@@ -428,6 +430,25 @@ Primary public functions:
   replication reads `floor(reference/XRsiz)` and stays anchored to absolute
   coordinates. Reduction commutes with the component ceil-div, so replication
   runs unchanged in reduced coordinates.
+- `decodeLosslessPlanarUpsampledToSink(allocator, bytes, options, sink)` /
+  `decodeLosslessPlanarUpsampledToSinkProfiled(...)` — push-based upsampled
+  output over the same bounded profile and selectors. `sink` is a pointer whose
+  pointee exposes `pub fn begin(self, info: UpsampledBandSinkInfo) !void` and
+  `pub fn writeBand(self, region: UpsampledBandSinkRegion) !void`. This contract
+  is banded rather than tiled because replication reads
+  `floor(reference/XRsiz)`, which for a subsampled component sits one sample
+  outside a tile's own ceil-div window; a per-tile contract could not supply
+  that neighbouring sample, and the edge clamp would silently substitute the
+  tile's first sample at every internal boundary. A band spans the full
+  requested width and one complete SIZ tile row, is produced by the unchanged
+  whole-image upsampling path with the band as its `reference_region`, and is
+  therefore exactly the corresponding crop of a full upsampled decode. Bands are
+  emitted top to bottom, are disjoint, and cover the reported window exactly;
+  every component shares the reference grid, so all layouts describe the same
+  rectangle and differ only in precision. Peak output memory is one band; the
+  cost is that the source widening reaches one reference row into the tile row
+  above, so a subsampled multi-row grid reconstructs that tile row again for the
+  next band
 - `chromaAlignedSelection` and `cropConvertedChromaAlignedSelection` carry the
   same selectors through a colour conversion whose chroma phase depends on the
   absolute image origin. The first resolves `tile_index`/`reference_region` to

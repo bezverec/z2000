@@ -5,6 +5,37 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Band-Oriented Upsampled Output Sink
+
+- `decodeLosslessPlanarUpsampledToSink` / `...Profiled` add
+  `UpsampledBandSinkInfo` and `UpsampledBandSinkRegion`. Unlike the three tile
+  sinks this contract is **banded**, not tiled, and that is forced by the
+  arithmetic rather than chosen for convenience: nearest-neighbour replication
+  reads the component sample at `floor(reference/XRsiz)`, which for a subsampled
+  component sits one sample outside a tile's own ceil-div window. A per-tile
+  contract would have to invent that neighbouring sample — and the existing
+  edge clamp would silently substitute the tile's first sample, so every
+  internal tile boundary of a 4:2:0 image would differ from a full decode.
+- A band spans the full requested width and one complete SIZ tile row, so it
+  can widen its source window exactly the way a whole-image decode does. Each
+  band is produced by the unchanged whole-image upsampling path with the band as
+  its `reference_region`, so a band is by construction the corresponding crop of
+  a full upsampled decode. Bands are emitted top to bottom, are disjoint, and
+  cover the reported window exactly; `bands_total` is exactly the number of
+  `writeBand` calls.
+- Peak output memory is one band rather than the complete upsampled raster,
+  which on this path is the largest allocation because replication expands every
+  component onto the reference grid. The trade-off is decode work: the source
+  widening reaches one reference row into the tile row above, so on a subsampled
+  multi-row grid that tile row is reconstructed again for the next band. Region
+  pruning keeps its T1 share small, but its T2 walk and inverse DWT run in full.
+- The 4:2:0 twelve-tile stream at a nonzero image origin pins the bands against
+  the whole-image upsampled decode over full, reduced, tile-selected, and
+  region-selected combinations at 1 and 8 threads, with a reassembling sink
+  counting writes per output sample. A tracking allocator pins the reduced peak,
+  a rejecting sink pins error propagation, selector validation is pinned
+  identical across both shapes, and a single-tile stream reports one band.
+
 ### Tile-Oriented Native Output Sink
 
 - `decodeLosslessNativeToSink` completes the tile-sink contract across the three

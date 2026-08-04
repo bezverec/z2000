@@ -33457,6 +33457,322 @@ const CountingRgbTileSink = struct {
     }
 };
 
+/// Reassembles every emitted upsampled band into whole reference-grid planes
+/// and counts how often each output sample was written, so one comparison
+/// proves that the bands are exact, disjoint, and complete.
+const ReassemblingBandSink = struct {
+    allocator: std.mem.Allocator,
+    begun: bool = false,
+    x0: u32 = 0,
+    y0: u32 = 0,
+    width: usize = 0,
+    height: usize = 0,
+    bands_total: u64 = 0,
+    bands_written: u64 = 0,
+    reject_at_band: ?u64 = null,
+    component_count: usize = 0,
+    layouts: [color.max_components]codestream.TileSinkComponentLayout = undefined,
+    planes: [color.max_components][]u16 = .{&.{}} ** color.max_components,
+    writes: [color.max_components][]u8 = .{&.{}} ** color.max_components,
+
+    const SinkError = error{SinkRejected};
+
+    pub fn begin(self: *ReassemblingBandSink, info: codestream.UpsampledBandSinkInfo) !void {
+        try std.testing.expect(!self.begun);
+        self.begun = true;
+        self.x0 = info.x0;
+        self.y0 = info.y0;
+        self.width = info.width;
+        self.height = info.height;
+        self.bands_total = info.bands_total;
+        self.component_count = info.components.len;
+        for (info.components, 0..) |layout, index| {
+            // Upsampling puts every component on the shared reference grid.
+            try std.testing.expectEqual(info.x0, layout.x0);
+            try std.testing.expectEqual(info.y0, layout.y0);
+            try std.testing.expectEqual(info.width, layout.width);
+            try std.testing.expectEqual(info.height, layout.height);
+            self.layouts[index] = layout;
+            const count = layout.width * layout.height;
+            self.planes[index] = try self.allocator.alloc(u16, count);
+            @memset(self.planes[index], 0);
+            self.writes[index] = try self.allocator.alloc(u8, count);
+            @memset(self.writes[index], 0);
+        }
+    }
+
+    pub fn writeBand(self: *ReassemblingBandSink, region: codestream.UpsampledBandSinkRegion) !void {
+        try std.testing.expect(self.begun);
+        if (self.reject_at_band) |index| {
+            if (self.bands_written == index) return SinkError.SinkRejected;
+        }
+        try std.testing.expectEqual(self.bands_written, @as(u64, region.band_index));
+        try std.testing.expectEqual(self.component_count, region.components.len);
+        try std.testing.expectEqual(self.x0, region.x0);
+        try std.testing.expectEqual(self.width, region.width);
+        try std.testing.expect(region.height > 0 and region.y0 >= self.y0);
+        const destination_y = @as(usize, region.y0 - self.y0);
+        try std.testing.expect(destination_y + region.height <= self.height);
+        for (region.components, 0..) |component, index| {
+            const layout = self.layouts[index];
+            try std.testing.expectEqual(layout.bit_depth, component.bit_depth);
+            try std.testing.expectEqual(region.width, component.width);
+            try std.testing.expectEqual(region.height, component.height);
+            for (0..component.height) |row| {
+                const start = (destination_y + row) * layout.width;
+                @memcpy(self.planes[index][start..][0..component.width], component.row(row));
+                for (self.writes[index][start..][0..component.width]) |*written| written.* += 1;
+            }
+        }
+        self.bands_written += 1;
+    }
+
+    fn expectMatches(self: *ReassemblingBandSink, expected: color.SamplePlanes) !void {
+        try std.testing.expect(self.begun);
+        try std.testing.expectEqual(self.bands_total, self.bands_written);
+        try std.testing.expectEqual(self.component_count, expected.planes.len);
+        try std.testing.expectEqual(expected.width, self.width);
+        try std.testing.expectEqual(expected.height, self.height);
+        for (0..self.component_count) |index| {
+            try std.testing.expectEqualSlices(u16, expected.planes[index], self.planes[index]);
+            for (self.writes[index]) |written| try std.testing.expectEqual(@as(u8, 1), written);
+        }
+    }
+
+    fn deinit(self: *ReassemblingBandSink) void {
+        for (0..color.max_components) |index| {
+            if (self.planes[index].len != 0) self.allocator.free(self.planes[index]);
+            if (self.writes[index].len != 0) self.allocator.free(self.writes[index]);
+            self.planes[index] = &.{};
+            self.writes[index] = &.{};
+        }
+    }
+};
+
+/// Minimal band sink that keeps nothing, so a peak-allocation measurement
+/// reflects the decoder rather than the consumer.
+const CountingBandSink = struct {
+    bands_written: u64 = 0,
+    samples_seen: u64 = 0,
+
+    pub fn begin(self: *CountingBandSink, info: codestream.UpsampledBandSinkInfo) !void {
+        _ = self;
+        _ = info;
+    }
+
+    pub fn writeBand(self: *CountingBandSink, region: codestream.UpsampledBandSinkRegion) !void {
+        for (region.components) |component| {
+            self.samples_seen += @as(u64, component.width) * @as(u64, component.height);
+        }
+        self.bands_written += 1;
+    }
+};
+
+test "sampled upsampled decode streams tile-row bands through an output sink" {
+    const allocator = std.testing.allocator;
+    const width = 63;
+    const height = 64;
+    const image_origin_x: u32 = 5;
+    const image_origin_y: u32 = 3;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+
+    const encode_options = codestream.LosslessOptions{
+        .levels = 2,
+        .layers = 3,
+        .mct = .none,
+        .image_origin_x = image_origin_x,
+        .image_origin_y = image_origin_y,
+        .tile_origin_x = 1,
+        .tile_origin_y = 0,
+        .tile_width = 23,
+        .tile_height = 19,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+        .sop = true,
+        .eph = true,
+    };
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planes,
+        &sampling,
+        encode_options,
+    );
+    defer allocator.free(encoded);
+    // A 23x19 grid over a 63x64 image at origin (5,3) with tile origin (1,0)
+    // gives three tile columns and four tile rows.
+    try std.testing.expectEqual(@as(usize, 12), countMarker(encoded, codestream.markerValue("sot")));
+
+    const region = codestream.DecodeRegion{ .x0 = 20, .y0 = 16, .width = 32, .height = 29 };
+    const cases = [_]struct {
+        options: codestream.DecodeOptions,
+        bands: u64,
+    }{
+        .{ .options = .{ .threads = 1 }, .bands = 4 },
+        .{ .options = .{ .threads = 8 }, .bands = 4 },
+        .{ .options = .{ .threads = 1, .resolution_reduction = 1 }, .bands = 4 },
+        .{ .options = .{ .threads = 8, .resolution_reduction = 2 }, .bands = 4 },
+        .{ .options = .{ .threads = 1, .tile_index = 7 }, .bands = 1 },
+        .{ .options = .{ .threads = 8, .tile_index = 7, .resolution_reduction = 1 }, .bands = 1 },
+        // The region spans reference rows [16,45), which crosses three of the
+        // four tile rows ([3,19), [19,38), [38,57), [57,67)).
+        .{ .options = .{ .threads = 1, .reference_region = region }, .bands = 3 },
+        .{ .options = .{ .threads = 8, .reference_region = region, .resolution_reduction = 1 }, .bands = 3 },
+    };
+
+    for (cases) |case| {
+        var expected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            encoded,
+            case.options,
+        );
+        defer expected.deinit();
+
+        var sink = ReassemblingBandSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessPlanarUpsampledToSink(allocator, encoded, case.options, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(case.bands, sink.bands_total);
+    }
+
+    // The band path must not allocate the complete upsampled raster. This is
+    // the whole point of the contract: replication expands every component onto
+    // the reference grid, so the full raster is the largest allocation here.
+    var raster_tracker = PeakAllocator{ .parent = allocator };
+    var raster = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+        raster_tracker.allocator(),
+        encoded,
+        .{ .threads = 1 },
+    );
+    const raster_peak = raster_tracker.peak;
+    var raster_samples: usize = 0;
+    for (raster.planes) |plane| raster_samples += plane.len;
+    raster.deinit();
+    try std.testing.expectEqual(@as(usize, 0), raster_tracker.live);
+
+    var band_tracker = PeakAllocator{ .parent = allocator };
+    var counting = CountingBandSink{};
+    try codestream.decodeLosslessPlanarUpsampledToSink(
+        band_tracker.allocator(),
+        encoded,
+        .{ .threads = 1 },
+        &counting,
+    );
+    try std.testing.expectEqual(@as(u64, 4), counting.bands_written);
+    try std.testing.expectEqual(@as(u64, raster_samples), counting.samples_seen);
+    try std.testing.expectEqual(@as(usize, 0), band_tracker.live);
+    try std.testing.expect(band_tracker.peak < raster_peak);
+
+    // A sink error aborts the decode and propagates unchanged.
+    var rejecting = ReassemblingBandSink{ .allocator = allocator, .reject_at_band = 2 };
+    defer rejecting.deinit();
+    try std.testing.expectError(
+        ReassemblingBandSink.SinkError.SinkRejected,
+        codestream.decodeLosslessPlanarUpsampledToSink(
+            allocator,
+            encoded,
+            .{ .threads = 1 },
+            &rejecting,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 2), rejecting.bands_written);
+
+    // The same selector validation applies to both output shapes.
+    var unused = CountingBandSink{};
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarUpsampledToSink(
+            allocator,
+            encoded,
+            .{ .tile_index = 0, .reference_region = region },
+            &unused,
+        ),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarUpsampledToSink(
+            allocator,
+            encoded,
+            .{ .resolution_reduction = encode_options.levels + 1 },
+            &unused,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), unused.bands_written);
+}
+
+test "single-tile upsampled decode reports one band for the requested window" {
+    const allocator = std.testing.allocator;
+    const width = 31;
+    const height = 27;
+    const image_origin_x: u32 = 3;
+    const image_origin_y: u32 = 5;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planes,
+        &sampling,
+        .{
+            .levels = 2,
+            .mct = .none,
+            .image_origin_x = image_origin_x,
+            .image_origin_y = image_origin_y,
+            .tile_part_divisions = null,
+        },
+    );
+    defer allocator.free(encoded);
+
+    const region = codestream.DecodeRegion{ .x0 = 9, .y0 = 11, .width = 14, .height = 12 };
+    const cases = [_]codestream.DecodeOptions{
+        .{ .threads = 1 },
+        .{ .threads = 8 },
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{ .threads = 8, .reference_region = region },
+        .{ .threads = 1, .reference_region = region, .resolution_reduction = 1 },
+        .{ .threads = 8, .tile_index = 0 },
+    };
+    for (cases) |options| {
+        var expected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            encoded,
+            options,
+        );
+        defer expected.deinit();
+
+        var sink = ReassemblingBandSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessPlanarUpsampledToSink(allocator, encoded, options, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(@as(u64, 1), sink.bands_total);
+    }
+}
+
 /// Reassembles every emitted native window into whole planes and counts how
 /// often each output sample was written, so one comparison proves that the
 /// regions are exact, disjoint, and complete.

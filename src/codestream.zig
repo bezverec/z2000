@@ -443,6 +443,33 @@ pub const TileSinkInfo = struct {
     components: []const TileSinkComponentLayout,
 };
 
+/// Complete geometry of a reference-grid upsampled output, reported once
+/// before the first band. Upsampling puts every component on the shared
+/// reference grid, so all component layouts describe the same rectangle and
+/// differ only in precision. `bands_total` is exactly the number of `writeBand`
+/// calls that will follow.
+pub const UpsampledBandSinkInfo = struct {
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    bands_total: u64,
+    components: []const TileSinkComponentLayout,
+};
+
+/// One horizontal band of a reference-grid upsampled raster, spanning the full
+/// requested width and one complete SIZ tile row, in absolute reduced
+/// reference-grid coordinates. Bands are emitted top to bottom, are disjoint,
+/// and together cover the window reported by `begin` exactly.
+pub const UpsampledBandSinkRegion = struct {
+    band_index: usize,
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    components: []const TileSinkComponent,
+};
+
 /// Complete geometry of an interleaved RGB output window, reported once before
 /// the first tile. The RGB path is fixed at three components on a common grid,
 /// so there is no per-component layout; `tiles_selected` is exactly the number
@@ -4263,6 +4290,194 @@ pub fn decodeLosslessPlanarUpsampledWithOptionsProfiled(
 ) !color.SamplePlanes {
     timings.* = .{};
     return decodeLosslessPlanarUpsampledWithOptionsMeasured(allocator, bytes, options, timings);
+}
+
+/// Push-based reference-grid upsampled decode over the same bounded profile,
+/// selectors, and strict validation as
+/// `decodeLosslessPlanarUpsampledWithOptions`. `sink` is a pointer whose
+/// pointee exposes
+///
+///     pub fn begin(self: *Sink, info: UpsampledBandSinkInfo) !void
+///     pub fn writeBand(self: *Sink, region: UpsampledBandSinkRegion) !void
+///
+/// Unlike the tile sinks, this contract is banded rather than tiled, because
+/// nearest-neighbour replication reads the component sample at
+/// `floor(reference/XRsiz)`, which for a subsampled component sits one sample
+/// outside a tile's own ceil-div window. Emitting per tile would therefore have
+/// to invent that neighbouring sample; a band that spans the full requested
+/// width and one complete SIZ tile row can widen its source window exactly the
+/// way a whole-image decode does. Each band is decoded through the unchanged
+/// whole-image upsampling path, so a band is exactly the corresponding crop of
+/// a full upsampled decode.
+///
+/// Peak output memory is one band rather than the complete raster. The
+/// trade-off is decode work: the source widening reaches one reference row into
+/// the tile row above, so on a subsampled multi-row grid the overlapping tile
+/// row is reconstructed again for the next band. Region pruning keeps its T1
+/// share small, but its T2 walk and inverse DWT run in full.
+pub fn decodeLosslessPlanarUpsampledToSink(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+) !void {
+    return decodeLosslessPlanarUpsampledToSinkMeasured(allocator, bytes, options, sink, null);
+}
+
+pub fn decodeLosslessPlanarUpsampledToSinkProfiled(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+    timings: *DecodeTimings,
+) !void {
+    timings.* = .{};
+    return decodeLosslessPlanarUpsampledToSinkMeasured(allocator, bytes, options, sink, timings);
+}
+
+fn decodeLosslessPlanarUpsampledToSinkMeasured(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: DecodeOptions,
+    sink: anytype,
+    timings: ?*DecodeTimings,
+) !void {
+    const total_start = monotonicNs();
+    defer {
+        if (timings) |value| value.total_ns = elapsedNs(total_start);
+    }
+    var header = try readStrictCodestreamMetadata(allocator, bytes);
+    defer header.deinit();
+    if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
+    const reduction = options.resolution_reduction;
+    const image_rect = try strictImageReferenceRect(header);
+    const requested = (try upsampledSelectionRect(header, image_rect, options)) orelse image_rect;
+
+    var bands: std.ArrayList(tile_grid.Rect) = .empty;
+    defer bands.deinit(allocator);
+    try collectUpsampledBands(allocator, header, image_rect, requested, reduction, &bands);
+    if (bands.items.len == 0) return CodestreamError.InvalidCodestream;
+
+    const reduced_requested = reducedReferenceRect(requested, reduction);
+    const output_width = @as(usize, reduced_requested.x1 - reduced_requested.x0);
+    const output_height = @as(usize, reduced_requested.y1 - reduced_requested.y0);
+
+    const layouts = try allocator.alloc(TileSinkComponentLayout, header.component_count);
+    defer allocator.free(layouts);
+    const components = try allocator.alloc(TileSinkComponent, header.component_count);
+    defer allocator.free(components);
+    for (0..header.component_count) |component| {
+        layouts[component] = .{
+            .x0 = reduced_requested.x0,
+            .y0 = reduced_requested.y0,
+            .width = output_width,
+            .height = output_height,
+            .bit_depth = componentBitDepthForHeader(header, component),
+        };
+    }
+    try sink.begin(.{
+        .x0 = reduced_requested.x0,
+        .y0 = reduced_requested.y0,
+        .width = output_width,
+        .height = output_height,
+        .bands_total = bands.items.len,
+        .components = layouts,
+    });
+
+    for (bands.items, 0..) |band, band_index| {
+        var band_options = options;
+        band_options.tile_index = null;
+        band_options.reference_region = .{
+            .x0 = band.x0,
+            .y0 = band.y0,
+            .width = band.x1 - band.x0,
+            .height = band.y1 - band.y0,
+        };
+        var upsampled = try decodeLosslessPlanarUpsampledWithOptionsMeasured(
+            allocator,
+            bytes,
+            band_options,
+            timings,
+        );
+        defer upsampled.deinit();
+        if (upsampled.planes.len != header.component_count) return CodestreamError.InvalidCodestream;
+
+        const reduced_band = reducedReferenceRect(band, reduction);
+        const band_width = @as(usize, reduced_band.x1 - reduced_band.x0);
+        const band_height = @as(usize, reduced_band.y1 - reduced_band.y0);
+        if (band_width != output_width) return CodestreamError.InvalidCodestream;
+        for (0..header.component_count) |component| {
+            // Upsampling puts every component on the shared reference grid, so
+            // a disagreement here means the band did not land where it was
+            // requested.
+            const dimensions = upsampled.componentDimensions(component) orelse
+                return CodestreamError.InvalidCodestream;
+            if (dimensions[0] != band_width or dimensions[1] != band_height) {
+                return CodestreamError.InvalidCodestream;
+            }
+            components[component] = .{
+                .x0 = reduced_band.x0,
+                .y0 = reduced_band.y0,
+                .width = band_width,
+                .height = band_height,
+                .stride = band_width,
+                .bit_depth = upsampled.componentBitDepth(component) orelse
+                    return CodestreamError.InvalidCodestream,
+                .samples = upsampled.planes[component],
+            };
+        }
+        try sink.writeBand(.{
+            .band_index = band_index,
+            .x0 = reduced_band.x0,
+            .y0 = reduced_band.y0,
+            .width = band_width,
+            .height = band_height,
+            .components = components,
+        });
+    }
+}
+
+/// Splits the requested reference rectangle into bands that never divide a SIZ
+/// tile row, so a band decodes whole tiles and can widen its source window the
+/// way a whole-image decode does. Bands whose reduced height collapses are
+/// dropped, so the reported count is exactly the number of `writeBand` calls.
+fn collectUpsampledBands(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    image_rect: tile_grid.Rect,
+    requested: tile_grid.Rect,
+    reduction: u8,
+    bands: *std.ArrayList(tile_grid.Rect),
+) !void {
+    if (header.tile_width == 0 and header.tile_height == 0) {
+        const reduced = reducedReferenceRect(requested, reduction);
+        if (reduced.x1 > reduced.x0 and reduced.y1 > reduced.y0) {
+            try bands.append(allocator, requested);
+        }
+        return;
+    }
+    const grid = tile_grid.Grid.init(.{
+        .xsiz = image_rect.x1,
+        .ysiz = image_rect.y1,
+        .xosiz = image_rect.x0,
+        .yosiz = image_rect.y0,
+        .xtsiz = header.tile_width,
+        .ytsiz = header.tile_height,
+        .xtosiz = header.tile_origin_x,
+        .ytosiz = header.tile_origin_y,
+    }) catch return CodestreamError.InvalidCodestream;
+
+    var row: u32 = 0;
+    while (row < grid.rows) : (row += 1) {
+        const tile = grid.tile(row * grid.columns) catch return CodestreamError.InvalidCodestream;
+        const y0 = @max(requested.y0, tile.rect.y0);
+        const y1 = @min(requested.y1, tile.rect.y1);
+        if (y1 <= y0) continue;
+        const band = tile_grid.Rect{ .x0 = requested.x0, .y0 = y0, .x1 = requested.x1, .y1 = y1 };
+        const reduced = reducedReferenceRect(band, reduction);
+        if (reduced.x1 <= reduced.x0 or reduced.y1 <= reduced.y0) continue;
+        try bands.append(allocator, band);
+    }
 }
 
 fn decodeLosslessPlanarUpsampledWithOptionsMeasured(

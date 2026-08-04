@@ -306,7 +306,8 @@ The foundation landed on 2026-07-17:
   tile in codestream tile order. No multi-tile loop allocates the whole output,
   and each legacy whole-raster API is implemented as one sink over its loop.
   Native windows carry their component's precision, signedness, sampling step,
-  and CRG registration. The upsampled path, the CLI TIFF writer, incremental
+  and CRG registration. `decodeLosslessPlanarUpsampledToSink` adds the banded
+  variant for reference-grid upsampled output. The CLI TIFF writer, incremental
   codestream input, and row-oriented synthesis inside a single large tile
   remain open.
 
@@ -695,11 +696,24 @@ allocator, and a reassembling sink pins that the regions are exact, disjoint,
 and complete across full, reduced, tile-selected, and region-selected
 combinations at 1 and 8 threads.
 
+The reference-grid upsampled path is banded rather than tiled, and the
+arithmetic forces it: replication reads `floor(reference/XRsiz)`, which for a
+subsampled component sits one sample outside a tile's own ceil-div window, and
+the edge clamp would silently substitute the tile's first sample there. A
+per-tile contract would therefore disagree with a full decode at every internal
+tile boundary of a subsampled image. `decodeLosslessPlanarUpsampledToSink`
+emits one band per SIZ tile row across the full requested width, each produced
+by the unchanged whole-image upsampling path with the band as its
+`reference_region`, so a band is by construction the matching crop. The cost is
+that the source widening reaches one reference row into the tile row above, so
+a subsampled multi-row grid reconstructs that tile row again for the next band.
+
 What remains on this item:
 
-1. Promote the same sink contract to the reference-grid-upsampled output path,
-   and then to the CLI TIFF writer so a conversion never materializes the whole
-   raster either.
+1. Promote these contracts to the CLI TIFF writer so a conversion never
+   materializes the whole raster either. The banded upsampled contract is the
+   shape a row-oriented TIFF writer wants; the tile sinks need the writer to
+   place windows rather than stream rows.
 2. A large selected tile still runs a full inverse DWT into a full-tile plane.
    Row-oriented output inside one tile needs banded synthesis, not just a
    different sink shape.
