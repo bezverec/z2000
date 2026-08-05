@@ -8,11 +8,11 @@ to fail closed instead of silently producing payloads whose behavior is not
 implemented.
 
 Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
-of 2026-07-28, both the narrow RGB lossless JP2 target and the broader bounded
+of 2026-08-05, both the narrow RGB lossless JP2 target and the broader bounded
 Part 1 engineering scorecard are estimated at **100/100 within their declared
-profiles**. This is separate from the general-purpose G0-G7 plan, currently
-estimated at roughly 55% in [the roadmap](docs/roadmap.md). The current
-prerelease is [`v0.2.0-rc.1`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.1).
+profiles**. This is separate from the general-purpose G0-G7 plan, estimated at
+about 57% (+/- 8 points) in [the roadmap](docs/roadmap.md) as of 2026-07-31.
+The current prerelease is [`v0.2.0-rc.1`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.1).
 Neither figure is a formal ISO conformance certification.
 
 ## Features
@@ -157,6 +157,27 @@ Neither figure is a formal ISO conformance certification.
   bounded multi-tile sampled no-MCT 9/7 decode profile. The 9/7 gate covers a
   foreign Kakadu inline PLT/PLT-less payload plus deterministic PPT/PPM
   structural repacks at full and reduced resolution.
+- Push-based decode output, so a bounded decode no longer has to allocate the
+  whole raster. `decodeLosslessPlanarToSink`, `decodeLosslessTemporaryToSink`,
+  and `decodeLosslessNativeToSink` report the output geometry once and then
+  hand over one window per non-empty selected tile, in codestream tile order and
+  in absolute reduced coordinates; each legacy whole-raster API is now one sink
+  over that same loop, so the two shapes cannot diverge in what they accept or
+  produce. `decodeLosslessPlanarUpsampledToSink` is banded rather than tiled
+  because it has to be: nearest-neighbour replication reads a component sample
+  that can sit outside a tile's own window, so it emits one full-width band per
+  SIZ tile row. `decodeLosslessPlanarBandsToSink` offers the same banded shape
+  on the native grids for consumers that place rows rather than tiles; nothing
+  is replicated there, so no tile is decoded twice.
+  `tiff.RgbBandWriter` and `tiff.GrayBandWriter` stream the bounded
+  TIFF layouts, and `decode-temp-jp2` uses them for subsampled three-component
+  and one-component conversions, so neither the raster nor the output file is
+  held whole. Streamed output is byte-identical to the buffered path.
+- Multi-tile reversible no-MCT RPCL decodes through the planar surface with or
+  without component subsampling, and planar reconstruction consumes
+  component-local COC decomposition counts. Two committed four-tile Kakadu
+  tile-`COD/QCD` and tile-component-`COC/QCC` fixtures are sample-exact against
+  their PGX-pinned native decode at full resolution and reduction 1.
 - Bounded JPEG 2000 Part 1 `RGN` Maxshift ROI decode. Component-local
   main-header shifts are inherited or replaced by first-tile-part RGN markers,
   included in T1 bitplane accounting, and undone before dequantization/IDWT.
@@ -483,6 +504,10 @@ Other commands:
   --region,
   --layers, --threads, --t1-backend, --convert-to-srgb, and --timings. ICC conversion is opt-in;
   without the flag, profile bytes and samples are preserved unchanged.
+  Subsampled three-component and one-component conversions are written band by
+  band through a streaming TIFF writer, so peak memory is one tile-row band
+  rather than the whole raster plus the whole file; the bytes are identical
+  either way. Other layouts still buffer both.
 - **j2k-to-pgx INPUT OUTPUT**: Decode one selected component from a raw `.j2k`
   or `.j2c` codestream through the native reversible path. `--component`
   defaults to 0, `--tile-index`/`--region` default to the complete image, and `--layers`
@@ -656,8 +681,11 @@ envelope. The score is for that bounded envelope, not a claim that every Part 1
 or JPX profile is implemented.
 
 Full codec target: complete the G0-G7 plan across generic integer components,
-remaining Part 1 markers and ROI, tile/region-selective and streaming decode, a general
-encoder, broader JP2 mappings, and the final conformance/hardening gate. The
+remaining Part 1 markers and ROI, a general encoder, broader JP2 mappings, and
+the final conformance/hardening gate. Tile/region-selective decode and the
+output end of memory-bounded decode are landed for the bounded profiles;
+incremental codestream input and row-oriented synthesis inside one large tile
+are the remaining scaling boundaries. The
 phase-by-phase estimate and its uncertainty are maintained in the roadmap;
 the bounded 100/100 scorecards are not used as a proxy for this progress.
 

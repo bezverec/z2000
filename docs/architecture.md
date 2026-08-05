@@ -533,10 +533,12 @@ ReleaseSafe, and ReleaseFast configurations.
 
 Tile and region selection bound final raster allocation, avoid T1/DWT work for
 non-intersecting tiles, and skip both T1 and payload materialization for code
-blocks a selected region cannot reach inside the tiles that are decoded. They do
-not yet stream codestream input, reduce a selected tile's full-tile synthesis
-plane, or provide row-oriented output; those are the remaining G4 memory-scaling
-boundaries.
+blocks a selected region cannot reach inside the tiles that are decoded. The
+output end is pushed rather than buffered: the tile and band sinks hand each
+decoded window to the caller, and the CLI conversion path writes bounded TIFF
+layouts through streaming writers. What remains is streaming codestream input
+and reducing a selected tile's full-tile synthesis plane; those are the last G4
+memory-scaling boundaries.
 
 ## Verification Ownership
 

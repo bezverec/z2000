@@ -8,7 +8,7 @@ interop or strict-reader check when the feature is externally visible.
 
 ## Current Snapshot
 
-Last updated: 2026-07-28.
+Last updated: 2026-08-05.
 
 | Target | Score | Meaning |
 | --- | ---: | --- |
@@ -22,7 +22,7 @@ arbitrary-profile support, or completion of the roadmap's G0-G7 program.
 Remaining work includes generic component and encode breadth, ROI/registration encode and marker
 semantics, selective/streaming decode, broader JP2 mappings, producer diversity,
 and performance outside those scored bounds. The separate roadmap estimate is
-roughly 55% and is intentionally not folded into either 100/100 score.
+about 57% and is intentionally not folded into either 100/100 score.
 
 ## Broad Part 1 Readiness Matrix
 
