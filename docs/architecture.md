@@ -261,6 +261,12 @@ produced by the unchanged whole-image upsampling path with the band as its
 the widening reaches one reference row into the tile row above, so a subsampled
 multi-row grid reconstructs that tile row again for the next band.
 
+The planar surface accepts multi-tile reversible no-MCT RPCL with or without
+subsampling; the per-tile machinery was always generic, and its reconstruction
+now consumes component-local COC decomposition counts through
+`componentLevelsForHeader` rather than the header count, matching the native
+path.
+
 `decodeLosslessPlanarBandsToSink` offers the same banded shape without
 replication, for consumers that place rows rather than tiles. Its bands stay on
 the native component grids, so a subsampled component window is its own ceil-div

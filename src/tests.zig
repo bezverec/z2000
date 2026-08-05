@@ -1064,6 +1064,75 @@ test "Kakadu component-local B.7 code-block clamping decodes exactly" {
     }
 }
 
+test "multi-tile reversible no-MCT streams decode through the planar path" {
+    const allocator = std.testing.allocator;
+    // Both fixtures are four-tile reversible no-MCT RPCL streams with unsigned
+    // 8-bit components on a common grid. Their native decode is already pinned
+    // against Kakadu PGX references, so it is the oracle here: the legacy planar
+    // surface must reconstruct the same samples now that it accepts them.
+    const fixtures = [_][]const u8{
+        @embedFile("testdata/kakadu-tile-cod-qcd-override.j2c"),
+        @embedFile("testdata/kakadu-tile-coc-qcc-override.j2c"),
+    };
+    for (fixtures) |bytes| {
+        for ([_]u8{ 0, 1 }) |reduction| {
+            var native = try codestream.decodeLosslessNativeWithOptions(
+                allocator,
+                bytes,
+                .{ .threads = 1, .resolution_reduction = reduction },
+                .{},
+            );
+            defer native.deinit();
+
+            var planar = try codestream.decodeLosslessPlanarWithOptions(
+                allocator,
+                bytes,
+                .{ .threads = 1, .resolution_reduction = reduction },
+            );
+            defer planar.deinit();
+            var parallel = try codestream.decodeLosslessPlanarWithOptions(
+                allocator,
+                bytes,
+                .{ .threads = 8, .resolution_reduction = reduction },
+            );
+            defer parallel.deinit();
+
+            try std.testing.expectEqual(native.planes.len, planar.planes.len);
+            for (native.planes, 0..) |plane, component| {
+                const dimensions = planar.componentDimensions(component).?;
+                try std.testing.expectEqual(plane.layout.width, dimensions[0]);
+                try std.testing.expectEqual(plane.layout.height, dimensions[1]);
+                try std.testing.expectEqual(
+                    plane.layout.precision,
+                    planar.componentBitDepth(component).?,
+                );
+                try std.testing.expectEqual(plane.samples.len, planar.planes[component].len);
+                for (plane.samples, planar.planes[component]) |expected, actual| {
+                    try std.testing.expectEqual(expected, @as(i64, actual));
+                }
+                try std.testing.expectEqualSlices(
+                    u16,
+                    planar.planes[component],
+                    parallel.planes[component],
+                );
+            }
+
+            // The same streams now split into real tile-row bands, which is what
+            // a row-oriented consumer needs.
+            var sink = ReassemblingBandSink{ .allocator = allocator };
+            defer sink.deinit();
+            try codestream.decodeLosslessPlanarBandsToSink(
+                allocator,
+                bytes,
+                .{ .threads = 1, .resolution_reduction = reduction },
+                &sink,
+            );
+            try sink.expectMatches(planar);
+            try std.testing.expectEqual(@as(u64, 2), sink.bands_total);
+        }
+    }
+}
+
 test "Kakadu tile-header COD and QCD overrides decode exactly" {
     const allocator = std.testing.allocator;
     const bytes = @embedFile("testdata/kakadu-tile-cod-qcd-override.j2c");

@@ -723,16 +723,21 @@ against a binary built from the previous commit over the committed Kakadu
 
 `decodeLosslessPlanarBandsToSink` adds the same banded shape without
 replication, and `tiff.GrayBandWriter`/`GrayBandSink` stream a one-component
-conversion. One honest limit there: a multi-tile reversible no-MCT grayscale
-stream is not a supported decode profile, so such an image resolves to a single
-band and only the output file stops being buffered.
+conversion.
+
+Multi-tile reversible no-MCT RPCL is now accepted by the planar surface with or
+without subsampling, so a one-component multi-tile stream is decodable and its
+bands are real. Opening that gate exposed a genuine gap it had been masking: the
+planar reconstruction used the header decomposition count instead of
+`componentLevelsForHeader`, ignoring a component-local COC level count in block
+reconstruction and in both inverse 5/3 paths. Two committed four-tile Kakadu
+override fixtures pin the fix against their PGX-exact native decode.
 
 What remains on this item:
 
-1. Support multi-tile reversible no-MCT decode without subsampling, which is
-   what would make banded grayscale more than one band. It is currently
-   accepted only for irreversible 9/7 no-MCT, for subsampled layouts, and for
-   the mixed tile-transform profile.
+1. Commit or obtain a one-component multi-tile fixture. The grayscale banded
+   case currently rides on the shared per-tile path rather than on its own
+   evidence, because no z2000 encoder emits that layout.
 2. Extend streaming output to alpha and palette-expanded conversion. Both still
    buffer their whole raster and file, and the tile sinks would need a writer
    that places windows rather than appending rows — a strip- or tile-based TIFF

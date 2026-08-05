@@ -4999,6 +4999,13 @@ fn checkStrictPlanarProfile(
     output_mode: PlanarOutputMode,
 ) !void {
     if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
+    // A component-local COC may carry fewer levels than the header, and a
+    // reduction past its own count has no reconstruction.
+    if (componentCodingSliceForHeader(header)) |coding| {
+        for (coding) |component| {
+            if (options.resolution_reduction > component.levels) return CodestreamError.InvalidCodestream;
+        }
+    }
     const rct_alpha = header.component_count == 4 and header.mct == .rct;
     const sampled_rct = header.component_count == 3 and header.mct == .rct and
         headerHasUniformComponentSampling(header);
@@ -5022,12 +5029,14 @@ fn checkStrictPlanarProfile(
         return CodestreamError.UnsupportedPayload;
     }
     if (header.tile_width != 0 or header.tile_height != 0) {
-        const mixed_tile_transform_candidate = header.component_count == 3 and
-            header.mct == .none and header.progression == .rpcl and
-            headerHasUniformComponentSampling(header) and reversible;
+        // Reversible no-MCT RPCL is decodable on the shared per-tile path
+        // whether or not components are subsampled, so uniform sampling no
+        // longer has to route through the interleaved RGB decoder.
+        const reversible_no_mct = reversible and header.mct == .none and
+            header.progression == .rpcl;
         if (!headerHasComponentSubsampling(header) and
             !(header.transform == .irreversible_9_7 and header.quantization != .none and header.mct == .none) and
-            !mixed_tile_transform_candidate)
+            !reversible_no_mct)
         {
             return CodestreamError.UnsupportedPayload;
         }
@@ -5399,11 +5408,14 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
     while (initialized < header.component_count) {
         const component = initialized;
         const payload_start = monotonicNs();
+        // Component-local COC decomposition counts apply here exactly as they do
+        // on the native path; without a COC this is the header level count.
+        const component_levels = componentLevelsForHeader(header, component);
         coefficient_planes[component] = try reconstructStrictComponentCoefficientsFromBlockCatalog(
             allocator,
             catalog.component_widths[component],
             catalog.component_heights[component],
-            header.levels,
+            component_levels,
             catalog,
             component,
             componentRoiShiftForHeader(header, component),
@@ -5420,7 +5432,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
                 coefficient_planes[component],
                 catalog.component_widths[component],
                 catalog.component_heights[component],
-                header.levels,
+                component_levels,
                 catalog.component_x0[component],
                 catalog.component_y0[component],
             );
@@ -5430,7 +5442,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
                 coefficient_planes[component],
                 catalog.component_widths[component],
                 catalog.component_heights[component],
-                header.levels,
+                component_levels,
                 options.resolution_reduction,
                 catalog.component_x0[component],
                 catalog.component_y0[component],
@@ -10903,14 +10915,13 @@ fn decodeStrictMultiTilePlanarToSink(
     const reversible = header.transform == .reversible_5_3 and header.quantization == .none;
     const irreversible_no_mct = header.transform == .irreversible_9_7 and
         header.quantization != .none and header.mct == .none;
-    const component_local_layout = headerHasComponentSubsampling(header) or irreversible_no_mct;
-    const mixed_tile_transform_candidate = header.component_count == 3 and
-        header.mct == .none and header.progression == .rpcl and
-        headerHasUniformComponentSampling(header) and reversible;
+    const reversible_no_mct = reversible and header.mct == .none;
+    const component_local_layout = headerHasComponentSubsampling(header) or
+        irreversible_no_mct or reversible_no_mct;
     if ((header.mct != .none and !sampled_rct) or
         (header.progression != .rpcl and !sampled_rct) or
         (!reversible and !irreversible_no_mct) or
-        (!component_local_layout and !mixed_tile_transform_candidate))
+        !component_local_layout)
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -10919,15 +10930,6 @@ fn decodeStrictMultiTilePlanarToSink(
     defer context.deinit();
     const window = try strictTileDecodeWindow(context, header, options);
     recordStrictTileDecodeWindow(timings, window);
-    if (mixed_tile_transform_candidate) {
-        var has_tile_transform_override = false;
-        const component_count = @as(usize, header.component_count);
-        for (context.tile_component_coding, 0..) |coding, index| {
-            has_tile_transform_override = has_tile_transform_override or
-                coding.transform != header.component_coding[index % component_count].transform;
-        }
-        if (!has_tile_transform_override) return CodestreamError.UnsupportedPayload;
-    }
 
     const component_depths = try allocator.alloc(u8, header.component_count);
     defer allocator.free(component_depths);

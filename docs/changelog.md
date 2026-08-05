@@ -5,6 +5,37 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile Reversible No-MCT Planar Decode
+
+- The bounded planar surface now accepts multi-tile reversible no-MCT RPCL
+  streams whether or not their components are subsampled. Previously uniform
+  sampling was rejected unless the stream was irreversible 9/7 or carried an
+  actual tile transform override, which forced such streams through the
+  interleaved RGB decoder and left one-component multi-tile input undecodable.
+  The per-tile machinery was already generic; only the profile gate was narrow.
+- Fixed a real gap the gate had been masking: the planar reconstruction used
+  the header decomposition count instead of `componentLevelsForHeader`, so a
+  component-local COC level count was ignored in block reconstruction and in
+  both the full and reduced inverse 5/3. The native path already used the
+  effective count. `checkStrictPlanarProfile` now also rejects a resolution
+  reduction past a component's own COC level count, matching
+  `checkStrictNativeProfile`.
+- Two committed four-tile Kakadu fixtures pin the result. `kakadu-tile-cod-qcd-override`
+  replaces tile 1's COD/QCD with NL=1/8x8 and a four-band table;
+  `kakadu-tile-coc-qcc-override` replaces tile 1 component 1 through COC/QCC.
+  Their native decode is already exact against Kakadu PGX references, so it is
+  the oracle: planar output must match it sample for sample. Both fixtures pass
+  at full resolution and reduction 1, with identical one/eight-thread output,
+  and `decodeLosslessPlanarBandsToSink` now splits them into two real tile-row
+  bands that reassemble to the whole-image decode.
+- This is what makes banded grayscale more than one band in principle. No
+  one-component multi-tile fixture is committed and no z2000 encoder emits that
+  layout, so the grayscale case rides on the shared path rather than on its own
+  evidence; the queue records that.
+- Conversion output is unchanged: every committed and freshly encoded JP2
+  fixture — 28 in total — decodes to a byte-identical TIFF through a binary
+  built from the previous commit.
+
 ### Banded Planar Decode And Streaming Grayscale Conversion
 
 - Added `decodeLosslessPlanarBandsToSink` / `...Profiled`, the row-oriented
