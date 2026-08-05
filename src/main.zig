@@ -1137,11 +1137,61 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
 
     var decode_timings = codestream.DecodeTimings{};
 
-    // Bounded streaming conversion: a subsampled three-component JP2 with no
-    // colour conversion is the one path where both the upsampled raster and the
-    // TIFF file would otherwise be held whole. Decoding it band by band into a
-    // streaming TIFF writer keeps peak memory at one tile-row band. Every other
-    // layout keeps the whole-raster path below.
+    // Bounded streaming conversion: a one-component JP2 needs no colour
+    // handling at all, so its bands go straight to the streaming grayscale
+    // writer and neither the raster nor the file is held whole.
+    if (!info.has_palette and info.components == 1 and !convert_to_srgb and
+        !jp2InfoHasSubsampling(info))
+    {
+        const icc_start = monotonicNs();
+        const icc_profile = try jp2.extractIccProfile(allocator, bytes);
+        defer if (icc_profile) |profile| allocator.free(profile);
+        command_timings.icc_extract_ns = elapsedNs(icc_start);
+
+        const stream_start = monotonicNs();
+        var sink = tiff.GrayBandSink{
+            .io = io,
+            .allocator = allocator,
+            .path = args[1],
+            .bit_depth = info.bits_per_component,
+            .icc_profile = icc_profile,
+        };
+        defer sink.deinit();
+        if (show_timings) {
+            try codestream.decodeLosslessPlanarBandsToSinkProfiled(
+                allocator,
+                j2k,
+                options,
+                &sink,
+                &decode_timings,
+            );
+        } else {
+            try codestream.decodeLosslessPlanarBandsToSink(allocator, j2k, options, &sink);
+        }
+        try sink.finish();
+        command_timings.codestream_decode_ns = elapsedNs(stream_start);
+        command_timings.total_ns = command_timings.jp2_read_ns +
+            command_timings.codestream_extract_ns +
+            command_timings.codestream_decode_ns +
+            command_timings.icc_extract_ns;
+        reportDecodeTempJp2(
+            args[0],
+            args[1],
+            .{ sink.width, sink.height },
+            info,
+            options,
+            show_timings,
+            command_timings,
+            decode_timings,
+        );
+        return;
+    }
+
+    // A subsampled three-component JP2 with no colour conversion is the other
+    // path where both the upsampled raster and the TIFF file would otherwise be
+    // held whole. Decoding it band by band into a streaming TIFF writer keeps
+    // peak memory at one tile-row band. Every other layout keeps the
+    // whole-raster path below.
     if (!info.has_palette and info.components == 3 and !convert_to_srgb and
         info.color_space != .sycc and jp2InfoHasSubsampling(info))
     {

@@ -33537,6 +33537,203 @@ test "streaming RGB TIFF writer matches the whole-image writer byte for byte" {
     }
 }
 
+test "streaming grayscale TIFF writer matches the whole-image writer byte for byte" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 11;
+    const height = 9;
+    const profile = [_]u8{ 0x5A, 0x5B, 0x5C };
+    var case_index: usize = 0;
+    for ([_]u8{ 8, 16 }) |bit_depth| {
+        for ([_]bool{ false, true }) |with_icc| {
+            for ([_]bool{ false, true }) |white_is_zero| {
+                defer case_index += 1;
+                const samples = try allocator.alloc(u16, width * height);
+                defer allocator.free(samples);
+                const max_sample: u16 = if (bit_depth == 8) 255 else 65535;
+                for (samples, 0..) |*sample, index| {
+                    sample.* = @intCast((index * 4099) % (@as(usize, max_sample) + 1));
+                }
+
+                var path_buffers: [3][160]u8 = undefined;
+                const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+                const whole_path = try std.fmt.bufPrint(&path_buffers[1], "{s}/gwhole-{}.tif", .{ directory, case_index });
+                const streamed_path = try std.fmt.bufPrint(&path_buffers[2], "{s}/gstream-{}.tif", .{ directory, case_index });
+
+                const gray = image.GrayImage{
+                    .allocator = allocator,
+                    .width = width,
+                    .height = height,
+                    .bit_depth = bit_depth,
+                    .samples = samples,
+                    .white_is_zero = white_is_zero,
+                    .icc_profile = if (with_icc) @constCast(profile[0..]) else null,
+                };
+                try tiff.writeGray(io, allocator, gray, whole_path);
+
+                var writer = try tiff.GrayBandWriter.init(
+                    io,
+                    allocator,
+                    streamed_path,
+                    width,
+                    height,
+                    bit_depth,
+                    white_is_zero,
+                    if (with_icc) profile[0..] else null,
+                );
+                defer writer.deinit();
+                const chunks = [_]usize{ 2, 1, 4, 2 };
+                var row: usize = 0;
+                for (chunks) |rows| {
+                    try writer.writeRows(samples[row * width ..][0 .. rows * width]);
+                    row += rows;
+                }
+                try std.testing.expectEqual(height, row);
+                try writer.finish();
+
+                const whole_bytes = try std.Io.Dir.cwd().readFileAlloc(io, whole_path, allocator, .limited(1 << 20));
+                defer allocator.free(whole_bytes);
+                const streamed_bytes = try std.Io.Dir.cwd().readFileAlloc(io, streamed_path, allocator, .limited(1 << 20));
+                defer allocator.free(streamed_bytes);
+                try std.testing.expectEqualSlices(u8, whole_bytes, streamed_bytes);
+            }
+        }
+    }
+}
+
+test "planar band decode splits multi-tile output into tile rows" {
+    const allocator = std.testing.allocator;
+    const width = 63;
+    const height = 64;
+    const image_origin_x: u32 = 5;
+    const image_origin_y: u32 = 3;
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+    };
+    var planes = try sampledEncodeTestPlanesAtOrigin(
+        allocator,
+        width,
+        height,
+        image_origin_x,
+        image_origin_y,
+        &sampling,
+    );
+    defer planes.deinit();
+
+    const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planes,
+        &sampling,
+        .{
+            .levels = 2,
+            .mct = .none,
+            .image_origin_x = image_origin_x,
+            .image_origin_y = image_origin_y,
+            .tile_origin_x = 1,
+            .tile_origin_y = 0,
+            .tile_width = 23,
+            .tile_height = 19,
+            .block_width = 8,
+            .block_height = 8,
+            .tile_part_divisions = null,
+        },
+    );
+    defer allocator.free(encoded);
+
+    const region = codestream.DecodeRegion{ .x0 = 20, .y0 = 16, .width = 32, .height = 29 };
+    const cases = [_]struct {
+        options: codestream.DecodeOptions,
+        bands: u64,
+    }{
+        .{ .options = .{ .threads = 1 }, .bands = 4 },
+        .{ .options = .{ .threads = 8 }, .bands = 4 },
+        .{ .options = .{ .threads = 1, .resolution_reduction = 1 }, .bands = 4 },
+        .{ .options = .{ .threads = 8, .tile_index = 7 }, .bands = 1 },
+        .{ .options = .{ .threads = 1, .reference_region = region }, .bands = 3 },
+    };
+    for (cases) |case| {
+        // The native planar band output keeps each component on its own grid,
+        // so a chroma window is half as tall as the band that contains it.
+        var expected = try codestream.decodeLosslessPlanarWithOptions(allocator, encoded, case.options);
+        defer expected.deinit();
+
+        var sink = ReassemblingBandSink{ .allocator = allocator };
+        defer sink.deinit();
+        try codestream.decodeLosslessPlanarBandsToSink(allocator, encoded, case.options, &sink);
+        try sink.expectMatches(expected);
+        try std.testing.expectEqual(case.bands, sink.bands_total);
+    }
+}
+
+test "streamed grayscale TIFF conversion matches the whole-raster conversion" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 61;
+    const height = 47;
+    var planes = try color.SamplePlanes.initWithComponentBitDepths(allocator, width, height, &.{8});
+    defer planes.deinit();
+    for (planes.planes[0], 0..) |*sample, index| sample.* = @intCast((index * 31) % 256);
+
+    const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, .{
+        .levels = 2,
+        .mct = .none,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(encoded);
+
+    const profile = [_]u8{ 0x77, 0x88 };
+    const region = codestream.DecodeRegion{ .x0 = 7, .y0 = 5, .width = 30, .height = 25 };
+    const cases = [_]struct { options: codestream.DecodeOptions, icc: bool }{
+        .{ .options = .{ .threads = 1 }, .icc = false },
+        .{ .options = .{ .threads = 8 }, .icc = true },
+        .{ .options = .{ .threads = 1, .resolution_reduction = 1 }, .icc = false },
+        .{ .options = .{ .threads = 8, .tile_index = 0 }, .icc = true },
+        .{ .options = .{ .threads = 1, .reference_region = region }, .icc = false },
+    };
+
+    for (cases, 0..) |case, index| {
+        var path_buffers: [3][160]u8 = undefined;
+        const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        const whole_path = try std.fmt.bufPrint(&path_buffers[1], "{s}/gcwhole-{}.tif", .{ directory, index });
+        const streamed_path = try std.fmt.bufPrint(&path_buffers[2], "{s}/gcstream-{}.tif", .{ directory, index });
+
+        var decoded = try codestream.decodeLosslessGrayWithOptions(allocator, encoded, case.options);
+        defer decoded.deinit();
+        if (case.icc) decoded.icc_profile = @constCast(profile[0..]);
+        try tiff.writeGray(io, allocator, decoded, whole_path);
+        decoded.icc_profile = null;
+
+        var sink = tiff.GrayBandSink{
+            .io = io,
+            .allocator = allocator,
+            .path = streamed_path,
+            .bit_depth = 8,
+            .icc_profile = if (case.icc) profile[0..] else null,
+        };
+        defer sink.deinit();
+        try codestream.decodeLosslessPlanarBandsToSink(allocator, encoded, case.options, &sink);
+        try sink.finish();
+        try std.testing.expectEqual(decoded.width, sink.width);
+        try std.testing.expectEqual(decoded.height, sink.height);
+
+        const whole_bytes = try std.Io.Dir.cwd().readFileAlloc(io, whole_path, allocator, .limited(1 << 22));
+        defer allocator.free(whole_bytes);
+        const streamed_bytes = try std.Io.Dir.cwd().readFileAlloc(io, streamed_path, allocator, .limited(1 << 22));
+        defer allocator.free(streamed_bytes);
+        try std.testing.expectEqualSlices(u8, whole_bytes, streamed_bytes);
+    }
+}
+
 test "streaming RGB TIFF writer fails closed on an incomplete or overlong raster" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -33709,7 +33906,7 @@ const ReassemblingBandSink = struct {
 
     const SinkError = error{SinkRejected};
 
-    pub fn begin(self: *ReassemblingBandSink, info: codestream.UpsampledBandSinkInfo) !void {
+    pub fn begin(self: *ReassemblingBandSink, info: codestream.BandSinkInfo) !void {
         try std.testing.expect(!self.begun);
         self.begun = true;
         self.x0 = info.x0;
@@ -33719,11 +33916,6 @@ const ReassemblingBandSink = struct {
         self.bands_total = info.bands_total;
         self.component_count = info.components.len;
         for (info.components, 0..) |layout, index| {
-            // Upsampling puts every component on the shared reference grid.
-            try std.testing.expectEqual(info.x0, layout.x0);
-            try std.testing.expectEqual(info.y0, layout.y0);
-            try std.testing.expectEqual(info.width, layout.width);
-            try std.testing.expectEqual(info.height, layout.height);
             self.layouts[index] = layout;
             const count = layout.width * layout.height;
             self.planes[index] = try self.allocator.alloc(u16, count);
@@ -33733,7 +33925,7 @@ const ReassemblingBandSink = struct {
         }
     }
 
-    pub fn writeBand(self: *ReassemblingBandSink, region: codestream.UpsampledBandSinkRegion) !void {
+    pub fn writeBand(self: *ReassemblingBandSink, region: codestream.BandSinkRegion) !void {
         try std.testing.expect(self.begun);
         if (self.reject_at_band) |index| {
             if (self.bands_written == index) return SinkError.SinkRejected;
@@ -33743,15 +33935,20 @@ const ReassemblingBandSink = struct {
         try std.testing.expectEqual(self.x0, region.x0);
         try std.testing.expectEqual(self.width, region.width);
         try std.testing.expect(region.height > 0 and region.y0 >= self.y0);
-        const destination_y = @as(usize, region.y0 - self.y0);
-        try std.testing.expect(destination_y + region.height <= self.height);
+        try std.testing.expect(@as(usize, region.y0 - self.y0) + region.height <= self.height);
         for (region.components, 0..) |component, index| {
             const layout = self.layouts[index];
             try std.testing.expectEqual(layout.bit_depth, component.bit_depth);
-            try std.testing.expectEqual(region.width, component.width);
-            try std.testing.expectEqual(region.height, component.height);
+            // A subsampled component's window is its own ceil-div intersection
+            // of the band, so it is placed on its own grid rather than the
+            // reference grid.
+            try std.testing.expect(component.x0 >= layout.x0 and component.y0 >= layout.y0);
+            const destination_x = @as(usize, component.x0 - layout.x0);
+            const destination_y = @as(usize, component.y0 - layout.y0);
+            try std.testing.expect(destination_x + component.width <= layout.width);
+            try std.testing.expect(destination_y + component.height <= layout.height);
             for (0..component.height) |row| {
-                const start = (destination_y + row) * layout.width;
+                const start = (destination_y + row) * layout.width + destination_x;
                 @memcpy(self.planes[index][start..][0..component.width], component.row(row));
                 for (self.writes[index][start..][0..component.width]) |*written| written.* += 1;
             }
@@ -33763,9 +33960,10 @@ const ReassemblingBandSink = struct {
         try std.testing.expect(self.begun);
         try std.testing.expectEqual(self.bands_total, self.bands_written);
         try std.testing.expectEqual(self.component_count, expected.planes.len);
-        try std.testing.expectEqual(expected.width, self.width);
-        try std.testing.expectEqual(expected.height, self.height);
         for (0..self.component_count) |index| {
+            const dimensions = expected.componentDimensions(index).?;
+            try std.testing.expectEqual(dimensions[0], self.layouts[index].width);
+            try std.testing.expectEqual(dimensions[1], self.layouts[index].height);
             try std.testing.expectEqualSlices(u16, expected.planes[index], self.planes[index]);
             for (self.writes[index]) |written| try std.testing.expectEqual(@as(u8, 1), written);
         }
@@ -33787,12 +33985,12 @@ const CountingBandSink = struct {
     bands_written: u64 = 0,
     samples_seen: u64 = 0,
 
-    pub fn begin(self: *CountingBandSink, info: codestream.UpsampledBandSinkInfo) !void {
+    pub fn begin(self: *CountingBandSink, info: codestream.BandSinkInfo) !void {
         _ = self;
         _ = info;
     }
 
-    pub fn writeBand(self: *CountingBandSink, region: codestream.UpsampledBandSinkRegion) !void {
+    pub fn writeBand(self: *CountingBandSink, region: codestream.BandSinkRegion) !void {
         for (region.components) |component| {
             self.samples_seen += @as(u64, component.width) * @as(u64, component.height);
         }

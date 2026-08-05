@@ -88,7 +88,12 @@ raster serialization with `writeRgb`, so the two cannot disagree. A partial
 row, more rows than declared, fewer rows at `finish`, and samples outside the
 declared precision all fail closed. `tiff.RgbBandSink` adapts upsampled band
 regions onto it and takes those regions as `anytype`, so the TIFF layer gains
-no dependency on the codestream layer.
+no dependency on the codestream layer. `tiff.GrayBandWriter` and
+`tiff.GrayBandSink` are the single-channel counterparts, sharing `GrayLayout`
+with `writeGray`; `decode-temp-jp2` streams a one-component conversion through
+them. A multi-tile reversible no-MCT grayscale stream is not a supported decode
+profile today, so such an image resolves to one band and the benefit there is
+that the output file is not buffered rather than that the raster is.
 
 `j2k-to-pgx` is the raw-codestream diagnostic boundary. It accepts `.j2k` or
 `.j2c` without a JP2 wrapper, decodes through `decodeLosslessNativeWithOptions`,
@@ -303,8 +308,8 @@ Primary public types:
 - `NativeTileSinkInfo`
 - `NativeTileSinkRegion`
 - `NativeTileSinkComponent`
-- `UpsampledBandSinkInfo`
-- `UpsampledBandSinkRegion`
+- `BandSinkInfo`
+- `BandSinkRegion`
 - `TemporaryStats`
 - `ComponentStats`
 - `QualityLayerStats`
@@ -450,8 +455,8 @@ Primary public functions:
 - `decodeLosslessPlanarUpsampledToSink(allocator, bytes, options, sink)` /
   `decodeLosslessPlanarUpsampledToSinkProfiled(...)` — push-based upsampled
   output over the same bounded profile and selectors. `sink` is a pointer whose
-  pointee exposes `pub fn begin(self, info: UpsampledBandSinkInfo) !void` and
-  `pub fn writeBand(self, region: UpsampledBandSinkRegion) !void`. This contract
+  pointee exposes `pub fn begin(self, info: BandSinkInfo) !void` and
+  `pub fn writeBand(self, region: BandSinkRegion) !void`. This contract
   is banded rather than tiled because replication reads
   `floor(reference/XRsiz)`, which for a subsampled component sits one sample
   outside a tile's own ceil-div window; a per-tile contract could not supply
@@ -466,6 +471,16 @@ Primary public functions:
   cost is that the source widening reaches one reference row into the tile row
   above, so a subsampled multi-row grid reconstructs that tile row again for the
   next band
+- `decodeLosslessPlanarBandsToSink(allocator, bytes, options, sink)` /
+  `decodeLosslessPlanarBandsToSinkProfiled(...)` — the row-oriented counterpart
+  of `decodeLosslessPlanarToSink`, using the same `begin`/`writeBand` contract
+  as the upsampled band sink. A band spans the full requested width and one
+  complete SIZ tile row and is decoded through the unchanged whole-image planar
+  path with the band as its `reference_region`, so it is exactly the matching
+  crop. Output stays on the native component grids, so a subsampled component's
+  window is its own ceil-div intersection of the band and can be shorter than
+  the band itself. Nothing is replicated, so unlike the upsampled contract there
+  is no source widening and no tile is reconstructed twice
 - `chromaAlignedSelection` and `cropConvertedChromaAlignedSelection` carry the
   same selectors through a colour conversion whose chroma phase depends on the
   absolute image origin. The first resolves `tile_index`/`reference_region` to

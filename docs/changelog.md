@@ -5,6 +5,40 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Banded Planar Decode And Streaming Grayscale Conversion
+
+- Added `decodeLosslessPlanarBandsToSink` / `...Profiled`, the row-oriented
+  counterpart of `decodeLosslessPlanarToSink` for consumers such as a
+  strip-oriented image writer that cannot place a tile. A band spans the full
+  requested width and one complete SIZ tile row and is decoded through the
+  unchanged whole-image planar path with the band as its `reference_region`, so
+  a band is exactly the corresponding crop of a full decode. Output stays on the
+  native component grids, so a subsampled component's window is its own ceil-div
+  intersection of the band and can be shorter than the band; unlike the
+  upsampled contract nothing is replicated, so there is no source widening and
+  no tile is reconstructed twice.
+- `UpsampledBandSinkInfo` and `UpsampledBandSinkRegion` are renamed to
+  `BandSinkInfo` and `BandSinkRegion`, since both banded entry points now use
+  them. The library is pre-release, so no alias is kept.
+- Added `tiff.GrayBandWriter` and `tiff.GrayBandSink`, the single-channel
+  counterparts of the RGB pair. `GrayLayout` is shared with `writeGray` the same
+  way `RgbLayout` is shared with `writeRgb`, so buffered and streaming output
+  cannot diverge.
+- `decode-temp-jp2` streams a one-component conversion through that pair. Note
+  the honest limit: a multi-tile reversible no-MCT grayscale stream is not a
+  supported decode profile today, so such an image resolves to a single band and
+  the win there is that the output file is no longer buffered, not that the
+  raster is. Multi-band grayscale becomes real when that profile is supported.
+- Byte-identity is pinned in-tree for the writer against `writeGray` over both
+  precisions, both photometric senses, and with and without ICC, and for the
+  conversion against a whole-raster `writeGray` of the same decode across full,
+  reduced, tile-selected, and region-selected options at 1 and 8 threads. The
+  banded decode itself is pinned against the whole-image planar decode on the
+  4:2:0 twelve-tile fixture, where chroma windows really are half as tall as
+  their band. CLI output was additionally compared against a binary built from
+  the previous commit over three grayscale sources with and without selectors,
+  plus the RGB 4:2:0 fixtures to confirm the earlier path is unchanged.
+
 ### Streaming Subsampled JP2-To-TIFF Conversion
 
 - Added `tiff.RgbBandWriter`, a streaming chunky RGB TIFF writer. Every offset
@@ -37,7 +71,7 @@ entries are grouped by development milestone rather than semantic version.
 ### Band-Oriented Upsampled Output Sink
 
 - `decodeLosslessPlanarUpsampledToSink` / `...Profiled` add
-  `UpsampledBandSinkInfo` and `UpsampledBandSinkRegion`. Unlike the three tile
+  `BandSinkInfo` and `BandSinkRegion`. Unlike the three tile
   sinks this contract is **banded**, not tiled, and that is forced by the
   arithmetic rather than chosen for convenience: nearest-neighbour replication
   reads the component sample at `floor(reference/XRsiz)`, which for a subsampled

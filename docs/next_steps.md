@@ -309,9 +309,9 @@ The foundation landed on 2026-07-17:
   and CRG registration. `decodeLosslessPlanarUpsampledToSink` adds the banded
   variant for reference-grid upsampled output, and `decode-temp-jp2` streams a
   subsampled three-component conversion through `tiff.RgbBandWriter` without
-  holding the raster or the output file. The remaining conversion layouts,
-  incremental codestream input, and row-oriented synthesis inside a single
-  large tile remain open.
+  holding the raster or the output file, and a one-component conversion through
+  `tiff.GrayBandWriter`. Alpha and palette conversion, incremental codestream
+  input, and row-oriented synthesis inside a single large tile remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -721,13 +721,22 @@ otherwise be held in memory. Output is byte-identical, checked in-tree and
 against a binary built from the previous commit over the committed Kakadu
 4:2:0 fixtures with and without selectors.
 
+`decodeLosslessPlanarBandsToSink` adds the same banded shape without
+replication, and `tiff.GrayBandWriter`/`GrayBandSink` stream a one-component
+conversion. One honest limit there: a multi-tile reversible no-MCT grayscale
+stream is not a supported decode profile, so such an image resolves to a single
+band and only the output file stops being buffered.
+
 What remains on this item:
 
-1. Extend streaming output to the remaining conversion layouts. Grayscale,
-   alpha, and palette-expanded output still buffer their whole raster and file,
-   and the tile sinks would need a writer that places windows rather than
-   appending rows — a strip- or tile-based TIFF layout rather than the single
-   strip the bounded writer emits today.
+1. Support multi-tile reversible no-MCT decode without subsampling, which is
+   what would make banded grayscale more than one band. It is currently
+   accepted only for irreversible 9/7 no-MCT, for subsampled layouts, and for
+   the mixed tile-transform profile.
+2. Extend streaming output to alpha and palette-expanded conversion. Both still
+   buffer their whole raster and file, and the tile sinks would need a writer
+   that places windows rather than appending rows — a strip- or tile-based TIFF
+   layout rather than the single strip the bounded writers emit today.
 2. A large selected tile still runs a full inverse DWT into a full-tile plane.
    Row-oriented output inside one tile needs banded synthesis, not just a
    different sink shape.
