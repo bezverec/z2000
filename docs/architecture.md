@@ -282,12 +282,9 @@ layout makes that possible: every offset follows from dimensions, precision,
 and ICC length, so the header can be written before any raster byte exists.
 The streaming and buffered writers share `RgbLayout` and the raster
 serialization, and the interleave shares `color.interleaveRgbSamples` with the
-whole-image path, so the streamed file is byte-identical. A one-component
-conversion streams the same way through `tiff.GrayBandWriter`; because a
-multi-tile reversible no-MCT grayscale stream is not a supported decode profile,
-that case currently resolves to one band, so the benefit is the unbuffered file
-rather than an unbuffered raster. Every other layout keeps the whole-raster
-path.
+whole-image path, so the streamed file is byte-identical. One-, two-, and four-component conversions stream the
+same way through `tiff.GrayBandWriter` and `tiff.AlphaBandWriter`. Only
+palette-expanded output still keeps the whole-raster path.
 
 Codestream input is still read whole and a selected tile still runs a full
 inverse DWT into a full-tile plane, so those are the remaining memory

@@ -33803,6 +33803,157 @@ test "streamed grayscale TIFF conversion matches the whole-raster conversion" {
     }
 }
 
+test "streaming alpha TIFF writer matches the whole-image writer byte for byte" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 9;
+    const height = 7;
+    const profile = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    var case_index: usize = 0;
+    for ([_]tiff.AlphaColorSpace{ .grayscale, .rgb }) |color_space| {
+        for ([_]u8{ 8, 16 }) |bit_depth| {
+            for ([_]color.AlphaMode{ .associated, .unassociated }) |alpha_mode| {
+                for ([_]bool{ false, true }) |with_icc| {
+                    defer case_index += 1;
+                    const components: usize = if (color_space == .grayscale) 2 else 4;
+                    const samples = try allocator.alloc(u16, width * height * components);
+                    defer allocator.free(samples);
+                    const max_sample: u16 = if (bit_depth == 8) 255 else 65535;
+                    for (samples, 0..) |*sample, index| {
+                        sample.* = @intCast((index * 5701) % (@as(usize, max_sample) + 1));
+                    }
+
+                    var path_buffers: [3][160]u8 = undefined;
+                    const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+                    const whole_path = try std.fmt.bufPrint(&path_buffers[1], "{s}/awhole-{}.tif", .{ directory, case_index });
+                    const streamed_path = try std.fmt.bufPrint(&path_buffers[2], "{s}/astream-{}.tif", .{ directory, case_index });
+
+                    const alpha = tiff.AlphaImage{
+                        .allocator = allocator,
+                        .width = width,
+                        .height = height,
+                        .bit_depth = bit_depth,
+                        .color_space = color_space,
+                        .alpha_mode = alpha_mode,
+                        .samples = samples,
+                        .icc_profile = if (with_icc) @constCast(profile[0..]) else null,
+                    };
+                    try tiff.writeAlpha(io, allocator, alpha, whole_path);
+
+                    var writer = try tiff.AlphaBandWriter.init(
+                        io,
+                        allocator,
+                        streamed_path,
+                        width,
+                        height,
+                        bit_depth,
+                        color_space,
+                        alpha_mode,
+                        false,
+                        if (with_icc) profile[0..] else null,
+                    );
+                    defer writer.deinit();
+                    const chunks = [_]usize{ 3, 1, 3 };
+                    var row: usize = 0;
+                    for (chunks) |rows| {
+                        const row_samples = width * components;
+                        try writer.writeRows(samples[row * row_samples ..][0 .. rows * row_samples]);
+                        row += rows;
+                    }
+                    try std.testing.expectEqual(height, row);
+                    try writer.finish();
+
+                    const whole_bytes = try std.Io.Dir.cwd().readFileAlloc(io, whole_path, allocator, .limited(1 << 20));
+                    defer allocator.free(whole_bytes);
+                    const streamed_bytes = try std.Io.Dir.cwd().readFileAlloc(io, streamed_path, allocator, .limited(1 << 20));
+                    defer allocator.free(streamed_bytes);
+                    try std.testing.expectEqualSlices(u8, whole_bytes, streamed_bytes);
+                }
+            }
+        }
+    }
+}
+
+test "streamed alpha TIFF conversion matches the whole-raster conversion" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 53;
+    const height = 41;
+    const profile = [_]u8{ 0x31, 0x32 };
+    var case_index: usize = 0;
+    for ([_]usize{ 2, 4 }) |components| {
+        var planes = try color.SamplePlanes.init(allocator, width, height, 8, components);
+        defer planes.deinit();
+        for (planes.planes, 0..) |plane, component| {
+            for (plane, 0..) |*sample, index| {
+                sample.* = @intCast((index * (7 + component * 13)) % 256);
+            }
+        }
+
+        const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, .{
+            .levels = 2,
+            .mct = .none,
+            .block_width = 8,
+            .block_height = 8,
+            .tile_part_divisions = null,
+        });
+        defer allocator.free(encoded);
+
+        const region = codestream.DecodeRegion{ .x0 = 5, .y0 = 4, .width = 24, .height = 21 };
+        const cases = [_]struct { options: codestream.DecodeOptions, icc: bool }{
+            .{ .options = .{ .threads = 1 }, .icc = false },
+            .{ .options = .{ .threads = 8 }, .icc = true },
+            .{ .options = .{ .threads = 1, .resolution_reduction = 1 }, .icc = false },
+            .{ .options = .{ .threads = 8, .reference_region = region }, .icc = true },
+        };
+        for (cases) |case| {
+            defer case_index += 1;
+            var path_buffers: [3][160]u8 = undefined;
+            const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+            const whole_path = try std.fmt.bufPrint(&path_buffers[1], "{s}/acwhole-{}.tif", .{ directory, case_index });
+            const streamed_path = try std.fmt.bufPrint(&path_buffers[2], "{s}/acstream-{}.tif", .{ directory, case_index });
+
+            var decoded_planes = try codestream.decodeLosslessPlanarWithOptions(
+                allocator,
+                encoded,
+                case.options,
+            );
+            defer decoded_planes.deinit();
+            var whole = try tiff.AlphaImage.fromSamplePlanes(allocator, decoded_planes, .unassociated);
+            defer whole.deinit();
+            if (case.icc) whole.icc_profile = @constCast(profile[0..]);
+            try tiff.writeAlpha(io, allocator, whole, whole_path);
+            whole.icc_profile = null;
+
+            var sink = tiff.AlphaBandSink{
+                .io = io,
+                .allocator = allocator,
+                .path = streamed_path,
+                .bit_depth = 8,
+                .alpha_mode = .unassociated,
+                .icc_profile = if (case.icc) profile[0..] else null,
+            };
+            defer sink.deinit();
+            try codestream.decodeLosslessPlanarBandsToSink(allocator, encoded, case.options, &sink);
+            try sink.finish();
+            try std.testing.expectEqual(whole.width, sink.width);
+            try std.testing.expectEqual(whole.height, sink.height);
+
+            const whole_bytes = try std.Io.Dir.cwd().readFileAlloc(io, whole_path, allocator, .limited(1 << 22));
+            defer allocator.free(whole_bytes);
+            const streamed_bytes = try std.Io.Dir.cwd().readFileAlloc(io, streamed_path, allocator, .limited(1 << 22));
+            defer allocator.free(streamed_bytes);
+            try std.testing.expectEqualSlices(u8, whole_bytes, streamed_bytes);
+        }
+    }
+}
+
 test "streaming RGB TIFF writer fails closed on an incomplete or overlong raster" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

@@ -744,76 +744,135 @@ pub const GrayBandSink = struct {
     }
 };
 
+/// Byte layout of a bounded chunky gray+alpha or RGBA TIFF. A two-component
+/// image packs BitsPerSample inline; a four-component image places the array
+/// right after the directory. Either way every offset follows from the declared
+/// geometry, so the raster can be streamed.
+const AlphaLayout = struct {
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+    component_count: usize,
+    color_space: AlphaColorSpace,
+    alpha_mode: color.AlphaMode,
+    white_is_zero: bool,
+    icc_len: usize,
+    entry_count: u16,
+    metadata_end: u32,
+    raster_offset: u32,
+    raster_bytes: u32,
+    icc_offset: u32,
+
+    fn init(
+        width: usize,
+        height: usize,
+        bit_depth: u8,
+        color_space: AlphaColorSpace,
+        alpha_mode: color.AlphaMode,
+        white_is_zero: bool,
+        icc_len: usize,
+    ) !AlphaLayout {
+        if (width == 0 or height == 0 or (bit_depth != 8 and bit_depth != 16) or
+            (color_space == .rgb and white_is_zero))
+        {
+            return TiffError.InvalidTagValue;
+        }
+        const component_count = color_space.colorComponentCount() + 1;
+        const pixels = try std.math.mul(usize, width, height);
+        const sample_count = try std.math.mul(usize, pixels, component_count);
+        const raster_bytes = try std.math.mul(usize, sample_count, rasterBytesPerSample(bit_depth));
+        if (width > std.math.maxInt(u32) or height > std.math.maxInt(u32) or
+            raster_bytes > std.math.maxInt(u32))
+        {
+            return TiffError.ImageTooLarge;
+        }
+        if (icc_len != 0) {
+            if (icc_len > max_icc_profile_bytes) return TiffError.InvalidTagValue;
+            if (icc_len > std.math.maxInt(u32)) return TiffError.ImageTooLarge;
+        }
+        const entry_count: u16 = if (icc_len != 0) 12 else 11;
+        const metadata_end: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
+        const external_bits_bytes: u32 = if (component_count == 4) 8 else 0;
+        const raster_offset = try std.math.add(u32, metadata_end, external_bits_bytes);
+        return .{
+            .width = width,
+            .height = height,
+            .bit_depth = bit_depth,
+            .component_count = component_count,
+            .color_space = color_space,
+            .alpha_mode = alpha_mode,
+            .white_is_zero = white_is_zero,
+            .icc_len = icc_len,
+            .entry_count = entry_count,
+            .metadata_end = metadata_end,
+            .raster_offset = raster_offset,
+            .raster_bytes = @intCast(raster_bytes),
+            .icc_offset = try std.math.add(u32, raster_offset, @as(u32, @intCast(raster_bytes))),
+        };
+    }
+
+    fn totalBytes(self: AlphaLayout) !usize {
+        return std.math.add(usize, @as(usize, self.icc_offset), self.icc_len);
+    }
+
+    fn appendPrefix(self: AlphaLayout, allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
+        const bits_value: u32 = if (self.component_count == 2)
+            @as(u32, self.bit_depth) | (@as(u32, self.bit_depth) << 16)
+        else
+            self.metadata_end;
+        try out.appendSlice(allocator, "II");
+        try appendU16Le(allocator, out, 42);
+        try appendU32Le(allocator, out, 8);
+        try appendU16Le(allocator, out, self.entry_count);
+        try appendIfdEntryLe(allocator, out, 256, 4, 1, @intCast(self.width));
+        try appendIfdEntryLe(allocator, out, 257, 4, 1, @intCast(self.height));
+        try appendIfdEntryLe(allocator, out, 258, 3, @intCast(self.component_count), bits_value);
+        try appendIfdEntryLe(allocator, out, 259, 3, 1, 1);
+        try appendIfdEntryLe(allocator, out, 262, 3, 1, switch (self.color_space) {
+            .grayscale => if (self.white_is_zero) 0 else 1,
+            .rgb => 2,
+        });
+        try appendIfdEntryLe(allocator, out, 273, 4, 1, self.raster_offset);
+        try appendIfdEntryLe(allocator, out, 277, 3, 1, @intCast(self.component_count));
+        try appendIfdEntryLe(allocator, out, 278, 4, 1, @intCast(self.height));
+        try appendIfdEntryLe(allocator, out, 279, 4, 1, self.raster_bytes);
+        try appendIfdEntryLe(allocator, out, 284, 3, 1, 1);
+        try appendIfdEntryLe(allocator, out, 338, 3, 1, switch (self.alpha_mode) {
+            .associated => 1,
+            .unassociated => 2,
+        });
+        if (self.icc_len != 0) {
+            try appendIfdEntryLe(allocator, out, 34675, 7, @intCast(self.icc_len), self.icc_offset);
+        }
+        try appendU32Le(allocator, out, 0);
+        if (self.component_count == 4) {
+            for (0..self.component_count) |_| try appendU16Le(allocator, out, self.bit_depth);
+        }
+    }
+};
+
 pub fn writeAlpha(io: std.Io, allocator: std.mem.Allocator, alpha: AlphaImage, path: []const u8) !void {
-    if (alpha.width == 0 or alpha.height == 0 or
-        (alpha.bit_depth != 8 and alpha.bit_depth != 16) or
-        (alpha.color_space == .rgb and alpha.white_is_zero))
-    {
-        return TiffError.InvalidTagValue;
+    const icc_profile = alpha.icc_profile;
+    const layout = try AlphaLayout.init(
+        alpha.width,
+        alpha.height,
+        alpha.bit_depth,
+        alpha.color_space,
+        alpha.alpha_mode,
+        alpha.white_is_zero,
+        if (icc_profile) |profile| profile.len else 0,
+    );
+    if (icc_profile) |profile| {
+        if (profile.len == 0) return TiffError.InvalidTagValue;
     }
     const pixels = try std.math.mul(usize, alpha.width, alpha.height);
-    const component_count = alpha.componentCount();
-    const sample_count = try std.math.mul(usize, pixels, component_count);
+    const sample_count = try std.math.mul(usize, pixels, alpha.componentCount());
     if (alpha.samples.len != sample_count) return TiffError.InvalidTagValue;
-
-    const bytes_per_sample: usize = if (alpha.bit_depth == 8) 1 else 2;
-    const raster_bytes = try std.math.mul(usize, sample_count, bytes_per_sample);
-    if (alpha.width > std.math.maxInt(u32) or
-        alpha.height > std.math.maxInt(u32) or
-        raster_bytes > std.math.maxInt(u32))
-    {
-        return TiffError.ImageTooLarge;
-    }
-
-    const icc_profile = alpha.icc_profile;
-    if (icc_profile) |profile| {
-        if (profile.len == 0 or profile.len > max_icc_profile_bytes) return TiffError.InvalidTagValue;
-        if (profile.len > std.math.maxInt(u32)) return TiffError.ImageTooLarge;
-    }
-
-    const entry_count: u16 = if (icc_profile != null) 12 else 11;
-    const metadata_end: u32 = 8 + 2 + @as(u32, entry_count) * 12 + 4;
-    const external_bits_bytes: u32 = if (component_count == 4) 8 else 0;
-    const raster_offset = try std.math.add(u32, metadata_end, external_bits_bytes);
-    const icc_offset = try std.math.add(u32, raster_offset, @as(u32, @intCast(raster_bytes)));
-    const total_bytes = try std.math.add(usize, @as(usize, icc_offset), if (icc_profile) |profile| profile.len else 0);
-    const bits_value: u32 = if (component_count == 2)
-        @as(u32, alpha.bit_depth) | (@as(u32, alpha.bit_depth) << 16)
-    else
-        metadata_end;
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-    try out.ensureTotalCapacity(allocator, total_bytes);
-
-    try out.appendSlice(allocator, "II");
-    try appendU16Le(allocator, &out, 42);
-    try appendU32Le(allocator, &out, 8);
-    try appendU16Le(allocator, &out, entry_count);
-    try appendIfdEntryLe(allocator, &out, 256, 4, 1, @intCast(alpha.width));
-    try appendIfdEntryLe(allocator, &out, 257, 4, 1, @intCast(alpha.height));
-    try appendIfdEntryLe(allocator, &out, 258, 3, @intCast(component_count), bits_value);
-    try appendIfdEntryLe(allocator, &out, 259, 3, 1, 1);
-    try appendIfdEntryLe(allocator, &out, 262, 3, 1, switch (alpha.color_space) {
-        .grayscale => if (alpha.white_is_zero) 0 else 1,
-        .rgb => 2,
-    });
-    try appendIfdEntryLe(allocator, &out, 273, 4, 1, raster_offset);
-    try appendIfdEntryLe(allocator, &out, 277, 3, 1, @intCast(component_count));
-    try appendIfdEntryLe(allocator, &out, 278, 4, 1, @intCast(alpha.height));
-    try appendIfdEntryLe(allocator, &out, 279, 4, 1, @intCast(raster_bytes));
-    try appendIfdEntryLe(allocator, &out, 284, 3, 1, 1);
-    try appendIfdEntryLe(allocator, &out, 338, 3, 1, switch (alpha.alpha_mode) {
-        .associated => 1,
-        .unassociated => 2,
-    });
-    if (icc_profile) |profile| {
-        try appendIfdEntryLe(allocator, &out, 34675, 7, @intCast(profile.len), icc_offset);
-    }
-    try appendU32Le(allocator, &out, 0);
-    if (component_count == 4) {
-        for (0..component_count) |_| try appendU16Le(allocator, &out, alpha.bit_depth);
-    }
+    try out.ensureTotalCapacity(allocator, try layout.totalBytes());
+    try layout.appendPrefix(allocator, &out);
 
     appendRasterLe(&out, alpha.samples, alpha.bit_depth) catch |err| switch (err) {
         error.InvalidTagValue => return TiffError.InvalidTagValue,
@@ -822,6 +881,183 @@ pub fn writeAlpha(io: std.Io, allocator: std.mem.Allocator, alpha: AlphaImage, p
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.items });
 }
+
+/// Streaming chunky gray+alpha or RGBA TIFF writer, the alpha counterpart of
+/// `RgbBandWriter`. Output is byte-identical to `writeAlpha` for the same image.
+pub const AlphaBandWriter = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    file: std.Io.File,
+    layout: AlphaLayout,
+    icc_profile: ?[]const u8,
+    raster: std.ArrayList(u8),
+    rows_written: usize = 0,
+    finished: bool = false,
+
+    pub fn init(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        width: usize,
+        height: usize,
+        bit_depth: u8,
+        color_space: AlphaColorSpace,
+        alpha_mode: color.AlphaMode,
+        white_is_zero: bool,
+        icc_profile: ?[]const u8,
+    ) !AlphaBandWriter {
+        if (icc_profile) |profile| {
+            if (profile.len == 0) return TiffError.InvalidTagValue;
+        }
+        const layout = try AlphaLayout.init(
+            width,
+            height,
+            bit_depth,
+            color_space,
+            alpha_mode,
+            white_is_zero,
+            if (icc_profile) |profile| profile.len else 0,
+        );
+
+        var prefix: std.ArrayList(u8) = .empty;
+        defer prefix.deinit(allocator);
+        try prefix.ensureTotalCapacity(allocator, layout.raster_offset);
+        try layout.appendPrefix(allocator, &prefix);
+        std.debug.assert(prefix.items.len == layout.raster_offset);
+
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        errdefer file.close(io);
+        try file.writeStreamingAll(io, prefix.items);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .file = file,
+            .layout = layout,
+            .icc_profile = icc_profile,
+            .raster = .empty,
+        };
+    }
+
+    pub fn writeRows(self: *AlphaBandWriter, samples: []const u16) !void {
+        if (self.finished) return TiffError.InvalidTagValue;
+        const row_samples = self.layout.width * self.layout.component_count;
+        if (row_samples == 0 or samples.len % row_samples != 0) return TiffError.InvalidTagValue;
+        const rows = samples.len / row_samples;
+        if (rows == 0) return;
+        if (try std.math.add(usize, self.rows_written, rows) > self.layout.height) {
+            return TiffError.InvalidTagValue;
+        }
+
+        const bytes = samples.len * rasterBytesPerSample(self.layout.bit_depth);
+        try self.raster.resize(self.allocator, bytes);
+        serializeRasterLe(self.raster.items, samples, self.layout.bit_depth) catch |err| switch (err) {
+            error.InvalidTagValue => return TiffError.InvalidTagValue,
+        };
+        try self.file.writeStreamingAll(self.io, self.raster.items);
+        self.rows_written += rows;
+    }
+
+    pub fn finish(self: *AlphaBandWriter) !void {
+        if (self.finished) return TiffError.InvalidTagValue;
+        if (self.rows_written != self.layout.height) return TiffError.InvalidTagValue;
+        if (self.icc_profile) |profile| try self.file.writeStreamingAll(self.io, profile);
+        self.finished = true;
+        self.file.close(self.io);
+        self.raster.deinit(self.allocator);
+        self.raster = .empty;
+    }
+
+    pub fn deinit(self: *AlphaBandWriter) void {
+        if (!self.finished) {
+            self.finished = true;
+            self.file.close(self.io);
+        }
+        self.raster.deinit(self.allocator);
+        self.raster = .empty;
+    }
+};
+
+/// Band sink that interleaves two- or four-component bands into chunky
+/// gray+alpha or RGBA rows and appends them to an `AlphaBandWriter`. Like the
+/// other band sinks it takes the band types as `anytype`, so the TIFF layer
+/// gains no dependency on the codestream layer.
+pub const AlphaBandSink = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    bit_depth: u8,
+    alpha_mode: color.AlphaMode,
+    icc_profile: ?[]const u8 = null,
+    writer: ?AlphaBandWriter = null,
+    rows: std.ArrayList(u16) = .empty,
+    width: usize = 0,
+    height: usize = 0,
+
+    pub fn begin(self: *AlphaBandSink, info: anytype) !void {
+        if (self.writer != null) return TiffError.InvalidTagValue;
+        const components = info.components.len;
+        if (components != 2 and components != 4) return TiffError.UnsupportedExtraSamples;
+        for (info.components) |layout| {
+            if (layout.bit_depth != self.bit_depth) return TiffError.InvalidTagValue;
+        }
+        self.width = info.width;
+        self.height = info.height;
+        self.writer = try AlphaBandWriter.init(
+            self.io,
+            self.allocator,
+            self.path,
+            info.width,
+            info.height,
+            self.bit_depth,
+            if (components == 2) .grayscale else .rgb,
+            self.alpha_mode,
+            false,
+            self.icc_profile,
+        );
+    }
+
+    pub fn writeBand(self: *AlphaBandSink, region: anytype) !void {
+        if (self.writer == null) return TiffError.InvalidTagValue;
+        const writer = &self.writer.?;
+        const components = region.components.len;
+        if (components != writer.layout.component_count) return TiffError.InvalidTagValue;
+        const pixels = try std.math.mul(usize, region.width, region.height);
+        for (region.components) |component| {
+            // The alpha profile has no subsampling, so every component window
+            // is the band itself.
+            if (component.width != region.width or component.height != region.height or
+                component.stride != region.width or component.samples.len != pixels)
+            {
+                return TiffError.InvalidTagValue;
+            }
+        }
+        try self.rows.resize(self.allocator, try std.math.mul(usize, pixels, components));
+        const max_sample: u16 = if (self.bit_depth == 8)
+            255
+        else
+            @intCast((@as(u32, 1) << @as(u5, @intCast(self.bit_depth))) - 1);
+        for (0..pixels) |pixel| {
+            for (region.components, 0..) |component, index| {
+                const sample = component.samples[pixel];
+                if (sample > max_sample) return TiffError.InvalidTagValue;
+                self.rows.items[pixel * components + index] = sample;
+            }
+        }
+        try writer.writeRows(self.rows.items);
+    }
+
+    pub fn finish(self: *AlphaBandSink) !void {
+        if (self.writer == null) return TiffError.InvalidTagValue;
+        try self.writer.?.finish();
+    }
+
+    pub fn deinit(self: *AlphaBandSink) void {
+        if (self.writer) |*writer| writer.deinit();
+        self.writer = null;
+        self.rows.deinit(self.allocator);
+        self.rows = .empty;
+    }
+};
 
 fn appendRasterLe(out: *std.ArrayList(u8), samples: []const u16, bit_depth: u8) error{InvalidTagValue}!void {
     const start = out.items.len;

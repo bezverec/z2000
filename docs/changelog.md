@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Streaming Gray+Alpha And RGBA Conversion
+
+- Added `tiff.AlphaBandWriter` and `tiff.AlphaBandSink`, the alpha counterparts
+  of the RGB and grayscale pairs. `AlphaLayout` is shared with `writeAlpha` the
+  same way the other layouts are shared, so buffered and streaming output cannot
+  diverge. A two-component image packs BitsPerSample inline while a
+  four-component image places the array after the directory; both keep every
+  offset derivable from the declared geometry, which is what lets the raster be
+  streamed.
+- `decode-temp-jp2` now streams two- and four-component conversions through that
+  pair, so only palette-expanded output still buffers its whole raster and file.
+- Byte-identity is pinned in-tree for the writer against `writeAlpha` across
+  gray+alpha and RGBA, both precisions, both alpha modes, and with and without
+  ICC, and for the conversion against a whole-raster `writeAlpha` of the same
+  decode across full, reduced, and region-selected options at 1 and 8 threads.
+  CLI output was additionally compared against a binary built from the previous
+  commit over 27 fixtures including gray+alpha and RGBA sources.
+
 ### Multi-Tile Reversible No-MCT Planar Decode
 
 - The bounded planar surface now accepts multi-tile reversible no-MCT RPCL

@@ -310,8 +310,9 @@ The foundation landed on 2026-07-17:
   variant for reference-grid upsampled output, and `decode-temp-jp2` streams a
   subsampled three-component conversion through `tiff.RgbBandWriter` without
   holding the raster or the output file, and a one-component conversion through
-  `tiff.GrayBandWriter`. Alpha and palette conversion, incremental codestream
-  input, and row-oriented synthesis inside a single large tile remain open.
+  `tiff.GrayBandWriter`, and two-/four-component conversions through
+  `tiff.AlphaBandWriter`. Palette conversion, incremental codestream input, and
+  row-oriented synthesis inside a single large tile remain open.
 
 The active G0/G4 corpus expansion is:
 
@@ -738,10 +739,10 @@ What remains on this item:
 1. Commit or obtain a one-component multi-tile fixture. The grayscale banded
    case currently rides on the shared per-tile path rather than on its own
    evidence, because no z2000 encoder emits that layout.
-2. Extend streaming output to alpha and palette-expanded conversion. Both still
-   buffer their whole raster and file, and the tile sinks would need a writer
-   that places windows rather than appending rows — a strip- or tile-based TIFF
-   layout rather than the single strip the bounded writers emit today.
+2. Extend streaming output to palette-expanded conversion, the last layout that
+   still buffers its whole raster and file. Expansion happens per index sample,
+   so a band sink can feed `tiff.RgbBandWriter`; the palette table lives in
+   `jp2.zig`, so the adapter belongs above the TIFF layer.
 2. A large selected tile still runs a full inverse DWT into a full-tile plane.
    Row-oriented output inside one tile needs banded synthesis, not just a
    different sink shape.

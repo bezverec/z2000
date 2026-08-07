@@ -71,13 +71,14 @@ by default, transforming only RGB while alpha receives the ordinary unsigned
 DC level shift. Explicit `--mct none` keeps all four components independent.
 `decode-temp-jp2` dispatches one- through four-component bounded JP2 output to
 the matching TIFF writer; a supported one-component `pclr`/`cmap` stream is
-expanded to RGB first. A subsampled three-component stream with no palette, no
-sYCC conversion, and no `--convert-to-srgb` is instead converted band by band:
-`decodeLosslessPlanarUpsampledToSink` feeds `tiff.RgbBandSink`, which
-interleaves each tile-row band and appends it through `tiff.RgbBandWriter`.
-Peak memory for that conversion is one band rather than the complete raster
-plus the complete output file, and the bytes written are identical to the
-whole-raster path.
+expanded to RGB first. Everything except palette expansion is converted band by
+band. A subsampled three-component stream with no sYCC conversion and no
+`--convert-to-srgb` feeds `tiff.RgbBandSink` from
+`decodeLosslessPlanarUpsampledToSink`; one-, two-, and four-component streams
+feed `tiff.GrayBandSink` or `tiff.AlphaBandSink` from
+`decodeLosslessPlanarBandsToSink`. Peak memory for those conversions is one
+tile-row band rather than the complete raster plus the complete output file,
+and the bytes written are identical to the whole-raster path.
 
 `tiff.RgbBandWriter` is the streaming chunky RGB TIFF writer. Every offset in
 the bounded RGB layout follows from dimensions, precision, and ICC length
@@ -88,12 +89,12 @@ raster serialization with `writeRgb`, so the two cannot disagree. A partial
 row, more rows than declared, fewer rows at `finish`, and samples outside the
 declared precision all fail closed. `tiff.RgbBandSink` adapts upsampled band
 regions onto it and takes those regions as `anytype`, so the TIFF layer gains
-no dependency on the codestream layer. `tiff.GrayBandWriter` and
-`tiff.GrayBandSink` are the single-channel counterparts, sharing `GrayLayout`
-with `writeGray`; `decode-temp-jp2` streams a one-component conversion through
-them. A multi-tile reversible no-MCT grayscale stream is not a supported decode
-profile today, so such an image resolves to one band and the benefit there is
-that the output file is not buffered rather than that the raster is.
+no dependency on the codestream layer. `tiff.GrayBandWriter`/`tiff.GrayBandSink` and
+`tiff.AlphaBandWriter`/`tiff.AlphaBandSink` are the single-channel and
+gray+alpha/RGBA counterparts, sharing `GrayLayout` and `AlphaLayout` with
+`writeGray` and `writeAlpha`; `decode-temp-jp2` streams one-, two-, and
+four-component conversions through them, leaving only palette-expanded output
+buffered.
 
 `j2k-to-pgx` is the raw-codestream diagnostic boundary. It accepts `.j2k` or
 `.j2c` without a JP2 wrapper, decodes through `decodeLosslessNativeWithOptions`,
