@@ -741,10 +741,10 @@ What remains on this item:
 1. Commit or obtain a one-component multi-tile fixture. The grayscale banded
    case currently rides on the shared per-tile path rather than on its own
    evidence, because no z2000 encoder emits that layout.
-2. Commit a one-component multi-tile fixture, the last open evidence debt in
-   this item. The conversion dispatch itself is now covered in-tree through
-   `convert.jp2ToTiff` for every bounded layout, including palette, so that
-   debt is closed.
+2. Broaden independent evidence for multi-tile uniform-sampling encode. Kakadu
+   8.4.1 reconstructs the one-component stream exactly; the two-component
+   layout has z2000 round-trip evidence only, and OpenJPEG/Grok legs are not
+   run yet.
 2. A large selected tile still runs a full inverse DWT into a full-tile plane.
    Row-oriented output inside one tile needs banded synthesis, not just a
    different sink shape.

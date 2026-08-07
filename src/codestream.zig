@@ -872,9 +872,12 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         component_bit_depths[component] = depth;
         if (xrsiz != 1 or yrsiz != 1) any_subsampled = true;
     }
-    // An all-1 sampling layout is just the planar profile; route those there
-    // so the sampled path always carries genuine subsampling.
-    if (!any_subsampled) return CodestreamError.UnsupportedPayload;
+    // A single-tile all-1 sampling layout is just the planar profile, so it
+    // stays there and this path keeps carrying genuine subsampling. A
+    // multi-tile all-1 layout has no other encoder — the planar entry point is
+    // single-tile only — so leaving it here rather than rejecting it is what
+    // makes that layout reachable at all.
+    if (!any_subsampled and grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
 
     const encode_options = normalizedEncodePrecinctOptions(options, reference_levels);
     var scaffold_precincts: [33]packet_plan.Precinct = undefined;

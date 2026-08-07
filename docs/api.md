@@ -337,6 +337,12 @@ Primary public functions:
 - `encodeLosslessSkeleton(allocator, rgb, requested_levels)`
 - `encodeLosslessWithOptions(allocator, rgb, options)`
 - `encodeLosslessWithOptionsProfiled(allocator, rgb, options, timings)`
+- `encodeLosslessSampledPlanarWithOptions(allocator, planes, sampling, options)`
+  — the sampled encode boundary. A single-tile all-1 sampling layout is
+  rejected because it is exactly the planar profile, but a multi-tile all-1
+  layout is accepted: the planar entry point is single-tile only, so this is
+  the only encoder that can produce a common-grid multi-tile stream. Kakadu
+  8.4.1 reconstructs the one-component multi-tile case exactly
 - `encodeLosslessPlanarWithOptions(allocator, planes, options)` — bounded
   1..4-component layouts over `color.SamplePlanes`; reversible RGBA may use
   RCT over planes 0..2 while plane 3 remains independent. Mixed unsigned

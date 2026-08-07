@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Reachable Multi-Tile Uniform-Sampling Encode
+
+- `encodeLosslessSampledPlanarWithOptions` rejected every all-1 sampling layout
+  on the grounds that it "is just the planar profile". That premise only holds
+  for one tile: `encodeLosslessPlanarWithOptions` is single-tile only, so a
+  multi-tile layout on a common grid had no encoder at all and could not be
+  produced. The guard now applies only to single-tile input, which keeps one
+  spelling per layout while making the multi-tile one reachable.
+- That closes the last evidence debt in the streaming item. A 61x47 stream over
+  a 3x3 tile grid now exists for one and two components: it round-trips exactly
+  at 1 and 8 threads, `decodeLosslessPlanarBandsToSink` splits it into three
+  real tile-row bands at full resolution and reduction 1, and the conversion
+  dispatch streams it end to end. Grayscale banded decode previously rode on the
+  shared per-tile path without a stream of its own shape.
+- Independent evidence: Kakadu 8.4.1 `kdu_expand` reconstructs the
+  one-component multi-tile stream exactly, sample for sample against the source
+  plane. The two-component case is covered by z2000 round-trip only; OpenJPEG
+  and Grok were not available in this environment.
+
 ### Testable Conversion Dispatch
 
 - The JP2-to-TIFF conversion moved out of `main.zig` into `src/convert.zig`.

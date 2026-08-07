@@ -33740,6 +33740,116 @@ test "planar band decode splits multi-tile output into tile rows" {
     }
 }
 
+test "multi-tile uniform-sampling encode reaches layouts the planar path cannot" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 61;
+    const height = 47;
+    // One and two components on a common grid across a real 3x3 tile grid.
+    // The planar encoder is single-tile only, so before this layout was
+    // reachable there was no way to produce such a stream at all.
+    for ([_]usize{ 1, 2 }, 0..) |components, layout_index| {
+        const sampling = [_]codestream.ComponentSampling{
+            .{ .xrsiz = 1, .yrsiz = 1 },
+            .{ .xrsiz = 1, .yrsiz = 1 },
+        };
+        var planes = try color.SamplePlanes.init(allocator, width, height, 8, components);
+        defer planes.deinit();
+        for (planes.planes, 0..) |plane, component| {
+            for (plane, 0..) |*sample, position| {
+                sample.* = @intCast((position * (11 + component * 17)) % 256);
+            }
+        }
+
+        const encoded = try codestream.encodeLosslessSampledPlanarWithOptions(
+            allocator,
+            planes,
+            sampling[0..components],
+            .{
+                .levels = 2,
+                .mct = .none,
+                .tile_width = 23,
+                .tile_height = 19,
+                .block_width = 8,
+                .block_height = 8,
+                .tile_part_divisions = null,
+            },
+        );
+        defer allocator.free(encoded);
+        try std.testing.expectEqual(@as(usize, 9), countMarker(encoded, codestream.markerValue("sot")));
+
+        // Round-trip: the stream must reconstruct its own source exactly.
+        for ([_]u8{ 1, 8 }) |threads| {
+            var decoded = try codestream.decodeLosslessPlanarWithOptions(
+                allocator,
+                encoded,
+                .{ .threads = threads },
+            );
+            defer decoded.deinit();
+            try std.testing.expectEqual(components, decoded.planes.len);
+            for (planes.planes, decoded.planes) |expected, actual| {
+                try std.testing.expectEqualSlices(u16, expected, actual);
+            }
+        }
+
+        // The banded contract now yields real tile rows for these layouts,
+        // which is what the grayscale streaming path had been missing.
+        for ([_]u8{ 0, 1 }) |reduction| {
+            var reference = try codestream.decodeLosslessPlanarWithOptions(
+                allocator,
+                encoded,
+                .{ .threads = 1, .resolution_reduction = reduction },
+            );
+            defer reference.deinit();
+
+            var sink = ReassemblingBandSink{ .allocator = allocator };
+            defer sink.deinit();
+            try codestream.decodeLosslessPlanarBandsToSink(
+                allocator,
+                encoded,
+                .{ .threads = 1, .resolution_reduction = reduction },
+                &sink,
+            );
+            try sink.expectMatches(reference);
+            try std.testing.expectEqual(@as(u64, 3), sink.bands_total);
+        }
+
+        // End to end through the conversion dispatch, which must stream.
+        const wrapped = if (components == 1) blk: {
+            var gray = try codestream.decodeLosslessGrayWithOptions(allocator, encoded, .{});
+            defer gray.deinit();
+            break :blk try jp2.wrapGrayCodestream(allocator, gray, encoded);
+        } else try jp2.wrapPlanarAlphaCodestream(allocator, planes, .unassociated, null, encoded);
+        defer allocator.free(wrapped);
+
+        var path_buffers: [2][160]u8 = undefined;
+        const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        const path = try std.fmt.bufPrint(&path_buffers[1], "{s}/uniform-{}.tif", .{ directory, layout_index });
+        const result = try convert.jp2ToTiff(io, allocator, wrapped, path, .{ .threads = 1 }, false, false);
+        try std.testing.expect(result.streamed);
+        try std.testing.expectEqual(@as(usize, width), result.width);
+        try std.testing.expectEqual(@as(usize, height), result.height);
+    }
+
+    // A single-tile all-1 layout still belongs to the planar encoder, so the
+    // sampled entry point keeps rejecting it rather than offering two spellings.
+    var single = try color.SamplePlanes.init(allocator, 8, 8, 8, 1);
+    defer single.deinit();
+    @memset(single.planes[0], 0);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeLosslessSampledPlanarWithOptions(
+            allocator,
+            single,
+            &.{.{ .xrsiz = 1, .yrsiz = 1 }},
+            .{ .levels = 1, .mct = .none, .tile_part_divisions = null },
+        ),
+    );
+}
+
 test "streamed grayscale TIFF conversion matches the whole-raster conversion" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
