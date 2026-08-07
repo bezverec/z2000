@@ -23,8 +23,12 @@ and the `Rsiz` bit-14 CAP requirement. Only unrestricted Part 1 `Rsiz == 0`
 currently reaches payload decode; all structurally valid extension/profile
 declarations fail closed before reconstruction.
 
-`src/main.zig` owns CLI routing and conversion policy, while
-`src/cli_dispatch.zig` keeps extension inference independently testable.
+`src/main.zig` owns CLI routing and option parsing, while
+`src/cli_dispatch.zig` keeps extension inference independently testable and
+`src/convert.zig` owns the JP2-to-TIFF conversion policy itself. That split
+exists so the conversion dispatch can be driven directly by tests rather than
+only through the command; `src/clock.zig` holds the monotonic timer both layers
+report with.
 Raw `.j2k`/`.j2c` to PGX dispatch selects one native component, while ZRAW
 dispatch preserves every native plane and its geometry; neither assigns
 colour semantics. `src/tiff.zig` and the

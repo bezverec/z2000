@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Testable Conversion Dispatch
+
+- The JP2-to-TIFF conversion moved out of `main.zig` into `src/convert.zig`.
+  `convert.jp2ToTiff` takes already-read bytes, an output path, decode options,
+  and the sRGB flag, and returns the output geometry, phase timings, and whether
+  the conversion streamed. The command layer keeps argument parsing, file
+  reading, and reporting. `src/clock.zig` holds the monotonic timer both now
+  need, instead of duplicating the platform-specific implementation.
+- That makes the CLI branches directly testable. A new gate builds one JP2 per
+  bounded layout — grayscale, gray+alpha, RGBA, and palette through the library
+  wrappers, subsampled RGB from the committed Kakadu 4:2:0 multi-tile fixture
+  because no z2000 wrapper produces a subsampled container — and drives the real
+  dispatch across full, reduced, and region-selected options at 1 and 8 threads,
+  reparsing each written file and checking its shape and image family.
+- `Result.streamed` exists so that gate can assert what its name claims. Without
+  it a layout that silently fell back to the whole-raster path would still have
+  passed.
+- The extraction is behaviour-neutral: 84 CLI comparisons across committed and
+  freshly encoded fixtures, with and without `--threads` and `--timings`,
+  produce byte-identical TIFF against a binary built from the previous commit.
+
 ### Streaming Palette-Expanded Conversion
 
 - `jp2.Palette.expandSamples` factors the per-index lookup out of

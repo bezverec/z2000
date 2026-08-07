@@ -1,6 +1,7 @@
 const std = @import("std");
 const batch = @import("batch.zig");
 const cli_dispatch = @import("cli_dispatch.zig");
+const convert = @import("convert.zig");
 const bitplane = @import("bitplane.zig");
 const bmp = @import("formats/bmp.zig");
 const color = @import("color.zig");
@@ -33800,6 +33801,146 @@ test "streamed grayscale TIFF conversion matches the whole-raster conversion" {
         const streamed_bytes = try std.Io.Dir.cwd().readFileAlloc(io, streamed_path, allocator, .limited(1 << 22));
         defer allocator.free(streamed_bytes);
         try std.testing.expectEqualSlices(u8, whole_bytes, streamed_bytes);
+    }
+}
+
+/// Builds one JP2 per bounded conversion layout, so the dispatch in
+/// `convert.jp2ToTiff` is exercised for each of them rather than only through
+/// the library entry points it calls.
+const ConversionLayout = enum { grayscale, gray_alpha, rgba, palette, sampled_rgb };
+
+fn conversionFixture(
+    allocator: std.mem.Allocator,
+    comptime layout: ConversionLayout,
+) ![]u8 {
+    const width = 37;
+    const height = 29;
+    switch (layout) {
+        .grayscale, .palette => {
+            const entries: u16 = 5;
+            const samples = try allocator.alloc(u16, width * height);
+            defer allocator.free(samples);
+            for (samples, 0..) |*sample, position| {
+                sample.* = if (layout == .palette)
+                    @intCast(position % entries)
+                else
+                    @intCast((position * 31) % 256);
+            }
+            const gray = image.GrayImage{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = 8,
+                .samples = samples,
+            };
+            const codestream_bytes = try codestream.encodeLosslessGrayWithOptions(allocator, gray, .{
+                .levels = 2,
+                .mct = .none,
+                .block_width = 8,
+                .block_height = 8,
+                .tile_part_divisions = null,
+            });
+            defer allocator.free(codestream_bytes);
+            if (layout == .grayscale) {
+                return jp2.wrapGrayCodestream(allocator, gray, codestream_bytes);
+            }
+            const palette_samples = try allocator.dupe(u16, &.{
+                0x00, 0x00, 0x00,
+                0xff, 0x10, 0x20,
+                0x30, 0xe0, 0x40,
+                0x50, 0x60, 0xd0,
+                0x7f, 0x7f, 0x7f,
+            });
+            defer allocator.free(palette_samples);
+            return jp2.wrapPaletteCodestream(allocator, gray, .{
+                .allocator = allocator,
+                .entries = entries,
+                .bit_depth = 8,
+                .samples = palette_samples,
+            }, codestream_bytes);
+        },
+        .gray_alpha, .rgba => {
+            const components: usize = if (layout == .gray_alpha) 2 else 4;
+            var planes = try color.SamplePlanes.init(allocator, width, height, 8, components);
+            defer planes.deinit();
+            for (planes.planes, 0..) |plane, component| {
+                for (plane, 0..) |*sample, position| {
+                    sample.* = @intCast((position * (7 + component * 13)) % 256);
+                }
+            }
+            const codestream_bytes = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, .{
+                .levels = 2,
+                .mct = .none,
+                .block_width = 8,
+                .block_height = 8,
+                .tile_part_divisions = null,
+            });
+            defer allocator.free(codestream_bytes);
+            return jp2.wrapPlanarAlphaCodestream(
+                allocator,
+                planes,
+                .unassociated,
+                null,
+                codestream_bytes,
+            );
+        },
+        .sampled_rgb => {
+            // No z2000 wrapper produces a subsampled JP2 container, so the
+            // subsampled branch is driven by an independent Kakadu 4:2:0
+            // multi-tile fixture instead of a generated one.
+            return allocator.dupe(u8, @embedFile("testdata/kakadu-rpcl-420-multitile.jp2"));
+        },
+    }
+}
+
+test "JP2-to-TIFF conversion dispatch streams every bounded layout" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const layouts = [_]ConversionLayout{ .grayscale, .gray_alpha, .rgba, .palette, .sampled_rgb };
+    var case_index: usize = 0;
+    inline for (layouts) |layout| {
+        const bytes = try conversionFixture(allocator, layout);
+        defer allocator.free(bytes);
+
+        const region = codestream.DecodeRegion{ .x0 = 4, .y0 = 3, .width = 20, .height = 17 };
+        const cases = [_]codestream.DecodeOptions{
+            .{ .threads = 1 },
+            .{ .threads = 8 },
+            .{ .threads = 1, .resolution_reduction = 1 },
+            .{ .threads = 8, .reference_region = region },
+        };
+        for (cases) |options| {
+            defer case_index += 1;
+            var path_buffers: [2][160]u8 = undefined;
+            const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+            const path = try std.fmt.bufPrint(&path_buffers[1], "{s}/conv-{}.tif", .{ directory, case_index });
+
+            const result = try convert.jp2ToTiff(io, allocator, bytes, path, options, false, false);
+            try std.testing.expect(result.width > 0 and result.height > 0);
+            // Without this the test name would be an assumption: a layout that
+            // silently fell back to the whole-raster path would still pass.
+            try std.testing.expect(result.streamed);
+
+            // The written file must parse back as a TIFF of the reported shape,
+            // which is the property the CLI actually promises.
+            var reparsed = try tiff.read(io, allocator, path);
+            defer reparsed.deinit();
+            const dimensions = switch (reparsed) {
+                .rgb => |rgb| [2]usize{ rgb.width, rgb.height },
+                .grayscale => |gray| [2]usize{ gray.width, gray.height },
+                .alpha => |alpha| [2]usize{ alpha.width, alpha.height },
+            };
+            try std.testing.expectEqual(result.width, dimensions[0]);
+            try std.testing.expectEqual(result.height, dimensions[1]);
+            switch (layout) {
+                .grayscale => try std.testing.expect(reparsed == .grayscale),
+                .gray_alpha, .rgba => try std.testing.expect(reparsed == .alpha),
+                .palette, .sampled_rgb => try std.testing.expect(reparsed == .rgb),
+            }
+        }
     }
 }
 

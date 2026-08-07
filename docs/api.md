@@ -98,6 +98,13 @@ band into `tiff.RgbBandWriter` by an adapter above the TIFF layer, using
 same out-of-range index; output precision is the palette's rather than the index
 component's.
 
+`src/convert.zig` owns the conversion itself. `convert.jp2ToTiff(io, allocator,
+bytes, output_path, options, convert_to_srgb, collect_decode_timings)` takes
+already-read input and returns the output geometry, phase timings, and a
+`streamed` flag recording whether the layout was written band by band. The
+command layer keeps argument parsing, file reading, and reporting, so the
+dispatch is directly testable.
+
 `j2k-to-pgx` is the raw-codestream diagnostic boundary. It accepts `.j2k` or
 `.j2c` without a JP2 wrapper, decodes through `decodeLosslessNativeWithOptions`,
 and writes exactly one caller-selected component. Component 0, full resolution,
