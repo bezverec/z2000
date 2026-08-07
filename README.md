@@ -170,9 +170,10 @@ Neither figure is a formal ISO conformance certification.
   on the native grids for consumers that place rows rather than tiles; nothing
   is replicated there, so no tile is decoded twice.
   `tiff.RgbBandWriter` and `tiff.GrayBandWriter` stream the bounded
-  TIFF layouts, and `decode-temp-jp2` uses them for subsampled three-component
-  and one-component conversions, so neither the raster nor the output file is
-  held whole. Streamed output is byte-identical to the buffered path.
+  TIFF layouts, and `decode-temp-jp2` uses them for every bounded conversion —
+  subsampled three-component, one-component, gray+alpha, RGBA, and
+  palette-expanded — so neither the raster nor the output file is held whole.
+  Streamed output is byte-identical to the buffered path.
 - Multi-tile reversible no-MCT RPCL decodes through the planar surface with or
   without component subsampling, and planar reconstruction consumes
   component-local COC decomposition counts. Two committed four-tile Kakadu
@@ -504,10 +505,9 @@ Other commands:
   --region,
   --layers, --threads, --t1-backend, --convert-to-srgb, and --timings. ICC conversion is opt-in;
   without the flag, profile bytes and samples are preserved unchanged.
-  Subsampled three-component and one-component conversions are written band by
-  band through a streaming TIFF writer, so peak memory is one tile-row band
-  rather than the whole raster plus the whole file; the bytes are identical
-  either way. Other layouts still buffer both.
+  Every bounded conversion is written band by band through a streaming TIFF
+  writer, so peak memory is one tile-row band rather than the whole raster plus
+  the whole file; the bytes are identical either way.
 - **j2k-to-pgx INPUT OUTPUT**: Decode one selected component from a raw `.j2k`
   or `.j2c` codestream through the native reversible path. `--component`
   defaults to 0, `--tile-index`/`--region` default to the complete image, and `--layers`

@@ -283,8 +283,10 @@ and ICC length, so the header can be written before any raster byte exists.
 The streaming and buffered writers share `RgbLayout` and the raster
 serialization, and the interleave shares `color.interleaveRgbSamples` with the
 whole-image path, so the streamed file is byte-identical. One-, two-, and four-component conversions stream the
-same way through `tiff.GrayBandWriter` and `tiff.AlphaBandWriter`. Only
-palette-expanded output still keeps the whole-raster path.
+same way through `tiff.GrayBandWriter` and `tiff.AlphaBandWriter`, and a palette
+stream is expanded per band into `tiff.RgbBandWriter` by an adapter above the
+TIFF layer, since the palette table is a container concern. Every bounded
+JP2-to-TIFF conversion therefore streams.
 
 Codestream input is still read whole and a selected tile still runs a full
 inverse DWT into a full-tile plane, so those are the remaining memory

@@ -148,12 +148,7 @@ pub const Palette = struct {
         const samples = try allocator.alloc(u16, output_samples);
         errdefer allocator.free(samples);
 
-        for (indexed.samples, 0..) |palette_index, pixel_index| {
-            if (palette_index >= self.entries) return Jp2Error.PaletteIndexOutOfRange;
-            const source = @as(usize, palette_index) * 3;
-            const destination = pixel_index * 3;
-            @memcpy(samples[destination..][0..3], self.samples[source..][0..3]);
-        }
+        try self.expandSamples(samples, indexed.samples);
         return .{
             .allocator = allocator,
             .width = indexed.width,
@@ -161,6 +156,26 @@ pub const Palette = struct {
             .bit_depth = self.bit_depth,
             .samples = samples,
         };
+    }
+
+    /// Expands `indices` into RGB triples. Shared by whole-image expansion and
+    /// the streaming band conversion, so both reject the same out-of-range
+    /// index. `destination` must hold three samples per index.
+    pub fn expandSamples(self: Palette, destination: []u16, indices: []const u16) !void {
+        if (self.entries == 0 or (self.bit_depth != 8 and self.bit_depth != 16)) {
+            return Jp2Error.UnsupportedProfile;
+        }
+        const expected_palette_samples = std.math.mul(usize, @as(usize, self.entries), 3) catch
+            return Jp2Error.ImageTooLarge;
+        if (self.samples.len != expected_palette_samples) return Jp2Error.InvalidBox;
+        const expected = std.math.mul(usize, indices.len, 3) catch return Jp2Error.ImageTooLarge;
+        if (destination.len != expected) return Jp2Error.InvalidBox;
+
+        for (indices, 0..) |palette_index, pixel_index| {
+            if (palette_index >= self.entries) return Jp2Error.PaletteIndexOutOfRange;
+            const source = @as(usize, palette_index) * 3;
+            @memcpy(destination[pixel_index * 3 ..][0..3], self.samples[source..][0..3]);
+        }
     }
 };
 

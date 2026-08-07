@@ -5,6 +5,29 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Streaming Palette-Expanded Conversion
+
+- `jp2.Palette.expandSamples` factors the per-index lookup out of
+  `Palette.expand`, so whole-image expansion and a band-at-a-time expansion
+  reject the same out-of-range index against the same table.
+- `decode-temp-jp2` expands a palette stream band by band into
+  `tiff.RgbBandWriter` through a `PaletteRgbBandSink` adapter. The palette table
+  is a container concern, so the adapter lives above the TIFF layer rather than
+  inside it, and output precision is the palette's rather than the index
+  component's. This was the last conversion layout that still buffered its whole
+  raster and output file; every bounded JP2-to-TIFF conversion now streams.
+- The in-tree gate builds a palette JP2 through `jp2.wrapPaletteCodestream` and
+  compares the streamed file with a whole-raster `Palette.expand` plus
+  `writeRgb` of the same decode across full, reduced, and region-selected
+  options at 1 and 8 threads. An out-of-range index and its in-range neighbour
+  pin that the guard is on the index alone.
+- The CLI branch itself has no committed fixture, because no z2000 encoder
+  emits a palette JP2 — PNG palette input is expanded to RGBA before encoding.
+  It was verified for this change by generating a palette JP2 through the
+  library and comparing `decode-temp-jp2` output against a binary built from the
+  previous commit, with and without `--threads`, `--region`, and
+  `--tile-index`; committing such a fixture is recorded in the queue.
+
 ### Streaming Gray+Alpha And RGBA Conversion
 
 - Added `tiff.AlphaBandWriter` and `tiff.AlphaBandSink`, the alpha counterparts

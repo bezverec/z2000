@@ -33803,6 +33803,149 @@ test "streamed grayscale TIFF conversion matches the whole-raster conversion" {
     }
 }
 
+test "streamed palette TIFF conversion matches the whole-raster expansion" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 37;
+    const height = 29;
+    const entries: u16 = 5;
+    const indices = try allocator.alloc(u16, width * height);
+    defer allocator.free(indices);
+    for (indices, 0..) |*index, position| index.* = @intCast(position % entries);
+
+    const indexed_source = image.GrayImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = indices,
+    };
+    const codestream_bytes = try codestream.encodeLosslessGrayWithOptions(allocator, indexed_source, .{
+        .levels = 2,
+        .mct = .none,
+        .block_width = 8,
+        .block_height = 8,
+        .tile_part_divisions = null,
+    });
+    defer allocator.free(codestream_bytes);
+
+    const palette_samples = try allocator.dupe(u16, &.{
+        0x00, 0x00, 0x00,
+        0xff, 0x10, 0x20,
+        0x30, 0xe0, 0x40,
+        0x50, 0x60, 0xd0,
+        0x7f, 0x7f, 0x7f,
+    });
+    defer allocator.free(palette_samples);
+    const palette_jp2 = try jp2.wrapPaletteCodestream(allocator, indexed_source, .{
+        .allocator = allocator,
+        .entries = entries,
+        .bit_depth = 8,
+        .samples = palette_samples,
+    }, codestream_bytes);
+    defer allocator.free(palette_jp2);
+
+    const region = codestream.DecodeRegion{ .x0 = 6, .y0 = 3, .width = 20, .height = 17 };
+    const cases = [_]codestream.DecodeOptions{
+        .{ .threads = 1 },
+        .{ .threads = 8 },
+        .{ .threads = 1, .resolution_reduction = 1 },
+        .{ .threads = 8, .reference_region = region },
+    };
+    for (cases, 0..) |options, index| {
+        var path_buffers: [3][160]u8 = undefined;
+        const directory = try std.fmt.bufPrint(&path_buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        const whole_path = try std.fmt.bufPrint(&path_buffers[1], "{s}/pwhole-{}.tif", .{ directory, index });
+        const streamed_path = try std.fmt.bufPrint(&path_buffers[2], "{s}/pstream-{}.tif", .{ directory, index });
+
+        var table = (try jp2.extractPalette(allocator, palette_jp2)).?;
+        defer table.deinit();
+        const embedded = try jp2.extractCodestream(palette_jp2);
+
+        var indexed = try codestream.decodeLosslessGrayWithOptions(allocator, embedded, options);
+        defer indexed.deinit();
+        var expanded = try table.expand(allocator, indexed);
+        defer expanded.deinit();
+        try tiff.writeRgb(io, allocator, expanded, whole_path);
+
+        var writer = try tiff.RgbBandWriter.init(
+            io,
+            allocator,
+            streamed_path,
+            expanded.width,
+            expanded.height,
+            table.bit_depth,
+            null,
+        );
+        defer writer.deinit();
+        var band_rows: std.ArrayList(u16) = .empty;
+        defer band_rows.deinit(allocator);
+        var sink = PaletteBandTestSink{
+            .allocator = allocator,
+            .table = table,
+            .writer = &writer,
+            .rows = &band_rows,
+        };
+        try codestream.decodeLosslessPlanarBandsToSink(allocator, embedded, options, &sink);
+        try writer.finish();
+        try std.testing.expectEqual(expanded.width, sink.width);
+        try std.testing.expectEqual(expanded.height, sink.height);
+
+        const whole_bytes = try std.Io.Dir.cwd().readFileAlloc(io, whole_path, allocator, .limited(1 << 22));
+        defer allocator.free(whole_bytes);
+        const streamed_bytes = try std.Io.Dir.cwd().readFileAlloc(io, streamed_path, allocator, .limited(1 << 22));
+        defer allocator.free(streamed_bytes);
+        try std.testing.expectEqualSlices(u8, whole_bytes, streamed_bytes);
+    }
+
+    // An index outside the table fails closed rather than reading past it.
+    const small_samples = try allocator.dupe(u16, &.{ 1, 2, 3, 4, 5, 6 });
+    defer allocator.free(small_samples);
+    const small = jp2.Palette{
+        .allocator = allocator,
+        .entries = 2,
+        .bit_depth = 8,
+        .samples = small_samples,
+    };
+    var destination: [3]u16 = undefined;
+    try std.testing.expectError(
+        jp2.Jp2Error.PaletteIndexOutOfRange,
+        small.expandSamples(destination[0..], &.{2}),
+    );
+    // The in-range index still expands, so the guard is on the index alone.
+    try small.expandSamples(destination[0..], &.{1});
+    try std.testing.expectEqualSlices(u16, &.{ 4, 5, 6 }, destination[0..]);
+}
+
+/// Mirrors the CLI palette sink: expand each index band through the table and
+/// append the RGB rows. The CLI adapter itself lives in `main.zig`, which the
+/// test module does not import.
+const PaletteBandTestSink = struct {
+    allocator: std.mem.Allocator,
+    table: jp2.Palette,
+    writer: *tiff.RgbBandWriter,
+    rows: *std.ArrayList(u16),
+    width: usize = 0,
+    height: usize = 0,
+
+    pub fn begin(self: *PaletteBandTestSink, info: codestream.BandSinkInfo) !void {
+        try std.testing.expectEqual(@as(usize, 1), info.components.len);
+        self.width = info.width;
+        self.height = info.height;
+    }
+
+    pub fn writeBand(self: *PaletteBandTestSink, region: codestream.BandSinkRegion) !void {
+        const component = region.components[0];
+        const pixels = region.width * region.height;
+        try self.rows.resize(self.allocator, pixels * 3);
+        try self.table.expandSamples(self.rows.items, component.samples);
+        try self.writer.writeRows(self.rows.items);
+    }
+};
+
 test "streaming alpha TIFF writer matches the whole-image writer byte for byte" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

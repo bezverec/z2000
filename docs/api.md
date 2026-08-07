@@ -71,8 +71,7 @@ by default, transforming only RGB while alpha receives the ordinary unsigned
 DC level shift. Explicit `--mct none` keeps all four components independent.
 `decode-temp-jp2` dispatches one- through four-component bounded JP2 output to
 the matching TIFF writer; a supported one-component `pclr`/`cmap` stream is
-expanded to RGB first. Everything except palette expansion is converted band by
-band. A subsampled three-component stream with no sYCC conversion and no
+expanded to RGB first. Every bounded conversion is written band by band. A subsampled three-component stream with no sYCC conversion and no
 `--convert-to-srgb` feeds `tiff.RgbBandSink` from
 `decodeLosslessPlanarUpsampledToSink`; one-, two-, and four-component streams
 feed `tiff.GrayBandSink` or `tiff.AlphaBandSink` from
@@ -93,8 +92,11 @@ no dependency on the codestream layer. `tiff.GrayBandWriter`/`tiff.GrayBandSink`
 `tiff.AlphaBandWriter`/`tiff.AlphaBandSink` are the single-channel and
 gray+alpha/RGBA counterparts, sharing `GrayLayout` and `AlphaLayout` with
 `writeGray` and `writeAlpha`; `decode-temp-jp2` streams one-, two-, and
-four-component conversions through them, leaving only palette-expanded output
-buffered.
+four-component conversions through them. A palette stream is expanded band by
+band into `tiff.RgbBandWriter` by an adapter above the TIFF layer, using
+`jp2.Palette.expandSamples`, which `Palette.expand` also uses so both reject the
+same out-of-range index; output precision is the palette's rather than the index
+component's.
 
 `j2k-to-pgx` is the raw-codestream diagnostic boundary. It accepts `.j2k` or
 `.j2c` without a JP2 wrapper, decodes through `decodeLosslessNativeWithOptions`,

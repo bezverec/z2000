@@ -1187,6 +1187,57 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
         return;
     }
 
+    // A palette stream expands per index sample, so its bands can be expanded
+    // and written one at a time too. `--convert-to-srgb` already fails closed
+    // for palette input above, so no colour conversion can be pending here.
+    if (info.has_palette and !jp2InfoHasSubsampling(info)) {
+        const icc_start = monotonicNs();
+        const icc_profile = try jp2.extractIccProfile(allocator, bytes);
+        defer if (icc_profile) |profile| allocator.free(profile);
+        command_timings.icc_extract_ns = elapsedNs(icc_start);
+
+        const stream_start = monotonicNs();
+        var table = (try jp2.extractPalette(allocator, bytes)) orelse
+            return jp2.Jp2Error.MissingRequiredBox;
+        defer table.deinit();
+        var sink = PaletteRgbBandSink{
+            .io = io,
+            .allocator = allocator,
+            .path = args[1],
+            .palette = table,
+            .icc_profile = icc_profile,
+        };
+        defer sink.deinit();
+        if (show_timings) {
+            try codestream.decodeLosslessPlanarBandsToSinkProfiled(
+                allocator,
+                j2k,
+                options,
+                &sink,
+                &decode_timings,
+            );
+        } else {
+            try codestream.decodeLosslessPlanarBandsToSink(allocator, j2k, options, &sink);
+        }
+        try sink.finish();
+        command_timings.codestream_decode_ns = elapsedNs(stream_start);
+        command_timings.total_ns = command_timings.jp2_read_ns +
+            command_timings.codestream_extract_ns +
+            command_timings.codestream_decode_ns +
+            command_timings.icc_extract_ns;
+        reportDecodeTempJp2(
+            args[0],
+            args[1],
+            .{ sink.width, sink.height },
+            info,
+            options,
+            show_timings,
+            command_timings,
+            decode_timings,
+        );
+        return;
+    }
+
     // Gray+alpha and RGBA carry no colour conversion either, so their bands go
     // straight to the streaming alpha writer.
     if (!info.has_palette and (info.components == 2 or info.components == 4) and
@@ -1494,6 +1545,66 @@ fn reportDecodeTempJp2(
         printDecodeTempJp2Timings(command_timings, decode_timings);
     }
 }
+
+/// Expands each one-component index band through the JP2 palette and appends
+/// the resulting RGB rows to a streaming TIFF writer. The palette table is a
+/// container concern, so this adapter lives above the TIFF layer rather than
+/// inside it.
+const PaletteRgbBandSink = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    palette: jp2.Palette,
+    icc_profile: ?[]const u8 = null,
+    writer: ?tiff.RgbBandWriter = null,
+    rows: std.ArrayList(u16) = .empty,
+    width: usize = 0,
+    height: usize = 0,
+
+    pub fn begin(self: *PaletteRgbBandSink, info: codestream.BandSinkInfo) !void {
+        if (info.components.len != 1) return error.UnsupportedComponentCount;
+        self.width = info.width;
+        self.height = info.height;
+        // Output precision is the palette's, not the index component's.
+        self.writer = try tiff.RgbBandWriter.init(
+            self.io,
+            self.allocator,
+            self.path,
+            info.width,
+            info.height,
+            self.palette.bit_depth,
+            self.icc_profile,
+        );
+    }
+
+    pub fn writeBand(self: *PaletteRgbBandSink, region: codestream.BandSinkRegion) !void {
+        if (self.writer == null) return error.UnsupportedComponentCount;
+        const writer = &self.writer.?;
+        if (region.components.len != 1) return error.UnsupportedComponentCount;
+        const component = region.components[0];
+        const pixels = try std.math.mul(usize, region.width, region.height);
+        if (component.width != region.width or component.height != region.height or
+            component.stride != region.width or component.samples.len != pixels)
+        {
+            return error.UnsupportedComponentCount;
+        }
+        try self.rows.resize(self.allocator, try std.math.mul(usize, pixels, 3));
+        try self.palette.expandSamples(self.rows.items, component.samples);
+        try writer.writeRows(self.rows.items);
+    }
+
+    fn finish(self: *PaletteRgbBandSink) !void {
+        if (self.writer == null) return error.UnsupportedComponentCount;
+        try self.writer.?.finish();
+    }
+
+    fn deinit(self: *PaletteRgbBandSink) void {
+        if (self.writer) |*writer| writer.deinit();
+        self.writer = null;
+        self.rows.deinit(self.allocator);
+        self.rows = .empty;
+    }
+};
 
 fn jp2InfoHasSubsampling(info: jp2.Info) bool {
     for (0..info.components) |component| {
