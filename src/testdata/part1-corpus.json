@@ -1790,6 +1790,77 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "b3bfecaaaeae05e4775618554ad535a14634e12138e8e630576c9385de4eafd2"
+    },
+    {
+      "id": "kakadu-sop-eph-multitile-inline",
+      "path": "src/testdata/kakadu-sop-eph-multitile-inline.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "c7911b3bc5d1fe7a404dbc6b56b2329915024f954a73962518ae570ec39329fd",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "lossless 32x32 RGB, four 16x16 tiles, three RPCL layers, explicit precincts, SOP and EPH markers, inline packet headers; the source for the natively packed PPM fixture",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-sop-eph-multitile-inline.jp2 Creversible=yes Clevels=2 Clayers=3 Corder=RPCL Cprecincts={16,16},{8,8} Cblk={4,4} Stiles={16,16} Cuse_sop=yes Cuse_eph=yes -quiet"
+      },
+      "oracle": "src/tests.zig compares its decode with the natively packed PPM variant at 1 and 8 threads",
+      "features": [
+        "packet-header-placement",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-native-ppm-multitile",
+      "path": "src/testdata/kakadu-native-ppm-multitile.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "fe6a64746b005da2f5008a4100960ab5ac99a2f8266cb6cb5cfabd99ab2ee9b7",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "kdu_makeppm packed the four tile-part packet headers of the SOP/EPH inline fixture into one main-header PPM segment and stripped SOP/EPH; the first multi-tile PPM framing written by an independent implementation rather than repacked by this test suite",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_makeppm src/testdata/kakadu-sop-eph-multitile-inline.jp2 src/testdata/kakadu-native-ppm-multitile.jp2"
+      },
+      "oracle": "src/tests.zig pins Zppm=0, absent SOP, and decode equality with the inline source at 1 and 8 threads",
+      "features": [
+        "packet-header-placement",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-makeppm-stale-psot",
+      "path": "src/testdata/kakadu-makeppm-stale-psot.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "5a7c5e6ebe2f880d60b0c83df53e23847b818135458ed1467c218ea8fcbab669",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "reference-tool defect recorded rather than worked around: given a source carrying PLT, kdu_makeppm removes the PLT segments but does not shrink each tile-part Psot, so every part overstates its length by the 34 bytes it dropped",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress ... ORGgen_plt=yes | kdu_makeppm"
+      },
+      "oracle": "src/tests.zig pins that the JP2 tile-part sequence audit rejects it before a codestream is handed out",
+      "features": [
+        "packet-header-placement",
+        "tiles-and-tile-parts"
+      ],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream"
     }
   ]
 }

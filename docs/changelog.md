@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Independently Emitted PPM, And A kdu_makeppm Defect
+
+- `kdu_makeppm` packs the tile-part packet headers of a SOP/EPH stream into a
+  main-header PPM segment. Run on a four-tile Kakadu source it produced one
+  segment with four `Nppm` groups, `Zppm = 0`, and SOP/EPH stripped. Every
+  earlier multi-tile PPM case was a deterministic repack by this test suite, so
+  this is the first multi-tile PPM framing an independent implementation wrote.
+  It decodes identically to its inline source at 1 and 8 threads, and the corpus
+  runner confirms both streams share one native hash.
+- Recorded rather than worked around: **given a source carrying PLT,
+  `kdu_makeppm` 8.4.1 removes the PLT segments but does not shrink each
+  tile-part's `Psot`**, so every part overstates its length by exactly the bytes
+  it dropped — 34 per part in the reproduced case. z2000 rejects that stream,
+  which is correct; the JP2 tile-part sequence audit reconciles `Psot` before a
+  codestream is handed out. The defective stream is committed as a fail-closed
+  corpus entry so the behaviour stays pinned.
+- Three fixtures are committed with their commands:
+  `kakadu-sop-eph-multitile-inline.jp2`, `kakadu-native-ppm-multitile.jp2`, and
+  `kakadu-makeppm-stale-psot.jp2`.
+
 ### Independently Emitted Alternate-Width TLM
 
 - Kakadu ships `kdu_maketlm`, which writes a TLM into an existing codestream

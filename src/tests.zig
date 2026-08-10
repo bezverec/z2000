@@ -26021,6 +26021,64 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
     );
 }
 
+test "natively emitted Kakadu PPM decodes like its inline source" {
+    const allocator = std.testing.allocator;
+    // kdu_makeppm 8.4.1 packed the tile-part packet headers of a four-tile
+    // SOP/EPH stream into one main-header PPM segment. Every earlier multi-tile
+    // PPM case was a deterministic repack by this test suite, so this is the
+    // first stream whose PPM framing an independent implementation wrote.
+    const inline_stream = @embedFile("testdata/kakadu-sop-eph-multitile-inline.jp2");
+    const packed_stream = @embedFile("testdata/kakadu-native-ppm-multitile.jp2");
+
+    const inline_codestream = try jp2.extractCodestream(inline_stream);
+    const packed_codestream = try jp2.extractCodestream(packed_stream);
+    try std.testing.expect(findMarker(inline_codestream, codestream.markerValue("ppm")) == null);
+    const ppm_marker = findMarker(packed_codestream, codestream.markerValue("ppm")) orelse
+        return error.MissingPpm;
+    // Marker layout from the 0xFF byte: FF 60, Lppm, Zppm. Zppm is zero, so
+    // Kakadu emitted the whole packed-header stream as one segment rather than
+    // a continued sequence.
+    try std.testing.expectEqual(@as(u8, 0), packed_codestream[ppm_marker + 4]);
+    // Packing moves the headers out of the tile-parts, so SOP/EPH are gone.
+    try std.testing.expect(findMarker(packed_codestream, codestream.markerValue("sop")) == null);
+
+    // kdu_compress applies RCT by default, so this is the interleaved RGB
+    // multi-tile profile rather than the planar one.
+    for ([_]u8{ 1, 8 }) |threads| {
+        var expected = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            inline_codestream,
+            .{ .threads = threads },
+        );
+        defer expected.deinit();
+        var actual = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            packed_codestream,
+            .{ .threads = threads },
+        );
+        defer actual.deinit();
+        try std.testing.expectEqual(expected.width, actual.width);
+        try std.testing.expectEqual(expected.height, actual.height);
+        try std.testing.expectEqualSlices(u16, expected.samples, actual.samples);
+    }
+}
+
+test "kdu_makeppm leaves Psot stale when it strips PLT and is rejected" {
+    const allocator = std.testing.allocator;
+    // Reference-tool defect, recorded rather than worked around: given a source
+    // with PLT, kdu_makeppm 8.4.1 removes the PLT segments but does not shrink
+    // each tile-part's Psot, so every part overstates its length by exactly the
+    // bytes it dropped. Strict Psot reconciliation must reject that.
+    _ = allocator;
+    const stream = @embedFile("testdata/kakadu-makeppm-stale-psot.jp2");
+    // The JP2 tile-part sequence audit reconciles every Psot before a
+    // codestream is even handed out, so extraction is where this fails.
+    try std.testing.expectError(
+        jp2.Jp2Error.InvalidCodestream,
+        jp2.extractCodestream(stream),
+    );
+}
+
 test "natively emitted Kakadu TLM decodes exactly at an alternate entry width" {
     const allocator = std.testing.allocator;
     // kdu_maketlm 8.4.1 added this TLM to the committed 4:2:0 multi-tile
@@ -26033,9 +26091,10 @@ test "natively emitted Kakadu TLM decodes exactly at an alternate entry width" {
     const codestream_bytes = try jp2.extractCodestream(with_tlm);
     const tlm = findMarker(codestream_bytes, codestream.markerValue("tlm")) orelse
         return error.MissingTlm;
-    // Stlm bits 4-5 are ST and bit 6 is SP: a one-byte tile index with
-    // two-byte lengths, which is not the layout z2000 emits.
-    const stlm = codestream_bytes[tlm + 3];
+    // Marker layout from the 0xFF byte: FF 55, Ltlm, Ztlm, Stlm. Stlm bits 4-5
+    // are ST and bit 6 is SP: a one-byte tile index with two-byte lengths,
+    // which is not the layout z2000 emits.
+    const stlm = codestream_bytes[tlm + 5];
     try std.testing.expectEqual(@as(u8, 1), (stlm >> 4) & 3);
     try std.testing.expectEqual(@as(u8, 0), (stlm >> 6) & 1);
     // The source carries no TLM at all, so the marker really is added rather
@@ -26071,8 +26130,9 @@ test "natively emitted Kakadu TLM decodes exactly at an alternate entry width" {
     const corrupted_tlm = findMarker(corrupted_codestream, codestream.markerValue("tlm")) orelse
         return error.MissingTlm;
     const offset = @intFromPtr(corrupted_codestream.ptr) - @intFromPtr(corrupted.ptr);
-    // First entry: one index byte then a two-byte length.
-    corrupted[offset + corrupted_tlm + 5] +%= 1;
+    // Entries start after Stlm; the first is one index byte then a two-byte
+    // length, so this perturbs that length.
+    corrupted[offset + corrupted_tlm + 7] +%= 1;
     try std.testing.expectError(
         codestream.CodestreamError.InvalidCodestream,
         codestream.decodeLosslessPlanarUpsampledWithOptions(allocator, corrupted_codestream, .{}),

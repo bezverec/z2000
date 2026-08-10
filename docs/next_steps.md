@@ -662,8 +662,12 @@ Implement in small marker-to-raster slices:
    multi-tile decode, SOP/EPH, exact packet-catalog identity, corruption, and
    1/8-thread deterministic PPM emission are pinned. Structural PPM repacks
    retain independent Kakadu POC packet/T1 bytes and decode plane-exactly.
-   A natively emitted PPM+POC fixture from an independent producer and general
-   multipart POC schedules remain useful G3 breadth.
+   `kdu_makeppm` now supplies an independently written multi-tile PPM framing
+   that decodes identically to its inline source, so packed headers no longer
+   rest only on deterministic self-repacks; combining that framing with POC and
+   general multipart POC schedules remain useful G3 breadth. A reproduced
+   `kdu_makeppm` defect is pinned fail-closed: with a PLT-carrying source it
+   strips the PLT segments without shrinking each tile-part `Psot`.
 6. **Single normalized packet index — bounded foundation landed.** Strict
    decode, diagnostics, resolution selection, and quality-layer selection share
    the same fail-closed packet walk and stateful T2 headers. Preserve that
