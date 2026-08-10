@@ -156,16 +156,18 @@ method. Neither number changes the bounded 100/100 scorecards.
 | G0 | 78% | Manifest, differential runner, 60 cases, all profile-0 assets integrated, 11/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
 | G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
-| G3 | 50% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, and a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate | Independently emitted PLM, alternate-width TLM, and native PPM+POC marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, and general multipart packed schedules |
+| G3 | 50% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, and a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate | Independently emitted PLM and native PPM+POC marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, and general multipart packed schedules |
 | G4 | 70% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, single-/multi-tile reference-region selection whose intra-tile pruning reaches packet assembly, selected and reduced reference-grid upsampling, selected sampled sYCC conversion, push-based tile and band output sinks on every bounded decode shape with streaming bounded-TIFF conversion, plus T1 skipping, catalog compaction, and borrowed packet spans | Incremental codestream input, tile-local synthesis planes, and the remaining conversion layouts |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
 | G7 | 35% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
 
 These values should move only when a phase promotion criterion changes state,
-not after every small fixture. The CAP/PRF syntax-consistency gate and complete
-TLM width parser deliberately do not move G3 because the former exposes no new
-decoded profile and the latter's alternate widths are still test-produced.
+not after every small fixture. The CAP/PRF syntax-consistency gate deliberately does
+not move G3 because it exposes no new decoded profile. The TLM width parser was
+withheld for the same reason until `kdu_maketlm` supplied an independently
+emitted alternate-width stream; that evidence has now landed, so the sub-slice
+is complete even though the phase estimate is left for a maintainer to re-weigh.
 This re-estimate gives G3 a small promotion because sampled PPM+POC now exposes
 a real decoded and emitted profile with complete packet identity, corruption,
 and deterministic-output gates. It withholds broader promotion until valid

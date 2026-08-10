@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Independently Emitted Alternate-Width TLM
+
+- Kakadu ships `kdu_maketlm`, which writes a TLM into an existing codestream
+  and picks the entry widths itself. Running it on the committed 4:2:0
+  multi-tile fixture produced a stream with `ST=1`/`SP=0` — a one-byte tile
+  index with two-byte lengths, which is not the layout z2000 emits. The source
+  carries no TLM at all, so the marker is genuinely added rather than rewritten.
+- That closes the TLM width sub-slice. Every earlier alternate-width case was
+  produced by the test suite rewriting an existing marker over independent
+  Kakadu packet bytes, which evidenced the parser but not that any other
+  implementation writes those widths.
+- `kakadu-native-tlm-st1.jp2` is committed with its `kdu_maketlm` command in the
+  corpus manifest. Its decoded native hash is identical to the source fixture's,
+  which is the property a length marker must have. Tests pin the `Stlm` widths,
+  plane equality with the untouched source at 1 and 8 threads, and fail-closed
+  handling of a corrupted entry length.
+
 ### Reachable Multi-Tile Uniform-Sampling Encode
 
 - `encodeLosslessSampledPlanarWithOptions` rejected every all-1 sampling layout

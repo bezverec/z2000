@@ -647,11 +647,13 @@ Implement in small marker-to-raster slices:
    independently evidenced.
 4. General legal tile-part ordering and repetition beyond the landed inline
    PLT-less state machine and bounded COC/QCC PPT-resolution-part profile.
-   The TLM width sub-slice is implementation-complete: raw and JP2 paths share
-   all six `ST=0/1/2` x `SP=0/1` layouts, implicit-index continuation, strict
-   syntax, and exact SOT/`Psot` reconciliation. Independent Kakadu packet/T1
-   bytes remain exact under four explicit-width rewrites; obtain one
-   independently emitted alternate-width TLM before formal promotion.
+   **The TLM width sub-slice is complete.** Raw and JP2 paths share all six
+   `ST=0/1/2` x `SP=0/1` layouts, implicit-index continuation, strict syntax,
+   and exact SOT/`Psot` reconciliation. Independent Kakadu packet/T1 bytes stay
+   exact under four explicit-width rewrites, and `kdu_maketlm` supplies the
+   independently emitted alternate-width stream that was blocking promotion: it
+   chooses `ST=1`/`SP=0` itself and decodes plane-identically to the untouched
+   source fixture.
    PLT-less multipart PPM without POC is complete through the shared deferred-
    count state machine.
 5. **Legal `POC` schedules across inline, `PPT`, and `PPM` headers — complete

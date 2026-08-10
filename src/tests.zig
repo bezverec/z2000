@@ -26021,6 +26021,64 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
     );
 }
 
+test "natively emitted Kakadu TLM decodes exactly at an alternate entry width" {
+    const allocator = std.testing.allocator;
+    // kdu_maketlm 8.4.1 added this TLM to the committed 4:2:0 multi-tile
+    // fixture. Every earlier alternate-width case was produced by the test
+    // suite rewriting an existing marker, so this is the first stream whose
+    // TLM widths were chosen by an independent implementation.
+    const source = @embedFile("testdata/kakadu-rpcl-420-multitile.jp2");
+    const with_tlm = @embedFile("testdata/kakadu-native-tlm-st1.jp2");
+
+    const codestream_bytes = try jp2.extractCodestream(with_tlm);
+    const tlm = findMarker(codestream_bytes, codestream.markerValue("tlm")) orelse
+        return error.MissingTlm;
+    // Stlm bits 4-5 are ST and bit 6 is SP: a one-byte tile index with
+    // two-byte lengths, which is not the layout z2000 emits.
+    const stlm = codestream_bytes[tlm + 3];
+    try std.testing.expectEqual(@as(u8, 1), (stlm >> 4) & 3);
+    try std.testing.expectEqual(@as(u8, 0), (stlm >> 6) & 1);
+    // The source carries no TLM at all, so the marker really is added rather
+    // than rewritten.
+    try std.testing.expect(findMarker(
+        try jp2.extractCodestream(source),
+        codestream.markerValue("tlm"),
+    ) == null);
+
+    for ([_]u8{ 1, 8 }) |threads| {
+        var expected = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            try jp2.extractCodestream(source),
+            .{ .threads = threads },
+        );
+        defer expected.deinit();
+        var actual = try codestream.decodeLosslessPlanarUpsampledWithOptions(
+            allocator,
+            codestream_bytes,
+            .{ .threads = threads },
+        );
+        defer actual.deinit();
+        try std.testing.expectEqual(expected.planes.len, actual.planes.len);
+        for (expected.planes, actual.planes) |expected_plane, actual_plane| {
+            try std.testing.expectEqualSlices(u16, expected_plane, actual_plane);
+        }
+    }
+
+    // A length that disagrees with its Psot must still fail closed.
+    const corrupted = try allocator.dupe(u8, with_tlm);
+    defer allocator.free(corrupted);
+    const corrupted_codestream = try jp2.extractCodestream(corrupted);
+    const corrupted_tlm = findMarker(corrupted_codestream, codestream.markerValue("tlm")) orelse
+        return error.MissingTlm;
+    const offset = @intFromPtr(corrupted_codestream.ptr) - @intFromPtr(corrupted.ptr);
+    // First entry: one index byte then a two-byte length.
+    corrupted[offset + corrupted_tlm + 5] +%= 1;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessPlanarUpsampledWithOptions(allocator, corrupted_codestream, .{}),
+    );
+}
+
 test "foreign Kakadu multipart TLM accepts explicit ST SP width variants" {
     const allocator = std.testing.allocator;
     const container = @embedFile("testdata/kakadu-multipart-tlm.jp2");

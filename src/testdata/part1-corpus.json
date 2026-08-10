@@ -1766,6 +1766,30 @@
         "max_peak_error": 0,
         "max_mse": 0
       }]
+    },
+    {
+      "id": "kakadu-native-tlm-st1",
+      "path": "src/testdata/kakadu-native-tlm-st1.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "d7737ab87f34159e4f92ad3fccb45cd1bab756516cf719d9fc81e06868e09d00",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "kdu_maketlm added a TLM to the committed 4:2:0 multi-tile fixture and chose ST=1/SP=0 entry widths itself; the source stream carries no TLM at all",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_maketlm src/testdata/kakadu-rpcl-420-multitile.jp2 src/testdata/kakadu-native-tlm-st1.jp2"
+      },
+      "oracle": "src/tests.zig pins Stlm ST=1/SP=0, decode equality with the untouched source fixture at 1 and 8 threads, and fail-closed length corruption",
+      "features": [
+        "siz-subsampled-components",
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "b3bfecaaaeae05e4775618554ad535a14634e12138e8e630576c9385de4eafd2"
     }
   ]
 }
