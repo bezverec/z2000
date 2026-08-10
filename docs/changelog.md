@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Pinned General Multipart POC Boundary
+
+- Three independently produced Kakadu streams now pin where multipart POC
+  stops: 36 resolution tile-parts under a main-header POC, 28 layer tile-parts
+  under one, and a tile whose two tile-parts each carry their own POC so the
+  second sits in a `TPsot=1` header. All three are committed as fail-closed
+  corpus entries with their `kdu_compress` commands, so the boundary rests on
+  real streams instead of prose.
+- Investigating them found the boundary is deliberate and layered rather than
+  an accidentally closed door. Opening the JP2 audit's tile-part POC placement
+  check only moves the rejection to a second gate in the strict reader, and
+  opening that moves it to `validatePocResolutionTilePartSequence` /
+  `validatePocLayerTilePartSequence`, which are where the bounded one-part-per-
+  tile schedule is actually enforced. Implementing the profile means deciding
+  how a POC in a later tile-part continues the tile's packet sequence under
+  ISO A.6.6, not removing checks.
+- Worth recording for anyone probing this next: `jp2-info` accepts the two
+  main-header POC multipart streams because it only summarizes the container
+  and main header. Full decode rejects them. Container acceptance is not
+  evidence that a profile decodes.
+
 ### Independently Emitted PPM+POC
 
 - `kdu_compress Porder=...` writes a two-record main-header POC and
