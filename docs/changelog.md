@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Independently Emitted PPM+POC
+
+- `kdu_compress Porder=...` writes a two-record main-header POC and
+  `kdu_makeppm` then packs that stream's tile-part headers, so both the schedule
+  and the packed framing come from Kakadu rather than from a repack by this test
+  suite. That was the last packed-header combination resting only on
+  deterministic self-repacks.
+- The packed stream retains its POC marker and decodes identically to its inline
+  source at 1 and 8 threads. It also reconstructs the same image as the
+  schedule-free packed fixture, which is the property a progression change must
+  have: POC reorders packets and nothing else.
+- `kakadu-poc-sop-eph-multitile-inline.jp2` and
+  `kakadu-native-ppm-poc-multitile.jp2` are committed with their commands; the
+  corpus runner confirms both share the native hash of every other lossless
+  fixture built from the same source raster.
+
 ### Independently Emitted PPM, And A kdu_makeppm Defect
 
 - `kdu_makeppm` packs the tile-part packet headers of a SOP/EPH stream into a

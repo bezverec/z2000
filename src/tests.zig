@@ -26063,6 +26063,55 @@ test "natively emitted Kakadu PPM decodes like its inline source" {
     }
 }
 
+test "natively emitted Kakadu PPM carries a POC schedule" {
+    const allocator = std.testing.allocator;
+    // The PPM+POC combination was the remaining packed-header gap: z2000's own
+    // support was pinned only against deterministic self-repacks. Kakadu wrote
+    // both the POC schedule and the PPM framing here.
+    const inline_stream = @embedFile("testdata/kakadu-poc-sop-eph-multitile-inline.jp2");
+    const packed_stream = @embedFile("testdata/kakadu-native-ppm-poc-multitile.jp2");
+    const inline_codestream = try jp2.extractCodestream(inline_stream);
+    const packed_codestream = try jp2.extractCodestream(packed_stream);
+
+    // Both carry the main-header POC; only the packed one carries PPM.
+    try std.testing.expect(findMarker(inline_codestream, codestream.markerValue("poc")) != null);
+    try std.testing.expect(findMarker(packed_codestream, codestream.markerValue("poc")) != null);
+    try std.testing.expect(findMarker(inline_codestream, codestream.markerValue("ppm")) == null);
+    try std.testing.expect(findMarker(packed_codestream, codestream.markerValue("ppm")) != null);
+
+    for ([_]u8{ 1, 8 }) |threads| {
+        var expected = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            inline_codestream,
+            .{ .threads = threads },
+        );
+        defer expected.deinit();
+        var actual = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            packed_codestream,
+            .{ .threads = threads },
+        );
+        defer actual.deinit();
+        try std.testing.expectEqualSlices(u16, expected.samples, actual.samples);
+    }
+
+    // POC only reorders packets, so a lossless stream of the same source must
+    // reconstruct the same image as the schedule-free fixture.
+    var without_poc = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(@embedFile("testdata/kakadu-native-ppm-multitile.jp2")),
+        .{},
+    );
+    defer without_poc.deinit();
+    var with_poc = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        packed_codestream,
+        .{},
+    );
+    defer with_poc.deinit();
+    try std.testing.expectEqualSlices(u16, without_poc.samples, with_poc.samples);
+}
+
 test "kdu_makeppm leaves Psot stale when it strips PLT and is rejected" {
     const allocator = std.testing.allocator;
     // Reference-tool defect, recorded rather than worked around: given a source
