@@ -26063,6 +26063,46 @@ test "natively emitted Kakadu PPM decodes like its inline source" {
     }
 }
 
+test "general multipart POC decodes across arbitrary tile-part divisions" {
+    const allocator = std.testing.allocator;
+    // A POC composes one packet sequence per tile; tile-parts only cut it into
+    // consecutive runs. These three Kakadu streams divide that sequence in ways
+    // the former bounded schedule could not express: 36 resolution tile-parts,
+    // 28 layer tile-parts, and a tile whose second tile-part header carries its
+    // own POC. All are lossless renderings of the same source as the
+    // schedule-free fixture, so they must reconstruct exactly its raster —
+    // which Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 independently agree
+    // on. A wrong packet schedule would not land near it.
+    const reference_stream = @embedFile("testdata/kakadu-sop-eph-multitile-inline.jp2");
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(reference_stream),
+        .{},
+    );
+    defer reference.deinit();
+
+    const streams = [_][]const u8{
+        @embedFile("testdata/kakadu-poc-resolution-tileparts.jp2"),
+        @embedFile("testdata/kakadu-poc-layer-tileparts.jp2"),
+        @embedFile("testdata/kakadu-poc-later-tilepart.jp2"),
+    };
+    for (streams) |stream| {
+        const codestream_bytes = try jp2.extractCodestream(stream);
+        try std.testing.expect(findMarker(codestream_bytes, codestream.markerValue("poc")) != null);
+        for ([_]u8{ 1, 8 }) |threads| {
+            var decoded = try codestream.decodeLosslessTemporaryWithOptions(
+                allocator,
+                codestream_bytes,
+                .{ .threads = threads },
+            );
+            defer decoded.deinit();
+            try std.testing.expectEqual(reference.width, decoded.width);
+            try std.testing.expectEqual(reference.height, decoded.height);
+            try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+        }
+    }
+}
+
 test "natively emitted Kakadu PPM carries a POC schedule" {
     const allocator = std.testing.allocator;
     // The PPM+POC combination was the remaining packed-header gap: z2000's own

@@ -1927,15 +1927,15 @@
         "redistribution": "committed codestream; Kakadu application not redistributed",
         "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-poc-resolution-tileparts.jp2 Creversible=yes Clevels=2 Clayers=3 Cblk={4,4} Stiles={16,16} -quiet Corder=RPCL ORGtparts=R Porder={0,0,1,3,3,RPCL},{0,0,3,3,3,LRCP}"
       },
-      "oracle": "general multipart POC is unimplemented: validatePocResolutionTilePartSequence rejects before reconstruction",
+      "oracle": "src/tests.zig pins byte-equality with the schedule-free fixture; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 all decode it to the same raster",
       "features": [
         "progression-poc",
         "tiles-and-tile-parts",
         "packet-header-placement",
         "reversible-53"
       ],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload"
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     },
     {
       "id": "kakadu-poc-layer-tileparts",
@@ -1952,15 +1952,15 @@
         "redistribution": "committed codestream; Kakadu application not redistributed",
         "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-poc-layer-tileparts.jp2 Creversible=yes Clevels=2 Clayers=3 Cblk={4,4} Stiles={16,16} -quiet Corder=LRCP ORGtparts=L Porder={0,0,1,3,3,LRCP},{0,0,3,3,3,RLCP}"
       },
-      "oracle": "general multipart POC is unimplemented: validatePocLayerTilePartSequence rejects a layer that the bounded schedule does not predict",
+      "oracle": "src/tests.zig pins byte-equality with the schedule-free fixture; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 all decode it to the same raster",
       "features": [
         "progression-poc",
         "tiles-and-tile-parts",
         "packet-header-placement",
         "reversible-53"
       ],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload"
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     },
     {
       "id": "kakadu-poc-later-tilepart",
@@ -1977,15 +1977,15 @@
         "redistribution": "committed codestream; Kakadu application not redistributed",
         "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-poc-later-tilepart.jp2 Creversible=yes Clevels=2 Clayers=3 Cblk={4,4} Stiles={16,16} -quiet Corder=RPCL Porder:T0={0,0,1,3,3,RPCL} Porder:T0={0,0,3,3,3,LRCP}"
       },
-      "oracle": "POC is accepted only in a first tile-part header; the JP2 tile-part audit rejects a later-part POC before a codestream is handed out",
+      "oracle": "src/tests.zig pins byte-equality with the schedule-free fixture; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 all decode it to the same raster",
       "features": [
         "progression-poc",
         "tiles-and-tile-parts",
         "packet-header-placement",
         "reversible-53"
       ],
-      "expectation": "fail_closed",
-      "expected_error": "InvalidCodestream"
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }

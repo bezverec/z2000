@@ -1819,7 +1819,6 @@ fn validateMultiTileTilePartSequence(
             tile_part_end,
             cod,
             components,
-            sot_tile_part_index == 0,
             &packet_sequences[state_index],
             &ppt_states[state_index],
             has_ppm,
@@ -1886,7 +1885,6 @@ fn validateSotSegment(
         tile_part_end,
         cod,
         components,
-        tile_part_index == 0,
         packet_sequence,
         ppt_state,
         has_ppm,
@@ -1900,7 +1898,6 @@ fn validateFirstTilePartHeader(
     end: usize,
     cod: CodSegmentInfo,
     components: u16,
-    allow_poc: bool,
     packet_sequence: *u16,
     ppt_state: *PptState,
     has_ppm: bool,
@@ -1936,7 +1933,8 @@ fn validateFirstTilePartHeader(
                 return;
             },
             marker_plt, marker_com => {},
-            marker_poc => if (!allow_poc) return Jp2Error.InvalidCodestream,
+            // Part 1 permits POC in any tile-part header, not only the first.
+            marker_poc => {},
             marker_ppt => part_has_ppt = true,
             marker_sot, marker_eoc => return Jp2Error.InvalidCodestream,
             else => return Jp2Error.UnsupportedProfile,

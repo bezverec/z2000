@@ -5,6 +5,35 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### General Multipart POC Decode
+
+- A POC composes one packet sequence per tile, and tile-parts only cut that
+  sequence into consecutive runs. Decode previously required those cuts to
+  align with a resolution, layer, component, or position grouping, through four
+  progression-specific validators. That was a conservative shape assertion, not
+  a functional requirement: the catalog reader already joins a tile's parts
+  sequentially and rejects a non-consecutive first-packet index.
+- Those validators are replaced by the invariant that actually holds,
+  `validatePocTilePartCoverage`: the tile's parts together account for the
+  composed sequence exactly. Per-part counts still come from PLT, PPM, or the
+  deferred header walk. The four now-unused decode-side validators are removed;
+  the encoder keeps its own, which assert the divisions it emits.
+- POC is also accepted in any tile-part header rather than only the first, which
+  Part 1 permits. Records from later parts append to the tile's schedule, and
+  the coverage model then cuts it by tile-part.
+- Three independently produced Kakadu streams that previously failed closed now
+  decode: 36 resolution tile-parts under a main-header POC, 28 layer tile-parts
+  under one, and a tile whose second tile-part header carries its own POC. All
+  three reconstruct the schedule-free fixture's raster byte for byte, at 1 and 8
+  threads. Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 independently agree on
+  that raster, so three decoders corroborate the schedule; a wrong packet order
+  would not land near it. Their corpus entries move from fail-closed to
+  decode-pass, taking the runner to 37 decode-pass entries.
+- **Evidence caveat:** this was derived empirically against those decoders, not
+  read out of ISO/IEC 15444-1. The consecutive-slice and append semantics match
+  what three independent implementations produce and consume; they have not been
+  checked against the standard's text for A.6.6.
+
 ### Pinned General Multipart POC Boundary
 
 - Three independently produced Kakadu streams now pin where multipart POC

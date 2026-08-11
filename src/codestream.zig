@@ -6798,29 +6798,15 @@ fn readStrictCodestreamMetadataForProfile(
                         tile_poc_records[tile_index].items,
                     );
                 if (has_multiple_tile_parts) {
-                    switch (parsed_progression) {
-                        .rpcl => {
-                            try validatePocResolutionTilePartSequence(sequence, tile_plan);
-                            try validatePocResolutionTilePartSpans(spans.items, @intCast(tile_index), tile_plan);
-                        },
-                        .lrcp => {
-                            try validatePocLayerTilePartSequence(sequence, layers);
-                            try validatePocLayerTilePartSpans(spans.items, @intCast(tile_index), sequence.len, layers);
-                        },
-                        .cprl => {
-                            try validatePocComponentTilePartSequence(sequence);
-                            try validatePocComponentTilePartSpans(spans.items, @intCast(tile_index), sequence.len);
-                        },
-                        .pcrl => try validatePocPositionTileParts(
-                            allocator,
-                            sequence,
-                            spans.items,
-                            @intCast(tile_index),
-                            tile_plan,
-                            layers,
-                        ),
-                        else => unreachable,
-                    }
+                    // A POC composes one packet sequence per tile; tile-parts
+                    // only cut that sequence into consecutive runs. Their
+                    // boundaries need not align with a resolution, layer,
+                    // component, or position grouping, so the invariant to
+                    // enforce is coverage: the parts together account for the
+                    // composed sequence exactly. Per-part counts come from PLT,
+                    // PPM, or the deferred header walk, and the catalog reader
+                    // already rejects a non-consecutive first-packet index.
+                    try validatePocTilePartCoverage(spans.items, @intCast(tile_index), sequence.len);
                 }
                 allocator.free(sequence);
             }
@@ -15139,7 +15125,10 @@ fn readStrictMultiTileTilePartSpans(
                     .resolution_count = levels + 1,
                     .layer_count = options.layers,
                 },
-                .allowed = sot.tile_part_index == 0,
+                // Part 1 permits POC in any tile-part header. Records from
+                // later parts append to the tile's schedule, which the
+                // consecutive-slice model below then cuts by tile-part.
+                .allowed = true,
             },
             coding_target,
         );
@@ -15352,7 +15341,8 @@ fn readStrictTilePartHeader(
         if (poc_limits) |limits| .{
             .records = &poc_records,
             .limits = limits,
-            .allowed = sot.tile_part_index == 0,
+            // See above: POC placement is not restricted to the first part.
+            .allowed = true,
         } else null,
         coding_target,
     );
@@ -19587,6 +19577,27 @@ fn validateMultiTileDecodeGeometry(grid: tile_grid.Grid, levels: u8, options: Lo
     }
 }
 
+/// Coverage invariant for a POC schedule split across tile-parts: every part of
+/// the tile is a consecutive run of the composed sequence, so the known part
+/// counts must sum to its length. A part whose count is only derivable by
+/// walking its headers is validated there instead.
+fn validatePocTilePartCoverage(
+    spans: []const StrictMultiTileTilePartSpan,
+    tile_index: u16,
+    sequence_len: usize,
+) !void {
+    var total: u64 = 0;
+    var counts_known = true;
+    for (spans) |span| {
+        if (span.tile_index != tile_index) continue;
+        if (span.packet_count_known) {
+            total = std.math.add(u64, total, span.packet_count) catch
+                return CodestreamError.UnsupportedPayload;
+        } else counts_known = false;
+    }
+    if (counts_known and total != sequence_len) return CodestreamError.UnsupportedPayload;
+}
+
 fn validatePocLayerTilePartSequence(sequence: []const packet_plan.Packet, layers: u16) !void {
     const layer_count = @as(usize, layers);
     if (layer_count == 0 or layer_count > std.math.maxInt(u8) or sequence.len == 0 or
@@ -19625,59 +19636,7 @@ fn validatePocResolutionTilePartSequence(
     if (packet_index != sequence.len) return CodestreamError.UnsupportedPayload;
 }
 
-fn validatePocResolutionTilePartSpans(
-    spans: []const StrictMultiTileTilePartSpan,
-    tile_index: u16,
-    plan: packet_plan.Plan,
-) !void {
-    const part_count = @as(usize, plan.resolution_count);
-    if (part_count == 0 or part_count > std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
-    var part_index: usize = 0;
-    var first_packet: usize = 0;
-    for (spans) |span| {
-        if (span.tile_index != tile_index) continue;
-        if (part_index >= part_count) return CodestreamError.InvalidCodestream;
-        const packet_count = std.math.cast(usize, plan.resolutions[part_index].packets) orelse
-            return CodestreamError.InvalidCodestream;
-        if (span.tile_part_count != @as(u8, @intCast(part_count)) or
-            span.tile_part_index != @as(u8, @intCast(part_index)) or
-            span.first_packet != first_packet or span.packet_count != packet_count)
-        {
-            return CodestreamError.InvalidCodestream;
-        }
-        first_packet = try std.math.add(usize, first_packet, packet_count);
-        part_index += 1;
-    }
-    if (part_index != part_count or first_packet != plan.packets) {
-        return CodestreamError.InvalidCodestream;
-    }
-}
 
-fn validatePocLayerTilePartSpans(
-    spans: []const StrictMultiTileTilePartSpan,
-    tile_index: u16,
-    packet_count: usize,
-    layers: u16,
-) !void {
-    const layer_count = @as(usize, layers);
-    if (layer_count == 0 or layer_count > std.math.maxInt(u8) or packet_count % layer_count != 0) {
-        return CodestreamError.InvalidCodestream;
-    }
-    const packets_per_layer = packet_count / layer_count;
-    var part_index: usize = 0;
-    for (spans) |span| {
-        if (span.tile_index != tile_index) continue;
-        if (part_index >= layer_count or span.tile_part_count != @as(u8, @intCast(layers)) or
-            span.tile_part_index != @as(u8, @intCast(part_index)) or
-            span.first_packet != part_index * packets_per_layer or
-            span.packet_count != packets_per_layer)
-        {
-            return CodestreamError.InvalidCodestream;
-        }
-        part_index += 1;
-    }
-    if (part_index != layer_count) return CodestreamError.InvalidCodestream;
-}
 
 fn validatePocComponentTilePartSequence(sequence: []const packet_plan.Packet) !void {
     if (sequence.len == 0 or sequence.len % 3 != 0) return CodestreamError.UnsupportedPayload;
@@ -19690,27 +19649,6 @@ fn validatePocComponentTilePartSequence(sequence: []const packet_plan.Packet) !v
     }
 }
 
-fn validatePocComponentTilePartSpans(
-    spans: []const StrictMultiTileTilePartSpan,
-    tile_index: u16,
-    packet_count: usize,
-) !void {
-    if (packet_count == 0 or packet_count % 3 != 0) return CodestreamError.InvalidCodestream;
-    const packets_per_component = packet_count / 3;
-    var part_index: usize = 0;
-    for (spans) |span| {
-        if (span.tile_index != tile_index) continue;
-        if (part_index >= 3 or span.tile_part_count != 3 or
-            span.tile_part_index != @as(u8, @intCast(part_index)) or
-            span.first_packet != part_index * packets_per_component or
-            span.packet_count != packets_per_component)
-        {
-            return CodestreamError.InvalidCodestream;
-        }
-        part_index += 1;
-    }
-    if (part_index != 3) return CodestreamError.InvalidCodestream;
-}
 
 fn validatePocPositionTilePartSequence(
     allocator: std.mem.Allocator,
@@ -19735,53 +19673,6 @@ fn validatePocPositionTilePartSequence(
     }
 }
 
-fn validatePocPositionTileParts(
-    allocator: std.mem.Allocator,
-    sequence: []const packet_plan.Packet,
-    spans: []const StrictMultiTileTilePartSpan,
-    tile_index: u16,
-    plan: packet_plan.Plan,
-    layers: u16,
-) !void {
-    try validatePocPositionTilePartSequence(allocator, sequence, plan, layers);
-    var part_count: usize = 0;
-    var packet_index: usize = 0;
-    while (packet_index < sequence.len) : (part_count += 1) {
-        const position = packet_plan.packetPosition(plan, sequence[packet_index]) catch
-            return CodestreamError.InvalidCodestream;
-        packet_index += 1;
-        while (packet_index < sequence.len) : (packet_index += 1) {
-            const next = packet_plan.packetPosition(plan, sequence[packet_index]) catch
-                return CodestreamError.InvalidCodestream;
-            if (next.x_ref != position.x_ref or next.y_ref != position.y_ref) break;
-        }
-    }
-    if (part_count == 0 or part_count > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
-
-    var part_index: usize = 0;
-    packet_index = 0;
-    for (spans) |span| {
-        if (span.tile_index != tile_index) continue;
-        if (part_index >= part_count or packet_index >= sequence.len) return CodestreamError.InvalidCodestream;
-        const first_packet = packet_index;
-        const position = packet_plan.packetPosition(plan, sequence[packet_index]) catch
-            return CodestreamError.InvalidCodestream;
-        packet_index += 1;
-        while (packet_index < sequence.len) : (packet_index += 1) {
-            const next = packet_plan.packetPosition(plan, sequence[packet_index]) catch
-                return CodestreamError.InvalidCodestream;
-            if (next.x_ref != position.x_ref or next.y_ref != position.y_ref) break;
-        }
-        if (span.tile_part_count != @as(u8, @intCast(part_count)) or
-            span.tile_part_index != @as(u8, @intCast(part_index)) or
-            span.first_packet != first_packet or span.packet_count != packet_index - first_packet)
-        {
-            return CodestreamError.InvalidCodestream;
-        }
-        part_index += 1;
-    }
-    if (part_index != part_count or packet_index != sequence.len) return CodestreamError.InvalidCodestream;
-}
 
 const MultiTilePacketPart = struct {
     tile_index: u16,

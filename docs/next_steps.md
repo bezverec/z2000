@@ -665,14 +665,16 @@ Implement in small marker-to-raster slices:
    `kdu_makeppm` now supplies an independently written multi-tile PPM framing,
    with and without a Kakadu-written main-header POC schedule, that decodes
    identically to its inline source; packed headers no longer rest only on
-   deterministic self-repacks. General multipart POC schedules remain G3
-   breadth, now pinned by three independently produced fail-closed fixtures:
-   resolution tile-parts and layer tile-parts under a main-header POC, and a
-   POC in a `TPsot=1` tile-part header. The boundary is enforced at three
-   layers — the JP2 tile-part audit, the strict reader's POC placement check,
-   and the bounded per-tile schedule validators — so the work is deciding how a
-   later-part POC continues the tile's packet sequence under ISO A.6.6, not
-   relaxing checks. A reproduced
+   deterministic self-repacks. **General multipart POC decode is complete.** Tile-parts
+   are treated as consecutive runs of the tile's composed sequence rather than
+   having to align with a progression grouping, and POC is accepted in any
+   tile-part header. Three independently produced Kakadu streams — 36
+   resolution tile-parts, 28 layer tile-parts, and a POC in a `TPsot=1` header —
+   reconstruct the schedule-free fixture's raster byte for byte, corroborated by
+   Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6. The semantics were derived
+   empirically from those decoders, not from ISO/IEC 15444-1 A.6.6; confirming
+   them against the standard text remains open, as does POC emission for these
+   divisions. A reproduced
    `kdu_makeppm` defect is pinned fail-closed: with a PLT-carrying source it
    strips the PLT segments without shrinking each tile-part `Psot`.
 6. **Single normalized packet index — bounded foundation landed.** Strict
