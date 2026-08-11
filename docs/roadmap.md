@@ -156,7 +156,7 @@ method. Neither number changes the bounded 100/100 scorecards.
 | G0 | 78% | Manifest, differential runner, 60 cases, all profile-0 assets integrated, 11/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
 | G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
-| G3 | 50% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, and a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate | Independently emitted PLM and native PPM+POC marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, and general multipart packed schedules |
+| G3 | 50% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, and a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate | Independently emitted PLM marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, POC emission for general tile-part divisions, and confirming the empirically derived multipart POC semantics against ISO/IEC 15444-1 A.6.6 |
 | G4 | 70% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, single-/multi-tile reference-region selection whose intra-tile pruning reaches packet assembly, selected and reduced reference-grid upsampling, selected sampled sYCC conversion, push-based tile and band output sinks on every bounded decode shape with streaming bounded-TIFF conversion, plus T1 skipping, catalog compaction, and borrowed packet spans | Incremental codestream input, tile-local synthesis planes, and the remaining conversion layouts |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
@@ -168,12 +168,21 @@ not move G3 because it exposes no new decoded profile. The TLM width parser was
 withheld for the same reason until `kdu_maketlm` supplied an independently
 emitted alternate-width stream; that evidence has now landed, so the sub-slice
 is complete even though the phase estimate is left for a maintainer to re-weigh.
-This re-estimate gives G3 a small promotion because sampled PPM+POC now exposes
-a real decoded and emitted profile with complete packet identity, corruption,
-and deterministic-output gates. It withholds broader promotion until valid
+This re-estimate gave G3 a small promotion because sampled PPM+POC exposed a
+real decoded and emitted profile with complete packet identity, corruption, and
+deterministic-output gates. It then withheld broader promotion until valid
 independently emitted PLM, alternate-width TLM, and native PPM+POC evidence
-lands, or an externally specified profile-signalling capability is implemented
+landed, or an externally specified profile-signalling capability was implemented
 through actual payload behavior.
+
+Three of those withholding reasons have since been satisfied and the phase
+estimate is deliberately left for a maintainer to re-weigh. `kdu_maketlm`
+supplied the alternate-width TLM; `kdu_makeppm` supplied a multi-tile PPM
+framing, with and without a Kakadu-written POC schedule; and general multipart
+POC now decodes across arbitrary tile-part divisions, verified byte for byte
+against Kakadu, OpenJPEG, and Grok. Independently emitted PLM remains open —
+Kakadu ships no PLM writer — as does confirming the empirically derived POC
+semantics against the standard's own text.
 G4 advances again because absolute reference-region selection now changes both
 work scheduling and peak output allocation across multiple tiles, with exact
 RGB/sampled/native reduced-crop oracles and fail-closed skipped-tile
@@ -189,15 +198,19 @@ every bounded decode shape hands each decoded tile — or, where replication
 crosses a tile's own component window, each full-width tile-row band — to a
 caller sink, each legacy whole-raster API is implemented as one sink over that
 same loop so the shapes cannot diverge, and the bounded TIFF conversion path
-writes subsampled three-component and one-component output through streaming
-writers with byte-identical results. Incremental input, tile-local synthesis
-planes, and the remaining conversion layouts remain substantial, so the G4
-estimate is deliberately left where it is until a maintainer re-weighs it.
+writes every bounded layout — subsampled three-component, one-component,
+gray+alpha, RGBA, and palette-expanded — through streaming writers with
+byte-identical results. Incremental input and tile-local synthesis planes remain
+substantial, so the G4 estimate is deliberately left where it is until a
+maintainer re-weighs it. Note that a single-tile stream is one band, so the
+benefit there is the unbuffered output file rather than an unbuffered raster;
+bounding a large tile needs line-based T1 as well as banded synthesis, because
+the `i32` coefficient plane dominates the `u16` output raster.
 
 G0 evidence expansion and G1/G2/G4 implementation are active. The 2026-07-17
 G0 foundation includes an unscored broad capability
 matrix plus a provenance/checksum/oracle manifest and strict corpus runner.
-Twenty-eight committed foreign-encoded streams cover sampled origins/POC and sampled
+Thirty-seven committed foreign-encoded streams cover sampled origins/POC and sampled
 multi-tile no-MCT 9/7 reduction,
 signed 8-bit single-/multi-tile, signed 20-bit, mixed signed 5/12/19-bit plus
 8/16/20-bit, and independently sampled signed 7/13/23-bit

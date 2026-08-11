@@ -39,6 +39,9 @@ Neither figure is a formal ISO conformance certification.
   progression orders, PLT/TLM, and strict no-sidecar decode. Raw and JP2
   readers accept all six legal TLM `ST=0/1/2` x `SP=0/1` entry widths and
   reconcile every listed tile index/length with the actual SOT sequence.
+  The sampled encoder also emits common-grid multi-tile streams, which the
+  single-tile planar entry point cannot; Kakadu reconstructs the one-component
+  case exactly.
 - Lossy JP2 encoding with irreversible 9/7 DWT, ICT or bounded single-tile
   no-MCT component coding, scalar-derived or scalar-expounded quantization,
   and rate allocation. Single-tile no-MCT or transform-appropriate RCT/ICT
@@ -78,8 +81,11 @@ Neither figure is a formal ISO conformance certification.
   `COD/QCD`, then reversible tile 1 component 1 `COC/QCC`; all six
   full/reduced PGX planes pass and a mismatched QCC fails closed. PLT-less
   multipart PPM without POC now derives per-part packet counts from checked
-  `Nppm` and `Psot` boundaries. Bounded sampled PPM+POC is supported with one
-  part per tile; general multipart POC and packed-header/TLM combinations
+  `Nppm` and `Psot` boundaries. On common-grid components, general multipart
+  POC decodes across arbitrary tile-part divisions: a POC composes one packet
+  sequence per tile and tile-parts only cut it into consecutive runs, so the
+  cuts need not align with a progression grouping, and POC is accepted in any
+  tile-part header. Subsampled components with multiple tile-parts under a POC
   remain fail-closed.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
@@ -94,6 +100,14 @@ Neither figure is a formal ISO conformance certification.
   future work. `CAP`/`PRF` and nonzero `Rsiz` declarations are structurally
   validated, ordered, and kept fail-closed until their declared extension or
   profile is implemented end to end.
+- Marker evidence from independent writers, not only from repacks by this
+  project's own tests: `kdu_maketlm` chooses `ST=1`/`SP=0` TLM entry widths
+  itself, and `kdu_makeppm` writes multi-tile PPM framing with and without a
+  Kakadu-written main-header POC schedule. All decode plane-identically to their
+  inline sources. A reproduced `kdu_makeppm` defect is pinned fail-closed: given
+  a source carrying PLT it strips those segments without shrinking each
+  tile-part's `Psot`, which strict `Psot` reconciliation rejects. Independently
+  emitted `PLM` remains outstanding because Kakadu ships no PLM writer.
 - Bounded grayscale and palette JP2 profiles, plus bounded 1..4-component
   planar layouts, alpha-aware JP2 `cdef` signalling, and reversible RGBA RCT
   over the RGB triplet only, with strict malformed-input handling and
@@ -197,7 +211,7 @@ Neither figure is a formal ISO conformance certification.
 
 Not yet complete: arbitrary JP2/JPX profiles, component layouts beyond the
 bounded 1..4 envelope (including mixed-precision sampled multi-tile/MCT),
-broader packed-header/POC tile-part combinations, broad color management, CFA/general RAW
+POC emission for general tile-part divisions, PLM emission, broad color management, CFA/general RAW
 and HDR/general OpenEXR input, broader BMP/PNG/JPEG/DNG/EXR profiles, and metadata handling
 beyond the staged ICC and JPEG UUID-carrier paths. See the [ISO coverage scorecard](docs/iso_coverage.md) for the exact
 supported envelope.

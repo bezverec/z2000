@@ -400,7 +400,7 @@ same effective table now proves all three override levels in one directly
 emitted four-tile stream: main reversible `COD/QCD`, tile 1 irreversible
 `COD/QCD`, and tile 1 component 1 reversible `COC/QCC`. PLT-less multipart PPM
 without POC is supported. PPM+POC is additionally supported for the bounded
-sampled one-part-per-tile profile; general multipart POC and packed-header/TLM
+sampled one-part-per-tile profile; subsampled multipart POC and packed-header/TLM
 combinations remain fail-closed.
 
 Inline PLT-less multipart streams carry no packet count at the Stage B frame

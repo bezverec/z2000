@@ -21,6 +21,8 @@ entries are grouped by development milestone rather than semantic version.
 - POC is also accepted in any tile-part header rather than only the first, which
   Part 1 permits. Records from later parts append to the tile's schedule, and
   the coverage model then cuts it by tile-part.
+- This covers common-grid components; subsampled components with multiple
+  tile-parts under a POC still fail closed.
 - Three independently produced Kakadu streams that previously failed closed now
   decode: 36 resolution tile-parts under a main-header POC, 28 layer tile-parts
   under one, and a tile whose second tile-part header carries its own POC. All
