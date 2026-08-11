@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Subsampled Multipart POC Decode
+
+- The previous slice opened general multipart POC for common-grid components
+  only; subsampled components with multiple tile-parts under a POC still failed
+  closed behind their own guard. That guard is removed, and the same
+  consecutive-slice model covers them without further change — the sampled
+  packet scheduler already composed the sequence correctly.
+- Two committed Kakadu raw codestreams pin it: 4:2:0 components under a
+  two-record main-header POC, once with one tile-part per tile and once split
+  into 36 resolution tile-parts. Both reconstruct the three committed source
+  PGM planes sample for sample at 1 and 8 threads, so the oracle is the encoder
+  input rather than another decoder's opinion. Kakadu 8.4.1 reconstructs the
+  same planes; OpenJPEG 2.5.4 and Grok 20.3.6 produce output identical to their
+  own decode of the one-part variant.
+- Recorded reference-tool behaviour: Grok 20.3.6 refuses any **JP2-wrapped**
+  subsampled stream whose `colr` box declares sRGB, including the
+  already-committed 4:2:0 fixtures, on the grounds that sRGB mandates uniform
+  sampling. These fixtures are therefore committed as raw codestreams so all
+  three references can read them.
+- The same empirical-evidence caveat applies as for the common-grid case: the
+  semantics were derived from those decoders, not from ISO/IEC 15444-1 A.6.6.
+
 ### General Multipart POC Decode
 
 - A POC composes one packet sequence per tile, and tile-parts only cut that

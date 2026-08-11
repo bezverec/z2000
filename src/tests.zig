@@ -26063,6 +26063,59 @@ test "natively emitted Kakadu PPM decodes like its inline source" {
     }
 }
 
+test "subsampled multipart POC decodes to its exact source planes" {
+    const allocator = std.testing.allocator;
+    // 4:2:0 components under a two-record main-header POC, split into 36
+    // resolution tile-parts. This layout used to fail closed: the general POC
+    // model was opened for common-grid components only. The source planes are
+    // committed, so the oracle is exact rather than comparative — Kakadu 8.4.1
+    // reconstructs the same three planes from this stream, and OpenJPEG 2.5.4
+    // and Grok 20.3.6 produce output identical to their own decode of the
+    // one-part variant. Grok rejects the JP2-wrapped form outright, because it
+    // requires uniform sampling under an sRGB `colr` box, so these fixtures are
+    // committed as raw codestreams.
+    const multipart = @embedFile("testdata/kakadu-sampled-poc-resolution-tileparts.j2c");
+    const one_part = @embedFile("testdata/kakadu-sampled-poc-one-part.j2c");
+    const sources = [_][]const u8{
+        @embedFile("testdata/kakadu-sampled-97-source-c0.pgm"),
+        @embedFile("testdata/kakadu-sampled-97-source-c1.pgm"),
+        @embedFile("testdata/kakadu-sampled-97-source-c2.pgm"),
+    };
+
+    try std.testing.expect(findMarker(multipart, codestream.markerValue("poc")) != null);
+    try std.testing.expect(findMarker(one_part, codestream.markerValue("poc")) != null);
+    try std.testing.expect(countMarker(multipart, codestream.markerValue("sot")) == 36);
+    try std.testing.expect(countMarker(one_part, codestream.markerValue("sot")) == 4);
+
+    for ([_][]const u8{ multipart, one_part }) |stream| {
+        for ([_]u8{ 1, 8 }) |threads| {
+            var planes = try codestream.decodeLosslessPlanarWithOptions(
+                allocator,
+                stream,
+                .{ .threads = threads },
+            );
+            defer planes.deinit();
+            try std.testing.expectEqual(@as(usize, 3), planes.planes.len);
+            for (sources, 0..) |source, component| {
+                // Skip the four whitespace-separated PGM header tokens.
+                var cursor: usize = 0;
+                var token: usize = 0;
+                while (token < 4) : (token += 1) {
+                    while (std.ascii.isWhitespace(source[cursor])) cursor += 1;
+                    while (!std.ascii.isWhitespace(source[cursor])) cursor += 1;
+                }
+                cursor += 1;
+                const expected = source[cursor..];
+                const actual = planes.planes[component];
+                try std.testing.expectEqual(expected.len, actual.len);
+                for (expected, actual) |expected_sample, actual_sample| {
+                    try std.testing.expectEqual(@as(u16, expected_sample), actual_sample);
+                }
+            }
+        }
+    }
+}
+
 test "general multipart POC decodes across arbitrary tile-part divisions" {
     const allocator = std.testing.allocator;
     // A POC composes one packet sequence per tile; tile-parts only cut it into

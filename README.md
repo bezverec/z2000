@@ -85,8 +85,9 @@ Neither figure is a formal ISO conformance certification.
   POC decodes across arbitrary tile-part divisions: a POC composes one packet
   sequence per tile and tile-parts only cut it into consecutive runs, so the
   cuts need not align with a progression grouping, and POC is accepted in any
-  tile-part header. Subsampled components with multiple tile-parts under a POC
-  remain fail-closed.
+  tile-part header. Subsampled components are covered too: 4:2:0 streams split
+  into 36 resolution tile-parts under a POC reconstruct their source planes
+  exactly.
 - Reference-grid-aware single- and multi-tile encode/decode, including odd
   tile origins and global cross-tile rate targets.
 - Direct lower-resolution reconstruction for bounded 5/3 and 9/7 profiles,

@@ -1986,6 +1986,54 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-sampled-poc-one-part",
+      "path": "src/testdata/kakadu-sampled-poc-one-part.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "sha256": "2d9fbb985320b6b1203ad2a84e01dc5028ac0e971f491b0995a96d31ccffd7c0",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "4:2:0 components under a two-record main-header POC with one tile-part per tile; the one-part reference for the multipart variant",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c1.pgm,src/testdata/kakadu-sampled-97-source-c2.pgm -o src/testdata/kakadu-sampled-poc-one-part.j2c Creversible=yes Clevels=2 Clayers=3 Corder=RPCL Cblk={4,4} Stiles={16,16} Ssampling={1,1},{2,2},{2,2} Porder={0,0,1,3,3,RPCL},{0,0,3,3,3,LRCP} -quiet"
+      },
+      "oracle": "src/tests.zig compares all three decoded planes with the committed source PGMs sample for sample",
+      "features": [
+        "siz-subsampled-components",
+        "progression-poc",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "8804e738001e438801c5071b8ee75f656e317a7a04063244d0284c4c03e2187c"
+    },
+    {
+      "id": "kakadu-sampled-poc-resolution-tileparts",
+      "path": "src/testdata/kakadu-sampled-poc-resolution-tileparts.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "sha256": "d50488f25913eb7e568e50a12eda18f2030cc99f6383d8238edc1afc7b7c533f",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "the same 4:2:0 POC layout split into 36 resolution tile-parts; subsampled components with multiple tile-parts under a POC previously failed closed",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-sampled-97-source-c0.pgm,src/testdata/kakadu-sampled-97-source-c1.pgm,src/testdata/kakadu-sampled-97-source-c2.pgm -o src/testdata/kakadu-sampled-poc-resolution-tileparts.j2c Creversible=yes Clevels=2 Clayers=3 Corder=RPCL Cblk={4,4} Stiles={16,16} Ssampling={1,1},{2,2},{2,2} Porder={0,0,1,3,3,RPCL},{0,0,3,3,3,LRCP} -quiet ORGtparts=R"
+      },
+      "oracle": "src/tests.zig compares all three decoded planes with the committed source PGMs; Kakadu 8.4.1 reconstructs the same planes, and OpenJPEG 2.5.4 and Grok 20.3.6 match their own one-part decode",
+      "features": [
+        "siz-subsampled-components",
+        "progression-poc",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "8804e738001e438801c5071b8ee75f656e317a7a04063244d0284c4c03e2187c"
     }
   ]
 }

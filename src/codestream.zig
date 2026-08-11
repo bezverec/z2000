@@ -6749,9 +6749,6 @@ fn readStrictCodestreamMetadataForProfile(
             }
         }
         if (poc_records.items.len != 0 or has_tile_poc) {
-            if (subsampled_components and has_multiple_tile_parts) {
-                return CodestreamError.UnsupportedPayload;
-            }
             if (has_multiple_tile_parts) {
                 switch (parsed_progression) {
                     .rpcl, .lrcp, .pcrl, .cprl => {},

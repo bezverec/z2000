@@ -570,7 +570,7 @@ COC/QCC source preserves its foreign T1 bodies and matches all six full/
 reduction-1 PGX references at one and eight threads; malformed PPM framing
 fails closed. Kakadu did not emit the PPM framing, so this is not claimed as an
 independent packed-header stream. The following bounded sampled PPM+POC slice
-now covers one part per tile; subsampled multipart POC and packed-header/TLM combinations
+now covers one part per tile; packed-header/TLM combinations
 remain outside this slice.
 
 The first complete G3 marker-to-raster slice is now landed. Main-header `RGN`
@@ -671,8 +671,8 @@ Implement in small marker-to-raster slices:
    tile-part header. Three independently produced Kakadu streams — 36
    resolution tile-parts, 28 layer tile-parts, and a POC in a `TPsot=1` header —
    reconstruct the schedule-free fixture's raster byte for byte, corroborated by
-   Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6. Subsampled components with
-   multiple tile-parts under a POC still fail closed. The semantics were derived
+   Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6. Subsampled components are
+   covered by the same model, pinned against their committed source planes. The semantics were derived
    empirically from those decoders, not from ISO/IEC 15444-1 A.6.6; confirming
    them against the standard text remains open, as does POC emission for these
    divisions. A reproduced
