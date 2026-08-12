@@ -8611,13 +8611,29 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
         const UnsupportedTilePartMarkerCase = struct {
             label: []const u8,
             replacement: u16,
+            expected: anyerror,
         };
         const unsupported_tile_part_marker_cases = [_]UnsupportedTilePartMarkerCase{
-            // Re-labelling PLT bytes as PPT removes the required packet-body
-            // lengths and must remain an unsupported malformed profile.
-            .{ .label = "PPT without PLT", .replacement = codestream.markerValue("ppt") },
-            .{ .label = "COC tile-part marker", .replacement = codestream.markerValue("coc") },
-            .{ .label = "QCC tile-part marker", .replacement = codestream.markerValue("qcc") },
+            // A PLT-less PPT tile-part is a supported profile now, so
+            // re-labelling PLT bytes as PPT no longer reads as an unimplemented
+            // profile. It is still rejected: the remaining PLT accounting no
+            // longer frames the packets it claims to, which is a malformed
+            // codestream rather than an unsupported one.
+            .{
+                .label = "PLT bytes relabelled as PPT",
+                .replacement = codestream.markerValue("ppt"),
+                .expected = jp2.Jp2Error.InvalidCodestream,
+            },
+            .{
+                .label = "COC tile-part marker",
+                .replacement = codestream.markerValue("coc"),
+                .expected = jp2.Jp2Error.UnsupportedProfile,
+            },
+            .{
+                .label = "QCC tile-part marker",
+                .replacement = codestream.markerValue("qcc"),
+                .expected = jp2.Jp2Error.UnsupportedProfile,
+            },
         };
         for (unsupported_tile_part_marker_cases) |scenario| {
             errdefer std.debug.print("JP2 tile-part unsupported marker case failed: {s}\n", .{scenario.label});
@@ -8627,14 +8643,14 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
             defer allocator.free(bad_codestream);
             writeU16BeTest(bad_codestream, plt_offset, scenario.replacement);
             try std.testing.expectError(
-                jp2.Jp2Error.UnsupportedProfile,
+                scenario.expected,
                 jp2.wrapRgbCodestream(allocator, rgb, bad_codestream),
             );
 
             const bad_wrapped = try allocator.dupe(u8, wrapped);
             defer allocator.free(bad_wrapped);
             writeU16BeTest(bad_wrapped, jp2c_payload.start + plt_offset, scenario.replacement);
-            try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(bad_wrapped));
+            try std.testing.expectError(scenario.expected, jp2.parseInfo(bad_wrapped));
         }
     }
 
@@ -26019,6 +26035,59 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
         codestream.CodestreamError.TruncatedData,
         codestream.decodeLosslessTemporary(allocator, bytes[0 .. bytes.len - 8]),
     );
+}
+
+test "natively emitted PLT-less PPT and packed-header plus TLM decode" {
+    const allocator = std.testing.allocator;
+    // Two gaps closed at once. `kdu_makeppm -ppt` writes per-tile-part PPT
+    // segments and strips PLT, which the JP2 audit used to reject outright even
+    // though the strict reader already walks PLT-less packed headers. And
+    // running `kdu_maketlm` over a packed stream produces the packed-header
+    // plus TLM combination that the docs had listed as fail-closed.
+    const inline_stream = @embedFile("testdata/kakadu-sop-eph-multitile-inline.jp2");
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(inline_stream),
+        .{},
+    );
+    defer reference.deinit();
+
+    const Case = struct {
+        stream: []const u8,
+        ppt: bool,
+        tlm: bool,
+    };
+    const cases = [_]Case{
+        .{ .stream = @embedFile("testdata/kakadu-native-ppt-pltless.jp2"), .ppt = true, .tlm = false },
+        .{ .stream = @embedFile("testdata/kakadu-native-ppm-tlm.jp2"), .ppt = false, .tlm = true },
+        .{ .stream = @embedFile("testdata/kakadu-native-ppt-tlm.jp2"), .ppt = true, .tlm = true },
+    };
+    for (cases) |case| {
+        const codestream_bytes = try jp2.extractCodestream(case.stream);
+        // No PLT anywhere: the packet spans are only recoverable by walking the
+        // packed headers.
+        try std.testing.expect(findMarker(codestream_bytes, codestream.markerValue("plt")) == null);
+        if (case.ppt) {
+            try std.testing.expect(findMarker(codestream_bytes, codestream.markerValue("ppt")) != null);
+            try std.testing.expect(findMarker(codestream_bytes, codestream.markerValue("ppm")) == null);
+        } else {
+            try std.testing.expect(findMarker(codestream_bytes, codestream.markerValue("ppm")) != null);
+        }
+        try std.testing.expectEqual(
+            case.tlm,
+            findMarker(codestream_bytes, codestream.markerValue("tlm")) != null,
+        );
+
+        for ([_]u8{ 1, 8 }) |threads| {
+            var decoded = try codestream.decodeLosslessTemporaryWithOptions(
+                allocator,
+                codestream_bytes,
+                .{ .threads = threads },
+            );
+            defer decoded.deinit();
+            try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+        }
+    }
 }
 
 test "natively emitted Kakadu PPM decodes like its inline source" {

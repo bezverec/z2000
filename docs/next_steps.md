@@ -570,7 +570,7 @@ COC/QCC source preserves its foreign T1 bodies and matches all six full/
 reduction-1 PGX references at one and eight threads; malformed PPM framing
 fails closed. Kakadu did not emit the PPM framing, so this is not claimed as an
 independent packed-header stream. The following bounded sampled PPM+POC slice
-now covers one part per tile; packed-header/TLM combinations
+now covers one part per tile; remaining packed-header/TLM combinations
 remain outside this slice.
 
 The first complete G3 marker-to-raster slice is now landed. Main-header `RGN`

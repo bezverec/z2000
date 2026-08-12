@@ -2034,6 +2034,78 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "8804e738001e438801c5071b8ee75f656e317a7a04063244d0284c4c03e2187c"
+    },
+    {
+      "id": "kakadu-native-ppt-pltless",
+      "path": "src/testdata/kakadu-native-ppt-pltless.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "18043fde1095eccea91f51dab92b7db4c152ea95d38deeeb57a028358132283c",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "kdu_makeppm -ppt moved each tile-part's packet headers into its own PPT segments and stripped PLT; a PLT-less PPT tile-part previously failed closed in the JP2 audit",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_makeppm src/testdata/kakadu-sop-eph-multitile-inline.jp2 src/testdata/kakadu-native-ppt-pltless.jp2 -ppt"
+      },
+      "oracle": "src/tests.zig pins the absent PLT, the packed-header and TLM marker mix, and byte-equality with the inline source at 1 and 8 threads",
+      "features": [
+        "packet-header-placement",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-native-ppm-tlm",
+      "path": "src/testdata/kakadu-native-ppm-tlm.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "5517c6e3ed4d0f3705933a1fa0d533ca2ee1d4cd12ab50436915463b43201722",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "kdu_maketlm added a TLM to the natively packed PPM stream, giving a packed-header plus TLM combination with no PLT",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_maketlm src/testdata/kakadu-native-ppm-multitile.jp2 src/testdata/kakadu-native-ppm-tlm.jp2"
+      },
+      "oracle": "src/tests.zig pins the absent PLT, the packed-header and TLM marker mix, and byte-equality with the inline source at 1 and 8 threads",
+      "features": [
+        "packet-header-placement",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-native-ppt-tlm",
+      "path": "src/testdata/kakadu-native-ppt-tlm.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "66eeca85607ea50e080e60dab0b8c6f46721a957742068f40c5b93423594a264",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "the same combination over PPT rather than PPM: per-tile-part packed headers, a TLM, and no PLT",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_maketlm src/testdata/kakadu-native-ppt-pltless.jp2 src/testdata/kakadu-native-ppt-tlm.jp2"
+      },
+      "oracle": "src/tests.zig pins the absent PLT, the packed-header and TLM marker mix, and byte-equality with the inline source at 1 and 8 threads",
+      "features": [
+        "packet-header-placement",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }

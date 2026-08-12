@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### PLT-Less PPT And Packed-Header Plus TLM
+
+- `kdu_makeppm -ppt` writes per-tile-part PPT segments and strips PLT. The JP2
+  audit rejected that outright as an unsupported profile, even though the strict
+  reader already walks PLT-less packed headers — the same situation the audit
+  explicitly allows for PLT-less inline and PPM parts. That one rule is removed;
+  the raw-codestream path needed no change at all, which is how the gap was
+  identified.
+- Running `kdu_maketlm` over a packed stream produces the packed-header plus TLM
+  combination that the docs had listed as fail-closed. It already decoded for
+  PPM and now decodes for PPT as well.
+- Three fixtures are committed with their commands: PLT-less PPT, PPM+TLM, and
+  PPT+TLM, none carrying PLT. Each reconstructs the inline source's raster byte
+  for byte at 1 and 8 threads, and the tests pin the absent PLT together with
+  the expected packed-header and TLM marker mix.
+- One existing malformed case changes error class rather than outcome.
+  Re-labelling PLT bytes as PPT is still rejected, but now as
+  `InvalidCodestream` — the remaining PLT accounting no longer frames the
+  packets it claims to — instead of `UnsupportedProfile`, because a PLT-less PPT
+  tile-part is a supported profile. The test records that distinction.
+
 ### Subsampled Multipart POC Decode
 
 - The previous slice opened general multipart POC for common-grid components

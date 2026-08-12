@@ -1923,13 +1923,13 @@ fn validateFirstTilePartHeader(
                     } else {
                         try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
                     }
-                } else if (part_has_ppt) {
-                    return Jp2Error.UnsupportedProfile;
                 }
                 // PLT-less tile-parts (default OpenJPEG/Grok/Kakadu output):
                 // packet spans are recoverable only by decoding the headers in
                 // stream order, which the strict decoder does (foreign
-                // Stage B); the wrapper skips per-packet frame validation.
+                // Stage B); the wrapper skips per-packet frame validation. That
+                // applies to a PLT-less PPT part too — its packet headers live
+                // in the PPT segments, so there is nothing here to frame.
                 return;
             },
             marker_plt, marker_com => {},
