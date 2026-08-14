@@ -349,7 +349,13 @@ The active G0/G4 corpus expansion is:
    general multipart packed-header/POC combinations remain.
 4. Record OpenJPEG, Grok, and Kakadu disagreement instead of selecting a
    convenient oracle. Part 4 expected results and exact samples take priority
-   when available.
+   when available. One disagreement is open as a policy question: Grok
+   `-u R --plt` puts one PLT in each tile's first tile-part covering the whole
+   tile, while Kakadu and OpenJPEG write one per tile-part. z2000 reconciles PLT
+   against each tile-part's SOD body and fails closed; the three references
+   decode it because PLT is an optional index. Decide whether to keep rejecting
+   or to fall back to the header walk when PLT cannot frame a part — the latter
+   would also drop the PLT-flip corruption detection those tests pin.
 5. Map the remaining public profiles to manifested decode and malformed cases,
    then run optional assets with `--require-optional` in release evidence.
 

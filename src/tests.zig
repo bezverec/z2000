@@ -26037,6 +26037,36 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
     );
 }
 
+test "Grok tile-level PLT disagrees with per-tile-part accounting" {
+    const allocator = std.testing.allocator;
+    // Producer disagreement, pinned rather than papered over. Grok 20.3.6 with
+    // `-u R --plt` writes one PLT in each tile's *first* tile-part listing the
+    // packet lengths of the whole tile; its later parts carry no PLT at all.
+    // OpenJPEG 2.5.4 and Kakadu 8.4.1 write one PLT per tile-part covering only
+    // that part. z2000 reconciles PLT against each tile-part's SOD body, so the
+    // Grok layout fails closed in both the JP2 audit and the strict reader.
+    //
+    // The packet data itself is fine: the same Grok encode without `--plt`
+    // decodes and matches, and Kakadu, OpenJPEG, and Grok all decode the
+    // PLT-carrying stream to that same raster — they treat PLT as the optional
+    // index it is. Whether to keep rejecting or to fall back to the header walk
+    // when PLT cannot frame a part is an open policy question.
+    const with_plt = @embedFile("testdata/grok-tile-level-plt.jp2");
+    const without_plt = @embedFile("testdata/grok-resolution-tileparts-pltless.jp2");
+
+    const plt_codestream = try jp2.extractCodestream(without_plt);
+    try std.testing.expect(findMarker(plt_codestream, codestream.markerValue("plt")) == null);
+    try std.testing.expect(countMarker(plt_codestream, codestream.markerValue("sot")) == 12);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, plt_codestream, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 32), decoded.width);
+    try std.testing.expectEqual(@as(usize, 32), decoded.height);
+
+    // The PLT-carrying twin is rejected before a codestream is handed out.
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.extractCodestream(with_plt));
+}
+
 test "natively emitted PLT-less PPT and packed-header plus TLM decode" {
     const allocator = std.testing.allocator;
     // Two gaps closed at once. `kdu_makeppm -ppt` writes per-tile-part PPT

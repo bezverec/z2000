@@ -2106,6 +2106,54 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "grok-resolution-tileparts-pltless",
+      "path": "src/testdata/grok-resolution-tileparts-pltless.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "bb21dd130fad6728969bf9a941cf3759ed3964b0ee43965ef8ad6926bc63d55e",
+      "source": {
+        "producer": "Grok",
+        "version": "20.3.6",
+        "origin": "producer-diversity fixture: twelve resolution tile-parts across four tiles with no PLT, from a non-Kakadu encoder",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Grok application not redistributed",
+        "command": "grk_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/grok-resolution-tileparts-pltless.jp2 -n 3 -t 16,16 -b 32,32 -p RPCL -r 1 -u R"
+      },
+      "oracle": "src/tests.zig decodes it and pins its shape; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree on the raster",
+      "features": [
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "grok-tile-level-plt",
+      "path": "src/testdata/grok-tile-level-plt.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "3ad28111c967335326834d7d52d4830d727305f6baa2c023f5b5c5c721d1055b",
+      "source": {
+        "producer": "Grok",
+        "version": "20.3.6",
+        "origin": "the same encode with --plt: Grok writes one PLT in each tile's first tile-part listing the whole tile's packet lengths, and none in the later parts, where Kakadu and OpenJPEG write one PLT per tile-part covering only that part",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Grok application not redistributed",
+        "command": "grk_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/grok-tile-level-plt.jp2 -n 3 -t 16,16 -b 32,32 -p RPCL -r 1 -u R --plt"
+      },
+      "oracle": "pinned producer disagreement: z2000 reconciles PLT against each tile-part SOD body and fails closed, while all three reference decoders treat PLT as an optional index and decode the stream; the PLT-less twin proves the packet data is sound",
+      "features": [
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream"
     }
   ]
 }

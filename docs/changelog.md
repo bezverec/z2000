@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Producer-Diversity Sweep And A Pinned Grok PLT Disagreement
+
+- The foreign corpus is almost entirely Kakadu, so this sweep encoded the same
+  raster with OpenJPEG 2.5.4 and Grok 20.3.6 across tile-part divisions
+  (`R`/`L`/`C`), PLT, TLM, POC, and SOP/EPH. Every OpenJPEG variant and every
+  Grok variant except one decodes and matches. Two of those are committed as the
+  corpus's first non-Kakadu, non-CMYK decode entries.
+- The exception is a genuine producer disagreement, now pinned. Grok with
+  `-u R --plt` writes **one PLT in each tile's first tile-part listing the whole
+  tile's packet lengths**, and none in the later parts; OpenJPEG and Kakadu
+  write one PLT per tile-part covering only that part. z2000 reconciles PLT
+  against each tile-part's SOD body, so the Grok layout fails closed — in the
+  JP2 audit and in the strict reader, which uses PLT for per-part packet spans.
+- The packet data is sound: the same Grok encode without `--plt` decodes and
+  matches, and all three reference decoders decode the PLT-carrying stream to
+  that raster, treating PLT as the optional index it is. Both twins are
+  committed so the discrepancy is reproducible either way.
+- Neither OpenJPEG nor Grok can emit `PLM` — both offer only PLT and TLM — so
+  the independently emitted PLM debt is blocked by tooling rather than by this
+  project.
+
 ### PLT-Less PPT And Packed-Header Plus TLM
 
 - `kdu_makeppm -ppt` writes per-tile-part PPT segments and strips PLT. The JP2
