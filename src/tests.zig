@@ -26037,34 +26037,61 @@ test "multi-tile decode SOT walk validates the v1 tile-part discipline" {
     );
 }
 
-test "Grok tile-level PLT disagrees with per-tile-part accounting" {
+test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     const allocator = std.testing.allocator;
-    // Producer disagreement, pinned rather than papered over. Grok 20.3.6 with
-    // `-u R --plt` writes one PLT in each tile's *first* tile-part listing the
-    // packet lengths of the whole tile; its later parts carry no PLT at all.
-    // OpenJPEG 2.5.4 and Kakadu 8.4.1 write one PLT per tile-part covering only
-    // that part. z2000 reconciles PLT against each tile-part's SOD body, so the
-    // Grok layout fails closed in both the JP2 audit and the strict reader.
-    //
-    // The packet data itself is fine: the same Grok encode without `--plt`
-    // decodes and matches, and Kakadu, OpenJPEG, and Grok all decode the
-    // PLT-carrying stream to that same raster — they treat PLT as the optional
-    // index it is. Whether to keep rejecting or to fall back to the header walk
-    // when PLT cannot frame a part is an open policy question.
+    // Producer disagreement, resolved by accepting both layouts rather than
+    // picking one. Grok 20.3.6 with `-u R --plt` writes one PLT in each tile's
+    // *first* tile-part listing the packet lengths of the whole tile; its later
+    // parts carry no PLT at all. OpenJPEG 2.5.4 and Kakadu 8.4.1 write one PLT
+    // per tile-part covering only that part. A PLT that reaches past its own
+    // SOD body is now split at the body boundary and the remainder carried to
+    // the tile's later parts, so per-tile-part packet accounting -- and the
+    // corruption detection resting on it -- survives either layout.
     const with_plt = @embedFile("testdata/grok-tile-level-plt.jp2");
     const without_plt = @embedFile("testdata/grok-resolution-tileparts-pltless.jp2");
 
-    const plt_codestream = try jp2.extractCodestream(without_plt);
-    try std.testing.expect(findMarker(plt_codestream, codestream.markerValue("plt")) == null);
-    try std.testing.expect(countMarker(plt_codestream, codestream.markerValue("sot")) == 12);
+    const carried = try jp2.extractCodestream(with_plt);
+    const pltless = try jp2.extractCodestream(without_plt);
+    // Four tiles of three parts each: one PLT per tile in the carrying stream,
+    // none at all in the twin encoded without `--plt`.
+    try std.testing.expectEqual(@as(usize, 12), countMarker(carried, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 12), countMarker(pltless, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 4), countMarker(carried, codestream.markerValue("plt")));
+    try std.testing.expect(findMarker(pltless, codestream.markerValue("plt")) == null);
 
-    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, plt_codestream, .{});
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, carried, .{});
     defer decoded.deinit();
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(allocator, pltless, .{});
+    defer reference.deinit();
     try std.testing.expectEqual(@as(usize, 32), decoded.width);
     try std.testing.expectEqual(@as(usize, 32), decoded.height);
+    try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+    // Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 decode the carrying stream
+    // to this same raster; the corpus pins its native hash.
 
-    // The PLT-carrying twin is rejected before a codestream is handed out.
-    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.extractCodestream(with_plt));
+    // The carried lengths still have to add up. Growing the tile's last packet
+    // length by one byte leaves the last part one byte short of its share, so
+    // both the container audit and the strict reader fail closed.
+    const corrupted = try allocator.dupe(u8, with_plt);
+    defer allocator.free(corrupted);
+    const codestream_base = @intFromPtr(carried.ptr) - @intFromPtr(with_plt);
+    const plt_offset = findMarker(carried, codestream.markerValue("plt")).?;
+    const plt_length = (@as(usize, carried[plt_offset + 2]) << 8) | carried[plt_offset + 3];
+    const last_byte = codestream_base + plt_offset + 2 + plt_length - 1;
+    // Stay inside the seven-bit payload so the continuation bit is untouched.
+    corrupted[last_byte] = if (corrupted[last_byte] < 0x7f)
+        corrupted[last_byte] + 1
+    else
+        corrupted[last_byte] - 1;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.extractCodestream(corrupted));
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            corrupted[codestream_base .. codestream_base + carried.len],
+            .{},
+        ),
+    );
 }
 
 test "natively emitted PLT-less PPT and packed-header plus TLM decode" {

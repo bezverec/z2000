@@ -2146,14 +2146,14 @@
         "redistribution": "committed codestream; Grok application not redistributed",
         "command": "grk_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/grok-tile-level-plt.jp2 -n 3 -t 16,16 -b 32,32 -p RPCL -r 1 -u R --plt"
       },
-      "oracle": "pinned producer disagreement: z2000 reconciles PLT against each tile-part SOD body and fails closed, while all three reference decoders treat PLT as an optional index and decode the stream; the PLT-less twin proves the packet data is sound",
+      "oracle": "src/tests.zig decodes it to the same raster as its PLT-less twin; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree on that raster",
       "features": [
         "tiles-and-tile-parts",
         "packet-header-placement",
         "reversible-53"
       ],
-      "expectation": "fail_closed",
-      "expected_error": "InvalidCodestream"
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }

@@ -181,8 +181,12 @@ supplied the alternate-width TLM; `kdu_makeppm` supplied a multi-tile PPM
 framing, with and without a Kakadu-written POC schedule; and general multipart
 POC now decodes across arbitrary tile-part divisions, verified byte for byte
 against Kakadu, OpenJPEG, and Grok. Independently emitted PLM remains open —
-Kakadu ships no PLM writer — as does confirming the empirically derived POC
-semantics against the standard's own text.
+none of Kakadu, OpenJPEG, or Grok ships a PLM writer — as does confirming the
+empirically derived POC semantics against the standard's own text. A
+producer-diversity sweep over OpenJPEG and Grok added the corpus's first
+non-Kakadu, non-CMYK decode entries and turned up one more narrow gate, now
+open: a tile-level PLT covering all of a tile's parts decodes alongside the
+per-tile-part PLT that Kakadu and OpenJPEG write.
 G4 advances again because absolute reference-region selection now changes both
 work scheduling and peak output allocation across multiple tiles, with exact
 RGB/sampled/native reduced-crop oracles and fail-closed skipped-tile

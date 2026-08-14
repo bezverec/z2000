@@ -7914,19 +7914,24 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
     var expected_ppt_index: u16 = 0;
+    // Tile-level PLT carry: see applyTileLevelPltCarry.
+    var plt_carry: std.ArrayList(usize) = .empty;
+    defer plt_carry.deinit(allocator);
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         if (marker == @intFromEnum(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            // A tile-level PLT that outlives its tile is an overrun.
+            if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
             try validateStrictTilePartSequenceFinished(tile_part_index, expected_tile_part_count);
             return out.toOwnedSlice(allocator);
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null, null, &plt_carry);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
 
@@ -8035,19 +8040,24 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
     var expected_ppt_index: u16 = 0;
+    // Tile-level PLT carry: see applyTileLevelPltCarry.
+    var plt_carry: std.ArrayList(usize) = .empty;
+    defer plt_carry.deinit(allocator);
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         if (marker == @intFromEnum(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            // A tile-level PLT that outlives its tile is an overrun.
+            if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
             try validateStrictTilePartSequenceFinished(tile_part_index, expected_tile_part_count);
             return;
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null, null, &plt_carry);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
             if (tile_part.packet_lengths.items.len > 0) {
@@ -9826,6 +9836,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
     stateful: *StrictStatefulPrecinctGroups,
     external_packet_lengths: ?[]const usize,
     external_packed_headers: ?[]const u8,
+    plt_carry: *std.ArrayList(usize),
 ) !StrictPacketCatalog {
     var entries: std.ArrayList(StrictPacketEntry) = .empty;
     errdefer entries.deinit(allocator);
@@ -9900,7 +9911,15 @@ fn readStrictMultiTileTilePartPacketCatalog(
         if (packed_headers.items.len != 0) return CodestreamError.InvalidCodestream;
         try packed_headers.appendSlice(allocator, headers);
     }
-    const has_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_packet_lengths);
+    const signalled_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_packet_lengths);
+    const has_packet_lengths = try applyTileLevelPltCarry(
+        allocator,
+        &packet_lengths,
+        signalled_packet_lengths,
+        plt_carry,
+        span.sod,
+        span.end,
+    );
     const has_packed_headers = has_external_packed_headers or packed_headers.items.len != 0;
     if (span.missing_plt) {
         if (has_packet_lengths) return CodestreamError.InvalidCodestream;
@@ -10097,6 +10116,9 @@ fn readStrictMultiTilePacketCatalogForTile(
     var expected_first_packet: usize = 0;
     var part_count: usize = 0;
     var expected_ppt_index: u16 = 0;
+    // Tile-level PLT carry across this tile's parts: see applyTileLevelPltCarry.
+    var plt_carry: std.ArrayList(usize) = .empty;
+    defer plt_carry.deinit(allocator);
     var stateful = try StrictStatefulPrecinctGroups.init(allocator, tile_header);
     defer stateful.deinit();
     for (spans) |span| {
@@ -10128,6 +10150,7 @@ fn readStrictMultiTilePacketCatalogForTile(
             &stateful,
             external_lengths,
             external_headers,
+            &plt_carry,
         );
         defer part.deinit();
 
@@ -10141,6 +10164,8 @@ fn readStrictMultiTilePacketCatalogForTile(
         expected_first_packet = try std.math.add(usize, expected_first_packet, part.entries.len);
         part_count += 1;
     }
+    // A tile-level PLT that outlives its tile is an overrun.
+    if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
 
     if (part_count == 0 or expected_first_packet != tile_plan.packets) {
         return CodestreamError.InvalidCodestream;
@@ -13582,12 +13607,17 @@ fn readStrictSodRpclPacketStream(
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
     var expected_ppt_index: u16 = 0;
+    // Tile-level PLT carry: see applyTileLevelPltCarry.
+    var plt_carry: std.ArrayList(usize) = .empty;
+    defer plt_carry.deinit(allocator);
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         if (marker == @intFromEnum(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            // A tile-level PLT that outlives its tile is an overrun.
+            if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
             if (expected_tile_part_count) |count| {
                 if (tile_part_index != count) return CodestreamError.InvalidCodestream;
             }
@@ -13618,7 +13648,7 @@ fn readStrictSodRpclPacketStream(
                 try strictPlmGroupAt(plm_packet_lengths, tile_part_index)
             else
                 null;
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries, &expected_ppt_index, external_lengths, external_headers, null, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, entries, &expected_ppt_index, external_lengths, external_headers, null, null, &plt_carry);
             defer tile_part.deinit(allocator);
             if (!tile_part.has_packet_lengths) return CodestreamError.UnsupportedPayload;
             if (tile_part.packed_headers.items.len != 0) return CodestreamError.UnsupportedPayload;
@@ -14077,6 +14107,7 @@ fn readStrictFirstTilePartPocRecords(
         null,
         limits,
         null,
+        null,
     );
     defer tile_part.deinit(allocator);
     const records = tile_part.poc_records;
@@ -14189,6 +14220,9 @@ pub fn collectStrictInlinePacketSpans(
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
     var expected_ppt_index: u16 = 0;
+    // Tile-level PLT carry: see applyTileLevelPltCarry.
+    var plt_carry: std.ArrayList(usize) = .empty;
+    defer plt_carry.deinit(allocator);
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
@@ -14196,6 +14230,8 @@ pub fn collectStrictInlinePacketSpans(
             eoc_offset = cursor;
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            // A tile-level PLT that outlives its tile is an overrun.
+            if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
             break;
         }
         if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
@@ -14213,6 +14249,7 @@ pub fn collectStrictInlinePacketSpans(
             null,
             poc_limits,
             null,
+                &plt_carry,
         );
         defer tile_part.deinit(allocator);
         cursor = tile_part.sod + 2;
@@ -14550,12 +14587,17 @@ fn readStrictSodPacketCatalog(
     var tile_part_index: usize = 0;
     var expected_tile_part_count: ?u8 = null;
     var expected_ppt_index: u16 = 0;
+    // Tile-level PLT carry: see applyTileLevelPltCarry.
+    var plt_carry: std.ArrayList(usize) = .empty;
+    defer plt_carry.deinit(allocator);
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         if (marker == @intFromEnum(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
+            // A tile-level PLT that outlives its tile is an overrun.
+            if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
             if (expected_tile_part_count) |count| {
                 if (tile_part_index != count) return CodestreamError.InvalidCodestream;
             }
@@ -14599,7 +14641,7 @@ fn readStrictSodPacketCatalog(
                 try strictPlmGroupAt(lengths, tile_part_index)
             else
                 null;
-            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index, external_lengths, external_headers, poc_limits, null);
+            var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index, external_lengths, external_headers, poc_limits, null, &plt_carry);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
             if (!tile_part.has_packet_lengths) {
@@ -14817,6 +14859,9 @@ fn readStrictTilePartPacketPlan(
     var result = StrictTilePartPacketPlan{};
     var expected_tile_part_count: ?u8 = null;
     var expected_ppt_index: u16 = 0;
+    // Tile-level PLT carry: see applyTileLevelPltCarry.
+    var plt_carry: std.ArrayList(usize) = .empty;
+    defer plt_carry.deinit(allocator);
     var scan = first_sot;
     while (scan < bytes.len) {
         if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
@@ -14824,6 +14869,8 @@ fn readStrictTilePartPacketPlan(
         if (marker == @intFromEnum(Marker.eoc)) {
             scan += 2;
             if (scan != bytes.len) return CodestreamError.InvalidCodestream;
+            // A tile-level PLT that outlives its tile is an overrun.
+            if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
             if (expected_tile_part_count) |count| {
                 if (result.count != @as(usize, count)) return CodestreamError.InvalidCodestream;
             }
@@ -14865,6 +14912,7 @@ fn readStrictTilePartPacketPlan(
                 external_headers,
                 poc_limits,
                 part_coding_target,
+                        &plt_carry,
             );
             defer tile_part.deinit(allocator);
             if (!tile_part.has_packet_lengths) {
@@ -14886,6 +14934,71 @@ fn strictPpmGroupAt(headers: ppm.PackedHeaders, index: usize) ![]const u8 {
 
 fn strictPlmGroupAt(lengths: plm.PacketLengths, index: usize) ![]const usize {
     return lengths.groupAt(index) orelse CodestreamError.InvalidCodestream;
+}
+
+/// Splits a tile-level PLT at a tile-part body boundary: returns the shortest
+/// prefix of `packet_lengths` whose entries sum to exactly `body_bytes`.
+fn strictTileLevelPltPrefix(packet_lengths: []const usize, body_bytes: usize) !usize {
+    // A zero-length entry on the boundary would let the split fall either side
+    // of it, so the split is not decidable and the stream is rejected.
+    if (body_bytes == 0) {
+        if (packet_lengths.len != 0 and packet_lengths[0] == 0) return CodestreamError.InvalidCodestream;
+        return 0;
+    }
+    var total: usize = 0;
+    for (packet_lengths, 0..) |length, index| {
+        total = try std.math.add(usize, total, length);
+        if (total > body_bytes) return CodestreamError.InvalidCodestream;
+        if (total == body_bytes) {
+            if (index + 1 < packet_lengths.len and packet_lengths[index + 1] == 0) {
+                return CodestreamError.InvalidCodestream;
+            }
+            return index + 1;
+        }
+    }
+    return CodestreamError.InvalidCodestream;
+}
+
+/// Grok writes one PLT in a tile's first tile-part describing every packet of
+/// the whole tile, while Kakadu and OpenJPEG write one PLT per tile-part
+/// describing only that part. Both are accepted: lengths a PLT describes beyond
+/// its own tile-part body are carried here and framed against the tile's later
+/// parts, which must then carry no PLT of their own, and the carry must be
+/// exhausted when the tile ends. Per-part accounting is preserved either way,
+/// so a PLT that disagrees with the bytes present is still rejected.
+///
+/// Returns whether this tile-part's packets are framed by signalled lengths.
+fn applyTileLevelPltCarry(
+    allocator: std.mem.Allocator,
+    packet_lengths: *std.ArrayList(usize),
+    signalled_lengths: bool,
+    plt_carry: ?*std.ArrayList(usize),
+    sod: usize,
+    tile_part_end: usize,
+) !bool {
+    const carry = plt_carry orelse return signalled_lengths;
+    const payload_start = try std.math.add(usize, sod, 2);
+    if (payload_start > tile_part_end) return CodestreamError.TruncatedData;
+    const body_bytes = tile_part_end - payload_start;
+    if (signalled_lengths) {
+        // A fresh PLT while an earlier one still describes later parts would
+        // leave the accounting ambiguous.
+        if (carry.items.len != 0) return CodestreamError.InvalidCodestream;
+        var total: usize = 0;
+        for (packet_lengths.items) |length| total = try std.math.add(usize, total, length);
+        if (total <= body_bytes) return true;
+        const prefix = try strictTileLevelPltPrefix(packet_lengths.items, body_bytes);
+        try carry.appendSlice(allocator, packet_lengths.items[prefix..]);
+        packet_lengths.shrinkRetainingCapacity(prefix);
+        return true;
+    }
+    if (carry.items.len == 0) return false;
+    const prefix = try strictTileLevelPltPrefix(carry.items, body_bytes);
+    try packet_lengths.appendSlice(allocator, carry.items[0..prefix]);
+    const remaining = carry.items.len - prefix;
+    std.mem.copyForwards(usize, carry.items[0..remaining], carry.items[prefix..]);
+    carry.shrinkRetainingCapacity(remaining);
+    return true;
 }
 
 fn applyExternalPacketLengths(
@@ -15027,6 +15140,13 @@ fn readStrictMultiTileTilePartSpans(
     const expected_ppt_indices = try allocator.alloc(u16, tile_count_usize);
     defer allocator.free(expected_ppt_indices);
     @memset(expected_ppt_indices, 0);
+    // Tile-level PLT carry, one list per tile: see applyTileLevelPltCarry.
+    const plt_carry = try allocator.alloc(std.ArrayList(usize), tile_count_usize);
+    defer {
+        for (plt_carry) |*carry| carry.deinit(allocator);
+        allocator.free(plt_carry);
+    }
+    @memset(plt_carry, .empty);
 
     var spans: std.ArrayList(StrictMultiTileTilePartSpan) = .empty;
     errdefer spans.deinit(allocator);
@@ -15040,6 +15160,7 @@ fn readStrictMultiTileTilePartSpans(
             scan += 2;
             if (scan != bytes.len) return CodestreamError.InvalidCodestream;
             for (completed_tiles, 0..) |completed, index| {
+                if (plt_carry[index].items.len != 0) return CodestreamError.InvalidCodestream;
                 if (completed) continue;
                 // A tile whose part count was never signalled (TNsot 0 in
                 // every part, ISO A.4.2) is complete once its parts consumed
@@ -15140,7 +15261,15 @@ fn readStrictMultiTileTilePartSpans(
         if (external_headers != null and packed_headers.items.len != 0) {
             return CodestreamError.InvalidCodestream;
         }
-        const has_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_lengths);
+        const signalled_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_lengths);
+        const has_packet_lengths = try applyTileLevelPltCarry(
+            allocator,
+            &packet_lengths,
+            signalled_packet_lengths,
+            &plt_carry[tile_index],
+            sod,
+            tile_part_end,
+        );
 
         const tile = grid.tile(sot.tile_index) catch return CodestreamError.InvalidCodestream;
         const coding_override = if (tile_coding_overrides) |overrides| overrides[tile_index] else StrictTileCodingOverride{};
@@ -15288,6 +15417,8 @@ fn readStrictMultiTileTilePartSpans(
         }
         next_parts[tile_index] = std.math.add(u8, next_parts[tile_index], 1) catch return CodestreamError.InvalidCodestream;
         if (expected_parts[tile_index] != 0 and next_parts[tile_index] == expected_parts[tile_index]) {
+            // A tile-level PLT that outlives its tile is an overrun.
+            if (plt_carry[tile_index].items.len != 0) return CodestreamError.InvalidCodestream;
             completed_tiles[tile_index] = true;
         }
         tile_part_index += 1;
@@ -15309,6 +15440,7 @@ fn readStrictTilePartHeader(
     external_packed_headers: ?[]const u8,
     poc_limits: ?TilePartPocLimits,
     coding_target: ?TilePartCodingTarget,
+    plt_carry: ?*std.ArrayList(usize),
 ) !StrictTilePartHeader {
     const sot = try readStrictSotInfo(bytes, marker_start);
     try validateStrictSotSequence(sot, tile_part_index, expected_tile_part_count);
@@ -15347,7 +15479,15 @@ fn readStrictTilePartHeader(
         if (packed_headers.items.len != 0 or headers.len == 0) return CodestreamError.InvalidCodestream;
         try packed_headers.appendSlice(allocator, headers);
     }
-    const has_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_packet_lengths);
+    const signalled_packet_lengths = try applyExternalPacketLengths(allocator, &packet_lengths, external_packet_lengths);
+    const has_packet_lengths = try applyTileLevelPltCarry(
+        allocator,
+        &packet_lengths,
+        signalled_packet_lengths,
+        plt_carry,
+        sod,
+        tile_part_end,
+    );
     const packet_payload_bytes = try validateStrictTilePartPacketSpan(
         sod,
         tile_part_end,

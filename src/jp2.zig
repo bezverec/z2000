@@ -1775,6 +1775,11 @@ fn validateMultiTileTilePartSequence(
     var completed_tiles = [_]bool{false} ** 256;
     var packet_sequences = [_]u16{0} ** 256;
     var ppt_states = [_]PptState{.{}} ** 256;
+    // Grok writes one PLT in a tile's first part covering the whole tile, while
+    // Kakadu and OpenJPEG write one per part covering only that part. Both are
+    // accepted: bytes a PLT describes beyond its own part are carried to the
+    // tile's later parts, which must then carry no PLT of their own.
+    var plt_carry = [_]usize{0} ** 256;
     var cursor = first_sot_offset;
     var sequence_index: u32 = 0;
     while (cursor < payload.len - 2) {
@@ -1822,10 +1827,13 @@ fn validateMultiTileTilePartSequence(
             &packet_sequences[state_index],
             &ppt_states[state_index],
             has_ppm,
+            &plt_carry[state_index],
         );
         cursor = tile_part_end;
         next_parts[state_index] = std.math.add(u8, next_parts[state_index], 1) catch return Jp2Error.InvalidCodestream;
         if (expected_parts[state_index] != 0 and next_parts[state_index] == expected_parts[state_index]) {
+            // A tile-level PLT must be exhausted by the time its tile ends.
+            if (plt_carry[state_index] != 0) return Jp2Error.InvalidCodestream;
             completed_tiles[state_index] = true;
         }
         sequence_index += 1;
@@ -1834,7 +1842,8 @@ fn validateMultiTileTilePartSequence(
     // Tiles whose count was never signalled (TNsot 0 everywhere) are
     // structurally complete with at least one part; the strict decoder's
     // packet accounting decides whether the data is actually whole.
-    for (completed_tiles[0..tile_count], next_parts[0..tile_count], expected_parts[0..tile_count]) |completed, next, expected| {
+    for (completed_tiles[0..tile_count], next_parts[0..tile_count], expected_parts[0..tile_count], plt_carry[0..tile_count]) |completed, next, expected, carry| {
+        if (carry != 0) return Jp2Error.InvalidCodestream;
         if (completed) continue;
         if (expected == 0 and next > 0) continue;
         return Jp2Error.InvalidCodestream;
@@ -1879,6 +1888,9 @@ fn validateSotSegment(
     }
     const tile_part_end = std.math.add(usize, marker_offset, tile_part_length) catch return Jp2Error.InvalidCodestream;
     if (tile_part_end > payload.len - 2) return Jp2Error.InvalidCodestream;
+    // Single-tile validation sees one tile-part at a time, so a PLT that
+    // reaches past it has nowhere to carry to and must fail here.
+    var plt_carry: usize = 0;
     try validateFirstTilePartHeader(
         payload,
         segment_end,
@@ -1888,7 +1900,9 @@ fn validateSotSegment(
         packet_sequence,
         ppt_state,
         has_ppm,
+        &plt_carry,
     );
+    if (plt_carry != 0) return Jp2Error.InvalidCodestream;
     return tile_part_end;
 }
 
@@ -1901,6 +1915,7 @@ fn validateFirstTilePartHeader(
     packet_sequence: *u16,
     ppt_state: *PptState,
     has_ppm: bool,
+    plt_carry: *usize,
 ) !void {
     var cursor = start;
     var plt_state = PltState{};
@@ -1912,17 +1927,28 @@ fn validateFirstTilePartHeader(
             marker_sod => {
                 const payload_start = std.math.add(usize, cursor, 2) catch return Jp2Error.InvalidCodestream;
                 if (payload_start > end) return Jp2Error.InvalidCodestream;
+                const body_bytes = end - payload_start;
                 if (plt_state.saw) {
-                    if (plt_state.packet_bytes != end - payload_start) {
-                        return Jp2Error.InvalidCodestream;
+                    // A second PLT while an earlier one still describes later
+                    // parts would leave the accounting ambiguous.
+                    if (plt_carry.* != 0) return Jp2Error.InvalidCodestream;
+                    if (plt_state.packet_bytes < body_bytes) return Jp2Error.InvalidCodestream;
+                    plt_carry.* = plt_state.packet_bytes - body_bytes;
+                    if (plt_carry.* == 0) {
+                        if (has_ppm) {
+                            if (part_has_ppt) return Jp2Error.UnsupportedProfile;
+                        } else if (part_has_ppt) {
+                            if (ppt_state.header_bytes == 0) return Jp2Error.UnsupportedProfile;
+                        } else {
+                            try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
+                        }
                     }
-                    if (has_ppm) {
-                        if (part_has_ppt) return Jp2Error.UnsupportedProfile;
-                    } else if (part_has_ppt) {
-                        if (ppt_state.header_bytes == 0) return Jp2Error.UnsupportedProfile;
-                    } else {
-                        try validateTilePartPacketFrames(payload, start, cursor, payload_start, end, cod, packet_sequence);
-                    }
+                    // When the PLT reaches beyond this part, its lengths cannot
+                    // frame these packets alone; the strict reader distributes
+                    // them across the tile's parts and validates each span.
+                } else if (plt_carry.* != 0) {
+                    if (plt_carry.* < body_bytes) return Jp2Error.InvalidCodestream;
+                    plt_carry.* -= body_bytes;
                 }
                 // PLT-less tile-parts (default OpenJPEG/Grok/Kakadu output):
                 // packet spans are recoverable only by decoding the headers in
