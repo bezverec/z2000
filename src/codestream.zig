@@ -14624,6 +14624,10 @@ fn readStrictSodPacketCatalog(
     // Tile-level PLT carry: see applyTileLevelPltCarry.
     var plt_carry: std.ArrayList(usize) = .empty;
     defer plt_carry.deinit(allocator);
+    // Tile-level PPT carry: a tile's PPT segments form one byte stream consumed
+    // by its packets across its tile-parts, see consumePackedHeaderCarry.
+    var packed_carry: std.ArrayList(u8) = .empty;
+    defer packed_carry.deinit(allocator);
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
@@ -14641,6 +14645,8 @@ fn readStrictSodPacketCatalog(
             if (main_header.plm_lengths) |lengths| {
                 if (tile_part_index != lengths.group_ends.len) return CodestreamError.InvalidCodestream;
             }
+            // A tile-level PPT that outlives its tile is an overrun.
+            if (packed_carry.items.len != 0) return CodestreamError.InvalidCodestream;
             if (entries.items.len != sequence.len or sequence_index != sequence.len) return CodestreamError.InvalidCodestream;
 
             const owned_entries = try entries.toOwnedSlice(allocator);
@@ -14678,11 +14684,26 @@ fn readStrictSodPacketCatalog(
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, tlm_entries, &expected_ppt_index, external_lengths, external_headers, poc_limits, null, &plt_carry);
             defer tile_part.deinit(allocator);
             cursor = tile_part.sod + 2;
+            // PPT data belongs to the tile, not to the part that carries it;
+            // PPM keeps its explicit per-tile-part `Nppm` group.
+            const carry_packed_headers = external_headers == null;
+            if (carry_packed_headers and tile_part.packed_headers.items.len != 0) {
+                try packed_carry.appendSlice(allocator, tile_part.packed_headers.items);
+                tile_part.packed_headers.clearRetainingCapacity();
+            }
+            const active_packed_headers = if (carry_packed_headers)
+                packed_carry.items
+            else
+                tile_part.packed_headers.items;
             if (!tile_part.has_packet_lengths) {
-                if (tile_part.packed_headers.items.len != 0) {
+                if (active_packed_headers.len != 0) {
                     if (stateful == null) stateful = try StrictStatefulPrecinctGroups.init(allocator, header);
                     var packed_header_cursor: usize = 0;
-                    while (packed_header_cursor < tile_part.packed_headers.items.len) {
+                    // Carried headers may describe more packets than this part
+                    // holds bodies for, so its own SOD body is the stop.
+                    while (packed_header_cursor < active_packed_headers.len and
+                        (!carry_packed_headers or cursor < tile_part.end))
+                    {
                         if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
                         const packet = sequence[sequence_index];
                         sequence_index += 1;
@@ -14695,7 +14716,7 @@ fn readStrictSodPacketCatalog(
                             &cursor,
                             tile_part.end,
                             null,
-                            tile_part.packed_headers.items,
+                            active_packed_headers,
                             &packed_header_cursor,
                             packet,
                             groups,
@@ -14716,6 +14737,7 @@ fn readStrictSodPacketCatalog(
                         });
                     }
                     if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
+                    if (carry_packed_headers) consumePackedHeaderCarry(&packed_carry, packed_header_cursor);
                 } else {
                     // Foreign-stream Stage B: no PLT, so each packet's span comes
                     // from decoding its header in stream order with persistent
@@ -14790,7 +14812,7 @@ fn readStrictSodPacketCatalog(
                     );
                 }
                 var packed_header_cursor: usize = 0;
-                if (tile_part.packed_headers.items.len != 0) {
+                if (active_packed_headers.len != 0) {
                     if (stateful == null) stateful = try StrictStatefulPrecinctGroups.init(allocator, header);
                 }
                 for (tile_part.packet_lengths.items) |packet_length| {
@@ -14800,7 +14822,7 @@ fn readStrictSodPacketCatalog(
                     const owned_byte_offset = packet_bytes.items.len;
                     var borrowed_span: ?StrictSodPacketPayloadSpan = null;
                     var packed_span: ?StrictPackedPacketPayloadSpan = null;
-                    const byte_length = if (tile_part.packed_headers.items.len != 0) blk: {
+                    const byte_length = if (active_packed_headers.len != 0) blk: {
                         const groups = try stateful.?.groupsFor(packet);
                         const payload_span = try appendStrictPackedPacketPayload(
                             allocator,
@@ -14810,7 +14832,7 @@ fn readStrictSodPacketCatalog(
                             &cursor,
                             tile_part.end,
                             packet_length,
-                            tile_part.packed_headers.items,
+                            active_packed_headers,
                             &packed_header_cursor,
                             packet,
                             groups,
@@ -14869,7 +14891,11 @@ fn readStrictSodPacketCatalog(
                             0,
                     });
                 }
-                if (packed_header_cursor != tile_part.packed_headers.items.len) return CodestreamError.InvalidCodestream;
+                if (carry_packed_headers) {
+                    consumePackedHeaderCarry(&packed_carry, packed_header_cursor);
+                } else if (packed_header_cursor != active_packed_headers.len) {
+                    return CodestreamError.InvalidCodestream;
+                }
                 if (cursor != tile_part.end) return CodestreamError.InvalidCodestream;
             }
             cursor = tile_part.end;
@@ -15630,12 +15656,17 @@ fn validateStrictSotSequence(
     if (sot.tile_index != 0) return CodestreamError.UnsupportedPayload;
     if (tile_part_index > std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
     if (sot.tile_part_index != @as(u8, @intCast(tile_part_index))) return CodestreamError.InvalidCodestream;
-    if (sot.tile_part_count == 0) return CodestreamError.UnsupportedPayload;
-    if (sot.tile_part_count <= sot.tile_part_index) return CodestreamError.InvalidCodestream;
-    if (expected_tile_part_count.*) |count| {
-        if (sot.tile_part_count != count) return CodestreamError.InvalidCodestream;
-    } else {
-        expected_tile_part_count.* = sot.tile_part_count;
+    // TNsot == 0 means "part count not signalled in this part" (ISO A.4.2);
+    // a later part may carry the real count. Once any part signals a nonzero
+    // count, every later nonzero value must agree and must exceed the part
+    // index.
+    if (sot.tile_part_count != 0) {
+        if (sot.tile_part_count <= sot.tile_part_index) return CodestreamError.InvalidCodestream;
+        if (expected_tile_part_count.*) |count| {
+            if (sot.tile_part_count != count) return CodestreamError.InvalidCodestream;
+        } else {
+            expected_tile_part_count.* = sot.tile_part_count;
+        }
     }
 }
 

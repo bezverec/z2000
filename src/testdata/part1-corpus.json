@@ -2229,6 +2229,78 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-singletile-multipart-inline",
+      "path": "src/testdata/kakadu-singletile-multipart-inline.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "2f87fd544b5e06033d3896dc99e6ea38ca2d93a0dfacb4e5ee1701c1b515056f",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "single tile divided into three resolution tile-parts with inline SOP/EPH headers; TNsot stays zero until the last part (ISO A.4.2 deferred tile-part count)",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-singletile-multipart-inline.jp2 Creversible=yes Clevels=2 Clayers=3 Corder=RPCL Cblk={4,4} Cuse_sop=yes Cuse_eph=yes ORGtparts=R -quiet"
+      },
+      "oracle": "src/tests.zig decodes all three placements to one raster; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree on it",
+      "features": [
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-singletile-multipart-ppm",
+      "path": "src/testdata/kakadu-singletile-multipart-ppm.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "44f604bd90d0c4dce52c18023becb9aaa0437792f0a0ed12a42b66c45df73436",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "the same single-tile multipart stream repacked with one main-header PPM carrying three Nppm groups, one per tile-part",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_makeppm src/testdata/kakadu-singletile-multipart-inline.jp2 src/testdata/kakadu-singletile-multipart-ppm.jp2"
+      },
+      "oracle": "src/tests.zig decodes all three placements to one raster; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree on it",
+      "features": [
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-singletile-multipart-ppt",
+      "path": "src/testdata/kakadu-singletile-multipart-ppt.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "9da7ea3a857c8b80f07e1cef55b1b0bc88199f70f55797dca7397dbe4e78bae6",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "the same single-tile multipart stream repacked with one tile-level PPT in the first tile-part holding the whole tile's packed headers",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_makeppm src/testdata/kakadu-singletile-multipart-inline.jp2 src/testdata/kakadu-singletile-multipart-ppt.jp2 -ppt"
+      },
+      "oracle": "src/tests.zig decodes all three placements to one raster; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree on it",
+      "features": [
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }

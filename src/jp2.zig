@@ -1750,10 +1750,15 @@ fn validateTilePartSequence(
         expected_tile_part_index = std.math.add(u8, expected_tile_part_index, 1) catch return Jp2Error.InvalidCodestream;
     }
     if (cursor != payload.len - 2) return Jp2Error.InvalidCodestream;
-    const expected_count = tile_part_count orelse return Jp2Error.InvalidCodestream;
-    if (expected_tile_part_index != expected_count) return Jp2Error.InvalidCodestream;
+    // A count signalled anywhere in the tile has to match the parts present;
+    // a tile that never signals one (TNsot 0 throughout, ISO A.4.2) is
+    // structurally complete with the parts it has, and the strict decoder's
+    // packet accounting decides whether the data is whole.
+    if (tile_part_count) |expected_count| {
+        if (expected_tile_part_index != expected_count) return Jp2Error.InvalidCodestream;
+    }
     if (tlm_state) |state| {
-        if (state.count != expected_count) return Jp2Error.InvalidCodestream;
+        if (state.count != expected_tile_part_index) return Jp2Error.InvalidCodestream;
     }
 }
 
@@ -1874,13 +1879,19 @@ fn validateSotSegment(
     const tile_part_length = try readU32Be(payload, marker_offset + 6);
     const tile_part_index = payload[marker_offset + 10];
     const current_tile_part_count = payload[marker_offset + 11];
-    if (tile_index != 0 or tile_part_index != expected_tile_part_index or current_tile_part_count == 0) {
+    if (tile_index != 0 or tile_part_index != expected_tile_part_index) {
         return Jp2Error.UnsupportedProfile;
     }
-    if (tile_part_count.*) |expected_count| {
-        if (current_tile_part_count != expected_count) return Jp2Error.InvalidCodestream;
-    } else {
-        tile_part_count.* = current_tile_part_count;
+    // TNsot == 0 means "part count not signalled in this part" (ISO A.4.2);
+    // a later part may carry the real count. `kdu_compress ORGtparts=R` on a
+    // single tile leaves it zero until the last part.
+    if (current_tile_part_count != 0) {
+        if (current_tile_part_count <= tile_part_index) return Jp2Error.InvalidCodestream;
+        if (tile_part_count.*) |expected_count| {
+            if (current_tile_part_count != expected_count) return Jp2Error.InvalidCodestream;
+        } else {
+            tile_part_count.* = current_tile_part_count;
+        }
     }
     if (tile_part_length == 0) return Jp2Error.UnsupportedProfile;
     if (expected_tile_part_length) |expected_length| {

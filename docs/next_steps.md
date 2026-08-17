@@ -349,11 +349,9 @@ The active G0/G4 corpus expansion is:
    general multipart packed-header/POC combinations now decode in all three
    placements: thirty-six tile-parts across four tiles under a two-record POC
    schedule, inline, with one PPM group per part, and with one tile-level PPT
-   per tile. What remains open here is narrower: single-tile streams that leave
-   `TNsot` zero until the last tile-part are rejected by the container audit,
-   which is narrower than the multi-tile audit beside it (ISO A.4.2 permits the
-   deferred count). `kdu_compress ORGtparts=R` on a single tile produces exactly
-   that, so no single-tile multipart Kakadu stream is accepted today.
+   per tile. Single-tile multipart streams are covered too: a tile-part count
+   deferred to a later part (TNsot 0, ISO A.4.2) is accepted in the single-tile
+   audit and reader, with the same three placements pinned against one raster.
 4. Record OpenJPEG, Grok, and Kakadu disagreement instead of selecting a
    convenient oracle. Part 4 expected results and exact samples take priority
    when available. The one open disagreement is now resolved: Grok `-u R --plt`

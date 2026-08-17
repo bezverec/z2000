@@ -8324,11 +8324,14 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
                     bytes[sot + 10] = 1;
                 }
             }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
-            .{ .label = "unknown tile-part count", .mutate = struct {
+            // TNsot 0 is legal (ISO A.4.2, "not signalled in this part"), so the
+            // rejected case is a count that contradicts the one a later part
+            // signals.
+            .{ .label = "tile-part count disagrees with a later part", .mutate = struct {
                 fn mutate(bytes: []u8, sot: usize) void {
-                    bytes[sot + 11] = 0;
+                    bytes[sot + 11] = 3;
                 }
-            }.mutate, .expected = jp2.Jp2Error.UnsupportedProfile },
+            }.mutate, .expected = jp2.Jp2Error.InvalidCodestream },
         };
         for (first_sot_cases) |scenario| {
             errdefer std.debug.print("JP2 first-SOT field case failed: {s}\n", .{scenario.label});
@@ -26089,6 +26092,59 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
         codestream.decodeLosslessTemporaryWithOptions(
             allocator,
             corrupted[codestream_base .. codestream_base + carried.len],
+            .{},
+        ),
+    );
+}
+
+test "single-tile multipart streams defer their tile-part count" {
+    const allocator = std.testing.allocator;
+    // `kdu_compress ORGtparts=R` on a single tile writes three resolution
+    // tile-parts and leaves TNsot zero until the last one -- ISO A.4.2's
+    // "not signalled in this part". The single-tile audit and reader used to
+    // require a count in every part, which the multi-tile paths beside them
+    // already did not, so no single-tile multipart Kakadu stream was accepted.
+    // The PPT repack additionally exercises the tile-level packed-header
+    // carry on the single-tile catalog.
+    const inline_stream = @embedFile("testdata/kakadu-singletile-multipart-inline.jp2");
+    const ppm_stream = @embedFile("testdata/kakadu-singletile-multipart-ppm.jp2");
+    const ppt_stream = @embedFile("testdata/kakadu-singletile-multipart-ppt.jp2");
+
+    const inline_bytes = try jp2.extractCodestream(inline_stream);
+    const ppm_bytes = try jp2.extractCodestream(ppm_stream);
+    const ppt_bytes = try jp2.extractCodestream(ppt_stream);
+    try std.testing.expectEqual(@as(usize, 3), countMarker(inline_bytes, codestream.markerValue("sot")));
+    // One PPT for three parts: the tile's packed headers all live in its first.
+    try std.testing.expectEqual(@as(usize, 1), countMarker(ppt_bytes, codestream.markerValue("ppt")));
+    try std.testing.expectEqual(@as(usize, 1), countMarker(ppm_bytes, codestream.markerValue("ppm")));
+
+    const first_sot = findMarker(inline_bytes, codestream.markerValue("sot")).?;
+    // TNsot sits at SOT+11 and is deferred here.
+    try std.testing.expectEqual(@as(u8, 0), inline_bytes[first_sot + 11]);
+
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(allocator, inline_bytes, .{});
+    defer reference.deinit();
+    try std.testing.expectEqual(@as(usize, 32), reference.width);
+    try std.testing.expectEqual(@as(usize, 32), reference.height);
+    for ([_][]const u8{ ppm_bytes, ppt_bytes }) |packed_bytes| {
+        var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, packed_bytes, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+    }
+
+    // A deferred count is still reconciled: signalling two parts in the first
+    // part contradicts both the three parts present and the count the last
+    // part signals.
+    const corrupted = try allocator.dupe(u8, inline_stream);
+    defer allocator.free(corrupted);
+    const codestream_base = @intFromPtr(inline_bytes.ptr) - @intFromPtr(inline_stream);
+    corrupted[codestream_base + first_sot + 11] = 2;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.extractCodestream(corrupted));
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            corrupted[codestream_base .. codestream_base + inline_bytes.len],
             .{},
         ),
     );

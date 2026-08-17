@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Single-Tile Multipart Streams
+
+- `kdu_compress ORGtparts=R` on a single tile writes three resolution
+  tile-parts and leaves `TNsot` zero until the last one, which ISO A.4.2 defines
+  as "not signalled in this part". The single-tile audit and the single-tile
+  reader both required a count in every part, so **no single-tile multipart
+  Kakadu stream was accepted at all** — a rule the multi-tile paths beside them
+  had already dropped. Both now accept a deferred count and still reconcile any
+  count that is signalled against the parts present and against the other
+  parts' values.
+- The tile-level PPT carry now also covers the single-tile catalog, in both its
+  PLT-driven and PLT-less branches.
+- Three fixtures are committed: the inline SOP/EPH baseline and its PPM and PPT
+  repacks, all decoding to one raster that Kakadu 8.4.1, OpenJPEG 2.5.4, and
+  Grok 20.3.6 agree on. The malformed case that pinned "unknown tile-part count"
+  as unsupported is replaced by one that pins a signalled count contradicting a
+  later part.
+
 ### General Multipart Packed Headers With A POC Schedule
 
 - Thirty-six tile-parts across four tiles under a two-record POC schedule now
