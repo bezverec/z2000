@@ -15630,7 +15630,20 @@ fn validateStrictTilePartPacketPlan(
         if (@as(u64, @intCast(tile_parts.packet_counts[0])) != plan.packets) return CodestreamError.InvalidCodestream;
         return emptyTilePartPlan();
     }
-    return CodestreamError.UnsupportedPayload;
+    // Any other PLT-backed division is accepted on its packet accounting alone:
+    // the parts consume the tile's packet sequence in TPsot order and have to
+    // land exactly on the plan total, which is what the catalog stage then
+    // reconstructs. `kdu_compress ORGtparts=R|L|C` writes such layouts, and the
+    // multi-tile reader has generalized this way since general multipart POC.
+    // The division itself is not one of the named shapes, so no tile-part plan
+    // is reported.
+    var total: u64 = 0;
+    for (tile_parts.packet_counts[0..tile_parts.count]) |packets| {
+        total = std.math.add(u64, total, @as(u64, @intCast(packets))) catch
+            return CodestreamError.InvalidCodestream;
+    }
+    if (total != plan.packets) return CodestreamError.InvalidCodestream;
+    return emptyTilePartPlan();
 }
 
 fn readStrictSotInfo(bytes: []const u8, marker_start: usize) !StrictSotInfo {

@@ -26097,6 +26097,70 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "combined resolution/layer/component tile-part divisions decode" {
+    const allocator = std.testing.allocator;
+    // `ORGtparts=R|L|C` divides a tile by all three axes at once. The
+    // single-tile PLT path used to accept only two shapes -- exactly one part,
+    // or exactly one part per resolution -- and rejected everything else as an
+    // unsupported payload, while the multi-tile reader had already generalized
+    // to plain packet accounting. Both now accept any division whose per-part
+    // PLT counts land exactly on the tile's packet plan.
+    const plt_stream = @embedFile("testdata/kakadu-singletile-rlc-tileparts-plt.jp2");
+    const poc_stream = @embedFile("testdata/kakadu-singletile-rlc-tileparts-poc-plt.jp2");
+    const multitile_stream = @embedFile("testdata/kakadu-multitile-rlc-tileparts-pcrl.jp2");
+
+    const plt_bytes = try jp2.extractCodestream(plt_stream);
+    const poc_bytes = try jp2.extractCodestream(poc_stream);
+    const multitile_bytes = try jp2.extractCodestream(multitile_stream);
+    // 27 parts per tile: three resolutions times three layers times three
+    // components. One PLT per part in the two PLT streams, none in the third.
+    try std.testing.expectEqual(@as(usize, 27), countMarker(plt_bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 27), countMarker(plt_bytes, codestream.markerValue("plt")));
+    try std.testing.expectEqual(@as(usize, 27), countMarker(poc_bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 108), countMarker(multitile_bytes, codestream.markerValue("sot")));
+    try std.testing.expect(findMarker(multitile_bytes, codestream.markerValue("plt")) == null);
+
+    const reference_stream = @embedFile("testdata/kakadu-singletile-multipart-inline.jp2");
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(reference_stream),
+        .{},
+    );
+    defer reference.deinit();
+    for ([_][]const u8{ plt_bytes, poc_bytes, multitile_bytes }) |stream_bytes| {
+        var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, stream_bytes, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+    }
+    // The 27-part PLT stream is a Kakadu-versus-Kakadu disagreement: OpenJPEG
+    // 2.5.4, Grok 20.3.6, and z2000 reconstruct it, while Kakadu 8.4.1's own
+    // kdu_expand rejects this kdu_compress output for running out of packet
+    // length information. Every part's PLT sums exactly to its own SOD body,
+    // which is what the accounting below still requires.
+
+    // Per-part accounting is unchanged: growing one part's only PLT length by a
+    // byte leaves it disagreeing with the bytes that part actually holds.
+    const corrupted = try allocator.dupe(u8, plt_stream);
+    defer allocator.free(corrupted);
+    const codestream_base = @intFromPtr(plt_bytes.ptr) - @intFromPtr(plt_stream);
+    const plt_offset = findMarker(plt_bytes, codestream.markerValue("plt")).?;
+    const plt_length = (@as(usize, plt_bytes[plt_offset + 2]) << 8) | plt_bytes[plt_offset + 3];
+    const last_byte = codestream_base + plt_offset + 2 + plt_length - 1;
+    corrupted[last_byte] = if (corrupted[last_byte] < 0x7f)
+        corrupted[last_byte] + 1
+    else
+        corrupted[last_byte] - 1;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.extractCodestream(corrupted));
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            corrupted[codestream_base .. codestream_base + plt_bytes.len],
+            .{},
+        ),
+    );
+}
+
 test "single-tile multipart streams defer their tile-part count" {
     const allocator = std.testing.allocator;
     // `kdu_compress ORGtparts=R` on a single tile writes three resolution

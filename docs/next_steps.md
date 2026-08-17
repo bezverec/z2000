@@ -359,8 +359,27 @@ The active G0/G4 corpus expansion is:
    Kakadu and OpenJPEG write one per tile-part. Both layouts decode — a PLT that
    reaches past its own SOD body is split at the body boundary and the remainder
    carried to the tile's later parts — so per-tile-part accounting and the
-   PLT-flip corruption detection are kept rather than traded away.
-5. Map the remaining public profiles to manifested decode and malformed cases,
+   PLT-flip corruption detection are kept rather than traded away. A second
+   disagreement is recorded rather than resolved, because it is one producer
+   against itself: `kdu_compress ORGgen_plt=yes ORGtparts=R|L|C` on a single
+   tile writes 27 tile-parts that Kakadu's own `kdu_expand` refuses to read,
+   while OpenJPEG, Grok, and z2000 reconstruct the raster and every part's PLT
+   sums exactly to its own SOD body.
+5. Two gaps found by the tile-part division sweep are open and independent of
+   tile-parts themselves:
+   - Arithmetic bypass (`Cmodes=BYPASS`) decodes at one quality layer and fails
+     with `InvalidBlock` at two or more, unless `RESTART` also terminates every
+     pass. A terminated codeword segment that spans a layer boundary is
+     signalled as one partial length per packet (ISO B.10.7); the T1 bypass
+     decoder instead requires exactly one signalled length per terminated
+     segment. The block catalog needs to merge a segment's per-layer partial
+     lengths before T1 sees it. The pinned all-six-style-bits fixture includes
+     `RESTART`, which is why this was not visible.
+   - A tile-grid origin offset that leaves a narrow edge tile
+     (`Sorigin={3,5} Stile_origin={1,2}` with 16x16 tiles gives a two-pixel-wide
+     tile column) is rejected by the reversible 5/3 decomposition guard at two
+     levels. Kakadu 8.4.1 and OpenJPEG 2.5.4 decode it; Grok 20.3.6 does not.
+6. Map the remaining public profiles to manifested decode and malformed cases,
    then run optional assets with `--require-optional` in release evidence.
 
 Exit when every existing public profile maps to the new matrix and the runner

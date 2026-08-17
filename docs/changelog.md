@@ -5,6 +5,44 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile-Part Division Sweep
+
+- A systematic sweep over Kakadu's tile-part machinery: every `ORGtparts`
+  value and combination (`R`, `L`, `C`, `R|L`, `R|C`, `L|C`, `R|L|C`) against
+  all five progression orders, on a single tile and on a 2x2 grid, with and
+  without `ORGgen_tlm`, then every combined-division stream repacked three ways
+  (`kdu_makeppm`, `kdu_makeppm -ppt`, `kdu_maketlm`). 160 streams; 159 decode
+  to the same raster. `ORGtparts=P` is not a Kakadu option at all — only `R`,
+  `L`, and `C` are — so position tile-parts stay covered by z2000's own writer.
+- The one rejection was a genuine gate. The single-tile PLT path accepted only
+  two divisions — exactly one part, or exactly one part per resolution — and
+  rejected everything else as an unsupported payload, while the multi-tile
+  reader had already generalized to plain packet accounting. It now accepts any
+  division whose per-part PLT counts land exactly on the tile's packet plan.
+- A fourth producer disagreement, and the first Kakadu-versus-Kakadu one:
+  `kdu_compress ORGgen_plt=yes ORGtparts=R|L|C` on a single tile writes 27
+  tile-parts whose PLTs each sum exactly to their own SOD body, and Kakadu's
+  own `kdu_expand` refuses to read it back, reporting that it ran out of packet
+  length information. OpenJPEG 2.5.4, Grok 20.3.6, and z2000 all reconstruct
+  the raster. It is committed as a decode entry with that oracle recorded.
+- A second sweep over precincts, image and tile-grid origins, `Cmodes`, and POC
+  crossed with the same divisions found two further gaps, recorded in the queue
+  rather than fixed here:
+  - **Arithmetic bypass with more than one quality layer** fails with
+    `InvalidBlock`. `Cmodes=BYPASS` alone decodes at `Clayers=1` and fails at
+    `Clayers=2`; adding `RESTART` makes every layer count decode, because each
+    coding pass is then its own terminated segment. The T1 bypass decoder
+    requires one signalled length per terminated codeword segment, but a
+    segment that spans a layer boundary is signalled as one partial length per
+    packet (ISO B.10.7), so the counts disagree. The previously pinned
+    all-six-style-bits fixture includes `RESTART`, which is why this was not
+    visible.
+  - **A tile-grid origin offset that produces a narrow edge tile** is rejected
+    by the reversible 5/3 decomposition guard: `Sorigin={3,5}
+    Stile_origin={1,2}` with 16x16 tiles leaves a two-pixel-wide tile column
+    that cannot be decomposed at two levels. Kakadu and OpenJPEG decode it;
+    Grok fails on it too.
+
 ### Single-Tile Multipart Streams
 
 - `kdu_compress ORGtparts=R` on a single tile writes three resolution

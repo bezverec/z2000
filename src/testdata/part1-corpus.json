@@ -2301,6 +2301,79 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-singletile-rlc-tileparts-plt",
+      "path": "src/testdata/kakadu-singletile-rlc-tileparts-plt.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "c339ff348f575e897e8e51de7c5b1cdcdbbd296b9b0c8e9b0a23c6527725e34b",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "single tile divided by resolution, layer, and component at once into 27 tile-parts, each with its own one-entry PLT and a tile-part count deferred to the last part",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-singletile-rlc-tileparts-plt.jp2 Creversible=yes Clevels=2 Clayers=3 Cblk={4,4} Cuse_sop=yes Cuse_eph=yes -quiet Corder=RPCL ORGtparts=R|L|C ORGgen_plt=yes"
+      },
+      "oracle": "producer disagreement pinned as a decode: OpenJPEG 2.5.4, Grok 20.3.6, and z2000 all reconstruct the raster, while Kakadu 8.4.1's own kdu_expand rejects this kdu_compress output, reporting that it ran out of packet length information while processing tile-parts; every tile-part's PLT sums exactly to its own SOD body",
+      "features": [
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-singletile-rlc-tileparts-poc-plt",
+      "path": "src/testdata/kakadu-singletile-rlc-tileparts-poc-plt.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "6137d8eddfeb74cd64ef2f684d95733ce70ba2bb0d1960e2dc6a086b1d529e79",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "the same 27-part resolution/layer/component division under a two-record POC schedule, with per-tile-part PLT",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-singletile-rlc-tileparts-poc-plt.jp2 Creversible=yes Clevels=2 Clayers=3 Cblk={4,4} Cuse_sop=yes Cuse_eph=yes -quiet Corder=RPCL ORGtparts=R|L|C ORGgen_plt=yes Porder={0,0,1,3,3,RPCL},{0,0,3,3,3,LRCP}"
+      },
+      "oracle": "src/tests.zig pins it; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree on the raster",
+      "features": [
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "progression-poc",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-multitile-rlc-tileparts-pcrl",
+      "path": "src/testdata/kakadu-multitile-rlc-tileparts-pcrl.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "fdfbf6b92f33e81187308ef821c3f742a9920fe3f8e3d60b2149f62c1b992ace",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "four tiles each divided by resolution, layer, and component into 27 parts -- 108 tile-parts in a PCRL progression with inline SOP/EPH headers and no PLT",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-multitile-rlc-tileparts-pcrl.jp2 Creversible=yes Clevels=2 Clayers=3 Cblk={4,4} Cuse_sop=yes Cuse_eph=yes -quiet Corder=PCRL ORGtparts=R|L|C Stiles={16,16}"
+      },
+      "oracle": "src/tests.zig pins it; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree on the raster",
+      "features": [
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }
