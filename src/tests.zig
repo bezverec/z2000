@@ -26094,6 +26094,58 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "general multipart packed headers decode with a POC schedule" {
+    const allocator = std.testing.allocator;
+    // Thirty-six tile-parts across four tiles under a two-record POC schedule,
+    // in all three packet-header placements. The PPT repack is the interesting
+    // one: `kdu_makeppm -ppt` writes four PPT segments for thirty-six parts --
+    // one in each tile's first part holding that whole tile's packed headers,
+    // with nothing in the eight parts that follow. A tile's PPT data is
+    // therefore consumed as one stream across its parts, each part stopping
+    // when its own SOD body runs out, and the stream must be exhausted exactly
+    // when the tile ends. PPM keeps its explicit `Nppm` group per tile-part.
+    const inline_stream = @embedFile("testdata/kakadu-poc-multipart-sop-eph-inline.jp2");
+    const ppm_stream = @embedFile("testdata/kakadu-poc-multipart-ppm.jp2");
+    const ppt_stream = @embedFile("testdata/kakadu-poc-multipart-ppt.jp2");
+
+    const inline_bytes = try jp2.extractCodestream(inline_stream);
+    const ppm_bytes = try jp2.extractCodestream(ppm_stream);
+    const ppt_bytes = try jp2.extractCodestream(ppt_stream);
+    try std.testing.expectEqual(@as(usize, 36), countMarker(inline_bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 36), countMarker(ppm_bytes, codestream.markerValue("sot")));
+    try std.testing.expectEqual(@as(usize, 36), countMarker(ppt_bytes, codestream.markerValue("sot")));
+    // One PPM group stream for the whole image; one PPT per tile, not per part.
+    try std.testing.expectEqual(@as(usize, 1), countMarker(ppm_bytes, codestream.markerValue("ppm")));
+    try std.testing.expectEqual(@as(usize, 4), countMarker(ppt_bytes, codestream.markerValue("ppt")));
+    try std.testing.expect(findMarker(ppm_bytes, codestream.markerValue("ppt")) == null);
+    try std.testing.expect(findMarker(ppt_bytes, codestream.markerValue("ppm")) == null);
+    // The repacks absorb the inline SOP/EPH framing into the packed headers.
+    try std.testing.expect(findMarker(inline_bytes, codestream.markerValue("sop")) != null);
+    try std.testing.expect(findMarker(ppt_bytes, codestream.markerValue("sop")) == null);
+
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(allocator, inline_bytes, .{});
+    defer reference.deinit();
+    try std.testing.expectEqual(@as(usize, 32), reference.width);
+    try std.testing.expectEqual(@as(usize, 32), reference.height);
+    for ([_][]const u8{ ppm_bytes, ppt_bytes }) |packed_bytes| {
+        var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, packed_bytes, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+    }
+
+    // The carried headers are decoded, not merely skipped: flipping one bit of
+    // the first tile's PPT payload breaks the packet framing it declares.
+    const corrupted = try allocator.dupe(u8, ppt_bytes);
+    defer allocator.free(corrupted);
+    const ppt_offset = findMarker(corrupted, codestream.markerValue("ppt")).?;
+    // Lppt (2) and Zppt (1) precede the packed-header payload.
+    corrupted[ppt_offset + 5] ^= 0x01;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(allocator, corrupted, .{}),
+    );
+}
+
 test "natively emitted PLT-less PPT and packed-header plus TLM decode" {
     const allocator = std.testing.allocator;
     // Two gaps closed at once. `kdu_makeppm -ppt` writes per-tile-part PPT

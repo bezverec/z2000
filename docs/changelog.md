@@ -5,6 +5,34 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### General Multipart Packed Headers With A POC Schedule
+
+- Thirty-six tile-parts across four tiles under a two-record POC schedule now
+  decode in all three packet-header placements. Inline and PPM already worked;
+  PPT did not.
+- `kdu_makeppm -ppt` writes **four PPT segments for thirty-six tile-parts** —
+  one in each tile's first part holding that whole tile's packed headers, and
+  nothing in the eight parts that follow. The reader treated each part's PPT as
+  covering only that part and ran off the end of the first part's body. A tile's
+  PPT segments are now consumed as one byte stream across the tile's parts, each
+  part stopping when its own SOD body runs out, with the stream required to be
+  exhausted exactly when the tile ends. That subsumes the per-part layout, where
+  a part's own PPT is exhausted by its own packets. PPM is unchanged: its `Nppm`
+  group boundaries are explicit and are not carried.
+- The headers are decoded rather than skipped — flipping one bit anywhere in the
+  first tile's PPT payload is rejected; the test pins one such flip, and every
+  single-bit flip over the first twenty payload bytes was rejected when the
+  boundary was probed.
+- Three fixtures are committed with their commands: the inline SOP/EPH baseline
+  and its PPM and PPT repacks. All three decode to one raster that Kakadu 8.4.1,
+  OpenJPEG 2.5.4, and Grok 20.3.6 agree on.
+- Found while probing the same boundary: single-tile streams that leave `TNsot`
+  zero until the last tile-part are rejected by the container audit, which is
+  narrower than the multi-tile audit beside it (ISO A.4.2 permits the deferred
+  count). `kdu_compress ORGtparts=R` on a single tile produces exactly that, so
+  no single-tile multipart stream from Kakadu is currently accepted. Recorded in
+  the queue rather than fixed here.
+
 ### Tile-Level PLT Accepted Alongside Per-Tile-Part PLT
 
 - Grok with `-u R --plt` writes **one PLT in each tile's first tile-part listing

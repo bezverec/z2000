@@ -9837,6 +9837,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
     external_packet_lengths: ?[]const usize,
     external_packed_headers: ?[]const u8,
     plt_carry: *std.ArrayList(usize),
+    packed_carry: *std.ArrayList(u8),
 ) !StrictPacketCatalog {
     var entries: std.ArrayList(StrictPacketEntry) = .empty;
     errdefer entries.deinit(allocator);
@@ -9920,7 +9921,23 @@ fn readStrictMultiTileTilePartPacketCatalog(
         span.sod,
         span.end,
     );
-    const has_packed_headers = has_external_packed_headers or packed_headers.items.len != 0;
+    // `kdu_makeppm -ppt` writes one PPT in a tile's first tile-part holding the
+    // packed headers of every packet in the tile, and none in its later parts.
+    // A tile's PPT segments are therefore treated as one byte stream consumed
+    // by the tile's packets in order across its parts (ISO A.7.5), which also
+    // covers the per-part layout where each part's PPT is exhausted by its own
+    // packets. PPM keeps its explicit `Nppm` group boundaries and is not
+    // carried.
+    const carry_packed_headers = !has_external_packed_headers;
+    if (carry_packed_headers and packed_headers.items.len != 0) {
+        try packed_carry.appendSlice(allocator, packed_headers.items);
+        packed_headers.clearRetainingCapacity();
+    }
+    const active_packed_headers = if (carry_packed_headers)
+        packed_carry.items
+    else
+        packed_headers.items;
+    const has_packed_headers = has_external_packed_headers or active_packed_headers.len != 0;
     if (span.missing_plt) {
         if (has_packet_lengths) return CodestreamError.InvalidCodestream;
     } else if (packet_lengths.items.len != packet_capacity) return CodestreamError.InvalidCodestream;
@@ -9961,8 +9978,11 @@ fn readStrictMultiTileTilePartPacketCatalog(
         if (has_packed_headers) {
             var packed_header_cursor: usize = 0;
             var sequence_index: usize = 0;
-            while (packed_header_cursor < packed_headers.items.len and
-                sequence_index < sequence.len) : (sequence_index += 1)
+            // Carried headers may describe more packets than this part holds
+            // bodies for, so the part's own SOD body is the stopping point.
+            while (packed_header_cursor < active_packed_headers.len and
+                sequence_index < sequence.len and
+                (!carry_packed_headers or cursor < span.end)) : (sequence_index += 1)
             {
                 const packet = sequence[sequence_index];
                 const groups = try stateful.groupsFor(packet);
@@ -9975,7 +9995,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
                     &cursor,
                     span.end,
                     null,
-                    packed_headers.items,
+                    active_packed_headers,
                     &packed_header_cursor,
                     packet,
                     groups,
@@ -9990,7 +10010,12 @@ fn readStrictMultiTileTilePartPacketCatalog(
                     .byte_length = packed_span.byte_length,
                 });
             }
-            if (packed_header_cursor != packed_headers.items.len) return CodestreamError.InvalidCodestream;
+            if (carry_packed_headers) {
+                if (cursor != span.end) return CodestreamError.InvalidCodestream;
+                consumePackedHeaderCarry(packed_carry, packed_header_cursor);
+            } else if (packed_header_cursor != active_packed_headers.len) {
+                return CodestreamError.InvalidCodestream;
+            }
         } else {
             var sequence_index: usize = 0;
             while (cursor < span.end and sequence_index < sequence.len) : (sequence_index += 1) {
@@ -10038,7 +10063,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
         var packed_header_cursor: usize = 0;
         for (packet_lengths.items, sequence) |packet_length, packet| {
             const byte_offset = packet_bytes.items.len;
-            const byte_length = if (packed_headers.items.len != 0) blk: {
+            const byte_length = if (active_packed_headers.len != 0) blk: {
                 const groups = try stateful.groupsFor(packet);
                 break :blk (try appendStrictPackedPacketPayload(
                     allocator,
@@ -10048,7 +10073,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
                     &cursor,
                     span.end,
                     packet_length,
-                    packed_headers.items,
+                    active_packed_headers,
                     &packed_header_cursor,
                     packet,
                     groups,
@@ -10074,7 +10099,11 @@ fn readStrictMultiTileTilePartPacketCatalog(
                 .byte_length = byte_length,
             });
         }
-        if (packed_header_cursor != packed_headers.items.len) return CodestreamError.InvalidCodestream;
+        if (carry_packed_headers) {
+            consumePackedHeaderCarry(packed_carry, packed_header_cursor);
+        } else if (packed_header_cursor != active_packed_headers.len) {
+            return CodestreamError.InvalidCodestream;
+        }
     }
     if (cursor != span.end) return CodestreamError.InvalidCodestream;
     if (span.packet_count_known and entries.items.len != span.packet_count) {
@@ -10119,6 +10148,9 @@ fn readStrictMultiTilePacketCatalogForTile(
     // Tile-level PLT carry across this tile's parts: see applyTileLevelPltCarry.
     var plt_carry: std.ArrayList(usize) = .empty;
     defer plt_carry.deinit(allocator);
+    // Tile-level PPT carry across this tile's parts, see above.
+    var packed_carry: std.ArrayList(u8) = .empty;
+    defer packed_carry.deinit(allocator);
     var stateful = try StrictStatefulPrecinctGroups.init(allocator, tile_header);
     defer stateful.deinit();
     for (spans) |span| {
@@ -10151,6 +10183,7 @@ fn readStrictMultiTilePacketCatalogForTile(
             external_lengths,
             external_headers,
             &plt_carry,
+            &packed_carry,
         );
         defer part.deinit();
 
@@ -10164,8 +10197,9 @@ fn readStrictMultiTilePacketCatalogForTile(
         expected_first_packet = try std.math.add(usize, expected_first_packet, part.entries.len);
         part_count += 1;
     }
-    // A tile-level PLT that outlives its tile is an overrun.
+    // A tile-level PLT or PPT that outlives its tile is an overrun.
     if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
+    if (packed_carry.items.len != 0) return CodestreamError.InvalidCodestream;
 
     if (part_count == 0 or expected_first_packet != tile_plan.packets) {
         return CodestreamError.InvalidCodestream;
@@ -14934,6 +14968,14 @@ fn strictPpmGroupAt(headers: ppm.PackedHeaders, index: usize) ![]const u8 {
 
 fn strictPlmGroupAt(lengths: plm.PacketLengths, index: usize) ![]const usize {
     return lengths.groupAt(index) orelse CodestreamError.InvalidCodestream;
+}
+
+/// Drops the bytes a tile-part consumed from the front of its tile's carried
+/// packed-header stream, leaving the remainder for the tile's later parts.
+fn consumePackedHeaderCarry(carry: *std.ArrayList(u8), consumed: usize) void {
+    const remaining = carry.items.len - consumed;
+    std.mem.copyForwards(u8, carry.items[0..remaining], carry.items[consumed..]);
+    carry.shrinkRetainingCapacity(remaining);
 }
 
 /// Splits a tile-level PLT at a tile-part body boundary: returns the shortest

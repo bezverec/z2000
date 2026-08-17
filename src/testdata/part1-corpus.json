@@ -2154,6 +2154,81 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-poc-multipart-sop-eph-inline",
+      "path": "src/testdata/kakadu-poc-multipart-sop-eph-inline.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "882c694a667efd906a820e8bc254a7eb1162927063878fd4ce2eb105c853c269",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "general multipart POC baseline: thirty-six tile-parts across four tiles with a two-record POC schedule and inline SOP/EPH packet headers; the packed-header twins below are repacks of this stream",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-poc-multipart-sop-eph-inline.jp2 Creversible=yes Clevels=2 Clayers=3 Corder=RPCL Cblk={4,4} Stiles={16,16} Cuse_sop=yes Cuse_eph=yes ORGtparts=R Porder={0,0,1,3,3,RPCL},{0,0,3,3,3,LRCP} -quiet"
+      },
+      "oracle": "src/tests.zig pins it against the PPM and PPT repacks; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree on the raster",
+      "features": [
+        "tiles-and-tile-parts",
+        "progression-poc",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-poc-multipart-ppm",
+      "path": "src/testdata/kakadu-poc-multipart-ppm.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "d7ce16cb0689d96aa64c87eb83d989d32c5e66b20a58980fd5eb3ca1a03d5f66",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "general multipart packed-header plus POC: one main-header PPM with thirty-six Nppm groups, one per tile-part, over the same POC schedule",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_makeppm src/testdata/kakadu-poc-multipart-sop-eph-inline.jp2 src/testdata/kakadu-poc-multipart-ppm.jp2"
+      },
+      "oracle": "src/tests.zig decodes it to the inline twin's raster; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree",
+      "features": [
+        "tiles-and-tile-parts",
+        "progression-poc",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-poc-multipart-ppt",
+      "path": "src/testdata/kakadu-poc-multipart-ppt.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "a2e18ead5bbb6c3e2cc652e5dd600463c0b64c67953323ea72fcd16522b55830",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "tile-level PPT: four PPT segments for thirty-six tile-parts, one in each tile's first part holding that whole tile's packed packet headers, over the same POC schedule",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_makeppm src/testdata/kakadu-poc-multipart-sop-eph-inline.jp2 src/testdata/kakadu-poc-multipart-ppt.jp2 -ppt"
+      },
+      "oracle": "src/tests.zig decodes it to the inline twin's raster; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree",
+      "features": [
+        "tiles-and-tile-parts",
+        "progression-poc",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }
