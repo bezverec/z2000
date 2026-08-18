@@ -2476,13 +2476,65 @@ const StrictRpclBlockAssembly = struct {
     code_block_style: ebcot.CodeBlockStyle = .{},
     segment_count: u8 = 0,
     segment_lengths: [ebcot.max_block_segments]u64 = [_]u64{0} ** ebcot.max_block_segments,
+    /// BYPASS only: the last recorded length is a partial codeword segment that
+    /// a later quality layer continues.
+    open_segment: bool = false,
 
     fn appendSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock) !void {
+        // ISO B.10.7: a packet signals one length per terminated codeword
+        // segment ending inside its contribution, plus one more when the
+        // contribution stops short of a termination point. With BYPASS and no
+        // RESTART a segment spans several coding passes and can therefore
+        // straddle a quality-layer boundary, so those partial lengths are
+        // folded back into one length per terminated segment here -- which is
+        // what T1 consumes. Every other style terminates on boundaries the
+        // packet structure already respects.
+        if (self.code_block_style.bypass and !self.code_block_style.terminate_all) {
+            return self.appendBypassSegmentLengths(decoded);
+        }
         var index: u8 = 0;
         while (index < decoded.segment_count) : (index += 1) {
             if (self.segment_count >= ebcot.max_block_segments) return CodestreamError.InvalidCodestream;
             self.segment_lengths[self.segment_count] = decoded.segment_lengths[index];
             self.segment_count += 1;
+        }
+    }
+
+    fn appendBypassSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock) !void {
+        if (decoded.pass_count == 0) {
+            if (decoded.segment_count != 0) return CodestreamError.InvalidCodestream;
+            return;
+        }
+        // `cumulative_passes` already covers this packet's contribution.
+        if (decoded.pass_count > self.cumulative_passes) return CodestreamError.InvalidCodestream;
+        const first_pass = self.cumulative_passes - decoded.pass_count;
+        const last_pass = self.cumulative_passes - 1;
+
+        var terminations: u8 = 0;
+        var pass = first_pass;
+        while (pass <= last_pass) : (pass += 1) {
+            if (ebcot.bypassSegmentEndsAfterPass(pass)) {
+                terminations = std.math.add(u8, terminations, 1) catch return CodestreamError.InvalidCodestream;
+            }
+        }
+        const closes_last = ebcot.bypassSegmentEndsAfterPass(last_pass);
+        const expected_pieces: u8 = if (closes_last) terminations else terminations + 1;
+        if (decoded.segment_count != expected_pieces) return CodestreamError.InvalidCodestream;
+
+        var index: u8 = 0;
+        while (index < decoded.segment_count) : (index += 1) {
+            if (self.open_segment) {
+                self.segment_lengths[self.segment_count - 1] = try std.math.add(
+                    u64,
+                    self.segment_lengths[self.segment_count - 1],
+                    decoded.segment_lengths[index],
+                );
+            } else {
+                if (self.segment_count >= ebcot.max_block_segments) return CodestreamError.InvalidCodestream;
+                self.segment_lengths[self.segment_count] = decoded.segment_lengths[index];
+                self.segment_count += 1;
+            }
+            self.open_segment = index + 1 == decoded.segment_count and !closes_last;
         }
     }
 

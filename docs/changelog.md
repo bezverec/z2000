@@ -5,6 +5,36 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Arithmetic Bypass Across Quality Layers And Truncated Blocks
+
+- Two independent defects in the same feature, both found by the tile-part
+  sweep and both making `Cmodes=BYPASS` unusable outside one narrow
+  configuration.
+- **Segments spanning quality layers.** With BYPASS and no RESTART a terminated
+  codeword segment covers two or three coding passes (ISO D.6), so it can
+  straddle a layer boundary. ISO B.10.7 then has the packet signal one partial
+  length per contribution rather than one length per terminated segment, and
+  the T1 bypass decoder wants the latter — so anything above `Clayers=1` failed
+  with `InvalidBlock`. Those partial lengths are now folded back together while
+  the block is assembled, with the piece count checked against the termination
+  pattern rather than trusted.
+- **Truncated blocks.** Both bypass decoders required a block to carry *every*
+  coding pass. Rate allocation truncates blocks to a prefix, so every
+  irreversible bypass stream was rejected outright, RESTART or not. Only an
+  overlong pass count is malformed now; the segmentation is computed from the
+  passes actually present.
+- Together these cover `Cmodes=BYPASS` at 1, 2, 4, 6, and 8 layers, reversible
+  and irreversible, tiled and untiled, from Kakadu 8.4.1, OpenJPEG 2.5.4
+  (`-M 1`), and Grok 20.3.6 — plus the whole `Cmodes` matrix crossed with
+  tile-part divisions. Three fixtures are committed.
+- The lossy fixture is pinned on z2000's own deterministic output, with the
+  reference spread measured rather than asserted: z2000 differs from Kakadu on
+  209 of 3072 samples and from OpenJPEG on 3, while Kakadu and OpenJPEG differ
+  from each other on 211 — all at a peak error of one LSB.
+- Why this was invisible: the pinned all-six-style-bits fixture sets RESTART,
+  which terminates every coding pass and so never produces a multi-pass
+  segment, and it is lossless, so no block is truncated.
+
 ### Tile-Part Division Sweep
 
 - A systematic sweep over Kakadu's tile-part machinery: every `ORGtparts`

@@ -2374,6 +2374,79 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-bypass-multilayer-tiles",
+      "path": "src/testdata/kakadu-bypass-multilayer-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "eb60bd47681abf3faa145d67af6ab09029b6e6a10bb39cdd6e08bff3b478ace5",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "arithmetic bypass without RESTART over four quality layers and a 2x2 tile grid, so a terminated codeword segment straddles layer boundaries and is signalled as one partial length per packet",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; producer application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-bypass-multilayer-tiles.jp2 Creversible=yes Clevels=3 Clayers=4 Corder=RPCL Cblk={16,16} Cmodes=BYPASS Stiles={16,16} -quiet"
+      },
+      "oracle": "src/tests.zig decodes it to the lossless source raster; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6 agree, and 1/8-thread output is identical",
+      "features": [
+        "t1-code-block-styles",
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "openjpeg-bypass-multilayer",
+      "path": "src/testdata/openjpeg-bypass-multilayer.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "4e1881dfe63692f6842f1357035aa9c295af5d78f061aafc6345706959f4bf29",
+      "source": {
+        "producer": "OpenJPEG",
+        "version": "2.5.4",
+        "origin": "independent producer for the same feature: arithmetic bypass over six lossless quality layers",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; producer application not redistributed",
+        "command": "opj_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/openjpeg-bypass-multilayer.jp2 -M 1 -n 4 -p RPCL -b 16,16 -r 1,1,1,1,1,1"
+      },
+      "oracle": "src/tests.zig decodes it to the lossless source raster; Kakadu 8.4.1 and Grok 20.3.6 agree",
+      "features": [
+        "t1-code-block-styles",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-bypass-lossy-truncated",
+      "path": "src/testdata/kakadu-bypass-lossy-truncated.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "8d621c31bec22ae0f765e1acf3e3598dbb4dff9011b67761d33469fa8b8271e7",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "irreversible 9/7 with arithmetic bypass and four rate-allocated layers, so code blocks carry a truncated prefix of their coding passes rather than every pass",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; producer application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-bypass-lossy-truncated.jp2 Creversible=no Clevels=3 Clayers=4 Corder=RPCL Cblk={16,16} Cmodes=BYPASS -quiet"
+      },
+      "oracle": "lossy, so the hash pins z2000's own deterministic output; against the references the peak error is one LSB either way -- z2000 differs from Kakadu 8.4.1 on 209 of 3072 samples and from OpenJPEG 2.5.4 on 3, while Kakadu and OpenJPEG differ from each other on 211, all at PAE 1/255; 1/8-thread output is identical",
+      "features": [
+        "t1-code-block-styles",
+        "packet-header-placement",
+        "irreversible-97"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "9dcc70fbbfeab1dd3e8410260691f0aaad58b83db4914edef2e03bcdd99c8b48"
     }
   ]
 }

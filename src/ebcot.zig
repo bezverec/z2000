@@ -3530,6 +3530,18 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorr
 
 pub const max_block_segments = 64;
 
+/// True when a terminated codeword segment ends after the zero-based coding
+/// pass `index` in BYPASS mode without RESTART: the first ten passes form one
+/// MQ segment, then raw significance/refinement pairs alternate with single MQ
+/// cleanup passes (ISO D.6). The final pass of a block always ends its segment
+/// regardless, which callers handle separately.
+pub fn bypassSegmentEndsAfterPass(index: u16) bool {
+    if (index < 9) return false;
+    if (index == 9) return true;
+    const cycle = (index - 10) % 3;
+    return cycle == 1 or cycle == 2;
+}
+
 /// Expected pass counts per terminated codeword segment in BYPASS mode:
 /// ten MQ passes first, then raw (significance + refinement) pairs
 /// alternating with single MQ cleanup passes.
@@ -3615,8 +3627,11 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
         return scratch.coeffs.items;
     }
 
+    // Rate allocation truncates a block to a prefix of its coding passes, so
+    // only an overlong pass count is malformed here; the segmentation below is
+    // computed from the passes actually present.
     const expected_passes = expectedCodingPasses(bitplanes);
-    if (pass_count != expected_passes) return EbcotError.InvalidBlock;
+    if (pass_count > expected_passes) return EbcotError.InvalidBlock;
 
     var seg_passes: [max_block_segments]u16 = undefined;
     const seg_count = try bypassSegmentPassCounts(bitplanes, pass_count, &seg_passes);
@@ -3750,8 +3765,9 @@ pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrow
         return scratch.coeffs.items;
     }
 
+    // See above: a truncated prefix of the coding passes is legal.
     const expected_passes = expectedCodingPasses(bitplanes);
-    if (pass_count != expected_passes) return EbcotError.InvalidBlock;
+    if (pass_count > expected_passes) return EbcotError.InvalidBlock;
     if (segment_lengths.len != pass_count) return EbcotError.InvalidBlock;
     var total_bytes: u64 = 0;
     for (segment_lengths) |len| total_bytes = try std.math.add(u64, total_bytes, len);

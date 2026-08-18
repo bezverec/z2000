@@ -365,16 +365,8 @@ The active G0/G4 corpus expansion is:
    tile writes 27 tile-parts that Kakadu's own `kdu_expand` refuses to read,
    while OpenJPEG, Grok, and z2000 reconstruct the raster and every part's PLT
    sums exactly to its own SOD body.
-5. Two gaps found by the tile-part division sweep are open and independent of
+5. One gap found by the tile-part division sweep is open and independent of
    tile-parts themselves:
-   - Arithmetic bypass (`Cmodes=BYPASS`) decodes at one quality layer and fails
-     with `InvalidBlock` at two or more, unless `RESTART` also terminates every
-     pass. A terminated codeword segment that spans a layer boundary is
-     signalled as one partial length per packet (ISO B.10.7); the T1 bypass
-     decoder instead requires exactly one signalled length per terminated
-     segment. The block catalog needs to merge a segment's per-layer partial
-     lengths before T1 sees it. The pinned all-six-style-bits fixture includes
-     `RESTART`, which is why this was not visible.
    - A tile-grid origin offset that leaves a narrow edge tile
      (`Sorigin={3,5} Stile_origin={1,2}` with 16x16 tiles gives a two-pixel-wide
      tile column) is rejected by the reversible 5/3 decomposition guard at two

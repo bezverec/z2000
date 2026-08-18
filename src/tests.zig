@@ -26097,6 +26097,57 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "arithmetic bypass spanning quality layers decodes" {
+    const allocator = std.testing.allocator;
+    // With BYPASS and no RESTART a terminated codeword segment covers two or
+    // three coding passes (ISO D.6), so it can straddle a quality-layer
+    // boundary. ISO B.10.7 then signals one partial length per packet instead
+    // of one length per terminated segment, and the T1 bypass decoder wants the
+    // latter. Those partial lengths are now folded back together as the block
+    // is assembled. The previously pinned all-six-style-bits fixture includes
+    // RESTART, which terminates every pass and hid this.
+    const kakadu_stream = @embedFile("testdata/kakadu-bypass-multilayer-tiles.jp2");
+    const openjpeg_stream = @embedFile("testdata/openjpeg-bypass-multilayer.jp2");
+    const reference_stream = @embedFile("testdata/kakadu-singletile-multipart-inline.jp2");
+
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(reference_stream),
+        .{},
+    );
+    defer reference.deinit();
+
+    for ([_][]const u8{ kakadu_stream, openjpeg_stream }) |stream| {
+        const bytes = try jp2.extractCodestream(stream);
+        // The style byte carries the bypass bit and not the termall bit.
+        const cod = findMarker(bytes, codestream.markerValue("cod")).?;
+        const style_byte = bytes[cod + 12];
+        try std.testing.expect(style_byte & 0x01 != 0);
+        try std.testing.expect(style_byte & 0x04 == 0);
+
+        var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+    }
+
+    // Rate allocation truncates a block to a prefix of its coding passes; the
+    // bypass decoders used to insist on every pass being present, so an
+    // irreversible bypass stream was rejected outright. It is lossy, so this
+    // pins determinism and shape rather than an exact reference raster -- the
+    // corpus entry records the measured one-LSB spread against Kakadu 8.4.1 and
+    // OpenJPEG 2.5.4.
+    const lossy_stream = @embedFile("testdata/kakadu-bypass-lossy-truncated.jp2");
+    var lossy = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(lossy_stream),
+        .{},
+    );
+    defer lossy.deinit();
+    try std.testing.expectEqual(@as(usize, 32), lossy.width);
+    try std.testing.expectEqual(@as(usize, 32), lossy.height);
+    try std.testing.expectEqual(reference.samples.len, lossy.samples.len);
+}
+
 test "combined resolution/layer/component tile-part divisions decode" {
     const allocator = std.testing.allocator;
     // `ORGtparts=R|L|C` divides a tile by all three axes at once. The
