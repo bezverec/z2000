@@ -2486,13 +2486,13 @@
         "redistribution": "committed codestream; Kakadu application not redistributed",
         "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-tile-origin-empty-resolution.jp2 Creversible=yes Clevels=2 Clayers=1 Corder=RPCL Cblk={16,16} Sorigin={3,5} Stile_origin={1,2} Stiles={16,16} -quiet"
       },
-      "oracle": "current fail-closed boundary, not a defect in the stream: Kakadu 8.4.1 and OpenJPEG 2.5.4 both decode it (Grok 20.3.6 does not). The same geometry decodes at zero and one decomposition level; only two levels collapse a resolution. Empty resolutions and empty subbands are legal under ISO B.5/B.6 and z2000 does not carry them yet",
+      "oracle": "src/tests.zig decodes it to the lossless source raster, as does its aligned twin above; Kakadu 8.4.1 and OpenJPEG 2.5.4 agree (Grok 20.3.6 fails on it), and 1/8-thread output is identical",
       "features": [
         "tiles-and-tile-parts",
         "reversible-53"
       ],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload"
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }

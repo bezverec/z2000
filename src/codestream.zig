@@ -19850,10 +19850,18 @@ fn validateMultiTileDecodeGeometry(grid: tile_grid.Grid, levels: u8, options: Lo
     try validateDecodePrecinctBlockSpans(options, 1, 1, 0, 0);
     if (levels > 32) return CodestreamError.UnsupportedPayload;
 
+    // Decode does not require every tile to survive `levels` decompositions with
+    // a non-empty region. A tile grid anchored away from the image origin can
+    // leave a narrow edge tile whose deepest resolutions are empty in one axis,
+    // which ISO B.5/B.6 defines rather than forbids: the subband list keeps the
+    // empty bands, the packet plan gives the resolution no precincts and no
+    // packets, and the inverse 5/3 descends through it as a no-op. Only a
+    // degenerate tile rectangle is malformed here. `canDecompose53Region` stays
+    // as the encoder-side rule, where z2000 chooses not to emit such tiles.
     var iterator = grid.iterator();
     while (iterator.next() catch return CodestreamError.InvalidCodestream) |tile| {
-        if (!wavelet_int.canDecompose53Region(tile.rect.x0, tile.rect.y0, tile.rect.x1, tile.rect.y1, levels)) {
-            return CodestreamError.UnsupportedPayload;
+        if (tile.rect.x1 <= tile.rect.x0 or tile.rect.y1 <= tile.rect.y0) {
+            return CodestreamError.InvalidCodestream;
         }
     }
 }

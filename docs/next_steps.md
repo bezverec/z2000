@@ -365,32 +365,22 @@ The active G0/G4 corpus expansion is:
    tile writes 27 tile-parts that Kakadu's own `kdu_expand` refuses to read,
    while OpenJPEG, Grok, and z2000 reconstruct the raster and every part's PLT
    sums exactly to its own SOD body.
-5. Carry empty resolutions and empty subbands (ISO B.5/B.6) through decode. A
-   tile grid anchored away from the image origin can leave a narrow edge tile
-   whose deepest resolutions are empty in one axis — `Sorigin={3,5}
+5. Empty resolutions and empty subbands (ISO B.5/B.6) are carried through
+   decode. A tile grid anchored away from the image origin can leave a narrow
+   edge tile whose deepest resolutions are empty in one axis — `Sorigin={3,5}
    Stile_origin={1,2}` with 16x16 tiles and two levels gives a two-pixel-wide
-   column — which Kakadu 8.4.1 and OpenJPEG 2.5.4 decode and Grok 20.3.6 does
-   not. Tile-grid origins themselves are fine; both halves of the pair are
-   committed, the aligned one as a decode and the collapsing one as the current
-   fail-closed boundary. The work is layered, in this order:
-   1. `validateMultiTileDecodeGeometry` rejects the tile outright through
-      `canDecompose53Region`; decode does not need that encoder-side rule.
-   2. **Done.** `packet_plan.rpclTileRegion` records an empty resolution with
-      zero precincts and zero packets, and `validateResolution` accepts that
-      shape.
-   3. **Done.** `StrictComponentPacketPlans.initWithCoding` and
-      `validateComponentPacketTopology` require precincts only of a non-empty
-      resolution.
-   4. **Done.** `subband.makeBandsForRegion` no longer stops short when a
-      region collapses and `appendBand` no longer drops empty bands, so the
-      list is always `1 + 3 * levels` entries and band position keeps selecting
-      the right `QCD`/`QCC` entry.
-   5. Inverse 5/3 synthesis rejects a zero-size span. Measured with the gate
-      opened locally, this is the only remaining layer: T2 packet-header
-      parsing and tag trees already cope with zero-block bands, so the failure
-      goes straight from the geometry gate to `inverse53ReducedWithWorkspaceOrigin`.
-   The layers are being taken bottom-up (4, 2, 3, 5, 1) so each one is
-   verifiable on its own and the geometry gate in step 1 opens last.
+   column. Both halves of the committed pair now decode, as does a 108-part
+   `R|L|C` variant and a fifteen-stream sweep over image origin, tile-grid
+   origin, and zero to two levels. Four things index by level and all of them
+   carry the emptiness now: the subband list keeps its empty bands, the packet
+   plan gives the resolution no precincts and no packets, the component plan
+   requires precincts only of a non-empty resolution, and the inverse 5/3
+   descends through it as a no-op. T2 packet-header parsing and tag trees
+   needed nothing. `canDecompose53Region` remains the encoder-side rule.
+   Open remainder: the same geometry through the irreversible 9/7 synthesis and
+   through reduced-resolution native decode is untested — the native profile
+   rejects these streams for an unrelated reason (it requires no MCT, and these
+   carry RCT).
 6. Map the remaining public profiles to manifested decode and malformed cases,
    then run optional assets with `--require-optional` in release evidence.
 

@@ -26265,20 +26265,19 @@ test "subband lists keep empty bands for collapsed regions" {
     }
 }
 
-test "tile-grid origins decode until a resolution collapses" {
+test "tile grids that collapse a resolution decode" {
     const allocator = std.testing.allocator;
-    // A tile grid anchored away from the reference-grid origin is fine on its
-    // own: this pair differs only in where the tile grid starts. When it starts
-    // at the image origin, every tile keeps a non-empty region at all three
-    // resolutions and the stream decodes. When it starts elsewhere, the image
-    // is cut into a two-pixel-wide edge column whose lowest resolution is empty
-    // in one axis at two decomposition levels.
+    // A pair differing only in where the tile grid is anchored. Anchored at the
+    // image origin, every tile keeps a non-empty region at all three
+    // resolutions. Anchored elsewhere, the image is cut into a two-pixel-wide
+    // edge column whose lowest resolution is empty in one axis at two
+    // decomposition levels -- legal under ISO B.5/B.6, and decoded by Kakadu
+    // 8.4.1 and OpenJPEG 2.5.4 (Grok 20.3.6 fails on it).
     //
-    // Empty resolutions and empty subbands are legal (ISO B.5/B.6) and both
-    // Kakadu 8.4.1 and OpenJPEG 2.5.4 decode the second stream; Grok 20.3.6
-    // does not. z2000 does not carry empty spans through its packet plan,
-    // subband layout, and synthesis yet, so it fails closed here rather than
-    // guessing. The same geometry decodes at zero and one decomposition level.
+    // Carrying that emptiness took four layers agreeing on level indices: the
+    // subband list keeps its empty bands, the packet plan gives the resolution
+    // no precincts and no packets, the component plan stops demanding
+    // precincts of it, and the inverse 5/3 descends through it as a no-op.
     const aligned = @embedFile("testdata/kakadu-tile-origin-offset-grid.jp2");
     const collapsing = @embedFile("testdata/kakadu-tile-origin-empty-resolution.jp2");
 
@@ -26290,21 +26289,28 @@ test "tile-grid origins decode until a resolution collapses" {
     );
     defer reference.deinit();
 
-    var decoded = try codestream.decodeLosslessTemporaryWithOptions(
-        allocator,
-        try jp2.extractCodestream(aligned),
-        .{},
-    );
-    defer decoded.deinit();
-    try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
-
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessTemporaryWithOptions(
+    for ([_][]const u8{ aligned, collapsing }) |stream| {
+        var decoded = try codestream.decodeLosslessTemporaryWithOptions(
             allocator,
-            try jp2.extractCodestream(collapsing),
+            try jp2.extractCodestream(stream),
             .{},
-        ),
+        );
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+    }
+
+    // A tile rectangle that is empty outright stays malformed. SIZ carries the
+    // tile grid origin at offset 30/34; pushing it past the image origin at
+    // 22/26 would leave the first tile column with nothing in it.
+    const collapsing_bytes = try jp2.extractCodestream(collapsing);
+    const siz = findMarker(collapsing_bytes, codestream.markerValue("siz")).?;
+    const corrupted = try allocator.dupe(u8, collapsing_bytes);
+    defer allocator.free(corrupted);
+    const image_x1 = readU32BeTest(corrupted, siz + 6);
+    writeU32BeTest(corrupted, siz + 30, image_x1);
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessTemporaryWithOptions(allocator, corrupted, .{}),
     );
 }
 

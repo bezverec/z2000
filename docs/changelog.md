@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Empty Resolutions Decode
+
+- Last of the five layers: the decode geometry gate no longer requires every
+  tile to survive `levels` decompositions with a non-empty region. Only a
+  degenerate tile rectangle is malformed. `canDecompose53Region` stays as the
+  encoder-side rule, where z2000 simply chooses not to emit such tiles.
+- The stream that started this work — a 32x32 image at reference-grid origin
+  (3,5) whose tile grid starts at (1,2), leaving a two-pixel-wide edge column
+  whose lowest resolution is empty in one axis — now decodes to the lossless
+  source raster, identically at one and eight threads, and its corpus entry
+  moves from `fail_closed` to `decode_pass`. A fifteen-stream sweep over image
+  origin, tile-grid origin, and zero to two decomposition levels decodes
+  exactly; a 108-part `R|L|C` variant of the same geometry does too.
+- Emptiness had to be carried consistently by four things that all index by
+  level: the subband list keeps its empty bands, the packet plan gives the
+  resolution no precincts and no packets, the component plan stops demanding
+  precincts of it, and the inverse 5/3 descends through it as a no-op. T2
+  packet-header parsing and tag trees needed nothing — measurement, not
+  assumption, put the remaining work in the wavelet rather than in T2.
+- The malformed case is still pinned: pushing the tile-grid origin past the
+  image origin, so the first tile column contains nothing, is rejected.
+
 ### Inverse 5/3 Descends Every Signalled Level
 
 - Layer four of five in dependency order, and the last one before the gate.
