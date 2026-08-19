@@ -3080,6 +3080,10 @@ const StrictComponentPacketPlans = struct {
                 try validateComponentPacketTopology(reference, plan, xrsiz != 1 or yrsiz != 1);
             } else {
                 for (plan.resolutions[0..plan.resolution_count]) |resolution| {
+                    // A resolution that is empty in either axis legitimately
+                    // has no precincts (ISO B.6); only a non-empty one without
+                    // precincts is malformed.
+                    if (resolution.width == 0 or resolution.height == 0) continue;
                     if (resolution.precincts == 0) return CodestreamError.InvalidCodestream;
                 }
             }
@@ -3124,6 +3128,8 @@ fn validateComponentPacketTopology(
             }
             continue;
         }
+        // See above: an empty resolution has no precincts by construction.
+        if (component_resolution.width == 0 or component_resolution.height == 0) continue;
         if (component_resolution.precincts == 0) return CodestreamError.InvalidCodestream;
     }
 }

@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Component Plans Accept Empty Resolutions
+
+- Layer three of five, and a small one: `StrictComponentPacketPlans` and
+  `validateComponentPacketTopology` both required every resolution to have
+  precincts. An empty resolution has none by construction, so the requirement
+  now applies only to non-empty ones.
+- Its own effect is invisible while the geometry gate of layer one still
+  rejects these streams, so it was verified by opening that gate locally: with
+  layers two through four in place the failure moves past this check *and past
+  T2 packet-header parsing altogether*, landing in the inverse 5/3 synthesis.
+  Tag trees and packet headers already cope with zero-block bands, which makes
+  the remaining layer narrower than the queue entry assumed.
+
 ### Empty Resolutions Carry No Precincts
 
 - Layer two of five. `packet_plan.rpclTileRegion` rejected a resolution whose

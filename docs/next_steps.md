@@ -378,14 +378,17 @@ The active G0/G4 corpus expansion is:
    2. **Done.** `packet_plan.rpclTileRegion` records an empty resolution with
       zero precincts and zero packets, and `validateResolution` accepts that
       shape.
-   3. `StrictComponentPacketPlans.initWithCoding` requires every resolution to
-      have precincts.
+   3. **Done.** `StrictComponentPacketPlans.initWithCoding` and
+      `validateComponentPacketTopology` require precincts only of a non-empty
+      resolution.
    4. **Done.** `subband.makeBandsForRegion` no longer stops short when a
       region collapses and `appendBand` no longer drops empty bands, so the
       list is always `1 + 3 * levels` entries and band position keeps selecting
       the right `QCD`/`QCC` entry.
-   5. T2 packet-header parsing, tag trees, and inverse synthesis then have to
-      skip zero-block bands and zero-size spans deliberately.
+   5. Inverse 5/3 synthesis rejects a zero-size span. Measured with the gate
+      opened locally, this is the only remaining layer: T2 packet-header
+      parsing and tag trees already cope with zero-block bands, so the failure
+      goes straight from the geometry gate to `inverse53ReducedWithWorkspaceOrigin`.
    The layers are being taken bottom-up (4, 2, 3, 5, 1) so each one is
    verifiable on its own and the geometry gate in step 1 opens last.
 6. Map the remaining public profiles to manifested decode and malformed cases,
