@@ -26097,6 +26097,50 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "packet plans give an empty resolution no precincts" {
+    const allocator = std.testing.allocator;
+    // ISO B.6: a resolution whose region is empty in either axis has no
+    // precincts and contributes no packets at all. The two-pixel-wide corner
+    // tile of a 32x32 image at reference-grid origin (3,5) with a tile grid
+    // starting at (1,2) collapses this way at two decomposition levels.
+    const precincts = [_]packet_plan.Precinct{
+        .{ .width = 32768, .height = 32768 },
+        .{ .width = 32768, .height = 32768 },
+        .{ .width = 32768, .height = 32768 },
+    };
+    const plan = try packet_plan.rpclTileRegion(33, 34, 35, 37, 2, 3, 1, &precincts);
+    try std.testing.expectEqual(@as(usize, 3), plan.resolution_count);
+
+    // Resolution 0 is the level-2 low-pass span, empty in x.
+    try std.testing.expectEqual(@as(u32, 0), plan.resolutions[0].width);
+    try std.testing.expectEqual(@as(u64, 0), plan.resolutions[0].precincts);
+    try std.testing.expectEqual(@as(u64, 0), plan.resolutions[0].packets);
+
+    // The two resolutions above it are ordinary.
+    try std.testing.expectEqual(@as(u32, 1), plan.resolutions[1].width);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[1].height);
+    try std.testing.expectEqual(@as(u64, 3), plan.resolutions[1].packets);
+    try std.testing.expectEqual(@as(u32, 2), plan.resolutions[2].width);
+    try std.testing.expectEqual(@as(u32, 3), plan.resolutions[2].height);
+    try std.testing.expectEqual(@as(u64, 3), plan.resolutions[2].packets);
+    try std.testing.expectEqual(@as(u64, 6), plan.packets);
+
+    // Every ordering agrees on that total, so no order emits a phantom packet
+    // for the empty resolution.
+    for ([_]packet_plan.PositionOrder{ .pcrl, .cprl }) |order| {
+        const packets = try packet_plan.positionOrderedPackets(allocator, plan, 3, 1, order);
+        defer allocator.free(packets);
+        try std.testing.expectEqual(@as(usize, 6), packets.len);
+        for (packets) |packet| try std.testing.expect(packet.resolution != 0);
+    }
+
+    // A tile that is empty outright is still malformed.
+    try std.testing.expectError(
+        packet_plan.PacketPlanError.InvalidDimensions,
+        packet_plan.rpclTileRegion(33, 34, 33, 37, 2, 3, 1, &precincts),
+    );
+}
+
 test "subband lists keep empty bands for collapsed regions" {
     const allocator = std.testing.allocator;
     // ISO B.5 gives a decomposition of a collapsed region empty subband spans

@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Empty Resolutions Carry No Precincts
+
+- Layer two of five. `packet_plan.rpclTileRegion` rejected a resolution whose
+  region is empty in either axis; ISO B.6 gives such a resolution no precincts
+  and therefore no packets. It now records a zero-size resolution with zero
+  precincts and zero packets, and `validateResolution` accepts exactly that
+  shape rather than assuming every resolution is non-empty.
+- A tile that is empty outright is still malformed — only a collapsed
+  *resolution* of a non-empty tile is legal.
+- Tests pin the corner-tile plan directly: three resolutions, the lowest with
+  no packets, six packets in total, and both position-ordered progressions
+  agreeing on that total so no ordering emits a phantom packet for the empty
+  resolution.
+
 ### Empty Subbands Stay In The Band List
 
 - First of the five layers behind empty resolutions, taken bottom-up so each

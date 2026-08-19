@@ -626,15 +626,19 @@ pub fn rpclTileRegion(
         const res_y0 = ceilDivPow2U32(y0, decomp);
         const res_x1 = ceilDivPow2U32(x1, decomp);
         const res_y1 = ceilDivPow2U32(y1, decomp);
-        if (res_x1 <= res_x0 or res_y1 <= res_y0) return PacketPlanError.InvalidDimensions;
-        const res_width = res_x1 - res_x0;
-        const res_height = res_y1 - res_y0;
+        // ISO B.6: a resolution whose region is empty in either axis has no
+        // precincts, and therefore no packets at all. A tile grid anchored away
+        // from the image origin can leave a narrow edge tile whose deepest
+        // resolutions collapse this way.
+        const res_empty = res_x1 <= res_x0 or res_y1 <= res_y0;
+        const res_width = if (res_empty) 0 else res_x1 - res_x0;
+        const res_height = if (res_empty) 0 else res_y1 - res_y0;
         const precinct = precinctForResolution(precincts, resolution);
         if (precinct.width == 0 or precinct.height == 0) return PacketPlanError.InvalidDimensions;
-        const precinct_x0 = res_x0 / precinct.width;
-        const precinct_y0 = res_y0 / precinct.height;
-        const precinct_x1 = ceilDiv(u32, res_x1, precinct.width);
-        const precinct_y1 = ceilDiv(u32, res_y1, precinct.height);
+        const precinct_x0 = if (res_empty) 0 else res_x0 / precinct.width;
+        const precinct_y0 = if (res_empty) 0 else res_y0 / precinct.height;
+        const precinct_x1 = if (res_empty) 0 else ceilDiv(u32, res_x1, precinct.width);
+        const precinct_y1 = if (res_empty) 0 else ceilDiv(u32, res_y1, precinct.height);
         const precincts_x = precinct_x1 - precinct_x0;
         const precincts_y = precinct_y1 - precinct_y0;
         const precinct_count = try std.math.mul(u64, precincts_x, precincts_y);
@@ -642,8 +646,8 @@ pub fn rpclTileRegion(
         const packets = try std.math.mul(u64, precinct_packets, layers);
 
         plan.resolutions[resolution] = .{
-            .x0 = res_x0,
-            .y0 = res_y0,
+            .x0 = if (res_empty) 0 else res_x0,
+            .y0 = if (res_empty) 0 else res_y0,
             .width = res_width,
             .height = res_height,
             .precinct_width = precinct.width,
@@ -662,7 +666,11 @@ pub fn rpclTileRegion(
 }
 
 fn validateResolution(resolution: Resolution, components: u16, layers: u16) !void {
-    if (resolution.width == 0 or resolution.height == 0) return PacketPlanError.InvalidDimensions;
+    // An empty resolution (ISO B.6) carries no precincts and no packets.
+    if (resolution.width == 0 or resolution.height == 0) {
+        if (resolution.precincts != 0 or resolution.packets != 0) return PacketPlanError.InvalidDimensions;
+        return;
+    }
     if (resolution.precinct_width == 0 or resolution.precinct_height == 0) return PacketPlanError.InvalidDimensions;
     if (resolution.precincts_x == 0 or resolution.precincts_y == 0) return PacketPlanError.InvalidDimensions;
     const right = @as(u64, resolution.x0) + resolution.width;

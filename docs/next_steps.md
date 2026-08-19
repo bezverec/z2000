@@ -375,9 +375,9 @@ The active G0/G4 corpus expansion is:
    fail-closed boundary. The work is layered, in this order:
    1. `validateMultiTileDecodeGeometry` rejects the tile outright through
       `canDecompose53Region`; decode does not need that encoder-side rule.
-   2. `packet_plan.rpclTileRegion` rejects an empty resolution instead of
-      giving it zero precincts and zero packets, and `validateResolution`
-      assumes non-empty.
+   2. **Done.** `packet_plan.rpclTileRegion` records an empty resolution with
+      zero precincts and zero packets, and `validateResolution` accepts that
+      shape.
    3. `StrictComponentPacketPlans.initWithCoding` requires every resolution to
       have precincts.
    4. **Done.** `subband.makeBandsForRegion` no longer stops short when a
