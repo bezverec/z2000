@@ -377,10 +377,15 @@ The active G0/G4 corpus expansion is:
    requires precincts only of a non-empty resolution, and the inverse 5/3
    descends through it as a no-op. T2 packet-header parsing and tag trees
    needed nothing. `canDecompose53Region` remains the encoder-side rule.
-   Open remainder: the same geometry through the irreversible 9/7 synthesis and
-   through reduced-resolution native decode is untested — the native profile
-   rejects these streams for an unrelated reason (it requires no MCT, and these
-   carry RCT).
+   Open remainder, now measured rather than assumed: a fourteen-stream sweep
+   over the same collapsing geometry crossed with reversible/irreversible,
+   MCT/no MCT, two to four levels, and subsampling shows the reversible path
+   passing everywhere — including subsampled and four levels — while every
+   **irreversible 9/7** variant fails with `InvalidDimensions`. The float
+   synthesis needs the descent change the 5/3 path received in layer four.
+   Reduced-resolution native decode of this geometry stays untested because the
+   native profile rejects these streams for an unrelated reason: it requires no
+   MCT, and they carry RCT.
 6. Map the remaining public profiles to manifested decode and malformed cases,
    then run optional assets with `--require-optional` in release evidence.
 

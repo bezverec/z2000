@@ -11,6 +11,9 @@ The active documentation is intentionally split by purpose. Only
 - [`iso_coverage.md`](iso_coverage.md) — evidence-based coverage scorecard.
 - [`part1_corpus.md`](part1_corpus.md) — broad Part 1 capability manifest and
   reproducible corpus gate.
+- [`reference_tools.md`](reference_tools.md) — measured Kakadu/OpenJPEG/Grok
+  behaviour: what they cannot emit, where they disagree, and what each sweep
+  found.
 - [`architecture.md`](architecture.md) — current design and data flow.
 - [`api.md`](api.md) — CLI and library surfaces.
 
@@ -33,7 +36,9 @@ their status language must not be used to infer current support.
 When a feature lands:
 
 1. update `changelog.md` with evidence;
-2. update `iso_coverage.md` only when the scored boundary changes;
-3. remove or advance the item in `next_steps.md`;
-4. update `roadmap.md` only when strategy or profile policy changes;
-5. update API/architecture documentation when behavior or ownership changes.
+2. record any new reference-tool observation in `reference_tools.md`, so it is
+   findable the next time a sweep hits the same wall;
+3. update `iso_coverage.md` only when the scored boundary changes;
+4. remove or advance the item in `next_steps.md`;
+5. update `roadmap.md` only when strategy or profile policy changes;
+6. update API/architecture documentation when behavior or ownership changes.

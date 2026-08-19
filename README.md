@@ -633,6 +633,7 @@ Detailed notes live in `docs/`:
 - [API notes](docs/api.md)
 - [ISO coverage scorecard](docs/iso_coverage.md)
 - [Part 1 corpus gate](docs/part1_corpus.md)
+- [Reference tool behaviour](docs/reference_tools.md)
 - [Roadmap](docs/roadmap.md)
 - [Next steps](docs/next_steps.md)
 - [Optimization plan](docs/optimization_plan.md)

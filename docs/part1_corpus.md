@@ -11,6 +11,11 @@ Run the committed corpus with the production strict decoder:
 zig build part1-corpus
 ```
 
+Measured behaviour of the reference implementations that supply these
+fixtures — what they cannot emit, where they disagree with each other or with
+themselves, and how much lossy reconstruction spread to expect — is collected in
+[`reference_tools.md`](reference_tools.md).
+
 The runner verifies the SHA-256 of every input before extraction or mutation.
 JP2 entries first pass strict container metadata validation. Each manifest
 entry then selects the production `planar` or `interleaved_rgb` strict decoder

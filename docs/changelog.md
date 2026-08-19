@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Reference Tool Behaviour Collected In One Place
+
+- Observations about Kakadu, OpenJPEG, and Grok had accumulated one sentence at
+  a time through this changelog, where they are hard to find when a later sweep
+  hits the same wall. [`reference_tools.md`](reference_tools.md) collects them:
+  what the producers cannot emit, the legal layout choices they differ on, the
+  defects and self-inconsistencies recorded rather than worked around, the
+  measured lossy reconstruction spread, and every sweep run with what it found.
+  The changelog stays the chronological record; the new file is the lookup
+  table, and the documentation update rule now names it.
+- One new measurement while assembling it: a fourteen-stream sweep over the
+  collapsing tile-grid geometry crossed with reversible/irreversible, MCT/no
+  MCT, two to four decomposition levels, and subsampling. Every reversible
+  variant decodes, including subsampled and four levels; every **irreversible
+  9/7** variant fails with `InvalidDimensions`, so the float synthesis still
+  needs the descent change the 5/3 path received. That replaces an "untested"
+  note in the queue with a measured one.
+
 ### Empty Resolutions Decode
 
 - Last of the five layers: the decode geometry gate no longer requires every
