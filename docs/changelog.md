@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Empty Subbands Stay In The Band List
+
+- First of the five layers behind empty resolutions, taken bottom-up so each
+  one is verifiable on its own; the geometry gate that rejects these streams
+  opens last.
+- `subband.makeBandsForRegion` used to stop decomposing as soon as a region
+  collapsed in one axis, and `appendBand` dropped any empty band. Both were
+  silent: a truncated list makes `dwtLevelsFromBands`, which is
+  `(len - 1) / 3`, report fewer levels than the codestream signals, and a
+  dropped band shifts every later band onto the wrong `QCD`/`QCC` entry.
+- The list is now always `1 + 3 * levels` bands. ISO B.5 defines a collapsed
+  decomposition's subbands as empty spans rather than as absent, so band
+  position maps directly onto the quantization band order and onto the
+  resolutions the codestream declares. Code-block partitioning already yields
+  nothing for a zero-size band, so no consumer changed.
+- Tests pin the geometry directly: the two-pixel-wide corner tile that started
+  this work resolves to an empty level-2 LL, 1x1 HL and HH, an empty LH, and
+  the level-1 bands over the 2x3 region; and a region already collapsed to one
+  sample keeps decomposing into empty detail bands. The full suite and corpus
+  are unchanged by the switch.
+
 ### Tile-Grid Origins Pinned, Empty Resolutions Scoped
 
 - Tile grids anchored away from the reference-grid origin decode; that was

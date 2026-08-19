@@ -26097,6 +26097,66 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "subband lists keep empty bands for collapsed regions" {
+    const allocator = std.testing.allocator;
+    // ISO B.5 gives a decomposition of a collapsed region empty subband spans
+    // rather than no subbands, so the list is always 1 + 3 * levels entries.
+    // Band position is what selects a band's QCD/QCC entry and what the
+    // decomposition count is derived from, so dropping an empty band would
+    // shift every later band onto the wrong quantization parameters.
+    {
+        // The two-pixel-wide corner tile of a 32x32 image at reference-grid
+        // origin (3,5) whose tile grid starts at (1,2): x in [33,35),
+        // y in [34,37), two decomposition levels.
+        const bands = try subband.makeBandsForRegion(allocator, 33, 34, 35, 37, 2);
+        defer allocator.free(bands);
+        try std.testing.expectEqual(@as(usize, 7), bands.len);
+
+        // Resolution 0 is the level-2 LL, empty in x.
+        try std.testing.expectEqual(subband.Kind.ll, bands[0].kind);
+        try std.testing.expectEqual(@as(u8, 2), bands[0].level);
+        try std.testing.expectEqual(@as(usize, 0), bands[0].rect.width);
+        try std.testing.expectEqual(@as(usize, 1), bands[0].rect.height);
+
+        // Resolution 1 carries the level-2 detail bands. HL and HH are 1x1;
+        // LH inherits the empty width of the low-pass span.
+        try std.testing.expectEqual(subband.Kind.hl, bands[1].kind);
+        try std.testing.expectEqual(@as(u8, 2), bands[1].level);
+        try std.testing.expectEqual(@as(usize, 1), bands[1].rect.width);
+        try std.testing.expectEqual(@as(usize, 1), bands[1].rect.height);
+        try std.testing.expectEqual(subband.Kind.lh, bands[2].kind);
+        try std.testing.expectEqual(@as(usize, 0), bands[2].rect.width);
+        try std.testing.expectEqual(subband.Kind.hh, bands[3].kind);
+        try std.testing.expectEqual(@as(usize, 1), bands[3].rect.width);
+        try std.testing.expectEqual(@as(usize, 1), bands[3].rect.height);
+
+        // Resolution 2 carries the level-1 detail bands over the 2x3 region.
+        try std.testing.expectEqual(@as(u8, 1), bands[4].level);
+        try std.testing.expectEqual(@as(u8, 1), bands[6].level);
+
+        // An empty band contributes no code blocks.
+        const blocks = try subband.makeCodeBlocks(allocator, bands, 16, 16);
+        defer allocator.free(blocks);
+        for (blocks) |block| {
+            try std.testing.expect(block.rect.width != 0 and block.rect.height != 0);
+            try std.testing.expect(block.band_index != 0 and block.band_index != 2);
+        }
+    }
+
+    {
+        // A region that has already collapsed to a single sample keeps
+        // decomposing into empty detail bands rather than stopping short.
+        const bands = try subband.makeBandsForRegion(allocator, 0, 0, 1, 1, 3);
+        defer allocator.free(bands);
+        try std.testing.expectEqual(@as(usize, 10), bands.len);
+        try std.testing.expectEqual(@as(usize, 1), bands[0].rect.width);
+        try std.testing.expectEqual(@as(usize, 1), bands[0].rect.height);
+        for (bands[1..]) |band| {
+            try std.testing.expect(band.rect.width == 0 or band.rect.height == 0);
+        }
+    }
+}
+
 test "tile-grid origins decode until a resolution collapses" {
     const allocator = std.testing.allocator;
     // A tile grid anchored away from the reference-grid origin is fine on its

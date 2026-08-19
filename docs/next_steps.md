@@ -380,13 +380,14 @@ The active G0/G4 corpus expansion is:
       assumes non-empty.
    3. `StrictComponentPacketPlans.initWithCoding` requires every resolution to
       have precincts.
-   4. `subband.appendBand` drops empty bands from the list, which shifts every
-      later band's index — the band list has to keep them so quantization
-      lookup, nominal bitplanes, and code-block enumeration stay aligned.
+   4. **Done.** `subband.makeBandsForRegion` no longer stops short when a
+      region collapses and `appendBand` no longer drops empty bands, so the
+      list is always `1 + 3 * levels` entries and band position keeps selecting
+      the right `QCD`/`QCC` entry.
    5. T2 packet-header parsing, tag trees, and inverse synthesis then have to
       skip zero-block bands and zero-size spans deliberately.
-   Steps 1-3 were verified to be the actual next failures in that order; step 4
-   is where the current investigation stopped.
+   The layers are being taken bottom-up (4, 2, 3, 5, 1) so each one is
+   verifiable on its own and the geometry gate in step 1 opens last.
 6. Map the remaining public profiles to manifested decode and malformed cases,
    then run optional assets with `--require-optional` in release evidence.
 

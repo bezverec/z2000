@@ -66,20 +66,21 @@ pub fn makeBandsForRegion(
     var cur_y1 = y1;
     var cur_width: usize = x1 - x0;
     var cur_height: usize = y1 - y0;
+    // Every requested decomposition is performed, even when the region has
+    // already collapsed in one axis. ISO B.5 defines the subband coordinates of
+    // such a level as an empty span rather than as absent, and the resulting
+    // list is always `1 + 3 * levels` bands, so band position maps directly
+    // onto the `QCD`/`QCC` band order and onto the resolutions the codestream
+    // signals.
     var actual: u8 = 0;
-    while (actual < levels and (cur_width > 1 or cur_height > 1)) : (actual += 1) {
-        const next_x0 = ceilDiv2(cur_x0);
-        const next_y0 = ceilDiv2(cur_y0);
-        const next_x1 = ceilDiv2(cur_x1);
-        const next_y1 = ceilDiv2(cur_y1);
-        if (next_x1 <= next_x0 or next_y1 <= next_y0) break;
+    while (actual < levels) : (actual += 1) {
         shapes[actual] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0, .x1 = cur_x1, .y1 = cur_y1 };
-        cur_x0 = next_x0;
-        cur_y0 = next_y0;
-        cur_x1 = next_x1;
-        cur_y1 = next_y1;
-        cur_width = cur_x1 - cur_x0;
-        cur_height = cur_y1 - cur_y0;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+        cur_x1 = ceilDiv2(cur_x1);
+        cur_y1 = ceilDiv2(cur_y1);
+        cur_width = spanOf(cur_x0, cur_x1);
+        cur_height = spanOf(cur_y0, cur_y1);
     }
 
     try list.append(allocator, .{
@@ -101,8 +102,9 @@ pub fn makeBandsForRegion(
         const high_y0 = shape.y0 / 2;
         const high_x1 = shape.x1 / 2;
         const high_y1 = shape.y1 / 2;
-        const low_w: usize = low_x1 - low_x0;
-        const low_h: usize = low_y1 - low_y0;
+        const low_w = spanOf(low_x0, low_x1);
+        const low_h = spanOf(low_y0, low_y1);
+        if (low_w > shape.width or low_h > shape.height) return SubbandError.InvalidDimensions;
         const high_w = shape.width - low_w;
         const high_h = shape.height - low_h;
 
@@ -125,7 +127,7 @@ pub fn makeBandsForRegion(
             .height = high_h,
         }, high_x0, high_y0);
 
-        if (high_x1 - high_x0 != high_w or high_y1 - high_y0 != high_h) {
+        if (spanOf(high_x0, high_x1) != high_w or spanOf(high_y0, high_y1) != high_h) {
             return SubbandError.InvalidDimensions;
         }
 
@@ -233,8 +235,15 @@ fn appendBand(
     origin_x: u32,
     origin_y: u32,
 ) !void {
-    if (rect.width == 0 or rect.height == 0) return;
+    // Empty bands stay in the list: dropping one shifts every later band's
+    // index, which decides both the `QCD`/`QCC` entry a band reads and the
+    // decomposition count derived from the list length.
     try list.append(allocator, .{ .kind = kind, .level = level, .rect = rect, .origin_x = origin_x, .origin_y = origin_y });
+}
+
+/// Subband spans are empty rather than negative when a region has collapsed.
+fn spanOf(low: u32, high: u32) usize {
+    return if (high > low) high - low else 0;
 }
 
 fn ceilDiv2(value: u32) u32 {
