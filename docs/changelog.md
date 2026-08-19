@@ -5,6 +5,31 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile-Grid Origins Pinned, Empty Resolutions Scoped
+
+- Tile grids anchored away from the reference-grid origin decode; that was
+  never the problem. A committed pair differs only in where the tile grid
+  starts: anchored at the image origin it decodes to the source raster,
+  anchored elsewhere it cuts a two-pixel-wide edge column whose lowest
+  resolution is empty in one axis at two decomposition levels. The same
+  geometry decodes at zero and one level, so the trigger is precisely the
+  collapse, not the origin.
+- That second stream stays fail-closed and is committed as such, with the
+  boundary recorded rather than described: Kakadu 8.4.1 and OpenJPEG 2.5.4
+  decode it, Grok 20.3.6 does not, and empty resolutions and subbands are legal
+  under ISO B.5/B.6.
+- Carrying empty spans was explored far enough to size it honestly, and the
+  work is layered rather than local. Relaxing the decode geometry guard moves
+  the failure into the packet plan; teaching `rpclTileRegion` that an empty
+  resolution has no precincts and no packets moves it into the per-component
+  plan check; relaxing that moves it into T2 packet-header parsing. The reason
+  it lands there is that `subband.appendBand` drops empty bands from the list
+  entirely, which silently shifts every later band's index — so band lists have
+  to keep empty entries and every consumer (quantization lookup, nominal
+  bitplanes, code-block enumeration, tag trees, synthesis) has to skip them
+  deliberately. That exploration is not in this commit; the queue entry now
+  names the five layers instead of the symptom.
+
 ### Arithmetic Bypass Across Quality Layers And Truncated Blocks
 
 - Two independent defects in the same feature, both found by the tile-part

@@ -2447,6 +2447,52 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "9dcc70fbbfeab1dd3e8410260691f0aaad58b83db4914edef2e03bcdd99c8b48"
+    },
+    {
+      "id": "kakadu-tile-origin-offset-grid",
+      "path": "src/testdata/kakadu-tile-origin-offset-grid.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "54f4d5c68b7f5232b9c38f3dcc5a96816bbf9fd406de74154ead964fd1f9c009",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "tile grid anchored away from the reference-grid origin, at the same point as the image origin, so every tile keeps a non-empty region at all three resolutions",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-tile-origin-offset-grid.jp2 Creversible=yes Clevels=2 Clayers=1 Corder=RPCL Cblk={16,16} Sorigin={3,5} Stile_origin={3,5} Stiles={16,16} -quiet"
+      },
+      "oracle": "src/tests.zig decodes it to the lossless source raster; it is the accepted half of the tile-origin pair below",
+      "features": [
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-tile-origin-empty-resolution",
+      "path": "src/testdata/kakadu-tile-origin-empty-resolution.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "e04d8b479d6c225f00918f68794a943273dc24216159127b6d66455f6bc79885",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "tile grid anchored at a different point from the image origin, leaving a two-pixel-wide edge tile column whose lowest resolution is empty in one axis at two decomposition levels",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-tile-origin-empty-resolution.jp2 Creversible=yes Clevels=2 Clayers=1 Corder=RPCL Cblk={16,16} Sorigin={3,5} Stile_origin={1,2} Stiles={16,16} -quiet"
+      },
+      "oracle": "current fail-closed boundary, not a defect in the stream: Kakadu 8.4.1 and OpenJPEG 2.5.4 both decode it (Grok 20.3.6 does not). The same geometry decodes at zero and one decomposition level; only two levels collapse a resolution. Empty resolutions and empty subbands are legal under ISO B.5/B.6 and z2000 does not carry them yet",
+      "features": [
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload"
     }
   ]
 }

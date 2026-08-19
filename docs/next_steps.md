@@ -365,12 +365,28 @@ The active G0/G4 corpus expansion is:
    tile writes 27 tile-parts that Kakadu's own `kdu_expand` refuses to read,
    while OpenJPEG, Grok, and z2000 reconstruct the raster and every part's PLT
    sums exactly to its own SOD body.
-5. One gap found by the tile-part division sweep is open and independent of
-   tile-parts themselves:
-   - A tile-grid origin offset that leaves a narrow edge tile
-     (`Sorigin={3,5} Stile_origin={1,2}` with 16x16 tiles gives a two-pixel-wide
-     tile column) is rejected by the reversible 5/3 decomposition guard at two
-     levels. Kakadu 8.4.1 and OpenJPEG 2.5.4 decode it; Grok 20.3.6 does not.
+5. Carry empty resolutions and empty subbands (ISO B.5/B.6) through decode. A
+   tile grid anchored away from the image origin can leave a narrow edge tile
+   whose deepest resolutions are empty in one axis — `Sorigin={3,5}
+   Stile_origin={1,2}` with 16x16 tiles and two levels gives a two-pixel-wide
+   column — which Kakadu 8.4.1 and OpenJPEG 2.5.4 decode and Grok 20.3.6 does
+   not. Tile-grid origins themselves are fine; both halves of the pair are
+   committed, the aligned one as a decode and the collapsing one as the current
+   fail-closed boundary. The work is layered, in this order:
+   1. `validateMultiTileDecodeGeometry` rejects the tile outright through
+      `canDecompose53Region`; decode does not need that encoder-side rule.
+   2. `packet_plan.rpclTileRegion` rejects an empty resolution instead of
+      giving it zero precincts and zero packets, and `validateResolution`
+      assumes non-empty.
+   3. `StrictComponentPacketPlans.initWithCoding` requires every resolution to
+      have precincts.
+   4. `subband.appendBand` drops empty bands from the list, which shifts every
+      later band's index — the band list has to keep them so quantization
+      lookup, nominal bitplanes, and code-block enumeration stay aligned.
+   5. T2 packet-header parsing, tag trees, and inverse synthesis then have to
+      skip zero-block bands and zero-size spans deliberately.
+   Steps 1-3 were verified to be the actual next failures in that order; step 4
+   is where the current investigation stopped.
 6. Map the remaining public profiles to manifested decode and malformed cases,
    then run optional assets with `--require-optional` in release evidence.
 

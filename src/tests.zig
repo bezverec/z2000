@@ -26097,6 +26097,49 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "tile-grid origins decode until a resolution collapses" {
+    const allocator = std.testing.allocator;
+    // A tile grid anchored away from the reference-grid origin is fine on its
+    // own: this pair differs only in where the tile grid starts. When it starts
+    // at the image origin, every tile keeps a non-empty region at all three
+    // resolutions and the stream decodes. When it starts elsewhere, the image
+    // is cut into a two-pixel-wide edge column whose lowest resolution is empty
+    // in one axis at two decomposition levels.
+    //
+    // Empty resolutions and empty subbands are legal (ISO B.5/B.6) and both
+    // Kakadu 8.4.1 and OpenJPEG 2.5.4 decode the second stream; Grok 20.3.6
+    // does not. z2000 does not carry empty spans through its packet plan,
+    // subband layout, and synthesis yet, so it fails closed here rather than
+    // guessing. The same geometry decodes at zero and one decomposition level.
+    const aligned = @embedFile("testdata/kakadu-tile-origin-offset-grid.jp2");
+    const collapsing = @embedFile("testdata/kakadu-tile-origin-empty-resolution.jp2");
+
+    const reference_stream = @embedFile("testdata/kakadu-singletile-multipart-inline.jp2");
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(reference_stream),
+        .{},
+    );
+    defer reference.deinit();
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(aligned),
+        .{},
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            try jp2.extractCodestream(collapsing),
+            .{},
+        ),
+    );
+}
+
 test "arithmetic bypass spanning quality layers decodes" {
     const allocator = std.testing.allocator;
     // With BYPASS and no RESTART a terminated codeword segment covers two or
