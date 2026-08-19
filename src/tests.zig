@@ -26097,6 +26097,70 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "inverse 5/3 descends every level past a collapsed span" {
+    const allocator = std.testing.allocator;
+    // The two-pixel-wide corner tile again: x in [33,35), y in [34,37), two
+    // decomposition levels. Its level-2 low-pass span is empty in x, which the
+    // descent used to reject outright. ISO F.3.8 makes 2D_SR a no-op on an
+    // empty region, and the band list and packet plan already carry the level,
+    // so the descent has to reach it too or the three disagree on level
+    // indices.
+    var workspace = try wavelet_int.Workspace.init(allocator, 3);
+    defer workspace.deinit();
+    var data = [_]i32{ 0, 0, 0, 0, 0, 0 };
+
+    const full = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+        &workspace,
+        data[0..],
+        2,
+        3,
+        2,
+        0,
+        33,
+        34,
+    );
+    try std.testing.expectEqual(@as(usize, 2), full.width);
+    try std.testing.expectEqual(@as(usize, 3), full.height);
+    try std.testing.expectEqual(@as(u32, 33), full.x0);
+    try std.testing.expectEqual(@as(u32, 34), full.y0);
+
+    // Reduction 1 is the ordinary intermediate resolution.
+    const reduced_one = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+        &workspace,
+        data[0..],
+        2,
+        3,
+        2,
+        1,
+        33,
+        34,
+    );
+    try std.testing.expectEqual(@as(usize, 1), reduced_one.width);
+    try std.testing.expectEqual(@as(usize, 2), reduced_one.height);
+    try std.testing.expectEqual(@as(u32, 17), reduced_one.x0);
+    try std.testing.expectEqual(@as(u32, 17), reduced_one.y0);
+
+    // Reduction 2 is the collapsed level itself: empty in x, one row tall.
+    const reduced_two = try wavelet_int.inverse53ReducedWithWorkspaceOrigin(
+        &workspace,
+        data[0..],
+        2,
+        3,
+        2,
+        2,
+        33,
+        34,
+    );
+    try std.testing.expectEqual(@as(usize, 0), reduced_two.width);
+    try std.testing.expectEqual(@as(usize, 1), reduced_two.height);
+
+    // A reduction past the signalled level count is still malformed.
+    try std.testing.expectError(
+        wavelet_int.TransformError.InvalidDimensions,
+        wavelet_int.inverse53ReducedWithWorkspaceOrigin(&workspace, data[0..], 2, 3, 2, 3, 33, 34),
+    );
+}
+
 test "packet plans give an empty resolution no precincts" {
     const allocator = std.testing.allocator;
     // ISO B.6: a resolution whose region is empty in either axis has no

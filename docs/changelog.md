@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Inverse 5/3 Descends Every Signalled Level
+
+- Layer four of five in dependency order, and the last one before the gate.
+  The origin-aware inverse 5/3 descent stopped as soon as a low-pass span
+  collapsed, and rejected a zero-size span outright. ISO F.3.8 makes 2D_SR a
+  no-op on an empty region, and the band list and packet plan already carry
+  those levels, so stopping short left all three disagreeing about level
+  indices.
+- Both the plain and the range-checked variants now descend every signalled
+  level and skip an empty region rather than failing on it. Tests pin the
+  descent arithmetic for the corner tile at each reduction — 2x3 at (33,34),
+  1x2 at (17,17), and the collapsed 0x1 — and keep rejecting a reduction past
+  the signalled level count.
+- With the geometry gate opened locally, the whole stream now decodes to the
+  lossless source raster. That gate is layer five and lands next.
+
 ### Component Plans Accept Empty Resolutions
 
 - Layer three of five, and a small one: `StrictComponentPacketPlans` and

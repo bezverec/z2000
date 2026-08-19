@@ -216,11 +216,15 @@ pub fn inverse53ReducedWithWorkspaceOrigin(
     var cur_y0 = y0;
     resolutions[0] = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 };
     var actual_levels: u8 = 0;
-    while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
+    // Every signalled decomposition is descended, even once a low-pass span has
+    // collapsed to nothing: ISO F.3.8 makes 2D_SR a no-op on an empty region
+    // rather than an error, and the subband list and packet plan already carry
+    // those levels, so stopping short here would leave the level indices of the
+    // three disagreeing.
+    while (actual_levels < levels) : (actual_levels += 1) {
         shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
         cur_width = lowCountOrigin(cur_width, cur_x0);
         cur_height = lowCountOrigin(cur_height, cur_y0);
-        if (cur_width == 0 or cur_height == 0) return TransformError.InvalidDimensions;
         cur_x0 = ceilDiv2(cur_x0);
         cur_y0 = ceilDiv2(cur_y0);
         resolutions[@as(usize, actual_levels) + 1] = .{
@@ -240,6 +244,8 @@ pub fn inverse53ReducedWithWorkspaceOrigin(
     while (level > reduction) {
         level -= 1;
         const shape = shapes[level];
+        // An empty region synthesizes to itself (ISO F.3.8).
+        if (shape.width == 0 or shape.height == 0) continue;
 
         // Mirror of the ISO forward order (vertical then horizontal): the
         // inverse runs horizontally first, then vertically (F.3.8 2D_SR).
@@ -302,11 +308,15 @@ pub fn inverse53ReducedCheckedWithWorkspaceOrigin(
     var cur_y0 = y0;
     resolutions[0] = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 };
     var actual_levels: u8 = 0;
-    while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
+    // Every signalled decomposition is descended, even once a low-pass span has
+    // collapsed to nothing: ISO F.3.8 makes 2D_SR a no-op on an empty region
+    // rather than an error, and the subband list and packet plan already carry
+    // those levels, so stopping short here would leave the level indices of the
+    // three disagreeing.
+    while (actual_levels < levels) : (actual_levels += 1) {
         shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
         cur_width = lowCountOrigin(cur_width, cur_x0);
         cur_height = lowCountOrigin(cur_height, cur_y0);
-        if (cur_width == 0 or cur_height == 0) return TransformError.InvalidDimensions;
         cur_x0 = ceilDiv2(cur_x0);
         cur_y0 = ceilDiv2(cur_y0);
         resolutions[@as(usize, actual_levels) + 1] = .{
@@ -324,6 +334,8 @@ pub fn inverse53ReducedCheckedWithWorkspaceOrigin(
     while (level > reduction) {
         level -= 1;
         const shape = shapes[level];
+        // An empty region synthesizes to itself (ISO F.3.8).
+        if (shape.width == 0 or shape.height == 0) continue;
         for (0..shape.height) |row| {
             try inverse53LineOriginChecked(
                 rowSlice(data, width, row, shape.width),
