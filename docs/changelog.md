@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile Counts Past 256
+
+- The JP2 container audit kept its per-tile state in fixed 256-entry arrays and
+  rejected any larger grid outright, so a 32x32 image on a 1x1 tile grid — 1024
+  tiles — was refused as an unsupported profile even though the strict
+  codestream reader decoded the same bytes unwrapped.
+- `parseInfo` and `extractCodestream` now take an allocator, threaded down to
+  the tile-part sequence audit, which allocates its per-tile state. The wrapper
+  bounds tile counts the same way `SOT` does, at 65535. This is a breaking
+  change to two public functions; every other JP2 entry point already took an
+  allocator.
+- The tile-shape sweep that found this now decodes all 120 of its streams, up
+  from 108: the twelve rejections were all the 1x1 grid. A 1024-tile fixture is
+  committed and pins the raster; the geometry checks are unchanged, and a zero
+  tile dimension is still rejected.
+- One bound remains and is deliberate: a stream that also carries `TLM` is
+  still limited to `max_tlm_entries` (4096) tile-parts, which is the tighter
+  constraint only for very large grids.
+
 ### Tile-Shape Sweep: Two Gaps Recorded
 
 - A 120-stream sweep over tile shapes from 1x1 to 13x13, crossed with image

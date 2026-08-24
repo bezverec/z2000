@@ -2539,6 +2539,30 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "0f31fcd18ef3fefca9e5c35f18a068d7d7131fef05cd65a3d18bda61d0b1e74d"
+    },
+    {
+      "id": "kakadu-1024-tile-grid",
+      "path": "src/testdata/kakadu-1024-tile-grid.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "01a35dc44732bdf4251533ce54e32bd9a5a0256d249a48e4cabe8d4457c6c4de",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "one tile per pixel: a 32x32 image on a 1x1 tile grid, so the container audit sees 1024 tiles",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-1024-tile-grid.jp2 Creversible=yes Clevels=1 Clayers=1 Corder=RPCL Cblk={16,16} Stiles={1,1} -quiet"
+      },
+      "oracle": "src/tests.zig decodes it to the lossless source raster; Kakadu 8.4.1 and OpenJPEG 2.5.4 agree",
+      "features": [
+        "tiles-and-tile-parts",
+        "jp2-core-container",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }

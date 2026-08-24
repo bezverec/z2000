@@ -559,7 +559,7 @@ fn wrapCodestream(
     profile: WrapProfile,
     codestream: []const u8,
 ) ![]u8 {
-    try validateCodestreamPayload(codestream, .{
+    try validateCodestreamPayload(allocator, codestream, .{
         .width = profile.width,
         .height = profile.height,
         .components = profile.components,
@@ -652,7 +652,7 @@ fn wrapCodestream(
     return out.toOwnedSlice(allocator);
 }
 
-pub fn parseInfo(bytes: []const u8) !Info {
+pub fn parseInfo(allocator: std.mem.Allocator, bytes: []const u8) !Info {
     var cursor: usize = 0;
     var saw_signature = false;
     var saw_ftyp = false;
@@ -709,7 +709,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
             @intFromEnum(BoxType.contiguous_codestream) => {
                 if (!saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
                 var geometry = CodestreamGeometry{};
-                try validateCodestreamPayload(box.payload, .{
+                try validateCodestreamPayload(allocator, box.payload, .{
                     .width = info.width,
                     .height = info.height,
                     .components = info.components,
@@ -752,8 +752,8 @@ pub fn parseInfo(bytes: []const u8) !Info {
     return info;
 }
 
-pub fn extractCodestream(bytes: []const u8) ![]const u8 {
-    _ = try parseInfo(bytes);
+pub fn extractCodestream(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    _ = try parseInfo(allocator, bytes);
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, true);
@@ -772,7 +772,7 @@ pub fn attachMetadata(
     bytes: []const u8,
     metadata: Metadata,
 ) ![]u8 {
-    _ = try parseInfo(bytes);
+    _ = try parseInfo(allocator, bytes);
     try validateMetadata(metadata);
     if (metadata.exif == null and metadata.xmp == null and metadata.iptc == null) {
         return allocator.dupe(u8, bytes);
@@ -801,7 +801,7 @@ pub fn attachMetadata(
     try out.appendSlice(allocator, bytes[insert_offset..]);
     const result = try out.toOwnedSlice(allocator);
     errdefer allocator.free(result);
-    _ = try parseInfo(result);
+    _ = try parseInfo(allocator, result);
     return result;
 }
 
@@ -809,7 +809,7 @@ pub fn attachMetadata(
 /// Both established EXIF UUIDs and both deployed IPTC UUIDs are accepted, but
 /// multiple boxes for one metadata family are ambiguous and fail closed.
 pub fn extractMetadata(allocator: std.mem.Allocator, bytes: []const u8) !OwnedMetadata {
-    _ = try parseInfo(bytes);
+    _ = try parseInfo(allocator, bytes);
     var result = OwnedMetadata{ .allocator = allocator };
     errdefer result.deinit();
     var cursor: usize = 0;
@@ -920,7 +920,7 @@ fn validateIptc(bytes: []const u8) !void {
 }
 
 pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
-    const info = try parseInfo(bytes);
+    const info = try parseInfo(allocator, bytes);
     if (!info.has_icc_profile) return null;
 
     var cursor: usize = 0;
@@ -938,7 +938,7 @@ pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8
 }
 
 pub fn extractPalette(allocator: std.mem.Allocator, bytes: []const u8) !?Palette {
-    const info = try parseInfo(bytes);
+    const info = try parseInfo(allocator, bytes);
     if (!info.has_palette) return null;
 
     var cursor: usize = 0;
@@ -1496,6 +1496,7 @@ fn validateFileTypeBox(payload: []const u8) !void {
 }
 
 fn validateCodestreamPayload(
+    allocator: std.mem.Allocator,
     payload: []const u8,
     expected: CodestreamShape,
     geometry_out: ?*CodestreamGeometry,
@@ -1544,9 +1545,11 @@ fn validateCodestreamPayload(
     const tile_columns = (@as(u64, xsiz - xtosiz) + xtsiz - 1) / xtsiz;
     const tile_rows = (@as(u64, ysiz - ytosiz) + ytsiz - 1) / ytsiz;
     const tile_count_u64 = tile_columns * tile_rows;
-    // The tile-part walker tracks up to 256 TLM entries; larger grids stay
-    // unsupported in the wrapper profile until the walker is generalized.
-    if (tile_count_u64 == 0 or tile_count_u64 > 256) return Jp2Error.UnsupportedProfile;
+    // The strict codestream reader bounds tile counts by the u16 the SOT
+    // marker can express; the wrapper audit now allocates its per-tile state
+    // instead of holding it in fixed arrays, so it bounds them the same way.
+    // A stream that also carries TLM stays limited by `max_tlm_entries`.
+    if (tile_count_u64 == 0 or tile_count_u64 > std.math.maxInt(u16)) return Jp2Error.UnsupportedProfile;
     const tile_count: u32 = @intCast(tile_count_u64);
     if (width != expected.width or
         height != expected.height or
@@ -1585,10 +1588,11 @@ fn validateCodestreamPayload(
             geometry.yrsiz[component_index] = yrsiz;
         }
     }
-    try validateMainHeaderMarkers(payload, segment_end, tile_count, components, expected.bits_per_component == 0, rsiz);
+    try validateMainHeaderMarkers(allocator, payload, segment_end, tile_count, components, expected.bits_per_component == 0, rsiz);
 }
 
 fn validateMainHeaderMarkers(
+    allocator: std.mem.Allocator,
     payload: []const u8,
     cursor_after_siz: usize,
     tile_count: u32,
@@ -1631,7 +1635,7 @@ fn validateMainHeaderMarkers(
                 if (tile_count == 1) {
                     try validateTilePartSequence(payload, cursor, effective_cod, components, if (tlm_state.saw) &tlm_state else null, ppm_state.saw);
                 } else {
-                    try validateMultiTileTilePartSequence(payload, cursor, effective_cod, components, if (tlm_state.saw) &tlm_state else null, tile_count, ppm_state.saw);
+                    try validateMultiTileTilePartSequence(allocator, payload, cursor, effective_cod, components, if (tlm_state.saw) &tlm_state else null, tile_count, ppm_state.saw);
                 }
                 return;
             },
@@ -1766,6 +1770,7 @@ fn validateTilePartSequence(
 /// tile order (Kakadu writes some small grids as 0,1,3,2). Resolution-divided
 /// tiles carry exactly NL+1 consecutive parts with TPsot increasing from zero.
 fn validateMultiTileTilePartSequence(
+    allocator: std.mem.Allocator,
     payload: []const u8,
     first_sot_offset: usize,
     cod: CodSegmentInfo,
@@ -1774,17 +1779,31 @@ fn validateMultiTileTilePartSequence(
     tile_count: u32,
     has_ppm: bool,
 ) !void {
-    if (tile_count > 256) return Jp2Error.UnsupportedProfile;
-    var next_parts = [_]u8{0} ** 256;
-    var expected_parts = [_]u8{0} ** 256;
-    var completed_tiles = [_]bool{false} ** 256;
-    var packet_sequences = [_]u16{0} ** 256;
-    var ppt_states = [_]PptState{.{}} ** 256;
+    if (tile_count == 0 or tile_count > std.math.maxInt(u16)) return Jp2Error.UnsupportedProfile;
+    // Per-tile audit state is allocated rather than held in fixed arrays, so a
+    // grid is bounded only by what SOT can address.
+    const next_parts = try allocator.alloc(u8, tile_count);
+    defer allocator.free(next_parts);
+    @memset(next_parts, 0);
+    const expected_parts = try allocator.alloc(u8, tile_count);
+    defer allocator.free(expected_parts);
+    @memset(expected_parts, 0);
+    const completed_tiles = try allocator.alloc(bool, tile_count);
+    defer allocator.free(completed_tiles);
+    @memset(completed_tiles, false);
+    const packet_sequences = try allocator.alloc(u16, tile_count);
+    defer allocator.free(packet_sequences);
+    @memset(packet_sequences, 0);
+    const ppt_states = try allocator.alloc(PptState, tile_count);
+    defer allocator.free(ppt_states);
+    @memset(ppt_states, .{});
     // Grok writes one PLT in a tile's first part covering the whole tile, while
     // Kakadu and OpenJPEG write one per part covering only that part. Both are
     // accepted: bytes a PLT describes beyond its own part are carried to the
     // tile's later parts, which must then carry no PLT of their own.
-    var plt_carry = [_]usize{0} ** 256;
+    const plt_carry = try allocator.alloc(usize, tile_count);
+    defer allocator.free(plt_carry);
+    @memset(plt_carry, 0);
     var cursor = first_sot_offset;
     var sequence_index: u32 = 0;
     while (cursor < payload.len - 2) {

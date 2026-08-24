@@ -380,8 +380,8 @@ fn runEntry(
 
     const extracted = switch (entry.format) {
         .jp2 => blk: {
-            _ = jp2.parseInfo(bytes) catch |err| return reportEarlyError(entry, err);
-            break :blk jp2.extractCodestream(bytes) catch |err| {
+            _ = jp2.parseInfo(allocator, bytes) catch |err| return reportEarlyError(entry, err);
+            break :blk jp2.extractCodestream(allocator, bytes) catch |err| {
                 return reportEarlyError(entry, err);
             };
         },

@@ -47,8 +47,8 @@ pub fn jp2ToTiff(
 ) !Result {
     var command_timings = Timings{};
     const extract_start = clock.monotonicNs();
-    const info = try jp2.parseInfo(bytes);
-    const j2k = try jp2.extractCodestream(bytes);
+    const info = try jp2.parseInfo(allocator, bytes);
+    const j2k = try jp2.extractCodestream(allocator, bytes);
     command_timings.codestream_extract_ns = clock.elapsedNs(extract_start);
     if (convert_to_srgb) {
         if (info.color_space != .restricted_icc or info.components != 3 or info.has_palette) {

@@ -367,16 +367,11 @@ The active G0/G4 corpus expansion is:
    sums exactly to its own SOD body.
 5a. Two gaps found by a 120-stream tile-shape sweep, both independent of the
    empty-resolution work:
-   - **The JP2 audit caps tile counts at 256.** `validateMultiTileTilePartSequence`
-     keeps six fixed 256-entry arrays, and `validateCodestreamPayload` rejects
-     larger grids outright, so a 32x32 image tiled 1x1 is refused as an
-     unsupported profile. The strict codestream reader already handles it — the
-     same stream as a raw codestream decodes — so only the wrapper is in the
-     way. Lifting it is a design choice, not a bug fix: thread an allocator
-     through `parseInfo`/`extractCodestream` (clean, but ~300 call sites in
-     tests), raise the fixed bound (cheap, arbitrary), or skip the deep
-     tile-part audit above the bound and let the strict reader carry it
-     (cheap, weakens container-level fail-closed).
+   - ~~The JP2 audit caps tile counts at 256.~~ **Done.** `parseInfo` and
+     `extractCodestream` now take an allocator and the tile-part sequence audit
+     allocates its per-tile state, so the wrapper bounds tile counts at 65535
+     like `SOT` does. A stream that also carries `TLM` remains limited to
+     `max_tlm_entries` (4096) tile-parts.
    - **Irreversible 9/7 drifts on small-by-small tiles**, to 2-3 LSB where
      Kakadu and OpenJPEG hold one. Diffuse rather than structural: 5 samples of
      3072 exceed one LSB at 2x3 tiles. Likely precision in the mirrored

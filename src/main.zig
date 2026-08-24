@@ -775,7 +775,7 @@ fn jp2InfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []cons
     );
     defer allocator.free(bytes);
 
-    const info = try jp2.parseInfo(bytes);
+    const info = try jp2.parseInfo(allocator, bytes);
     std.debug.print(
         "JP2: {s}: {}x{}, {} codestream component{s}, {} output component{s}",
         .{
@@ -872,7 +872,7 @@ fn jp2StatsCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
     );
     defer allocator.free(bytes);
 
-    const j2k = try jp2.extractCodestream(bytes);
+    const j2k = try jp2.extractCodestream(allocator, bytes);
     const stats = try codestream.analyzeLosslessTemporaryWithOptions(j2k, options);
     printTemporaryStats(args[0], stats);
 }

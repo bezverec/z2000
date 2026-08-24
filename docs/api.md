@@ -786,8 +786,8 @@ Primary public functions:
 - `wrapPlanarCodestream(allocator, planes, icc, codestream)`
 - `wrapPlanarAlphaCodestream(allocator, planes, alpha_mode, icc, codestream)`
 - `wrapPaletteCodestream(allocator, indexed, palette, codestream)`
-- `parseInfo(bytes)`
-- `extractCodestream(bytes)`
+- `parseInfo(allocator, bytes)`
+- `extractCodestream(allocator, bytes)`
 - `extractIccProfile(allocator, bytes)`
 - `extractPalette(allocator, bytes)`
 
