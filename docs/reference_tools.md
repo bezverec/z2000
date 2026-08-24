@@ -95,10 +95,31 @@ one through strict decode. The value is in the misses, so the misses are named.
 | Image origin x tile-grid origin x 0..2 decomposition levels | 15 | One miss, and only at two levels: an edge tile whose lowest resolution collapses. Tile-grid origins themselves were never the problem. |
 | Collapsed geometry x reversible/irreversible x MCT/no MCT x 2..4 levels x subsampled | 14 | Reversible passed everywhere; irreversible 9/7 failed with `InvalidDimensions`. Fixing the descent alone made it decode at a peak error of 81 LSB — the second, larger defect was a one-sample odd-origin span left unhalved. |
 | Tile width 2..32 x 1..3 decomposition levels, irreversible 9/7 at the reference-grid origin | 27 | All within one LSB after both float-synthesis fixes; before them, every width that puts a tile at an odd column was rejected at two or more levels. No tile-grid origin offset needed to reach the defect. |
+| Tile shapes 1x1 .. 13x13 x image origin 0 and (3,7) x both transforms x 1..3 levels | 120 | 95 exact or within one LSB. Two findings, both open: 1x1 tiles are rejected by the JP2 container's 256-tile bound, and irreversible 9/7 drifts to 2-3 LSB when *both* tile dimensions are small. |
+| Tile height 2..32 x width 2..32, irreversible 9/7, one level | 49 | Peak error is one LSB everywhere except the small-by-small corner: 2 LSB for tiles up to about 4x5 and 3 LSB at 2x3. |
 
 The recurring pattern across all of them: **a gate is narrow only until something
 other than our own encoder writes to it.** Of the boundaries probed, most opened
 cleanly once an oracle confirmed the stream was sound.
+
+## Known Divergences From The References
+
+Measured gaps where z2000 is outside the reference-versus-reference spread, kept
+here so they are not rediscovered as new.
+
+- **Small-by-small tiles in irreversible 9/7.** When both tile dimensions are
+  small the reconstruction drifts past the one-LSB band the references hold to
+  each other: 2 LSB for tiles up to roughly 4x5, and 3 LSB at 2x3. The
+  distribution is diffuse rather than structural — on a 2x3 tiling of the 32x32
+  fixture, 5 samples of 3072 exceed one LSB (four at 2, one at 3), while 664
+  differ by exactly one against Kakadu, where Kakadu and OpenJPEG differ from
+  each other on 163. Both references stay at one LSB throughout, so this is
+  z2000 losing more precision in the mirrored boundary terms, not reference
+  spread. Long spans in either axis are unaffected.
+- **Tile counts above 256.** The JP2 container audit tracks per-tile state in
+  fixed 256-entry arrays and rejects larger grids with `UnsupportedProfile`,
+  so a 32x32 image tiled 1x1 (1024 tiles) is refused. The strict codestream
+  reader has no such bound: the same stream as a raw codestream decodes.
 
 ## Methodological Cautions
 

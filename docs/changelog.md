@@ -5,6 +5,32 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile-Shape Sweep: Two Gaps Recorded
+
+- A 120-stream sweep over tile shapes from 1x1 to 13x13, crossed with image
+  origin 0 and (3,7), both transforms, and one to three decomposition levels,
+  plus a 49-stream height-by-width map of irreversible 9/7. 95 of the 120 are
+  exact or within one LSB. The two misses are recorded rather than fixed,
+  because one of them is a design choice and the other is a precision question
+  rather than a defect.
+- **The JP2 container audit caps tile counts at 256**, so a 32x32 image tiled
+  1x1 (1024 tiles) is refused as an unsupported profile. The strict codestream
+  reader has no such bound — the same stream as a raw codestream decodes
+  cleanly, so only the wrapper is in the way. Lifting it means choosing between
+  threading an allocator through `parseInfo`/`extractCodestream` (clean, about
+  300 call sites in tests), raising the fixed bound, or skipping the deep
+  tile-part audit above the bound and letting the strict reader carry it.
+- **Irreversible 9/7 drifts to 2-3 LSB when both tile dimensions are small**,
+  where Kakadu 8.4.1 and OpenJPEG 2.5.4 hold to one LSB against each other. The
+  difference is diffuse, not structural: on a 2x3 tiling, 5 samples of 3072
+  exceed one LSB (four at 2, one at 3), while 664 differ by exactly one against
+  Kakadu where the two references differ on 163. Long spans in either axis are
+  unaffected, so this is precision in the mirrored boundary terms rather than a
+  wrong rule.
+- Both are written up in [`reference_tools.md`](reference_tools.md) under a new
+  "Known Divergences From The References" section, so they are not rediscovered
+  as new findings later.
+
 ### Irreversible 9/7 Short And Collapsed Spans
 
 - Two defects in the float synthesis, found while extending the empty-resolution

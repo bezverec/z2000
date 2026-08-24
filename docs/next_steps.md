@@ -365,6 +365,23 @@ The active G0/G4 corpus expansion is:
    tile writes 27 tile-parts that Kakadu's own `kdu_expand` refuses to read,
    while OpenJPEG, Grok, and z2000 reconstruct the raster and every part's PLT
    sums exactly to its own SOD body.
+5a. Two gaps found by a 120-stream tile-shape sweep, both independent of the
+   empty-resolution work:
+   - **The JP2 audit caps tile counts at 256.** `validateMultiTileTilePartSequence`
+     keeps six fixed 256-entry arrays, and `validateCodestreamPayload` rejects
+     larger grids outright, so a 32x32 image tiled 1x1 is refused as an
+     unsupported profile. The strict codestream reader already handles it — the
+     same stream as a raw codestream decodes — so only the wrapper is in the
+     way. Lifting it is a design choice, not a bug fix: thread an allocator
+     through `parseInfo`/`extractCodestream` (clean, but ~300 call sites in
+     tests), raise the fixed bound (cheap, arbitrary), or skip the deep
+     tile-part audit above the bound and let the strict reader carry it
+     (cheap, weakens container-level fail-closed).
+   - **Irreversible 9/7 drifts on small-by-small tiles**, to 2-3 LSB where
+     Kakadu and OpenJPEG hold one. Diffuse rather than structural: 5 samples of
+     3072 exceed one LSB at 2x3 tiles. Likely precision in the mirrored
+     boundary terms, which dominate when nearly every sample is a boundary
+     sample.
 5. Empty resolutions and empty subbands (ISO B.5/B.6) are carried through
    decode. A tile grid anchored away from the image origin can leave a narrow
    edge tile whose deepest resolutions are empty in one axis — `Sorigin={3,5}
