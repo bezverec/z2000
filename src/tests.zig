@@ -26097,6 +26097,56 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "irreversible 9/7 reconstructs one-sample and collapsed spans" {
+    const allocator = std.testing.allocator;
+    // Two defects in the float synthesis, both invisible until a span got
+    // short. The descent stopped as soon as a low-pass span collapsed, exactly
+    // as the reversible path used to; and a one-sample span at an odd origin
+    // was passed through unchanged instead of halved, which ISO F.3.7 requires
+    // because that lone sample is a high-pass coefficient.
+    //
+    // Neither needs a tile-grid origin offset to reach: three-sample-wide tiles
+    // on an ordinary grid put every tile that starts at an odd column into both
+    // cases at two decomposition levels.
+    // A one-sample span at an odd origin is halved; at an even origin it is
+    // passed through. Exercised through the public 2D entry point with a single
+    // row so the 1D rule is what is being pinned.
+    {
+        var row = [_]f32{40.0};
+        _ = try wavelet.inverse2DReducedOrigin(allocator, row[0..], 1, 1, 1, 0, .irreversible_9_7, 5, 0);
+        try std.testing.expectEqual(@as(f32, 20.0), row[0]);
+    }
+    {
+        var row = [_]f32{40.0};
+        _ = try wavelet.inverse2DReducedOrigin(allocator, row[0..], 1, 1, 1, 0, .irreversible_9_7, 4, 0);
+        try std.testing.expectEqual(@as(f32, 40.0), row[0]);
+    }
+
+    // A three-wide region at an odd origin collapses to an empty low-pass span
+    // at two levels; the descent reaches that level instead of erroring.
+    {
+        var region = [_]f32{ 0.0, 0.0, 0.0 };
+        const shape = try wavelet.inverse2DReducedOrigin(allocator, region[0..], 3, 1, 2, 2, .irreversible_9_7, 9, 0);
+        try std.testing.expectEqual(@as(usize, 0), shape.width);
+    }
+
+    // End to end: both committed 9/7 fixtures decode. They are lossy, so the
+    // corpus pins the hash and records the measured one-LSB spread against
+    // Kakadu 8.4.1 and OpenJPEG 2.5.4.
+    const narrow = @embedFile("testdata/kakadu-97-narrow-tiles.jp2");
+    const collapsing = @embedFile("testdata/kakadu-97-tile-origin-empty-resolution.jp2");
+    for ([_][]const u8{ narrow, collapsing }) |stream| {
+        var decoded = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            try jp2.extractCodestream(stream),
+            .{},
+        );
+        defer decoded.deinit();
+        try std.testing.expectEqual(@as(usize, 32), decoded.width);
+        try std.testing.expectEqual(@as(usize, 32), decoded.height);
+    }
+}
+
 test "inverse 5/3 descends every level past a collapsed span" {
     const allocator = std.testing.allocator;
     // The two-pixel-wide corner tile again: x in [33,35), y in [34,37), two

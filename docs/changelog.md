@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Irreversible 9/7 Short And Collapsed Spans
+
+- Two defects in the float synthesis, found while extending the empty-resolution
+  work to 9/7 and both larger than that work: they need no tile-grid origin
+  offset at all. `Stiles={32,3}` on an ordinary grid puts every tile that starts
+  at an odd column into both cases at two decomposition levels, and Kakadu
+  8.4.1 decodes those streams fine.
+  1. **The descent stopped at a collapse**, exactly as the reversible path used
+     to, rejecting the stream with `InvalidDimensions`. It now descends every
+     signalled level and treats an empty region as a no-op (ISO F.3.8).
+  2. **A one-sample span at an odd origin was passed through unchanged**
+     instead of halved. That lone sample is a high-pass coefficient, and ISO
+     F.3.7 gives it `X(i0) = Y(i0)/2`; the reversible path already did this.
+- The second one was caught by measurement, not by the first fix landing:
+  relaxing the descent alone made the streams decode with a peak error of 81
+  LSB against Kakadu, where Kakadu and OpenJPEG agree to within one. Committing
+  that would have traded a clean rejection for silently wrong pixels. With both
+  fixes the whole 27-stream tile-width/level sweep is within one LSB.
+- Two fixtures are committed, both lossy, so their hashes pin z2000's own
+  deterministic output and their oracles record the measured spread: on the
+  narrow-tile stream z2000 differs from Kakadu on 198 of 3072 samples and from
+  OpenJPEG on 9, while Kakadu and OpenJPEG differ from each other on 198 — all
+  at one LSB.
+
 ### Reference Tool Behaviour Collected In One Place
 
 - Observations about Kakadu, OpenJPEG, and Grok had accumulated one sentence at

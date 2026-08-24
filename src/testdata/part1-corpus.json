@@ -2493,6 +2493,52 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-97-narrow-tiles",
+      "path": "src/testdata/kakadu-97-narrow-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "4d58cbf1888a14221aba39d2882d6f9b054b78998dd697a9c09eba1fbe9012e1",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "irreversible 9/7 over three-sample-wide tiles at the reference-grid origin: every tile starting at an odd column has a one-sample low-pass span at one level and an empty one at two, with no tile-grid origin offset involved",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-97-narrow-tiles.jp2 Creversible=no Clevels=2 Clayers=1 Corder=RPCL Cblk={16,16} Stiles={32,3} -quiet"
+      },
+      "oracle": "lossy, so the hash pins z2000's own deterministic output; the peak error against both references is one LSB, z2000 differs from Kakadu 8.4.1 on 198 of 3072 samples and from OpenJPEG 2.5.4 on 9, while Kakadu and OpenJPEG differ from each other on 198; 1/8-thread output is identical",
+      "features": [
+        "tiles-and-tile-parts",
+        "irreversible-97"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "637e9cb004b3e1ceb820dcfbb108a81b4d1b8cf86b8ee025968d43eaabe311bf"
+    },
+    {
+      "id": "kakadu-97-tile-origin-empty-resolution",
+      "path": "src/testdata/kakadu-97-tile-origin-empty-resolution.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "b5ffa95de8297a282b4ce5cd3ac68d59e0245c5ff670af1ef34448c69a1df237",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "the irreversible twin of kakadu-tile-origin-empty-resolution: a tile grid anchored away from the image origin leaving a two-pixel-wide edge column whose lowest resolution is empty in one axis",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-97-tile-origin-empty-resolution.jp2 Creversible=no Clevels=2 Clayers=1 Corder=RPCL Cblk={16,16} Sorigin={3,5} Stile_origin={1,2} Stiles={16,16} -quiet"
+      },
+      "oracle": "lossy, so the hash pins z2000's own deterministic output; the peak error against both references is one LSB, z2000 differs from Kakadu 8.4.1 on 178 of 3072 samples and from OpenJPEG 2.5.4 on 19, while Kakadu and OpenJPEG differ from each other on 176; 1/8-thread output is identical",
+      "features": [
+        "tiles-and-tile-parts",
+        "irreversible-97"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "0f31fcd18ef3fefca9e5c35f18a068d7d7131fef05cd65a3d18bda61d0b1e74d"
     }
   ]
 }

@@ -161,11 +161,14 @@ pub fn inverse2DReducedOrigin(
     var cur_y0 = y0;
     resolutions[0] = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 };
     var actual_levels: u8 = 0;
-    while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
+    // Every signalled decomposition is descended, even once a low-pass span has
+    // collapsed to nothing: ISO F.3.8 makes 2D_SR a no-op on an empty region,
+    // and the subband list and packet plan already carry those levels. Mirrors
+    // the reversible path in `wavelet_int.zig`.
+    while (actual_levels < levels) : (actual_levels += 1) {
         shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
         cur_width = lowCountOrigin(cur_width, cur_x0);
         cur_height = lowCountOrigin(cur_height, cur_y0);
-        if (cur_width == 0 or cur_height == 0) return TransformError.InvalidDimensions;
         cur_x0 = ceilDiv2(cur_x0);
         cur_y0 = ceilDiv2(cur_y0);
         resolutions[@as(usize, actual_levels) + 1] = .{
@@ -193,6 +196,8 @@ pub fn inverse2DReducedOrigin(
     while (level > reduction) {
         level -= 1;
         const shape = shapes[level];
+        // An empty region synthesizes to itself (ISO F.3.8).
+        if (shape.width == 0 or shape.height == 0) continue;
 
         // Mirror of the ISO forward order: horizontal first, then vertical.
         for (0..shape.height) |row| {
@@ -235,7 +240,14 @@ fn forward1DOrigin(data: []f32, scratch: []f32, wavelet: Wavelet, origin: u32) v
 }
 
 fn inverse1DOrigin(data: []f32, scratch: []f32, wavelet: Wavelet, origin: u32) void {
-    if (data.len < 2) return;
+    if (data.len == 0) return;
+    if (data.len == 1) {
+        // ISO F.3.7: a one-sample span holds a single high-pass coefficient
+        // when its origin is odd, and is passed through when it is even.
+        if ((origin & 1) == 1) data[0] = data[0] / 2.0;
+        return;
+    }
+
     switch (wavelet) {
         .reversible_5_3 => if ((origin & 1) == 0) inverse53(data, scratch) else inverse53OddOrigin(data, scratch),
         .irreversible_9_7 => if ((origin & 1) == 0) inverse97(data, scratch) else inverse97OddOrigin(data, scratch),
@@ -1020,13 +1032,11 @@ pub fn inverse97Parallel(
     var cur_x0 = x0;
     var cur_y0 = y0;
     var actual_levels: u8 = 0;
-    while (actual_levels < levels and (cur_width > 1 or cur_height > 1)) : (actual_levels += 1) {
-        const next_width = lowCountOrigin(cur_width, cur_x0);
-        const next_height = lowCountOrigin(cur_height, cur_y0);
-        if (next_width == 0 or next_height == 0) break;
+    // See `inverse2DReducedOrigin`: every signalled level is descended.
+    while (actual_levels < levels) : (actual_levels += 1) {
         shapes[actual_levels] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
-        cur_width = next_width;
-        cur_height = next_height;
+        cur_width = lowCountOrigin(cur_width, cur_x0);
+        cur_height = lowCountOrigin(cur_height, cur_y0);
         cur_x0 = ceilDiv2(cur_x0);
         cur_y0 = ceilDiv2(cur_y0);
     }
@@ -1035,6 +1045,8 @@ pub fn inverse97Parallel(
     while (level > 0) {
         level -= 1;
         const shape = shapes[level];
+        // An empty region synthesizes to itself (ISO F.3.8).
+        if (shape.width == 0 or shape.height == 0) continue;
         // Mirror of the ISO forward order: horizontal first, then vertical.
         runDwt97Phase(&pool, planes, width, shape.width, shape.height, shape.x0, shape.y0, scratches, pack_len, max_dim, .inverse_rows);
         runDwt97Phase(&pool, planes, width, shape.width, shape.height, shape.x0, shape.y0, scratches, pack_len, max_dim, .inverse_columns);

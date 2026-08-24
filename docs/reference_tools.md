@@ -93,7 +93,8 @@ one through strict decode. The value is in the misses, so the misses are named.
 | `Cmodes` bits x tile-part divisions | 24 | `BYPASS` failed at every division; `RESTART` masked it. Led to the two bypass defects below. |
 | Arithmetic bypass: mode combinations x block sizes x 1..8 layers x reversible/irreversible x tiled/untiled, from all three producers | 40+ | Two defects: a terminated codeword segment spanning a quality layer, and blocks truncated by rate allocation. |
 | Image origin x tile-grid origin x 0..2 decomposition levels | 15 | One miss, and only at two levels: an edge tile whose lowest resolution collapses. Tile-grid origins themselves were never the problem. |
-| Collapsed geometry x reversible/irreversible x MCT/no MCT x 2..4 levels x subsampled | 14 | Reversible passes everywhere. Irreversible 9/7 fails with `InvalidDimensions` — the float synthesis still needs the descent change the 5/3 path received. |
+| Collapsed geometry x reversible/irreversible x MCT/no MCT x 2..4 levels x subsampled | 14 | Reversible passed everywhere; irreversible 9/7 failed with `InvalidDimensions`. Fixing the descent alone made it decode at a peak error of 81 LSB — the second, larger defect was a one-sample odd-origin span left unhalved. |
+| Tile width 2..32 x 1..3 decomposition levels, irreversible 9/7 at the reference-grid origin | 27 | All within one LSB after both float-synthesis fixes; before them, every width that puts a tile at an odd column was rejected at two or more levels. No tile-grid origin offset needed to reach the defect. |
 
 The recurring pattern across all of them: **a gate is narrow only until something
 other than our own encoder writes to it.** Of the boundaries probed, most opened
@@ -109,6 +110,11 @@ cleanly once an oracle confirmed the stream was sound.
   sets `BYPASS`, but it also sets `RESTART` and is lossless — so it never
   produced a multi-pass codeword segment and never truncated a block, and both
   bypass defects survived it for months.
+- **A relaxed gate is not a fix.** Opening the irreversible 9/7 descent made
+  previously rejected streams decode at a peak error of 81 LSB, where the two
+  references agree to within one. Committing that would have traded a clean
+  rejection for silently wrong pixels. Measure against a reference before
+  treating "it decodes now" as progress.
 - **Check the tool's own reader.** Two of the findings above are a producer
   disagreeing with itself; neither would have surfaced from cross-checking
   different vendors alone.
