@@ -261,18 +261,22 @@ const CodSegmentInfo = struct {
     eph: bool,
 };
 
-// Multi-part tiles multiply the tile-part count (e.g. Kakadu pads every tile
-// to a fixed TNsot), so the TLM capacity is tile-part-count sized rather than
-// tile-count sized. 4096 covers 256 tiles x 16 parts with headroom while
-// keeping the parser state a fixed-size stack value.
-const max_tlm_entries = 4096;
-
+// TLM entries are tile-part sized, and multi-part tiles multiply them (Kakadu
+// pads every tile to a fixed TNsot, so a 1024-tile grid with five resolution
+// parts already carries 5120). The entries are therefore collected into
+// allocated lists rather than a fixed-capacity array.
 const TlmState = struct {
     next_segment_index: u16 = 0,
-    lengths: [max_tlm_entries]u32 = [_]u32{0} ** max_tlm_entries,
-    tile_indices: [max_tlm_entries]u16 = [_]u16{0} ** max_tlm_entries,
-    count: u16 = 0,
+    lengths: std.ArrayList(u32) = .empty,
+    tile_indices: std.ArrayList(u16) = .empty,
+    count: usize = 0,
     saw: bool = false,
+
+    fn deinit(self: *TlmState, allocator: std.mem.Allocator) void {
+        self.lengths.deinit(allocator);
+        self.tile_indices.deinit(allocator);
+        self.* = .{};
+    }
 };
 
 const PltState = struct {
@@ -1548,7 +1552,6 @@ fn validateCodestreamPayload(
     // The strict codestream reader bounds tile counts by the u16 the SOT
     // marker can express; the wrapper audit now allocates its per-tile state
     // instead of holding it in fixed arrays, so it bounds them the same way.
-    // A stream that also carries TLM stays limited by `max_tlm_entries`.
     if (tile_count_u64 == 0 or tile_count_u64 > std.math.maxInt(u16)) return Jp2Error.UnsupportedProfile;
     const tile_count: u32 = @intCast(tile_count_u64);
     if (width != expected.width or
@@ -1606,6 +1609,7 @@ fn validateMainHeaderMarkers(
     var saw_qcd = false;
     var qcd_payload: []const u8 = &.{};
     var tlm_state = TlmState{};
+    defer tlm_state.deinit(allocator);
     var ppm_state = PpmState{};
     var expected_plm_index: u16 = 0;
     var override_state = ComponentOverrideState{};
@@ -1712,7 +1716,7 @@ fn validateMainHeaderMarkers(
                 }
                 expected_plm_index += 1;
             },
-            else => try validateMainHeaderMarkerSegment(payload, marker, length_offset, marker_length, &tlm_state, &ppm_state, cod_info, components),
+            else => try validateMainHeaderMarkerSegment(allocator, payload, marker, length_offset, marker_length, &tlm_state, &ppm_state, cod_info, components),
         }
         cursor = next;
     }
@@ -1747,8 +1751,8 @@ fn validateTilePartSequence(
         if (try readU16Be(payload, cursor) != marker_sot) return Jp2Error.InvalidCodestream;
         const expected_psot = if (tlm_state) |state| blk: {
             if (expected_tile_part_index >= state.count) return Jp2Error.InvalidCodestream;
-            if (state.tile_indices[expected_tile_part_index] != 0) return Jp2Error.InvalidCodestream;
-            break :blk state.lengths[expected_tile_part_index];
+            if (state.tile_indices.items[expected_tile_part_index] != 0) return Jp2Error.InvalidCodestream;
+            break :blk state.lengths.items[expected_tile_part_index];
         } else null;
         cursor = try validateSotSegment(payload, cursor, expected_tile_part_index, expected_psot, cod, components, &packet_sequence, &tile_part_count, &ppt_state, has_ppm);
         expected_tile_part_index = std.math.add(u8, expected_tile_part_index, 1) catch return Jp2Error.InvalidCodestream;
@@ -1837,8 +1841,8 @@ fn validateMultiTileTilePartSequence(
         if (tile_part_length == 0) return Jp2Error.UnsupportedProfile;
         if (tlm_state) |state| {
             if (sequence_index >= state.count) return Jp2Error.InvalidCodestream;
-            if (state.tile_indices[sequence_index] != sot_tile_index) return Jp2Error.InvalidCodestream;
-            if (state.lengths[sequence_index] != tile_part_length) return Jp2Error.InvalidCodestream;
+            if (state.tile_indices.items[sequence_index] != sot_tile_index) return Jp2Error.InvalidCodestream;
+            if (state.lengths.items[sequence_index] != tile_part_length) return Jp2Error.InvalidCodestream;
         }
         const tile_part_end = std.math.add(usize, cursor, tile_part_length) catch return Jp2Error.InvalidCodestream;
         if (tile_part_end > payload.len - 2) return Jp2Error.InvalidCodestream;
@@ -2031,6 +2035,7 @@ fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
 }
 
 fn validateMainHeaderMarkerSegment(
+    allocator: std.mem.Allocator,
     payload: []const u8,
     marker: u16,
     length_offset: usize,
@@ -2041,7 +2046,7 @@ fn validateMainHeaderMarkerSegment(
     components: u16,
 ) !void {
     switch (marker) {
-        marker_tlm => try validateTlmSegment(payload, length_offset, marker_length, tlm_state),
+        marker_tlm => try validateTlmSegment(allocator, payload, length_offset, marker_length, tlm_state),
         marker_ppm => {
             if (ppm_state.expected_segment_index > std.math.maxInt(u8) or
                 payload[length_offset + 2] != @as(u8, @intCast(ppm_state.expected_segment_index)))
@@ -2348,15 +2353,22 @@ fn reversibleQcdExponentByte(bit_depth: u8, kind: SubbandKind) !u8 {
     return exponent << 3;
 }
 
-fn validateTlmSegment(payload: []const u8, length_offset: usize, marker_length: u16, state: *TlmState) !void {
+fn validateTlmSegment(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    length_offset: usize,
+    marker_length: u16,
+    state: *TlmState,
+) !void {
     const segment_payload = payload[length_offset + 2 .. length_offset + @as(usize, marker_length)];
     const parsed = tlm.parse(segment_payload, state.next_segment_index, state.count) catch
         return Jp2Error.InvalidCodestream;
-    if (parsed.count > state.lengths.len - state.count) return Jp2Error.UnsupportedProfile;
+    try state.tile_indices.ensureUnusedCapacity(allocator, parsed.count);
+    try state.lengths.ensureUnusedCapacity(allocator, parsed.count);
     for (0..parsed.count) |index| {
         const entry = parsed.entry(index) catch return Jp2Error.InvalidCodestream;
-        state.tile_indices[state.count] = entry.tile_index;
-        state.lengths[state.count] = entry.psot;
+        state.tile_indices.appendAssumeCapacity(entry.tile_index);
+        state.lengths.appendAssumeCapacity(entry.psot);
         state.count += 1;
     }
     state.next_segment_index += 1;

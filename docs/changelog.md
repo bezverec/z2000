@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### TLM Past 4096 Tile-Parts
+
+- The last fixed bound left in the JP2 container audit after tile counts were
+  lifted. `TLM` entries scale with tile-parts, not tiles, and Kakadu pads each
+  tile to a fixed `TNsot`: 1024 one-pixel tiles with five resolution parts
+  already carry 5120 entries, which the audit held in a fixed 4096-entry array
+  and refused as an unsupported profile. The strict codestream reader never had
+  that bound — the same codestream decodes unwrapped.
+- The entries are now collected into allocated lists. Every `Psot` is still
+  reconciled against its `TLM` entry: flipping one bit of the last `Ptlm` in the
+  5120-part fixture is rejected.
+- Committed fixture: `kakadu-tlm-5120-tileparts` (1024 tiles x 5 parts, one
+  TLM segment). A 15360-part `R|C` variant with two TLM segments also decodes.
+  Kakadu 8.4.1 and OpenJPEG 2.5.4 reproduce the raster exactly.
+- With this, the container audit has no fixed-capacity per-tile or per-part
+  state left; its bounds are what `SOT` and `TLM` themselves can express.
+
 ### Tile Counts Past 256
 
 - The JP2 container audit kept its per-tile state in fixed 256-entry arrays and

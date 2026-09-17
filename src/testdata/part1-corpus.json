@@ -2563,6 +2563,30 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-tlm-5120-tileparts",
+      "path": "src/testdata/kakadu-tlm-5120-tileparts.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "a756dae533e2812025cf1282d163452b583d27fb8341950f7670901081a1943b",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "a 1024-tile 1x1 grid split into five resolution tile-parts per tile with a main-header TLM listing all 5120 of them, past the container audit's former fixed capacity of 4096 entries",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-tlm-5120-tileparts.jp2 Creversible=yes Clevels=4 Clayers=1 Corder=RPCL Cblk={16,16} Stiles={1,1} ORGtparts=R ORGgen_tlm=5 -quiet"
+      },
+      "oracle": "src/tests.zig decodes it to the lossless source raster and pins a flipped Ptlm as rejected; Kakadu 8.4.1 and OpenJPEG 2.5.4 agree (AE=0)",
+      "features": [
+        "tiles-and-tile-parts",
+        "jp2-core-container",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     }
   ]
 }

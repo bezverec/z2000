@@ -116,10 +116,10 @@ here so they are not rediscovered as new.
   each other on 163. Both references stay at one LSB throughout, so this is
   z2000 losing more precision in the mirrored boundary terms, not reference
   spread. Long spans in either axis are unaffected.
-- **Tile-part counts above 4096 with `TLM`.** The container audit holds `TLM`
-  entries in a fixed `max_tlm_entries` array, so a very large grid that also
-  carries `TLM` is still refused. Tile counts themselves are bounded only by
-  what `SOT` can address.
+- *(Resolved.)* The container audit's fixed 256-tile and 4096-`TLM`-entry
+  bounds are gone; a Kakadu stream with 1024 tiles and 5120 TLM-listed
+  tile-parts decodes. Kakadu's `ORGgen_tlm=N` caps tile-parts *per tile* at N
+  and aborts when padding would exceed it.
 
 ## Methodological Cautions
 

@@ -26097,6 +26097,40 @@ test "Grok tile-level PLT decodes alongside per-tile-part PLT" {
     );
 }
 
+test "the container audit accepts TLM past 4096 tile-parts" {
+    const allocator = std.testing.allocator;
+    // TLM entries scale with tile-parts, not tiles: Kakadu pads each tile to a
+    // fixed TNsot, so 1024 one-pixel tiles with five resolution parts carry
+    // 5120 entries. The audit held them in a fixed 4096-entry array and
+    // refused the rest as an unsupported profile; they are now collected into
+    // allocated lists, and every Psot is still reconciled against its entry.
+    const stream = @embedFile("testdata/kakadu-tlm-5120-tileparts.jp2");
+    const bytes = try jp2.extractCodestream(allocator, stream);
+
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 32), decoded.width);
+    try std.testing.expectEqual(@as(usize, 32), decoded.height);
+    const reference_stream = @embedFile("testdata/kakadu-singletile-multipart-inline.jp2");
+    var reference = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(allocator, reference_stream),
+        .{},
+    );
+    defer reference.deinit();
+    try std.testing.expectEqualSlices(u16, reference.samples, decoded.samples);
+
+    // Collecting past the old capacity did not loosen the reconciliation: the
+    // low bit of the last Ptlm entry, flipped, no longer matches its Psot.
+    const tlm = findMarker(bytes, codestream.markerValue("tlm")).?;
+    const ltlm = (@as(usize, bytes[tlm + 2]) << 8) | bytes[tlm + 3];
+    const corrupted = try allocator.dupe(u8, stream);
+    defer allocator.free(corrupted);
+    const codestream_base = @intFromPtr(bytes.ptr) - @intFromPtr(stream);
+    corrupted[codestream_base + tlm + 2 + ltlm - 1] ^= 0x01;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(allocator, corrupted));
+}
+
 test "the container audit accepts grids past 256 tiles" {
     const allocator = std.testing.allocator;
     // The JP2 audit used to keep its per-tile state in fixed 256-entry arrays

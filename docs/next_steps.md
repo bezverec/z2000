@@ -370,8 +370,8 @@ The active G0/G4 corpus expansion is:
    - ~~The JP2 audit caps tile counts at 256.~~ **Done.** `parseInfo` and
      `extractCodestream` now take an allocator and the tile-part sequence audit
      allocates its per-tile state, so the wrapper bounds tile counts at 65535
-     like `SOT` does. A stream that also carries `TLM` remains limited to
-     `max_tlm_entries` (4096) tile-parts.
+     like `SOT` does. `TLM` entries are collected into allocated lists as
+     well, so a TLM-carrying grid is no longer capped at 4096 tile-parts.
    - **Irreversible 9/7 drifts on small-by-small tiles**, to 2-3 LSB where
      Kakadu and OpenJPEG hold one. Diffuse rather than structural: 5 samples of
      3072 exceed one LSB at 2x3 tiles. Likely precision in the mirrored
