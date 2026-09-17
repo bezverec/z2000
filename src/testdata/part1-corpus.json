@@ -2509,13 +2509,13 @@
         "redistribution": "committed codestream; Kakadu application not redistributed",
         "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-97-narrow-tiles.jp2 Creversible=no Clevels=2 Clayers=1 Corder=RPCL Cblk={16,16} Stiles={32,3} -quiet"
       },
-      "oracle": "lossy, so the hash pins z2000's own deterministic output; the peak error against both references is one LSB, z2000 differs from Kakadu 8.4.1 on 198 of 3072 samples and from OpenJPEG 2.5.4 on 9, while Kakadu and OpenJPEG differ from each other on 198; 1/8-thread output is identical",
+      "oracle": "lossy, so the hash pins z2000's own deterministic output; the peak error against both references is one LSB, z2000 differs from Kakadu 8.4.1 on 197 of 3072 samples and from OpenJPEG 2.5.4 on 6, while Kakadu and OpenJPEG differ from each other on 198; 1/8-thread output is identical",
       "features": [
         "tiles-and-tile-parts",
         "irreversible-97"
       ],
       "expectation": "decode_pass",
-      "expected_native_sha256": "637e9cb004b3e1ceb820dcfbb108a81b4d1b8cf86b8ee025968d43eaabe311bf"
+      "expected_native_sha256": "d437b6b553a29f04ec03859542f024b67455009f0bec9011ad31776254555065"
     },
     {
       "id": "kakadu-97-tile-origin-empty-resolution",
@@ -2532,13 +2532,13 @@
         "redistribution": "committed codestream; Kakadu application not redistributed",
         "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-97-tile-origin-empty-resolution.jp2 Creversible=no Clevels=2 Clayers=1 Corder=RPCL Cblk={16,16} Sorigin={3,5} Stile_origin={1,2} Stiles={16,16} -quiet"
       },
-      "oracle": "lossy, so the hash pins z2000's own deterministic output; the peak error against both references is one LSB, z2000 differs from Kakadu 8.4.1 on 178 of 3072 samples and from OpenJPEG 2.5.4 on 19, while Kakadu and OpenJPEG differ from each other on 176; 1/8-thread output is identical",
+      "oracle": "lossy, so the hash pins z2000's own deterministic output; the peak error against both references is one LSB, z2000 differs from Kakadu 8.4.1 on 176 of 3072 samples and from OpenJPEG 2.5.4 on 5, while Kakadu and OpenJPEG differ from each other on 176; 1/8-thread output is identical",
       "features": [
         "tiles-and-tile-parts",
         "irreversible-97"
       ],
       "expectation": "decode_pass",
-      "expected_native_sha256": "0f31fcd18ef3fefca9e5c35f18a068d7d7131fef05cd65a3d18bda61d0b1e74d"
+      "expected_native_sha256": "d6a2b355d3124dd461883a570318e8c7121bdf7968b9e803eacf1af24c5f923e"
     },
     {
       "id": "kakadu-1024-tile-grid",
@@ -2587,6 +2587,29 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-97-small-tiles-ict",
+      "path": "src/testdata/kakadu-97-small-tiles-ict.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "49554090233d5c8f8eb4aa2b79a2791fce3ae42b876596a4a602484b003e9842",
+      "source": {
+        "producer": "Kakadu",
+        "version": "8.4.1",
+        "origin": "irreversible 9/7 with ICT over 3x2 tiles and one decomposition level; most code blocks end short of the cleanup pass of bitplane zero, which is what exposed the midpoint offset being counted twice",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream and an OpenJPEG-decoded reference raster; producer applications not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-97-small-tiles-ict.jp2 Creversible=no Cycc=yes Clevels=1 Clayers=1 Corder=RPCL Cblk={16,16} Stiles={2,3} -quiet"
+      },
+      "oracle": "lossy, so the hash pins z2000's own deterministic output; src/tests.zig also compares it with OpenJPEG 2.5.4's decode (kakadu-97-small-tiles-ict-openjpeg.rgb): 3 of 3072 samples differ, all by one LSB, where Kakadu 8.4.1 and OpenJPEG differ on 155 and Grok 20.3.6 and OpenJPEG on 325; before the fix z2000 differed from OpenJPEG on 613 samples with a peak of 3 LSB",
+      "features": [
+        "tiles-and-tile-parts",
+        "irreversible-97"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "402cc40af56ad3fd3d540ffac11b92cbbc4bd3c841d2b83fad2010eeb1093c5d"
     }
   ]
 }

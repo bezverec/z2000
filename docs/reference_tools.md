@@ -96,7 +96,7 @@ one through strict decode. The value is in the misses, so the misses are named.
 | Collapsed geometry x reversible/irreversible x MCT/no MCT x 2..4 levels x subsampled | 14 | Reversible passed everywhere; irreversible 9/7 failed with `InvalidDimensions`. Fixing the descent alone made it decode at a peak error of 81 LSB — the second, larger defect was a one-sample odd-origin span left unhalved. |
 | Tile width 2..32 x 1..3 decomposition levels, irreversible 9/7 at the reference-grid origin | 27 | All within one LSB after both float-synthesis fixes; before them, every width that puts a tile at an odd column was rejected at two or more levels. No tile-grid origin offset needed to reach the defect. |
 | Tile shapes 1x1 .. 13x13 x image origin 0 and (3,7) x both transforms x 1..3 levels | 120 | All 120 decode. 107 are exact or within one LSB; the remaining 13 are the small-by-small 9/7 drift below. The twelve initial rejections were the 1x1 grid hitting the container's since-lifted 256-tile bound. |
-| Tile height 2..32 x width 2..32, irreversible 9/7, one level | 49 | Peak error is one LSB everywhere except the small-by-small corner: 2 LSB for tiles up to about 4x5 and 3 LSB at 2x3. |
+| Tile height 2..32 x width 2..32, irreversible 9/7, one level | 49 | Initially 2-3 LSB in the small-by-small corner. The cause was the midpoint offset being added twice at dequantization, not synthesis precision. After that fix every cell is within one LSB. |
 
 The recurring pattern across all of them: **a gate is narrow only until something
 other than our own encoder writes to it.** Of the boundaries probed, most opened
@@ -107,6 +107,9 @@ cleanly once an oracle confirmed the stream was sound.
 Measured gaps where z2000 is outside the reference-versus-reference spread, kept
 here so they are not rediscovered as new.
 
+- *(Resolved; diagnosis below was wrong.)* The drift was the midpoint offset
+  being added twice for coefficients whose code block stopped before the end
+  of bitplane zero, not boundary precision. Kept for the record:
 - **Small-by-small tiles in irreversible 9/7.** When both tile dimensions are
   small the reconstruction drifts past the one-LSB band the references hold to
   each other: 2 LSB for tiles up to roughly 4x5, and 3 LSB at 2x3. The
@@ -136,6 +139,11 @@ here so they are not rediscovered as new.
   references agree to within one. Committing that would have traded a clean
   rejection for silently wrong pixels. Measure against a reference before
   treating "it decodes now" as progress.
+- **Verify a "precision" diagnosis before recording it.** The small-tile 9/7
+  drift was first written up as boundary precision because the difference was
+  diffuse. A direct comparison of the synthesis against an independent ISO
+  implementation took minutes and ruled that out, which pointed the search at
+  dequantization, where the real defect was.
 - **Check the tool's own reader.** Two of the findings above are a producer
   disagreeing with itself; neither would have surfaced from cross-checking
   different vendors alone.

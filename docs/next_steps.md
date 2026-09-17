@@ -372,11 +372,12 @@ The active G0/G4 corpus expansion is:
      allocates its per-tile state, so the wrapper bounds tile counts at 65535
      like `SOT` does. `TLM` entries are collected into allocated lists as
      well, so a TLM-carrying grid is no longer capped at 4096 tile-parts.
-   - **Irreversible 9/7 drifts on small-by-small tiles**, to 2-3 LSB where
-     Kakadu and OpenJPEG hold one. Diffuse rather than structural: 5 samples of
-     3072 exceed one LSB at 2x3 tiles. Likely precision in the mirrored
-     boundary terms, which dominate when nearly every sample is a boundary
-     sample.
+   - ~~Irreversible 9/7 drifts on small-by-small tiles.~~ **Done, and the
+     earlier diagnosis was wrong.** The synthesis matches an independent
+     ISO F.3.8 implementation exactly. The drift came from dequantization adding
+     the midpoint offset to coefficients T1 had already centered, in blocks
+     whose passes stop before the end of bitplane zero. The whole tile-size
+     map is now within one LSB.
 5. Empty resolutions and empty subbands (ISO B.5/B.6) are carried through
    decode. A tile grid anchored away from the image origin can leave a narrow
    edge tile whose deepest resolutions are empty in one axis — `Sorigin={3,5}

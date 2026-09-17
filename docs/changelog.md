@@ -5,6 +5,41 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Irreversible Midpoint Offset Counted Once
+
+- The 2-3 LSB drift on small irreversible 9/7 tiles, recorded last round as
+  "precision in the mirrored boundary terms", was a real reconstruction defect,
+  and that earlier diagnosis was wrong. It is corrected here.
+- How it was ruled out: the float synthesis was compared against an
+  independent implementation of ISO F.3.7/F.3.8 with periodic symmetric
+  extension, for every span length 1..10 in 1D and every tile shape up to 17x17
+  in 2D, at both origin parities. The largest difference was 4e-4, so the
+  wavelet was exact and the error had to come from the coefficients.
+- The cause: T1 already reconstructs a coefficient last decoded at bitplane
+  p >= 1 at the midpoint of its interval, `m * 2^p + 2^(p-1)`. At bitplane zero
+  that half step is fractional, so dequantization adds it as `+ 0.5` — but it
+  added it to *every* non-zero coefficient, counting the offset twice for any
+  code block whose coding passes stop before the end of bitplane zero. On the
+  3x2-tile stream that exposed it, 1586 of 1826 blocks stop early. The error is
+  proportional to the quantization step, which is why `Qstep=0.0005` hid it and
+  default steps did not, and ICT amplifies it in the blue channel.
+- The fix derives, from each block's last coding pass, which coefficients
+  actually reached bitplane zero. After refinement or cleanup at plane zero,
+  every non-zero coefficient did. After significance propagation at plane zero,
+  only the newly significant ones did, and those have magnitude exactly one.
+  If the block stopped at a higher plane, none did. The offset is removed where
+  it was not earned. Components with ROI maxshift keep the uniform rule.
+- Effect, measured against the references: every cell of the 49-stream
+  tile-size map is now within one LSB (the worst was 3). On the stream that
+  exposed it, z2000 differs from OpenJPEG 2.5.4 on 3 of 3072 samples, down from
+  613. Existing independent fixtures moved closer too. The Grok-encoded 9/7
+  fixture now decodes byte-identically to OpenJPEG (411 differences before).
+  The truncated OpenJPEG fixture differs from OpenJPEG on 7 samples (101
+  before). The Kakadu one-guard-bit fixture differs on 9 (300 before). Their
+  pinned hashes and error bounds were updated and tightened.
+- Committed: `kakadu-97-small-tiles-ict` with OpenJPEG's decode as a reference
+  raster. Its test asserts a peak difference of one LSB against that raster.
+
 ### TLM Past 4096 Tile-Parts
 
 - The last fixed bound left in the JP2 container audit after tile counts were

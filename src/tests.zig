@@ -12404,6 +12404,38 @@ test "decodes a foreign OpenJPEG 9/7 lossy JP2 byte-identically to OpenJPEG" {
     try std.testing.expectEqual(@as(u64, 0x026f5befb7ae22c1), fnv1a64DecodedSamples(decoded.samples));
 }
 
+test "irreversible dequantization counts the midpoint offset once" {
+    const allocator = std.testing.allocator;
+    // T1 reconstructs a coefficient last decoded at bitplane p >= 1 at the
+    // midpoint of its interval, m * 2^p + 2^(p-1). At bitplane zero that half
+    // step is fractional, so dequantization adds it as + 0.5 -- and it used to
+    // add it to every non-zero coefficient, counting it twice for any code
+    // block whose coding passes stop before the end of bitplane zero. On 3x2
+    // tiles most blocks do, and with ICT amplifying chroma the error reached
+    // 3 LSB where Kakadu 8.4.1 and OpenJPEG 2.5.4 hold to one.
+    const stream = @embedFile("testdata/kakadu-97-small-tiles-ict.jp2");
+    const openjpeg = @embedFile("testdata/kakadu-97-small-tiles-ict-openjpeg.rgb");
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(
+        allocator,
+        try jp2.extractCodestream(allocator, stream),
+        .{},
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqual(openjpeg.len, decoded.samples.len);
+
+    var differing: usize = 0;
+    var peak: u16 = 0;
+    for (decoded.samples, openjpeg) |sample, reference| {
+        const difference = if (sample > reference) sample - reference else reference - sample;
+        if (difference != 0) differing += 1;
+        peak = @max(peak, difference);
+    }
+    // Measured: 3 samples differ, all by one. Before the fix, 613 differed
+    // with a peak of 3; Kakadu and OpenJPEG differ from each other on 155.
+    try std.testing.expect(peak <= 1);
+    try std.testing.expect(differing <= 8);
+}
+
 test "decodes a heavily truncated foreign OpenJPEG 9/7 lossy JP2 through ISO-MQ" {
     const allocator = std.testing.allocator;
     // A 32x32 RGB gradient encoded by OpenJPEG 2.5.4 with
@@ -12436,13 +12468,17 @@ test "decodes a heavily truncated foreign OpenJPEG 9/7 lossy JP2 through ISO-MQ"
     try std.testing.expectEqual(@as(usize, 32), decoded.height);
     try std.testing.expectEqual(@as(usize, 32 * 32 * 3), decoded.samples.len);
 
-    try std.testing.expectEqual(@as(u64, 0xa4b5809161f36c8b), fnv1a64DecodedSamples(decoded.samples));
-    // With midpoint reconstruction of truncated planes the decode agrees with
-    // OpenJPEG's own output at rounding level (verified out-of-process:
-    // ~53 dB / max byte diff 2 on the 96x96 diagnostic; this tiny 10:1
-    // fixture measures 7,934,302 against its source gradient, down from
-    // ~8.5M with the old floor reconstruction).
-    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 8_000_000);
+    try std.testing.expectEqual(@as(u64, 0xde314fa40c40e39b), fnv1a64DecodedSamples(decoded.samples));
+    // The midpoint offset is applied once per coefficient, at the bitplane it
+    // was last decoded to: T1 carries it for truncated planes and
+    // dequantization adds it only for coefficients that reached plane zero.
+    // Adding it uniformly had counted it twice for truncated coefficients.
+    // Measured out of process: z2000 now differs from OpenJPEG 2.5.4's own
+    // decode on 7 of 3072 samples (101 before), at one LSB; Kakadu 8.4.1 and
+    // OpenJPEG differ from each other on 337. Against the source gradient
+    // this 10:1 fixture measures 7,933,586 (OpenJPEG 7,933,351; previously
+    // 7,934,302, and ~8.5M with the older floor reconstruction).
+    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 7_934_000);
 }
 
 test "decodes a foreign Grok 9/7 lossy JP2 with signalled QCD steps" {
@@ -12483,11 +12519,14 @@ test "decodes a foreign Grok 9/7 lossy JP2 with signalled QCD steps" {
     try std.testing.expectEqual(@as(usize, 32), decoded.height);
     try std.testing.expectEqual(@as(usize, 32 * 32 * 3), decoded.samples.len);
 
-    try std.testing.expectEqual(@as(u64, 0x64783081d94ad53c), fnv1a64DecodedSamples(decoded.samples));
-    // Midpoint reconstruction: 2,206,273 against the source gradient, down
-    // from ~3M with the old floor reconstruction; reference-relative
-    // agreement with Grok is ~52 dB / max 2 on the 96x96 diagnostic.
-    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 2_300_000);
+    try std.testing.expectEqual(@as(u64, 0x6df3a09768783b12), fnv1a64DecodedSamples(decoded.samples));
+    // With the midpoint offset applied once per coefficient, this decode is
+    // byte-identical to OpenJPEG 2.5.4's (it differed on 411 samples when the
+    // offset was added uniformly). Grok 20.3.6 and Kakadu 8.4.1 differ from
+    // OpenJPEG on 364 and 154 samples. Against the source gradient it measures
+    // 2,199,593, the same as OpenJPEG (previously 2,206,273; ~3M with the
+    // older floor reconstruction).
+    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 2_200_000);
 }
 
 test "decodes a foreign Kakadu 9/7 lossy JP2 with signalled QCD steps and one guard bit" {
@@ -12536,12 +12575,15 @@ test "decodes a foreign Kakadu 9/7 lossy JP2 with signalled QCD steps and one gu
     try std.testing.expectEqual(@as(usize, 32), decoded.height);
     try std.testing.expectEqual(@as(usize, 32 * 32 * 3), decoded.samples.len);
 
-    try std.testing.expectEqual(@as(u64, 0x628051ba18af98e2), fnv1a64DecodedSamples(decoded.samples));
-    // Reference-relative agreement with kdu_expand's own decode of this file
-    // is max byte diff 1 / 56.4 dB (verified out-of-process); the source
-    // error is dominated by the sawtooth gradient wrap edges at 3 bpp
-    // (measured 3,184,743).
-    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 3_300_000);
+    try std.testing.expectEqual(@as(u64, 0xc3ed660538230535), fnv1a64DecodedSamples(decoded.samples));
+    // Measured out of process, all at a peak difference of one LSB: z2000
+    // differs from kdu_expand's own decode of this file on 317 of 3072
+    // samples and from OpenJPEG 2.5.4 on 9 (392 and 300 when the midpoint
+    // offset was added uniformly), where Kakadu and OpenJPEG differ from each
+    // other on 312. The source error is dominated by the sawtooth gradient
+    // wrap edges at 3 bpp: 3,183,628 (OpenJPEG 3,183,297, Kakadu 3,184,249;
+    // previously 3,184,743).
+    try std.testing.expect(squaredErrorAgainstForeign97FixtureGradient(decoded.samples) <= 3_184_000);
 }
 
 fn kduMultiPartFixtureGradientSample(index: usize) u16 {

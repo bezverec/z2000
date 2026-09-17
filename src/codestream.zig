@@ -1782,6 +1782,71 @@ fn quantizeBandRegion(src: []const f32, dst: []i32, stride: usize, rect: subband
     }
 }
 
+const IrreversibleMidpointRule = enum {
+    /// Every non-zero coefficient was decoded through bitplane zero.
+    all,
+    /// Only coefficients that became significant in the final significance
+    /// propagation pass of bitplane zero (magnitude exactly one) were.
+    unit_magnitudes,
+    /// No coefficient reached bitplane zero.
+    none,
+};
+
+/// T1 already reconstructs a coefficient last decoded at bitplane p >= 1 at the
+/// midpoint of its uncertainty interval, m * 2^p + 2^(p-1); at bitplane zero
+/// that half step is fractional and cannot be stored, so dequantization adds
+/// it as `+ 0.5`. Applying `+ 0.5` to a coefficient that stopped at p >= 1
+/// counts the midpoint twice. Which coefficients reached bitplane zero follows
+/// from the block's last coding pass (ISO D.3): cleanup at the top plane, then
+/// significance propagation, magnitude refinement, and cleanup for each lower
+/// plane.
+fn strictIrreversibleMidpointRule(block: StrictPacketBlock) IrreversibleMidpointRule {
+    const passes = block.cumulative_passes;
+    const bitplanes = block.encoded_bitplanes;
+    if (passes == 0 or bitplanes == 0) return .none;
+    if (passes == 1) return if (bitplanes == 1) .all else .none;
+    const after_first = passes - 2;
+    const planes_below_top = after_first / 3;
+    if (planes_below_top + 2 > bitplanes) return .all;
+    const plane = bitplanes - 2 - planes_below_top;
+    if (plane != 0) return .none;
+    return switch (after_first % 3) {
+        // Significance propagation at plane zero: refinement of previously
+        // significant coefficients never ran, so only the newly significant
+        // ones (magnitude exactly one) reached plane zero.
+        0 => .unit_magnitudes,
+        // Refinement or cleanup at plane zero: every non-zero coefficient was
+        // visited there. Coefficients a missing cleanup would have made
+        // significant are still zero and take no offset either way.
+        else => .all,
+    };
+}
+
+fn removeUnearnedMidpointOffsets(job: *IrreversibleInversePlaneJob, blocks: []const StrictPacketBlock) !void {
+    for (blocks) |block| {
+        const rule = strictIrreversibleMidpointRule(block);
+        if (rule == .all) continue;
+        if (block.band_index >= job.bands.len) return CodestreamError.InvalidCodestream;
+        const band = job.bands[block.band_index];
+        if (!strictBandRequiredForReduction(band, job.reduction)) continue;
+        const half_step: f32 = @floatCast(job.deltas[block.band_index] * 0.5);
+        const end_x = try std.math.add(usize, block.rect.x, block.rect.width);
+        const end_y = try std.math.add(usize, block.rect.y, block.rect.height);
+        if (end_x > job.width or end_y > job.height) return CodestreamError.InvalidCodestream;
+        var y = block.rect.y;
+        while (y < end_y) : (y += 1) {
+            var x = block.rect.x;
+            while (x < end_x) : (x += 1) {
+                const index = y * job.width + x;
+                const q = job.quantized[index];
+                if (q == 0) continue;
+                if (rule == .unit_magnitudes and @abs(q) == 1) continue;
+                job.plane[index] -= if (q < 0) -half_step else half_step;
+            }
+        }
+    }
+}
+
 fn dequantizeBandRegion(src: []const i32, dst: []f32, stride: usize, rect: subband.Rect, delta: f64) void {
     var row: usize = 0;
     while (row < rect.height) : (row += 1) {
@@ -5382,6 +5447,7 @@ fn decodeMixedTransformPlanarFromBlockCatalogMeasured(
                     .bands = bands,
                     .deltas = deltas,
                     .reduction = options.resolution_reduction,
+                    .blocks = irreversibleMidpointBlocks(header, catalog, component),
                 };
                 try irreversibleInversePlane(&job);
                 if (job.shape.width != output_widths[component] or
@@ -9826,6 +9892,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
             options.threads,
             options.resolution_reduction,
             timings,
+            catalog,
         );
     }
 
@@ -12078,6 +12145,16 @@ fn auditStrictMultiTilePacketHeaders(
     return total;
 }
 
+/// The blocks that drive per-coefficient midpoint offsets for one component, or
+/// null to keep the uniform `+ 0.5`. ROI maxshift reshapes which bitplane a
+/// coefficient's bits land in, so shifted components keep the uniform rule.
+fn irreversibleMidpointBlocks(header: TemporaryHeader, catalog: ?StrictPacketBlockCatalog, component: usize) ?[]const StrictPacketBlock {
+    const blocks_catalog = catalog orelse return null;
+    if (component >= blocks_catalog.component_count) return null;
+    if (componentRoiShiftForHeader(header, component) != 0) return null;
+    return blocks_catalog.components[component];
+}
+
 /// Irreversible path back end: selectively dequantize the assembled i32
 /// coefficient planes, run the requested float 9/7 inverse DWT levels, and
 /// undo ICT or the independent component level shift.
@@ -12086,7 +12163,7 @@ fn decodeIrreversibleImageFromQuantizedPlanes(
     header: TemporaryHeader,
     quantized: color.RctPlanes,
 ) !image.RgbImage {
-    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, 1, 0, null);
+    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, 1, 0, null, null);
 }
 
 const IrreversibleInversePlaneJob = struct {
@@ -12100,6 +12177,12 @@ const IrreversibleInversePlaneJob = struct {
     bands: []const subband.Band,
     deltas: []const f64,
     reduction: u8,
+    /// The component's code blocks, when known, let dequantization apply the
+    /// ISO midpoint offset only to coefficients whose last decoded bitplane is
+    /// zero (see `strictIrreversibleMidpointRule`). Without them every
+    /// non-zero coefficient takes the offset, which is exact only for blocks
+    /// decoded through the end of bitplane zero.
+    blocks: ?[]const StrictPacketBlock = null,
     shape: wavelet.ResolutionShape = undefined,
     result: anyerror!void = {},
 };
@@ -12113,6 +12196,9 @@ fn irreversibleInversePlane(job: *IrreversibleInversePlaneJob) anyerror!void {
     for (job.bands, job.deltas) |band, delta| {
         if (!strictBandRequiredForReduction(band, job.reduction)) continue;
         dequantizeBandRegion(job.quantized, job.plane, job.width, band.rect, delta);
+    }
+    if (job.blocks) |blocks| {
+        try removeUnearnedMidpointOffsets(job, blocks);
     }
     job.shape = try wavelet.inverse2DReducedOrigin(
         std.heap.smp_allocator,
@@ -12134,6 +12220,7 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     thread_count: u8,
     resolution_reduction: u8,
     timings: ?*DecodeTimings,
+    catalog: ?StrictPacketBlockCatalog,
 ) !image.RgbImage {
     if (resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, header.width, header.height);
@@ -12192,9 +12279,9 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     // so three fused plane jobs avoid extra full-plane traffic. A wider
     // intra-plane inverse was bit-exact but regressed the maintained t16 gate.
     var jobs = [3]IrreversibleInversePlaneJob{
-        .{ .quantized = quantized.planes[0], .plane = reconstructed.planes[0], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[0..bands.len], .reduction = resolution_reduction },
-        .{ .quantized = quantized.planes[1], .plane = reconstructed.planes[1], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[bands.len .. 2 * bands.len], .reduction = resolution_reduction },
-        .{ .quantized = quantized.planes[2], .plane = reconstructed.planes[2], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[2 * bands.len .. 3 * bands.len], .reduction = resolution_reduction },
+        .{ .quantized = quantized.planes[0], .plane = reconstructed.planes[0], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[0..bands.len], .reduction = resolution_reduction, .blocks = irreversibleMidpointBlocks(header, catalog, 0) },
+        .{ .quantized = quantized.planes[1], .plane = reconstructed.planes[1], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[bands.len .. 2 * bands.len], .reduction = resolution_reduction, .blocks = irreversibleMidpointBlocks(header, catalog, 1) },
+        .{ .quantized = quantized.planes[2], .plane = reconstructed.planes[2], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[2 * bands.len .. 3 * bands.len], .reduction = resolution_reduction, .blocks = irreversibleMidpointBlocks(header, catalog, 2) },
     };
     try runComponentJobs(IrreversibleInversePlaneJob, allocator, jobs[0..], componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
@@ -12361,6 +12448,7 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
             .bands = component_bands[component],
             .deltas = component_deltas[component],
             .reduction = options.resolution_reduction,
+            .blocks = irreversibleMidpointBlocks(header, catalog, component),
         };
     }
 
