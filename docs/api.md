@@ -811,7 +811,11 @@ one index component, three uniform unsigned 8/16-bit `pclr` columns, and
 explicit `cmap` records to sRGB output channels; and 2/4-component
 gray+alpha/RGBA layouts whose final plane has complete Typ 1/2, Asoc 0 `cdef`
 semantics. `Info.alpha_mode` preserves whether that plane is unassociated or
-associated. Signed/mixed palettes, arbitrary auxiliary-channel mappings, and
+associated. Reversible RGBA with RCT on the colour channels (what
+`kdu_compress` writes for an RGBA TIFF) decodes on single- and multi-tile
+grids, and a quality-layer prefix saturates to the component range as it does
+for plain RGB. Irreversible RGBA (ICT over the colour channels) and reduced
+RGBA decode remain fail-closed. Signed/mixed palettes, arbitrary auxiliary-channel mappings, and
 JPX-only features fail closed. The writers require non-empty
 dimensions, 8/16 bit depth, matching sample counts, codestream/JP2 shape
 agreement, and no MCT for one component. `wrapGrayCodestream` accepts only

@@ -5245,7 +5245,7 @@ fn checkStrictPlanarProfile(
         const reversible_no_mct = reversible and header.mct == .none;
         if (!headerHasComponentSubsampling(header) and
             !(header.transform == .irreversible_9_7 and header.quantization != .none and header.mct == .none) and
-            !reversible_no_mct)
+            !reversible_no_mct and !(reversible and rct_alpha))
         {
             return CodestreamError.UnsupportedPayload;
         }
@@ -5693,7 +5693,10 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
     if (output_mode == .output_components and rct_alpha) {
-        return color.inverseRctAlpha(allocator, transformed);
+        return if (!strictDecodeIsPartial(options))
+            color.inverseRctAlpha(allocator, transformed)
+        else
+            color.inverseRctAlphaSaturated(allocator, transformed);
     }
     if (output_mode == .output_components and header.mct == .rct) {
         if (header.component_count != 3 or
@@ -11203,9 +11206,13 @@ fn decodeStrictMultiTilePlanarToSink(
     const irreversible_no_mct = header.transform == .irreversible_9_7 and
         header.quantization != .none and header.mct == .none;
     const reversible_no_mct = reversible and header.mct == .none;
+    // RGBA with RCT over the first three components; the alpha plane stays
+    // independent, and each tile is inverted on its own.
+    const reversible_rct_alpha = reversible and header.component_count == 4 and
+        header.mct == .rct;
     const component_local_layout = headerHasComponentSubsampling(header) or
-        irreversible_no_mct or reversible_no_mct;
-    if ((header.mct != .none and !sampled_rct) or
+        irreversible_no_mct or reversible_no_mct or reversible_rct_alpha;
+    if ((header.mct != .none and !sampled_rct and !reversible_rct_alpha) or
         (!reversible and !irreversible_no_mct) or
         !component_local_layout)
     {

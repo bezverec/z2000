@@ -2933,6 +2933,66 @@
           "max_mse": 0.0
         }
       ]
+    },
+    {
+      "id": "kakadu-rgba-rct-tiles",
+      "path": "src/testdata/kakadu-rgba-rct-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "74b4dbb2eb070f24b8a5cba02868f6d851de352b485b24a8ac54b8a789fdf2c1",
+      "source": {
+        "producer": "Kakadu 8.4.1 from the committed kakadu-97-native-multitile-source.ppm plus a synthetic alpha ramp",
+        "version": "8.4.1",
+        "origin": "reversible RGBA JP2 over 13x11 tiles, RCT on the colour channels (Kakadu's default for an RGBA TIFF) and an independent alpha plane; the planar decoder accepted this layout only on a single tile",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick src/testdata/kakadu-97-native-multitile-source.ppm -alpha set -channel A -fx \"(i+j)/(w+h)\" rgba48.tif; kdu_compress -i rgba48.tif -o src/testdata/kakadu-rgba-rct-tiles.jp2 Creversible=yes Stiles={13,11} Clayers=3 Cblk={8,8} Clevels=2 -quiet; kdu_expand -i src/testdata/kakadu-rgba-rct-tiles.jp2 -o <c0,c1,c2,c3>.pgx -quiet -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, exact (equal to the source); the unit test also pins the one-layer prefix against Kakadu's single-threaded decode",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-c0.pgx",
+          "sha256": "7a0862320ac46934b4c63c687e7c40f54ebd2c6d95e51fd0943c69bf002d70ae",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-c1.pgx",
+          "sha256": "951c086248ea692a6b6a0a58755851d238e098ae164e0963e7559d76c280e61a",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-c2.pgx",
+          "sha256": "6eb8a25c5fb9b80e60beafc67653767dddfcb795d234ed7d79d428f05e52b8b7",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-c3.pgx",
+          "sha256": "6347d33df8bd17ed65bdb984bac76e3c95b49ab6880e45839da575dd7ea0e30c",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
     }
   ]
 }

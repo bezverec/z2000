@@ -12441,6 +12441,48 @@ test "odd-origin single-sample 5/3 lines floor a truncated coefficient" {
     }
 }
 
+test "multi-tile RGBA with RCT decodes through the planar path" {
+    const allocator = std.testing.allocator;
+    // kdu_compress applies RCT to the colour channels of an RGBA TIFF by
+    // default and leaves alpha independent. The planar decoder accepted that
+    // layout only on a single tile, so a tiled RGBA JP2 failed
+    // `decode-temp-jp2` with UnsupportedPayload. A quality-layer prefix also
+    // failed on any tiling: the RGBA inverse RCT did not saturate partial
+    // reconstructions the way the RGB one does. Full output must equal
+    // Kakadu 8.4.1's PGX planes (and the source), and one layer must equal
+    // Kakadu's single-threaded one-layer decode.
+    const stream = @embedFile("testdata/kakadu-rgba-rct-tiles.jp2");
+    // A view into `stream`; nothing to free.
+    const codestream_bytes = try jp2.extractCodestream(allocator, stream);
+    const pgx = [_][]const u8{
+        @embedFile("testdata/kakadu-rgba-rct-tiles-c0.pgx"),
+        @embedFile("testdata/kakadu-rgba-rct-tiles-c1.pgx"),
+        @embedFile("testdata/kakadu-rgba-rct-tiles-c2.pgx"),
+        @embedFile("testdata/kakadu-rgba-rct-tiles-c3.pgx"),
+    };
+    var full = try codestream.decodeLosslessPlanarWithOptions(allocator, codestream_bytes, .{});
+    defer full.deinit();
+    try std.testing.expectEqual(@as(usize, 4), full.planes.len);
+    for (full.planes, pgx) |plane, reference| {
+        const header_end = std.mem.indexOfScalar(u8, reference, '\n').?;
+        const body = reference[header_end + 1 ..];
+        try std.testing.expectEqual(body.len, plane.len);
+        for (plane, body) |sample, expected| {
+            try std.testing.expectEqual(@as(u16, expected), sample);
+        }
+    }
+
+    const one_layer = @embedFile("testdata/kakadu-rgba-rct-tiles-l1-kakadu.rgba");
+    var prefix = try codestream.decodeLosslessPlanarWithOptions(allocator, codestream_bytes, .{ .quality_layer_limit = 1 });
+    defer prefix.deinit();
+    try std.testing.expectEqual(one_layer.len, prefix.planes[0].len * 4);
+    for (0..prefix.planes[0].len) |pixel| {
+        for (prefix.planes, 0..) |plane, component| {
+            try std.testing.expectEqual(@as(u16, one_layer[pixel * 4 + component]), plane[pixel]);
+        }
+    }
+}
+
 test "planar multi-tile decode accepts every progression order" {
     const allocator = std.testing.allocator;
     // Multi-tile no-MCT planar decode used to require RPCL, even though the

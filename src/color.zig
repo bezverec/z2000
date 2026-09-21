@@ -482,6 +482,21 @@ pub fn forwardRctAlpha(allocator: std.mem.Allocator, samples: SamplePlanes) !Rct
 }
 
 pub fn inverseRctAlpha(allocator: std.mem.Allocator, planes: RctPlanes) !SamplePlanes {
+    return inverseRctAlphaImpl(allocator, planes, false);
+}
+
+/// Partial decodes (a quality-layer prefix, a reduced resolution) legitimately
+/// reconstruct samples slightly outside the component range; clamp them the
+/// way `inverseRctPlanarSaturated` does for plain RGB.
+pub fn inverseRctAlphaSaturated(allocator: std.mem.Allocator, planes: RctPlanes) !SamplePlanes {
+    return inverseRctAlphaImpl(allocator, planes, true);
+}
+
+fn inverseRctAlphaImpl(
+    allocator: std.mem.Allocator,
+    planes: RctPlanes,
+    saturate: bool,
+) !SamplePlanes {
     const pixels = try validatePixelPlanes(i32, planes, 4);
     const level_shift = try dcLevelShift(planes.bit_depth);
     const max_sample = try maxSample(planes.bit_depth);
@@ -496,15 +511,16 @@ pub fn inverseRctAlpha(allocator: std.mem.Allocator, planes: RctPlanes) !SampleP
         const r = cr + g;
         const b = cb + g;
         const alpha = planes.planes[3][pixel] + level_shift;
-        if (r < 0 or g < 0 or b < 0 or alpha < 0 or
-            r > max_sample or g > max_sample or b > max_sample or alpha > max_sample)
+        if (!saturate and
+            (r < 0 or g < 0 or b < 0 or alpha < 0 or
+                r > max_sample or g > max_sample or b > max_sample or alpha > max_sample))
         {
             return ColorError.SampleOutOfRange;
         }
-        out.planes[0][pixel] = @intCast(r);
-        out.planes[1][pixel] = @intCast(g);
-        out.planes[2][pixel] = @intCast(b);
-        out.planes[3][pixel] = @intCast(alpha);
+        out.planes[0][pixel] = @intCast(std.math.clamp(r, 0, max_sample));
+        out.planes[1][pixel] = @intCast(std.math.clamp(g, 0, max_sample));
+        out.planes[2][pixel] = @intCast(std.math.clamp(b, 0, max_sample));
+        out.planes[3][pixel] = @intCast(std.math.clamp(alpha, 0, max_sample));
     }
     return out;
 }

@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tiled RGBA Decodes Through The Planar Path
+
+- `kdu_compress` applies RCT to the colour channels of an RGBA TIFF by default
+  and leaves alpha independent. The planar decoder accepted that layout only
+  on a single tile, so any tiled RGBA JP2 from Kakadu failed
+  `decode-temp-jp2` with `UnsupportedPayload`. It was the one failure in a
+  sweep of thirteen common `kdu_compress` JP2 layouts (RGB with and without
+  YCC, reversible and irreversible, 16-bit, precincts, tile-parts, all
+  `Cmodes`, SOP/EPH, grayscale).
+- Multi-tile planar decode now admits reversible four-component RCT and
+  inverts each tile on its own.
+- A second, older defect surfaced on the same streams: a quality-layer prefix
+  of RGBA failed with `SampleOutOfRange` on any tiling, because the RGBA
+  inverse RCT did not saturate partial reconstructions the way the RGB one
+  does. It now clamps whenever the decode is partial.
+- Measured against Kakadu 8.4.1 on 48x40 and 96x80 RGBA: all five progression
+  orders over 19x23 tiles at image origin (5,3), `R` tile-parts, one and two
+  layer prefixes, a tile selection, and a region are exact, alpha included.
+- `kakadu-rgba-rct-tiles` (13x11 tiles, three layers) is a new corpus entry
+  with exact Kakadu PGX planes. The unit test also pins the one-layer prefix
+  against Kakadu's single-threaded decode, and fails on the previous commit.
+- Still closed, and queued: irreversible RGBA (ICT plus alpha) and reduced
+  RGBA decode.
+
 ### Truncated Odd-Origin 5/3 Lines No Longer Crash
 
 - A one-sample 5/3 line at an odd origin holds a single high-pass
