@@ -936,7 +936,10 @@ fn forward53LineOrigin(data: []i32, scratch: []i32, origin: u32) void {
 fn inverse53LineOrigin(data: []i32, scratch: []i32, origin: u32) void {
     if ((origin & 1) == 0) return inverse53Line(data, scratch);
     if (data.len == 1) {
-        data[0] = @divExact(data[0], 2);
+        // A lone high-pass coefficient: X = Y/2 (ISO F.3.7). Only complete
+        // streams guarantee an even Y; a quality-layer prefix does not. Floor,
+        // as Kakadu does (OpenJPEG truncates toward zero).
+        data[0] = @divFloor(data[0], 2);
         return;
     }
 
@@ -1000,8 +1003,10 @@ fn inverse53ColumnsOriginChecked(
 fn inverse53LineOriginChecked(data: []i32, scratch: []i32, origin: u32) !void {
     if ((origin & 1) == 0) return inverse53LineChecked(data, scratch);
     if (data.len == 1) {
-        if ((data[0] & 1) != 0) return TransformError.CoefficientOverflow;
-        data[0] = @divExact(data[0], 2);
+        // A lone high-pass coefficient: X = Y/2 (ISO F.3.7). Only complete
+        // streams guarantee an even Y; a quality-layer prefix does not. Floor,
+        // as Kakadu does (OpenJPEG truncates toward zero).
+        data[0] = @divFloor(data[0], 2);
         return;
     }
 

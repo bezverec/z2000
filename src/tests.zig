@@ -12404,6 +12404,43 @@ test "decodes a foreign OpenJPEG 9/7 lossy JP2 byte-identically to OpenJPEG" {
     try std.testing.expectEqual(@as(u64, 0x026f5befb7ae22c1), fnv1a64DecodedSamples(decoded.samples));
 }
 
+test "odd-origin single-sample 5/3 lines floor a truncated coefficient" {
+    const allocator = std.testing.allocator;
+    // A one-sample line at an odd origin is a lone high-pass coefficient,
+    // reconstructed as Y/2 (ISO F.3.7). Complete streams always carry an even
+    // value there, and the decoder divided exactly: a quality-layer prefix
+    // does not, so the planar path panicked (undefined behaviour in release
+    // builds) and the native path rejected the stream. Kakadu 8.4.1 floors
+    // the halving and OpenJPEG 2.5.4 truncates it toward zero; the two
+    // references differ on exactly these samples (24 of 1920 at two layers).
+    // z2000 floors, and matches Kakadu's single-threaded output exactly.
+    const stream = @embedFile("testdata/kakadu-odd-origin-layers.j2c");
+    const References = struct { layers: u16, pgx: []const u8 };
+    const references = [_]References{
+        .{ .layers = 2, .pgx = @embedFile("testdata/kakadu-odd-origin-layers-l2.pgx") },
+        .{ .layers = 3, .pgx = @embedFile("testdata/kakadu-odd-origin-layers-l3.pgx") },
+    };
+    for (references) |reference| {
+        const header_end = std.mem.indexOfScalar(u8, reference.pgx, '\n').?;
+        const body = reference.pgx[header_end + 1 ..];
+        const options: codestream.DecodeOptions = .{ .quality_layer_limit = reference.layers };
+
+        var planar = try codestream.decodeLosslessPlanarWithOptions(allocator, stream, options);
+        defer planar.deinit();
+        try std.testing.expectEqual(body.len, planar.planes[0].len);
+        for (planar.planes[0], body) |sample, expected| {
+            try std.testing.expectEqual(@as(u16, expected), sample);
+        }
+
+        var native = try codestream.decodeLosslessNativeWithOptions(allocator, stream, options, .{});
+        defer native.deinit();
+        try std.testing.expectEqual(body.len, native.planes[0].samples.len);
+        for (native.planes[0].samples, body) |sample, expected| {
+            try std.testing.expectEqual(@as(i64, expected), @as(i64, sample));
+        }
+    }
+}
+
 test "planar multi-tile decode accepts every progression order" {
     const allocator = std.testing.allocator;
     // Multi-tile no-MCT planar decode used to require RPCL, even though the

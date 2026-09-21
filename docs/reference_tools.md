@@ -68,6 +68,11 @@ Recorded rather than worked around, so the behaviour stays pinned.
   files. OpenJPEG 2.5.4 decodes the same stream at every reduction. Committed
   as `kakadu-reduced-edge-column` with OpenJPEG references. Check the exit
   status and output size: this failure is silent.
+- **Multithreaded `kdu_expand` crashes intermittently on layer-limited decode.**
+  On 48x40 RGBA streams over 19x23 tiles at image origin (5,3), `kdu_expand
+  -layers 1` segfaulted in 4 of 20 runs of the same file (RLCP; CPRL also
+  crashed once). With `-num_threads 0` it crashed in 0 of 20. Generate
+  reference output single-threaded, and check the exit status.
 - **Grok fails on collapsed resolutions.** Grok 20.3.6 does not decode a tile
   grid anchored away from the image origin that leaves an edge tile whose
   deepest resolution is empty in one axis. Kakadu and OpenJPEG do.
@@ -87,6 +92,16 @@ cannot be pinned against a reference hash. Measured on
 z2000 sits inside the spread the two references already show against each other.
 Lossy corpus entries therefore pin z2000's own deterministic output and record
 the measured spread in their oracle field.
+
+Reversible streams have a spread of their own once they are truncated. A
+one-sample 5/3 line at an odd origin is a lone high-pass coefficient,
+reconstructed as Y/2. A complete stream always carries an even Y there; a
+quality-layer prefix does not. Kakadu 8.4.1 floors the halving and OpenJPEG
+2.5.4 truncates it toward zero. On `kakadu-odd-origin-layers` (48x40 on 19x23
+tiles at image origin (5,3)) that is the *entire* difference between them: 24
+samples at two layers and 94 at three. Swapping z2000 between the two roundings
+moves it from exact-against-one to exact-against-the-other. z2000 floors, like
+Kakadu.
 
 ## Sweeps Run And What They Found
 

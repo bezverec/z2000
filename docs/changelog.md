@@ -5,6 +5,29 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Truncated Odd-Origin 5/3 Lines No Longer Crash
+
+- A one-sample 5/3 line at an odd origin holds a single high-pass
+  coefficient, reconstructed as Y/2 (ISO F.3.7). The decoder divided exactly,
+  because a complete stream always carries an even value there. A
+  quality-layer prefix does not. On such a tile grid, `--layers N` below the
+  full count hit a Debug-build panic in the planar path (undefined behaviour in
+  release builds) and made the native path reject the stream with
+  `CoefficientOverflow`.
+- Both paths now floor the halving. The rounding is not arbitrary: Kakadu
+  8.4.1 floors and OpenJPEG 2.5.4 truncates toward zero, and that one choice
+  accounts for *all* of the difference between the two references on the new
+  fixture (24 samples at two layers, 94 at three). With floor, z2000 matches
+  Kakadu's single-threaded output exactly; with truncation it matched
+  OpenJPEG exactly.
+- `kakadu-odd-origin-layers` (48x40 grayscale on 19x23 tiles at image origin
+  (5,3), four layers) carries Kakadu PGX references at two and three layers.
+  The unit test fails on the previous commit.
+- Found while sweeping `decode-temp-jp2`: a layer-limited decode of a tiled
+  RGBA stream crashed first, and a three-component no-MCT stream on the same
+  grid crashed the same way. `kdu_expand` itself segfaulted intermittently on those streams unless
+  run single-threaded, now noted in `reference_tools.md`.
+
 ### Planar Multi-Tile Decode In Every Progression Order
 
 - The planar decoder rejected every multi-tile no-MCT stream that was not
