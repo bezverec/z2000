@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Planar Multi-Tile Decode In Every Progression Order
+
+- The planar decoder rejected every multi-tile no-MCT stream that was not
+  RPCL, at any resolution. That included the simplest foreign input there is:
+  a tiled grayscale JP2 straight out of `kdu_compress`, whose default
+  progression is LRCP, failed `decode-temp-jp2` with `UnsupportedPayload`.
+  The native decoder (`j2k-to-pgx`, `j2k-to-zraw`) already decoded the same
+  streams.
+- The restriction was stale. The multi-tile catalog reader normalizes every
+  tile to RPCL order before reconstruction, whatever the progression order or
+  POC schedule, so the planar path only had to stop refusing. Two gates were
+  removed: one in the shared planar profile check, one in the multi-tile sink.
+  Sampled RCT, which already bypassed both, is unchanged.
+- Measured before committing: 17 Kakadu streams (reversible and irreversible
+  96x80 no-MCT in all five orders over 19x23 tiles at a shifted origin,
+  components subsampled by {2,2} and {2,1} in all five orders, a two-record POC
+  schedule, and `L` tile-parts) decode through the planar API identically to
+  the native decoder, sample for sample, at reductions 0, 1, and 2. Two
+  reversible Kakadu LRCP JP2s (grayscale and three-component) now decode
+  through `decode-temp-jp2` to TIFFs equal to their sources.
+- Two corpus entries pin the change with Kakadu PGX references at full
+  resolution and reduction 1, both exact: `kakadu-tiled-gray-lrcp` (a JP2) and
+  `kakadu-subsampled-cprl` (three components sampled {1,1}, {2,2}, {2,1} at
+  image origin (3,1)). Both fail with `UnsupportedPayload` on the previous
+  commit. A unit test also checks planar against native on two committed LRCP
+  fixtures, one reversible and one irreversible.
+
 ### Reduced Decode Skips Tiles With No Samples Left
 
 - The gap recorded in the previous entry, now fixed. A stream whose tile grid

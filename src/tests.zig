@@ -12404,6 +12404,37 @@ test "decodes a foreign OpenJPEG 9/7 lossy JP2 byte-identically to OpenJPEG" {
     try std.testing.expectEqual(@as(u64, 0x026f5befb7ae22c1), fnv1a64DecodedSamples(decoded.samples));
 }
 
+test "planar multi-tile decode accepts every progression order" {
+    const allocator = std.testing.allocator;
+    // Multi-tile no-MCT planar decode used to require RPCL, even though the
+    // tile catalogs it reads are already normalized to RPCL for every order.
+    // A tiled grayscale JP2 straight out of kdu_compress (LRCP by default)
+    // therefore failed `decode-temp-jp2` with UnsupportedPayload. Both LRCP
+    // fixtures below come from Kakadu 8.4.1; the planar result has to equal
+    // the native decode of the same stream sample for sample, reversible and
+    // irreversible alike, at full resolution and after reduction.
+    const streams = [_][]const u8{
+        @embedFile("testdata/kakadu-reduced-edge-column.j2c"),
+        @embedFile("testdata/kakadu-97-native-multitile.j2c"),
+    };
+    for (streams) |stream| {
+        for ([_]u8{ 0, 1 }) |reduction| {
+            const options: codestream.DecodeOptions = .{ .resolution_reduction = reduction };
+            var native = try codestream.decodeLosslessNativeWithOptions(allocator, stream, options, .{});
+            defer native.deinit();
+            var planar = try codestream.decodeLosslessPlanarWithOptions(allocator, stream, options);
+            defer planar.deinit();
+            try std.testing.expectEqual(native.planes.len, planar.planes.len);
+            for (native.planes, planar.planes) |expected, actual| {
+                try std.testing.expectEqual(expected.samples.len, actual.len);
+                for (expected.samples, actual) |sample, value| {
+                    try std.testing.expectEqual(sample, @as(i64, value));
+                }
+            }
+        }
+    }
+}
+
 test "reduced decode skips a tile that has no samples left" {
     const allocator = std.testing.allocator;
     // 47-wide tiles over a 48-wide image at x0 = 3 leave a one-sample edge

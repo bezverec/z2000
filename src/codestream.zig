@@ -5242,8 +5242,7 @@ fn checkStrictPlanarProfile(
         // Reversible no-MCT RPCL is decodable on the shared per-tile path
         // whether or not components are subsampled, so uniform sampling no
         // longer has to route through the interleaved RGB decoder.
-        const reversible_no_mct = reversible and header.mct == .none and
-            header.progression == .rpcl;
+        const reversible_no_mct = reversible and header.mct == .none;
         if (!headerHasComponentSubsampling(header) and
             !(header.transform == .irreversible_9_7 and header.quantization != .none and header.mct == .none) and
             !reversible_no_mct)
@@ -11207,7 +11206,6 @@ fn decodeStrictMultiTilePlanarToSink(
     const component_local_layout = headerHasComponentSubsampling(header) or
         irreversible_no_mct or reversible_no_mct;
     if ((header.mct != .none and !sampled_rct) or
-        (header.progression != .rpcl and !sampled_rct) or
         (!reversible and !irreversible_no_mct) or
         !component_local_layout)
     {

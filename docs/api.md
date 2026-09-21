@@ -738,9 +738,12 @@ component's SIZ sampling factors; `componentSampling(index)` returns the pair.
 `Info.image_origin_x/y` and `Info.tile_origin_x/y` retain the independent SIZ
 image and tile-partition origins for container/tool-layer registration.
 Metadata parsing accepts nonzero factors, while normal JP2 wrapping still
-requires unit sampling. Strict planar decode supports RPCL, reversible 5/3
+requires unit sampling. Strict planar decode supports reversible 5/3
 no-MCT subsampling with inline, PPT, or PPM packet headers and all SOP/EPH
-combinations; PLT is optional where the layout permits it. It merges unequal
+combinations; PLT is optional where the layout permits it. Multi-tile no-MCT
+streams, reversible or irreversible, may use any of the five progression
+orders or a POC schedule; each tile's packets are normalized to RPCL before
+reconstruction. It merges unequal
 component precinct grids in reference-grid RPCL order and uses component-local
 sampled bounds, subbands, code-block catalogs, T1 planes, and origin-aware
 inverse DWT. Image and tile-partition origins are retained independently in
