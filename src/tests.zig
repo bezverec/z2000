@@ -12404,6 +12404,42 @@ test "decodes a foreign OpenJPEG 9/7 lossy JP2 byte-identically to OpenJPEG" {
     try std.testing.expectEqual(@as(u64, 0x026f5befb7ae22c1), fnv1a64DecodedSamples(decoded.samples));
 }
 
+test "reduced decode skips a tile that has no samples left" {
+    const allocator = std.testing.allocator;
+    // 47-wide tiles over a 48-wide image at x0 = 3 leave a one-sample edge
+    // column. Two discarded DWT levels shrink that column's tiles to nothing,
+    // and every multi-tile path used to reject the whole stream from inside
+    // coefficient reconstruction. Such a tile contributes no samples at that
+    // resolution, so it is now treated like an unselected tile: its headers
+    // are still validated, but it is not decoded. Kakadu 8.4.1's kdu_expand
+    // fails on this file at -reduce 2 as well (exit 127, empty output); the
+    // reference here is OpenJPEG 2.5.4's decode, which the reversible stream
+    // has to match exactly.
+    const stream = @embedFile("testdata/kakadu-reduced-edge-column-rct.j2c");
+    const openjpeg = @embedFile("testdata/kakadu-reduced-edge-column-rct-r2-openjpeg.rgb");
+    var decoded = try codestream.decodeLosslessTemporaryWithOptions(allocator, stream, .{ .resolution_reduction = 2 });
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 12), decoded.width);
+    try std.testing.expectEqual(@as(usize, 10), decoded.height);
+    try std.testing.expectEqual(openjpeg.len, decoded.samples.len);
+    for (decoded.samples, openjpeg) |sample, reference| {
+        try std.testing.expectEqual(@as(u16, reference), sample);
+    }
+
+    // The native path follows the same rule; its reduce 2 and 3 planes are
+    // pinned against OpenJPEG by the corpus entry kakadu-reduced-edge-column.
+    const native_stream = @embedFile("testdata/kakadu-reduced-edge-column.j2c");
+    for ([_]u8{ 2, 3 }) |reduction| {
+        var native = try codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            native_stream,
+            .{ .resolution_reduction = reduction },
+            .{},
+        );
+        native.deinit();
+    }
+}
+
 test "native decode accepts irreversible 9/7 components" {
     const allocator = std.testing.allocator;
     // The native decoder -- and with it `j2k-to-pgx` and `j2k-to-zraw` -- used

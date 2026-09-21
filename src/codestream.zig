@@ -10616,6 +10616,10 @@ const StrictTileDecodeWindow = struct {
     selection: Selection,
     tile_count: u64,
     decoded_tile_count: u64,
+    /// Discarded DWT levels. A tile whose reference rectangle shrinks to nothing
+    /// at this reduction contributes no samples, so it is treated as
+    /// unselected: its headers are still validated, but it is never decoded.
+    reduction: u8 = 0,
 
     const Selection = union(enum) {
         all,
@@ -10624,6 +10628,7 @@ const StrictTileDecodeWindow = struct {
     };
 
     fn includes(self: StrictTileDecodeWindow, tile_index: u32, rect: tile_grid.Rect) bool {
+        if (reducedReferenceRectIsEmpty(rect, self.reduction)) return false;
         return switch (self.selection) {
             .all => true,
             .tile => |selected| selected == tile_index,
@@ -10890,7 +10895,36 @@ fn cropStrictSamplePlanesToReferenceRect(
     return cropped;
 }
 
+/// True when `rect` has no samples left after discarding `reduction` DWT
+/// levels, i.e. when its ceil-divided bounds meet in either axis. A narrow edge
+/// tile reaches this before the image does.
+fn reducedReferenceRectIsEmpty(rect: tile_grid.Rect, reduction: u8) bool {
+    if (reduction == 0) return rect.x1 <= rect.x0 or rect.y1 <= rect.y0;
+    return reducedGridCoordinate(rect.x1, reduction) <= reducedGridCoordinate(rect.x0, reduction) or
+        reducedGridCoordinate(rect.y1, reduction) <= reducedGridCoordinate(rect.y0, reduction);
+}
+
 fn strictTileDecodeWindow(
+    context: StrictMultiTileContext,
+    header: TemporaryHeader,
+    options: DecodeOptions,
+) !StrictTileDecodeWindow {
+    var window = try strictTileDecodeWindowUnreduced(context, header, options);
+    if (options.resolution_reduction == 0) return window;
+    window.reduction = options.resolution_reduction;
+    var decoded_tile_count: u64 = 0;
+    var tile_index: u32 = 0;
+    while (tile_index < window.tile_count) : (tile_index += 1) {
+        const tile = context.grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
+        if (window.includes(tile_index, tile.rect)) decoded_tile_count += 1;
+    }
+    // A selection that keeps nothing at this reduction is not a decode.
+    if (decoded_tile_count == 0) return CodestreamError.InvalidCodestream;
+    window.decoded_tile_count = decoded_tile_count;
+    return window;
+}
+
+fn strictTileDecodeWindowUnreduced(
     context: StrictMultiTileContext,
     header: TemporaryHeader,
     options: DecodeOptions,

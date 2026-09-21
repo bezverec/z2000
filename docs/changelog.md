@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Reduced Decode Skips Tiles With No Samples Left
+
+- The gap recorded in the previous entry, now fixed. A stream whose tile grid
+  leaves a one-sample edge column was rejected by every multi-tile decode path
+  (native, RCT, ICT) as soon as two DWT levels were discarded. That column's
+  tiles have nothing left at that resolution, and coefficient reconstruction
+  refused an empty span deep inside `fillStrictComponentCoefficientsFromBlockCatalog`.
+- `StrictTileDecodeWindow` now carries the reduction. A tile whose reference
+  rectangle shrinks to nothing is treated like an unselected tile: every
+  header is still validated, but it is never decoded. The decoded-tile count
+  reported through `DecodeTimings` follows the same rule, and a selection that
+  keeps no tile at all is still rejected.
+- Verified against OpenJPEG 2.5.4 at reductions 0 to 3 on a 96x80 stream:
+  reversible no-MCT and RCT are exact, and irreversible no-MCT and ICT are
+  within one LSB (at most 21 of 23,040 samples differ).
+- A correction to the previous entry's queue note, which said Kakadu 8.4.1
+  decodes these streams. It does not: `kdu_expand` exits 127 with empty output
+  at `-reduce 2` and `-reduce 3`. That claim had not been checked; it came from
+  an earlier probe that never tested the exit status. The committed references
+  are therefore OpenJPEG's.
+- Why the first reproduction attempts did not fail: Kakadu's `Sorigin` and
+  `Stiles` are `{y,x}`, not `{x,y}`. The failing stream's one-sample column only
+  appeared with the axes read that way. The committed fixture,
+  `kakadu-reduced-edge-column` (plus an RCT twin with an OpenJPEG RGB
+  reference), fails on the previous commit at reductions 2 and 3 and passes
+  now.
+
 ### Native Decode Of Irreversible 9/7
 
 - A bit-depth sweep found that the raw-codestream commands could not decode any

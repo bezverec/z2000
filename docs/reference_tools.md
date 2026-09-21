@@ -62,6 +62,12 @@ Recorded rather than worked around, so the behaviour stays pinned.
   JP2-wrapped subsampled stream whose `colr` box declares sRGB, on the grounds
   that sRGB mandates uniform sampling. Those fixtures are committed as raw
   codestreams so all three references can read them.
+- **`kdu_expand` fails when reduction empties an edge tile.** On a stream
+  whose tile grid leaves a one-sample edge column, `kdu_expand -reduce 2`
+  (and `-reduce 3`) exits 127 without an error message and writes empty
+  files. OpenJPEG 2.5.4 decodes the same stream at every reduction. Committed
+  as `kakadu-reduced-edge-column` with OpenJPEG references. Check the exit
+  status and output size: this failure is silent.
 - **Grok fails on collapsed resolutions.** Grok 20.3.6 does not decode a tile
   grid anchored away from the image origin that leaves an edge tile whose
   deepest resolution is empty in one axis. Kakadu and OpenJPEG do.
@@ -145,6 +151,10 @@ here so they are not rediscovered as new.
   diffuse. A direct comparison of the synthesis against an independent ISO
   implementation took minutes and ruled that out, which pointed the search at
   dequantization, where the real defect was.
+- **Kakadu geometry parameters are `{y,x}`.** `Sorigin`, `Stile_origin`,
+  `Stiles`, `Sdims`, and `Cblk` all list the vertical value first. Reading them
+  as `{x,y}` put the one-sample edge column in the wrong axis and made a real
+  failure look unreproducible.
 - **Do not feed signed PGX into OpenJPEG.** OpenJPEG 2.5.4's PGX *reader*
   misparses signed headers: `PG ML -8` became signed 7-bit and `-4` became
   unsigned 13-bit, which surfaced as z2000 "defects" that were really

@@ -378,13 +378,13 @@ The active G0/G4 corpus expansion is:
      the midpoint offset to coefficients T1 had already centered, in blocks
      whose passes stop before the end of bitplane zero. The whole tile-size
      map is now within one LSB.
-5b. Resolution reduction still rejects a stream in which an edge tile collapses
-   to an empty *reduced* region: `reducedGridLength` returns
-   `InvalidCodestream` for an empty span. Reproduced with 23x19 tiles at image
-   origin (5,3) and `--reduce 2`, for reversible and irreversible streams
-   alike. The tile should simply contribute nothing at that reduction, as the
-   empty-resolution work already does at full resolution. Kakadu 8.4.1 decodes
-   it.
+5b. **Done.** Resolution reduction no longer rejects a stream in which an edge
+   tile has no samples left at the requested reduction. Such a tile is treated
+   like an unselected one: its headers are still validated, but it is not
+   decoded. (The previous note here claimed Kakadu 8.4.1 decodes these streams.
+   That was never checked, and it is wrong: `kdu_expand` exits 127 with empty
+   output at `-reduce 2`. OpenJPEG 2.5.4 decodes them, and it is the reference
+   used.)
 5. Empty resolutions and empty subbands (ISO B.5/B.6) are carried through
    decode. A tile grid anchored away from the image origin can leave a narrow
    edge tile whose deepest resolutions are empty in one axis — `Sorigin={3,5}

@@ -2732,6 +2732,85 @@
           "max_mse": 0.12
         }
       ]
+    },
+    {
+      "id": "kakadu-reduced-edge-column",
+      "path": "src/testdata/kakadu-reduced-edge-column.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "761b451527e49fdfd968f1140c3aaf337ef14a65a56638a398b122e1636929a1",
+      "source": {
+        "producer": "Kakadu 8.4.1 from the committed kakadu-97-native-multitile-source.ppm",
+        "version": "8.4.1",
+        "origin": "reversible no-MCT stream whose 47-wide tiles leave a one-sample edge column at x = 50; at two or more discarded levels that tile has no samples left, which reduced decode used to reject",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and OpenJPEG PGX references committed; producer applications not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-97-native-multitile-source.ppm -o src/testdata/kakadu-reduced-edge-column.j2c Creversible=yes Cycc=no Clevels=3 Clayers=1 Cblk={8,8} Stiles={17,47} Sorigin={5,3} -quiet; opj_decompress -i src/testdata/kakadu-reduced-edge-column.j2c -o <name>.pgx -r 2 (and -r 3)"
+      },
+      "oracle": "OpenJPEG 2.5.4 PGX planes at reduction 2 and 3, exact (the stream is reversible); Kakadu 8.4.1's own kdu_expand fails on this file at -reduce 2 and 3, exiting 127 with empty output",
+      "features": [
+        "tiles-and-tile-parts",
+        "reversible-53",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-reduced-edge-column-r2-c0.pgx",
+          "sha256": "414b5e357426b79395aaea430960abde11c9f1b524f03a052e50c77283268d12",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 2,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-reduced-edge-column-r2-c1.pgx",
+          "sha256": "f4123eb248232ed40bb93106c0527793ea8c63dbbc179cd3ed910215561e4212",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 2,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-reduced-edge-column-r2-c2.pgx",
+          "sha256": "f4cea733976b03efd511ac653d6ef05e753678a54d176d9a8efe06a28db7780e",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 2,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-reduced-edge-column-r3-c0.pgx",
+          "sha256": "18fda941afab3d6dceac7db990dea97b15427be1ef73fc308db37beb2d90a453",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 3,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-reduced-edge-column-r3-c1.pgx",
+          "sha256": "5f9a7c94bc77311e4e8266dadfab3d7c46ca663ea162920c34b5b929c0df9902",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 3,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-reduced-edge-column-r3-c2.pgx",
+          "sha256": "8f2646ae224086f4fba7952a4bb799489faecacee64f0496ff25e1258dde2dc9",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 3,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
     }
   ]
 }
