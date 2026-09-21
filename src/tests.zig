@@ -12404,6 +12404,48 @@ test "decodes a foreign OpenJPEG 9/7 lossy JP2 byte-identically to OpenJPEG" {
     try std.testing.expectEqual(@as(u64, 0x026f5befb7ae22c1), fnv1a64DecodedSamples(decoded.samples));
 }
 
+test "native decode accepts irreversible 9/7 components" {
+    const allocator = std.testing.allocator;
+    // The native decoder -- and with it `j2k-to-pgx` and `j2k-to-zraw` -- used
+    // to accept only reversible 5/3, so no raw irreversible codestream could be
+    // decoded to component samples from the CLI at all, not even a single
+    // grayscale plane. It now dequantizes with the per-block midpoint rule,
+    // runs the float 9/7 synthesis, rounds, and clamps to the component range.
+    // A signed 12-bit plane is checked against Kakadu 8.4.1's own PGX at full
+    // resolution and -reduce 1.
+    const stream = @embedFile("testdata/kakadu-97-native-signed12.j2c");
+    const References = struct { reduction: u8, pgx: []const u8 };
+    const references = [_]References{
+        .{ .reduction = 0, .pgx = @embedFile("testdata/kakadu-97-native-signed12-full.pgx") },
+        .{ .reduction = 1, .pgx = @embedFile("testdata/kakadu-97-native-signed12-r1.pgx") },
+    };
+    for (references) |reference| {
+        var decoded = try codestream.decodeLosslessNativeWithOptions(
+            allocator,
+            stream,
+            .{ .resolution_reduction = reference.reduction },
+            .{},
+        );
+        defer decoded.deinit();
+        try std.testing.expectEqual(@as(usize, 1), decoded.planes.len);
+        const plane = decoded.planes[0];
+        try std.testing.expect(plane.layout.signed);
+        try std.testing.expectEqual(@as(u8, 12), plane.layout.precision);
+
+        // Kakadu writes this PGX as "PG LM -12 w h": little-endian 16-bit
+        // two's-complement samples.
+        const header_end = std.mem.indexOfScalar(u8, reference.pgx, '\n').?;
+        const body = reference.pgx[header_end + 1 ..];
+        try std.testing.expectEqual(plane.samples.len * 2, body.len);
+        var peak: i64 = 0;
+        for (plane.samples, 0..) |sample, index| {
+            const expected: i64 = @as(i16, @bitCast(@as(u16, body[index * 2]) | (@as(u16, body[index * 2 + 1]) << 8)));
+            peak = @max(peak, @as(i64, @intCast(@abs(sample - expected))));
+        }
+        try std.testing.expect(peak <= 1);
+    }
+}
+
 test "irreversible dequantization counts the midpoint offset once" {
     const allocator = std.testing.allocator;
     // T1 reconstructs a coefficient last decoded at bitplane p >= 1 at the

@@ -2610,6 +2610,128 @@
       ],
       "expectation": "decode_pass",
       "expected_native_sha256": "402cc40af56ad3fd3d540ffac11b92cbbc4bd3c841d2b83fad2010eeb1093c5d"
+    },
+    {
+      "id": "kakadu-97-native-signed12",
+      "path": "src/testdata/kakadu-97-native-signed12.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "81671a0db01eed4091299f3d0d2bd842888d3fb50a1da06c5cdd74126ef09e77",
+      "source": {
+        "producer": "Kakadu 8.4.1 from a committed synthetic raw plane",
+        "version": "8.4.1",
+        "origin": "one signed 12-bit component, 37x29, irreversible 9/7 over three levels; the first irreversible stream the native decoder and the j2k-to-pgx/j2k-to-zraw commands accept",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "source raw plane, codestream, and PGX references committed; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/kakadu-97-native-signed12-source.raw -o src/testdata/kakadu-97-native-signed12.j2c Sdims={29,37} Sprecision=12 Nprecision=12 Ssigned=yes Nsigned=yes Scomponents=1 Creversible=no Clevels=3 -quiet; kdu_expand -i src/testdata/kakadu-97-native-signed12.j2c -o src/testdata/kakadu-97-native-signed12-full.pgx; kdu_expand -i src/testdata/kakadu-97-native-signed12.j2c -o src/testdata/kakadu-97-native-signed12-r1.pgx -reduce 1"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX at full resolution and -reduce 1; native peak error <= 1 and MSE <= 0.12",
+      "features": [
+        "siz-native-signed-components",
+        "irreversible-97",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-97-native-signed12-full.pgx",
+          "sha256": "76a993a28d868b224a0e0c604efd4cfffac7b935bc120e8ec5515b09e6011dd4",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-97-native-signed12-r1.pgx",
+          "sha256": "7859b26b222bacff06e97600b5d470ec74c4895e70debcb5981c4f93dd4dbea4",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        }
+      ]
+    },
+    {
+      "id": "kakadu-97-native-multitile",
+      "path": "src/testdata/kakadu-97-native-multitile.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "abcb3fb23aee2f07fa4c85824fcc87a7c812b90b71dc9f1db323540635074beb",
+      "source": {
+        "producer": "Kakadu 8.4.1 from a committed ImageMagick plasma",
+        "version": "8.4.1",
+        "origin": "three components without MCT, irreversible 9/7 over 13x11 tiles at image origin (5,3), three rate-allocated layers, so code blocks stop at varied coding passes",
+        "license": "project-generated synthetic source and test fixture under the repository license",
+        "redistribution": "source PPM, codestream, and PGX references committed; Kakadu and ImageMagick applications not redistributed",
+        "command": "magick -seed 11 -size 48x40 plasma:fractal -depth 8 -type TrueColor src/testdata/kakadu-97-native-multitile-source.ppm; kdu_compress -i src/testdata/kakadu-97-native-multitile-source.ppm -o src/testdata/kakadu-97-native-multitile.j2c Creversible=no Cycc=no Clevels=2 Clayers=3 Cblk={8,8} -rate 1,2,4 Stiles={13,11} Sorigin={5,3} -quiet; kdu_expand -i src/testdata/kakadu-97-native-multitile.j2c -o src/testdata/kakadu-97-native-multitile-full-c0.pgx,src/testdata/kakadu-97-native-multitile-full-c1.pgx,src/testdata/kakadu-97-native-multitile-full-c2.pgx; kdu_expand ... -reduce 1 into the -r1- names"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes at full resolution and -reduce 1; native peak error <= 1 and MSE <= 0.12 per component",
+      "features": [
+        "tiles-and-tile-parts",
+        "irreversible-97",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-97-native-multitile-full-c0.pgx",
+          "sha256": "31497923ad2490a6ac9c06be836ba7124859969ac9756a9e95574bafa3686a50",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-97-native-multitile-full-c1.pgx",
+          "sha256": "31497923ad2490a6ac9c06be836ba7124859969ac9756a9e95574bafa3686a50",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-97-native-multitile-full-c2.pgx",
+          "sha256": "31497923ad2490a6ac9c06be836ba7124859969ac9756a9e95574bafa3686a50",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-97-native-multitile-r1-c0.pgx",
+          "sha256": "fe496a79eb2dc0eb64d6d5bd8fcfcf6b49c9213c565e154fe5c3dc439a791182",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-97-native-multitile-r1-c1.pgx",
+          "sha256": "fe496a79eb2dc0eb64d6d5bd8fcfcf6b49c9213c565e154fe5c3dc439a791182",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-97-native-multitile-r1-c2.pgx",
+          "sha256": "fe496a79eb2dc0eb64d6d5bd8fcfcf6b49c9213c565e154fe5c3dc439a791182",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        }
+      ]
     }
   ]
 }

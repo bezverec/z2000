@@ -5,6 +5,40 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Native Decode Of Irreversible 9/7
+
+- A bit-depth sweep found that the raw-codestream commands could not decode any
+  irreversible stream at all. `j2k-to-pgx` and `j2k-to-zraw` go through the
+  native decoder, which accepted only reversible 5/3, so even a single
+  grayscale 9/7 plane was rejected as an unsupported payload. The only way to
+  decode irreversible data was the JP2-to-TIFF path or the planar library API.
+- The native decoder now has an irreversible path. A shared helper runs the
+  inverse DWT for one component: the checked integer 5/3 as before, or
+  dequantization (with the per-block midpoint rule) followed by the float 9/7
+  synthesis, rounded and clamped to the component range. Single-tile and
+  multi-tile native decode both use it, including at reduced resolution and
+  with per-tile COD/QCD overrides. Components wider than 24 bits stay
+  unsupported, because f32 synthesis carries only 24 significant bits.
+- Sweep results against `kdu_expand`, one component at a time from Kakadu raw
+  input: all 24 reversible streams (depths 1..16, signed and unsigned) are
+  lossless-exact, and all 24 irreversible ones are within one LSB. A
+  three-component 96x80 stream is within one LSB at full resolution and
+  reductions 1 and 2, untiled and on a 32x32 grid; on 23x19 tiles at image
+  origin (5,3) it is within one LSB at reductions 0 and 1, and reduction 2
+  hits the pre-existing gap below.
+- Two fixtures carry PGX references from Kakadu 8.4.1: a signed 12-bit plane at
+  full resolution and reduction 1, and a three-component 13x11-tile stream at
+  image origin (5,3) with three rate-allocated layers. Kakadu, OpenJPEG 2.5.4,
+  and z2000 agree on the second one exactly.
+- Found and recorded, not fixed: resolution reduction rejects a stream in which
+  an edge tile collapses to an empty *reduced* region (`reducedGridLength`).
+  This happens with reversible and irreversible streams alike and predates this
+  change. It belongs with the empty-resolution work.
+- A harness pitfall worth knowing: OpenJPEG 2.5.4 misreads signed PGX *input*
+  (`PG ML -8 ...` came back as signed 7-bit, `-4` as unsigned 13-bit). Its
+  output is fine, but signed sources for sweeps have to come through Kakadu's
+  raw input instead.
+
 ### Irreversible Midpoint Offset Counted Once
 
 - The 2-3 LSB drift on small irreversible 9/7 tiles, recorded last round as

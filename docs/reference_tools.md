@@ -96,6 +96,7 @@ one through strict decode. The value is in the misses, so the misses are named.
 | Collapsed geometry x reversible/irreversible x MCT/no MCT x 2..4 levels x subsampled | 14 | Reversible passed everywhere; irreversible 9/7 failed with `InvalidDimensions`. Fixing the descent alone made it decode at a peak error of 81 LSB — the second, larger defect was a one-sample odd-origin span left unhalved. |
 | Tile width 2..32 x 1..3 decomposition levels, irreversible 9/7 at the reference-grid origin | 27 | All within one LSB after both float-synthesis fixes; before them, every width that puts a tile at an odd column was rejected at two or more levels. No tile-grid origin offset needed to reach the defect. |
 | Tile shapes 1x1 .. 13x13 x image origin 0 and (3,7) x both transforms x 1..3 levels | 120 | All 120 decode. 107 are exact or within one LSB; the remaining 13 are the small-by-small 9/7 drift below. The twelve initial rejections were the 1x1 grid hitting the container's since-lifted 256-tile bound. |
+| Bit depth 1..16 x signed/unsigned x reversible/irreversible, one component from Kakadu raw input, decoded through `j2k-to-pgx` | 48 | Reversible: all 24 lossless-exact. Irreversible: all 24 rejected, because the native decoder had no 9/7 path. After adding it, all 24 are within one LSB of `kdu_expand`. |
 | Tile height 2..32 x width 2..32, irreversible 9/7, one level | 49 | Initially 2-3 LSB in the small-by-small corner. The cause was the midpoint offset being added twice at dequantization, not synthesis precision. After that fix every cell is within one LSB. |
 
 The recurring pattern across all of them: **a gate is narrow only until something
@@ -144,6 +145,12 @@ here so they are not rediscovered as new.
   diffuse. A direct comparison of the synthesis against an independent ISO
   implementation took minutes and ruled that out, which pointed the search at
   dequantization, where the real defect was.
+- **Do not feed signed PGX into OpenJPEG.** OpenJPEG 2.5.4's PGX *reader*
+  misparses signed headers: `PG ML -8` became signed 7-bit and `-4` became
+  unsigned 13-bit, which surfaced as z2000 "defects" that were really
+  mis-encoded sources. Use Kakadu's raw input (`Sdims`, `Sprecision`,
+  `Nprecision`, `Ssigned`, `Nsigned`) for signed sweeps. OpenJPEG's PGX
+  *output* is fine.
 - **Check the tool's own reader.** Two of the findings above are a producer
   disagreeing with itself; neither would have surfaced from cross-checking
   different vendors alone.

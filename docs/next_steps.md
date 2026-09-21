@@ -378,6 +378,13 @@ The active G0/G4 corpus expansion is:
      the midpoint offset to coefficients T1 had already centered, in blocks
      whose passes stop before the end of bitplane zero. The whole tile-size
      map is now within one LSB.
+5b. Resolution reduction still rejects a stream in which an edge tile collapses
+   to an empty *reduced* region: `reducedGridLength` returns
+   `InvalidCodestream` for an empty span. Reproduced with 23x19 tiles at image
+   origin (5,3) and `--reduce 2`, for reversible and irreversible streams
+   alike. The tile should simply contribute nothing at that reduction, as the
+   empty-resolution work already does at full resolution. Kakadu 8.4.1 decodes
+   it.
 5. Empty resolutions and empty subbands (ISO B.5/B.6) are carried through
    decode. A tile grid anchored away from the image origin can leave a narrow
    edge tile whose deepest resolutions are empty in one axis — `Sorigin={3,5}

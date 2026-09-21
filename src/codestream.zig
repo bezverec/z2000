@@ -4186,10 +4186,108 @@ fn checkStrictNativeProfile(header: TemporaryHeader, options: DecodeOptions) !vo
             if (options.resolution_reduction > component.levels) return CodestreamError.InvalidCodestream;
         }
     }
-    if (header.transform != .reversible_5_3 or header.quantization != .none or
-        header.mct != .none or headerHasMixedComponentTransforms(header))
-    {
+    if (header.mct != .none or headerHasMixedComponentTransforms(header)) {
         return CodestreamError.UnsupportedPayload;
+    }
+    switch (header.transform) {
+        .reversible_5_3 => if (header.quantization != .none) return CodestreamError.UnsupportedPayload,
+        // Irreversible samples are rounded from f32 synthesis, which carries
+        // them exactly only up to 24 significant bits; wider components stay
+        // unsupported rather than silently losing precision.
+        .irreversible_9_7 => {
+            if (header.quantization == .none) return CodestreamError.UnsupportedPayload;
+            for (0..header.component_count) |component| {
+                if (componentBitDepthForHeader(header, component) > 24) return CodestreamError.UnsupportedPayload;
+            }
+        },
+    }
+}
+
+/// Inverse DWT for one native component, in place over `coefficients` (row
+/// stride `width`). Reversible components run the checked integer 5/3.
+/// Irreversible components are dequantized -- with the per-block midpoint rule
+/// -- run through the float 9/7 synthesis, and rounded back into the plane.
+/// The reconstructed samples occupy the returned top-left shape; `lossy`
+/// tells the caller to clamp to the component range instead of treating an
+/// out-of-range sample as malformed.
+const NativeComponentInverse = struct {
+    shape: wavelet_int.ResolutionShape,
+    lossy: bool,
+};
+
+fn inverseNativeComponentPlane(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    component: usize,
+    coefficients: []i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+    workspace: *wavelet_int.Workspace,
+) !NativeComponentInverse {
+    const x0 = catalog.component_x0[component];
+    const y0 = catalog.component_y0[component];
+    switch (header.transform) {
+        .reversible_5_3 => {
+            if (reduction == 0) {
+                wavelet_int.inverse53CheckedWithWorkspaceOrigin(workspace, coefficients, width, height, levels, x0, y0) catch |err| switch (err) {
+                    wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                    else => return err,
+                };
+                return .{ .shape = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 }, .lossy = false };
+            }
+            const reduced = wavelet_int.inverse53ReducedCheckedWithWorkspaceOrigin(workspace, coefficients, width, height, levels, reduction, x0, y0) catch |err| switch (err) {
+                wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                else => return err,
+            };
+            return .{ .shape = reduced, .lossy = false };
+        },
+        .irreversible_9_7 => {
+            const width_u32 = std.math.cast(u32, width) orelse return CodestreamError.InvalidCodestream;
+            const height_u32 = std.math.cast(u32, height) orelse return CodestreamError.InvalidCodestream;
+            const x1 = std.math.add(u32, x0, width_u32) catch return CodestreamError.InvalidCodestream;
+            const y1 = std.math.add(u32, y0, height_u32) catch return CodestreamError.InvalidCodestream;
+            const bands = try subband.makeBandsForRegion(allocator, x0, y0, x1, y1, levels);
+            defer allocator.free(bands);
+            const deltas = try allocator.alloc(f64, bands.len);
+            defer allocator.free(deltas);
+            const depth = componentBitDepthForHeader(header, component);
+            if (component >= header.component_qcd.len) return CodestreamError.InvalidCodestream;
+            const component_qcd = &header.component_qcd[component];
+            for (bands, deltas) |band, *delta| {
+                const step = signalledQcdBandStep(component_qcd, levels, band.kind, band.level) orelse
+                    signalledHeaderBandStep(header, band.kind, band.level) orelse
+                    try irreversibleBandStepSizeFor(header.quantization, depth, band.kind, band.level, levels);
+                delta.* = irreversibleBandDelta(depth, band.kind, step);
+            }
+            const plane = try allocator.alloc(f32, try std.math.mul(usize, width, height));
+            defer allocator.free(plane);
+            var job = IrreversibleInversePlaneJob{
+                .quantized = coefficients,
+                .plane = plane,
+                .width = width,
+                .height = height,
+                .levels = levels,
+                .x0 = x0,
+                .y0 = y0,
+                .bands = bands,
+                .deltas = deltas,
+                .reduction = reduction,
+                .blocks = irreversibleMidpointBlocks(header, catalog, component),
+            };
+            try irreversibleInversePlane(&job);
+            const limit: f32 = @floatFromInt(std.math.maxInt(i32));
+            for (0..job.shape.height) |row| {
+                const base = row * width;
+                for (coefficients[base..][0..job.shape.width], plane[base..][0..job.shape.width]) |*coefficient, value| {
+                    const rounded = if (std.math.isNan(value)) 0 else std.math.clamp(@round(value), -limit, limit);
+                    coefficient.* = @intFromFloat(rounded);
+                }
+            }
+            return .{ .shape = .{ .width = job.shape.width, .height = job.shape.height, .x0 = job.shape.x0, .y0 = job.shape.y0 }, .lossy = true };
+        },
     }
 }
 
@@ -4278,45 +4376,31 @@ fn decodeStrictSingleTileNative(
         defer allocator.free(coefficients);
         var decoded_width = component_width;
         var decoded_height = component_height;
-        if (options.resolution_reduction == 0) {
-            wavelet_int.inverse53CheckedWithWorkspaceOrigin(
-                &workspace,
-                coefficients,
-                component_width,
-                component_height,
-                component_levels,
-                catalog.component_x0[component],
-                catalog.component_y0[component],
-            ) catch |err| switch (err) {
-                wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
-                else => return err,
-            };
-        } else {
-            const reduced = wavelet_int.inverse53ReducedCheckedWithWorkspaceOrigin(
-                &workspace,
-                coefficients,
-                component_width,
-                component_height,
-                component_levels,
-                options.resolution_reduction,
-                catalog.component_x0[component],
-                catalog.component_y0[component],
-            ) catch |err| switch (err) {
-                wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
-                else => return err,
-            };
+        const inverse = try inverseNativeComponentPlane(
+            allocator,
+            header,
+            catalog,
+            component,
+            coefficients,
+            component_width,
+            component_height,
+            component_levels,
+            options.resolution_reduction,
+            &workspace,
+        );
+        if (options.resolution_reduction != 0) {
             const compact = try compactTopLeftCoefficientPlane(
                 allocator,
                 coefficients,
                 component_width,
                 component_height,
-                reduced.width,
-                reduced.height,
+                inverse.shape.width,
+                inverse.shape.height,
             );
             allocator.free(coefficients);
             coefficients = compact;
-            decoded_width = reduced.width;
-            decoded_height = reduced.height;
+            decoded_width = inverse.shape.width;
+            decoded_height = inverse.shape.height;
         }
         if (requested_region == null and
             (plane_layout.width != decoded_width or plane_layout.height != decoded_height or
@@ -4357,7 +4441,7 @@ fn decodeStrictSingleTileNative(
             const destination_row = output.planes[component].samples[row * plane_layout.width ..][0..plane_layout.width];
             for (source_row, destination_row) |coefficient, *sample| {
                 const value = @as(i64, coefficient) + level_shift;
-                sample.* = if (options.resolution_reduction == 0 and options.quality_layer_limit == 0)
+                sample.* = if (!inverse.lossy and options.resolution_reduction == 0 and options.quality_layer_limit == 0)
                     value
                 else
                     std.math.clamp(value, minimum, maximum);
@@ -11517,11 +11601,8 @@ fn decodeStrictMultiTileNativeToSink(
     limits: NativeSampleLimits,
     sink: anytype,
 ) !void {
-    if (header.transform != .reversible_5_3 or header.quantization != .none or
-        header.mct != .none or options.resolution_reduction > header.levels)
-    {
-        return CodestreamError.UnsupportedPayload;
-    }
+    if (options.resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
+    try checkStrictNativeProfile(header, options);
 
     var context = try readStrictMultiTileContext(allocator, bytes, header);
     defer context.deinit();
@@ -11575,11 +11656,9 @@ fn decodeStrictMultiTileNativeToSink(
     while (tile_index < context.grid.tileCount()) : (tile_index += 1) {
         const tile = context.grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;
         const tile_header = try context.tileHeader(header, tile);
-        if (tile_header.transform != .reversible_5_3 or tile_header.quantization != .none or
-            tile_header.mct != .none or options.resolution_reduction > tile_header.levels)
-        {
-            return CodestreamError.UnsupportedPayload;
-        }
+        if (options.resolution_reduction > tile_header.levels) return CodestreamError.InvalidCodestream;
+        // A tile may override COD/QCD, so its own header decides the profile.
+        try checkStrictNativeProfile(tile_header, options);
         if (componentCodingSliceForHeader(tile_header)) |coding| {
             for (coding) |component| {
                 if (options.resolution_reduction > component.levels) {
@@ -11690,38 +11769,20 @@ fn decodeStrictMultiTileNativeToSink(
                 null,
             );
             defer allocator.free(coefficients);
-            var tile_width = source_width;
-            var tile_height = source_height;
-            if (options.resolution_reduction == 0) {
-                wavelet_int.inverse53CheckedWithWorkspaceOrigin(
-                    &workspace,
-                    coefficients,
-                    source_width,
-                    source_height,
-                    component_levels,
-                    block_catalog.component_x0[component],
-                    block_catalog.component_y0[component],
-                ) catch |err| switch (err) {
-                    wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
-                    else => return err,
-                };
-            } else {
-                const reduced = wavelet_int.inverse53ReducedCheckedWithWorkspaceOrigin(
-                    &workspace,
-                    coefficients,
-                    source_width,
-                    source_height,
-                    component_levels,
-                    options.resolution_reduction,
-                    block_catalog.component_x0[component],
-                    block_catalog.component_y0[component],
-                ) catch |err| switch (err) {
-                    wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
-                    else => return err,
-                };
-                tile_width = reduced.width;
-                tile_height = reduced.height;
-            }
+            const inverse = try inverseNativeComponentPlane(
+                allocator,
+                tile_header,
+                block_catalog,
+                component,
+                coefficients,
+                source_width,
+                source_height,
+                component_levels,
+                options.resolution_reduction,
+                &workspace,
+            );
+            const tile_width = inverse.shape.width;
+            const tile_height = inverse.shape.height;
 
             const plane_layout = layout.components[component];
             const reduced_x0 = reducedGridCoordinate(
@@ -11796,15 +11857,11 @@ fn decodeStrictMultiTileNativeToSink(
                 const destination_row = samples[row * copy_width ..][0..copy_width];
                 for (source_row, destination_row) |coefficient, *sample| {
                     const value = @as(i64, coefficient) + level_shift;
-                    if (options.resolution_reduction == 0 and options.quality_layer_limit == 0 and
-                        (value < minimum or value > maximum))
-                    {
+                    const exact = !inverse.lossy and options.resolution_reduction == 0 and options.quality_layer_limit == 0;
+                    if (exact and (value < minimum or value > maximum)) {
                         return native_samples.NativeSampleError.SampleOutOfRange;
                     }
-                    sample.* = if (options.resolution_reduction == 0 and options.quality_layer_limit == 0)
-                        value
-                    else
-                        std.math.clamp(value, minimum, maximum);
+                    sample.* = if (exact) value else std.math.clamp(value, minimum, maximum);
                 }
             }
         }

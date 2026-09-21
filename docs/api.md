@@ -112,8 +112,11 @@ all logical CPUs, the ISO MQ backend, and big-endian `ML` PGX are defaults.
 `--component N`, `--tile-index N`, `--region X,Y,W,H`, `--layers N`,
 `--reduce N`, `--threads N`, `--t1-backend`, and
 `--pgx-order ML|LM` are available in explicit, shorthand, and batch forms.
-Invalid component indexes and profiles outside the native reversible contract
-fail before an output file is written.
+Invalid component indexes and profiles outside the native contract fail before
+an output file is written. That contract covers reversible 5/3 and, since the
+native decoder gained an irreversible path, uniform 9/7 without MCT for
+components of up to 24 bits; irreversible samples are rounded and clamped to the
+component range.
 
 `j2k-to-zraw` uses the same raw-codestream decode boundary but writes every
 native component. ZRAW begins with the eight-byte `Z2KRAW1\n` magic, four
@@ -391,8 +394,9 @@ Primary public functions:
   boundary validation
 - `decodeLosslessNative(allocator, bytes, limits)` /
   `decodeLosslessNativeWithOptions(allocator, bytes, options, limits)` — first
-  native payload profile: strict single- and multi-tile reversible 5/3, no MCT,
-  and caller-limited signed or unsigned 1..29-bit components, including mixed
+  native payload profile: strict single- and multi-tile reversible 5/3 or
+  uniform irreversible 9/7 (components up to 24 bits), no MCT, and
+  caller-limited signed or unsigned 1..29-bit components, including mixed
   component precision, independent SIZ sampling grids, and counts up to the
   256-component metadata boundary,
   additionally bounded by
