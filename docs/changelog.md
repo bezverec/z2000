@@ -5,6 +5,29 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Encoder Matrix Re-Decoded Through All Three References
+
+- Documentation only. 24 `tiff-to-jp2` layouts on a 96x80 RGB source
+  (untiled, 32x32 and 24x24 tiles, every progression order with its
+  matching or no tile-part division, TLM, SOP/EPH, PPT, PPM with and without
+  SOP/EPH, main- and tile-header POC, the full resilience style set, two
+  explicit precinct sets, 16x16 blocks, zero levels, rate-targeted layers,
+  16-bit, ISO-MQ) decode pixel-exactly through Kakadu 8.4.1 and OpenJPEG
+  2.5.4. Grok 20.4.12 is exact on 22 of them; the two multi-tile PPM
+  layouts it gets wrong (75 percent of samples) or, with SOP/EPH on a 3x3
+  grid, never finishes. Grok 20.3.6 returns wrong pixels on the same files
+  and on Kakadu's `kdu_makeppm` fixtures. Recorded in `reference_tools.md`;
+  the older claim that Grok 20.3.6 was exact on a 16-tile PPM smoke is
+  flagged as not reproduced.
+- Four requests were refused by the encoder, all inside its documented
+  envelope rather than new: 19x23 tiles at any level count
+  (`canDecompose53Region`, the encoder-side rule the decoder dropped),
+  BYPASS on a multi-tile grid, no MCT on a multi-tile grid, and grayscale or
+  RGBA on a multi-tile grid (the planar encoder is single-tile). One CLI
+  reminder: the multi-tile default is `--tile-parts R`, which only RPCL may
+  carry, so another progression order needs `--tile-parts none` or its own
+  division.
+
 ### Tile Grids Beyond Isot's Reach Are Refused
 
 - A first fuzz campaign over the committed fixtures: `tools/fuzz_fixtures.py`

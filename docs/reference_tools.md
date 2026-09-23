@@ -86,6 +86,18 @@ Recorded rather than worked around, so the behaviour stays pinned.
   closed, committed as `grok-roi-shift-below-bitplanes`; without MCT, or
   in grayscale, z2000 equals Kakadu exactly on the same broken input. Shifts
   of 9 and 12 decode exactly through every decoder.
+- **Grok misdecodes multi-tile PPM.** `grk_decompress` 20.3.6 and 20.4.12
+  both return wrong pixels for every multi-tile stream with main-header
+  packed packet headers that was tried: eight z2000 `--ppm --tile-parts R`
+  layouts (2x2 and 3x3 grids, one to three layers, one to five levels, with
+  and without TLM; 75 to 87 percent of samples wrong, or "Tile N is corrupt"
+  with SOP/EPH or five levels on 3x3) and three committed Kakadu
+  `kdu_makeppm` fixtures (`kakadu-native-ppm-multitile`, `-tlm`, and
+  `kakadu-poc-multipart-ppm`; half to all samples wrong, exit 0). Single-tile
+  PPM is exact, as is every PPT layout. Kakadu and OpenJPEG decode all of
+  them exactly. An earlier note in `iso_coverage.md` reported Grok 20.3.6
+  exact on a 16-tile PPM smoke; that result was not reproduced here and
+  should not be relied on.
 - **Grok refuses JP2-wrapped subsampled sRGB.** Grok 20.3.6 rejects any
   JP2-wrapped subsampled stream whose `colr` box declares sRGB, on the grounds
   that sRGB mandates uniform sampling. Those fixtures are committed as raw
