@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Gray+Alpha JP2s From Kakadu Decode
+
+- The queue item from the previous entry, now fixed. `kdu_compress` writes
+  a gray+alpha JP2 with `cdef` entries (0, colour, Asoc 0) and (1, opacity,
+  Asoc 0). The reader required a colour channel's association to be its own
+  index plus one and rejected the file as an unsupported profile at every
+  depth. ISO I.5.3.6 permits Asoc 0, "the whole image", for a colour channel,
+  and with a single colour channel it says the same thing.
+- The reader now accepts Asoc 0 for the colour channel of a gray+alpha
+  layout only; RGB(A) colour channels still have to name their colour, since
+  three channels all "associated with the whole image" would be ambiguous.
+- Kakadu gray+alpha JP2s at 8 and 12 bits, with associated and unassociated
+  alpha, decode pixel identical to `kdu_expand`. `kakadu-12bit-gray-alpha-tiles`
+  is a new corpus entry with Kakadu PGX at full resolution and reduction 1;
+  the unit test fails on the previous commit.
+
 ### JP2 Reader And TIFF Writer Take Depths Between 8 And 16 Bits
 
 - A sweep of less common `kdu_compress` and `opj_compress` settings (derived

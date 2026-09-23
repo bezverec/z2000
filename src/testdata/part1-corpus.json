@@ -3604,6 +3604,68 @@
           "max_mse": 0.0
         }
       ]
+    },
+    {
+      "id": "kakadu-12bit-gray-alpha-tiles",
+      "path": "src/testdata/kakadu-12bit-gray-alpha-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "e235d2147183da9248d166483f010a9467ab5da49c252429c176ba0386489325",
+      "source": {
+        "producer": "Kakadu 8.4.1 from a committed ImageMagick plasma plus a synthetic alpha ramp",
+        "version": "8.4.1",
+        "origin": "reversible 12-bit gray+alpha over 32x32 tiles. kdu_compress writes the colour channel's cdef association as 0 (the whole image) and the opacity channel as type 1, association 0; the reader used to require association 1 for the colour channel and rejected every Kakadu gray+alpha JP2 as an unsupported profile, at any depth",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.ppm; magick src.ppm -colorspace gray -alpha set -channel A -fx i/w -depth 12 -define tiff:alpha=unassociated ga12u.tif; kdu_compress -i ga12u.tif -o src/testdata/kakadu-12bit-gray-alpha-tiles.jp2 Creversible=yes Stiles={32,32} -quiet; kdu_expand -i src/testdata/kakadu-12bit-gray-alpha-tiles.jp2 -o <full-c0,c1>.pgx -quiet -num_threads 0 (and -reduce 1 into the -r1- names)"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes at full resolution and -reduce 1, exact; z2000's 12-bit gray+alpha TIFF equals kdu_expand's pixel for pixel, as do the 8-bit variants",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "reversible-53",
+        "siz-bounded-unsigned-components",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-12bit-gray-alpha-tiles-full-c0.pgx",
+          "sha256": "37f8d03d8a2b3fd9f8fa9deb7a8aacdc9de3fa1c540ba51e3c941d187aba358e",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-gray-alpha-tiles-full-c1.pgx",
+          "sha256": "ad1126fe32a82aac9f46e33ebda21fc238d77f9c07de12f9448db54f4324cb91",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-gray-alpha-tiles-r1-c0.pgx",
+          "sha256": "91e9b566b71e87455cd2c23e86e14173fa3d06fbd80e68227590b58f10ed1698",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-gray-alpha-tiles-r1-c1.pgx",
+          "sha256": "e9a3cbeb7477a473d980109c42433875e92eb4e15be5c1a13c95aa0d79188614",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
     }
   ]
 }

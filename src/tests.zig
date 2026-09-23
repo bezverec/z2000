@@ -32339,6 +32339,42 @@ test "JP2 planar alpha wrapper preserves gray-alpha and RGBA cdef semantics" {
     }
 }
 
+test "JP2 cdef accepts Asoc 0 for the lone colour channel of gray+alpha" {
+    const allocator = std.testing.allocator;
+    // kdu_compress writes a gray+alpha JP2 with cdef entries (0, colour,
+    // Asoc 0) and (1, opacity, Asoc 0). The reader required Asoc 1 for the
+    // colour channel and rejected every Kakadu gray+alpha file as an
+    // unsupported profile, at any depth. ISO I.5.3.6 permits Asoc 0, "the
+    // whole image", and with one colour channel it is unambiguous.
+    const stream = @embedFile("testdata/kakadu-12bit-gray-alpha-tiles.jp2");
+    const info = try jp2.parseInfo(allocator, stream);
+    try std.testing.expectEqual(@as(u16, 2), info.components);
+    try std.testing.expectEqual(@as(u8, 12), info.bits_per_component);
+    try std.testing.expectEqual(jp2.AlphaMode.unassociated, info.alpha_mode.?);
+
+    const jp2h = try findJp2BoxPayload(stream, "jp2h");
+    const cdef = try findJp2ChildBoxPayload(stream, jp2h, "cdef");
+    // Entry 0 is channel(2) type(2) assoc(2) after the two-byte count.
+    try std.testing.expectEqual(@as(u8, 0), stream[cdef.start + 7]);
+
+    // Any other association for the colour channel is still wrong.
+    const other = try allocator.dupe(u8, stream);
+    defer allocator.free(other);
+    other[cdef.start + 7] = 2;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(allocator, other));
+
+    // With three colour channels Asoc 0 no longer names a colour, so RGBA
+    // keeps requiring the index.
+    const rgba = @embedFile("testdata/kakadu-rgba-rct-tiles.jp2");
+    const rgba_jp2h = try findJp2BoxPayload(rgba, "jp2h");
+    const rgba_cdef = try findJp2ChildBoxPayload(rgba, rgba_jp2h, "cdef");
+    try std.testing.expectEqual(@as(u8, 1), rgba[rgba_cdef.start + 7]);
+    const ambiguous = try allocator.dupe(u8, rgba);
+    defer allocator.free(ambiguous);
+    ambiguous[rgba_cdef.start + 7] = 0;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(allocator, ambiguous));
+}
+
 test "JP2 planar alpha cdef fails closed for missing or malformed semantics" {
     const allocator = std.testing.allocator;
     var source = try makePlanarTestPlanes(allocator, 9, 7, 8, 2);

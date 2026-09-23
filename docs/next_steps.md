@@ -378,13 +378,9 @@ The active G0/G4 corpus expansion is:
      the midpoint offset to coefficients T1 had already centered, in blocks
      whose passes stop before the end of bitplane zero. The whole tile-size
      map is now within one LSB.
-5e. Kakadu 8.4.1 writes a gray+alpha JP2 with `cdef` entries (0, colour,
-   Asoc 0) and (1, opacity, Asoc 0); `validateChannelDefinition` requires a
-   colour channel's association to be its own index plus one and rejects the
-   file as an unsupported profile at every depth. ISO I.5.3.6 permits Asoc 0
-   ("the whole image") for a colour channel, and with one colour channel it is
-   unambiguous. Accept Asoc 0 for the single colour channel of a gray+alpha
-   layout and pin the Kakadu file against `kdu_expand`.
+5e. **Done.** The reader accepts `cdef` Asoc 0 for the single colour channel
+   of a gray+alpha layout, which is what Kakadu writes; pinned by
+   `kakadu-12bit-gray-alpha-tiles`.
 5d. **Done.** Irreversible ROI components now follow the per-block midpoint
    rule; the ICT ROI stream that was 2 LSB from both references is within one
    LSB of each, and is committed as `kakadu-roi-ict-tiles`.

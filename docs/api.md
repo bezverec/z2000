@@ -813,7 +813,8 @@ palette layout with
 one index component, three uniform unsigned 8/16-bit `pclr` columns, and
 explicit `cmap` records to sRGB output channels; and 2/4-component
 gray+alpha/RGBA layouts whose final plane has complete Typ 1/2, Asoc 0 `cdef`
-semantics. `Info.alpha_mode` preserves whether that plane is unassociated or
+semantics; the lone colour channel of a gray+alpha layout may carry Asoc 0
+("the whole image", ISO I.5.3.6) as Kakadu writes it, or Asoc 1. `Info.alpha_mode` preserves whether that plane is unassociated or
 associated. Reversible RGBA with RCT on the colour channels (what
 `kdu_compress` writes for an RGBA TIFF) decodes on single- and multi-tile
 grids, at full or reduced resolution, and a partial decode (a quality-layer

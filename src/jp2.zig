@@ -1353,7 +1353,12 @@ fn validateChannelDefinition(payload: []const u8, components: u16) !?AlphaMode {
         if (seen[channel]) return Jp2Error.InvalidBox;
         seen[channel] = true;
         if (channel < color_components) {
-            if (channel_type != 0 or association != channel + 1) {
+            // A colour channel names its colour (Asoc = index + 1). With a
+            // single colour channel, Asoc 0 ("the whole image", ISO I.5.3.6)
+            // says the same thing, and it is what kdu_compress writes for
+            // gray+alpha.
+            const whole_image = association == 0 and color_components == 1;
+            if (channel_type != 0 or (association != channel + 1 and !whole_image)) {
                 return Jp2Error.UnsupportedProfile;
             }
             continue;
