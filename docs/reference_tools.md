@@ -11,7 +11,8 @@ to find when a new sweep hits the same wall. The
 [changelog](changelog.md) remains the chronological record; this file is the
 lookup table.
 
-Versions measured: **Kakadu 8.4.1**, **OpenJPEG 2.5.4**, **Grok 20.3.6**.
+Versions measured: **Kakadu 8.4.1**, **OpenJPEG 2.5.4**, **Grok 20.3.6**, and
+where stated **Grok 20.4.12** (re-measured on the same files).
 
 ## What The Producers Cannot Emit
 
@@ -75,7 +76,8 @@ Recorded rather than worked around, so the behaviour stays pinned.
 - **Grok refuses JP2-wrapped subsampled sRGB.** Grok 20.3.6 rejects any
   JP2-wrapped subsampled stream whose `colr` box declares sRGB, on the grounds
   that sRGB mandates uniform sampling. Those fixtures are committed as raw
-  codestreams so all three references can read them.
+  codestreams so all three references can read them. Grok 20.4.12 refuses
+  them as well, including a Kakadu-written JP2 whose `colr` says sRGB.
 - **`kdu_expand` fails when reduction empties an edge tile.** On a stream
   whose tile grid leaves a one-sample edge column, `kdu_expand -reduce 2`
   (and `-reduce 3`) exits 127 without an error message and writes empty
@@ -87,9 +89,14 @@ Recorded rather than worked around, so the behaviour stays pinned.
   -layers 1` segfaulted in 4 of 20 runs of the same file (RLCP; CPRL also
   crashed once). With `-num_threads 0` it crashed in 0 of 20. Generate
   reference output single-threaded, and check the exit status.
-- **Grok fails on collapsed resolutions.** Grok 20.3.6 does not decode a tile
-  grid anchored away from the image origin that leaves an edge tile whose
-  deepest resolution is empty in one axis. Kakadu and OpenJPEG do.
+- **Grok 20.3.6 misdecodes collapsed resolutions.** On a tile grid anchored
+  away from the image origin that leaves an edge tile whose deepest resolution
+  is empty in one axis (`kakadu-tile-origin-empty-resolution` and its 9/7
+  twin), `grk_decompress` 20.3.6 exits 0 and writes wrong pixels: 510 and 700
+  samples off by the full range. Kakadu and OpenJPEG decode them. Grok
+  20.4.12 fixes it: the reversible file is exact and the 9/7 one is within one
+  LSB. An earlier note here said 20.3.6 "does not decode" the stream; it
+  decodes and is wrong, which is worse, so check pixels and not exit codes.
 
 ## Reconstruction Spread
 
@@ -163,7 +170,20 @@ here so they are not rediscovered as new.
   to 29 LSB away on 32x32 tiles, whoever encoded them, and is further from
   the source (PSNR 29.8 dB against 33.9 dB for Kakadu and z2000 on Grok's own
   tiled RGB file). Reversible streams, tiled or not, are exact. Do not use
-  `grk_decompress` as a 9/7 oracle on tiled streams.
+  `grk_decompress` 20.3.6 as a 9/7 oracle on tiled streams. Grok 20.4.12
+  brings the same files to within one LSB untiled and two LSB on tiles, but
+  still differs from Kakadu on 40 to 50 percent of samples (3642 of 7680 on
+  the tiled RGB file) where z2000 differs from Kakadu on 30 percent and from
+  OpenJPEG on 0.3 percent; a coarse oracle at best.
+- *(Resolved in Grok 20.4.12; a Grok defect, not ours.)* A dense two-volume
+  POC (layer 0 of everything in LRCP, then everything in RPCL) from z2000's
+  `--poc`, tiled or not, and Kakadu's equivalent `Porder` file decode exactly
+  through Kakadu and OpenJPEG. Grok 20.3.6 misdecoded all three (7441 to 7673
+  of 7680 samples wrong); Grok 20.4.12 decodes all three exactly. The
+  committed Kakadu POC fixtures (`kakadu-poc-sop-eph-multitile-inline`,
+  `kakadu-poc-layer-tileparts`) were exact in both versions. Subsampled POC
+  rasters (`kakadu-sampled-poc-*`) still disagree with Kakadu's in 20.4.12,
+  as they did in 20.3.6, so that claim stands.
 - *(Resolved.)* Irreversible ROI was 2 LSB out because ROI components skipped
   the per-block midpoint rule and took the offset twice. On the Kakadu ICT
   ROI stream (`Rshift=14 -rate 2`, 32x32 tiles) Kakadu and OpenJPEG differ on

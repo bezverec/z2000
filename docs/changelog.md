@@ -5,6 +5,17 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Grok 20.4.12 Re-Measured
+
+- Documentation only. The Grok findings in `reference_tools.md` were
+  re-measured on the same files with Grok 20.4.12: the dense LRCP-to-RPCL
+  POC misdecode and the collapsed-resolution misdecode are fixed (the latter
+  was recorded as "does not decode"; 20.3.6 in fact exits 0 with wrong
+  pixels), tiled 9/7 reconstruction improves from 29 LSB to one or two but
+  still differs from Kakadu on nearly half the samples, and the refusal of
+  JP2-wrapped subsampled sRGB and the subsampled POC raster disagreement are
+  unchanged. Committed fixtures keep their 20.3.6 provenance.
+
 ### Gray+Alpha JP2s From Kakadu Decode
 
 - The queue item from the previous entry, now fixed. `kdu_compress` writes
