@@ -3666,6 +3666,31 @@
           "max_mse": 0.0
         }
       ]
+    },
+    {
+      "id": "grok-roi-shift-below-bitplanes",
+      "path": "src/testdata/grok-roi-shift-below-bitplanes.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "f3172be00b5d9f7c92c9dd4f86d4ab39f1a884d511ed2ede50ffb19f190befff",
+      "source": {
+        "producer": "Grok 20.4.12 grk_compress from a committed ImageMagick plasma",
+        "version": "20.4.12",
+        "origin": "reversible RGB with RCT over 32x32 tiles and a Maxshift ROI on component 0 with shift 6 (-R c=0,U=6), below the background's magnitude bit-plane count, so ROI and background coefficients overlap and no decoder can separate them (ISO E.3.3 requires the shift to exceed the background's bit-planes; Kakadu refuses to write such a stream)",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 committed; producer application not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.png; grk_compress -i src.png -o src/testdata/grok-roi-shift-below-bitplanes.jp2 -R c=0,U=6 -t 32,32"
+      },
+      "oracle": "fail-closed: the inverse RCT of a complete decode meets samples outside the component range and refuses. The references disagree with each other on this file (Kakadu differs from the source on 40 percent of samples, OpenJPEG and Grok on 91 percent, Kakadu from OpenJPEG on 64 percent). The same request with shift 9 or 12 decodes exactly everywhere, and with shift 6 but no MCT z2000 equals Kakadu exactly",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "reversible-53",
+        "roi-rgn-maxshift"
+      ],
+      "expectation": "fail_closed",
+      "expected_error": "SampleOutOfRange"
     }
   ]
 }

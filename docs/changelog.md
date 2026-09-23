@@ -5,6 +5,17 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Grok's Under-Shifted ROI Pinned As Fail-Closed
+
+- A sweep of 21 Grok 20.4.12-produced layouts through `decode-temp-jp2`
+  matched Kakadu and Grok exactly on every reversible file and within one
+  LSB on the lossy ones. The one miss was `-R c=0,U=6`: an ROI shift below
+  the background's bit-plane count, which Kakadu refuses to write and which
+  no decoder reconstructs consistently. With RCT the complete decode fails
+  closed in the inverse RCT; without MCT z2000 equals Kakadu exactly.
+  Committed as the fail-closed entry `grok-roi-shift-below-bitplanes` and
+  recorded in `reference_tools.md`.
+
 ### Grok 20.4.12 Re-Measured
 
 - Documentation only. The Grok findings in `reference_tools.md` were

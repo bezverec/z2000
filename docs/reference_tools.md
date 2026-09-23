@@ -73,6 +73,19 @@ Recorded rather than worked around, so the behaviour stays pinned.
   than clamping or refusing. z2000 and the JP2 audit reject the record;
   `kdu_expand` tolerates it. (`-n` is the resolution count, not the layer
   count, which is how the request came about.)
+- **`grk_compress` writes an ROI shift below the background's bit-planes.**
+  `-R c=0,U=6` on 8-bit RGB produces a Maxshift stream whose shift is
+  smaller than the background's magnitude bit-plane count, so ROI and
+  background coefficients overlap and nothing can separate them (ISO E.3.3
+  puts that requirement on the encoder; `kdu_compress` refuses the same
+  request with "too small a value for the ROI up-shift"). Grok 20.4.12
+  writes it anyway. The decoders then disagree with each other: Kakadu is
+  40 percent of samples from the source, OpenJPEG and Grok 91 percent, and
+  Kakadu differs from OpenJPEG on 64 percent. With RCT, z2000's complete
+  decode meets samples outside the range in the inverse RCT and fails
+  closed, committed as `grok-roi-shift-below-bitplanes`; without MCT, or
+  in grayscale, z2000 equals Kakadu exactly on the same broken input. Shifts
+  of 9 and 12 decode exactly through every decoder.
 - **Grok refuses JP2-wrapped subsampled sRGB.** Grok 20.3.6 rejects any
   JP2-wrapped subsampled stream whose `colr` box declares sRGB, on the grounds
   that sRGB mandates uniform sampling. Those fixtures are committed as raw
