@@ -3162,6 +3162,155 @@
           "max_mse": 0.12
         }
       ]
+    },
+    {
+      "id": "openjpeg-poc-overlap-missing-packets",
+      "path": "src/testdata/openjpeg-poc-overlap-missing-packets.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "d7306031ffd0c4d9c8deec8bddf6241157ddf21f64f5be99f412637eb2b43714",
+      "source": {
+        "producer": "OpenJPEG 2.5.4 opj_compress from a committed ImageMagick plasma",
+        "version": "2.5.4",
+        "origin": "96x80 RGB over 32x32 tiles, three resolutions, three layers, tile-header POC with two overlapping volumes: LRCP over layer 0 of everything, then RPCL over everything. ISO B.12 skips packets an earlier volume already sent, so each tile still has 27 packets; opj_compress writes only 25 per tile (225 SOP markers instead of 243 when re-encoded with -SOP). Two packets per tile are missing, and the tile body is short",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 committed; producer application not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.png; opj_compress -i src.png -o src/testdata/openjpeg-poc-overlap-missing-packets.jp2 -t 32,32 -n 3 -POC T1=0,0,1,3,3,LRCP/T1=0,0,3,3,3,RPCL -r 20,10,1"
+      },
+      "oracle": "fail-closed: a tile whose parts hold fewer packets than its plan is incomplete. kdu_expand 8.4.1 and opj_decompress 2.5.4 both decode the file without complaint; a non-overlapping schedule from the same command decodes exactly through all three",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "progression-poc"
+      ],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream"
+    },
+    {
+      "id": "kakadu-roi-gray-tiles",
+      "path": "src/testdata/kakadu-roi-gray-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "0cd43eb863335389ad749fffe2cd826cc2157af06aa605e06c58eef5482ad1ad",
+      "source": {
+        "producer": "Kakadu 8.4.1 from the red channel of the committed kakadu-97-native-multitile-source.ppm",
+        "version": "8.4.1",
+        "origin": "reversible grayscale JP2 over 32x32 tiles with a Maxshift ROI (RGN in the main header, shift 12) on the central quarter; the JP2 audit used to reject any RGN marker as an unsupported profile even though the codestream decoder handled it",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick src/testdata/kakadu-97-native-multitile-source.ppm -channel R -separate g0.pgm; kdu_compress -i g0.pgm -o src/testdata/kakadu-roi-gray-tiles.jp2 Creversible=yes Stiles={32,32} -roi {0.25,0.25},{0.5,0.5} Rshift=12 -quiet; kdu_expand -i src/testdata/kakadu-roi-gray-tiles.jp2 -o src/testdata/kakadu-roi-gray-tiles-full.pgx -quiet -num_threads 0 (and -reduce 1 into -r1.pgx)"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX at full resolution and -reduce 1, exact; OpenJPEG 2.5.4 decodes the file identically",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "reversible-53",
+        "roi-rgn-maxshift",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-roi-gray-tiles-full.pgx",
+          "sha256": "7a0862320ac46934b4c63c687e7c40f54ebd2c6d95e51fd0943c69bf002d70ae",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-roi-gray-tiles-r1.pgx",
+          "sha256": "812411d31e61087610addca9e5610253e6223d7ae0d9676374098ed6e4683263",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "openjpeg-roi-rct-tiles",
+      "path": "src/testdata/openjpeg-roi-rct-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "4df8879eaaa097fcfe330281202f95c66e4b2a241e02e902e91ee3a2fc7848b1",
+      "source": {
+        "producer": "OpenJPEG 2.5.4 opj_compress from a committed ImageMagick plasma",
+        "version": "2.5.4",
+        "origin": "reversible RGB with RCT over 32x32 tiles and a Maxshift ROI on component 0 (RGN in the main header, shift 5, the implicit-ROI upshift OpenJPEG writes for -ROI U=5); the JP2 audit used to reject any RGN marker",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and Kakadu PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.png; opj_compress -i src.png -o src/testdata/openjpeg-roi-rct-tiles.jp2 -ROI c=0,U=5 -t 32,32; kdu_expand -i src/testdata/openjpeg-roi-rct-tiles.jp2 -o <full-c0,c1,c2>.pgx -quiet -num_threads 0 (and -reduce 1 into the -r1- names)"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes at full resolution and -reduce 1, exact; OpenJPEG's own decode of the file equals Kakadu's plane for plane",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "reversible-53",
+        "roi-rgn-maxshift",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/openjpeg-roi-rct-tiles-full-c0.pgx",
+          "sha256": "d948b5479f1cde4742a57045e06b344269897393736f44896c06120fa21cedae",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/openjpeg-roi-rct-tiles-full-c1.pgx",
+          "sha256": "ee4261e97cc54a3f27d9abe5ce16617ed68b382339a77134387836e1f5d022cd",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/openjpeg-roi-rct-tiles-full-c2.pgx",
+          "sha256": "b2e23017093fd86701d6876ac7bcc257619595cb9e24df1cc448372ca174296e",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/openjpeg-roi-rct-tiles-r1-c0.pgx",
+          "sha256": "7e409e4214a6ef6badbc2b27203cc230e8409c760adc0ad59d9bc956df8cb0b8",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/openjpeg-roi-rct-tiles-r1-c1.pgx",
+          "sha256": "736379022105e1655e2a4d79ad24d83400ae538237d5b195df4184a7406c794a",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/openjpeg-roi-rct-tiles-r1-c2.pgx",
+          "sha256": "1aa9fccf84212b32c8d7985a5dbd2b78184d57e9dcca7711f5c25ed6ef93d1ef",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
     }
   ]
 }

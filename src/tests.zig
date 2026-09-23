@@ -8239,7 +8239,8 @@ test "JP2 wrapper validates z2000 codestream SIZ metadata" {
         };
         const unsupported_main_marker_cases = [_]UnsupportedMainMarkerCase{
             .{ .label = "malformed CAP main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("cap"), .expected = jp2.Jp2Error.InvalidCodestream },
-            .{ .label = "RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn") },
+            // RGN is accepted now, so a segment carrying COD's length is malformed.
+            .{ .label = "malformed RGN main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("rgn"), .expected = jp2.Jp2Error.InvalidCodestream },
             .{ .label = "PPT main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("ppt") },
             .{ .label = "malformed CRG main marker", .source = codestream.markerValue("cod"), .replacement = codestream.markerValue("crg"), .expected = jp2.Jp2Error.InvalidCodestream },
         };
@@ -12481,6 +12482,39 @@ test "multi-tile RGBA with RCT decodes through the planar path" {
             try std.testing.expectEqual(@as(u16, one_layer[pixel * 4 + component]), plane[pixel]);
         }
     }
+}
+
+test "JP2 audit accepts a Maxshift RGN marker and checks its fields" {
+    const allocator = std.testing.allocator;
+    // The wrapper audit refused every RGN marker as an unsupported profile,
+    // although RGN is legal in the main and first tile-part headers (ISO
+    // A.6.3) and the codestream decoder already applied the Maxshift. A
+    // tiled grayscale ROI JP2 from Kakadu therefore failed decode-temp-jp2
+    // while the same bytes decoded as a raw codestream. The audit now checks
+    // the segment: length, component index, and style 0 (the only Part 1
+    // style). Both corpus entries pin the decoded planes against Kakadu.
+    const stream = @embedFile("testdata/kakadu-roi-gray-tiles.jp2");
+    const info = try jp2.parseInfo(allocator, stream);
+    try std.testing.expectEqual(@as(u16, 1), info.components);
+
+    // Kakadu writes one RGN: FF5E 0005 Crgn=0 Srgn=0 SPrgn=12.
+    const rgn = std.mem.indexOf(u8, stream, &[_]u8{ 0xff, 0x5e, 0x00, 0x05, 0x00, 0x00, 0x0c }).?;
+    const mutated = try allocator.dupe(u8, stream);
+    defer allocator.free(mutated);
+
+    // A style other than Maxshift is outside Part 1.
+    mutated[rgn + 5] = 1;
+    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(allocator, mutated));
+    mutated[rgn + 5] = 0;
+
+    // A component index past Csiz is malformed.
+    mutated[rgn + 4] = 1;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(allocator, mutated));
+    mutated[rgn + 4] = 0;
+
+    // The segment length is fixed for fewer than 257 components.
+    mutated[rgn + 3] = 6;
+    try std.testing.expectError(jp2.Jp2Error.InvalidCodestream, jp2.parseInfo(allocator, mutated));
 }
 
 test "irreversible RGBA with ICT decodes through the planar path" {

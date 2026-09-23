@@ -817,7 +817,9 @@ grids, at full or reduced resolution, and a partial decode (a quality-layer
 prefix or a reduction) saturates to the component range as it does for plain
 RGB. Irreversible RGBA, with ICT over the colour channels and the same
 independent alpha plane, decodes on the same grids; its planes carry the usual
-lossy 9/7 reference spread. Signed/mixed palettes, arbitrary auxiliary-channel mappings, and
+lossy 9/7 reference spread. A Maxshift `RGN` marker is accepted in the main
+header or a first tile-part header, with its length, component index, and
+style checked; the codestream decoder applies the shift. Signed/mixed palettes, arbitrary auxiliary-channel mappings, and
 JPX-only features fail closed. The writers require non-empty
 dimensions, 8/16 bit depth, matching sample counts, codestream/JP2 shape
 agreement, and no MCT for one component. `wrapGrayCodestream` accepts only

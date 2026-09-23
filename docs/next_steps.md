@@ -378,6 +378,13 @@ The active G0/G4 corpus expansion is:
      the midpoint offset to coefficients T1 had already centered, in blocks
      whose passes stop before the end of bitplane zero. The whole tile-size
      map is now within one LSB.
+5d. Irreversible 9/7 with a Maxshift ROI reconstructs 2 LSB from both Kakadu
+   and OpenJPEG on a Kakadu `-roi ... Rshift=14 -rate 2` ICT stream, where
+   the two references hold to one LSB of each other (the reversible ROI
+   streams are exact). One candidate: `irreversibleMidpointBlocks` returns
+   null for any component with an ROI shift, so those blocks skip the
+   per-block midpoint rule that fixed the small-tile drift. Reproduce with
+   the ICT file from the RGN audit sweep before changing anything.
 5c. **Done.** Every RGBA layout from the `decode-temp-jp2` sweep over common
    `kdu_compress` output now decodes: multi-tile reversible RGBA, its reduced
    decode, and irreversible RGBA (ICT over the colour channels plus an

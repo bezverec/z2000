@@ -1674,7 +1674,10 @@ fn validateMainHeaderMarkers(
             },
             marker_crg => {},
             marker_cap, marker_prf => {},
-            marker_rgn, marker_ppt => {
+            // RGN needs no COD/QCD context (ISO A.6.3); its fields are checked
+            // with the other main-header segments.
+            marker_rgn => {},
+            marker_ppt => {
                 return Jp2Error.UnsupportedProfile;
             },
             marker_soc, marker_siz, marker_sod, marker_eoc => return Jp2Error.InvalidCodestream,
@@ -1697,6 +1700,7 @@ fn validateMainHeaderMarkers(
             },
             marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, components, &override_state),
             marker_qcc => try validateUniformQccSegment(payload, length_offset, marker_length, cod_info.?, components, &override_state, allow_component_qcc),
+            marker_rgn => try validateRgnSegment(payload, length_offset, marker_length, components),
             marker_crg => {
                 const expected_length = 2 + @as(usize, components) * 4;
                 if (saw_crg or @as(usize, marker_length) != expected_length) {
@@ -1995,6 +1999,7 @@ fn validateFirstTilePartHeader(
             marker_plt, marker_com => {},
             // Part 1 permits POC in any tile-part header, not only the first.
             marker_poc => {},
+            marker_rgn => {},
             marker_ppt => part_has_ppt = true,
             marker_sot, marker_eoc => return Jp2Error.InvalidCodestream,
             else => return Jp2Error.UnsupportedProfile,
@@ -2006,6 +2011,9 @@ fn validateFirstTilePartHeader(
         const next = std.math.add(usize, length_offset, marker_length) catch return Jp2Error.InvalidCodestream;
         if (next > end) return Jp2Error.InvalidCodestream;
         try validateTilePartHeaderMarkerSegment(payload, marker, length_offset, marker_length, &plt_state, ppt_state);
+        if (marker == marker_rgn) {
+            try validateRgnSegment(payload, length_offset, marker_length, components);
+        }
         if (marker == marker_poc) {
             try validatePocSegment(payload, length_offset, marker_length, cod, components);
         }
@@ -2021,6 +2029,7 @@ fn validateMarkerSegmentLength(marker: u16, marker_length: u16) !void {
         marker_coc => 5, // Lcoc(2) Ccoc(1) Scoc(1) + >=1 SPcoc byte
         marker_qcc => 4, // Lqcc(2) Cqcc(1) Sqcc(1)
         marker_poc => 9,
+        marker_rgn => 5, // Lrgn(2) Crgn(1) Srgn(1) SPrgn(1)
         marker_tlm => 6,
         marker_cap => 8,
         marker_prf => 4,
@@ -2100,6 +2109,23 @@ fn validatePocSegment(
             return Jp2Error.InvalidCodestream;
         }
     }
+}
+
+/// ISO A.6.3: one component index (one byte below 257 components), the ROI
+/// style, and the implicit-ROI shift. Only style 0 (Maxshift) exists in Part
+/// 1; the shift's usable range is the codestream reader's concern.
+fn validateRgnSegment(payload: []const u8, length_offset: usize, marker_length: u16, components: u16) !void {
+    const component_bytes: usize = if (components < 257) 1 else 2;
+    if (@as(usize, marker_length) != 2 + component_bytes + 2) return Jp2Error.InvalidCodestream;
+    const data_start = length_offset + 2;
+    if (data_start + component_bytes + 2 > payload.len) return Jp2Error.InvalidCodestream;
+    const component = if (component_bytes == 1)
+        @as(u16, payload[data_start])
+    else
+        try readU16Be(payload, data_start);
+    if (component >= components) return Jp2Error.InvalidCodestream;
+    const style = payload[data_start + component_bytes];
+    if (style != 0) return Jp2Error.UnsupportedProfile;
 }
 
 fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: u16, components: u16) !CodSegmentInfo {

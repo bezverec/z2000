@@ -5,6 +5,42 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### JP2 Audit Accepts RGN
+
+- The wrapper audit refused every `RGN` marker as an unsupported profile,
+  in the main header and in tile-part headers alike, although RGN is legal
+  in both (ISO A.6.3) and the codestream decoder already applied the
+  Maxshift. Any ROI JP2 from OpenJPEG or Kakadu failed `decode-temp-jp2`
+  while the same codestream decoded raw. Found by a `decode-temp-jp2` sweep
+  over common `opj_compress` layouts, where it was one of two misses.
+- The audit now validates the segment (length, component index, Maxshift
+  style) where the other main-header segments are validated, and again in
+  the first tile-part header next to POC.
+- Two corpus entries, both exact against Kakadu PGX at full resolution and
+  reduction 1: `kakadu-roi-gray-tiles` (main-header RGN, shift 12) and
+  `openjpeg-roi-rct-tiles` (RCT, RGN on component 0, shift 5), and OpenJPEG
+  decodes both files identically. Four more Kakadu ROI JP2s (RCT with two
+  layers, RGBA at an odd origin, and ICT at `-rate 2`) decode; the reversible
+  ones are exact. The unit test mutates the RGN fields and fails on the
+  previous commit.
+- Recorded, not fixed: the irreversible ICT ROI stream reconstructs 2 LSB
+  from both Kakadu and OpenJPEG, which agree with each other within one.
+  PSNR against the source is 26.31 dB for all three. Queued below the
+  empty-resolution work.
+
+### OpenJPEG's Overlapping POC Pinned As Fail-Closed
+
+- The sweep's other miss was not ours. `opj_compress` given two overlapping
+  POC volumes (layer 0 of everything in LRCP, then everything in RPCL) writes
+  25 packets per tile instead of 27: ISO B.12 skips packets an earlier volume
+  already sent, and OpenJPEG skips two more. Re-encoding with `-SOP` counts
+  225 markers where 9 tiles need 243. `kdu_expand` and `opj_decompress` decode
+  the file silently; z2000 rejects each tile as incomplete, which is the
+  existing truncation rule doing its job.
+- Committed as the fail-closed entry `openjpeg-poc-overlap-missing-packets`.
+  Non-overlapping schedules from the same command decode exactly through all
+  three decoders, as does a Kakadu two-volume schedule.
+
 ### Irreversible RGBA Decodes
 
 - `kdu_compress -rate` on an RGBA TIFF writes ICT over the colour channels

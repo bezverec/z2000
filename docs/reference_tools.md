@@ -58,6 +58,20 @@ Recorded rather than worked around, so the behaviour stays pinned.
   "Unexpectedly ran out of packet length information while processing
   tile-parts". OpenJPEG, Grok, and z2000 all reconstruct the raster. Committed
   as the decode entry `kakadu-singletile-rlc-tileparts-plt`.
+- **`opj_compress` drops packets from an overlapping POC schedule.** Given
+  `-POC T1=0,0,1,3,3,LRCP/T1=0,0,3,3,3,RPCL` (layer 0 of everything, then
+  everything), OpenJPEG 2.5.4 writes 25 packets per tile instead of 27:
+  re-encoding with `-SOP` shows 225 markers where 9 tiles x 27 need 243.
+  ISO B.12 only skips packets an earlier volume already sent, so the tile
+  bodies are short. `kdu_expand` and `opj_decompress` decode the file without
+  a word; z2000 rejects each tile as incomplete. Committed as the fail-closed
+  entry `openjpeg-poc-overlap-missing-packets`. The same command with
+  non-overlapping volumes writes all 243 and decodes exactly everywhere.
+- **`opj_compress` writes out-of-range POC records as given.** Asked for a
+  resolution end of 6 on a three-resolution stream, it writes REpoc=6 rather
+  than clamping or refusing. z2000 and the JP2 audit reject the record;
+  `kdu_expand` tolerates it. (`-n` is the resolution count, not the layer
+  count, which is how the request came about.)
 - **Grok refuses JP2-wrapped subsampled sRGB.** Grok 20.3.6 rejects any
   JP2-wrapped subsampled stream whose `colr` box declares sRGB, on the grounds
   that sRGB mandates uniform sampling. Those fixtures are committed as raw
@@ -141,6 +155,21 @@ here so they are not rediscovered as new.
   each other on 163. Both references stay at one LSB throughout, so this is
   z2000 losing more precision in the mirrored boundary terms, not reference
   spread. Long spans in either axis are unaffected.
+- **`grk_decompress` misreconstructs tiled 9/7.** Irreversible JP2s from
+  `grk_compress -I -r 20,10,1` (96x80 RGB, grayscale, RGBA, gray+alpha) and
+  from `kdu_compress -rate 2` decode through Kakadu, OpenJPEG, and z2000 to
+  within one LSB of each other (z2000 versus OpenJPEG: 3 to 28 samples).
+  `grk_decompress` 20.3.6 on the same files lands 2 LSB away untiled and up
+  to 29 LSB away on 32x32 tiles, whoever encoded them, and is further from
+  the source (PSNR 29.8 dB against 33.9 dB for Kakadu and z2000 on Grok's own
+  tiled RGB file). Reversible streams, tiled or not, are exact. Do not use
+  `grk_decompress` as a 9/7 oracle on tiled streams.
+- **z2000 is 2 LSB out on irreversible ROI.** On a Kakadu ICT stream with a
+  Maxshift ROI (`Rshift=14 -rate 2`, 32x32 tiles), Kakadu and OpenJPEG agree
+  within one LSB (2497 of 7680 samples differ) and z2000 is within two of
+  each (3616 against Kakadu, 2493 against OpenJPEG). PSNR against the source
+  is 26.31 dB for all three. Queued in `next_steps.md`; the reversible ROI
+  streams are exact.
 - *(Resolved.)* The container audit's fixed 256-tile and 4096-`TLM`-entry
   bounds are gone; a Kakadu stream with 1024 tiles and 5120 TLM-listed
   tile-parts decodes. Kakadu's `ORGgen_tlm=N` caps tile-parts *per tile* at N
