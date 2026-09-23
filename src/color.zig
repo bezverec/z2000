@@ -1096,6 +1096,45 @@ fn inverseIctRange(samples: []u16, planes: IctPlanes, begin: usize, end: usize, 
     }
 }
 
+/// Inverse ICT from three reconstructed f32 planes (row stride `source_stride`,
+/// only the top-left `width` x `height` window is valid) into three planar u16
+/// outputs, with the rounding and clamping of the interleaved inverse. The
+/// colour components must share a bit depth: the ICT is defined over one
+/// sample range (ISO G.3).
+pub fn inverseIctIntoPlanes(
+    sources: []const []const f32,
+    source_stride: usize,
+    outputs: [][]u16,
+    width: usize,
+    height: usize,
+    bit_depths: []const u8,
+) !void {
+    if (sources.len != 3 or outputs.len != 3 or bit_depths.len != 3) return ColorError.InvalidImage;
+    if (bit_depths[1] != bit_depths[0] or bit_depths[2] != bit_depths[0]) return ColorError.InvalidImage;
+    const max_sample = try maxSample(bit_depths[0]);
+    const shift: f32 = @floatFromInt(try dcLevelShift(bit_depths[0]));
+    const pixels = try std.math.mul(usize, width, height);
+    const needed = if (height == 0) 0 else (height - 1) * source_stride + width;
+    for (sources) |source| {
+        if (source.len < needed) return ColorError.InvalidImage;
+    }
+    for (outputs) |output| {
+        if (output.len != pixels) return ColorError.InvalidImage;
+    }
+    for (0..height) |row| {
+        const in = row * source_stride;
+        const out = row * width;
+        for (0..width) |column| {
+            const y = sources[0][in + column];
+            const cb = sources[1][in + column];
+            const cr = sources[2][in + column];
+            outputs[0][out + column] = clampToSample(y + 1.402 * cr + shift, max_sample);
+            outputs[1][out + column] = clampToSample(y - 0.34413 * cb - 0.71414 * cr + shift, max_sample);
+            outputs[2][out + column] = clampToSample(y + 1.772 * cb + shift, max_sample);
+        }
+    }
+}
+
 const IctInverseJob = struct {
     samples: []u16,
     planes: IctPlanes,

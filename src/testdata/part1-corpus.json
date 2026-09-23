@@ -3065,6 +3065,103 @@
           "max_mse": 0.0
         }
       ]
+    },
+    {
+      "id": "kakadu-rgba-ict-tiles",
+      "path": "src/testdata/kakadu-rgba-ict-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "a5e8cab1b209484bfc258b8ddf2792d7e9e4a14941188b151396852bbe12e7ce",
+      "source": {
+        "producer": "Kakadu 8.4.1 from the committed kakadu-97-native-multitile-source.ppm plus a synthetic alpha ramp",
+        "version": "8.4.1",
+        "origin": "irreversible RGBA JP2 over 13x11 tiles, ICT on the colour channels (Kakadu's default for a rate-allocated RGBA TIFF) and an independent alpha plane, three rate-allocated layers; the JP2 audit and every decode gate used to reject four-component MCT unless the transform was reversible",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick src/testdata/kakadu-97-native-multitile-source.ppm -alpha set -channel A -fx \"(i+j)/(w+h)\" rgba48.tif; kdu_compress -i rgba48.tif -o src/testdata/kakadu-rgba-ict-tiles.jp2 Stiles={13,11} Clayers=3 Cblk={8,8} Clevels=2 -rate 3,6,12 -quiet; kdu_expand -i src/testdata/kakadu-rgba-ict-tiles.jp2 -o <c0,c1,c2,c3>.pgx -quiet -num_threads 0 (and -reduce 1 into the -r1- names)"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes at full resolution and -reduce 1; peak error <= 1 and MSE <= 0.12 per plane. Measured spread at full resolution: z2000 vs Kakadu 143/89/158/60 of 1920 samples per plane differ by one LSB, Kakadu vs OpenJPEG 2.5.4 143/87/157/60, z2000 vs OpenJPEG 2/2/1/0",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "irreversible-97",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-rgba-ict-tiles-c0.pgx",
+          "sha256": "fb7dab8b09596cc9196d3e92f840e430ba60d5afb8dfd54278a896c1a4e762db",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-ict-tiles-c1.pgx",
+          "sha256": "472100b0a3ef5c3cbcac35ae05fe98847c0700d951424686d7c06e4bb7c5312a",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-ict-tiles-c2.pgx",
+          "sha256": "8b00156f8f049b1481083c0918fb7c0cfe8f9da386e8d370be851acea83d101e",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-ict-tiles-c3.pgx",
+          "sha256": "620dd3f8f479ecc8dc2dbd0c5e354f310c575b51b1c59840b536646b23534282",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-ict-tiles-r1-c0.pgx",
+          "sha256": "62ceb594f030994f51b242d9dafe71cbbb02e56cede2865b54e21821e061f452",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-ict-tiles-r1-c1.pgx",
+          "sha256": "6ed3738e12979facbbdbd41c83953830e97b91c698bcd538a5b7d1181a606240",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-ict-tiles-r1-c2.pgx",
+          "sha256": "df886ee18ab2b6a2b38b004b8a055e7e70036af76fcce64f6b828db6b34ec91c",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-ict-tiles-r1-c3.pgx",
+          "sha256": "19ca3835394d4c40bc687ac5823f751eefa3859203322576a7a6bf4c7b7a8ba3",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.12
+        }
+      ]
     }
   ]
 }

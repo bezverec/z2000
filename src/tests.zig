@@ -12483,6 +12483,57 @@ test "multi-tile RGBA with RCT decodes through the planar path" {
     }
 }
 
+test "irreversible RGBA with ICT decodes through the planar path" {
+    const allocator = std.testing.allocator;
+    // A rate-allocated RGBA TIFF through kdu_compress gets ICT on the colour
+    // channels and an independent alpha plane. The JP2 audit, the metadata
+    // profile, and the planar gates all rejected four-component MCT unless the
+    // transform was reversible, so no irreversible RGBA file decoded at all.
+    // The irreversible planar path now inverts the ICT over components 0..2
+    // and level-shifts alpha. Lossy 9/7 has a reference spread, so the planes
+    // are bounded against Kakadu 8.4.1 (single-threaded kdu_expand) at one
+    // LSB peak rather than pinned; at full resolution z2000 is within 0..2
+    // samples of OpenJPEG 2.5.4 per plane.
+    const stream = try jp2.extractCodestream(allocator, @embedFile("testdata/kakadu-rgba-ict-tiles.jp2"));
+    const Level = struct { reduction: u8, pgx: [4][]const u8 };
+    const levels = [_]Level{
+        .{ .reduction = 0, .pgx = .{
+            @embedFile("testdata/kakadu-rgba-ict-tiles-c0.pgx"),
+            @embedFile("testdata/kakadu-rgba-ict-tiles-c1.pgx"),
+            @embedFile("testdata/kakadu-rgba-ict-tiles-c2.pgx"),
+            @embedFile("testdata/kakadu-rgba-ict-tiles-c3.pgx"),
+        } },
+        .{ .reduction = 1, .pgx = .{
+            @embedFile("testdata/kakadu-rgba-ict-tiles-r1-c0.pgx"),
+            @embedFile("testdata/kakadu-rgba-ict-tiles-r1-c1.pgx"),
+            @embedFile("testdata/kakadu-rgba-ict-tiles-r1-c2.pgx"),
+            @embedFile("testdata/kakadu-rgba-ict-tiles-r1-c3.pgx"),
+        } },
+    };
+    for (levels) |level| {
+        var decoded = try codestream.decodeLosslessPlanarWithOptions(
+            allocator,
+            stream,
+            .{ .resolution_reduction = level.reduction },
+        );
+        defer decoded.deinit();
+        try std.testing.expectEqual(@as(usize, 4), decoded.planes.len);
+        for (decoded.planes, level.pgx) |plane, reference| {
+            const header_end = std.mem.indexOfScalar(u8, reference, '\n').?;
+            const body = reference[header_end + 1 ..];
+            try std.testing.expectEqual(body.len, plane.len);
+            var differing: usize = 0;
+            for (plane, body) |sample, expected| {
+                const difference = @abs(@as(i32, sample) - @as(i32, expected));
+                try std.testing.expect(difference <= 1);
+                if (difference != 0) differing += 1;
+            }
+            // Well inside the Kakadu-versus-OpenJPEG spread on the same planes.
+            try std.testing.expect(differing * 8 <= plane.len);
+        }
+    }
+}
+
 test "planar multi-tile decode accepts every progression order" {
     const allocator = std.testing.allocator;
     // Multi-tile no-MCT planar decode used to require RPCL, even though the

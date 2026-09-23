@@ -5223,9 +5223,11 @@ fn checkStrictPlanarProfile(
     const irreversible_codestream_components = output_mode == .codestream_components and
         header.component_count == 3 and header.mct == .rct and
         headerHasUniformComponentSampling(header);
+    // RGBA with ICT on the colour channels and an independent alpha plane.
+    const ict_alpha = rct_alpha and headerHasUniformComponentSampling(header);
     const irreversible = header.transform == .irreversible_9_7 and
         header.quantization != .none and
-        (header.mct == .none or irreversible_codestream_components);
+        (header.mct == .none or irreversible_codestream_components or ict_alpha);
     const mixed_component_transform = header.mct == .none and
         headerHasMixedComponentTransforms(header);
     if (headerHasSignedComponent(header) or headerHasNonLegacyPrecision(header) or
@@ -5236,7 +5238,7 @@ fn checkStrictPlanarProfile(
         return CodestreamError.UnsupportedPayload;
     }
     if (options.resolution_reduction != 0 and header.mct != .none and !sampled_rct and
-        !(reversible and rct_alpha))
+        !(reversible and rct_alpha) and !(irreversible and ict_alpha))
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -5247,7 +5249,7 @@ fn checkStrictPlanarProfile(
         const reversible_no_mct = reversible and header.mct == .none;
         if (!headerHasComponentSubsampling(header) and
             !(header.transform == .irreversible_9_7 and header.quantization != .none and header.mct == .none) and
-            !reversible_no_mct and !(reversible and rct_alpha))
+            !reversible_no_mct and !(reversible and rct_alpha) and !(irreversible and ict_alpha))
         {
             return CodestreamError.UnsupportedPayload;
         }
@@ -5579,7 +5581,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
     }
     if (header.transform == .irreversible_9_7) {
         if (header.quantization == .none or
-            (header.mct != .none and output_mode != .codestream_components))
+            (header.mct != .none and output_mode != .codestream_components and !rct_alpha))
         {
             return CodestreamError.UnsupportedPayload;
         }
@@ -5588,6 +5590,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
             header,
             catalog,
             options,
+            output_mode == .output_components and rct_alpha,
             timings,
         );
     }
@@ -6712,9 +6715,8 @@ fn readStrictCodestreamMetadataForProfile(
         precincts[0..precinct_count],
         component_coding[max_levels_component].precincts[0..precinct_count],
     );
-    if (parsed_mct != .none and component_count != 3 and
-        !(component_count == 4 and parsed_transform == .reversible_5_3))
-    {
+    // Four components with MCT: RCT or ICT over the first three, alpha independent.
+    if (parsed_mct != .none and component_count != 3 and component_count != 4) {
         return CodestreamError.UnsupportedPayload;
     }
     const parsed_grid_value = parsed_grid orelse return CodestreamError.InvalidCodestream;
@@ -11210,12 +11212,16 @@ fn decodeStrictMultiTilePlanarToSink(
     const reversible_no_mct = reversible and header.mct == .none;
     // RGBA with RCT over the first three components; the alpha plane stays
     // independent, and each tile is inverted on its own.
-    const reversible_rct_alpha = reversible and header.component_count == 4 and
-        header.mct == .rct;
+    const alpha_mct = header.component_count == 4 and header.mct == .rct and
+        headerHasUniformComponentSampling(header);
+    const reversible_rct_alpha = reversible and alpha_mct;
+    const irreversible_ict_alpha = header.transform == .irreversible_9_7 and
+        header.quantization != .none and alpha_mct;
     const component_local_layout = headerHasComponentSubsampling(header) or
-        irreversible_no_mct or reversible_no_mct or reversible_rct_alpha;
-    if ((header.mct != .none and !sampled_rct and !reversible_rct_alpha) or
-        (!reversible and !irreversible_no_mct) or
+        irreversible_no_mct or reversible_no_mct or reversible_rct_alpha or
+        irreversible_ict_alpha;
+    if ((header.mct != .none and !sampled_rct and !alpha_mct) or
+        (!reversible and !irreversible_no_mct and !irreversible_ict_alpha) or
         !component_local_layout)
     {
         return CodestreamError.UnsupportedPayload;
@@ -12419,15 +12425,22 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
         color.inverseIctThreaded(allocator, compact, thread_count);
 }
 
+/// `apply_ict` inverts the ICT over components 0..2 into output samples; the
+/// four-component RGBA layout is the only caller, and its alpha plane receives
+/// the DC level shift alone. Without it, MCT streams return pre-ICT planes.
 fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
+    apply_ict: bool,
     timings: ?*DecodeTimings,
 ) !color.SamplePlanes {
-    const bounded_ict_components = header.component_count == 3 and header.mct == .rct and
-        headerHasUniformComponentSampling(header);
+    const bounded_ict_components = (header.component_count == 3 or header.component_count == 4) and
+        header.mct == .rct and headerHasUniformComponentSampling(header);
+    if (apply_ict and (header.component_count != 4 or header.mct != .rct)) {
+        return CodestreamError.UnsupportedPayload;
+    }
     if ((header.mct != .none and !bounded_ict_components) or
         header.transform != .irreversible_9_7 or
         header.quantization == .none or catalog.component_count != header.component_count or
@@ -12603,7 +12616,19 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
     errdefer output.deinit();
 
     const color_start = monotonicNs();
+    if (apply_ict) {
+        // Uniform sampling makes the three colour planes share one shape.
+        try color.inverseIctIntoPlanes(
+            reconstructed.planes[0..3],
+            catalog.component_widths[0],
+            output.planes[0..3],
+            output_widths[0],
+            output_heights[0],
+            component_depths[0..3],
+        );
+    }
     for (0..header.component_count) |component| {
+        if (apply_ict and component < 3) continue;
         const bit_depth = component_depths[component];
         const max_sample = (@as(i32, 1) << @as(u5, @intCast(bit_depth))) - 1;
         const max_float: f32 = @floatFromInt(max_sample);

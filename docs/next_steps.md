@@ -378,11 +378,10 @@ The active G0/G4 corpus expansion is:
      the midpoint offset to coefficients T1 had already centered, in blocks
      whose passes stop before the end of bitplane zero. The whole tile-size
      map is now within one LSB.
-5c. One RGBA layout found by a `decode-temp-jp2` sweep over common
-   `kdu_compress` output still fails closed: irreversible RGBA (`-rate` on an
-   RGBA TIFF gives ICT over the colour channels plus an independent alpha,
-   rejected by the JP2 COD audit). Multi-tile reversible RGBA and its reduced
-   decode through the planar API are done.
+5c. **Done.** Every RGBA layout from the `decode-temp-jp2` sweep over common
+   `kdu_compress` output now decodes: multi-tile reversible RGBA, its reduced
+   decode, and irreversible RGBA (ICT over the colour channels plus an
+   independent alpha, previously rejected by the JP2 COD audit).
 5b. **Done.** Resolution reduction no longer rejects a stream in which an edge
    tile has no samples left at the requested reduction. Such a tile is treated
    like an unselected one: its headers are still validated, but it is not

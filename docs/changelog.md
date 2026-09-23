@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Irreversible RGBA Decodes
+
+- `kdu_compress -rate` on an RGBA TIFF writes ICT over the colour channels
+  and an independent alpha plane. Three gates rejected that file in turn: the
+  JP2 COD audit (four components with MCT only for the reversible transform),
+  the metadata profile (the same rule), and the planar decode paths (MCT with
+  9/7 only in pre-ICT codestream-component mode). It was the last RGBA layout
+  from the `decode-temp-jp2` sweep still failing closed.
+- The irreversible planar decoder now takes an `apply_ict` flag. For the
+  four-component layout in output-component mode it inverts the ICT over
+  components 0..2 through a new planar `color.inverseIctIntoPlanes`, with the
+  rounding and clamping of the interleaved inverse, and level-shifts alpha on
+  its own. Single- and multi-tile grids and reduced decode go through the
+  same path. Codestream-component mode still returns pre-ICT planes.
+- `kakadu-rgba-ict-tiles` (13x11 tiles, three rate-allocated layers) is a
+  new corpus entry bounded against Kakadu 8.4.1 PGX planes at full resolution
+  and reduction 1, one LSB peak. The spread is the usual lossy one: z2000
+  differs from Kakadu on 143/89/158/60 of 1920 samples per plane, Kakadu
+  differs from OpenJPEG 2.5.4 on 143/87/157/60, and z2000 differs from
+  OpenJPEG on 2/2/1/0. The unit test fails on the previous commit.
+- Swept on a 96x80 RGBA stream at `-rate 3,6,12`: all five progression orders
+  over 19x23 tiles at image origin (5,3), a single tile, `R` tile-parts, one-
+  and two-layer prefixes, a region, and a tile selection all decode within one
+  LSB of `kdu_expand`. There z2000 sits with OpenJPEG rather than Kakadu: on
+  the LRCP stream Kakadu and OpenJPEG differ on 2362 of 7680 colour samples
+  and z2000 differs from OpenJPEG on 11, with alpha identical.
+
 ### Reduced Decode Of Reversible RGBA
 
 - The planar profile check refused resolution reduction for any MCT layout
