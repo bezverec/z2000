@@ -3392,6 +3392,218 @@
           "max_mse": 0.2
         }
       ]
+    },
+    {
+      "id": "kakadu-12bit-gray",
+      "path": "src/testdata/kakadu-12bit-gray.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "8f3eef9c7e077adc0f07e8fb619335a2b2775fdd9b67474f1c26f9de16718708",
+      "source": {
+        "producer": "Kakadu 8.4.1 from a committed ImageMagick plasma",
+        "version": "8.4.1",
+        "origin": "single-tile reversible 12-bit grayscale JP2 (ihdr BPC 11); the JP2 reader used to accept only 8- and 16-bit components, so every 12-bit JP2 failed decode-temp-jp2 while its codestream decoded raw",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.ppm; magick src.ppm -depth 12 -colorspace gray g12.pgm (and -depth 10 g10.pgm, -depth 12 rgb12.ppm); kdu_compress -i g12.pgm -o src/testdata/kakadu-12bit-gray.jp2 Creversible=yes -quiet; kdu_expand -i src/testdata/kakadu-12bit-gray.jp2 -o src/testdata/kakadu-12bit-gray-full.pgx -quiet -num_threads 0 (and -reduce 1 into -r1.pgx)"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX at full resolution and -reduce 1, exact; z2000's 12-bit TIFF equals kdu_expand's and opj_decompress's pixel for pixel",
+      "features": [
+        "jp2-core-container",
+        "reversible-53",
+        "siz-bounded-unsigned-components",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-12bit-gray-full.pgx",
+          "sha256": "7487f5ae6cd1748646c96e41e268370f223f7a50fd2df71f293ab9733b942c80",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-gray-r1.pgx",
+          "sha256": "5a3c3748ea21dcc6dfdfd4b2d6c469621bc01e184870baab0526728f50907d86",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-12bit-gray-97-tiles",
+      "path": "src/testdata/kakadu-12bit-gray-97-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "1bf59ef90c54c1a5d894d687557742c50f203c171889ccebbb5615d03a5072ae",
+      "source": {
+        "producer": "Kakadu 8.4.1 from a committed ImageMagick plasma",
+        "version": "8.4.1",
+        "origin": "irreversible 12-bit grayscale over 32x32 tiles at -rate 3; 12-bit lossy carries the usual one-LSB reference spread at its own depth",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.ppm; magick src.ppm -depth 12 -colorspace gray g12.pgm (and -depth 10 g10.pgm, -depth 12 rgb12.ppm); kdu_compress -i g12.pgm -o src/testdata/kakadu-12bit-gray-97-tiles.jp2 -rate 3 Stiles={32,32} -quiet; kdu_expand ... as above"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX at full resolution and -reduce 1; peak error <= 1 (of 4095) and MSE <= 0.05",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "irreversible-97",
+        "siz-bounded-unsigned-components",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-12bit-gray-97-tiles-full.pgx",
+          "sha256": "9cc5864ccca42ea9df4fdbc0775e481bde373809ae9dc134e5b25bfaad07ffbc",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.05
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-gray-97-tiles-r1.pgx",
+          "sha256": "1a3ec58cb44909785dd3fb148015fe09330fb3d0fcb3f7a72cc66d6911226abe",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.05
+        }
+      ]
+    },
+    {
+      "id": "kakadu-10bit-gray-tiles",
+      "path": "src/testdata/kakadu-10bit-gray-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "sha256": "df4a1a7ac0d6301540683baf29d901776af29d62a38dbfdcf5c151d2b1a65b8d",
+      "source": {
+        "producer": "Kakadu 8.4.1 from a committed ImageMagick plasma",
+        "version": "8.4.1",
+        "origin": "reversible 10-bit grayscale over 32x32 tiles; a depth whose packed TIFF rows (96 samples, 120 bytes) end on a byte boundary only because the width is a multiple of four",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.ppm; magick src.ppm -depth 12 -colorspace gray g12.pgm (and -depth 10 g10.pgm, -depth 12 rgb12.ppm); kdu_compress -i g10.pgm -o src/testdata/kakadu-10bit-gray-tiles.jp2 Creversible=yes Stiles={32,32} -quiet; kdu_expand ... as above"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX at full resolution and -reduce 1, exact",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "reversible-53",
+        "siz-bounded-unsigned-components",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-10bit-gray-tiles-full.pgx",
+          "sha256": "b3e96651a09ec6398c5a6c4c9c6d78bc1d525a86ff8f0cf062a531447650b236",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-10bit-gray-tiles-r1.pgx",
+          "sha256": "4a04fae45c5c9339bb041a8c6cd2e0c93524a058d0b385f6184f320a50ea01e6",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-12bit-rgb-rct-tiles",
+      "path": "src/testdata/kakadu-12bit-rgb-rct-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "7346d99d2ca6c6d0b1f2934a07000c5a18534cdf39f7d910328a4f90fdba0330",
+      "source": {
+        "producer": "Kakadu 8.4.1 from a committed ImageMagick plasma",
+        "version": "8.4.1",
+        "origin": "reversible 12-bit RGB with RCT over 32x32 tiles, Kakadu's default for a 12-bit PPM",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.ppm; magick src.ppm -depth 12 -colorspace gray g12.pgm (and -depth 10 g10.pgm, -depth 12 rgb12.ppm); kdu_compress -i rgb12.ppm -o src/testdata/kakadu-12bit-rgb-rct-tiles.jp2 Creversible=yes Stiles={32,32} -quiet; kdu_expand -i ... -o <full-c0,c1,c2>.pgx (and -reduce 1 into the -r1- names)"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes at full resolution and -reduce 1, exact; OpenJPEG 2.5.4 decodes the file identically",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "reversible-53",
+        "siz-bounded-unsigned-components",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-12bit-rgb-rct-tiles-full-c0.pgx",
+          "sha256": "c8f1c81bc956e047115b053014c349cda7dd0c62a25c573efedd30050b4b03a9",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-rgb-rct-tiles-full-c1.pgx",
+          "sha256": "aa7684a45e571dcb47403a5ffdeac70f05c27e6bc135199acd0336a03ac583c6",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-rgb-rct-tiles-full-c2.pgx",
+          "sha256": "967a9b1e8f3a967e5fbdb2ddf9f70072aa4dd29e408f8c5d4390a3b31b73100b",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-rgb-rct-tiles-r1-c0.pgx",
+          "sha256": "371da82d44e3acb99e0e5030c987a930f52b2cc63b81c3d90fdb3a3c1871b305",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-rgb-rct-tiles-r1-c1.pgx",
+          "sha256": "48fa17598d6496946d787fa175fe9d183c8036028f323ccc8d6887827787bd48",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-12bit-rgb-rct-tiles-r1-c2.pgx",
+          "sha256": "dee72171dc1813a2c6be6191a141d219238f53c18a9b9e82a2c64daf8add0ce5",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
     }
   ]
 }

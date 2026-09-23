@@ -1071,7 +1071,10 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 } else {
                     if ((bpc & 0x80) != 0) return Jp2Error.UnsupportedProfile;
                     info.bits_per_component = bpc + 1;
-                    if (info.bits_per_component != 8 and info.bits_per_component != 16) {
+                    // A uniform depth of 1..16 bits is decodable end to end;
+                    // the TIFF writer packs the depths that are not whole
+                    // bytes. Mixed BPCC depths stay at 8/16 below.
+                    if (info.bits_per_component > 16) {
                         return Jp2Error.UnsupportedColorSpace;
                     }
                     for (info.component_bit_depths[0..info.components]) |*component_bits| {

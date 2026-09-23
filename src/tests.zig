@@ -6136,6 +6136,66 @@ test "TIFF grayscale writer roundtrips BlackIsZero and WhiteIsZero rasters" {
     try std.testing.expectEqualSlices(u8, icc, decoded16.icc_profile.?);
 }
 
+test "TIFF writers pack depths other than 8 and 16 MSB-first with padded rows" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/gray12.tif", .{tmp.sub_path});
+
+    // Three 12-bit samples fill 4.5 bytes, so every row carries four padding
+    // bits; the second row proves the row boundary resets the bit cursor.
+    // This is the layout kdu_expand and libtiff write for a 12-bit image.
+    const samples = try allocator.dupe(u16, &.{ 0xabc, 0xdef, 0x123, 0x001, 0xfff, 0x800 });
+    defer allocator.free(samples);
+    const gray = image.GrayImage{
+        .allocator = allocator,
+        .width = 3,
+        .height = 2,
+        .bit_depth = 12,
+        .samples = samples,
+    };
+    try tiff.writeGray(io, allocator, gray, path);
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096));
+    defer allocator.free(bytes);
+    const raster = bytes[bytes.len - 10 ..];
+    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd, 0xef, 0x12, 0x30, 0x00, 0x1f, 0xff, 0x80, 0x00 }, raster);
+    // BitsPerSample = 12 (tag 258, inline SHORT) sits after the two size tags.
+    try std.testing.expectEqual(@as(u8, 12), bytes[8 + 2 + 2 * 12 + 8]);
+
+    // A sample past the depth's range fails closed instead of aliasing.
+    samples[4] = 0x1000;
+    try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.writeGray(io, allocator, gray, path));
+}
+
+test "JP2 reader accepts uniform component depths between 8 and 16 bits" {
+    const allocator = std.testing.allocator;
+    // The reader took only 8- and 16-bit components, so a 12-bit grayscale
+    // JP2 from kdu_compress failed decode-temp-jp2 as an unsupported colour
+    // space while its codestream decoded raw. Uniform depths of 1..16 bits
+    // are decodable end to end; the planes are pinned against Kakadu's PGX
+    // by the corpus, and here the 10-bit stream is checked exactly.
+    const stream = @embedFile("testdata/kakadu-10bit-gray-tiles.jp2");
+    const info = try jp2.parseInfo(allocator, stream);
+    try std.testing.expectEqual(@as(u8, 10), info.bits_per_component);
+    try std.testing.expectEqual(@as(u16, 1), info.components);
+
+    const codestream_bytes = try jp2.extractCodestream(allocator, stream);
+    var decoded = try codestream.decodeLosslessPlanar(allocator, codestream_bytes);
+    defer decoded.deinit();
+    const reference = @embedFile("testdata/kakadu-10bit-gray-tiles-full.pgx");
+    const header_end = std.mem.indexOfScalar(u8, reference, '\n').?;
+    const body = reference[header_end + 1 ..];
+    // Kakadu writes "PG LM 10 w h" with little-endian 16-bit samples.
+    try std.testing.expectEqual(decoded.planes[0].len * 2, body.len);
+    for (decoded.planes[0], 0..) |sample, index| {
+        const expected = @as(u16, body[index * 2]) | (@as(u16, body[index * 2 + 1]) << 8);
+        try std.testing.expectEqual(expected, sample);
+    }
+}
+
 test "TIFF alpha writer roundtrips gray-alpha and RGBA semantics" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

@@ -228,12 +228,11 @@ const RgbLayout = struct {
     icc_offset: u32,
 
     fn init(width: usize, height: usize, bit_depth: u8, icc_len: usize) !RgbLayout {
-        if (width == 0 or height == 0 or (bit_depth != 8 and bit_depth != 16)) {
+        if (width == 0 or height == 0 or bit_depth == 0 or bit_depth > 16) {
             return TiffError.InvalidTagValue;
         }
-        const pixels = try std.math.mul(usize, width, height);
-        const sample_count = try std.math.mul(usize, pixels, 3);
-        const raster_bytes = try std.math.mul(usize, sample_count, rasterBytesPerSample(bit_depth));
+        const row_bytes = try rasterRowBytes(try std.math.mul(usize, width, 3), bit_depth);
+        const raster_bytes = try std.math.mul(usize, row_bytes, height);
         if (width > std.math.maxInt(u32) or height > std.math.maxInt(u32) or
             raster_bytes > std.math.maxInt(u32))
         {
@@ -264,7 +263,7 @@ const RgbLayout = struct {
     }
 
     fn rowBytes(self: RgbLayout) usize {
-        return self.width * 3 * rasterBytesPerSample(self.bit_depth);
+        return rasterRowBytes(self.width * 3, self.bit_depth) catch unreachable;
     }
 
     /// Appends everything before the raster: header, IFD, and the BitsPerSample
@@ -313,7 +312,7 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
     try out.ensureTotalCapacity(allocator, try layout.totalBytes());
     try layout.appendPrefix(allocator, &out);
 
-    appendRasterLe(&out, rgb.samples, rgb.bit_depth) catch |err| switch (err) {
+    appendRasterLe(&out, rgb.samples, rgb.width * 3, rgb.bit_depth) catch |err| switch (err) {
         error.InvalidTagValue => return TiffError.InvalidTagValue,
     };
     if (icc_profile) |profile| try out.appendSlice(allocator, profile);
@@ -386,9 +385,9 @@ pub const RgbBandWriter = struct {
             return TiffError.InvalidTagValue;
         }
 
-        const bytes = samples.len * rasterBytesPerSample(self.layout.bit_depth);
+        const bytes = rows * (rasterRowBytes(row_samples, self.layout.bit_depth) catch unreachable);
         try self.raster.resize(self.allocator, bytes);
-        serializeRasterLe(self.raster.items, samples, self.layout.bit_depth) catch |err| switch (err) {
+        serializeRasterLe(self.raster.items, samples, row_samples, self.layout.bit_depth) catch |err| switch (err) {
             error.InvalidTagValue => return TiffError.InvalidTagValue,
         };
         try self.file.writeStreamingAll(self.io, self.raster.items);
@@ -513,11 +512,11 @@ const GrayLayout = struct {
         white_is_zero: bool,
         icc_len: usize,
     ) !GrayLayout {
-        if (width == 0 or height == 0 or (bit_depth != 8 and bit_depth != 16)) {
+        if (width == 0 or height == 0 or bit_depth == 0 or bit_depth > 16) {
             return TiffError.InvalidTagValue;
         }
-        const pixels = try std.math.mul(usize, width, height);
-        const raster_bytes = try std.math.mul(usize, pixels, rasterBytesPerSample(bit_depth));
+        const row_bytes = try rasterRowBytes(width, bit_depth);
+        const raster_bytes = try std.math.mul(usize, row_bytes, height);
         if (width > std.math.maxInt(u32) or height > std.math.maxInt(u32) or
             raster_bytes > std.math.maxInt(u32))
         {
@@ -588,7 +587,7 @@ pub fn writeGray(io: std.Io, allocator: std.mem.Allocator, gray: image.GrayImage
     try out.ensureTotalCapacity(allocator, try layout.totalBytes());
     try layout.appendPrefix(allocator, &out);
 
-    appendRasterLe(&out, gray.samples, gray.bit_depth) catch |err| switch (err) {
+    appendRasterLe(&out, gray.samples, gray.width, gray.bit_depth) catch |err| switch (err) {
         error.InvalidTagValue => return TiffError.InvalidTagValue,
     };
     if (icc_profile) |profile| try out.appendSlice(allocator, profile);
@@ -658,9 +657,9 @@ pub const GrayBandWriter = struct {
             return TiffError.InvalidTagValue;
         }
 
-        const bytes = samples.len * rasterBytesPerSample(self.layout.bit_depth);
+        const bytes = rows * (rasterRowBytes(row_samples, self.layout.bit_depth) catch unreachable);
         try self.raster.resize(self.allocator, bytes);
-        serializeRasterLe(self.raster.items, samples, self.layout.bit_depth) catch |err| switch (err) {
+        serializeRasterLe(self.raster.items, samples, row_samples, self.layout.bit_depth) catch |err| switch (err) {
             error.InvalidTagValue => return TiffError.InvalidTagValue,
         };
         try self.file.writeStreamingAll(self.io, self.raster.items);
@@ -772,15 +771,14 @@ const AlphaLayout = struct {
         white_is_zero: bool,
         icc_len: usize,
     ) !AlphaLayout {
-        if (width == 0 or height == 0 or (bit_depth != 8 and bit_depth != 16) or
+        if (width == 0 or height == 0 or bit_depth == 0 or bit_depth > 16 or
             (color_space == .rgb and white_is_zero))
         {
             return TiffError.InvalidTagValue;
         }
         const component_count = color_space.colorComponentCount() + 1;
-        const pixels = try std.math.mul(usize, width, height);
-        const sample_count = try std.math.mul(usize, pixels, component_count);
-        const raster_bytes = try std.math.mul(usize, sample_count, rasterBytesPerSample(bit_depth));
+        const row_bytes = try rasterRowBytes(try std.math.mul(usize, width, component_count), bit_depth);
+        const raster_bytes = try std.math.mul(usize, row_bytes, height);
         if (width > std.math.maxInt(u32) or height > std.math.maxInt(u32) or
             raster_bytes > std.math.maxInt(u32))
         {
@@ -874,7 +872,7 @@ pub fn writeAlpha(io: std.Io, allocator: std.mem.Allocator, alpha: AlphaImage, p
     try out.ensureTotalCapacity(allocator, try layout.totalBytes());
     try layout.appendPrefix(allocator, &out);
 
-    appendRasterLe(&out, alpha.samples, alpha.bit_depth) catch |err| switch (err) {
+    appendRasterLe(&out, alpha.samples, alpha.width * alpha.componentCount(), alpha.bit_depth) catch |err| switch (err) {
         error.InvalidTagValue => return TiffError.InvalidTagValue,
     };
     if (icc_profile) |profile| try out.appendSlice(allocator, profile);
@@ -948,9 +946,9 @@ pub const AlphaBandWriter = struct {
             return TiffError.InvalidTagValue;
         }
 
-        const bytes = samples.len * rasterBytesPerSample(self.layout.bit_depth);
+        const bytes = rows * (rasterRowBytes(row_samples, self.layout.bit_depth) catch unreachable);
         try self.raster.resize(self.allocator, bytes);
-        serializeRasterLe(self.raster.items, samples, self.layout.bit_depth) catch |err| switch (err) {
+        serializeRasterLe(self.raster.items, samples, row_samples, self.layout.bit_depth) catch |err| switch (err) {
             error.InvalidTagValue => return TiffError.InvalidTagValue,
         };
         try self.file.writeStreamingAll(self.io, self.raster.items);
@@ -1059,24 +1057,69 @@ pub const AlphaBandSink = struct {
     }
 };
 
-fn appendRasterLe(out: *std.ArrayList(u8), samples: []const u16, bit_depth: u8) error{InvalidTagValue}!void {
+/// Packs samples of 1..15 bits (other than 8) MSB-first, one padded row at a
+/// time. A sample outside the depth's range fails closed.
+fn serializeRasterPacked(raster: []u8, samples: []const u16, row_samples: usize, bit_depth: u8) error{InvalidTagValue}!void {
+    if (bit_depth == 0 or bit_depth > 16 or row_samples == 0 or samples.len % row_samples != 0) {
+        return error.InvalidTagValue;
+    }
+    const row_bytes = (row_samples * bit_depth + 7) / 8;
+    std.debug.assert(raster.len == (samples.len / row_samples) * row_bytes);
+    const max_sample: u32 = (@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1;
+    var out: usize = 0;
+    var row_start: usize = 0;
+    while (row_start < samples.len) : (row_start += row_samples) {
+        var accumulator: u32 = 0;
+        var pending: u5 = 0;
+        for (samples[row_start .. row_start + row_samples]) |sample| {
+            if (sample > max_sample) return error.InvalidTagValue;
+            accumulator = (accumulator << @as(u5, @intCast(bit_depth))) | sample;
+            pending += @intCast(bit_depth);
+            while (pending >= 8) {
+                pending -= 8;
+                raster[out] = @intCast((accumulator >> pending) & 0xff);
+                out += 1;
+            }
+            accumulator &= (@as(u32, 1) << pending) - 1;
+        }
+        if (pending != 0) {
+            raster[out] = @intCast((accumulator << @as(u5, @intCast(8 - pending))) & 0xff);
+            out += 1;
+        }
+    }
+    std.debug.assert(out == raster.len);
+}
+
+fn appendRasterLe(out: *std.ArrayList(u8), samples: []const u16, row_samples: usize, bit_depth: u8) error{InvalidTagValue}!void {
     const start = out.items.len;
     errdefer out.items.len = start;
 
-    const raster_len = samples.len * rasterBytesPerSample(bit_depth);
+    if (row_samples == 0 or samples.len % row_samples != 0) return error.InvalidTagValue;
+    const row_bytes = rasterRowBytes(row_samples, bit_depth) catch return error.InvalidTagValue;
+    const raster_len = (samples.len / row_samples) * row_bytes;
     std.debug.assert(out.capacity >= start + raster_len);
     out.items.len = start + raster_len;
-    try serializeRasterLe(out.items[start..][0..raster_len], samples, bit_depth);
+    try serializeRasterLe(out.items[start..][0..raster_len], samples, row_samples, bit_depth);
 }
 
-fn rasterBytesPerSample(bit_depth: u8) usize {
-    return if (bit_depth == 8) 1 else 2;
+/// Bytes one raster row occupies. Eight- and sixteen-bit samples are whole
+/// bytes; any other depth is packed MSB-first and each row is padded to a byte
+/// boundary (TIFF 6.0, section 7), which is how libtiff and Kakadu lay out a
+/// 12-bit image.
+fn rasterRowBytes(row_samples: usize, bit_depth: u8) !usize {
+    return switch (bit_depth) {
+        8 => row_samples,
+        16 => std.math.mul(usize, row_samples, 2),
+        else => (try std.math.mul(usize, row_samples, bit_depth) + 7) / 8,
+    };
 }
 
 /// Writes `samples` into `raster` in the TIFF little-endian layout for
 /// `bit_depth`. Shared by the whole-image writers and the streaming band
-/// writer, so both serialize identically.
-fn serializeRasterLe(raster: []u8, samples: []const u16, bit_depth: u8) error{InvalidTagValue}!void {
+/// writer, so both serialize identically. `row_samples` matters only for
+/// packed depths, where every row is padded to a byte boundary.
+fn serializeRasterLe(raster: []u8, samples: []const u16, row_samples: usize, bit_depth: u8) error{InvalidTagValue}!void {
+    if (bit_depth != 8 and bit_depth != 16) return serializeRasterPacked(raster, samples, row_samples, bit_depth);
     if (bit_depth == 8) {
         std.debug.assert(raster.len == samples.len);
         var index: usize = 0;

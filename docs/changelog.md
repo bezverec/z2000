@@ -5,6 +5,37 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### JP2 Reader And TIFF Writer Take Depths Between 8 And 16 Bits
+
+- A sweep of less common `kdu_compress` and `opj_compress` settings (derived
+  quantization, guard bits, zero levels, 4x4 blocks, twelve layers, tile-part
+  and TLM combinations, 16-bit lossy) decoded everything within one LSB. The
+  one miss was a 12-bit grayscale JP2, which `decode-temp-jp2` refused as an
+  unsupported colour space: the JP2 reader took only 8- and 16-bit components,
+  although the codestream decoder handles 1..16 and the same bytes decoded raw.
+  Twelve- and ten-bit grayscale is common scanner and medical output.
+- The reader now accepts any uniform `ihdr` depth of 1..16 bits for the
+  grayscale, RGB, gray+alpha, and RGBA layouts. Mixed `BPCC` depths stay at
+  8/16, as does the sYCC conversion.
+- The TIFF writers (whole-image and streaming, gray, RGB, and alpha) write
+  depths other than 8 and 16 as packed samples: `BitsPerSample` = N,
+  MSB-first, each row padded to a byte boundary, which is what libtiff and
+  `kdu_expand` produce. Samples past the depth's range fail closed.
+- Measured against Kakadu 8.4.1 TIFFs: 12-bit gray (single tile and eight
+  layers), 10-bit gray tiles, 12-bit RGB with RCT, and 12-bit RGBA are pixel
+  identical; 12-bit lossy gray and RGB are within one LSB at 12 bits; a tile
+  selection and a two-layer prefix are exact. OpenJPEG 2.5.4 decodes the
+  reversible files identically.
+- Four corpus entries carry Kakadu PGX at full resolution and reduction 1:
+  `kakadu-12bit-gray`, `kakadu-10bit-gray-tiles`, `kakadu-12bit-rgb-rct-tiles`
+  (exact), and `kakadu-12bit-gray-97-tiles` (one LSB). A unit test pins the
+  packed row layout byte for byte and the reader's 10-bit metadata; both fail
+  on the previous commit.
+- Found and recorded, not fixed: Kakadu's gray+alpha JP2s fail at any depth,
+  not because of the depth but because `kdu_compress` writes the single
+  colour channel's `cdef` association as 0 (the whole image) where the reader
+  requires 1. ISO I.5.3.6 allows 0 there. Queued as 5e.
+
 ### Irreversible ROI Components Use The Per-Block Midpoint Rule
 
 - The queue item from the previous entry, now fixed. Components with an ROI

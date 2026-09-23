@@ -802,8 +802,11 @@ The supported box profile is intentionally narrow: signature box first, `ftyp`
 second with `jp2 ` compatibility, a basic `jp2h` containing first `ihdr` and
 enumerated CMYK (12), default-parameter CIELab (14), sRGB (16), grayscale (17),
 bounded sYCC (18), e-sRGB (20), or bounded e-sYCC (24) `colr`, and one
-contiguous `jp2c` codestream. The reader accepts bounded unsigned 8-bit and
-16-bit one- through four-component metadata. A variable-BPC `ihdr` plus `BPCC` may describe a
+contiguous `jp2c` codestream. The reader accepts bounded unsigned one- through
+four-component metadata at any uniform depth of 1..16 bits (`ihdr` BPC);
+`decode-temp-jp2` writes depths other than 8 and 16 as packed TIFF samples
+(`BitsPerSample` = N, MSB-first, rows padded to a byte), the layout libtiff and
+`kdu_expand` produce. A variable-BPC `ihdr` plus `BPCC` may describe a
 bounded mixture of unsigned 8/16-bit component precisions and is checked
 component-by-component against SIZ. Two additional bounded extensions are a
 palette layout with
