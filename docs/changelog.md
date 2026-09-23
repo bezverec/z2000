@@ -44,7 +44,9 @@ entries are grouped by development milestone rather than semantic version.
   per-tile walk finite. The mutant fails in under a second with
   `InvalidCodestream`. The unit test fails on the previous commit.
 - Everything else held: 2038 mutants returned an error or decoded, none
-  panicked. The script is committed so later seeds can be run as a gate.
+  panicked. The script is committed so later seeds can be run as a gate; a
+  second campaign after the fix (seed 2, 40 mutations per file, 4080 runs)
+  found nothing.
 
 ### Grok's Under-Shifted ROI Pinned As Fail-Closed
 
