@@ -91,7 +91,9 @@ Recorded rather than worked around, so the behaviour stays pinned.
   packed packet headers that was tried: eight z2000 `--ppm --tile-parts R`
   layouts (2x2 and 3x3 grids, one to three layers, one to five levels, with
   and without TLM; 75 to 87 percent of samples wrong, or "Tile N is corrupt"
-  with SOP/EPH or five levels on 3x3) and three committed Kakadu
+  with SOP/EPH or five levels on 3x3; on the 3x3 PPM with SOP/EPH, 20.4.12
+  never finishes and has to be killed, where 20.3.6 exits 0 with wrong
+  pixels) and three committed Kakadu
   `kdu_makeppm` fixtures (`kakadu-native-ppm-multitile`, `-tlm`, and
   `kakadu-poc-multipart-ppm`; half to all samples wrong, exit 0). Single-tile
   PPM is exact, as is every PPT layout. Kakadu and OpenJPEG decode all of
