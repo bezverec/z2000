@@ -75,13 +75,20 @@ pub const Grid = struct {
         const end_tile_x = endTileIndex(params.xsiz, params.xtosiz, params.xtsiz);
         const end_tile_y = endTileIndex(params.ysiz, params.ytosiz, params.ytsiz);
         if (end_tile_x <= first_tile_x or end_tile_y <= first_tile_y) return TileGridError.InvalidTileGrid;
+        // Isot is sixteen bits (ISO A.4.2), so no codestream can address more
+        // than 65535 tiles. Refusing the grid here keeps every per-tile walk
+        // finite: a fuzzed SIZ with a 2^31-wide image over 16x16 tiles used to
+        // hang the metadata reader.
+        const columns = end_tile_x - first_tile_x;
+        const rows = end_tile_y - first_tile_y;
+        if (@as(u64, columns) * @as(u64, rows) > std.math.maxInt(u16)) return TileGridError.InvalidTileGrid;
 
         return .{
             .params = params,
             .first_tile_x = first_tile_x,
             .first_tile_y = first_tile_y,
-            .columns = end_tile_x - first_tile_x,
-            .rows = end_tile_y - first_tile_y,
+            .columns = columns,
+            .rows = rows,
         };
     }
 

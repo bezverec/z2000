@@ -209,6 +209,11 @@ here so they are not rediscovered as new.
 
 ## Methodological Cautions
 
+- **Fuzz the fixtures, not just the profiles.** `tools/fuzz_fixtures.py`
+  mutates every committed codestream and expects an error, never a panic or
+  a hang. Its first run found a SIZ that walks a 2^53-tile grid for ever, a
+  case no producer would write and no profile sweep would reach. Run a fresh
+  seed after touching header parsing.
 - **Container acceptance is not decode evidence.** `jp2-info` validating a
   file's boxes says nothing about whether the codestream decodes. Two multipart
   POC streams were reported as accepted on that basis and then turned out to be

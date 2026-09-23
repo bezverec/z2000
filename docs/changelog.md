@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile Grids Beyond Isot's Reach Are Refused
+
+- A first fuzz campaign over the committed fixtures: `tools/fuzz_fixtures.py`
+  applies bit flips, truncation, zeroed runs, and byte insertion to every
+  committed JP2 and raw codestream and runs the CLI decoders on each mutant
+  (seed 1, 20 mutations per file, 102 fixtures, 2039 runs). A clean error is
+  the expected outcome; a panic, a crash, or a hang is a finding.
+- One finding. A 20-bit fixture with `Xsiz` flipped to 2^31 + 16 and `Ysiz`
+  to 2^30 + 16 over 16x16 tiles describes a 2^53-tile grid, and the metadata
+  reader walked it: a `u32` tile index compared against the `u64` tile count
+  never got there, and `j2k-to-zraw` ran until killed. `Isot` is sixteen
+  bits (ISO A.4.2), so no codestream can address more than 65535 tiles;
+  `tile_grid.Grid.init` now refuses a larger grid, which keeps every
+  per-tile walk finite. The mutant fails in under a second with
+  `InvalidCodestream`. The unit test fails on the previous commit.
+- Everything else held: 2038 mutants returned an error or decoded, none
+  panicked. The script is committed so later seeds can be run as a gate.
+
 ### Grok's Under-Shifted ROI Pinned As Fail-Closed
 
 - A sweep of 21 Grok 20.4.12-produced layouts through `decode-temp-jp2`

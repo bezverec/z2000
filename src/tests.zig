@@ -32339,6 +32339,36 @@ test "JP2 planar alpha wrapper preserves gray-alpha and RGBA cdef semantics" {
     }
 }
 
+test "tile grid refuses more tiles than Isot can address" {
+    // Isot is sixteen bits (ISO A.4.2), so a SIZ that implies more than 65535
+    // tiles describes nothing decodable. The metadata reader used to walk the
+    // whole grid before any such check: a fuzzed 20-bit fixture with Xsiz
+    // flipped to 2^31 + 16 and Ysiz to 2^30 + 16 over 16x16 tiles (a 2^53-tile
+    // grid) hung j2k-to-zraw for good, with the u32 tile index never reaching
+    // the u64 count.
+    try std.testing.expectError(
+        tile_grid.TileGridError.InvalidTileGrid,
+        tile_grid.Grid.init(.{ .xsiz = 65536 * 2, .ysiz = 1, .xtsiz = 1, .ytsiz = 1 }),
+    );
+    // Exactly 65535 tiles is the largest legal grid.
+    const largest = try tile_grid.Grid.init(.{ .xsiz = 65535, .ysiz = 1, .xtsiz = 1, .ytsiz = 1 });
+    try std.testing.expectEqual(@as(u64, 65535), largest.tileCount());
+
+    const allocator = std.testing.allocator;
+    const fixture = @embedFile("testdata/kakadu-signed-20bit.j2c");
+    const mutated = try allocator.dupe(u8, fixture);
+    defer allocator.free(mutated);
+    // SIZ starts at offset 2: Xsiz is bytes 6..9 of the segment, Ysiz 10..13.
+    try std.testing.expectEqual(@as(u8, 0xff), mutated[2]);
+    try std.testing.expectEqual(@as(u8, 0x51), mutated[3]);
+    mutated[8] = 0x80;
+    mutated[13] = 0x40;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.decodeLosslessNativeWithOptions(allocator, mutated, .{}, .{}),
+    );
+}
+
 test "JP2 cdef accepts Asoc 0 for the lone colour channel of gray+alpha" {
     const allocator = std.testing.allocator;
     // kdu_compress writes a gray+alpha JP2 with cdef entries (0, colour,
