@@ -12484,6 +12484,49 @@ test "multi-tile RGBA with RCT decodes through the planar path" {
     }
 }
 
+test "irreversible ROI components follow the per-block midpoint rule" {
+    const allocator = std.testing.allocator;
+    // Components with an ROI Maxshift were excluded from the per-block
+    // midpoint rule, so every ROI coefficient took the +0.5 offset on top of
+    // the midpoint T1 had already placed, and an ICT stream with an ROI
+    // reconstructed 2 LSB from both Kakadu and OpenJPEG, which agree with
+    // each other within one. With the rule applied the planes are within one
+    // LSB of Kakadu at full resolution and reduction 1.
+    const stream = try jp2.extractCodestream(allocator, @embedFile("testdata/kakadu-roi-ict-tiles.jp2"));
+    const Level = struct { reduction: u8, pgx: [3][]const u8 };
+    const levels = [_]Level{
+        .{ .reduction = 0, .pgx = .{
+            @embedFile("testdata/kakadu-roi-ict-tiles-full-c0.pgx"),
+            @embedFile("testdata/kakadu-roi-ict-tiles-full-c1.pgx"),
+            @embedFile("testdata/kakadu-roi-ict-tiles-full-c2.pgx"),
+        } },
+        .{ .reduction = 1, .pgx = .{
+            @embedFile("testdata/kakadu-roi-ict-tiles-r1-c0.pgx"),
+            @embedFile("testdata/kakadu-roi-ict-tiles-r1-c1.pgx"),
+            @embedFile("testdata/kakadu-roi-ict-tiles-r1-c2.pgx"),
+        } },
+    };
+    for (levels) |level| {
+        var decoded = try codestream.decodeLosslessTemporaryWithOptions(
+            allocator,
+            stream,
+            .{ .resolution_reduction = level.reduction },
+        );
+        defer decoded.deinit();
+        const pixels = decoded.width * decoded.height;
+        try std.testing.expectEqual(pixels * 3, decoded.samples.len);
+        for (level.pgx, 0..) |reference, component| {
+            const header_end = std.mem.indexOfScalar(u8, reference, '\n').?;
+            const body = reference[header_end + 1 ..];
+            try std.testing.expectEqual(pixels, body.len);
+            for (body, 0..) |expected, pixel| {
+                const sample: i32 = decoded.samples[pixel * 3 + component];
+                try std.testing.expect(@abs(sample - @as(i32, expected)) <= 1);
+            }
+        }
+    }
+}
+
 test "JP2 audit accepts a Maxshift RGN marker and checks its fields" {
     const allocator = std.testing.allocator;
     // The wrapper audit refused every RGN marker as an unsupported profile,

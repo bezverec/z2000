@@ -12250,12 +12250,21 @@ fn auditStrictMultiTilePacketHeaders(
 }
 
 /// The blocks that drive per-coefficient midpoint offsets for one component, or
-/// null to keep the uniform `+ 0.5`. ROI maxshift reshapes which bitplane a
-/// coefficient's bits land in, so shifted components keep the uniform rule.
+/// null to keep the uniform `+ 0.5`.
+///
+/// Components with an ROI Maxshift use the same per-block rule. For a
+/// background coefficient it is exact as ever. For an ROI coefficient the
+/// shift-down (E.3.3) floors away T1's midpoint whenever the block stopped at
+/// or below the shift plane, so the rule's "remove" leaves that coefficient
+/// reconstructed at the bottom of its interval, which is what OpenJPEG does
+/// too; above the shift plane T1's midpoint survives the shift as an integer
+/// and the removal is exact. Excluding ROI components instead (the previous
+/// behaviour) added the offset twice for every ROI coefficient and put
+/// irreversible ROI streams 2 LSB from both references.
 fn irreversibleMidpointBlocks(header: TemporaryHeader, catalog: ?StrictPacketBlockCatalog, component: usize) ?[]const StrictPacketBlock {
+    _ = header;
     const blocks_catalog = catalog orelse return null;
     if (component >= blocks_catalog.component_count) return null;
-    if (componentRoiShiftForHeader(header, component) != 0) return null;
     return blocks_catalog.components[component];
 }
 

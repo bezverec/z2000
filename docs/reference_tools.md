@@ -164,12 +164,11 @@ here so they are not rediscovered as new.
   the source (PSNR 29.8 dB against 33.9 dB for Kakadu and z2000 on Grok's own
   tiled RGB file). Reversible streams, tiled or not, are exact. Do not use
   `grk_decompress` as a 9/7 oracle on tiled streams.
-- **z2000 is 2 LSB out on irreversible ROI.** On a Kakadu ICT stream with a
-  Maxshift ROI (`Rshift=14 -rate 2`, 32x32 tiles), Kakadu and OpenJPEG agree
-  within one LSB (2497 of 7680 samples differ) and z2000 is within two of
-  each (3616 against Kakadu, 2493 against OpenJPEG). PSNR against the source
-  is 26.31 dB for all three. Queued in `next_steps.md`; the reversible ROI
-  streams are exact.
+- *(Resolved.)* Irreversible ROI was 2 LSB out because ROI components skipped
+  the per-block midpoint rule and took the offset twice. On the Kakadu ICT
+  ROI stream (`Rshift=14 -rate 2`, 32x32 tiles) Kakadu and OpenJPEG differ on
+  2497 of 7680 samples by one LSB; z2000 now differs from Kakadu on 2500 and
+  from OpenJPEG on 144, all by one LSB.
 - *(Resolved.)* The container audit's fixed 256-tile and 4096-`TLM`-entry
   bounds are gone; a Kakadu stream with 1024 tiles and 5120 TLM-listed
   tile-parts decodes. Kakadu's `ORGgen_tlm=N` caps tile-parts *per tile* at N

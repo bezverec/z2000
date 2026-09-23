@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Irreversible ROI Components Use The Per-Block Midpoint Rule
+
+- The queue item from the previous entry, now fixed. Components with an ROI
+  Maxshift were excluded from the per-block midpoint rule on the assumption
+  that the shift reshapes which bitplane a coefficient's bits land in. It
+  does, but the exclusion meant every ROI coefficient took the dequantizer's
+  `+ 0.5` on top of the midpoint T1 had already placed, the same double count
+  the rule was introduced to remove. The Kakadu ICT ROI stream reconstructed
+  2 LSB from both references.
+- ROI components now use the same per-block rule. For background coefficients
+  it is exact as before. For ROI coefficients the shift-down (ISO E.3.3)
+  floors away T1's midpoint whenever the block stopped at or below the shift
+  plane, so "remove" leaves them at the bottom of their interval, which is
+  OpenJPEG's reconstruction too; above the shift plane T1's midpoint survives
+  the shift as an integer and the removal is exact.
+- Measured on that stream: z2000 is now within one LSB of both references,
+  differing from Kakadu on 2500 of 7680 samples (Kakadu and OpenJPEG differ
+  on 2497) and from OpenJPEG on 144. `kakadu-roi-ict-tiles` is a new corpus
+  entry bounded against Kakadu PGX at full resolution and reduction 1; the
+  unit test fails on the previous commit.
+
 ### JP2 Audit Accepts RGN
 
 - The wrapper audit refused every `RGN` marker as an unsupported profile,

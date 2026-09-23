@@ -3311,6 +3311,87 @@
           "max_mse": 0.0
         }
       ]
+    },
+    {
+      "id": "kakadu-roi-ict-tiles",
+      "path": "src/testdata/kakadu-roi-ict-tiles.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "c72e8806899ab8bd8b823967470a016fd2a478f640df8f84cf765771c1e9e5df",
+      "source": {
+        "producer": "Kakadu 8.4.1 from a committed ImageMagick plasma",
+        "version": "8.4.1",
+        "origin": "irreversible RGB with ICT over 32x32 tiles at -rate 2 with a Maxshift ROI (RGN in the main header, shift 14) on the central quarter; irreversible ROI components used to skip the per-block midpoint rule and landed 2 LSB from both references",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.ppm; kdu_compress -i src.ppm -o src/testdata/kakadu-roi-ict-tiles.jp2 Stiles={32,32} -roi {0.25,0.25},{0.5,0.5} Rshift=14 -rate 2 -quiet; kdu_expand -i src/testdata/kakadu-roi-ict-tiles.jp2 -o <full-c0,c1,c2>.pgx -quiet -num_threads 0 (and -reduce 1 into the -r1- names)"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes at full resolution and -reduce 1; peak error <= 1 and MSE <= 0.2 per plane. Kakadu and OpenJPEG 2.5.4 differ from each other on 2497 of 7680 samples at full resolution and about 200 per plane at reduction 1, all by one LSB; z2000 differs from OpenJPEG on 144 at full resolution",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "irreversible-97",
+        "roi-rgn-maxshift",
+        "selective-streaming-decode"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-roi-ict-tiles-full-c0.pgx",
+          "sha256": "4e8af92c4704b320aab95223565b715a4edcba4c7ead8e0a858a1cc8139249c1",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        },
+        {
+          "path": "src/testdata/kakadu-roi-ict-tiles-full-c1.pgx",
+          "sha256": "cfaf0f9c21be0089625dab37382beb0ea8a46be0861ebaba0e712d39d0cfa6de",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        },
+        {
+          "path": "src/testdata/kakadu-roi-ict-tiles-full-c2.pgx",
+          "sha256": "eeafc4d0d6996fea7e7845a7a40d6e7efb2d73bf37de8bc65f0d7c9e46691d0b",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        },
+        {
+          "path": "src/testdata/kakadu-roi-ict-tiles-r1-c0.pgx",
+          "sha256": "9b91054d63d2093e527996efb6e4b7cefca2efbf3f4fffbc1146fce996858106",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        },
+        {
+          "path": "src/testdata/kakadu-roi-ict-tiles-r1-c1.pgx",
+          "sha256": "e742e200c9f95788148d786119c91e5324fd72b2f5fbbf49780faad767366104",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        },
+        {
+          "path": "src/testdata/kakadu-roi-ict-tiles-r1-c2.pgx",
+          "sha256": "f5f5ccf82944b843f95d0f3c053ad413131ab7583bdfb952b9b5beb6a0e17dbd",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        }
+      ]
     }
   ]
 }
