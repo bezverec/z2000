@@ -2948,7 +2948,7 @@
         "redistribution": "JP2 and PGX references committed; producer applications not redistributed",
         "command": "magick src/testdata/kakadu-97-native-multitile-source.ppm -alpha set -channel A -fx \"(i+j)/(w+h)\" rgba48.tif; kdu_compress -i rgba48.tif -o src/testdata/kakadu-rgba-rct-tiles.jp2 Creversible=yes Stiles={13,11} Clayers=3 Cblk={8,8} Clevels=2 -quiet; kdu_expand -i src/testdata/kakadu-rgba-rct-tiles.jp2 -o <c0,c1,c2,c3>.pgx -quiet -num_threads 0"
       },
-      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, exact (equal to the source); the unit test also pins the one-layer prefix against Kakadu's single-threaded decode",
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes at full resolution and reductions 1 and 2, exact (the full planes equal the source); the unit test also pins the one-layer prefix against Kakadu's single-threaded decode",
       "features": [
         "jp2-core-container",
         "tiles-and-tile-parts",
@@ -2989,6 +2989,78 @@
           "format": "pgx",
           "component": 3,
           "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-r1-c0.pgx",
+          "sha256": "bee0a268cf2807e4b6469243f1fd39fb8f9f95bd0e922e229d657f3ec89ece1c",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-r1-c1.pgx",
+          "sha256": "4f4e2e787e06d87568b95ceb0553d8bc034ffd5ce4cbf8ae375705ec69945a86",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-r1-c2.pgx",
+          "sha256": "f89b4caa3b801da7b79963bbd77f669958ffc98bd2dd4e7ba95ec993d3685801",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-r1-c3.pgx",
+          "sha256": "46bca2c787136a6ce6122598ea77b8ae92113aff562e253d378f0430c3955601",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-r2-c0.pgx",
+          "sha256": "40165a8073d4502e2f5babbe839ba6035b6362d094b37bfceb065cf9e52f9f68",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 2,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-r2-c1.pgx",
+          "sha256": "bb0e4e17420ac23ae74ad28b4bdd2cc1518df5e00cfbae3d2ce8329d333ad603",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 2,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-r2-c2.pgx",
+          "sha256": "00cff77ae873cabeb0f65990dde90fc1fa0a9285cd94506b053dcad668277538",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 2,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rgba-rct-tiles-r2-c3.pgx",
+          "sha256": "4d3ae8fb7333c089b8f8820b3e95569e30c2d0943cfd62d0c4066061a58a226a",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 2,
           "max_peak_error": 0,
           "max_mse": 0.0
         }

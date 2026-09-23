@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Reduced Decode Of Reversible RGBA
+
+- The planar profile check refused resolution reduction for any MCT layout
+  other than sampled three-component RCT, so reversible RGBA with RCT (the
+  previous entry's layout) could be decoded only at full resolution. Nothing
+  downstream needed the restriction: the reduced planes already went through
+  the saturating RGBA inverse RCT. The check now admits reversible
+  four-component RCT.
+- `kakadu-rgba-rct-tiles` gained Kakadu PGX planes at reductions 1 and 2,
+  all exact. The 96x80 odd-origin RGBA stream over 19x23 tiles is also exact
+  against `kdu_expand -reduce 1` and `-reduce 2`, alpha included.
+
 ### Tiled RGBA Decodes Through The Planar Path
 
 - `kdu_compress` applies RCT to the colour channels of an RGBA TIFF by default

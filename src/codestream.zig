@@ -5235,7 +5235,9 @@ fn checkStrictPlanarProfile(
     {
         return CodestreamError.UnsupportedPayload;
     }
-    if (options.resolution_reduction != 0 and header.mct != .none and !sampled_rct) {
+    if (options.resolution_reduction != 0 and header.mct != .none and !sampled_rct and
+        !(reversible and rct_alpha))
+    {
         return CodestreamError.UnsupportedPayload;
     }
     if (header.tile_width != 0 or header.tile_height != 0) {
