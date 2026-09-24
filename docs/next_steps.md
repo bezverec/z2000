@@ -406,7 +406,8 @@ The active G0/G4 corpus expansion is:
    plan gives the resolution no precincts and no packets, the component plan
    requires precincts only of a non-empty resolution, and the inverse 5/3
    descends through it as a no-op. T2 packet-header parsing and tag trees
-   needed nothing. `canDecompose53Region` remains the encoder-side rule.
+   needed nothing. The encoder dropped `canDecompose53Region` later, once its
+   forward transforms descended every level the same way.
    The irreversible 9/7 path now carries the same geometry: its descent
    reaches every signalled level, and a one-sample span at an odd origin is
    halved per ISO F.3.7 rather than passed through. Both were reachable without

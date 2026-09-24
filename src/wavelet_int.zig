@@ -99,7 +99,25 @@ pub fn forward53WithWorkspace(
     height: usize,
     requested_levels: u8,
 ) !u8 {
-    return forward53WithWorkspaceOrigin(workspace, data, width, height, requested_levels, 0, 0);
+    _ = try forward53WithWorkspaceOrigin(workspace, data, width, height, requested_levels, 0, 0);
+    // At the reference-grid origin every level past a one-sample region is the
+    // identity, so the transformed samples are the same either way; report the
+    // depth that still changed something, which is what origin-free callers
+    // have always signalled.
+    return levelsBeforeSinglePixel(width, height, requested_levels);
+}
+
+/// Decomposition levels applied before an origin-anchored region shrinks to a
+/// single sample.
+pub fn levelsBeforeSinglePixel(width: usize, height: usize, requested_levels: u8) u8 {
+    var cur_width = width;
+    var cur_height = height;
+    var done: u8 = 0;
+    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        cur_width = lowCount(cur_width);
+        cur_height = lowCount(cur_height);
+    }
+    return done;
 }
 
 pub fn forward53WithWorkspaceOrigin(
@@ -124,10 +142,19 @@ pub fn forward53WithWorkspaceOrigin(
     var cur_x0 = x0;
     var cur_y0 = y0;
     var done: u8 = 0;
-    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+    while (done < requested_levels) : (done += 1) {
+        // Mirror of the inverse descent (see `inverse53ReducedWithWorkspaceOrigin`):
+        // every requested level is applied, so the result always has the
+        // requested depth. Once the low-pass region is empty every remaining
+        // level is a no-op (ISO F.4.8). A one-sample region at the
+        // reference-grid origin stays at an even origin and is unchanged by
+        // every further level. Any other one-sample region still has work to
+        // do: its origin turns odd at some level, where the sample becomes
+        // high-pass.
+        if (cur_width == 0 or cur_height == 0) return requested_levels;
+        if (cur_width == 1 and cur_height == 1 and cur_x0 == 0 and cur_y0 == 0) return requested_levels;
         const next_width = lowCountOrigin(cur_width, cur_x0);
         const next_height = lowCountOrigin(cur_height, cur_y0);
-        if (next_width == 0 or next_height == 0) break;
         // ISO/IEC 15444-1 F.4.8: the forward 2D transform filters vertically
         // first, then horizontally. The 5/3 lifting steps use floor
         // operations, so the direction order changes coefficients by +-1 and

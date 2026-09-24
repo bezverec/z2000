@@ -253,7 +253,11 @@ Supported public JP2 profiles are still narrow:
   foreign tile decode, global cross-tile PCRD, and PLT-backed `R`/RPCL,
   `L`/LRCP, `C`/CPRL, and `P`/PCRL tile-part divisions; plus the
   implemented CAUSAL/SEGMARK/terminated resilience styles, reference-grid
-  precinct/code-block/tag-tree partitions, and origin-aware reversible 5/3 lifting
+  precinct/code-block/tag-tree partitions, and origin-aware reversible 5/3 lifting;
+  any tile size is accepted at the global level count, including tiles whose
+  low-pass region empties (a one-sample edge column at an odd origin, or tiles
+  smaller than 2^levels), and `R` divisions give such a tile one part per
+  resolution that has packets
 - 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
 - 24/32-bit uncompressed Windows BMP input through the bounded adapter
 - non-interlaced PNG gray/RGB/palette/gray-alpha/RGBA input with `PLTE`/`tRNS`

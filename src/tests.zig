@@ -26234,6 +26234,72 @@ test "multi-tile terminate-all fails closed on packet corruption" {
     try std.testing.expect(rejected);
 }
 
+test "multi-tile encode accepts tiles whose low-pass region empties" {
+    // The encoder used to refuse any tile that could not carry the global
+    // decomposition count on its own (`canDecompose53Region`): a one-sample
+    // edge column at an odd origin, or a tile that reaches a single sample
+    // before the last level. The forward transforms now descend every level
+    // as the inverse does, a one-sample span at an odd origin becomes a single
+    // high-pass coefficient (ISO F.4.8.2), and resolutions left without
+    // packets get no resolution tile-part. Measured against Kakadu 8.4.1 and
+    // OpenJPEG 2.5.4 as well: every reversible grid here is lossless through
+    // both, and 9/7 is within one LSB of Kakadu.
+    const allocator = std.testing.allocator;
+    const width = 48;
+    const height = 40;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    const Grid = struct { tile_width: u32, tile_height: u32, levels: u8, divisions: ?u8 };
+    const grids = [_]Grid{
+        // 47-wide tiles leave a one-sample column at x = 47 (odd).
+        .{ .tile_width = 47, .tile_height = 23, .levels = 3, .divisions = 'R' },
+        .{ .tile_width = 19, .tile_height = 23, .levels = 5, .divisions = null },
+        // Tiny tiles reach a single sample long before the last level.
+        .{ .tile_width = 2, .tile_height = 2, .levels = 3, .divisions = 'R' },
+        .{ .tile_width = 5, .tile_height = 7, .levels = 4, .divisions = null },
+    };
+    for (grids) |grid| {
+        errdefer std.debug.print("odd tile grid failed: {d}x{d} levels {d}\n", .{ grid.tile_width, grid.tile_height, grid.levels });
+        var options = multi_tile_test_options;
+        options.tile_width = grid.tile_width;
+        options.tile_height = grid.tile_height;
+        options.levels = grid.levels;
+        options.tile_part_divisions = grid.divisions;
+        // Tiny tiles produce more tile-parts than one TLM segment addresses.
+        options.tlm = false;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+    }
+
+    var lossy_options = multi_tile_test_options;
+    lossy_options.tile_width = 19;
+    lossy_options.tile_height = 23;
+    lossy_options.levels = 3;
+    lossy_options.transform = .irreversible_9_7;
+    lossy_options.mct = .ict;
+    lossy_options.quantization = .scalar_expounded;
+    const lossy = try codestream.encodeLosslessWithOptions(allocator, rgb, lossy_options);
+    defer allocator.free(lossy);
+    var lossy_decoded = try codestream.decodeLosslessTemporary(allocator, lossy);
+    defer lossy_decoded.deinit();
+    var max_diff: u32 = 0;
+    for (samples, lossy_decoded.samples) |expected, actual| {
+        max_diff = @max(max_diff, @abs(@as(i32, expected) - @as(i32, actual)));
+    }
+    try std.testing.expect(max_diff <= 8);
+}
+
 test "multi-tile encode fails closed outside the bounded envelope" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -26291,14 +26357,6 @@ test "multi-tile encode fails closed outside the bounded envelope" {
                 options.progression = .lrcp;
             }
         }.mutate },
-        .{
-            .label = "tile cannot carry the global DWT level count",
-            .mutate = struct {
-                fn mutate(options: *codestream.LosslessOptions) void {
-                    options.tile_width = 2;
-                }
-            }.mutate,
-        },
     };
 
     for (cases) |scenario| {
@@ -27684,10 +27742,13 @@ test "multi-tile stats and header audit aggregate across tiles" {
     try std.testing.expectEqual(audit.payload_bytes, stats.t2_payload_bytes);
 }
 
-test "multi-tile encode rejects tiles that clamp the global DWT level count" {
+test "multi-tile encode carries the global DWT level count on 2-wide edge tiles" {
     const allocator = std.testing.allocator;
-    // The 2-wide edge tiles can only achieve one decomposition level against
-    // the global two, so COD would lie about them (multi_tile_plan §2.3).
+    // The 2-wide edge tiles reach a single sample after one level against the
+    // global two. This used to be refused so that COD would not claim a depth
+    // the tile could not achieve (multi_tile_plan §2.3); the forward transform
+    // now applies every level, as ISO F.4.8 and the inverse do, and the tile
+    // is lossless.
     const width = 34;
     const height = 34;
     const samples = try makeMultiTileTestImage(allocator, width, height);
@@ -27700,10 +27761,11 @@ test "multi-tile encode rejects tiles that clamp the global DWT level count" {
         .samples = samples,
     };
 
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options),
-    );
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, multi_tile_test_options);
+    defer allocator.free(bytes);
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
 test "corrupted segmentation symbol is caught as a bounded decode error" {
@@ -27793,9 +27855,9 @@ test "unsupported JP2 profile marker options fail closed" {
         .{ .label = "9-7 JP2", .options = .{ .transform = .irreversible_9_7 } },
         .{ .label = "scalar-derived quantization", .options = .{ .quantization = .scalar_derived } },
         .{ .label = "scalar-expounded quantization", .options = .{ .quantization = .scalar_expounded } },
-        .{ .label = "multi-tile request", .options = .{ .tile_width = 1, .tile_height = 2 } },
-        // The general multi-tile envelope is still narrow: tiny/misaligned
-        // grids and the remaining permuted orders fail closed.
+        // Tiny multi-tile grids encode now (a 1x2 tile grid is covered by
+        // "multi-tile encode accepts tiles whose low-pass region empties");
+        // these fail because the default resolution tile-parts need RPCL.
         .{ .label = "LRCP tiny multi-tile", .options = .{ .progression = .lrcp, .tile_width = 1, .tile_height = 2 } },
         .{ .label = "RLCP tiny multi-tile", .options = .{ .progression = .rlcp, .tile_width = 1, .tile_height = 2 } },
         .{ .label = "PCRL tiny multi-tile", .options = .{ .progression = .pcrl, .tile_width = 1, .tile_height = 2 } },
@@ -32011,6 +32073,7 @@ fn ref97Unpack(data: []f32, scratch: []f32, evens_first: bool) void {
 }
 
 fn ref97Forward1D(data: []f32, scratch: []f32, origin: u32) void {
+    if (data.len == 1 and (origin & 1) == 1) data[0] *= 2.0;
     if (data.len < 2) return;
     if ((origin & 1) == 0) {
         ref97LiftOdd(data, ref97_alpha);
@@ -32030,6 +32093,7 @@ fn ref97Forward1D(data: []f32, scratch: []f32, origin: u32) void {
 }
 
 fn ref97Inverse1D(data: []f32, scratch: []f32, origin: u32) void {
+    if (data.len == 1 and (origin & 1) == 1) data[0] /= 2.0;
     if (data.len < 2) return;
     if ((origin & 1) == 0) {
         ref97Unpack(data, scratch, true);
@@ -32068,10 +32132,13 @@ fn ref97Forward2D(allocator: std.mem.Allocator, data: []f32, width: usize, heigh
     var cur_x0 = x0;
     var cur_y0 = y0;
     var done: u8 = 0;
-    while (done < levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+    // ISO F.4.8: every level is applied. An empty region, or a single sample at
+    // the reference-grid origin, is unchanged by all remaining levels.
+    while (done < levels) : (done += 1) {
+        if (cur_width == 0 or cur_height == 0) return levels;
+        if (cur_width == 1 and cur_height == 1 and cur_x0 == 0 and cur_y0 == 0) return levels;
         const next_width = ref97LowCount(cur_width, cur_x0);
         const next_height = ref97LowCount(cur_height, cur_y0);
-        if (next_width == 0 or next_height == 0) break;
         for (0..cur_width) |col| {
             for (0..cur_height) |row| line[row] = data[row * width + col];
             ref97Forward1D(line[0..cur_height], scratch[0..cur_height], cur_y0);
@@ -32097,10 +32164,9 @@ fn ref97Inverse2D(allocator: std.mem.Allocator, data: []f32, width: usize, heigh
     var cur_x0 = x0;
     var cur_y0 = y0;
     var actual: u8 = 0;
-    while (actual < levels and (cur_width > 1 or cur_height > 1)) : (actual += 1) {
+    while (actual < levels) : (actual += 1) {
         const next_width = ref97LowCount(cur_width, cur_x0);
         const next_height = ref97LowCount(cur_height, cur_y0);
-        if (next_width == 0 or next_height == 0) break;
         shapes[actual] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
         cur_width = next_width;
         cur_height = next_height;
@@ -32118,6 +32184,7 @@ fn ref97Inverse2D(allocator: std.mem.Allocator, data: []f32, width: usize, heigh
     while (level > 0) {
         level -= 1;
         const shape = shapes[level];
+        if (shape.width == 0 or shape.height == 0) continue;
         for (0..shape.height) |row| {
             for (0..shape.width) |col| line[col] = data[row * width + col];
             ref97Inverse1D(line[0..shape.width], scratch[0..shape.width], shape.x0);

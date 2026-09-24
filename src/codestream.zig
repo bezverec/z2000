@@ -20051,13 +20051,19 @@ fn validateDecodePrecinctBlockSpans(
     }
 }
 
+/// Every non-degenerate tile is encodable at the global level count: the
+/// forward transforms descend every level even after a tile's low-pass region
+/// empties (ISO F.4.8), and the subband list and packet plan already carry
+/// empty resolutions. Tiles narrower than a sample at their odd origin were
+/// once refused here (`canDecompose53Region`); the decoder had dropped that
+/// rule earlier, and now the encoder has too.
 fn validateMultiTileGeometry(grid: tile_grid.Grid, levels: u8) !void {
     if (levels > 32) return CodestreamError.UnsupportedPayload;
 
     var iterator = grid.iterator();
     while (iterator.next() catch return CodestreamError.InvalidCodestream) |tile| {
-        if (!wavelet_int.canDecompose53Region(tile.rect.x0, tile.rect.y0, tile.rect.x1, tile.rect.y1, levels)) {
-            return CodestreamError.UnsupportedPayload;
+        if (tile.rect.x1 <= tile.rect.x0 or tile.rect.y1 <= tile.rect.y0) {
+            return CodestreamError.InvalidCodestream;
         }
     }
 }
@@ -20255,20 +20261,37 @@ fn buildMultiTileResolutionParts(
     levels: u8,
     options: LosslessOptions,
 ) ![]MultiTilePacketPart {
-    const parts_per_tile = try std.math.add(usize, levels, 1);
-    if (parts_per_tile > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
-    const total_parts = try std.math.mul(usize, artifacts.tiles.len, parts_per_tile);
+    const resolutions_per_tile = try std.math.add(usize, levels, 1);
+    if (resolutions_per_tile > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
+    // A tile whose low-pass region empties at some level (a narrow edge tile
+    // at an odd origin) has resolutions without packets. They get no
+    // tile-part: an empty part could carry no PLT, and TNsot simply counts
+    // the parts the tile has.
+    var total_parts: usize = 0;
+    for (artifacts.tiles) |tile_artifacts| {
+        if (tile_artifacts.scaffold.plan.resolution_count != resolutions_per_tile) return CodestreamError.InvalidCodestream;
+        for (tile_artifacts.scaffold.plan.resolutions[0..resolutions_per_tile]) |resolution| {
+            if (resolution.packets != 0) total_parts += 1;
+        }
+    }
     const parts = try allocator.alloc(MultiTilePacketPart, total_parts);
     errdefer allocator.free(parts);
 
     var out_index: usize = 0;
     for (artifacts.tiles) |tile_artifacts| {
         if (tile_artifacts.tile.index > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
-        if (tile_artifacts.scaffold.plan.resolution_count != parts_per_tile) return CodestreamError.InvalidCodestream;
+        var parts_per_tile: usize = 0;
+        for (tile_artifacts.scaffold.plan.resolutions[0..resolutions_per_tile]) |resolution| {
+            if (resolution.packets != 0) parts_per_tile += 1;
+        }
+        if (parts_per_tile == 0) return CodestreamError.InvalidCodestream;
         var first_packet: usize = 0;
-        for (tile_artifacts.scaffold.plan.resolutions[0..parts_per_tile], 0..) |resolution, resolution_index| {
+        var part_index: usize = 0;
+        for (tile_artifacts.scaffold.plan.resolutions[0..resolutions_per_tile]) |resolution| {
             const packet_count = std.math.cast(usize, resolution.packets) orelse return CodestreamError.InvalidCodestream;
-            if (packet_count == 0) return CodestreamError.InvalidCodestream;
+            if (packet_count == 0) continue;
+            const resolution_index = part_index;
+            part_index += 1;
             const packet_end = try std.math.add(usize, first_packet, packet_count);
             if (packet_end > tile_artifacts.stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
             const packet_lengths = tile_artifacts.stream.packet_lengths[first_packet..packet_end];

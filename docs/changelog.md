@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Encoder Accepts Odd And Tiny Tiles
+
+- The multi-tile encoder refused any tile that could not carry the global
+  decomposition count on its own (`canDecompose53Region`): a 19x23 grid over
+  a 96x80 image failed even at one level, because the one-sample column at
+  x = 95 has an empty low-pass band, and so did any tile smaller than
+  2^levels. The decoder had dropped that rule long ago.
+- The forward transforms (integer 5/3, float 5/3 and 9/7, and the parallel
+  9/7) now descend every requested level, mirroring the inverse: an empty
+  region is a no-op, and a one-sample span at an odd origin becomes a single
+  high-pass coefficient 2X (ISO F.4.8.2), which the float path used to leave
+  alone. Origin-anchored callers keep reporting the depth that changed
+  something, so every existing single-tile stream is byte-identical (checked
+  on a 24x24-tile 9/7 encode, old against new).
+- `R` tile-part divisions give a tile one part per resolution that has
+  packets; an empty part could carry no PLT. TNsot counts what the tile has.
+- Measured on a 96x80 RGB source. 19x23 tiles with `R` (plus TLM), `C`/CPRL,
+  `P`/PCRL, and `L`/LRCP divisions, SOP/EPH, PPT, PPM, and rate-targeted
+  layers are lossless through z2000, Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok
+  20.4.12 (Grok's known multi-tile PPM failure aside). 47x33, 5x7, 3x3, 2x2,
+  1x5, and 1x1 grids at two to five levels are lossless through z2000,
+  Kakadu, and OpenJPEG. The 9/7 variants (19x23, 47x33, 5x7, 3x3) are within
+  one LSB of Kakadu and 6 to 15 samples of 7680 from OpenJPEG.
+- Two tests that pinned the old refusal now pin the round trip, and the test
+  oracle for the 9/7 kernels follows the same ISO descent. Tiny grids still
+  need `--no-tlm` when they exceed 256 tile-parts; that is the next item.
+
 ### Encoder Matrix Re-Decoded Through All Three References
 
 - Documentation only. 24 `tiff-to-jp2` layouts on a 96x80 RGB source

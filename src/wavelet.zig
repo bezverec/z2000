@@ -43,7 +43,21 @@ pub fn forward2D(
     requested_levels: u8,
     wavelet: Wavelet,
 ) !u8 {
-    return forward2DOrigin(allocator, data, width, height, requested_levels, wavelet, 0, 0);
+    _ = try forward2DOrigin(allocator, data, width, height, requested_levels, wavelet, 0, 0);
+    // See `wavelet_int.forward53WithWorkspace`: origin-free callers keep
+    // signalling the depth that still changed something.
+    return levelsBeforeSinglePixel(width, height, requested_levels);
+}
+
+fn levelsBeforeSinglePixel(width: usize, height: usize, requested_levels: u8) u8 {
+    var cur_width = width;
+    var cur_height = height;
+    var done: u8 = 0;
+    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        cur_width = lowCount(cur_width);
+        cur_height = lowCount(cur_height);
+    }
+    return done;
 }
 
 pub fn forward2DOrigin(
@@ -78,10 +92,12 @@ pub fn forward2DOrigin(
     var cur_y0 = y0;
     var done: u8 = 0;
 
-    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+    while (done < requested_levels) : (done += 1) {
+        // Same descent rule as the integer 5/3 forward transform.
+        if (cur_width == 0 or cur_height == 0) return requested_levels;
+        if (cur_width == 1 and cur_height == 1 and cur_x0 == 0 and cur_y0 == 0) return requested_levels;
         const next_width = lowCountOrigin(cur_width, cur_x0);
         const next_height = lowCountOrigin(cur_height, cur_y0);
-        if (next_width == 0 or next_height == 0) break;
         // ISO/IEC 15444-1 F.4.8: forward transform filters vertically first,
         // then horizontally, matching independent codecs.
         var col: usize = 0;
@@ -232,7 +248,14 @@ fn ceilDiv2(value: u32) u32 {
 }
 
 fn forward1DOrigin(data: []f32, scratch: []f32, wavelet: Wavelet, origin: u32) void {
-    if (data.len < 2) return;
+    if (data.len == 0) return;
+    if (data.len == 1) {
+        // ISO F.4.8.2: a one-sample span at an odd origin becomes a single
+        // high-pass coefficient 2X; at an even origin it passes through.
+        // `inverse1DOrigin` halves it back.
+        if ((origin & 1) == 1) data[0] *= 2.0;
+        return;
+    }
     switch (wavelet) {
         .reversible_5_3 => if ((origin & 1) == 0) forward53(data, scratch) else forward53OddOrigin(data, scratch),
         .irreversible_9_7 => if ((origin & 1) == 0) forward97(data, scratch) else forward97OddOrigin(data, scratch),
@@ -987,10 +1010,12 @@ pub fn forward97Parallel(
     var cur_x0 = x0;
     var cur_y0 = y0;
     var done: u8 = 0;
-    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+    while (done < requested_levels) : (done += 1) {
+        // Same descent rule as `forward2DOrigin`.
+        if (cur_width == 0 or cur_height == 0) return requested_levels;
+        if (cur_width == 1 and cur_height == 1 and cur_x0 == 0 and cur_y0 == 0) return requested_levels;
         const next_width = lowCountOrigin(cur_width, cur_x0);
         const next_height = lowCountOrigin(cur_height, cur_y0);
-        if (next_width == 0 or next_height == 0) break;
         // ISO/IEC 15444-1 F.4.8 forward order: vertical first, then horizontal.
         runDwt97Phase(&pool, planes, width, cur_width, cur_height, cur_x0, cur_y0, scratches, pack_len, max_dim, .forward_columns);
         runDwt97Phase(&pool, planes, width, cur_width, cur_height, cur_x0, cur_y0, scratches, pack_len, max_dim, .forward_rows);
