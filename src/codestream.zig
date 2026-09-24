@@ -650,8 +650,9 @@ pub fn encodeLosslessGrayWithOptions(
 
 /// Bounded 1..4-plane reversible profile. Independent layouts use MCT none;
 /// four-plane RGBA may use MCT=1, which applies RCT to RGB only and leaves the
-/// final alpha plane independent. The current planar surface remains
-/// single-tile RPCL with in-band headers and optional R tile-parts/TLM/SOP/EPH.
+/// final alpha plane independent. A single tile stays RPCL with in-band
+/// headers and optional R tile-parts/TLM/SOP/EPH; a tile grid goes through
+/// `encodeLosslessPlanarMultiTile` and the full multi-tile option set.
 pub fn encodeLosslessPlanarWithOptions(
     allocator: std.mem.Allocator,
     planar: color.SamplePlanes,
@@ -693,6 +694,19 @@ pub fn encodeLosslessPlanarWithOptions(
     try validateTilePartDivisions(options.tile_part_divisions);
     try validateCodingPath(options);
 
+    const grid = tile_grid.Grid.fromImageSize(
+        planar.width,
+        planar.height,
+        options.tile_width,
+        options.tile_height,
+    ) catch |err| switch (err) {
+        tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
+        tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
+    };
+    if (!grid.isSingleTile()) {
+        return encodeLosslessPlanarMultiTile(allocator, planar, grid, options, mixed_component_precision);
+    }
+
     const rct_alpha = options.mct == .rct and planar.planes.len == 4 and !mixed_component_precision;
     if (options.transform != .reversible_5_3 or options.quantization != .none or
         (options.mct != .none and !rct_alpha) or options.progression != .rpcl or
@@ -705,17 +719,6 @@ pub fn encodeLosslessPlanarWithOptions(
     if (options.tile_part_divisions != null and options.tile_part_divisions != 'R') {
         return CodestreamError.UnsupportedPayload;
     }
-
-    const grid = tile_grid.Grid.fromImageSize(
-        planar.width,
-        planar.height,
-        options.tile_width,
-        options.tile_height,
-    ) catch |err| switch (err) {
-        tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
-        tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
-    };
-    if (!grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
 
     const levels = actualDwtLevels(planar.width, planar.height, options.levels);
     const encode_options = normalizedEncodePrecinctOptions(options, levels);
@@ -775,6 +778,91 @@ pub fn encodeLosslessPlanarWithOptions(
         .packet_header_lengths = artifacts.stream.packet_header_lengths,
         .packet_bytes = artifacts.stream.bytes,
     }, encode_options);
+}
+
+/// Multi-tile planar encode: grayscale, gray+alpha, and RGBA (with RCT over
+/// the colour planes or without MCT) through the same tile pipeline, tile-part
+/// divisions, global PCRD, POC, and packed-header options as multi-tile RGB.
+/// Each tile's planes are cut from `planar` and transformed by
+/// `tile_pipeline.forwardPlanarTile`.
+fn encodeLosslessPlanarMultiTile(
+    allocator: std.mem.Allocator,
+    planar: color.SamplePlanes,
+    grid: tile_grid.Grid,
+    options: LosslessOptions,
+    mixed_component_precision: bool,
+) ![]u8 {
+    const total_start = monotonicNs();
+    // One QCD serves every component on this path.
+    if (mixed_component_precision) return CodestreamError.UnsupportedPayload;
+    const components: u16 = @intCast(planar.planes.len);
+    const rct_alpha = options.mct == .rct and components == 4;
+    if (options.transform != .reversible_5_3 or options.quantization != .none or
+        (options.mct != .none and !rct_alpha))
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    try validateLosslessRequest(grid, options);
+
+    var context = PlanarTileFrontEndContext{ .planar = planar, .rct_alpha = rct_alpha };
+    // The tile pipeline checks the grid against these dimensions; the samples
+    // come from the front end's own planes.
+    const dimensions = image.RgbImage{
+        .allocator = allocator,
+        .width = planar.width,
+        .height = planar.height,
+        .bit_depth = planar.bit_depth,
+        .samples = &.{},
+    };
+    return encodeLosslessMultiTileMeasured(
+        allocator,
+        dimensions,
+        grid,
+        options,
+        components,
+        .{ .context = @ptrCast(&context), .build = buildPlanarTransformedTile },
+        null,
+        total_start,
+    );
+}
+
+const PlanarTileFrontEndContext = struct {
+    planar: color.SamplePlanes,
+    rct_alpha: bool,
+};
+
+fn buildPlanarTransformedTile(
+    context: *const anyopaque,
+    allocator: std.mem.Allocator,
+    source: image.RgbImage,
+    tile: tile_grid.Tile,
+    levels: u8,
+) anyerror!tile_pipeline.RctTile {
+    _ = source;
+    const ctx: *const PlanarTileFrontEndContext = @ptrCast(@alignCast(context));
+    var tile_planes = try extractPlanarTile(allocator, ctx.planar, tile.rect);
+    defer tile_planes.deinit();
+    return tile_pipeline.forwardPlanarTile(allocator, tile_planes, tile, levels, ctx.rct_alpha);
+}
+
+/// Copies one tile's window out of every uniformly sampled plane.
+fn extractPlanarTile(
+    allocator: std.mem.Allocator,
+    planar: color.SamplePlanes,
+    rect: tile_grid.Rect,
+) !color.SamplePlanes {
+    const width: usize = rect.width();
+    const height: usize = rect.height();
+    if (rect.x1 > planar.width or rect.y1 > planar.height) return CodestreamError.InvalidCodestream;
+    var out = try color.SamplePlanes.init(allocator, width, height, planar.bit_depth, planar.planes.len);
+    errdefer out.deinit();
+    for (planar.planes, out.planes) |source, destination| {
+        for (0..height) |row| {
+            const start = (@as(usize, rect.y0) + row) * planar.width + rect.x0;
+            @memcpy(destination[row * width ..][0..width], source[start..][0..width]);
+        }
+    }
+    return out;
 }
 
 /// Per-component subsampling factors (SIZ XRsiz/YRsiz) for the sampled
@@ -874,9 +962,9 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     }
     // A single-tile all-1 sampling layout is just the planar profile, so it
     // stays there and this path keeps carrying genuine subsampling. A
-    // multi-tile all-1 layout has no other encoder — the planar entry point is
-    // single-tile only — so leaving it here rather than rejecting it is what
-    // makes that layout reachable at all.
+    // multi-tile all-1 layout is still accepted here for existing callers,
+    // although `encodeLosslessPlanarWithOptions` now encodes tile grids with
+    // the full multi-tile option set.
     if (!any_subsampled and grid.isSingleTile()) return CodestreamError.UnsupportedPayload;
 
     const encode_options = normalizedEncodePrecinctOptions(options, reference_levels);
@@ -3405,46 +3493,10 @@ fn encodeLosslessWithOptionsMeasured(
         tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
         tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
     };
-    if (options.ppm and options.ppt) return CodestreamError.UnsupportedPayload;
-    if (options.poc_in_tile_header and options.poc_records.len == 0) {
-        return CodestreamError.InvalidCodestream;
-    }
-    if (options.poc_records.len != 0) {
-        if (options.ppm or options.ppt or options.emit_temporary_payload_sidecar) {
-            return CodestreamError.UnsupportedPayload;
-        }
-        if (grid.isSingleTile()) {
-            if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
-        } else if (options.tile_part_divisions != null and
-            options.tile_part_divisions != 'R' and options.tile_part_divisions != 'L' and
-            options.tile_part_divisions != 'C' and options.tile_part_divisions != 'P')
-        {
-            return CodestreamError.UnsupportedPayload;
-        }
-    }
-    if (options.ppm or options.ppt) {
-        if (options.progression != .rpcl or options.emit_temporary_payload_sidecar) {
-            return CodestreamError.UnsupportedPayload;
-        }
-        if (grid.isSingleTile()) {
-            if (options.tile_part_divisions != null and options.tile_part_divisions != 'R') {
-                return CodestreamError.UnsupportedPayload;
-            }
-        } else if (options.tile_part_divisions != 'R') {
-            return CodestreamError.UnsupportedPayload;
-        }
-    }
-    try validatePrecincts(options);
-    try validateTilePartDivisions(options.tile_part_divisions);
-    try validateCodingPath(options);
-    if (options.layers == 0) return CodestreamError.InvalidCodestream;
-    if (options.layers > max_quality_layers) return CodestreamError.InvalidCodestream;
-    if (options.rate_count > options.layers) return CodestreamError.InvalidCodestream;
-    try validateRates(options);
-    if (options.threads == 0) return CodestreamError.InvalidCodestream;
+    try validateLosslessRequest(grid, options);
 
     if (!grid.isSingleTile()) {
-        return encodeLosslessMultiTileMeasured(allocator, rgb, grid, options, timings, total_start);
+        return encodeLosslessMultiTileMeasured(allocator, rgb, grid, options, 3, null, timings, total_start);
     }
 
     const levels = actualDwtLevels(rgb.width, rgb.height, options.levels);
@@ -16849,6 +16901,23 @@ fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_componen
     }
 }
 
+fn appendMultiTileSiz(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    rgb: image.RgbImage,
+    components: u16,
+    options: LosslessOptions,
+) !void {
+    return appendSizForComponents(allocator, out, .{
+        .width = @intCast(rgb.width),
+        .height = @intCast(rgb.height),
+        .bit_depth = rgb.bit_depth,
+        .components = components,
+        .tile_width = options.tile_width,
+        .tile_height = options.tile_height,
+    });
+}
+
 fn appendSiz(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -19502,6 +19571,7 @@ fn reorderTilePacketStreamFromRpclSequence(
     allocator: std.mem.Allocator,
     stream: *tile_pipeline.TileRpclPacketStream,
     plan: packet_plan.Plan,
+    components: u16,
     layers: u16,
     sequence: []const packet_plan.Packet,
 ) !void {
@@ -19529,7 +19599,7 @@ fn reorderTilePacketStreamFromRpclSequence(
 
     var out_offset: usize = 0;
     for (sequence, 0..) |packet, out_index| {
-        const source_sequence = packet_plan.rpclSequenceForPacket(plan, 3, layers, packet) catch
+        const source_sequence = packet_plan.rpclSequenceForPacket(plan, components, layers, packet) catch
             return CodestreamError.InvalidCodestream;
         const source = std.math.cast(usize, source_sequence) orelse return CodestreamError.InvalidCodestream;
         if (source >= packet_count) return CodestreamError.InvalidCodestream;
@@ -19974,13 +20044,54 @@ fn validateBlockSize(width: u16, height: u16) !void {
     if (@as(u32, width) * @as(u32, height) > 4096) return CodestreamError.InvalidCodestream;
 }
 
+/// Option checks shared by the RGB and planar encoders before either one
+/// chooses its single- or multi-tile path.
+fn validateLosslessRequest(grid: tile_grid.Grid, options: LosslessOptions) !void {
+    if (options.ppm and options.ppt) return CodestreamError.UnsupportedPayload;
+    if (options.poc_in_tile_header and options.poc_records.len == 0) {
+        return CodestreamError.InvalidCodestream;
+    }
+    if (options.poc_records.len != 0) {
+        if (options.ppm or options.ppt or options.emit_temporary_payload_sidecar) {
+            return CodestreamError.UnsupportedPayload;
+        }
+        if (grid.isSingleTile()) {            if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
+        } else if (options.tile_part_divisions != null and
+            options.tile_part_divisions != 'R' and options.tile_part_divisions != 'L' and
+            options.tile_part_divisions != 'C' and options.tile_part_divisions != 'P')
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+    if (options.ppm or options.ppt) {
+        if (options.progression != .rpcl or options.emit_temporary_payload_sidecar) {
+            return CodestreamError.UnsupportedPayload;
+        }
+        if (grid.isSingleTile()) {
+            if (options.tile_part_divisions != null and options.tile_part_divisions != 'R') {
+                return CodestreamError.UnsupportedPayload;
+            }
+        } else if (options.tile_part_divisions != 'R') {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+    try validatePrecincts(options);
+    try validateTilePartDivisions(options.tile_part_divisions);
+    try validateCodingPath(options);
+    if (options.layers == 0) return CodestreamError.InvalidCodestream;
+    if (options.layers > max_quality_layers) return CodestreamError.InvalidCodestream;
+    if (options.rate_count > options.layers) return CodestreamError.InvalidCodestream;
+    try validateRates(options);
+    if (options.threads == 0) return CodestreamError.InvalidCodestream;
+}
+
 /// Multi-tile constraints (docs/multi_tile_plan.md §3): the tile pipeline
 /// currently covers reversible 5/3 + RCT and irreversible 9/7 + ICT, quality
 /// layers across all five Part 1 packet orders, the supported resilience style
 /// combinations, and PLT-backed R/L/C/P tile-part divisions on matching packet
 /// orders. Everything outside that fails closed so COD/SIZ never advertise
 /// behavior the tile encoder does not implement.
-fn validateMultiTileCodingPath(options: LosslessOptions) !void {
+fn validateMultiTileCodingPath(options: LosslessOptions, components: u16) !void {
     try validateMultiTileProgression(options.progression, options.layers);
     try validateTilePartDivisions(options.tile_part_divisions);
     if (options.tile_part_divisions == 'R' and options.progression != .rpcl) {
@@ -20002,11 +20113,16 @@ fn validateMultiTileCodingPath(options: LosslessOptions) !void {
         return CodestreamError.UnsupportedPayload;
     }
     switch (options.transform) {
-        .reversible_5_3 => {
-            if (options.mct != .rct) return CodestreamError.UnsupportedPayload;
+        // RGB carries RCT; RGBA may carry RCT over its colour planes; gray,
+        // gray+alpha, and RGBA may also go without MCT. RGB without MCT is
+        // not part of the multi-tile envelope yet.
+        .reversible_5_3 => switch (options.mct) {
+            .rct => if (components != 3 and components != 4) return CodestreamError.UnsupportedPayload,
+            .none => if (components == 3) return CodestreamError.UnsupportedPayload,
+            .ict => return CodestreamError.UnsupportedPayload,
         },
         .irreversible_9_7 => {
-            if (options.mct != .ict) return CodestreamError.UnsupportedPayload;
+            if (components != 3 or options.mct != .ict) return CodestreamError.UnsupportedPayload;
             if (options.quantization != .scalar_expounded and
                 options.quantization != .scalar_derived)
             {
@@ -20153,10 +20269,10 @@ fn validatePocResolutionTilePartSequence(
 
 
 
-fn validatePocComponentTilePartSequence(sequence: []const packet_plan.Packet) !void {
-    if (sequence.len == 0 or sequence.len % 3 != 0) return CodestreamError.UnsupportedPayload;
-    const packets_per_component = sequence.len / 3;
-    for (0..3) |component| {
+fn validatePocComponentTilePartSequence(sequence: []const packet_plan.Packet, components: u16) !void {
+    if (components == 0 or sequence.len == 0 or sequence.len % components != 0) return CodestreamError.UnsupportedPayload;
+    const packets_per_component = sequence.len / components;
+    for (0..components) |component| {
         const start = component * packets_per_component;
         for (sequence[start..][0..packets_per_component]) |packet| {
             if (packet.component != @as(u16, @intCast(component))) return CodestreamError.UnsupportedPayload;
@@ -20169,9 +20285,10 @@ fn validatePocPositionTilePartSequence(
     allocator: std.mem.Allocator,
     sequence: []const packet_plan.Packet,
     plan: packet_plan.Plan,
+    components: u16,
     layers: u16,
 ) !void {
-    const canonical = packet_plan.positionOrderedPackets(allocator, plan, 3, layers, .pcrl) catch |err| switch (err) {
+    const canonical = packet_plan.positionOrderedPackets(allocator, plan, components, layers, .pcrl) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return CodestreamError.InvalidCodestream,
     };
@@ -20366,9 +20483,10 @@ fn buildMultiTileLayerParts(
 fn buildMultiTileComponentParts(
     allocator: std.mem.Allocator,
     artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
+    components: u16,
     options: LosslessOptions,
 ) ![]MultiTilePacketPart {
-    const parts_per_tile: usize = 3;
+    const parts_per_tile: usize = components;
     const total_parts = try std.math.mul(usize, artifacts.tiles.len, parts_per_tile);
     const parts = try allocator.alloc(MultiTilePacketPart, total_parts);
     errdefer allocator.free(parts);
@@ -20390,7 +20508,7 @@ fn buildMultiTileComponentParts(
             parts[out_index] = .{
                 .tile_index = @intCast(tile_artifacts.tile.index),
                 .tile_part_index = @intCast(component_index),
-                .tile_part_count = parts_per_tile,
+                .tile_part_count = @intCast(parts_per_tile),
                 .first_packet = first_packet,
                 .packet_count = packet_count,
                 .psot = psot,
@@ -20410,6 +20528,7 @@ fn buildMultiTileComponentParts(
 fn buildMultiTilePositionParts(
     allocator: std.mem.Allocator,
     artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
+    components: u16,
     options: LosslessOptions,
 ) ![]MultiTilePacketPart {
     var parts: std.ArrayList(MultiTilePacketPart) = .empty;
@@ -20420,7 +20539,7 @@ fn buildMultiTilePositionParts(
         const packets = packet_plan.positionOrderedPackets(
             allocator,
             tile_artifacts.scaffold.plan,
-            3,
+            components,
             options.layers,
             .pcrl,
         ) catch return CodestreamError.InvalidCodestream;
@@ -20576,7 +20695,7 @@ fn appendMultiTilePacketPartSequence(
             const bytes_end = try rpclPacketByteOffset(tile_artifacts.stream.packet_lengths, packet_end);
             try appendSot(allocator, out, part.tile_index, part.psot, part.tile_part_index, part.tile_part_count);
             if (options.poc_in_tile_header and part.tile_part_index == 0) {
-                try appendPoc(allocator, out, tile_artifacts.levels, options);
+                try appendPocForComponents(allocator, out, tile_artifacts.levels, tile_artifacts.scaffold.components, options);
             }
             try appendMarker(allocator, out, .sod);
             var packet_sequence: u16 = @truncate(part.first_packet);
@@ -20618,7 +20737,7 @@ fn appendMultiTilePacketPartSequence(
             const bytes_end = try rpclPacketByteOffset(tile_artifacts.stream.packet_lengths, packet_end);
             try appendSot(allocator, out, part.tile_index, part.psot, part.tile_part_index, part.tile_part_count);
             if (options.poc_in_tile_header and part.tile_part_index == 0) {
-                try appendPoc(allocator, out, tile_artifacts.levels, options);
+                try appendPocForComponents(allocator, out, tile_artifacts.levels, tile_artifacts.scaffold.components, options);
             }
             if (uses_packed_headers) {
                 try appendPltFromPackedPacketLengths(allocator, out, options, packet_lengths, packet_header_lengths);
@@ -20664,15 +20783,20 @@ fn appendMultiTilePacketPartSequence(
     if (part_index != parts.len) return CodestreamError.InvalidCodestream;
 }
 
+/// `rgb` carries the image dimensions and bit depth for every source; its
+/// samples are read only when `planar_front_end` is null. A planar front end
+/// supplies each tile's transformed planes itself.
 fn encodeLosslessMultiTileMeasured(
     allocator: std.mem.Allocator,
     rgb: image.RgbImage,
     grid: tile_grid.Grid,
     options: LosslessOptions,
+    components: u16,
+    planar_front_end: ?tile_pipeline.TileFrontEnd,
     timings: ?*EncodeTimings,
     total_start: u64,
 ) ![]u8 {
-    try validateMultiTileCodingPath(options);
+    try validateMultiTileCodingPath(options, components);
 
     const levels = actualDwtLevels(rgb.width, rgb.height, options.levels);
     const encode_options = normalizedEncodePrecinctOptions(options, levels);
@@ -20705,7 +20829,7 @@ fn encodeLosslessMultiTileMeasured(
         .quantization = encode_options.quantization,
         .mct = encode_options.mct,
     };
-    const front_end: ?tile_pipeline.TileFrontEnd = if (encode_options.transform == .irreversible_9_7) .{
+    const front_end: ?tile_pipeline.TileFrontEnd = planar_front_end orelse if (encode_options.transform == .irreversible_9_7) .{
         .context = @ptrCast(&irreversible_context),
         .build = buildIrreversibleQuantizedTile,
     } else null;
@@ -20733,6 +20857,7 @@ fn encodeLosslessMultiTileMeasured(
             .nominal_bitplanes = nominal_bitplanes,
             .band_weights = band_weights,
             .front_end = front_end,
+            .components = components,
         },
         block_style,
         encode_options.threads,
@@ -20748,7 +20873,7 @@ fn encodeLosslessMultiTileMeasured(
             const sequence = poc.buildSequence(
                 allocator,
                 tile_artifacts.scaffold.plan,
-                3,
+                components,
                 encode_options.layers,
                 encode_options.poc_records,
             ) catch |err| switch (err) {
@@ -20759,11 +20884,12 @@ fn encodeLosslessMultiTileMeasured(
             switch (encode_options.tile_part_divisions orelse 0) {
                 'R' => try validatePocResolutionTilePartSequence(sequence, tile_artifacts.scaffold.plan),
                 'L' => try validatePocLayerTilePartSequence(sequence, encode_options.layers),
-                'C' => try validatePocComponentTilePartSequence(sequence),
+                'C' => try validatePocComponentTilePartSequence(sequence, components),
                 'P' => try validatePocPositionTilePartSequence(
                     allocator,
                     sequence,
                     tile_artifacts.scaffold.plan,
+                    components,
                     encode_options.layers,
                 ),
                 else => {},
@@ -20772,6 +20898,7 @@ fn encodeLosslessMultiTileMeasured(
                 allocator,
                 &tile_artifacts.stream,
                 tile_artifacts.scaffold.plan,
+                components,
                 encode_options.layers,
                 sequence,
             );
@@ -20789,8 +20916,8 @@ fn encodeLosslessMultiTileMeasured(
         else switch (division.?) {
             'R' => try buildMultiTileResolutionParts(allocator, artifacts, levels, encode_options),
             'L' => try buildMultiTileLayerParts(allocator, artifacts, encode_options),
-            'C' => try buildMultiTileComponentParts(allocator, artifacts, encode_options),
-            'P' => try buildMultiTilePositionParts(allocator, artifacts, encode_options),
+            'C' => try buildMultiTileComponentParts(allocator, artifacts, components, encode_options),
+            'P' => try buildMultiTilePositionParts(allocator, artifacts, components, encode_options),
             else => unreachable,
         };
         defer allocator.free(parts);
@@ -20799,11 +20926,11 @@ fn encodeLosslessMultiTileMeasured(
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
         try appendMarker(allocator, &out, .soc);
-        try appendSiz(allocator, &out, rgb, encode_options);
+        try appendMultiTileSiz(allocator, &out, rgb, components, encode_options);
         try appendCod(allocator, &out, levels, encode_options);
         try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
         if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
-            try appendPoc(allocator, &out, levels, encode_options);
+            try appendPocForComponents(allocator, &out, levels, components, encode_options);
         }
         if (encode_options.tlm) try appendMultiTileTlm(allocator, &out, parts);
         if (encode_options.ppm) try appendMultiTilePpm(allocator, &out, artifacts, parts, encode_options);
@@ -20844,11 +20971,11 @@ fn encodeLosslessMultiTileMeasured(
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendMarker(allocator, &out, .soc);
-    try appendSiz(allocator, &out, rgb, encode_options);
+    try appendMultiTileSiz(allocator, &out, rgb, components, encode_options);
     try appendCod(allocator, &out, levels, encode_options);
     try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
     if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
-        try appendPoc(allocator, &out, levels, encode_options);
+        try appendPocForComponents(allocator, &out, levels, components, encode_options);
     }
     try out.appendSlice(allocator, sequence.bytes);
     try appendMarker(allocator, &out, .eoc);

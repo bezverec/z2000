@@ -26281,6 +26281,61 @@ test "multi-tile TLM spans several segments past one segment's capacity" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "planar encode covers gray, gray+alpha, and RGBA on tile grids" {
+    // The planar encoder (grayscale, gray+alpha, RGBA) was single-tile only,
+    // so `tiff-to-jp2 --tile` refused every non-RGB TIFF. It now feeds the
+    // multi-tile RGB machinery through a planar tile front end, with the
+    // component count threaded through SIZ, POC, and the C/P divisions.
+    // Measured against Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.4.12 as well:
+    // every layout below is lossless through all three.
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        components: usize,
+        mct: codestream.MultipleComponentTransform,
+        progression: codestream.ProgressionOrder,
+        divisions: ?u8,
+        poc: bool,
+    };
+    const cases = [_]Case{
+        .{ .components = 1, .mct = .none, .progression = .rpcl, .divisions = 'R', .poc = false },
+        .{ .components = 2, .mct = .none, .progression = .lrcp, .divisions = 'L', .poc = false },
+        .{ .components = 4, .mct = .rct, .progression = .rpcl, .divisions = 'R', .poc = false },
+        .{ .components = 4, .mct = .none, .progression = .pcrl, .divisions = 'P', .poc = false },
+        // Four-component POC and C parts: the paths that assumed three.
+        .{ .components = 4, .mct = .rct, .progression = .cprl, .divisions = 'C', .poc = true },
+        .{ .components = 1, .mct = .none, .progression = .lrcp, .divisions = null, .poc = true },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("planar multi-tile case failed: {d} components, {s}\n", .{ case.components, @tagName(case.progression) });
+        var planes = try makePlanarTestPlanes(allocator, 45, 38, 8, case.components);
+        defer planes.deinit();
+        var options = multi_tile_test_options;
+        options.tile_width = 19;
+        options.tile_height = 23;
+        options.levels = 3;
+        options.layers = 2;
+        options.mct = case.mct;
+        options.progression = case.progression;
+        options.tile_part_divisions = case.divisions;
+        const records = [_]codestream.PocRecord{
+            .{ .resolution_start = 0, .component_start = 0, .layer_end = 2, .resolution_end = 4, .component_end = @intCast(case.components), .progression = std.meta.stringToEnum(poc.Progression, @tagName(case.progression)).? },
+        };
+        if (case.poc) options.poc_records = &records;
+        const bytes = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, options);
+        defer allocator.free(bytes);
+
+        const siz = findMarker(bytes, codestream.markerValue("siz")) orelse return error.MissingSiz;
+        try std.testing.expectEqual(@as(u16, @intCast(case.components)), readU16BeTest(bytes, siz + 38));
+        try std.testing.expect(countMarker(bytes, codestream.markerValue("sot")) >= 6);
+
+        var decoded = try codestream.decodeLosslessPlanar(allocator, bytes);
+        defer decoded.deinit();
+        for (planes.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
+}
+
 test "multi-tile encode accepts tiles whose low-pass region empties" {
     // The encoder used to refuse any tile that could not carry the global
     // decomposition count on its own (`canDecompose53Region`): a one-sample

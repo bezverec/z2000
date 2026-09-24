@@ -2244,6 +2244,46 @@ fn buildPlanarTileRpclEncodeArtifactsIsoMqInternal(
     style: ebcot.CodeBlockStyle,
     rct_alpha: bool,
 ) !TileRpclEncodeArtifacts {
+    if (options.front_end != null) return PacketScaffoldError.InvalidPlane;
+    var transformed = try forwardPlanarTile(allocator, source, tile, requested_levels, rct_alpha);
+    defer transformed.deinit();
+    const levels = requested_levels;
+
+    var component_bit_depths = [_]u8{0} ** color.max_components;
+    for (0..source.planes.len) |component| {
+        component_bit_depths[component] = source.componentBitDepth(component) orelse return PacketScaffoldError.InvalidPlane;
+    }
+    var planar_options = options;
+    planar_options.components = @intCast(source.planes.len);
+    planar_options.component_bit_depths = component_bit_depths;
+    var artifact = try buildTileRpclEncodeArtifactsFromTransformedTile(
+        allocator,
+        transformed,
+        levels,
+        planar_options,
+        style,
+    );
+    errdefer artifact.deinit();
+    try applyGridPcrdTargets(
+        allocator,
+        @as([*]TileRpclEncodeArtifacts, @ptrCast(&artifact))[0..1],
+        planar_options,
+    );
+    return artifact;
+}
+
+/// Reversible planar tile front end: the ISO B.1.1 DC level shift per plane,
+/// or RCT over the first three planes of RGBA with an independent alpha, then
+/// an origin-aware 5/3 DWT of every plane to the requested depth. `source`
+/// holds exactly the tile's samples; the result owns its coefficient planes.
+/// Shared by single-tile planar encode and the multi-tile planar front end.
+pub fn forwardPlanarTile(
+    allocator: std.mem.Allocator,
+    source: color.SamplePlanes,
+    tile: tile_grid.Tile,
+    requested_levels: u8,
+    rct_alpha: bool,
+) !RctTile {
     if (source.width == 0 or source.height == 0) return PacketScaffoldError.InvalidPlane;
     if (source.bit_depth != 0 and source.bit_depth != 8 and source.bit_depth != 16) {
         return PacketScaffoldError.InvalidPlane;
@@ -2251,7 +2291,6 @@ fn buildPlanarTileRpclEncodeArtifactsIsoMqInternal(
     if (source.planes.len == 0 or source.planes.len > color.max_components) {
         return PacketScaffoldError.InvalidPlane;
     }
-    if (options.front_end != null) return PacketScaffoldError.InvalidPlane;
     const pixels = try std.math.mul(usize, source.width, source.height);
     var component_bit_depths = [_]u8{0} ** color.max_components;
     for (source.planes, 0..) |plane, component| {
@@ -2295,12 +2334,12 @@ fn buildPlanarTileRpclEncodeArtifactsIsoMqInternal(
         .planes = planes_carrier,
     };
     planes_moved = true;
-    defer transformed.deinit();
+    errdefer transformed.deinit();
 
     var workspace = try wavelet_int.Workspace.init(allocator, @max(source.width, source.height));
     defer workspace.deinit();
-    var levels: u8 = 0;
-    for (transformed.planes.planes, 0..) |plane, component| {
+    for (transformed.planes.planes) |plane| {
+        // Origin-aware forward transforms apply every requested level.
         const plane_levels = try wavelet_int.forward53WithWorkspaceOrigin(
             &workspace,
             plane,
@@ -2310,30 +2349,9 @@ fn buildPlanarTileRpclEncodeArtifactsIsoMqInternal(
             tile.rect.x0,
             tile.rect.y0,
         );
-        if (component == 0) {
-            levels = plane_levels;
-        } else if (plane_levels != levels) {
-            return wavelet_int.TransformError.InvalidDimensions;
-        }
+        if (plane_levels != requested_levels) return wavelet_int.TransformError.InvalidDimensions;
     }
-
-    var planar_options = options;
-    planar_options.components = @intCast(source.planes.len);
-    planar_options.component_bit_depths = component_bit_depths;
-    var artifact = try buildTileRpclEncodeArtifactsFromTransformedTile(
-        allocator,
-        transformed,
-        levels,
-        planar_options,
-        style,
-    );
-    errdefer artifact.deinit();
-    try applyGridPcrdTargets(
-        allocator,
-        @as([*]TileRpclEncodeArtifacts, @ptrCast(&artifact))[0..1],
-        planar_options,
-    );
-    return artifact;
+    return transformed;
 }
 
 pub fn buildTileGridRpclEncodeArtifactsIsoMq(

@@ -5,6 +5,44 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile Gray, Gray+Alpha, And RGBA Encode
+
+- The planar encoder (grayscale, gray+alpha, and RGBA TIFFs, PNGs, and the
+  like) was single-tile only, so `tiff-to-jp2 --tile` refused every non-RGB
+  source. The sampled encoder could write a multi-tile grayscale stream, but
+  only RPCL without tile-part divisions, styles, or rate targets, and no
+  RGBA at all.
+- Multi-tile planar requests now go through the same tile pipeline as
+  multi-tile RGB: a planar tile front end cuts each tile from the source
+  planes and runs the level shift (or RCT over the colour planes of RGBA)
+  and the origin-aware 5/3 transform, shared with single-tile planar encode
+  as `tile_pipeline.forwardPlanarTile`. Every multi-tile option applies:
+  the five progression orders with their `R`/`L`/`C`/`P` divisions, TLM,
+  SOP/EPH, PPT, PPM, main- and tile-header POC, the resilience styles, and
+  global rate targets. Uniform 8- or 16-bit depth is required (one QCD
+  serves every component). RGB without MCT stays outside the envelope.
+- The component count is threaded through SIZ, the POC writers and
+  validators, the POC packet reorder, and the `C`/`P` divisions, all of
+  which assumed three. RGBA POC was the layout that exposed it: a POC
+  record ending at component 4 failed validation against three. Gray and
+  gray+alpha POC streams decoded exactly even with the three-component
+  reorder, so no wrong output was observed, but the index is now computed
+  for the real component count.
+- Measured on 96x80 sources against Kakadu 8.4.1, OpenJPEG 2.5.4 (through
+  PNG output, since its TIFF writer drops `ExtraSamples` on any alpha
+  image), and Grok 20.4.12: 8-bit gray, gray+alpha, and RGBA with RCT are
+  lossless through all of them on 32x32 and 19x23 tiles with every
+  division, TLM, SOP/EPH, PPT, POC (main and tile header, with `C` and `P`
+  parts), rates, and the full style set; RGBA on 5x7 and gray on 3x3 tiles,
+  RGBA without MCT, and 16-bit gray and RGBA on 32x32 tiles are lossless as
+  well. Exceptions are the known ones: Grok on multi-tile PPM, and
+  Kakadu on tile-header POC with `R` parts and PLT, which it refuses for
+  RGB as well.
+- `codestream.validateLosslessRequest` now holds the option checks the RGB
+  and planar encoders share. A unit test covers one, two, and four
+  components, four-component POC with `C` parts, and fails on the previous
+  commit.
+
 ### Multi-Tile TLM Spans Several Segments
 
 - The item the previous entry left open. Both multi-tile TLM writers (the
