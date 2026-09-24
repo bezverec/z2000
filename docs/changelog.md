@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile RGB Without MCT
+
+- Multi-tile RGB required RCT for 5/3 and ICT for 9/7, so `--mct none` with
+  `--tile` was refused. The tile pipeline's built-in RGB stage gains a
+  level-shift-only variant (`forwardLevelShiftedTile`, selected by
+  `PacketScaffoldOptions.rgb_transform`), and the irreversible front end
+  already handled `mct = none`, so 9/7 needed only the gate.
+- Measured on a 96x80 RGB source against Kakadu 8.4.1, OpenJPEG 2.5.4, and
+  Grok 20.4.12: reversible without MCT on 32x32 and 19x23 tiles with every
+  division, TLM, SOP/EPH, PPT, POC, rates, and the full style set is lossless
+  through all of them. 9/7 without MCT on 32x32 and 19x23 tiles, with and
+  without rates, is within one LSB of Kakadu and 4 to 19 samples of 7680
+  from OpenJPEG.
+- The test that pinned the refusal now checks the round trip for three
+  progression orders and 9/7, and that COD signals no MCT; it fails on the
+  previous commit.
+
 ### Multi-Tile Gray, Gray+Alpha, And RGBA Encode
 
 - The planar encoder (grayscale, gray+alpha, and RGBA TIFFs, PNGs, and the

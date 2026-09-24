@@ -224,18 +224,23 @@ Supported public JP2 profiles are still narrow:
 
 - lossless RGB: `--mct rct --transform 5-3 --qstyle none`
 - irreversible RGB: `--transform 9-7` with scalar-expounded or scalar-derived
-  quantization and either `--mct ict` or bounded single-tile `--mct none`;
-  bounded multi-tile irreversible RGB remains ICT-only and uses origin-aware
-  9/7 lifting, including odd tile origins, and global rate targets
-- reversible component-independent RGB: `--mct none --transform 5-3 --qstyle none`
-- reversible grayscale: one component, single tile, `--mct none --transform
-  5-3 --qstyle none --progression RPCL`, in-band headers, PLT, and optional
-  `R` resolution tile-parts/TLM/SOP/EPH
+  quantization and either `--mct ict` or `--mct none`, single- or
+  multi-tile; multi-tile irreversible RGB uses origin-aware 9/7 lifting,
+  including odd tile origins, and global rate targets
+- reversible component-independent RGB: `--mct none --transform 5-3 --qstyle none`,
+  single- or multi-tile with the full multi-tile option set
+- reversible grayscale: one component, `--mct none --transform 5-3 --qstyle
+  none`; a single tile is RPCL with in-band headers, PLT, and optional `R`
+  resolution tile-parts/TLM/SOP/EPH, and a tile grid takes the full
+  multi-tile option set (every progression and division, PPT/PPM, POC,
+  styles, rates) at a uniform 8- or 16-bit depth
 - reversible gray+alpha: two components with one final Typ 1/2 alpha channel,
-  `--mct none --transform 5-3 --qstyle none --progression RPCL`
+  `--mct none --transform 5-3 --qstyle none`, with the same single- and
+  multi-tile envelopes as grayscale
 - reversible RGBA: four components with one final Typ 1/2 alpha channel;
   `--mct rct` transforms only RGB and is the CLI default, while `--mct none`
-  keeps all four components independent; ICT remains fail-closed
+  keeps all four components independent; single- or multi-tile as above; ICT
+  remains fail-closed
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution

@@ -26401,6 +26401,67 @@ test "multi-tile encode accepts tiles whose low-pass region empties" {
     try std.testing.expect(max_diff <= 8);
 }
 
+test "multi-tile RGB encodes without MCT, reversible and irreversible" {
+    // Multi-tile RGB required RCT (or ICT for 9/7), so `--mct none` with
+    // `--tile` was refused. The built-in reversible RGB tile stage now has a
+    // level-shift-only variant, and the irreversible front end already carried
+    // `mct = none`. Measured against Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok
+    // 20.4.12 as well: reversible layouts are lossless through all three, 9/7
+    // within one LSB of Kakadu.
+    const allocator = std.testing.allocator;
+    const width = 45;
+    const height = 38;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+
+    var options = multi_tile_test_options;
+    options.tile_width = 19;
+    options.tile_height = 23;
+    options.levels = 3;
+    options.layers = 2;
+    options.mct = .none;
+    const Layout = struct { progression: codestream.ProgressionOrder, divisions: ?u8 };
+    for ([_]Layout{
+        .{ .progression = .rpcl, .divisions = 'R' },
+        .{ .progression = .cprl, .divisions = 'C' },
+        .{ .progression = .lrcp, .divisions = null },
+    }) |layout| {
+        options.progression = layout.progression;
+        options.tile_part_divisions = layout.divisions;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        // SGcod multiple component transform byte: 0 = none.
+        try std.testing.expectEqual(@as(u8, 0), bytes[cod + 8]);
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+    }
+
+    options.progression = .rpcl;
+    options.tile_part_divisions = null;
+    options.transform = .irreversible_9_7;
+    options.quantization = .scalar_expounded;
+    const lossy = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(lossy);
+    const cod = findMarker(lossy, codestream.markerValue("cod")) orelse return error.MissingCod;
+    try std.testing.expectEqual(@as(u8, 0), lossy[cod + 8]);
+    var lossy_decoded = try codestream.decodeLosslessTemporary(allocator, lossy);
+    defer lossy_decoded.deinit();
+    var max_diff: u32 = 0;
+    for (samples, lossy_decoded.samples) |expected, actual| {
+        max_diff = @max(max_diff, @abs(@as(i32, expected) - @as(i32, actual)));
+    }
+    try std.testing.expect(max_diff <= 8);
+}
+
 test "multi-tile encode fails closed outside the bounded envelope" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -26420,11 +26481,6 @@ test "multi-tile encode fails closed outside the bounded envelope" {
         mutate: *const fn (options: *codestream.LosslessOptions) void,
     };
     const cases = [_]Case{
-        .{ .label = "mct none", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                options.mct = .none;
-            }
-        }.mutate },
         .{ .label = "bypass without terminate-all", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.bypass = true;

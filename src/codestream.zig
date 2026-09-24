@@ -20113,16 +20113,19 @@ fn validateMultiTileCodingPath(options: LosslessOptions, components: u16) !void 
         return CodestreamError.UnsupportedPayload;
     }
     switch (options.transform) {
-        // RGB carries RCT; RGBA may carry RCT over its colour planes; gray,
-        // gray+alpha, and RGBA may also go without MCT. RGB without MCT is
-        // not part of the multi-tile envelope yet.
+        // RGB and RGBA may carry RCT over their colour planes; every layout
+        // may also go without MCT, each component then carrying only its DC
+        // level shift.
         .reversible_5_3 => switch (options.mct) {
             .rct => if (components != 3 and components != 4) return CodestreamError.UnsupportedPayload,
-            .none => if (components == 3) return CodestreamError.UnsupportedPayload,
+            .none => {},
             .ict => return CodestreamError.UnsupportedPayload,
         },
+        // The irreversible front end is RGB only, with ICT or without MCT.
         .irreversible_9_7 => {
-            if (components != 3 or options.mct != .ict) return CodestreamError.UnsupportedPayload;
+            if (components != 3 or (options.mct != .ict and options.mct != .none)) {
+                return CodestreamError.UnsupportedPayload;
+            }
             if (options.quantization != .scalar_expounded and
                 options.quantization != .scalar_derived)
             {
@@ -20858,6 +20861,7 @@ fn encodeLosslessMultiTileMeasured(
             .band_weights = band_weights,
             .front_end = front_end,
             .components = components,
+            .rgb_transform = if (encode_options.mct == .none) .none else .rct,
         },
         block_style,
         encode_options.threads,

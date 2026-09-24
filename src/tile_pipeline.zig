@@ -36,8 +36,13 @@ pub const TileFrontEnd = struct {
     ) anyerror!RctTile,
 };
 
+/// Inter-component transform for the built-in reversible RGB tile stage.
+pub const RgbTileTransform = enum { rct, none };
+
 pub const PacketScaffoldOptions = struct {
     components: u16 = 3,
+    /// RCT, or the DC level shift alone, for RGB tiles without a front end.
+    rgb_transform: RgbTileTransform = .rct,
     component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
     layers: u16 = 1,
     block_width: usize = 64,
@@ -1479,6 +1484,23 @@ pub fn forwardRctTile(
     };
 }
 
+/// RGB tile stage without an inter-component transform: each component gets
+/// only its DC level shift (ISO B.1.1).
+pub fn forwardLevelShiftedTile(
+    allocator: std.mem.Allocator,
+    source: image.RgbImage,
+    tile: tile_grid.Tile,
+) !RctTile {
+    var rgb_tile = try tile_grid.extractRgbTile(allocator, source, tile.rect);
+    defer rgb_tile.deinit();
+
+    const planes = try color.forwardNoTransform(allocator, rgb_tile);
+    return .{
+        .tile = tile,
+        .planes = planes,
+    };
+}
+
 pub fn inverseRctTileInto(
     allocator: std.mem.Allocator,
     destination: image.RgbImage,
@@ -2043,8 +2065,10 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
 ) !TileRpclEncodeArtifacts {
     var rct_tile = if (options.front_end) |front_end|
         try front_end.build(front_end.context, allocator, source, tile, requested_levels)
-    else
-        try forwardRctTile(allocator, source, tile);
+    else switch (options.rgb_transform) {
+        .rct => try forwardRctTile(allocator, source, tile),
+        .none => try forwardLevelShiftedTile(allocator, source, tile),
+    };
     defer rct_tile.deinit();
 
     // A front end returns already-transformed planes at the requested depth.
