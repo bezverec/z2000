@@ -3683,16 +3683,40 @@ fn initTilePacketReaderBandGroup(
     };
 }
 
+/// Blocks carry explicit codeword segments under TERMALL (one pass each) and
+/// under BYPASS without TERMALL (a leading MQ run, then two-pass raw and
+/// one-pass MQ segments, ISO D.6). A block of several single-pass segments
+/// can only be TERMALL, and a multi-pass segment can only be BYPASS; a block
+/// holding one single-pass segment segments the same way under both and says
+/// nothing. Blocks that disagree are malformed.
 fn encodedLayerBlocksUseTerminateAll(encoded: []const t2.EncodedLayerBlock) !bool {
-    var saw_terminated_block = false;
+    var terminate_all: ?bool = null;
     for (encoded) |block| {
         if (block.segments.len == 0) continue;
-        saw_terminated_block = true;
+        var multi_pass_segment = false;
         for (block.segments) |segment| {
-            if (segment.pass_count != 1) return PacketScaffoldError.InvalidPacket;
+            if (segment.pass_count == 0) return PacketScaffoldError.InvalidPacket;
+            if (segment.pass_count != 1) multi_pass_segment = true;
+        }
+        const vote: ?bool = if (multi_pass_segment)
+            false
+        else if (block.segments.len > 1)
+            true
+        else
+            null;
+        if (vote) |value| {
+            if (multi_pass_segment and !block.bypass) return PacketScaffoldError.InvalidPacket;
+            if (terminate_all) |expected| {
+                if (expected != value) return PacketScaffoldError.InvalidPacket;
+            } else {
+                terminate_all = value;
+            }
+        } else if (terminate_all == null and !block.bypass) {
+            // A lone single-pass segment without BYPASS is TERMALL.
+            terminate_all = true;
         }
     }
-    return saw_terminated_block;
+    return terminate_all orelse false;
 }
 
 fn encodedLayerBlocksUseBypass(encoded: []const t2.EncodedLayerBlock) !bool {

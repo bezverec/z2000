@@ -26462,6 +26462,52 @@ test "multi-tile RGB encodes without MCT, reversible and irreversible" {
     try std.testing.expect(max_diff <= 8);
 }
 
+test "multi-tile encode carries BYPASS without TERMALL across quality layers" {
+    // Multi-tile encode refused BYPASS unless TERMALL was set: the tile
+    // pipeline's packet self-check read every explicit codeword segment as a
+    // TERMALL segment and rejected the multi-pass raw and MQ segments that
+    // BYPASS alone produces (ISO D.6). It now tells the two models apart per
+    // block. Measured against Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.4.12
+    // as well: full decodes are lossless through all three, and one- and
+    // two-layer prefixes equal Kakadu's sample for sample.
+    const allocator = std.testing.allocator;
+    const width = 45;
+    const height = 38;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    var options = multi_tile_test_options;
+    options.tile_width = 19;
+    options.tile_height = 23;
+    options.levels = 3;
+    options.layers = 3;
+    options.bypass = true;
+    for ([_]bool{ false, true }) |styles| {
+        options.reset_context = styles;
+        options.predictable_termination = styles;
+        const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(bytes);
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        // SPcod code-block style: bit 0 is BYPASS, bit 2 TERMALL.
+        const block_style = bytes[cod + 12];
+        try std.testing.expect(block_style & 0x01 != 0);
+        try std.testing.expect(block_style & 0x04 == 0);
+
+        var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+        // A layer prefix must decode too: it cuts through codeword segments.
+        var prefix = try codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .quality_layer_limit = 1 });
+        prefix.deinit();
+    }
+}
+
 test "multi-tile encode fails closed outside the bounded envelope" {
     const allocator = std.testing.allocator;
     const width = 48;
@@ -26481,11 +26527,6 @@ test "multi-tile encode fails closed outside the bounded envelope" {
         mutate: *const fn (options: *codestream.LosslessOptions) void,
     };
     const cases = [_]Case{
-        .{ .label = "bypass without terminate-all", .mutate = struct {
-            fn mutate(options: *codestream.LosslessOptions) void {
-                options.bypass = true;
-            }
-        }.mutate },
         .{ .label = "debug sidecar", .mutate = struct {
             fn mutate(options: *codestream.LosslessOptions) void {
                 options.emit_temporary_payload_sidecar = true;

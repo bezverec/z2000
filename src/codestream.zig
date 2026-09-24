@@ -20134,7 +20134,6 @@ fn validateMultiTileCodingPath(options: LosslessOptions, components: u16) !void 
         },
     }
     if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
-    if (options.bypass and !options.terminate_all) return CodestreamError.UnsupportedPayload;
     // Standalone RESET and standalone ERTERM ride the same continuous ISO-MQ
     // block encoder/decoder pair as the single-tile path
     // (encodeComponentBlockIsoMq routes non-TERMALL styles through the direct

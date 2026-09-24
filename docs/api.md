@@ -284,8 +284,9 @@ Supported public JP2 profiles are still narrow:
 
 Unsupported combinations still fail closed. Examples include tile-part
 division/progression mismatches, JPX features, unsupported component layouts,
-and profile mixes outside the bounded envelope. In multi-tile mode, BYPASS
-without TERMALL remains unsupported. The sampled library API combines inline,
+and profile mixes outside the bounded envelope. In multi-tile mode, BYPASS is
+supported with or without TERMALL, across quality layers and rate targets.
+The sampled library API combines inline,
 PPT, or PPM headers with complete main- or first-tile-header POC schedules for
 one part per tile; the generic RGB CLI path and broader multipart packed POC
 combinations remain closed. Inline PLT-less multipart streams derive

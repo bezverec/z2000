@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile BYPASS Without TERMALL
+
+- The last refusal from the encoder option matrix. Multi-tile encode
+  rejected `--bypass` unless `--terminate-all` was set as well, although the
+  block coder and the T2 segment counting already supported BYPASS alone and
+  single-tile encode used it. The blocker was the tile pipeline's packet
+  self-check: it read every explicit codeword segment as a TERMALL segment
+  and rejected the multi-pass raw and MQ segments BYPASS produces (ISO D.6).
+- The check now tells the two models apart per block: several single-pass
+  segments mean TERMALL, a multi-pass segment means BYPASS, a block with a
+  single one-pass segment segments the same way under both and does not
+  vote, and blocks that disagree are malformed. The encoder gate is gone.
+- Measured on a 96x80 source against Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok
+  20.4.12: BYPASS on 32x32 and 19x23 tiles with one and three layers, rate
+  targets, `L` and `C` divisions, RESET+ERTERM, CAUSAL+SEGMARK, PPT, POC,
+  no MCT, grayscale, RGBA, and TERMALL decodes losslessly through all four.
+  One- and two-layer prefixes equal Kakadu's sample for sample; OpenJPEG
+  differs only on the 19x23 two-layer prefix, by its known truncating
+  rounding of a lone odd-origin coefficient. 9/7 with BYPASS is within one
+  LSB of Kakadu and 0 to 21 samples from OpenJPEG, prefixes included.
+- The envelope test's BYPASS case became a round-trip test with and without
+  RESET+ERTERM that also decodes a one-layer prefix; it fails on the
+  previous commit.
+
 ### Multi-Tile RGB Without MCT
 
 - Multi-tile RGB required RCT for 5/3 and ICT for 9/7, so `--mct none` with
