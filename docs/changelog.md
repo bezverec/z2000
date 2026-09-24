@@ -5,6 +5,36 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Planar 9/7, And Every Layout On A Single Planar Tile
+
+- Grayscale, gray+alpha, and RGBA could be encoded only with reversible 5/3,
+  and a single planar tile only in RPCL without POC or packed headers, so
+  `--transform 9-7`, `--progression LRCP`, `--poc`, or `--ppm` on a gray or
+  RGBA TIFF were refused. Lossy grayscale JP2 was not reachable at all.
+- A planar 9/7 front end (`forwardIrreversiblePlanarRegion`) level-shifts
+  each plane into floats, optionally applies the RGB ICT to the colour planes
+  of RGBA, and runs the origin-aware 9/7 transform and deadzone quantization
+  per plane. The multi-tile planar encoder uses it for 9/7 tiles.
+- Single-tile planar requests outside the dedicated single-tile writer's
+  envelope now go through the multi-tile machinery with a one-tile grid; a
+  request that writer does carry still uses it, so its output is unchanged.
+  A single tile in another progression order is written as one part, as
+  single-tile RGB is.
+- Measured against Kakadu 8.4.1, OpenJPEG 2.5.4 (PNG output), and Grok
+  20.4.12. 9/7: grayscale single-tile, on 32x32 and 19x23 tiles, and with
+  rates; 16-bit grayscale; gray+alpha; RGBA with ICT (single tile and tiled)
+  and without MCT. Every plane is within one LSB of Kakadu; OpenJPEG differs
+  from z2000 on 0 to 22 samples at 8 bits, and at 16 bits it differs from
+  Kakadu itself on 477 samples by up to 2 LSB while z2000 is within 1 LSB of
+  Kakadu on all but 9. Reversible single tiles in LRCP, CPRL, PCRL, RLCP with
+  SOP/EPH, with main- and tile-header POC, PPT, and PPM are lossless through
+  all four decoders; the RLCP SOP/EPH case is what exposed the EPH writer
+  defect fixed in the previous entry.
+- A unit test covers 9/7 on one, two, and four components (ICT and not),
+  single-tile and tiled, and reversible single tiles in LRCP and PCRL, and
+  checks COD's progression, MCT, and transform bytes. It fails on the
+  previous commit.
+
 ### EPH Written After The Packet Header, And Checked There
 
 - The multi-tile writer for one tile-part per tile (`--tile-parts none`, and

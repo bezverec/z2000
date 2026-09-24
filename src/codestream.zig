@@ -703,21 +703,27 @@ pub fn encodeLosslessPlanarWithOptions(
         tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
         tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
     };
-    if (!grid.isSingleTile()) {
-        return encodeLosslessPlanarMultiTile(allocator, planar, grid, options, mixed_component_precision);
-    }
-
     const rct_alpha = options.mct == .rct and planar.planes.len == 4 and !mixed_component_precision;
-    if (options.transform != .reversible_5_3 or options.quantization != .none or
-        (options.mct != .none and !rct_alpha) or options.progression != .rpcl or
-        options.poc_records.len != 0 or options.poc_in_tile_header or
-        options.ppm or options.ppt or options.emit_temporary_payload_sidecar or
-        options.t1_backend != .iso_mq)
-    {
-        return CodestreamError.UnsupportedPayload;
-    }
-    if (options.tile_part_divisions != null and options.tile_part_divisions != 'R') {
-        return CodestreamError.UnsupportedPayload;
+    const single_tile_profile = options.transform == .reversible_5_3 and
+        options.quantization == .none and
+        (options.mct == .none or rct_alpha) and options.progression == .rpcl and
+        options.poc_records.len == 0 and !options.poc_in_tile_header and
+        !options.ppm and !options.ppt and !options.emit_temporary_payload_sidecar and
+        options.t1_backend == .iso_mq and
+        (options.tile_part_divisions == null or options.tile_part_divisions == 'R');
+    // A tile grid, or a single tile asking for more than the single-tile planar
+    // path writes (9/7, another progression order, POC, packed headers, other
+    // divisions), goes through the multi-tile machinery; a one-tile grid is a
+    // valid input to it. Requests the single-tile path does carry stay there,
+    // so their bytes do not change.
+    if (!grid.isSingleTile() or !single_tile_profile) {
+        var routed = options;
+        // One tile in another progression order is written as one part, as
+        // the single-tile RGB path does; `R` parts need RPCL.
+        if (grid.isSingleTile() and routed.tile_part_divisions == 'R' and routed.progression != .rpcl) {
+            routed.tile_part_divisions = null;
+        }
+        return encodeLosslessPlanarMultiTile(allocator, planar, grid, routed, mixed_component_precision);
     }
 
     const levels = actualDwtLevels(planar.width, planar.height, options.levels);
@@ -796,15 +802,23 @@ fn encodeLosslessPlanarMultiTile(
     // One QCD serves every component on this path.
     if (mixed_component_precision) return CodestreamError.UnsupportedPayload;
     const components: u16 = @intCast(planar.planes.len);
-    const rct_alpha = options.mct == .rct and components == 4;
-    if (options.transform != .reversible_5_3 or options.quantization != .none or
-        (options.mct != .none and !rct_alpha))
-    {
-        return CodestreamError.UnsupportedPayload;
-    }
+    const reversible = options.transform == .reversible_5_3 and options.quantization == .none;
+    const irreversible = options.transform == .irreversible_9_7 and
+        (options.quantization == .scalar_expounded or options.quantization == .scalar_derived);
+    if (!reversible and !irreversible) return CodestreamError.UnsupportedPayload;
+    // RGBA may transform its colour planes: RCT with 5/3, ICT with 9/7.
+    const rct_alpha = reversible and options.mct == .rct and components == 4;
+    const ict_alpha = irreversible and options.mct == .ict and components == 4;
+    if (options.mct != .none and !rct_alpha and !ict_alpha) return CodestreamError.UnsupportedPayload;
     try validateLosslessRequest(grid, options);
 
-    var context = PlanarTileFrontEndContext{ .planar = planar, .rct_alpha = rct_alpha };
+    var context = PlanarTileFrontEndContext{
+        .planar = planar,
+        .rct_alpha = rct_alpha,
+        .irreversible = irreversible,
+        .ict_alpha = ict_alpha,
+        .quantization = options.quantization,
+    };
     // The tile pipeline checks the grid against these dimensions; the samples
     // come from the front end's own planes.
     const dimensions = image.RgbImage{
@@ -829,6 +843,9 @@ fn encodeLosslessPlanarMultiTile(
 const PlanarTileFrontEndContext = struct {
     planar: color.SamplePlanes,
     rct_alpha: bool,
+    irreversible: bool = false,
+    ict_alpha: bool = false,
+    quantization: QuantizationStyle = .none,
 };
 
 fn buildPlanarTransformedTile(
@@ -842,7 +859,105 @@ fn buildPlanarTransformedTile(
     const ctx: *const PlanarTileFrontEndContext = @ptrCast(@alignCast(context));
     var tile_planes = try extractPlanarTile(allocator, ctx.planar, tile.rect);
     defer tile_planes.deinit();
+    if (ctx.irreversible) {
+        const planes = try forwardIrreversiblePlanarRegion(
+            allocator,
+            tile_planes,
+            levels,
+            ctx.quantization,
+            ctx.ict_alpha,
+            tile.rect.x0,
+            tile.rect.y0,
+        );
+        return .{ .tile = tile, .planes = planes };
+    }
     return tile_pipeline.forwardPlanarTile(allocator, tile_planes, tile, levels, ctx.rct_alpha);
+}
+
+/// Irreversible planar front end for one region: the DC level shift into
+/// floats (with ICT over the colour planes of RGBA when `ict` is set, the
+/// alpha plane left independent), then each plane's origin-aware 9/7 DWT and
+/// deadzone quantization, exactly as the RGB front end does per plane.
+fn forwardIrreversiblePlanarRegion(
+    allocator: std.mem.Allocator,
+    planar: color.SamplePlanes,
+    levels: u8,
+    quantization: QuantizationStyle,
+    ict: bool,
+    x0: u32,
+    y0: u32,
+) !color.RctPlanes {
+    const count = planar.planes.len;
+    if (count == 0 or count > color.max_components) return CodestreamError.UnsupportedPayload;
+    if (ict and count != 4) return CodestreamError.UnsupportedPayload;
+    const bit_depth = planar.bit_depth;
+    if (bit_depth != 8 and bit_depth != 16) return CodestreamError.UnsupportedPayload;
+    const pixels = try std.math.mul(usize, planar.width, planar.height);
+    const shift: f32 = @floatFromInt(@as(i32, 1) << @as(u5, @intCast(bit_depth - 1)));
+
+    var floats: [color.max_components][]f32 = undefined;
+    var allocated: usize = 0;
+    defer for (floats[0..allocated]) |plane| allocator.free(plane);
+    while (allocated < count) : (allocated += 1) {
+        floats[allocated] = try allocator.alloc(f32, pixels);
+        for (planar.planes[allocated], floats[allocated]) |sample, *value| {
+            value.* = @as(f32, @floatFromInt(sample)) - shift;
+        }
+    }
+    if (ict) {
+        // Reuse the RGB ICT so the colour planes match the RGB front end
+        // bit for bit.
+        const interleaved = try allocator.alloc(u16, pixels * 3);
+        defer allocator.free(interleaved);
+        for (0..pixels) |pixel| {
+            for (0..3) |component| interleaved[pixel * 3 + component] = planar.planes[component][pixel];
+        }
+        var transformed = try color.forwardIct(allocator, .{
+            .allocator = allocator,
+            .width = planar.width,
+            .height = planar.height,
+            .bit_depth = bit_depth,
+            .samples = interleaved,
+        });
+        defer transformed.deinit();
+        for (0..3) |component| @memcpy(floats[component], transformed.planes[component]);
+    }
+
+    const width_u32 = std.math.cast(u32, planar.width) orelse return CodestreamError.ImageTooLarge;
+    const height_u32 = std.math.cast(u32, planar.height) orelse return CodestreamError.ImageTooLarge;
+    const x1 = std.math.add(u32, x0, width_u32) catch return CodestreamError.ImageTooLarge;
+    const y1 = std.math.add(u32, y0, height_u32) catch return CodestreamError.ImageTooLarge;
+    const bands = try subband.makeBandsForRegion(allocator, x0, y0, x1, y1, levels);
+    defer allocator.free(bands);
+    const deltas = try allocator.alloc(f64, bands.len);
+    defer allocator.free(deltas);
+    for (bands, deltas) |band, *delta| {
+        delta.* = irreversibleBandDelta(
+            bit_depth,
+            band.kind,
+            try irreversibleBandStepSizeFor(quantization, bit_depth, band.kind, band.level, levels),
+        );
+    }
+
+    var out = try color.RctPlanes.init(allocator, planar.width, planar.height, bit_depth, count);
+    errdefer out.deinit();
+    var jobs: [color.max_components]IrreversibleForwardPlaneJob = undefined;
+    for (0..count) |component| {
+        jobs[component] = .{
+            .plane = floats[component],
+            .quantized = out.planes[component],
+            .width = planar.width,
+            .height = planar.height,
+            .levels = levels,
+            .x0 = x0,
+            .y0 = y0,
+            .bands = bands,
+            .deltas = deltas,
+        };
+    }
+    // Tiles already run on parallel tile workers; keep the planes serial.
+    try runComponentJobs(IrreversibleForwardPlaneJob, allocator, jobs[0..count], 1, irreversibleForwardPlaneWorker);
+    return out;
 }
 
 /// Copies one tile's window out of every uniformly sampled plane.
@@ -20142,10 +20257,13 @@ fn validateMultiTileCodingPath(options: LosslessOptions, components: u16) !void 
             .none => {},
             .ict => return CodestreamError.UnsupportedPayload,
         },
-        // The irreversible front end is RGB only, with ICT or without MCT.
+        // ICT over RGB, or over the colour planes of RGBA; any layout may
+        // also go without MCT.
         .irreversible_9_7 => {
-            if (components != 3 or (options.mct != .ict and options.mct != .none)) {
-                return CodestreamError.UnsupportedPayload;
+            switch (options.mct) {
+                .ict => if (components != 3 and components != 4) return CodestreamError.UnsupportedPayload,
+                .none => {},
+                .rct => return CodestreamError.UnsupportedPayload,
             }
             if (options.quantization != .scalar_expounded and
                 options.quantization != .scalar_derived)

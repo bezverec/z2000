@@ -231,18 +231,19 @@ Supported public JP2 profiles are still narrow:
   including odd tile origins, and global rate targets
 - reversible component-independent RGB: `--mct none --transform 5-3 --qstyle none`,
   single- or multi-tile with the full multi-tile option set
-- reversible grayscale: one component, `--mct none --transform 5-3 --qstyle
-  none`; a single tile is RPCL with in-band headers, PLT, and optional `R`
-  resolution tile-parts/TLM/SOP/EPH, and a tile grid takes the full
-  multi-tile option set (every progression and division, PPT/PPM, POC,
-  styles, rates) at a uniform 8- or 16-bit depth
-- reversible gray+alpha: two components with one final Typ 1/2 alpha channel,
-  `--mct none --transform 5-3 --qstyle none`, with the same single- and
-  multi-tile envelopes as grayscale
-- reversible RGBA: four components with one final Typ 1/2 alpha channel;
-  `--mct rct` transforms only RGB and is the CLI default, while `--mct none`
-  keeps all four components independent; single- or multi-tile as above; ICT
-  remains fail-closed
+- grayscale: one component, `--mct none`, reversible 5/3 or irreversible
+  9/7 (`--transform 9-7` with scalar-expounded or scalar-derived
+  quantization); a single tile in RPCL with in-band headers, PLT, and
+  optional `R` resolution tile-parts/TLM/SOP/EPH keeps its dedicated writer,
+  and every other request (another progression order, POC, PPT/PPM, 9/7, a
+  tile grid) takes the full multi-tile option set at a uniform 8- or 16-bit
+  depth
+- gray+alpha: two components with one final Typ 1/2 alpha channel,
+  `--mct none`, 5/3 or 9/7, with the same envelopes as grayscale
+- RGBA: four components with one final Typ 1/2 alpha channel; with 5/3,
+  `--mct rct` transforms only RGB and is the CLI default; with 9/7, `--mct
+  ict` does the same; `--mct none` keeps all four components independent;
+  envelopes as for grayscale
 - all five Part 1 progression orders on the documented single-tile path;
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution

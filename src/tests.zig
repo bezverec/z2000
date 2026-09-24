@@ -26339,6 +26339,68 @@ test "multi-tile TLM spans several segments past one segment's capacity" {
     try std.testing.expectEqualSlices(u16, samples, decoded.samples);
 }
 
+test "planar encode covers 9/7 and every single-tile layout" {
+    // Grayscale, gray+alpha, and RGBA could only be encoded reversibly, and on
+    // a single tile only in RPCL without POC or packed headers. Irreversible
+    // planar tiles now go through a planar 9/7 front end (ICT over the colour
+    // planes of RGBA when asked), and single-tile requests the single-tile
+    // path cannot carry use the multi-tile machinery with a one-tile grid.
+    // Measured against Kakadu 8.4.1 as well: the 9/7 planes are within one
+    // LSB, and the reversible layouts are lossless.
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        components: usize,
+        tile: u32,
+        transform: codestream.WaveletTransform,
+        mct: codestream.MultipleComponentTransform,
+        progression: codestream.ProgressionOrder,
+    };
+    const cases = [_]Case{
+        .{ .components = 1, .tile = 0, .transform = .irreversible_9_7, .mct = .none, .progression = .rpcl },
+        .{ .components = 1, .tile = 19, .transform = .irreversible_9_7, .mct = .none, .progression = .lrcp },
+        .{ .components = 2, .tile = 19, .transform = .irreversible_9_7, .mct = .none, .progression = .rpcl },
+        .{ .components = 4, .tile = 19, .transform = .irreversible_9_7, .mct = .ict, .progression = .rpcl },
+        .{ .components = 4, .tile = 0, .transform = .irreversible_9_7, .mct = .ict, .progression = .cprl },
+        // Reversible single tiles outside the single-tile planar profile.
+        .{ .components = 1, .tile = 0, .transform = .reversible_5_3, .mct = .none, .progression = .lrcp },
+        .{ .components = 4, .tile = 0, .transform = .reversible_5_3, .mct = .rct, .progression = .pcrl },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("planar case failed: {d} components, tile {d}, {s}, {s}\n", .{ case.components, case.tile, @tagName(case.transform), @tagName(case.progression) });
+        var planes = try makePlanarTestPlanes(allocator, 45, 38, 8, case.components);
+        defer planes.deinit();
+        var options = multi_tile_test_options;
+        options.tile_width = if (case.tile == 0) 45 else case.tile;
+        options.tile_height = if (case.tile == 0) 38 else 23;
+        options.levels = 3;
+        options.layers = 2;
+        options.transform = case.transform;
+        options.quantization = if (case.transform == .irreversible_9_7) .scalar_expounded else .none;
+        options.mct = case.mct;
+        options.progression = case.progression;
+        const bytes = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, options);
+        defer allocator.free(bytes);
+
+        const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
+        try std.testing.expectEqual(@intFromEnum(case.progression), bytes[cod + 5]);
+        try std.testing.expectEqual(@as(u8, if (case.mct == .none) 0 else 1), bytes[cod + 8]);
+        try std.testing.expectEqual(@as(u8, if (case.transform == .irreversible_9_7) 0 else 1), bytes[cod + 13]);
+
+        var decoded = try codestream.decodeLosslessPlanar(allocator, bytes);
+        defer decoded.deinit();
+        var max_diff: u32 = 0;
+        for (planes.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqual(expected.len, actual.len);
+            for (expected, actual) |e, a| max_diff = @max(max_diff, @abs(@as(i32, e) - @as(i32, a)));
+        }
+        if (case.transform == .reversible_5_3) {
+            try std.testing.expectEqual(@as(u32, 0), max_diff);
+        } else {
+            try std.testing.expect(max_diff <= 8);
+        }
+    }
+}
+
 test "planar encode covers gray, gray+alpha, and RGBA on tile grids" {
     // The planar encoder (grayscale, gray+alpha, RGBA) was single-tile only,
     // so `tiff-to-jp2 --tile` refused every non-RGB TIFF. It now feeds the
