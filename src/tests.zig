@@ -2345,6 +2345,64 @@ test "PNG semantic malformed matrix fails after valid CRCs" {
     try std.testing.expectError(png.PngError.UnknownCriticalChunk, png.parse(allocator, &changed));
 }
 
+fn insertPngChunkForTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    offset: usize,
+    chunk_type: *const [4]u8,
+    data: []const u8,
+) ![]u8 {
+    const out = try allocator.alloc(u8, bytes.len + 12 + data.len);
+    @memcpy(out[0..offset], bytes[0..offset]);
+    putPngU32(out, offset, @intCast(data.len));
+    @memcpy(out[offset + 4 ..][0..4], chunk_type);
+    @memcpy(out[offset + 8 ..][0..data.len], data);
+    refreshPngChunkCrc(out, offset + 4, data.len);
+    @memcpy(out[offset + 12 + data.len ..], bytes[offset..]);
+    return out;
+}
+
+test "PNG accepts sRGB-valued cHRM and gAMA and fails closed on other values" {
+    const allocator = std.testing.allocator;
+    // ImageMagick writes a cHRM chunk with the sRGB chromaticities into every
+    // RGB PNG, and the reader refused any cHRM or gAMA, so png-to-jp2 rejected
+    // essentially every RGB or RGBA PNG ImageMagick produces. Chunks carrying
+    // exactly the sRGB values the PNG specification gives say nothing an
+    // unlabelled PNG does not; other values are accepted only when an sRGB
+    // chunk overrides them, and otherwise stay UnsupportedColorProfile.
+    const valid = @embedFile("testdata/imagemagick-png-rgb8-chrm.png");
+    try expectPngFixture(valid, @embedFile("testdata/imagemagick-png-rgb8-chrm.raw"), .rgb, 7, 5, 8, 3);
+
+    // IHDR ends at byte 33 and cHRM follows: length, type at 37, data at 41.
+    try std.testing.expectEqualSlices(u8, "cHRM", valid[37..41]);
+    var shifted: [valid.len]u8 = valid.*;
+    shifted[44] +%= 1; // white point x no longer 0.3127
+    refreshPngChunkCrc(&shifted, 37, 32);
+    try std.testing.expectError(png.PngError.UnsupportedColorProfile, png.parse(allocator, &shifted));
+
+    // The same non-sRGB cHRM is harmless under an sRGB chunk.
+    const overridden = try insertPngChunkForTest(allocator, &shifted, 33, "sRGB", &.{0});
+    defer allocator.free(overridden);
+    var decoded = try png.parse(allocator, overridden);
+    decoded.deinit();
+
+    // gAMA 45455 is the sRGB-recommended value; anything else is refused.
+    var gamma = [4]u8{ 0, 0, 0xb1, 0x8f };
+    const srgb_gamma = try insertPngChunkForTest(allocator, valid, 33, "gAMA", &gamma);
+    defer allocator.free(srgb_gamma);
+    var gamma_decoded = try png.parse(allocator, srgb_gamma);
+    gamma_decoded.deinit();
+    gamma = .{ 0, 1, 0x86, 0xa0 };
+    const linear_gamma = try insertPngChunkForTest(allocator, valid, 33, "gAMA", &gamma);
+    defer allocator.free(linear_gamma);
+    try std.testing.expectError(png.PngError.UnsupportedColorProfile, png.parse(allocator, linear_gamma));
+
+    // A second cHRM is malformed.
+    const duplicate = try insertPngChunkForTest(allocator, valid, 33, "cHRM", valid[41..73]);
+    defer allocator.free(duplicate);
+    try std.testing.expectError(png.PngError.InvalidChunkOrder, png.parse(allocator, duplicate));
+}
+
 test "PNG palette and transparency semantic bounds fail closed" {
     const allocator = std.testing.allocator;
     const palette_valid = @embedFile("testdata/imagemagick-png-palette-trns.png");

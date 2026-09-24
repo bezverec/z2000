@@ -72,6 +72,12 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !tiff.DecodedImage
     var ended_idat = false;
     var seen_iend = false;
     var seen_srgb = false;
+    var seen_chrm = false;
+    var seen_gama = false;
+    // cHRM/gAMA values other than sRGB's describe a colour space this reader
+    // does not convert; they are harmless only when an sRGB chunk overrides
+    // them (PNG 3rd ed. 11.3.2.5 / 11.3.3.5).
+    var non_srgb_color_chunk = false;
     var idat: std.ArrayList(u8) = .empty;
     defer idat.deinit(allocator);
 
@@ -129,10 +135,20 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !tiff.DecodedImage
                     return PngError.InvalidChunkOrder;
                 }
                 seen_srgb = true;
+            } else if (std.mem.eql(u8, chunk_type, "cHRM")) {
+                if (header == null or palette != null or seen_idat or seen_chrm or data.len != 32) {
+                    return PngError.InvalidChunkOrder;
+                }
+                seen_chrm = true;
+                if (!isSrgbChromaticities(data)) non_srgb_color_chunk = true;
+            } else if (std.mem.eql(u8, chunk_type, "gAMA")) {
+                if (header == null or palette != null or seen_idat or seen_gama or data.len != 4) {
+                    return PngError.InvalidChunkOrder;
+                }
+                seen_gama = true;
+                if (readU32(data, 0) != srgb_gamma) non_srgb_color_chunk = true;
             } else if (std.mem.eql(u8, chunk_type, "iCCP") or
-                std.mem.eql(u8, chunk_type, "cICP") or
-                std.mem.eql(u8, chunk_type, "cHRM") or
-                std.mem.eql(u8, chunk_type, "gAMA"))
+                std.mem.eql(u8, chunk_type, "cICP"))
             {
                 return PngError.UnsupportedColorProfile;
             } else if (std.mem.eql(u8, chunk_type, "acTL") or
@@ -148,9 +164,25 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !tiff.DecodedImage
     }
 
     const h = header orelse return PngError.InvalidHeader;
+    if (non_srgb_color_chunk and !seen_srgb) return PngError.UnsupportedColorProfile;
     if (!seen_iend or !seen_idat or idat.items.len == 0) return PngError.MissingImageData;
     if (h.color_type == 3 and palette == null) return PngError.InvalidPalette;
     return decodeImage(allocator, h, palette, transparency, idat.items);
+}
+
+/// The gAMA value (1/2.2 x 100000) and cHRM values (white point, then red,
+/// green, and blue, each x and y x 100000) that the PNG specification gives
+/// for sRGB images. ImageMagick writes exactly this cHRM into every RGB PNG.
+/// With them an image says nothing an unlabelled PNG does not, since both are
+/// read as sRGB.
+const srgb_gamma: u32 = 45455;
+const srgb_chromaticities = [8]u32{ 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000 };
+
+fn isSrgbChromaticities(data: []const u8) bool {
+    for (srgb_chromaticities, 0..) |expected, index| {
+        if (readU32(data, index * 4) != expected) return false;
+    }
+    return true;
 }
 
 fn parseHeader(data: []const u8) !Header {

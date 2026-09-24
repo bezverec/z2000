@@ -145,8 +145,10 @@ non-interlaced PNG color types 0/2/3/4/6 at their legal bit depths, validates
 all chunk CRCs and critical ordering, joins consecutive `IDAT`, inflates one
 exactly sized zlib stream, reverses filters 0..4, and expands `PLTE`/`tRNS`.
 PNG alpha is unassociated. Packed grayscale/palette samples expand to 8 bits;
-native 8/16-bit samples are unchanged. Adam7, APNG, and color-definition
-chunks not yet mapped to JP2 fail closed.
+native 8/16-bit samples are unchanged. `cHRM` and `gAMA` carrying exactly the
+sRGB values from the PNG specification (ImageMagick's default `cHRM`, gamma
+45455) are accepted as sRGB, as are any values under an `sRGB` chunk, which
+overrides them; other values, `iCCP`, `cICP`, Adam7, and APNG fail closed.
 
 `formats/jpeg.zig` exposes `read` and `parse` for the bounded 8-bit baseline
 sequential JPEG profile, plus `readPreservingMetadata` and

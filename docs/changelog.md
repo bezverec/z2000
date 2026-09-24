@@ -5,6 +5,29 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### PNGs From ImageMagick Are Accepted
+
+- A sweep of encoder options over non-RGB inputs turned up an input defect
+  first: `png-to-jp2` refused essentially every RGB or RGBA PNG that
+  ImageMagick writes, with `UnsupportedColorProfile`. ImageMagick puts a
+  `cHRM` chunk into each one, and the reader refused any `cHRM` or `gAMA` so
+  that it would never convert colour silently. The committed PNG fixtures
+  had been generated without those chunks, which is why nothing caught it.
+- `cHRM` and `gAMA` carrying exactly the values the PNG specification gives
+  for sRGB (ImageMagick's `cHRM` is precisely those; gamma 45455) now read as
+  sRGB, which is what an unlabelled PNG is taken to be anyway. Other values
+  are accepted only under an `sRGB` chunk, which the specification says
+  overrides them; without one they still fail closed. Ordering (before
+  `PLTE` and `IDAT`), length, and duplicates are checked. `iCCP` and `cICP`
+  are unchanged.
+- New fixture `imagemagick-png-rgb8-chrm` straight from ImageMagick's
+  defaults (`cHRM`, `bKGD`, `tIME`, `tEXt`); the unit test decodes it exactly
+  and pins the non-sRGB, `sRGB`-override, gamma, and duplicate cases. It fails
+  on the previous commit. A 96x80 RGB and an RGBA PNG from ImageMagick now
+  round-trip through `png-to-jp2` and `decode-temp-jp2` exactly.
+- A third fuzz campaign after the recent encoder and header changes (seed 3,
+  30 mutations per fixture, 3060 runs) found nothing.
+
 ### Multi-Tile BYPASS Without TERMALL
 
 - The last refusal from the encoder option matrix. Multi-tile encode
