@@ -3691,6 +3691,30 @@
       ],
       "expectation": "fail_closed",
       "expected_error": "SampleOutOfRange"
+    },
+    {
+      "id": "z2000-eph-after-body",
+      "path": "src/testdata/z2000-eph-after-body.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "53f0b472e1484df4c039f6fbac5c54a2a1cf2ee79de1b7737494ffee19595a1e",
+      "source": {
+        "producer": "z2000 before commit fixing EPH placement (tiff-to-jp2 --tile 32,32 --tile-parts none --eph)",
+        "version": "pre-fix",
+        "origin": "96x80 RGB over 32x32 tiles, one tile-part per tile, EPH signalled in COD; the single-part tile writer put each EPH after the packet body instead of after the packet header (ISO A.8.2). Kakadu 8.4.1 and OpenJPEG 2.5.4 refuse it and Grok 20.4.12 decodes garbage; z2000's own decoder used to accept it because it located EPH anywhere in the PLT-delimited packet",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 committed",
+        "command": "magick -seed 7 -size 96x80 plasma:fractal -depth 8 -type TrueColor src.tif; z2000 (pre-fix) tiff-to-jp2 src.tif src/testdata/z2000-eph-after-body.jp2 --tile 32,32 --tile-parts none --eph"
+      },
+      "oracle": "fail-closed: the packet header must end exactly where EPH sits; kdu_expand reports 'Expected to find EPH marker following packet header', opj_decompress fails",
+      "features": [
+        "jp2-core-container",
+        "tiles-and-tile-parts",
+        "reversible-53"
+      ],
+      "expectation": "fail_closed",
+      "expected_error": "InvalidCodestream"
     }
   ]
 }

@@ -30458,19 +30458,28 @@ fn expectTilePartPayloadMatchesStreamForTest(
         if (payload.len - cursor < packet_length or stream.bytes.len - raw_cursor < packet_length) {
             return error.Truncated;
         }
+        // Header, then EPH when signalled (ISO A.8.2), then body.
+        const header_length = @as(usize, @intCast(stream.packet_header_lengths[packet_index]));
         try std.testing.expectEqualSlices(
             u8,
-            stream.bytes[raw_cursor..][0..packet_length],
-            payload[cursor..][0..packet_length],
+            stream.bytes[raw_cursor..][0..header_length],
+            payload[cursor..][0..header_length],
         );
-        cursor += packet_length;
-        raw_cursor += packet_length;
-
+        cursor += header_length;
         if (options.eph) {
             if (payload.len - cursor < 2) return error.Truncated;
             try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.eph), readU16BeTest(payload, cursor));
             cursor += 2;
         }
+        const body_length = packet_length - header_length;
+        if (payload.len - cursor < body_length) return error.Truncated;
+        try std.testing.expectEqualSlices(
+            u8,
+            stream.bytes[raw_cursor + header_length ..][0..body_length],
+            payload[cursor..][0..body_length],
+        );
+        cursor += body_length;
+        raw_cursor += packet_length;
     }
 
     try std.testing.expectEqual(stream.bytes.len, raw_cursor);
@@ -37220,7 +37229,13 @@ test "sampled reversible packet layouts preserve strict packet payloads" {
             var catalog = try codestream.readStrictPacketCatalog(allocator, encoded);
             defer catalog.deinit();
             try std.testing.expectEqual(baseline_catalog.entries.len, catalog.entries.len);
-            try std.testing.expectEqualSlices(codestream.StrictPacketEntry, baseline_catalog.entries, catalog.entries);
+            // EPH layouts additionally record where each packet header ended;
+            // everything else about the entries must match the baseline.
+            for (baseline_catalog.entries, catalog.entries) |expected, actual| {
+                var comparable = actual;
+                comparable.eph_header_length = expected.eph_header_length;
+                try std.testing.expectEqual(expected, comparable);
+            }
             try std.testing.expectEqualSlices(u8, baseline_catalog.packet_bytes, catalog.packet_bytes);
 
             var decoded = try codestream.decodeLosslessPlanar(allocator, encoded);

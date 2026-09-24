@@ -5,6 +5,31 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### EPH Written After The Packet Header, And Checked There
+
+- The multi-tile writer for one tile-part per tile (`--tile-parts none`, and
+  every multi-tile layout that uses it) put each EPH marker after the packet
+  body instead of right after the packet header (ISO A.8.2). Every such
+  stream with EPH was broken for other decoders: Kakadu 8.4.1 stops with
+  "Expected to find EPH marker following packet header", OpenJPEG 2.5.4
+  fails, and Grok 20.4.12 decodes wrong pixels. The `R`, `L`, `C`, and `P`
+  division writers were already correct, which is why earlier SOP/EPH
+  sweeps, all on `R` parts, passed. The tile pipeline's own framing check
+  expected the same wrong position, so it confirmed the defect instead of
+  catching it.
+- z2000's decoder accepted those streams: on PLT-delimited packets it found
+  the EPH anywhere inside the packet and cut it out. A copied packet now
+  remembers the header length the EPH position implies, and the T2 header
+  walk must end exactly there; the split (borrowed) views were already
+  checked this way.
+- Found by a single-tile planar sweep (RLCP with SOP and EPH, routed through
+  the multi-tile machinery). After the fix, all five progression orders with
+  SOP, EPH, and both are lossless through z2000, Kakadu, OpenJPEG, and Grok,
+  and the Kakadu, OpenJPEG, and Grok SOP/EPH streams from earlier sweeps
+  still decode. The pre-fix stream is committed as the fail-closed entry
+  `z2000-eph-after-body`; two tests that had pinned the old framing now check
+  header, EPH, body.
+
 ### PNGs From ImageMagick Are Accepted
 
 - A sweep of encoder options over non-RGB inputs turned up an input defect

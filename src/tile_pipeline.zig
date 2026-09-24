@@ -1359,10 +1359,13 @@ fn appendTilePartSodPayload(
     options: TilePartLayoutOptions,
 ) !void {
     if (stream.bytes.len != try stream.totalPacketBytes()) return PacketScaffoldError.InvalidPacket;
+    if (stream.packet_header_lengths.len != stream.packet_lengths.len) return PacketScaffoldError.InvalidPacket;
 
     var packet_offset: usize = 0;
-    for (stream.packet_lengths, 0..) |packet_length_u32, packet_index| {
+    for (stream.packet_lengths, stream.packet_header_lengths, 0..) |packet_length_u32, header_length_u32, packet_index| {
         const packet_length = std.math.cast(usize, packet_length_u32) orelse return PacketScaffoldError.InvalidPacket;
+        const header_length = std.math.cast(usize, header_length_u32) orelse return PacketScaffoldError.InvalidPacket;
+        if (header_length == 0 or header_length > packet_length) return PacketScaffoldError.InvalidPacket;
         const packet_end = try std.math.add(usize, packet_offset, packet_length);
         if (packet_end > stream.bytes.len) return PacketScaffoldError.InvalidPacket;
 
@@ -1371,10 +1374,15 @@ fn appendTilePartSodPayload(
             try appendU16Be(allocator, out, 4);
             try appendU16Be(allocator, out, @as(u16, @intCast(packet_index & 0xffff)));
         }
-        try out.appendSlice(allocator, stream.bytes[packet_offset..packet_end]);
+        // EPH ends the packet header and precedes the body (ISO A.8.2); it
+        // used to be written after the body, which every other decoder
+        // rejected.
+        const header_end = packet_offset + header_length;
+        try out.appendSlice(allocator, stream.bytes[packet_offset..header_end]);
         if (options.eph) {
             try appendU16Be(allocator, out, @intFromEnum(TilePartMarker.eph));
         }
+        try out.appendSlice(allocator, stream.bytes[header_end..packet_end]);
         packet_offset = packet_end;
     }
 
@@ -3071,7 +3079,8 @@ pub fn validateTilePartCodestreamFragmentMatchesGridArtifacts(
         if (packet_spans.len != tile_artifacts.stream.packet_lengths.len) return PacketScaffoldError.InvalidPacket;
 
         var stream_cursor: usize = 0;
-        for (packet_spans, tile_artifacts.stream.packet_lengths, 0..) |span, packet_length, packet_index| {
+        if (tile_artifacts.stream.packet_header_lengths.len != packet_spans.len) return PacketScaffoldError.InvalidPacket;
+        for (packet_spans, tile_artifacts.stream.packet_lengths, tile_artifacts.stream.packet_header_lengths, 0..) |span, packet_length, header_length, packet_index| {
             if (span.length != try framedPacketLength(packet_length, options)) return PacketScaffoldError.InvalidPacket;
             const framed_packet = try fragment.tilePartPacketPayloadSlice(tile_part_index, span);
             try validateFramedPacketMatchesStreamForTilePart(
@@ -3079,6 +3088,7 @@ pub fn validateTilePartCodestreamFragmentMatchesGridArtifacts(
                 tile_artifacts.stream.bytes,
                 &stream_cursor,
                 packet_length,
+                header_length,
                 packet_index,
                 options,
             );
@@ -3144,7 +3154,7 @@ pub fn extractTileRpclPacketStreamFromFragmentTilePart(
     for (packet_spans, expected_header_lengths, 0..) |span, expected_header_length, packet_index| {
         const framed_packet = try fragment.tilePartPacketPayloadSlice(tile_part_index, span);
         const before = bytes.items.len;
-        try appendRawPacketFromFramedTilePart(allocator, &bytes, framed_packet, packet_index, options);
+        try appendRawPacketFromFramedTilePart(allocator, &bytes, framed_packet, expected_header_length, packet_index, options);
         const raw_length = bytes.items.len - before;
         if (raw_length == 0 or raw_length > std.math.maxInt(u32)) return PacketScaffoldError.InvalidPacket;
         if (expected_header_length == 0 or expected_header_length > raw_length) return PacketScaffoldError.InvalidPacket;
@@ -3171,6 +3181,7 @@ fn appendRawPacketFromFramedTilePart(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
     framed_packet: []const u8,
+    header_length: usize,
     packet_index: usize,
     options: TilePartLayoutOptions,
 ) !void {
@@ -3185,19 +3196,17 @@ fn appendRawPacketFromFramedTilePart(
         cursor += 6;
     }
 
-    const suffix_bytes: usize = if (options.eph) 2 else 0;
-    if (framed_packet.len < cursor + suffix_bytes) return PacketScaffoldError.InvalidPacket;
-    const raw_end = framed_packet.len - suffix_bytes;
-    if (raw_end <= cursor) return PacketScaffoldError.InvalidPacket;
-    try out.appendSlice(allocator, framed_packet[cursor..raw_end]);
-    cursor = raw_end;
-
+    if (header_length == 0) return PacketScaffoldError.InvalidPacket;
+    const header_end = try std.math.add(usize, cursor, header_length);
+    if (header_end > framed_packet.len) return PacketScaffoldError.InvalidPacket;
+    try out.appendSlice(allocator, framed_packet[cursor..header_end]);
+    cursor = header_end;
     if (options.eph) {
         if (framed_packet.len - cursor < 2) return PacketScaffoldError.InvalidPacket;
         if (readU16Be(framed_packet, cursor) != @intFromEnum(TilePartMarker.eph)) return PacketScaffoldError.InvalidPacket;
         cursor += 2;
     }
-    if (cursor != framed_packet.len) return PacketScaffoldError.InvalidPacket;
+    try out.appendSlice(allocator, framed_packet[cursor..]);
 }
 
 fn validateFramedPacketMatchesStreamForTilePart(
@@ -3205,6 +3214,7 @@ fn validateFramedPacketMatchesStreamForTilePart(
     stream_bytes: []const u8,
     stream_cursor: *usize,
     packet_length: u32,
+    header_length: u32,
     packet_index: usize,
     options: TilePartLayoutOptions,
 ) !void {
@@ -3220,23 +3230,31 @@ fn validateFramedPacketMatchesStreamForTilePart(
     }
 
     const raw_packet_length = @as(usize, @intCast(packet_length));
+    const raw_header_length = @as(usize, @intCast(header_length));
+    if (raw_header_length == 0 or raw_header_length > raw_packet_length) return PacketScaffoldError.InvalidPacket;
     const raw_packet_end = try std.math.add(usize, stream_cursor.*, raw_packet_length);
-    const framed_packet_end = try std.math.add(usize, cursor, raw_packet_length);
-    if (raw_packet_end > stream_bytes.len or framed_packet_end > framed_packet.len) {
-        return PacketScaffoldError.InvalidPacket;
-    }
-    if (!std.mem.eql(u8, stream_bytes[stream_cursor.*..raw_packet_end], framed_packet[cursor..framed_packet_end])) {
-        return PacketScaffoldError.InvalidPacket;
-    }
-    stream_cursor.* = raw_packet_end;
-    cursor = framed_packet_end;
+    if (raw_packet_end > stream_bytes.len) return PacketScaffoldError.InvalidPacket;
+    const raw_header_end = stream_cursor.* + raw_header_length;
 
+    // Header, then EPH when signalled, then body.
+    const framed_header_end = try std.math.add(usize, cursor, raw_header_length);
+    if (framed_header_end > framed_packet.len) return PacketScaffoldError.InvalidPacket;
+    if (!std.mem.eql(u8, stream_bytes[stream_cursor.*..raw_header_end], framed_packet[cursor..framed_header_end])) {
+        return PacketScaffoldError.InvalidPacket;
+    }
+    cursor = framed_header_end;
     if (options.eph) {
         if (framed_packet.len - cursor < 2) return PacketScaffoldError.InvalidPacket;
         if (readU16Be(framed_packet, cursor) != @intFromEnum(TilePartMarker.eph)) return PacketScaffoldError.InvalidPacket;
         cursor += 2;
     }
-    if (cursor != framed_packet.len) return PacketScaffoldError.InvalidPacket;
+    const body_length = raw_packet_length - raw_header_length;
+    const framed_body_end = try std.math.add(usize, cursor, body_length);
+    if (framed_body_end != framed_packet.len) return PacketScaffoldError.InvalidPacket;
+    if (!std.mem.eql(u8, stream_bytes[raw_header_end..raw_packet_end], framed_packet[cursor..framed_body_end])) {
+        return PacketScaffoldError.InvalidPacket;
+    }
+    stream_cursor.* = raw_packet_end;
 }
 
 pub fn buildRpclPacketIndex(

@@ -2239,6 +2239,11 @@ pub const StrictPacketEntry = struct {
     header_length: u32 = 0,
     body_offset: usize = 0,
     body_length: u32 = 0,
+    /// For a packet copied out of its SOD with the EPH removed: the header
+    /// length the EPH position implied. The T2 header walk must end exactly
+    /// there (ISO A.8.2); without the check an EPH anywhere in the packet,
+    /// even after the body, was accepted.
+    eph_header_length: ?u32 = null,
 };
 
 const StrictPacketView = struct {
@@ -2246,6 +2251,7 @@ const StrictPacketView = struct {
     header: []const u8 = &.{},
     body: []const u8 = &.{},
     split_header_body: bool = false,
+    eph_header_length: ?u32 = null,
 };
 
 pub const StrictPacketCatalog = struct {
@@ -2272,7 +2278,7 @@ pub const StrictPacketCatalog = struct {
 
     fn packetView(self: StrictPacketCatalog, entry: StrictPacketEntry) !StrictPacketView {
         if (!entry.split_header_body) {
-            return .{ .header_and_body = self.packetBytes(entry) };
+            return .{ .header_and_body = self.packetBytes(entry), .eph_header_length = entry.eph_header_length };
         }
         if (@as(u64, entry.header_length) + entry.body_length != entry.byte_length) {
             return CodestreamError.InvalidCodestream;
@@ -9103,6 +9109,9 @@ fn readStrictPacketHeaderForAudit(
     reader.byteAlign() catch return CodestreamError.InvalidCodestream;
 
     const header_length = reader.bytesConsumed();
+    if (view.eph_header_length) |expected| {
+        if (header_length != expected) return CodestreamError.InvalidCodestream;
+    }
     if (!packet_included) {
         if (view.split_header_body) {
             if (header_length != view.header.len or view.body.len != 0) return CodestreamError.InvalidCodestream;
@@ -10330,6 +10339,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
         var packed_header_cursor: usize = 0;
         for (packet_lengths.items, sequence) |packet_length, packet| {
             const byte_offset = packet_bytes.items.len;
+            var eph_header_length: ?u32 = null;
             const byte_length = if (active_packed_headers.len != 0) blk: {
                 const groups = try stateful.groupsFor(packet);
                 break :blk (try appendStrictPackedPacketPayload(
@@ -10347,23 +10357,28 @@ fn readStrictMultiTileTilePartPacketCatalog(
                     marker_policy,
                     &packet_sequence,
                 )).byte_length;
-            } else (try appendStrictSodPacketPayload(
-                allocator,
-                &packet_bytes,
-                bytes,
-                &cursor,
-                span.end,
-                packet_length,
-                marker_policy,
-                &packet_sequence,
-                true,
-            )).byte_length;
+            } else blk: {
+                const payload_span = try appendStrictSodPacketPayload(
+                    allocator,
+                    &packet_bytes,
+                    bytes,
+                    &cursor,
+                    span.end,
+                    packet_length,
+                    marker_policy,
+                    &packet_sequence,
+                    true,
+                );
+                if (payload_span.split_header_body) eph_header_length = payload_span.header_length;
+                break :blk payload_span.byte_length;
+            };
             try entries.append(allocator, .{
                 .packet = packet,
                 .tile_index = span.tile_index,
                 .tile_part_index = span.tile_part_index,
                 .byte_offset = byte_offset,
                 .byte_length = byte_length,
+                .eph_header_length = eph_header_length,
             });
         }
         if (carry_packed_headers) {
@@ -15152,6 +15167,7 @@ fn readStrictSodPacketCatalog(
                     const owned_byte_offset = packet_bytes.items.len;
                     var borrowed_span: ?StrictSodPacketPayloadSpan = null;
                     var packed_span: ?StrictPackedPacketPayloadSpan = null;
+                    var copied_eph_header_length: ?u32 = null;
                     const byte_length = if (active_packed_headers.len != 0) blk: {
                         const groups = try stateful.?.groupsFor(packet);
                         const payload_span = try appendStrictPackedPacketPayload(
@@ -15183,7 +15199,11 @@ fn readStrictSodPacketCatalog(
                             &packet_sequence,
                             !borrowing_packet_bytes,
                         );
-                        if (borrowing_packet_bytes) borrowed_span = payload_span;
+                        if (borrowing_packet_bytes) {
+                            borrowed_span = payload_span;
+                        } else if (payload_span.split_header_body) {
+                            copied_eph_header_length = payload_span.header_length;
+                        }
                         break :blk payload_span.byte_length;
                     };
                     const byte_offset = if (packed_span) |payload_span|
@@ -15201,6 +15221,7 @@ fn readStrictSodPacketCatalog(
                         .split_header_body = packed_span != null or
                             (if (borrowed_span) |payload_span| payload_span.split_header_body else false),
                         .header_from_aux = packed_span != null,
+                        .eph_header_length = copied_eph_header_length,
                         .header_length = if (packed_span) |payload_span|
                             payload_span.header_length
                         else if (borrowed_span) |payload_span|
