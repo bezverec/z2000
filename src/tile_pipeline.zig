@@ -856,6 +856,14 @@ pub fn validateSinglePartTileAuditOrder(entries: []const ParsedTilePartAuditEntr
     }
 }
 
+const tile_part_tlm_entries_per_segment: usize = (std.math.maxInt(u16) - 4) / tile_part_tlm_entry_bytes;
+
+fn tlmSegmentCount(entries: usize) !usize {
+    const segments = std.math.divCeil(usize, entries, tile_part_tlm_entries_per_segment) catch unreachable;
+    if (segments > 256) return PacketScaffoldError.InvalidPacket;
+    return segments;
+}
+
 pub const TilePartTlmPlan = struct {
     allocator: std.mem.Allocator,
     entries: []TilePartTlmEntry,
@@ -869,11 +877,14 @@ pub const TilePartTlmPlan = struct {
         return std.math.mul(usize, self.entries.len, tile_part_tlm_entry_bytes);
     }
 
-    pub fn singleSegmentMarkerBytes(self: TilePartTlmPlan) !usize {
+    /// Bytes of every TLM marker segment the plan needs. One segment holds at
+    /// most `tile_part_tlm_entries_per_segment` entries and Ztlm numbers up to
+    /// 256 segments (ISO A.7.1).
+    pub fn markerBytes(self: TilePartTlmPlan) !usize {
+        if (self.entries.len == 0) return PacketScaffoldError.InvalidPacket;
+        const segments = try tlmSegmentCount(self.entries.len);
         const payload_bytes = try self.payloadBytes();
-        const ltlm = try std.math.add(usize, 4, payload_bytes);
-        if (ltlm > std.math.maxInt(u16)) return PacketScaffoldError.InvalidPacket;
-        return try std.math.add(usize, 2, ltlm);
+        return std.math.add(usize, payload_bytes, try std.math.mul(usize, segments, 6));
     }
 };
 
@@ -2543,7 +2554,7 @@ pub fn buildTilePartTlmPlan(
         .allocator = allocator,
         .entries = entries,
     };
-    _ = try plan.singleSegmentMarkerBytes();
+    _ = try plan.markerBytes();
     return plan;
 }
 
@@ -2551,18 +2562,24 @@ pub fn writeTilePartTlmMarkerSegment(
     allocator: std.mem.Allocator,
     plan: TilePartTlmPlan,
 ) ![]u8 {
-    _ = try plan.singleSegmentMarkerBytes();
+    _ = try plan.markerBytes();
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    try appendU16Be(allocator, &out, @intFromEnum(TilePartMarker.tlm));
-    const ltlm = try std.math.add(u16, 4, @as(u16, @intCast(plan.entries.len * tile_part_tlm_entry_bytes)));
-    try appendU16Be(allocator, &out, ltlm);
-    try out.append(allocator, 0);
-    try out.append(allocator, tile_part_tlm_stlm_u16_u32);
-    for (plan.entries) |entry| {
-        try appendU16Be(allocator, &out, entry.tile_index);
-        try appendU32Be(allocator, &out, entry.psot);
+    var start: usize = 0;
+    var segment: usize = 0;
+    while (start < plan.entries.len) : (segment += 1) {
+        const end = @min(plan.entries.len, start + tile_part_tlm_entries_per_segment);
+        try appendU16Be(allocator, &out, @intFromEnum(TilePartMarker.tlm));
+        const ltlm: u16 = @intCast(4 + (end - start) * tile_part_tlm_entry_bytes);
+        try appendU16Be(allocator, &out, ltlm);
+        try out.append(allocator, @intCast(segment));
+        try out.append(allocator, tile_part_tlm_stlm_u16_u32);
+        for (plan.entries[start..end]) |entry| {
+            try appendU16Be(allocator, &out, entry.tile_index);
+            try appendU32Be(allocator, &out, entry.psot);
+        }
+        start = end;
     }
 
     return out.toOwnedSlice(allocator);
@@ -2745,7 +2762,7 @@ pub fn buildTilePartSequence(
     const tlm_bytes = if (options.tlm) blk: {
         const plan = tlm_plan orelse return PacketScaffoldError.InvalidPacket;
         if (plan.entries.len != layout.entries.len) return PacketScaffoldError.InvalidPacket;
-        break :blk try plan.singleSegmentMarkerBytes();
+        break :blk try plan.markerBytes();
     } else 0;
 
     var out = try std.ArrayList(u8).initCapacity(

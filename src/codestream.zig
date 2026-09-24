@@ -20480,17 +20480,26 @@ fn appendMultiTileTlm(
     parts: []const MultiTilePacketPart,
 ) !void {
     if (parts.len == 0) return CodestreamError.InvalidCodestream;
-    if (parts.len > 256) return CodestreamError.UnsupportedPayload;
-    const payload_bytes = try std.math.mul(usize, parts.len, 6);
-    const ltlm_usize = try std.math.add(usize, 4, payload_bytes);
-    const ltlm = std.math.cast(u16, ltlm_usize) orelse return CodestreamError.UnsupportedPayload;
-    try appendMarker(allocator, out, .tlm);
-    try appendU16Be(allocator, out, ltlm);
-    try out.append(allocator, 0);
-    try out.append(allocator, 0x60);
-    for (parts) |part| {
-        try appendU16Be(allocator, out, part.tile_index);
-        try appendU32Be(allocator, out, part.psot);
+    // Each entry is Ttlm (16 bits) plus Ptlm (32 bits). One segment holds at
+    // most (65535 - 4) / 6 entries, and Ztlm numbers up to 256 segments (ISO
+    // A.7.1), so small tiles no longer stop at 256 tile-parts.
+    const entries_per_segment: usize = (std.math.maxInt(u16) - 4) / 6;
+    const segment_count = std.math.divCeil(usize, parts.len, entries_per_segment) catch unreachable;
+    if (segment_count > 256) return CodestreamError.UnsupportedPayload;
+    var start: usize = 0;
+    var segment: usize = 0;
+    while (start < parts.len) : (segment += 1) {
+        const end = @min(parts.len, start + entries_per_segment);
+        const ltlm: u16 = @intCast(4 + (end - start) * 6);
+        try appendMarker(allocator, out, .tlm);
+        try appendU16Be(allocator, out, ltlm);
+        try out.append(allocator, @intCast(segment));
+        try out.append(allocator, 0x60);
+        for (parts[start..end]) |part| {
+            try appendU16Be(allocator, out, part.tile_index);
+            try appendU32Be(allocator, out, part.psot);
+        }
+        start = end;
     }
 }
 

@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Tile TLM Spans Several Segments
+
+- The item the previous entry left open. Both multi-tile TLM writers (the
+  one for `R`/`L`/`C`/`P` divisions and the one for single-part tiles)
+  emitted exactly one TLM segment; one refused more than 256 tile-parts and
+  the other more than 10921. Small tiles, which the previous change made
+  encodable, needed `--no-tlm`.
+- Both now split the entries over as many segments as they need, 10921 per
+  segment (a 16-bit `Ltlm` over six-byte entries) with `Ztlm` numbering them,
+  up to the 256 segments ISO A.7.1 allows. The pipeline's own TLM parser
+  already read several segments.
+- Measured: 480, 2208, 6000, and 14400 `R` tile-parts and 19200 single-part
+  tiles (two segments, 10921 + 8279 entries) decode losslessly through z2000,
+  Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.4.12. A unit test encodes 12000
+  one-sample tiles and checks two segments numbered 0 and 1, and the odd-tile
+  test runs with TLM again. On the previous commit the CLI refuses both
+  shapes: 8x8 tiles with `R` parts as `UnsupportedPayload`, 19200
+  single-part tiles as `InvalidPacket`.
+
 ### Encoder Accepts Odd And Tiny Tiles
 
 - The multi-tile encoder refused any tile that could not carry the global
@@ -30,7 +49,7 @@ entries are grouped by development milestone rather than semantic version.
   one LSB of Kakadu and 6 to 15 samples of 7680 from OpenJPEG.
 - Two tests that pinned the old refusal now pin the round trip, and the test
   oracle for the 9/7 kernels follows the same ISO descent. Tiny grids still
-  need `--no-tlm` when they exceed 256 tile-parts; that is the next item.
+  needed `--no-tlm` past 256 tile-parts; see the next entry.
 
 ### Encoder Matrix Re-Decoded Through All Three References
 

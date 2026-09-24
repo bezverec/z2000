@@ -26234,6 +26234,53 @@ test "multi-tile terminate-all fails closed on packet corruption" {
     try std.testing.expect(rejected);
 }
 
+test "multi-tile TLM spans several segments past one segment's capacity" {
+    const allocator = std.testing.allocator;
+    // The multi-tile writer emitted one TLM segment and refused more than 256
+    // tile-parts, so small tiles could only be written with --no-tlm. One
+    // segment holds (65535 - 4) / 6 = 10921 entries and Ztlm numbers up to
+    // 256 segments (ISO A.7.1). 120x100 one-sample tiles at zero levels give
+    // 12000 tile-parts: two segments.
+    const width = 120;
+    const height = 100;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    var options = multi_tile_test_options;
+    options.tile_width = 1;
+    options.tile_height = 1;
+    options.levels = 0;
+    options.tlm = true;
+    const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(bytes);
+
+    // Walk the main header: SOC, then marker segments up to the first SOT.
+    var cursor: usize = 2;
+    var segments: usize = 0;
+    var entries: usize = 0;
+    while (readU16BeTest(bytes, cursor) != codestream.markerValue("sot")) {
+        const length = readU16BeTest(bytes, cursor + 2);
+        if (readU16BeTest(bytes, cursor) == codestream.markerValue("tlm")) {
+            try std.testing.expectEqual(@as(u8, @intCast(segments)), bytes[cursor + 4]);
+            entries += (length - 4) / 6;
+            segments += 1;
+        }
+        cursor += 2 + length;
+    }
+    try std.testing.expectEqual(@as(usize, 2), segments);
+    try std.testing.expectEqual(@as(usize, width * height), entries);
+
+    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u16, samples, decoded.samples);
+}
+
 test "multi-tile encode accepts tiles whose low-pass region empties" {
     // The encoder used to refuse any tile that could not carry the global
     // decomposition count on its own (`canDecompose53Region`): a one-sample
@@ -26273,8 +26320,7 @@ test "multi-tile encode accepts tiles whose low-pass region empties" {
         options.tile_height = grid.tile_height;
         options.levels = grid.levels;
         options.tile_part_divisions = grid.divisions;
-        // Tiny tiles produce more tile-parts than one TLM segment addresses.
-        options.tlm = false;
+        options.tlm = true;
         const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
         defer allocator.free(bytes);
         var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
@@ -29314,7 +29360,7 @@ test "tile pipeline derives TLM plan from tile-part layout" {
 
     try std.testing.expectEqual(layout.entries.len, tlm.entries.len);
     try std.testing.expectEqual(layout.entries.len * 6, try tlm.payloadBytes());
-    try std.testing.expectEqual(2 + 4 + layout.entries.len * 6, try tlm.singleSegmentMarkerBytes());
+    try std.testing.expectEqual(2 + 4 + layout.entries.len * 6, try tlm.markerBytes());
     for (layout.entries, tlm.entries, 0..) |layout_entry, tlm_entry, index| {
         try std.testing.expectEqual(@as(u16, @intCast(index)), tlm_entry.tile_index);
         try std.testing.expectEqual(layout_entry.tile_index, tlm_entry.tile_index);
@@ -29327,7 +29373,7 @@ test "tile pipeline derives TLM plan from tile-part layout" {
     try std.testing.expectEqual(@as(u16, @intCast(4 + tlm.entries.len * 6)), readU16BeTest(marker, 2));
     try std.testing.expectEqual(@as(u8, 0), marker[4]);
     try std.testing.expectEqual(@as(u8, 0x60), marker[5]);
-    try std.testing.expectEqual(try tlm.singleSegmentMarkerBytes(), marker.len);
+    try std.testing.expectEqual(try tlm.markerBytes(), marker.len);
     var cursor: usize = 6;
     for (tlm.entries) |entry| {
         try std.testing.expectEqual(entry.tile_index, readU16BeTest(marker, cursor));
