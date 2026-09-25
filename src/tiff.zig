@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const color = @import("color.zig");
 const image = @import("image.zig");
 const simd = @import("simd.zig");
+const tiff_compression = @import("tiff_compression.zig");
 
 pub const TiffError = error{
     InvalidHeader,
@@ -17,6 +18,7 @@ pub const TiffError = error{
     UnsupportedExtraSamples,
     TruncatedData,
     ImageTooLarge,
+    InvalidCompressedData,
 };
 
 const max_file_size = 1024 * 1024 * 1024;
@@ -1296,6 +1298,8 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     var planar_config: u16 = 1;
     var sample_format: u16 = 1;
     var fill_order: u16 = 1;
+    var rows_per_strip: u32 = std.math.maxInt(u32);
+    var predictor: u16 = 1;
     var extra_samples_ref: ?ValueRef = null;
     var icc_profile_ref: ?ValueRef = null;
 
@@ -1310,9 +1314,10 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             266 => fill_order = try readSingleU16(bytes, endian, entry),
             273 => strip_offsets_ref = try valueRef(bytes, entry),
             277 => samples_per_pixel = try readSingleU16(bytes, endian, entry),
-            278 => {},
+            278 => rows_per_strip = try readSingleU32(bytes, endian, entry),
             279 => strip_counts_ref = try valueRef(bytes, entry),
             284 => planar_config = try readSingleU16(bytes, endian, entry),
+            317 => predictor = try readSingleU16(bytes, endian, entry),
             338 => {
                 if (extra_samples_ref != null) return TiffError.InvalidIfd;
                 extra_samples_ref = try valueRef(bytes, entry);
@@ -1330,7 +1335,8 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     const counts_ref = strip_counts_ref orelse return TiffError.MissingRequiredTag;
 
     if (w == 0 or h == 0) return TiffError.InvalidTagValue;
-    if (compression != 1) return TiffError.UnsupportedCompression;
+    const codec = tiff_compression.Compression.fromTag(compression) orelse
+        return TiffError.UnsupportedCompression;
     const color_component_count: usize = switch (photo) {
         0, 1 => 1,
         2 => 3,
@@ -1393,6 +1399,33 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         return TiffError.InvalidTagValue;
     }
 
+    if (codec != .none) {
+        const samples = try readCompressedStrips(allocator, bytes, endian, .{
+            .codec = codec,
+            .predictor = predictor,
+            .rows_per_strip = rows_per_strip,
+            .offsets = offsets_ref,
+            .counts = counts_ref,
+            .height = height_usize,
+            .row_samples = row_samples,
+            .samples_per_pixel = component_count,
+            .bit_depth = @intCast(bit_depth),
+            .raster_bytes = expected_raster_bytes,
+            .sample_count = sample_count,
+        });
+        errdefer allocator.free(samples);
+        const icc_profile = if (icc_profile_ref) |ref| try readIccProfile(allocator, bytes, endian, ref) else null;
+        return .{
+            .width = width_usize,
+            .height = height_usize,
+            .bit_depth = @as(u8, @intCast(bit_depth)),
+            .photometric = photo,
+            .alpha_mode = alpha_mode,
+            .samples = samples,
+            .icc_profile = icc_profile,
+        };
+    }
+
     var total_strip_bytes: usize = 0;
     for (0..offsets_ref.count) |i| {
         const strip_count = try readU32Value(bytes, endian, counts_ref, i);
@@ -1450,6 +1483,82 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         .samples = samples,
         .icc_profile = icc_profile,
     };
+}
+
+const CompressedStrips = struct {
+    codec: tiff_compression.Compression,
+    predictor: u16,
+    rows_per_strip: u32,
+    offsets: ValueRef,
+    counts: ValueRef,
+    height: usize,
+    row_samples: usize,
+    samples_per_pixel: usize,
+    bit_depth: u8,
+    raster_bytes: usize,
+    sample_count: usize,
+};
+
+/// Decompresses every strip into one raster laid out as an uncompressed
+/// image would be, reverses the predictor, then converts it to samples.
+/// Unlike uncompressed data, a compressed strip's decoded size comes only
+/// from RowsPerStrip, so the strip count must match it exactly.
+fn readCompressedStrips(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    endian: Endian,
+    layout: CompressedStrips,
+) ![]u16 {
+    const packed_depth = layout.bit_depth != 8 and layout.bit_depth != 16;
+    switch (layout.predictor) {
+        1 => {},
+        // Horizontal differencing is defined on whole 8- and 16-bit samples;
+        // libtiff refuses it at other depths.
+        2 => if (layout.codec.usesPredictor() and packed_depth) return TiffError.UnsupportedCompression,
+        // Floating-point prediction needs floating-point samples.
+        else => return TiffError.UnsupportedCompression,
+    }
+    if (layout.rows_per_strip == 0) return TiffError.InvalidTagValue;
+    const rows_per_strip: usize = @min(layout.rows_per_strip, layout.height);
+    const strip_count = (layout.height + rows_per_strip - 1) / rows_per_strip;
+    if (layout.offsets.count != strip_count) return TiffError.InvalidTagValue;
+    const row_bytes = try rasterRowBytes(layout.row_samples, layout.bit_depth);
+    std.debug.assert(row_bytes * layout.height == layout.raster_bytes);
+
+    const raster = try allocator.alloc(u8, layout.raster_bytes);
+    defer allocator.free(raster);
+    for (0..strip_count) |strip| {
+        const strip_offset = @as(usize, try readU32Value(bytes, endian, layout.offsets, strip));
+        const strip_length = @as(usize, try readU32Value(bytes, endian, layout.counts, strip));
+        if (strip_offset > bytes.len or bytes.len - strip_offset < strip_length) {
+            return TiffError.TruncatedData;
+        }
+        const first_row = strip * rows_per_strip;
+        const rows = @min(rows_per_strip, layout.height - first_row);
+        const out = raster[first_row * row_bytes ..][0 .. rows * row_bytes];
+        tiff_compression.decompressStrip(layout.codec, bytes[strip_offset..][0..strip_length], out) catch
+            return TiffError.InvalidCompressedData;
+    }
+    if (layout.predictor == 2 and layout.codec.usesPredictor()) {
+        tiff_compression.undoHorizontalDifferencing(
+            raster,
+            row_bytes,
+            layout.samples_per_pixel,
+            layout.bit_depth,
+            endian == .big,
+        );
+    }
+
+    const samples = try allocator.alloc(u16, layout.sample_count);
+    errdefer allocator.free(samples);
+    if (packed_depth) {
+        unpackRasterPacked(samples, raster, layout.row_samples, layout.bit_depth);
+    } else if (layout.bit_depth == 8) {
+        _ = widenU8Samples(samples, 0, raster);
+    } else {
+        _ = try readU16Samples(samples, 0, raster, endian);
+    }
+    return samples;
 }
 
 /// Inverse of `serializeRasterPacked`: MSB-first samples of `bit_depth`

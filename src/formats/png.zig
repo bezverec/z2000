@@ -1,5 +1,6 @@
 const std = @import("std");
 const tiff = @import("../tiff.zig");
+const zlib_inflate = @import("../zlib_inflate.zig");
 
 const signature = [_]u8{ 137, 80, 78, 71, 13, 10, 26, 10 };
 const max_file_size: usize = 1024 * 1024 * 1024;
@@ -261,16 +262,11 @@ fn decodeImage(
 
     const filtered = try allocator.alloc(u8, filtered_len);
     defer allocator.free(filtered);
-    var input: std.Io.Reader = .fixed(compressed);
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompress: std.compress.flate.Decompress = .init(&input, .zlib, &window);
-    decompress.reader.readSliceAll(filtered) catch return PngError.InvalidCompressedData;
-    var extra: [1]u8 = undefined;
-    const extra_len = decompress.reader.readSliceShort(&extra) catch return PngError.InvalidCompressedData;
-    if (extra_len != 0 or decompress.err != null) return PngError.InvalidCompressedData;
-    if ((input.readSliceShort(&extra) catch return PngError.InvalidCompressedData) != 0) {
-        return PngError.InvalidCompressedData;
-    }
+    // The zlib stream must fill the filtered rows exactly and end with the
+    // IDAT data; `zlib_inflate` also keeps a damaged stream from reading
+    // past its input.
+    const used = zlib_inflate.inflateExact(compressed, filtered) catch return PngError.InvalidCompressedData;
+    if (used != compressed.len) return PngError.InvalidCompressedData;
 
     const raw = try allocator.alloc(u8, raw_len);
     defer allocator.free(raw);

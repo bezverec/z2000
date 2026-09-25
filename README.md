@@ -17,10 +17,12 @@ Neither figure is a formal ISO conformance certification.
 
 ## Features
 
-- TIFF 6.0 RGB, grayscale, gray+alpha, and RGBA input: uncompressed chunky
-  strips at any uniform unsigned depth from 1 to 16 bits (depths other than
-  8 and 16 packed MSB-first, as libtiff writes them), including optional ICC
-  profile preservation and associated/unassociated alpha semantics.
+- TIFF 6.0 RGB, grayscale, gray+alpha, and RGBA input: chunky strips,
+  uncompressed or LZW, Deflate (8 and 32946), or PackBits compressed, with
+  horizontal-differencing prediction, at any uniform unsigned depth from 1
+  to 16 bits (depths other than 8 and 16 packed MSB-first, as libtiff writes
+  them), including optional ICC profile preservation and
+  associated/unassociated alpha semantics.
 - Bounded Windows BMP input: uncompressed 24/32-bit `BITMAPINFOHEADER` pixels,
   including DWORD row padding and top-down or bottom-up storage. Unsupported
   compression, bitfields, palettes, alpha interpretation, and newer DIB
@@ -580,7 +582,8 @@ The production `tiff-to-jp2` path is deliberately narrow:
 - chunky/interleaved samples;
 - 1 to 16 unsigned bits per channel, the same for every channel, with
   FillOrder 1;
-- uncompressed strip storage;
+- strip storage, uncompressed or LZW, Deflate (8 or 32946), or PackBits,
+  with Predictor 1, or 2 on 8- and 16-bit samples;
 - optional ICC tag 34675 copied into JP2 restricted ICC `colr`.
 
 The one-component CLI path is currently single-tile RPCL with reversible 5/3,

@@ -31,6 +31,7 @@ const tile_grid = @import("tile_grid.zig");
 const tile_pipeline = @import("tile_pipeline.zig");
 const tlm_parser = @import("tlm.zig");
 const tiff = @import("tiff.zig");
+const tiff_compression = @import("tiff_compression.zig");
 const version = @import("version.zig");
 const wavelet = @import("wavelet.zig");
 const wavelet_int = @import("wavelet_int.zig");
@@ -6109,7 +6110,7 @@ test "TIFF parser fails closed for unsupported narrow RGB variants" {
             .expected = tiff.TiffError.UnsupportedCompression,
             .mutate = struct {
                 fn mutate(bytes: []u8) !void {
-                    try writeTiffIfdInlineU16ForTest(bytes, 259, 5);
+                    try writeTiffIfdInlineU16ForTest(bytes, 259, 7);
                 }
             }.mutate,
         },
@@ -6395,6 +6396,268 @@ test "TIFF parser reads packed depths MSB-first across strips and byte orders" {
             try std.testing.expectEqualSlices(u16, samples, decoded_samples);
         }
     }
+}
+
+fn expectTiffRawFixture(bytes: []const u8, raw: []const u8, width: usize, height: usize, bit_depth: u8, components: usize) !void {
+    const allocator = std.testing.allocator;
+    var decoded = try tiff.parse(allocator, bytes);
+    defer decoded.deinit();
+    const samples, const decoded_width, const decoded_height, const decoded_depth = switch (decoded) {
+        .rgb => |rgb| .{ rgb.samples, rgb.width, rgb.height, rgb.bit_depth },
+        .grayscale => |gray| .{ gray.samples, gray.width, gray.height, gray.bit_depth },
+        .alpha => |alpha| .{ alpha.samples, alpha.width, alpha.height, alpha.bit_depth },
+    };
+    try std.testing.expectEqual(width, decoded_width);
+    try std.testing.expectEqual(height, decoded_height);
+    try std.testing.expectEqual(bit_depth, decoded_depth);
+    try std.testing.expectEqual(width * height * components, samples.len);
+    // Oracles hold one byte per sample up to 8 bits, else little-endian u16.
+    if (bit_depth <= 8) {
+        try std.testing.expectEqual(samples.len, raw.len);
+        for (samples, raw) |actual, expected| try std.testing.expectEqual(@as(u16, expected), actual);
+    } else {
+        try std.testing.expectEqual(samples.len * 2, raw.len);
+        for (samples, 0..) |actual, index| {
+            try std.testing.expectEqual(std.mem.readInt(u16, raw[index * 2 ..][0..2], .little), actual);
+        }
+    }
+}
+
+test "TIFF parser decompresses LZW, Deflate, and PackBits strips" {
+    const allocator = std.testing.allocator;
+    // Only uncompressed strips were read, so the LZW and Deflate TIFFs that
+    // scanners, Photoshop, and libtiff commonly write were refused as
+    // UnsupportedCompression. Each oracle is libtiff's own decompression
+    // (through ImageMagick), not z2000's.
+    //
+    // 64x48 16-bit RGB, big-endian, LZW with horizontal differencing, five
+    // rows per strip: 18432 raw bytes fill the 4094-entry table, so the
+    // stream walks every code width and resets the table.
+    try expectTiffRawFixture(
+        @embedFile("testdata/imagemagick-tiff-rgb16-lzw-pred-msb.tif"),
+        @embedFile("testdata/imagemagick-tiff-rgb16-lzw-pred-msb.raw"),
+        64,
+        48,
+        16,
+        3,
+    );
+    // RGBA, Deflate (8) with horizontal differencing across four components.
+    try expectTiffRawFixture(
+        @embedFile("testdata/imagemagick-tiff-rgba8-zip-pred.tif"),
+        @embedFile("testdata/imagemagick-tiff-rgba8-zip-pred.raw"),
+        31,
+        17,
+        8,
+        4,
+    );
+    // Packed depths go through the same raster: 1-bit PackBits and 12-bit
+    // LZW, both with rows that end mid-byte.
+    try expectTiffRawFixture(
+        @embedFile("testdata/imagemagick-tiff-gray1-packbits.tif"),
+        @embedFile("testdata/imagemagick-tiff-gray1-packbits.raw"),
+        37,
+        9,
+        1,
+        1,
+    );
+    try expectTiffRawFixture(
+        @embedFile("testdata/imagemagick-tiff-gray12-lzw.tif"),
+        @embedFile("testdata/imagemagick-tiff-gray12-lzw.raw"),
+        23,
+        9,
+        12,
+        1,
+    );
+    // Pillow's libtiff Deflate; the same zlib strips under the old Adobe
+    // code 32946 read identically.
+    const pillow = @embedFile("testdata/pillow-tiff-gray8-deflate.tif");
+    const pillow_raw = @embedFile("testdata/pillow-tiff-gray8-deflate.raw");
+    try expectTiffRawFixture(pillow, pillow_raw, 29, 13, 8, 1);
+    const adobe = try allocator.dupe(u8, pillow);
+    defer allocator.free(adobe);
+    try writeTiffIfdInlineU16ForTest(adobe, 259, 32946);
+    try expectTiffRawFixture(adobe, pillow_raw, 29, 13, 8, 1);
+}
+
+test "TIFF compressed strips and their tags fail closed" {
+    const allocator = std.testing.allocator;
+    const lzw = @embedFile("testdata/imagemagick-tiff-gray12-lzw.tif");
+    const Mutation = struct {
+        label: []const u8,
+        expected: anyerror,
+        mutate: *const fn ([]u8) anyerror!void,
+    };
+    const lzw_cases = [_]Mutation{
+        .{
+            // The first strip's byte count cut to three bytes.
+            .label = "truncated LZW strip",
+            .expected = tiff.TiffError.InvalidCompressedData,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    writeU16LeTest(bytes, try readTiffIfdValueOffsetForTest(bytes, 279), 3);
+                }
+            }.mutate,
+        },
+        .{
+            // A stream must open with Clear; 00 is also how the pre-6.0
+            // LSB-first variant begins.
+            .label = "LZW without a leading Clear code",
+            .expected = tiff.TiffError.InvalidCompressedData,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    const strip = readU32LeTest(bytes, try readTiffIfdValueOffsetForTest(bytes, 273));
+                    bytes[strip] = 0;
+                }
+            }.mutate,
+        },
+        .{
+            // Four rows per strip over nine rows is three strips; five rows
+            // would be two, which no longer matches the offsets.
+            .label = "RowsPerStrip disagreeing with the strip count",
+            .expected = tiff.TiffError.InvalidTagValue,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 278, 5);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "zero RowsPerStrip",
+            .expected = tiff.TiffError.InvalidTagValue,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 278, 0);
+                }
+            }.mutate,
+        },
+        .{
+            // Horizontal differencing is defined on 8- and 16-bit samples
+            // only; the PlanarConfiguration entry is repurposed as a
+            // Predictor 2 tag.
+            .label = "Predictor 2 on 12-bit samples",
+            .expected = tiff.TiffError.UnsupportedCompression,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    const entry = try tiffIfdEntryOffsetForTest(bytes, 284);
+                    writeU16LeTest(bytes, entry, 317);
+                    writeU16LeTest(bytes, entry + 8, 2);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "unknown compression",
+            .expected = tiff.TiffError.UnsupportedCompression,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 259, 7);
+                }
+            }.mutate,
+        },
+    };
+    for (lzw_cases) |case| {
+        errdefer std.debug.print("compressed TIFF case failed: {s}\n", .{case.label});
+        const mutated = try allocator.dupe(u8, lzw);
+        defer allocator.free(mutated);
+        try case.mutate(mutated);
+        try std.testing.expectError(case.expected, tiff.parseGray(allocator, mutated));
+    }
+
+    // Floating-point prediction on integer samples.
+    const zip = try allocator.dupe(u8, @embedFile("testdata/imagemagick-tiff-rgba8-zip-pred.tif"));
+    defer allocator.free(zip);
+    try writeTiffIfdInlineU16ForTest(zip, 317, 3);
+    try std.testing.expectError(tiff.TiffError.UnsupportedCompression, tiff.parseAlpha(allocator, zip));
+
+    // A corrupted zlib stream is caught by its Huffman codes or Adler-32.
+    const deflate = try allocator.dupe(u8, @embedFile("testdata/pillow-tiff-gray8-deflate.tif"));
+    defer allocator.free(deflate);
+    const deflate_strip = readU32LeTest(deflate, try readTiffIfdValueOffsetForTest(deflate, 273));
+    deflate[deflate_strip + 4] ^= 0x55;
+    try std.testing.expectError(tiff.TiffError.InvalidCompressedData, tiff.parseGray(allocator, deflate));
+
+    // A PackBits literal run longer than the strip's two 5-byte rows.
+    const packbits = try allocator.dupe(u8, @embedFile("testdata/imagemagick-tiff-gray1-packbits.tif"));
+    defer allocator.free(packbits);
+    packbits[readU32LeTest(packbits, try readTiffIfdValueOffsetForTest(packbits, 273))] = 0x7f;
+    try std.testing.expectError(tiff.TiffError.InvalidCompressedData, tiff.parseGray(allocator, packbits));
+}
+
+test "truncated zlib streams fail closed in PNG and TIFF" {
+    const allocator = std.testing.allocator;
+    // Zig 0.16's flate decompressor steps past the end of a truncated
+    // stream (tossBitsShort adds the consumed bits where it should subtract
+    // them): a safety-checked build panics in Reader.toss and ReleaseFast
+    // reads past the input. A PNG whose IDAT is cut short but carries a
+    // valid CRC reached it, as did a damaged TIFF Deflate strip found by
+    // fuzzing. zlib_inflate feeds the decompressor zeros after the input and
+    // rejects any stream that consumed them.
+    // A 100x30 grayscale PNG whose single 1458-byte IDAT Python's zlib
+    // wrote; short streams do not reach the defect, this one does.
+    const png_valid = @embedFile("testdata/python-zlib-png-gray8-long-idat.png");
+    // IHDR ends at 33; IDAT holds 1458 bytes at 41; IEND follows at 1503.
+    try std.testing.expectEqualSlices(u8, "IDAT", png_valid[37..41]);
+    try std.testing.expectEqual(@as(u32, 1458), std.mem.readInt(u32, png_valid[33..37], .big));
+    var decoded_valid = try png.parse(allocator, png_valid);
+    decoded_valid.deinit();
+    var cut: u32 = 1;
+    while (cut < 1458) : (cut += 1) {
+        errdefer std.debug.print("PNG IDAT cut to {d} bytes\n", .{cut});
+        var truncated: [png_valid.len]u8 = undefined;
+        @memcpy(truncated[0..41], png_valid[0..41]);
+        putPngU32(&truncated, 33, cut);
+        @memcpy(truncated[41..][0..cut], png_valid[41..][0..cut]);
+        refreshPngChunkCrc(&truncated, 37, cut);
+        const tail = png_valid[1503..];
+        @memcpy(truncated[45 + cut ..][0..tail.len], tail);
+        const bytes = truncated[0 .. 45 + cut + tail.len];
+        try std.testing.expectError(png.PngError.InvalidCompressedData, png.parse(allocator, bytes));
+    }
+
+    const tiff_valid = @embedFile("testdata/pillow-tiff-gray8-deflate.tif");
+    const counts = try readTiffIfdValueOffsetForTest(tiff_valid, 279);
+    const first_strip_length = readU16LeTest(tiff_valid, counts);
+    var length: u16 = 0;
+    while (length < first_strip_length) : (length += 1) {
+        errdefer std.debug.print("TIFF strip cut to {d} bytes\n", .{length});
+        const truncated = try allocator.dupe(u8, tiff_valid);
+        defer allocator.free(truncated);
+        writeU16LeTest(truncated, counts, length);
+        try std.testing.expectError(tiff.TiffError.InvalidCompressedData, tiff.parseGray(allocator, truncated));
+    }
+}
+
+test "TIFF strip decoders match the TIFF 6.0 definitions" {
+    // PackBits: the example stream from TIFF 6.0 section 9.
+    const packbits_input = [_]u8{ 0xfe, 0xaa, 0x02, 0x80, 0x00, 0x2a, 0xfd, 0xaa, 0x03, 0x80, 0x00, 0x2a, 0x22, 0xf7, 0xaa };
+    const packbits_expected = [_]u8{ 0xaa, 0xaa, 0xaa, 0x80, 0x00, 0x2a, 0xaa, 0xaa, 0xaa, 0xaa, 0x80, 0x00, 0x2a, 0x22 } ++ [_]u8{0xaa} ** 10;
+    var packbits_out: [packbits_expected.len]u8 = undefined;
+    try tiff_compression.decodePackBits(&packbits_input, &packbits_out);
+    try std.testing.expectEqualSlices(u8, &packbits_expected, &packbits_out);
+    var packbits_short: [packbits_expected.len + 1]u8 = undefined;
+    try std.testing.expectError(error.InvalidCompressedData, tiff_compression.decodePackBits(&packbits_input, &packbits_short));
+
+    // LZW "aaaaaa": Clear, 'a', then 258 and 259 each name the entry being
+    // defined (the KwKwK case), then EndOfInformation; five 9-bit codes.
+    const codes = [_]u16{ 256, 'a', 258, 259, 257 };
+    var lzw_input = [_]u8{0} ** 6;
+    for (codes, 0..) |code, index| {
+        for (0..9) |bit| {
+            if ((code >> @intCast(8 - bit)) & 1 != 0) {
+                const position = index * 9 + bit;
+                lzw_input[position / 8] |= @as(u8, 0x80) >> @intCast(position % 8);
+            }
+        }
+    }
+    var lzw_out: [6]u8 = undefined;
+    try tiff_compression.decodeLzw(&lzw_input, &lzw_out);
+    try std.testing.expectEqualSlices(u8, "aaaaaa", &lzw_out);
+    var lzw_long: [7]u8 = undefined;
+    try std.testing.expectError(error.InvalidCompressedData, tiff_compression.decodeLzw(&lzw_input, &lzw_long));
+
+    // Predictor 2 on big-endian 16-bit samples wraps modulo 2^16.
+    var row = [_]u8{ 0x00, 0x10, 0xff, 0xf0, 0x00, 0x20 };
+    tiff_compression.undoHorizontalDifferencing(&row, row.len, 1, 16, true);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x10, 0x00, 0x00, 0x00, 0x20 }, &row);
 }
 
 test "encoder takes every unsigned precision from 1 to 16 bits" {
@@ -6773,7 +7036,7 @@ test "TIFF grayscale adapters and writer fail closed" {
         value: u16,
         expected: anyerror,
     }{
-        .{ .tag = 259, .value = 5, .expected = tiff.TiffError.UnsupportedCompression },
+        .{ .tag = 259, .value = 7, .expected = tiff.TiffError.UnsupportedCompression },
         // Depths 1..16 are read (packed below 16 bits); 17 is not TIFF-able here.
         .{ .tag = 258, .value = 17, .expected = tiff.TiffError.UnsupportedBitsPerSample },
         // A packed depth whose raster size disagrees with the strip counts.

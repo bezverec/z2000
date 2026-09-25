@@ -58,7 +58,8 @@ its Git-derived build number and revision. It does not describe the internal
 legacy `.z2000` payload version or JPEG2000 marker/profile syntax.
 
 The TIFF module exposes `read`/`parse` for tagged RGB, grayscale, or alpha
-dispatch, plus strict `readRgb`/`parseRgb`, `readGray`/`parseGray`, and
+dispatch over uncompressed, LZW, Deflate (8/32946), and PackBits strips
+(`tiff_compression.zig`; Predictor 2 on 8- and 16-bit samples), plus strict `readRgb`/`parseRgb`, `readGray`/`parseGray`, and
 `readAlpha`/`parseAlpha` adapters. `AlphaImage` carries chunky gray+alpha or
 RGBA samples plus `color.AlphaMode`; `writeAlpha` emits exactly one final TIFF
 `ExtraSamples` value 1/2. The public `tiff-to-jp2` dispatches all three image

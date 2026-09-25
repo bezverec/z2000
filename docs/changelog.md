@@ -5,6 +5,63 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Truncated zlib Streams No Longer Crash PNG Input
+
+- Zig 0.16's `std.compress.flate.Decompress` steps past the end of its
+  input on a truncated stream: `tossBitsShort` checks
+  `bufferedLen() * 8 + consumed_bits < n` where the consumed bits should be
+  subtracted. A PNG whose IDAT was cut short but carried a valid CRC made
+  `png-to-jp2` panic in safe builds and read past the input buffer in
+  ReleaseFast; truncating a 1423-byte zlib stream reproduces it through
+  `std` alone. The PNG truncation sweep never reached it, because
+  cutting the file breaks a chunk CRC before inflate runs.
+- `zlib_inflate.zig` feeds the decompressor through a reader that supplies
+  zeros after the real input, so no toss can leave the buffer, and rejects
+  any stream that consumed a single bit of that tail. Decoding stops within
+  the requested output plus one byte, so the zero tail cannot run away.
+  PNG and TIFF Deflate use it. PNG read time on a 24 MP image is unchanged
+  and the output is byte-identical.
+- A new test cuts a 1458-byte IDAT (a Python-zlib PNG) at every length and
+  a Pillow Deflate TIFF strip at every length; on the previous commit the
+  PNG half panics with an integer overflow inside `std`.
+
+### LZW, Deflate, And PackBits TIFF Input
+
+- `tiff-to-jp2` read only uncompressed strips, so the LZW and Deflate TIFFs
+  that scanners, Photoshop, and libtiff commonly write were refused as
+  `UnsupportedCompression`.
+- `tiff_compression.zig` decodes LZW (TIFF 6.0 section 13: MSB-first 9..12
+  bit codes, early width change, Clear/EOI, KwKwK), Deflate under both
+  codes 8 and 32946, and PackBits, one strip at a time into a raster laid
+  out as uncompressed data, then reverses Predictor 2 (horizontal
+  differencing, 8- and 16-bit samples in either byte order). RowsPerStrip is
+  now read, and a compressed image's strip count must match it. Predictor
+  applies only to LZW and Deflate, as in libtiff. A strip that decodes
+  short, runs past its rows, or is malformed is `InvalidCompressedData`;
+  Predictor 2 on packed depths and Predictor 3 are refused, as are JPEG,
+  CCITT, and other schemes. Uncompressed input takes the same path as
+  before.
+- Measured end to end (TIFF -> JP2 -> strict decode -> compare): ImageMagick
+  LZW, Zip, and PackBits for 8-bit RGB, gray, and RGBA, 16-bit RGB in both
+  byte orders, with and without Predictor 2 and with one to all rows per
+  strip, and 12- and 1-bit gray; Pillow LZW, Deflate (8 and 32946), and
+  PackBits for RGB, RGBA, and gray; tifffile 16-bit Deflate with and
+  without prediction in both byte orders. All 47 are lossless. LZW reading
+  of a 72 MB RGB image takes 317 ms, about 5% of the conversion.
+- Five fixtures carry libtiff's own decompression as the oracle: 16-bit
+  big-endian RGB LZW with prediction (18 KB raw, so the table resets),
+  8-bit RGBA Deflate with prediction, 1-bit PackBits, 12-bit LZW, and
+  Pillow 8-bit Deflate, which the test also reads under code 32946. Tests
+  cover truncated and corrupted LZW, Deflate, and PackBits strips,
+  RowsPerStrip mismatches, the refused predictors, the TIFF 6.0 PackBits
+  example, an LZW KwKwK stream, and 16-bit prediction wrap-around. 3100
+  mutated TIFF and PNG files on a safety-checked build all end in an error
+  (the first campaign found the flate defect above).
+- `.gitattributes` now marks `*.raw`, `*.tif`, `*.png`, and `*.jp2` binary.
+  Git already detected every committed fixture as binary, but a raw oracle
+  without control bytes would otherwise be open to line-ending conversion
+  under `core.autocrlf`.
+
 ### PNG Grayscale Keeps Its Native 1, 2, Or 4 Bits
 
 - `png-to-jp2` widened 1-, 2-, and 4-bit grayscale to 8 bits, so a bilevel
