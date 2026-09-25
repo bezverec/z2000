@@ -80,7 +80,7 @@ pub const AlphaImage = struct {
     /// WhiteIsZero normalization affects only the grayscale color plane.
     pub fn toSamplePlanes(self: AlphaImage, allocator: std.mem.Allocator) !color.SamplePlanes {
         if (self.width == 0 or self.height == 0 or
-            (self.bit_depth != 8 and self.bit_depth != 16) or
+            self.bit_depth == 0 or self.bit_depth > 16 or
             (self.color_space == .rgb and self.white_is_zero))
         {
             return TiffError.InvalidTagValue;
@@ -98,7 +98,7 @@ pub const AlphaImage = struct {
             components,
         );
         errdefer planes.deinit();
-        const max_sample: u16 = if (self.bit_depth == 8) 255 else std.math.maxInt(u16);
+        const max_sample = maxSampleForDepth(self.bit_depth);
         for (0..pixels) |pixel| {
             for (0..components) |component| {
                 const sample = self.samples[pixel * components + component];
@@ -118,13 +118,13 @@ pub const AlphaImage = struct {
         alpha_mode: color.AlphaMode,
     ) !AlphaImage {
         if (planes.width == 0 or planes.height == 0 or
-            (planes.bit_depth != 8 and planes.bit_depth != 16) or
+            planes.bit_depth == 0 or planes.bit_depth > 16 or
             (planes.planes.len != 2 and planes.planes.len != 4))
         {
             return TiffError.UnsupportedExtraSamples;
         }
         const pixels = try std.math.mul(usize, planes.width, planes.height);
-        const max_sample: u16 = if (planes.bit_depth == 8) 255 else std.math.maxInt(u16);
+        const max_sample = maxSampleForDepth(planes.bit_depth);
         for (planes.planes) |plane| {
             if (plane.len != pixels) return TiffError.InvalidTagValue;
             for (plane) |sample| {
@@ -1295,6 +1295,7 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     var samples_per_pixel: u16 = 1;
     var planar_config: u16 = 1;
     var sample_format: u16 = 1;
+    var fill_order: u16 = 1;
     var extra_samples_ref: ?ValueRef = null;
     var icc_profile_ref: ?ValueRef = null;
 
@@ -1306,6 +1307,7 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             258 => bits_ref = try valueRef(bytes, entry),
             259 => compression = try readSingleU16(bytes, endian, entry),
             262 => photometric = try readSingleU16(bytes, endian, entry),
+            266 => fill_order = try readSingleU16(bytes, endian, entry),
             273 => strip_offsets_ref = try valueRef(bytes, entry),
             277 => samples_per_pixel = try readSingleU16(bytes, endian, entry),
             278 => {},
@@ -1364,7 +1366,16 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             return TiffError.UnsupportedBitsPerSample;
         }
     }
-    if (bit_depth != 8 and bit_depth != 16) return TiffError.UnsupportedBitsPerSample;
+    // Depths other than 8 and 16 are packed MSB first with every row padded
+    // to a byte boundary (TIFF 6.0 BitsPerSample, FillOrder 1), as libtiff and
+    // the packed writer below lay them out.
+    if (bit_depth == 0 or bit_depth > 16) return TiffError.UnsupportedBitsPerSample;
+    const packed_depth = bit_depth != 8 and bit_depth != 16;
+    // FillOrder 2 reverses the bits of every byte, which readers apply at any
+    // depth; the samples would be read wrong, so fail closed.
+    if (fill_order != 1) {
+        return if (fill_order == 2) TiffError.UnsupportedBitsPerSample else TiffError.InvalidTagValue;
+    }
 
     const width_usize = @as(usize, w);
     const height_usize = @as(usize, h);
@@ -1372,7 +1383,11 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     if (pixels > max_pixels) return TiffError.ImageTooLarge;
     const sample_count = try std.math.mul(usize, pixels, component_count);
     const bytes_per_sample: usize = if (bit_depth == 8) 1 else 2;
-    const expected_raster_bytes = try std.math.mul(usize, sample_count, bytes_per_sample);
+    const row_samples = try std.math.mul(usize, width_usize, component_count);
+    const expected_raster_bytes = if (packed_depth)
+        try std.math.mul(usize, height_usize, try rasterRowBytes(row_samples, @intCast(bit_depth)))
+    else
+        try std.math.mul(usize, sample_count, bytes_per_sample);
 
     if (offsets_ref.count != counts_ref.count or offsets_ref.count == 0) {
         return TiffError.InvalidTagValue;
@@ -1388,6 +1403,12 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     const samples = try allocator.alloc(u16, sample_count);
     errdefer allocator.free(samples);
 
+    // Packed rows may straddle strips only at row boundaries, but a strip
+    // need not hold whole samples of the next row; gather the raster first.
+    const packed_raster: []u8 = if (packed_depth) try allocator.alloc(u8, expected_raster_bytes) else &.{};
+    defer if (packed_depth) allocator.free(packed_raster);
+    var packed_cursor: usize = 0;
+
     var sample_index: usize = 0;
     for (0..offsets_ref.count) |strip| {
         const strip_offset = @as(usize, try readU32Value(bytes, endian, offsets_ref, strip));
@@ -1396,6 +1417,11 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             return TiffError.TruncatedData;
         }
         const strip_bytes = bytes[strip_offset .. strip_offset + strip_count];
+        if (packed_depth) {
+            @memcpy(packed_raster[packed_cursor..][0..strip_bytes.len], strip_bytes);
+            packed_cursor += strip_bytes.len;
+            continue;
+        }
         if (strip_bytes.len % bytes_per_sample != 0) return TiffError.InvalidTagValue;
 
         if (bit_depth == 8) {
@@ -1405,6 +1431,11 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         }
     }
 
+    if (packed_depth) {
+        std.debug.assert(packed_cursor == packed_raster.len);
+        unpackRasterPacked(samples, packed_raster, row_samples, @intCast(bit_depth));
+        sample_index = sample_count;
+    }
     if (sample_index != sample_count) return TiffError.InvalidTagValue;
 
     const icc_profile = if (icc_profile_ref) |ref| try readIccProfile(allocator, bytes, endian, ref) else null;
@@ -1419,6 +1450,40 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         .samples = samples,
         .icc_profile = icc_profile,
     };
+}
+
+/// Inverse of `serializeRasterPacked`: MSB-first samples of `bit_depth`
+/// bits, each row starting on a byte boundary. The caller sized `raster`
+/// from the row count, so every read is in bounds.
+fn unpackRasterPacked(samples: []u16, raster: []const u8, row_samples: usize, bit_depth: u8) void {
+    std.debug.assert(bit_depth != 0 and bit_depth <= 16 and samples.len % row_samples == 0);
+    const row_bytes = (row_samples * bit_depth + 7) / 8;
+    std.debug.assert(raster.len == (samples.len / row_samples) * row_bytes);
+    const depth: u5 = @intCast(bit_depth);
+    var row_start: usize = 0;
+    var cursor: usize = 0;
+    while (row_start < samples.len) : (row_start += row_samples) {
+        const row_end = cursor + row_bytes;
+        var accumulator: u32 = 0;
+        var pending: u5 = 0;
+        for (samples[row_start .. row_start + row_samples]) |*sample| {
+            while (pending < depth) {
+                accumulator = (accumulator << 8) | raster[cursor];
+                cursor += 1;
+                pending += 8;
+            }
+            pending -= depth;
+            sample.* = @intCast(accumulator >> pending);
+            accumulator &= (@as(u32, 1) << pending) - 1;
+        }
+        // Padding bits at the end of the row are ignored.
+        cursor = row_end;
+    }
+}
+
+fn maxSampleForDepth(bit_depth: u8) u16 {
+    std.debug.assert(bit_depth != 0 and bit_depth <= 16);
+    return @intCast((@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1);
 }
 
 fn widenU8Samples(out: []u16, start: usize, bytes: []const u8) usize {

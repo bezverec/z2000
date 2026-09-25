@@ -670,7 +670,7 @@ pub fn encodeLosslessPlanarWithOptions(
     var mixed_component_precision = false;
     for (0..planar.planes.len) |component| {
         const component_depth = planar.componentBitDepth(component) orelse return CodestreamError.UnsupportedPayload;
-        if (component_depth != 8 and component_depth != 16) return CodestreamError.UnsupportedPayload;
+        if (component_depth == 0 or component_depth > 16) return CodestreamError.UnsupportedPayload;
         component_bit_depths[component] = component_depth;
         if (component != 0 and component_depth != component_bit_depths[0]) mixed_component_precision = true;
     }
@@ -679,8 +679,9 @@ pub fn encodeLosslessPlanarWithOptions(
         return CodestreamError.UnsupportedPayload;
     }
     const pixels = std.math.mul(usize, planar.width, planar.height) catch return CodestreamError.ImageTooLarge;
-    for (planar.planes) |plane| {
+    for (planar.planes, 0..) |plane, component| {
         if (plane.len != pixels) return CodestreamError.InvalidCodestream;
+        try validateSamplesFitDepth(plane, component_bit_depths[component]);
     }
     if (options.levels > 32) return CodestreamError.TooManyLevels;
     if (options.layers == 0 or options.layers > max_quality_layers or
@@ -891,7 +892,7 @@ fn forwardIrreversiblePlanarRegion(
     if (count == 0 or count > color.max_components) return CodestreamError.UnsupportedPayload;
     if (ict and count != 4) return CodestreamError.UnsupportedPayload;
     const bit_depth = planar.bit_depth;
-    if (bit_depth != 8 and bit_depth != 16) return CodestreamError.UnsupportedPayload;
+    if (bit_depth == 0 or bit_depth > 16) return CodestreamError.UnsupportedPayload;
     const pixels = try std.math.mul(usize, planar.width, planar.height);
     const shift: f32 = @floatFromInt(@as(i32, 1) << @as(u5, @intCast(bit_depth - 1)));
 
@@ -3608,6 +3609,8 @@ fn encodeLosslessWithOptionsMeasured(
     if (rgb.width > std.math.maxInt(u32) or rgb.height > std.math.maxInt(u32)) {
         return CodestreamError.ImageTooLarge;
     }
+    if (rgb.bit_depth == 0 or rgb.bit_depth > 16) return CodestreamError.UnsupportedPayload;
+    try validateSamplesFitDepth(rgb.samples, rgb.bit_depth);
     if (options.levels > 32) return CodestreamError.TooManyLevels;
     try validateBlockSize(options.block_width, options.block_height);
     const grid = tile_grid.Grid.fromImageSize(rgb.width, rgb.height, options.tile_width, options.tile_height) catch |err| switch (err) {
@@ -20182,6 +20185,25 @@ fn validateBlockSize(width: u16, height: u16) !void {
 
 /// Option checks shared by the RGB and planar encoders before either one
 /// chooses its single- or multi-tile path.
+/// Any precision from 1 to 16 bits is encoded, so a sample above the
+/// declared precision would silently overflow the level shift and the
+/// signalled bit-plane count; refuse it before any coding work.
+fn validateSamplesFitDepth(samples: []const u16, bit_depth: u8) !void {
+    if (bit_depth == 0 or bit_depth > 16) return CodestreamError.UnsupportedPayload;
+    if (bit_depth == 16) return;
+    const lanes = 32;
+    const max: u16 = @intCast((@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1);
+    const max_vector: @Vector(lanes, u16) = @splat(max);
+    var index: usize = 0;
+    while (index + lanes <= samples.len) : (index += lanes) {
+        const values: @Vector(lanes, u16) = samples[index..][0..lanes].*;
+        if (@reduce(.Or, values > max_vector)) return CodestreamError.InvalidCodestream;
+    }
+    for (samples[index..]) |sample| {
+        if (sample > max) return CodestreamError.InvalidCodestream;
+    }
+}
+
 fn validateLosslessRequest(grid: tile_grid.Grid, options: LosslessOptions) !void {
     if (options.ppm and options.ppt) return CodestreamError.UnsupportedPayload;
     if (options.poc_in_tile_header and options.poc_records.len == 0) {

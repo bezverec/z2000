@@ -266,7 +266,10 @@ Supported public JP2 profiles are still narrow:
   low-pass region empties (a one-sample edge column at an odd origin, or tiles
   smaller than 2^levels), and `R` divisions give such a tile one part per
   resolution that has packets
-- 8/16-bit chunky RGB TIFF input, with optional ICC tag preservation
+- chunky RGB, grayscale, gray+alpha, and RGBA TIFF input at any uniform
+  unsigned depth 1..16 (packed MSB-first below 16 bits), with optional ICC tag
+  preservation; the encoders and JP2 wrappers take the same precisions and
+  reject samples above the declared one
 - 24/32-bit uncompressed Windows BMP input through the bounded adapter
 - non-interlaced PNG gray/RGB/palette/gray-alpha/RGBA input with `PLTE`/`tRNS`
 - 8-bit baseline sequential JPEG grayscale/JFIF YCbCr with restart intervals

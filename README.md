@@ -18,8 +18,9 @@ Neither figure is a formal ISO conformance certification.
 ## Features
 
 - TIFF 6.0 RGB, grayscale, gray+alpha, and RGBA input: uncompressed chunky
-  8-bit or 16-bit strips, including optional ICC profile preservation and
-  associated/unassociated alpha semantics.
+  strips at any uniform unsigned depth from 1 to 16 bits (depths other than
+  8 and 16 packed MSB-first, as libtiff writes them), including optional ICC
+  profile preservation and associated/unassociated alpha semantics.
 - Bounded Windows BMP input: uncompressed 24/32-bit `BITMAPINFOHEADER` pixels,
   including DWORD row padding and top-down or bottom-up storage. Unsupported
   compression, bitfields, palettes, alpha interpretation, and newer DIB
@@ -576,7 +577,8 @@ The production `tiff-to-jp2` path is deliberately narrow:
   interpretation, optionally with one final associated or unassociated alpha
   sample;
 - chunky/interleaved samples;
-- 8 or 16 unsigned bits per channel;
+- 1 to 16 unsigned bits per channel, the same for every channel, with
+  FillOrder 1;
 - uncompressed strip storage;
 - optional ICC tag 34675 copied into JP2 restricted ICC `colr`.
 

@@ -305,7 +305,7 @@ pub fn wrapRgbCodestream(
     if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
         return Jp2Error.ImageTooLarge;
     }
-    if (input.bit_depth != 8 and input.bit_depth != 16) return Jp2Error.UnsupportedProfile;
+    if (input.bit_depth == 0 or input.bit_depth > 16) return Jp2Error.UnsupportedProfile;
     const pixels = try std.math.mul(usize, input.width, input.height);
     const expected_samples = try std.math.mul(usize, pixels, 3);
     if (input.samples.len != expected_samples) return Jp2Error.InvalidBox;
@@ -333,7 +333,7 @@ pub fn wrapGrayCodestream(
     if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
         return Jp2Error.ImageTooLarge;
     }
-    if (input.bit_depth != 8 and input.bit_depth != 16) return Jp2Error.UnsupportedProfile;
+    if (input.bit_depth == 0 or input.bit_depth > 16) return Jp2Error.UnsupportedProfile;
     const expected_samples = try std.math.mul(usize, input.width, input.height);
     if (input.samples.len != expected_samples) return Jp2Error.InvalidBox;
     if (input.white_is_zero) return Jp2Error.UnsupportedProfile;
@@ -411,7 +411,7 @@ fn wrapPlanarEnumeratedCodestream(
     for (input.planes, 0..) |plane, component| {
         if (plane.len != pixels) return Jp2Error.InvalidBox;
         const component_depth = input.componentBitDepth(component) orelse return Jp2Error.UnsupportedProfile;
-        if (component_depth != 8 and component_depth != 16) return Jp2Error.UnsupportedProfile;
+        if (component_depth == 0 or component_depth > 16) return Jp2Error.UnsupportedProfile;
         component_bit_depths[component] = component_depth;
     }
     const mixed = input.bit_depth == 0;
@@ -424,7 +424,7 @@ fn wrapPlanarEnumeratedCodestream(
             }
         }
         if (!differs) return Jp2Error.InvalidBox;
-    } else if (input.bit_depth != 8 and input.bit_depth != 16) {
+    } else if (input.bit_depth > 16) {
         return Jp2Error.UnsupportedProfile;
     } else {
         for (component_bit_depths[0..input.planes.len]) |component_depth| {
@@ -457,7 +457,7 @@ pub fn wrapPlanarAlphaCodestream(
     if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
         return Jp2Error.ImageTooLarge;
     }
-    if (input.bit_depth != 8 and input.bit_depth != 16) return Jp2Error.UnsupportedProfile;
+    if (input.bit_depth == 0 or input.bit_depth > 16) return Jp2Error.UnsupportedProfile;
     if (input.planes.len != 2 and input.planes.len != 4) return Jp2Error.UnsupportedProfile;
     const pixels = std.math.mul(usize, input.width, input.height) catch
         return Jp2Error.ImageTooLarge;

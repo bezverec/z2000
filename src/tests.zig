@@ -6228,6 +6228,197 @@ test "TIFF writers pack depths other than 8 and 16 MSB-first with padded rows" {
     try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.writeGray(io, allocator, gray, path));
 }
 
+test "TIFF parser reads packed depths MSB-first across strips and byte orders" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // The reader took only 8- and 16-bit samples, so tiff-to-jp2 refused a
+    // 12-bit TIFF as UnsupportedBitsPerSample. ImageMagick 12-bit RGB,
+    // big-endian, RowsPerStrip 2 over 5x7: every row is 22.5 bytes padded to
+    // 23 and the strips end on row boundaries. The raw reference matches the
+    // planes kdu_compress reads from the same TIFF.
+    const fixture = @embedFile("testdata/imagemagick-tiff-rgb12-msb-strips.tif");
+    const raw = @embedFile("testdata/imagemagick-tiff-rgb12-msb-strips.raw");
+    var rgb = try tiff.parseRgb(allocator, fixture);
+    defer rgb.deinit();
+    try std.testing.expectEqual(@as(usize, 5), rgb.width);
+    try std.testing.expectEqual(@as(usize, 7), rgb.height);
+    try std.testing.expectEqual(@as(u8, 12), rgb.bit_depth);
+    try std.testing.expectEqual(raw.len / 2, rgb.samples.len);
+    for (rgb.samples, 0..) |sample, index| {
+        try std.testing.expectEqual(std.mem.readInt(u16, raw[index * 2 ..][0..2], .little), sample);
+    }
+
+    // FillOrder 2 reverses the bits of every byte; fail closed on it.
+    const reversed = try allocator.dupe(u8, fixture);
+    defer allocator.free(reversed);
+    const ifd = std.mem.readInt(u32, reversed[4..8], .big);
+    const entry_count = std.mem.readInt(u16, reversed[ifd..][0..2], .big);
+    var fill_order_found = false;
+    for (0..entry_count) |entry_index| {
+        const entry = ifd + 2 + entry_index * 12;
+        if (std.mem.readInt(u16, reversed[entry..][0..2], .big) != 266) continue;
+        try std.testing.expectEqual(@as(u8, 1), reversed[entry + 9]);
+        reversed[entry + 9] = 2;
+        fill_order_found = true;
+    }
+    try std.testing.expect(fill_order_found);
+    try std.testing.expectError(tiff.TiffError.UnsupportedBitsPerSample, tiff.parseRgb(allocator, reversed));
+
+    // Every packed depth and layout the writer produces reads back exactly.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/packed.tif", .{tmp.sub_path});
+    const width = 7;
+    const height = 3;
+    for ([_]u8{ 1, 2, 4, 5, 10, 12, 14, 15 }) |bit_depth| {
+        for ([_]usize{ 1, 2, 3, 4 }) |components| {
+            errdefer std.debug.print("packed TIFF case failed: {d} bits, {d} components\n", .{ bit_depth, components });
+            const max: usize = (@as(usize, 1) << @intCast(bit_depth)) - 1;
+            const samples = try allocator.alloc(u16, width * height * components);
+            defer allocator.free(samples);
+            for (samples, 0..) |*sample, index| sample.* = @intCast((index * 37 + components * 11) % (max + 1));
+            switch (components) {
+                1 => try tiff.writeGray(io, allocator, .{ .allocator = allocator, .width = width, .height = height, .bit_depth = bit_depth, .samples = samples }, path),
+                3 => try tiff.writeRgb(io, allocator, .{ .allocator = allocator, .width = width, .height = height, .bit_depth = bit_depth, .samples = samples }, path),
+                else => try tiff.writeAlpha(io, allocator, .{
+                    .allocator = allocator,
+                    .width = width,
+                    .height = height,
+                    .bit_depth = bit_depth,
+                    .color_space = if (components == 2) .grayscale else .rgb,
+                    .alpha_mode = .unassociated,
+                    .samples = samples,
+                }, path),
+            }
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 20));
+            defer allocator.free(bytes);
+            var decoded = try tiff.parse(allocator, bytes);
+            defer decoded.deinit();
+            const decoded_samples, const decoded_depth = switch (decoded) {
+                .rgb => |image_rgb| .{ image_rgb.samples, image_rgb.bit_depth },
+                .grayscale => |gray| .{ gray.samples, gray.bit_depth },
+                .alpha => |alpha| .{ alpha.samples, alpha.bit_depth },
+            };
+            try std.testing.expectEqual(bit_depth, decoded_depth);
+            try std.testing.expectEqualSlices(u16, samples, decoded_samples);
+        }
+    }
+}
+
+test "encoder takes every unsigned precision from 1 to 16 bits" {
+    const allocator = std.testing.allocator;
+    // The encoders and JP2 wrappers took only 8- and 16-bit samples. Level
+    // shift, bit-plane counts, and quantization already follow the
+    // precision, so every uniform precision 1..16 is now encoded for gray,
+    // gray+alpha, RGB, and RGBA, on one tile and on a grid. Kakadu, OpenJPEG,
+    // and Grok decode 1-, 10-, and 12-bit outputs losslessly too.
+    for ([_]u8{ 1, 5, 10, 12 }) |bit_depth| {
+        for ([_]usize{ 1, 2, 3, 4 }) |components| {
+            for ([_]u32{ 0, 11 }) |tile| {
+                errdefer std.debug.print("precision case failed: {d} bits, {d} components, tile {d}\n", .{ bit_depth, components, tile });
+                var planes = try makePlanarTestPlanes(allocator, 23, 17, bit_depth, components);
+                defer planes.deinit();
+                var options = codestream.LosslessOptions{
+                    .levels = 3,
+                    .block_width = 16,
+                    .block_height = 16,
+                    .tile_part_divisions = null,
+                    .mct = if (components >= 3) .rct else .none,
+                };
+                if (tile != 0) {
+                    options.tile_width = tile;
+                    options.tile_height = 9;
+                }
+                const bytes = if (components == 3) blk: {
+                    const interleaved = try allocator.alloc(u16, 23 * 17 * 3);
+                    defer allocator.free(interleaved);
+                    for (0..23 * 17) |pixel| {
+                        for (0..3) |component| interleaved[pixel * 3 + component] = planes.planes[component][pixel];
+                    }
+                    break :blk try codestream.encodeLosslessWithOptions(allocator, .{
+                        .allocator = allocator,
+                        .width = 23,
+                        .height = 17,
+                        .bit_depth = bit_depth,
+                        .samples = interleaved,
+                    }, options);
+                } else try codestream.encodeLosslessPlanarWithOptions(allocator, planes, options);
+                defer allocator.free(bytes);
+
+                // SIZ Ssiz carries precision - 1 for every component.
+                const siz = findMarker(bytes, codestream.markerValue("siz")) orelse return error.MissingMarker;
+                for (0..components) |component| {
+                    try std.testing.expectEqual(bit_depth - 1, bytes[siz + 40 + component * 3]);
+                }
+                if (components == 3) {
+                    // RCT RGB decodes through the interleaved RGB decoder.
+                    var decoded = try codestream.decodeLosslessTemporary(allocator, bytes);
+                    defer decoded.deinit();
+                    try std.testing.expectEqual(bit_depth, decoded.bit_depth);
+                    for (0..23 * 17) |pixel| {
+                        for (0..3) |component| {
+                            try std.testing.expectEqual(planes.planes[component][pixel], decoded.samples[pixel * 3 + component]);
+                        }
+                    }
+                } else {
+                    var decoded = try codestream.decodeLosslessPlanar(allocator, bytes);
+                    defer decoded.deinit();
+                    for (planes.planes, decoded.planes) |expected, actual| {
+                        try std.testing.expectEqualSlices(u16, expected, actual);
+                    }
+                }
+            }
+        }
+    }
+
+    // 9/7 at 12 bits stays within a few LSB, grayscale and RGBA with ICT.
+    for ([_]usize{ 1, 4 }) |components| {
+        var planes = try makePlanarTestPlanes(allocator, 23, 17, 12, components);
+        defer planes.deinit();
+        const bytes = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, .{
+            .levels = 3,
+            .tile_width = 11,
+            .tile_height = 9,
+            .transform = .irreversible_9_7,
+            .quantization = .scalar_expounded,
+            .mct = if (components == 4) .ict else .none,
+            .tile_part_divisions = null,
+        });
+        defer allocator.free(bytes);
+        var decoded = try codestream.decodeLosslessPlanar(allocator, bytes);
+        defer decoded.deinit();
+        for (planes.planes, decoded.planes) |expected, actual| {
+            for (expected, actual) |e, a| try std.testing.expect(@abs(@as(i32, e) - @as(i32, a)) <= 4);
+        }
+    }
+
+    // The JP2 header signals the precision; BPC stores precision - 1.
+    var gray_samples = [_]u16{ 0, 4095, 2048, 17 };
+    const gray = image.GrayImage{ .allocator = allocator, .width = 2, .height = 2, .bit_depth = 12, .samples = &gray_samples };
+    const j2k = try codestream.encodeLosslessGrayWithOptions(allocator, gray, .{ .levels = 1, .mct = .none, .tile_part_divisions = null });
+    defer allocator.free(j2k);
+    const wrapped = try jp2.wrapGrayCodestream(allocator, gray, j2k);
+    defer allocator.free(wrapped);
+    const info = try jp2.parseInfo(allocator, wrapped);
+    try std.testing.expectEqual(@as(u8, 12), info.bits_per_component);
+
+    // A sample above the declared precision is refused, not wrapped around.
+    gray_samples[1] = 4096;
+    try std.testing.expectError(
+        codestream.CodestreamError.InvalidCodestream,
+        codestream.encodeLosslessGrayWithOptions(allocator, gray, .{ .levels = 1, .mct = .none, .tile_part_divisions = null }),
+    );
+    var rgb_samples = [_]u16{ 1, 2, 3, 4, 5, 1024 };
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeLosslessWithOptions(allocator, .{
+        .allocator = allocator,
+        .width = 2,
+        .height = 1,
+        .bit_depth = 10,
+        .samples = &rgb_samples,
+    }, .{ .levels = 1 }));
+}
+
 test "JP2 reader accepts uniform component depths between 8 and 16 bits" {
     const allocator = std.testing.allocator;
     // The reader took only 8- and 16-bit components, so a 12-bit grayscale
@@ -6492,7 +6683,10 @@ test "TIFF grayscale adapters and writer fail closed" {
         expected: anyerror,
     }{
         .{ .tag = 259, .value = 5, .expected = tiff.TiffError.UnsupportedCompression },
-        .{ .tag = 258, .value = 4, .expected = tiff.TiffError.UnsupportedBitsPerSample },
+        // Depths 1..16 are read (packed below 16 bits); 17 is not TIFF-able here.
+        .{ .tag = 258, .value = 17, .expected = tiff.TiffError.UnsupportedBitsPerSample },
+        // A packed depth whose raster size disagrees with the strip counts.
+        .{ .tag = 258, .value = 4, .expected = tiff.TiffError.InvalidTagValue },
         .{ .tag = 277, .value = 2, .expected = tiff.TiffError.InvalidTagValue },
         .{ .tag = 284, .value = 2, .expected = tiff.TiffError.UnsupportedPlanarConfiguration },
     };
@@ -10175,7 +10369,7 @@ test "JP2 wrapper rejects unsupported RGB input metadata" {
         .allocator = allocator,
         .width = 2,
         .height = 1,
-        .bit_depth = 12,
+        .bit_depth = 17,
         .samples = samples,
     };
     try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, bad_depth, minimal_jp2_codestream[0..]));
@@ -32566,7 +32760,7 @@ test "9/7 split and vertical-band kernels match the interleaved reference bit fo
 fn makePlanarTestPlanes(allocator: std.mem.Allocator, width: usize, height: usize, bit_depth: u8, component_count: usize) !color.SamplePlanes {
     var planes = try color.SamplePlanes.init(allocator, width, height, bit_depth, component_count);
     errdefer planes.deinit();
-    const max_sample: u32 = if (bit_depth == 8) 255 else 65535;
+    const max_sample: u32 = (@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1;
     for (planes.planes, 0..) |plane, component| {
         for (plane, 0..) |*sample, index| {
             sample.* = @intCast((index * (17 + component * 29) + component * 101) % (max_sample + 1));

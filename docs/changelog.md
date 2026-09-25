@@ -5,6 +5,40 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Every Unsigned Precision From 1 To 16 Bits In TIFF And The Encoder
+
+- `tiff-to-jp2` refused any TIFF whose BitsPerSample was not 8 or 16 with
+  `UnsupportedBitsPerSample`, so 10-, 12-, and 14-bit scans, and bilevel
+  images, could not be converted at all, although `decode-temp-jp2` already
+  writes those depths. The encoders and the JP2 wrappers had the same 8/16
+  gate; the level shift, bit-plane counts, and quantization already followed
+  the precision.
+- The TIFF reader now unpacks depths 1..16 MSB-first with every row padded
+  to a byte boundary, the libtiff layout the TIFF writer already produced,
+  for gray, gray+alpha, RGB, and RGBA, in either byte order and across
+  strips. FillOrder 2 (bits reversed within each byte) fails closed at every
+  depth; it was silently ignored before. WhiteIsZero inverts against the
+  precision's own maximum rather than 255 or 65535.
+- The RGB, planar, and multi-tile encoders and the JP2 wrappers take every
+  uniform precision 1..16. Because a sample above the declared precision
+  would now overflow silently, the RGB and planar encoders reject it up
+  front; 8-bit encodes of a 24 MP image are byte-identical, and the added scan
+  is within run-to-run timing noise.
+- Measured on ImageMagick 7.1.2 TIFFs (67x43; 12-, 10-, and 1-bit gray,
+  12-bit RGB, RGBA, and gray+alpha; big-endian and multi-strip 12-bit):
+  reversible single-tile and 19x23-tile LRCP three-layer output is lossless
+  through z2000, Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.4.12 (TIFF output
+  compared at native depth). 9/7 on 32x32 tiles is within 1 to 2 LSB of the
+  source, and the four decoders agree to within one LSB. 12-bit WhiteIsZero
+  input reconstructs the same pixels as Kakadu's own TIFF reader.
+- A committed ImageMagick fixture (`imagemagick-tiff-rgb12-msb-strips`,
+  12-bit RGB, big-endian, rows of 22.5 bytes, four strips) is checked
+  against the planes kdu_compress reads from it. Tests cover packed
+  writer/reader roundtrips for depths 1, 2, 4, 5, 10, 12, 14, and 15 in all
+  four layouts, FillOrder 2 refusal, lossless encode at 1, 5, 10, and 12 bits
+  for one to four components on one tile and on a grid, 12-bit 9/7, the JP2
+  BPC, and the out-of-range refusal.
+
 ### Planar 9/7, And Every Layout On A Single Planar Tile
 
 - Grayscale, gray+alpha, and RGBA could be encoded only with reversible 5/3,

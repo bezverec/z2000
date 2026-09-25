@@ -645,7 +645,8 @@ fn rasterToJp2Command(
             if (gray.white_is_zero) {
                 const samples = try allocator.alloc(u16, gray.samples.len);
                 normalized_samples = samples;
-                const max_sample: u16 = if (gray.bit_depth == 8) 255 else std.math.maxInt(u16);
+                if (gray.bit_depth == 0 or gray.bit_depth > 16) return error.InvalidValue;
+                const max_sample: u16 = @intCast((@as(u32, 1) << @as(u5, @intCast(gray.bit_depth))) - 1);
                 for (gray.samples, samples) |sample, *out_sample| {
                     if (sample > max_sample) return error.InvalidValue;
                     out_sample.* = max_sample - sample;

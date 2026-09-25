@@ -2013,7 +2013,7 @@ pub fn reconstructGrayRpclEncodeArtifactsIsoMq(
 
     const samples = try allocator.alloc(u16, tile.planes.planes[0].len);
     errdefer allocator.free(samples);
-    const max_sample: i32 = if (artifacts.bit_depth == 8) 255 else std.math.maxInt(u16);
+    const max_sample: i32 = (@as(i32, 1) << @as(u5, @intCast(artifacts.bit_depth))) - 1;
     const level_shift = @as(i32, 1) << @as(u5, @intCast(artifacts.bit_depth - 1));
     for (tile.planes.planes[0], samples) |coefficient, *sample| {
         const value = coefficient + level_shift;
@@ -2317,9 +2317,7 @@ pub fn forwardPlanarTile(
     rct_alpha: bool,
 ) !RctTile {
     if (source.width == 0 or source.height == 0) return PacketScaffoldError.InvalidPlane;
-    if (source.bit_depth != 0 and source.bit_depth != 8 and source.bit_depth != 16) {
-        return PacketScaffoldError.InvalidPlane;
-    }
+    if (source.bit_depth > 16) return PacketScaffoldError.InvalidPlane;
     if (source.planes.len == 0 or source.planes.len > color.max_components) {
         return PacketScaffoldError.InvalidPlane;
     }
@@ -2328,7 +2326,7 @@ pub fn forwardPlanarTile(
     for (source.planes, 0..) |plane, component| {
         if (plane.len != pixels) return PacketScaffoldError.InvalidPlane;
         const component_depth = source.componentBitDepth(component) orelse return PacketScaffoldError.InvalidPlane;
-        if (component_depth != 8 and component_depth != 16) return PacketScaffoldError.InvalidPlane;
+        if (component_depth == 0 or component_depth > 16) return PacketScaffoldError.InvalidPlane;
         component_bit_depths[component] = component_depth;
     }
     if (rct_alpha and source.bit_depth == 0) return PacketScaffoldError.InvalidPlane;
