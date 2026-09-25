@@ -222,7 +222,8 @@ test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
         codestream.inspectNativeCodestreamLayout(allocator, reserved_precision, .{ .max_components = 8 }),
     );
 
-    const signed_base = try jp2.extractCodestream(std.testing.allocator, 
+    const signed_base = try jp2.extractCodestream(
+        std.testing.allocator,
         @embedFile("testdata/kakadu-rpcl-420-multi-precinct.jp2"),
     );
     const signed_foreign = try allocator.dupe(u8, signed_base);

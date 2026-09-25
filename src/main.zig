@@ -1169,8 +1169,6 @@ fn reportDecodeTempJp2(
     }
 }
 
-
-
 fn printTemporaryStats(path: []const u8, stats: codestream.TemporaryStats) void {
     std.debug.print(
         "JP2 payload stats: {s}: {}x{}, {} component{s}, {} bits/component, levels {}, layers {}, block {}x{}, tile-parts {s}",

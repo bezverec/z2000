@@ -14746,7 +14746,7 @@ pub fn collectStrictInlinePacketSpans(
             null,
             poc_limits,
             null,
-                &plt_carry,
+            &plt_carry,
         );
         defer tile_part.deinit(allocator);
         cursor = tile_part.sod + 2;
@@ -15441,7 +15441,7 @@ fn readStrictTilePartPacketPlan(
                 external_headers,
                 poc_limits,
                 part_coding_target,
-                        &plt_carry,
+                &plt_carry,
             );
             defer tile_part.deinit(allocator);
             if (!tile_part.has_packet_lengths) {
@@ -20213,7 +20213,8 @@ fn validateLosslessRequest(grid: tile_grid.Grid, options: LosslessOptions) !void
         if (options.ppm or options.ppt or options.emit_temporary_payload_sidecar) {
             return CodestreamError.UnsupportedPayload;
         }
-        if (grid.isSingleTile()) {            if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
+        if (grid.isSingleTile()) {
+            if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
         } else if (options.tile_part_divisions != null and
             options.tile_part_divisions != 'R' and options.tile_part_divisions != 'L' and
             options.tile_part_divisions != 'C' and options.tile_part_divisions != 'P')
@@ -20430,8 +20431,6 @@ fn validatePocResolutionTilePartSequence(
     if (packet_index != sequence.len) return CodestreamError.UnsupportedPayload;
 }
 
-
-
 fn validatePocComponentTilePartSequence(sequence: []const packet_plan.Packet, components: u16) !void {
     if (components == 0 or sequence.len == 0 or sequence.len % components != 0) return CodestreamError.UnsupportedPayload;
     const packets_per_component = sequence.len / components;
@@ -20442,7 +20441,6 @@ fn validatePocComponentTilePartSequence(sequence: []const packet_plan.Packet, co
         }
     }
 }
-
 
 fn validatePocPositionTilePartSequence(
     allocator: std.mem.Allocator,
@@ -20467,7 +20465,6 @@ fn validatePocPositionTilePartSequence(
         }
     }
 }
-
 
 const MultiTilePacketPart = struct {
     tile_index: u16,

@@ -30,7 +30,6 @@ pub const Result = struct {
     decode_timings: codestream.DecodeTimings,
 };
 
-
 /// Converts a bounded JP2 to TIFF. Every supported layout is written band by
 /// band through a streaming TIFF writer; only the colour-converting and
 /// interleaved-RGB layouts still assemble a whole raster first. The command
