@@ -2168,8 +2168,9 @@ fn expectPngFixture(
     };
     const expected_samples = try std.math.mul(usize, try std.math.mul(usize, width, height), components);
     try std.testing.expectEqual(expected_samples, samples.len);
-    try std.testing.expectEqual(expected_samples * (bit_depth / 8), expected_raw.len);
-    if (bit_depth == 8) {
+    // Oracles below 16 bits hold one byte per sample at the native depth.
+    try std.testing.expectEqual(expected_samples * @as(usize, if (bit_depth == 16) 2 else 1), expected_raw.len);
+    if (bit_depth <= 8) {
         for (expected_raw, samples) |expected, actual| {
             try std.testing.expectEqual(@as(u16, expected), actual);
         }
@@ -2183,14 +2184,53 @@ fn expectPngFixture(
 }
 
 test "PNG parser matches independent ImageMagick pixel oracles" {
+    // Grayscale below 8 bits keeps its native precision; each oracle is
+    // ImageMagick's 16-bit reading divided back to that precision exactly.
     try expectPngFixture(
         @embedFile("testdata/imagemagick-png-gray2.png"),
         @embedFile("testdata/imagemagick-png-gray2.raw"),
         .grayscale,
         8,
         2,
-        8,
+        2,
         1,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-gray1.png"),
+        @embedFile("testdata/imagemagick-png-gray1.raw"),
+        .grayscale,
+        9,
+        5,
+        1,
+        1,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-gray2-ramp.png"),
+        @embedFile("testdata/imagemagick-png-gray2-ramp.raw"),
+        .grayscale,
+        9,
+        5,
+        2,
+        1,
+    );
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-gray4.png"),
+        @embedFile("testdata/imagemagick-png-gray4.raw"),
+        .grayscale,
+        9,
+        5,
+        4,
+        1,
+    );
+    // tRNS on 4-bit gray: alpha is a second 4-bit plane, 0 or 15.
+    try expectPngFixture(
+        @embedFile("testdata/imagemagick-png-gray4-trns.png"),
+        @embedFile("testdata/imagemagick-png-gray4-trns.raw"),
+        .alpha,
+        9,
+        5,
+        4,
+        2,
     );
     try expectPngFixture(
         @embedFile("testdata/imagemagick-png-gray8.png"),
@@ -2273,6 +2313,56 @@ test "PNG parser matches independent ImageMagick pixel oracles" {
         8,
         4,
     );
+}
+
+test "PNG grayscale below 8 bits encodes to JP2 at its native precision" {
+    const allocator = std.testing.allocator;
+    // Packed grayscale used to be widened to 8 bits, so a 1-bit PNG became
+    // an 8-bit JP2 whose samples were 0 and 255. The JP2 now carries the
+    // PNG's own precision and the samples decode back unchanged.
+    const Case = struct { bytes: []const u8, bit_depth: u8 };
+    const cases = [_]Case{
+        .{ .bytes = @embedFile("testdata/imagemagick-png-gray1.png"), .bit_depth = 1 },
+        .{ .bytes = @embedFile("testdata/imagemagick-png-gray2-ramp.png"), .bit_depth = 2 },
+        .{ .bytes = @embedFile("testdata/imagemagick-png-gray4.png"), .bit_depth = 4 },
+        .{ .bytes = @embedFile("testdata/imagemagick-png-gray4-trns.png"), .bit_depth = 4 },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("PNG native depth case failed: {d} bits\n", .{case.bit_depth});
+        var decoded_png = try png.parse(allocator, case.bytes);
+        defer decoded_png.deinit();
+        var planes = switch (decoded_png) {
+            .grayscale => |gray| blk: {
+                const one = try color.SamplePlanes.init(allocator, gray.width, gray.height, gray.bit_depth, 1);
+                @memcpy(one.planes[0], gray.samples);
+                break :blk one;
+            },
+            .alpha => |alpha| try alpha.toSamplePlanes(allocator),
+            .rgb => return error.UnexpectedLayout,
+        };
+        defer planes.deinit();
+        try std.testing.expectEqual(case.bit_depth, planes.bit_depth);
+
+        const j2k = try codestream.encodeLosslessPlanarWithOptions(allocator, planes, .{
+            .levels = 2,
+            .mct = .none,
+            .tile_part_divisions = null,
+        });
+        defer allocator.free(j2k);
+        const wrapped = if (planes.planes.len == 1)
+            try jp2.wrapPlanarCodestream(allocator, planes, null, j2k)
+        else
+            try jp2.wrapPlanarAlphaCodestream(allocator, planes, .unassociated, null, j2k);
+        defer allocator.free(wrapped);
+        const info = try jp2.parseInfo(allocator, wrapped);
+        try std.testing.expectEqual(case.bit_depth, info.bits_per_component);
+
+        var roundtrip = try codestream.decodeLosslessPlanar(allocator, j2k);
+        defer roundtrip.deinit();
+        for (planes.planes, roundtrip.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(u16, expected, actual);
+        }
+    }
 }
 
 test "PNG truncation and single-bit mutation sweeps fail closed" {

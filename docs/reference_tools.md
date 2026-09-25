@@ -265,8 +265,10 @@ here so they are not rediscovered as new.
 - **Compare packed depths at native precision.** `magick compare` on a
   12-bit source against a decoder's 16-bit PNG measures the decoder's scaling,
   not its decode: Grok's PNG writer shifts where ImageMagick rescales, which
-  reads as up to 15 of 65535 at 12 bits and 60 at 10 bits. Ask OpenJPEG and
-  Grok for TIFF output, which keeps the precision, and the difference is zero.
+  reads as up to 15 of 65535 at 12 bits and 60 at 10 bits. Below 8 bits it
+  writes an 8-bit PNG the same way, so a 4-bit sample of 15 becomes 240 and a
+  4-bit gray+alpha image shows AE 39 of 45 pixels. Ask OpenJPEG and Grok for
+  TIFF output, which keeps the precision, and the difference is zero.
 - **Check the tool's own reader.** Two of the findings above are a producer
   disagreeing with itself; neither would have surfaced from cross-checking
   different vendors alone.

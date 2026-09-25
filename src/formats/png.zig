@@ -322,13 +322,17 @@ fn expandSamples(
     row_bytes: usize,
 ) !tiff.DecodedImage {
     const pixels = try std.math.mul(usize, header.width, header.height);
-    const output_depth: u8 = if (header.bit_depth < 8 or header.color_type == 3) 8 else header.bit_depth;
+    // Grayscale keeps its own precision, 1/2/4 bits included, since the
+    // encoder takes every precision from 1 to 16 bits; widening it to 8 bits
+    // changed the stored samples and the signalled depth. Palette indices
+    // expand into PLTE's 8-bit entries.
+    const output_depth: u8 = if (header.color_type == 3) 8 else header.bit_depth;
     const has_alpha = header.color_type == 4 or header.color_type == 6 or transparency != null;
     const color_components: usize = if (header.color_type == 0 or header.color_type == 4) 1 else 3;
     const output_components = color_components + @intFromBool(has_alpha);
     const samples = try allocator.alloc(u16, try std.math.mul(usize, pixels, output_components));
     errdefer allocator.free(samples);
-    const max_output: u16 = if (output_depth == 8) 255 else std.math.maxInt(u16);
+    const max_output: u16 = @intCast((@as(u32, 1) << @as(u5, @intCast(output_depth))) - 1);
 
     for (0..header.height) |y| {
         const row = raw[y * row_bytes ..][0..row_bytes];
@@ -338,7 +342,7 @@ fn expandSamples(
             switch (header.color_type) {
                 0 => {
                     const original = readSingleSample(row, x, header.bit_depth);
-                    samples[target] = scaleSample(original, header.bit_depth);
+                    samples[target] = original;
                     if (has_alpha) {
                         const transparent = readU16(transparency.?, 0);
                         samples[target + 1] = if (original == transparent) 0 else max_output;
@@ -422,12 +426,6 @@ fn readSingleSample(row: []const u8, index: usize, bit_depth: u8) u16 {
 fn readByteSample(row: []const u8, pixel_offset: usize, component: usize, bit_depth: u8) u16 {
     if (bit_depth == 8) return row[pixel_offset + component];
     return readU16(row, pixel_offset + component * 2);
-}
-
-fn scaleSample(sample: u16, bit_depth: u8) u16 {
-    if (bit_depth >= 8) return sample;
-    const max_source: u16 = (@as(u16, 1) << @intCast(bit_depth)) - 1;
-    return (sample * 255) / max_source;
 }
 
 fn validChunkType(chunk_type: []const u8) bool {

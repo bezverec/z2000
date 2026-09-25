@@ -28,8 +28,9 @@ Neither figure is a formal ISO conformance certification.
 - Bounded PNG input: non-interlaced grayscale, truecolor, indexed-color,
   grayscale+alpha, and RGBA with every legal 1/2/4/8/16-bit combination,
   `PLTE`/`tRNS`, all five scanline filters, zlib, and strict chunk CRC/order
-  validation. Packed samples and transparency expand into existing grayscale,
-  RGB, or unassociated-alpha carriers.
+  validation. Grayscale keeps its native 1/2/4/8/16-bit precision; palette
+  indices and transparency expand into existing grayscale, RGB, or
+  unassociated-alpha carriers.
 - Bounded JPEG input: 8-bit Huffman-coded baseline sequential DCT with one
   complete interleaved scan, grayscale or JFIF YCbCr 4:4:4/4:2:2/4:2:0,
   centered chroma interpolation, optional restart intervals, and exact

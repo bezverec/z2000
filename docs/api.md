@@ -144,8 +144,10 @@ union used by the raster encode boundary. The bounded profile accepts
 non-interlaced PNG color types 0/2/3/4/6 at their legal bit depths, validates
 all chunk CRCs and critical ordering, joins consecutive `IDAT`, inflates one
 exactly sized zlib stream, reverses filters 0..4, and expands `PLTE`/`tRNS`.
-PNG alpha is unassociated. Packed grayscale/palette samples expand to 8 bits;
-native 8/16-bit samples are unchanged. `cHRM` and `gAMA` carrying exactly the
+PNG alpha is unassociated. Grayscale keeps its own precision, including
+1/2/4-bit packed samples (and a `tRNS` alpha plane at the same precision);
+palette indices expand into the 8-bit `PLTE` entries; 8/16-bit samples are
+unchanged. `cHRM` and `gAMA` carrying exactly the
 sRGB values from the PNG specification (ImageMagick's default `cHRM`, gamma
 45455) are accepted as sRGB, as are any values under an `sRGB` chunk, which
 overrides them; other values, `iCCP`, `cICP`, Adam7, and APNG fail closed.

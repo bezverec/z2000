@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### PNG Grayscale Keeps Its Native 1, 2, Or 4 Bits
+
+- `png-to-jp2` widened 1-, 2-, and 4-bit grayscale to 8 bits, so a bilevel
+  PNG became an 8-bit JP2 holding 0 and 255: the signalled precision and
+  the stored samples no longer matched the source. With every precision
+  1..16 now encodable, grayscale keeps its own depth, and a `tRNS` alpha
+  plane has the same precision (0 or the maximum). Palette images still
+  expand into their 8-bit `PLTE` entries, and 8/16-bit input is unchanged.
+- Four ImageMagick fixtures (1-bit ramp, 2-bit ramp covering all four
+  values, 4-bit, and 4-bit with a `tRNS` gray) join the pixel-oracle test,
+  whose oracles are ImageMagick's 16-bit reading divided back exactly to the
+  native precision; the existing 2-bit oracle was rebased the same way. A
+  new test encodes each to JP2 and checks BPC and a lossless decode.
+- Measured through `png-to-jp2` on one tile and on 4x3 tiles in LRCP with
+  two layers: every fixture is lossless at its native depth through z2000,
+  Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.4.12 (Grok's PNG writer scales
+  4-bit alpha images by shifting; its TIFF output is exact).
+
+### Formatting
+
+- `zig fmt` over four files that had drifted (whitespace only).
+
 ### Every Unsigned Precision From 1 To 16 Bits In TIFF And The Encoder
 
 - `tiff-to-jp2` refused any TIFF whose BitsPerSample was not 8 or 16 with
