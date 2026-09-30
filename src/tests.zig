@@ -6128,7 +6128,7 @@ test "TIFF parser fails closed for unsupported narrow RGB variants" {
             .expected = tiff.TiffError.UnsupportedPlanarConfiguration,
             .mutate = struct {
                 fn mutate(bytes: []u8) !void {
-                    try writeTiffIfdInlineU16ForTest(bytes, 284, 2);
+                    try writeTiffIfdInlineU16ForTest(bytes, 284, 3);
                 }
             }.mutate,
         },
@@ -6754,6 +6754,37 @@ test "TIFF tile layout tags fail closed" {
     }
 }
 
+test "TIFF parser reads separate component planes" {
+    const allocator = std.testing.allocator;
+    // PlanarConfiguration 2 stores every component in its own strips or
+    // tiles, all of component 0 first; it was refused as
+    // UnsupportedPlanarConfiguration. Each plane is decoded through the
+    // chunk path with one sample per pixel, so the predictor runs within the
+    // plane, and its samples are interleaved into place.
+    //
+    // tifffile (not libtiff): 29x13 16-bit big-endian RGB, Deflate with
+    // Predictor 2, five rows per strip, so nine strips. Oracle: the array
+    // tifffile wrote, which libtiff reads identically.
+    try expectTiffRawFixture(
+        @embedFile("testdata/tifffile-tiff-rgb16-planar-deflate-pred-msb.tif"),
+        @embedFile("testdata/tifffile-tiff-rgb16-planar-deflate-pred-msb.raw"),
+        29,
+        13,
+        16,
+        3,
+    );
+    // ImageMagick 37x21 RGBA, LZW with Predictor 2 in 16x16 tiles: six
+    // padded tiles per plane, 24 in all. Oracle: libtiff.
+    const tiled = @embedFile("testdata/imagemagick-tiff-rgba8-planar-tiles-lzw.tif");
+    try expectTiffRawFixture(tiled, @embedFile("testdata/imagemagick-tiff-rgba8-planar-tiles-lzw.raw"), 37, 21, 8, 4);
+
+    // Read as chunky, the 24 tiles no longer match a six-tile grid.
+    const chunky = try allocator.dupe(u8, tiled);
+    defer allocator.free(chunky);
+    try writeTiffIfdInlineU16ForTest(chunky, 284, 1);
+    try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.parseAlpha(allocator, chunky));
+}
+
 test "TIFF strip decoders match the TIFF 6.0 definitions" {
     // PackBits: the example stream from TIFF 6.0 section 9.
     const packbits_input = [_]u8{ 0xfe, 0xaa, 0x02, 0x80, 0x00, 0x2a, 0xfd, 0xaa, 0x03, 0x80, 0x00, 0x2a, 0x22, 0xf7, 0xaa };
@@ -7170,7 +7201,7 @@ test "TIFF grayscale adapters and writer fail closed" {
         // A packed depth whose raster size disagrees with the strip counts.
         .{ .tag = 258, .value = 4, .expected = tiff.TiffError.InvalidTagValue },
         .{ .tag = 277, .value = 2, .expected = tiff.TiffError.InvalidTagValue },
-        .{ .tag = 284, .value = 2, .expected = tiff.TiffError.UnsupportedPlanarConfiguration },
+        .{ .tag = 284, .value = 3, .expected = tiff.TiffError.UnsupportedPlanarConfiguration },
     };
     for (malformed_cases) |case| {
         const mutated = try allocator.dupe(u8, bytes);

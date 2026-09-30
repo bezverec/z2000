@@ -1377,7 +1377,10 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         },
         else => return TiffError.UnsupportedExtraSamples,
     };
-    if (planar_config != 1) return TiffError.UnsupportedPlanarConfiguration;
+    // PlanarConfiguration 2 stores each component in its own strips or
+    // tiles; one component is the same either way.
+    if (planar_config != 1 and planar_config != 2) return TiffError.UnsupportedPlanarConfiguration;
+    const separate_planes = planar_config == 2 and component_count > 1;
     if (sample_format != 1) return TiffError.UnsupportedSampleFormat;
     const bit_values = bits_ref orelse return TiffError.UnsupportedBitsPerSample;
     if (bit_values.count != component_count) return TiffError.UnsupportedBitsPerSample;
@@ -1415,13 +1418,14 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         return TiffError.InvalidTagValue;
     }
 
-    if (codec != .none or tiled) {
+    if (codec != .none or tiled or separate_planes) {
         var layout = ChunkLayout{
             .codec = codec,
             .predictor = predictor,
             .chunk_width = w,
             .chunk_height = rows_per_strip,
             .padded = false,
+            .separate_planes = separate_planes,
             .offsets = offsets_ref,
             .counts = counts_ref,
             .width = width_usize,
@@ -1519,6 +1523,10 @@ const ChunkLayout = struct {
     chunk_width: u32,
     chunk_height: u32,
     padded: bool,
+    /// PlanarConfiguration 2: every chunk holds one component, and the
+    /// chunks of component 0 come first, then those of component 1, and so
+    /// on (TIFF 6.0 section 3).
+    separate_planes: bool,
     offsets: ValueRef,
     counts: ValueRef,
     width: usize,
@@ -1559,26 +1567,32 @@ fn readChunks(
     if (chunk_pixels > @max(layout.width * layout.height, max_default_tile_pixels)) return TiffError.ImageTooLarge;
     const across = (layout.width + chunk_width - 1) / chunk_width;
     const down = (layout.height + chunk_height - 1) / chunk_height;
-    if (layout.offsets.count != try std.math.mul(usize, across, down)) return TiffError.InvalidTagValue;
+    const planes: usize = if (layout.separate_planes) layout.samples_per_pixel else 1;
+    const chunks_per_plane = try std.math.mul(usize, across, down);
+    if (layout.offsets.count != try std.math.mul(usize, chunks_per_plane, planes)) return TiffError.InvalidTagValue;
+    // Samples interleaved within one chunk: all components, or just one.
+    const chunk_components: usize = if (layout.separate_planes) 1 else layout.samples_per_pixel;
 
-    const chunk_row_samples = try std.math.mul(usize, chunk_width, layout.samples_per_pixel);
+    const chunk_row_samples = try std.math.mul(usize, chunk_width, chunk_components);
     const chunk_row_bytes = try rasterRowBytes(chunk_row_samples, layout.bit_depth);
     const raster = try allocator.alloc(u8, try std.math.mul(usize, chunk_row_bytes, chunk_height));
     defer allocator.free(raster);
-    // A strip spans the full image width, so its samples go straight into
-    // place; only tiles need a staging buffer to drop their padding.
-    const chunk_samples: []u16 = if (layout.padded)
+    // A chunky strip spans the full image width, so its samples go straight
+    // into place; tiles drop their padding and separate planes interleave
+    // their component, both through a staging buffer.
+    const staged = layout.padded or layout.separate_planes;
+    const chunk_samples: []u16 = if (staged)
         try allocator.alloc(u16, try std.math.mul(usize, chunk_row_samples, chunk_height))
     else
         &.{};
-    defer if (layout.padded) allocator.free(chunk_samples);
+    defer if (staged) allocator.free(chunk_samples);
     const samples = try allocator.alloc(u16, layout.sample_count);
     errdefer allocator.free(samples);
 
     const image_row_samples = layout.width * layout.samples_per_pixel;
-    for (0..down) |chunk_y| {
+    for (0..planes) |plane| for (0..down) |chunk_y| {
         for (0..across) |chunk_x| {
-            const index = chunk_y * across + chunk_x;
+            const index = plane * chunks_per_plane + chunk_y * across + chunk_x;
             const offset = @as(usize, try readU32Value(bytes, endian, layout.offsets, index));
             const length = @as(usize, try readU32Value(bytes, endian, layout.counts, index));
             if (offset > bytes.len or bytes.len - offset < length) return TiffError.TruncatedData;
@@ -1594,13 +1608,13 @@ fn readChunks(
                 tiff_compression.undoHorizontalDifferencing(
                     out,
                     chunk_row_bytes,
-                    layout.samples_per_pixel,
+                    chunk_components,
                     layout.bit_depth,
                     endian == .big,
                 );
             }
 
-            const decoded = if (layout.padded)
+            const decoded = if (staged)
                 chunk_samples[0 .. rows * chunk_row_samples]
             else
                 samples[y0 * image_row_samples ..][0 .. rows * chunk_row_samples];
@@ -1612,14 +1626,22 @@ fn readChunks(
                 _ = try readU16Samples(decoded, 0, out, endian);
             }
 
-            if (!layout.padded) continue;
-            const visible_samples = @min(chunk_width, layout.width - x0) * layout.samples_per_pixel;
+            if (!staged) continue;
+            const visible_pixels = @min(chunk_width, layout.width - x0);
             for (0..visible_rows) |row| {
                 const target = (y0 + row) * image_row_samples + x0 * layout.samples_per_pixel;
-                @memcpy(samples[target..][0..visible_samples], decoded[row * chunk_row_samples ..][0..visible_samples]);
+                const source = decoded[row * chunk_row_samples ..];
+                if (layout.separate_planes) {
+                    for (0..visible_pixels) |x| {
+                        samples[target + x * layout.samples_per_pixel + plane] = source[x];
+                    }
+                } else {
+                    const visible_samples = visible_pixels * layout.samples_per_pixel;
+                    @memcpy(samples[target..][0..visible_samples], source[0..visible_samples]);
+                }
             }
         }
-    }
+    };
     return samples;
 }
 

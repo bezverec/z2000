@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Separate-Plane TIFF Input
+
+- PlanarConfiguration 2, where every component has its own strips or tiles,
+  was refused as `UnsupportedPlanarConfiguration`. Each plane now goes
+  through the chunk decoder with one sample per pixel, so Predictor 2
+  differences within the plane, and its samples are interleaved into place.
+  The chunk count must be the per-plane grid times the component count;
+  one-component images read the same either way.
+- Measured end to end: ImageMagick `-interlace plane` output, uncompressed,
+  LZW, Zip, and PackBits, for 8-bit RGB and RGBA, 16-bit big-endian RGB in
+  nine-row strips, 12-bit RGB, and 8-bit RGB in 64x48 tiles, plus tifffile
+  16-bit Deflate with prediction, RGBA tiles, and big-endian 8-bit RGB, are
+  lossless (23 files). A 72 MB planar LZW image reads in about 425 ms
+  against 340 ms chunky, 6.5% of the conversion.
+- Fixtures: tifffile 16-bit big-endian RGB, Deflate with Predictor 2 in
+  nine strips (oracle: the array tifffile wrote, which libtiff reads the
+  same), and ImageMagick RGBA LZW in 24 padded 16x16 tiles (libtiff
+  oracle). The tiled fixture read as chunky must fail on its tile count.
+  1200 mutated separate-plane TIFFs on a safety-checked build all end in an
+  error.
+
 ### Tiled TIFF Input
 
 - A tiled TIFF (TileWidth, TileLength, TileOffsets, TileByteCounts) has no
