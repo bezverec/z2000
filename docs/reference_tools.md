@@ -47,6 +47,18 @@ this decoder until an independently emitted stream exercised it.
 
 Recorded rather than worked around, so the behaviour stays pinned.
 
+- **Subsampled YCbCr JPEG TIFF has no working producer here.** ImageMagick
+  7.1.2 writes `-compress JPEG` TIFFs as Photometric RGB (libtiff then
+  stores the components unconverted, all at full resolution), and with
+  `-colorspace YCbCr` it writes Photometric YCbCr but always
+  YCbCrSubSampling 1,1, whatever `-sampling-factor` says. Pillow 10.4 writes
+  YCbCr 1,1 by default; asked for 2,1 it passes full-resolution rows to
+  libtiff's raw YCbCr path and produces garbage (PAE 60491), and for 2,2 it
+  fails because RowsPerStrip is not a multiple of 16.
+  `tools/make_tiff_jpeg_ycbcr.py` instead wraps libjpeg's own JPEG chunks
+  (through ImageMagick) in a TIFF with shared JPEGTables; libtiff decodes
+  those files exactly as libjpeg decodes the chunks.
+
 - **`kdu_makeppm` leaves stale `Psot`.** Given a source carrying PLT, Kakadu
   8.4.1's `kdu_makeppm` removes the PLT segments but does not shrink each
   tile-part's `Psot`, so every part overstates its length by exactly the bytes

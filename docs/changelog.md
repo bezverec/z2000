@@ -5,6 +5,44 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### JPEG-Compressed TIFF Input
+
+- Compression 7 (TIFF Technical Note 2) was refused. Each strip or tile is
+  an abbreviated JPEG stream; its tables come from the JPEGTables tag or
+  the stream itself. `jpeg.decodeTiffChunk` parses the tables, then one
+  baseline frame and scan (restart intervals included, application
+  segments skipped), and writes 8-bit samples into the chunk raster; the
+  existing chunk path places them, so strips, padded tiles, and edge
+  strips all work.
+- Photometric decides the colour, since libtiff writes no JFIF or Adobe
+  marker: gray, RGB stored unconverted at full resolution (what ImageMagick
+  and Pillow write), or YCbCr, converted to RGB with the JFIF equations and
+  the same fancy upsampling the standalone JPEG reader uses.
+  YCbCrSubSampling (default 2,2) must match the JPEG frame; a non-default
+  YCbCrCoefficients or ReferenceBlackWhite fails closed, as do YCbCr
+  without JPEG, alpha, depths other than 8, JPEG per component plane,
+  old-style JPEG (6), and progressive, arithmetic, lossless, or 12-bit
+  JPEG. The JPEG is decoded (it is lossy at the source) and the decoded
+  pixels are then encoded as requested; a JPEG TIFF gives no lossless path
+  back to the scanner's data.
+- Measured against libtiff and libjpeg (ImageMagick decode): ImageMagick
+  RGB in strips and tiles, gray, Pillow RGB, gray, and YCbCr 1x1, and five
+  libjpeg-built YCbCr files (2x2 and 2x1 strips, 2x2 tiles with
+  ReferenceBlackWhite, 1x1 tiles, restart intervals) are within 1 LSB for
+  gray and RGB and within 3 LSB for YCbCr, mean at most 0.21 LSB, the
+  bounds the standalone JPEG reader already had. `jpeg-to-jp2` output is
+  byte-identical after sharing its colour loop. A 24 MP RGB JPEG TIFF reads
+  in 768 ms, 11.6% of the conversion.
+- `tools/make_tiff_jpeg_ycbcr.py` builds subsampled YCbCr JPEG TIFFs from
+  libjpeg's chunks, because neither ImageMagick nor Pillow writes them
+  correctly (docs/reference_tools.md). Fixtures: ImageMagick RGB tiles,
+  Pillow gray, and two built YCbCr files (2x2 strips; 2x1 tiles with
+  ReferenceBlackWhite). Tests cover the tolerance against libtiff, a
+  subsampling tag that disagrees with the frame, studio-range
+  ReferenceBlackWhite, missing JPEGTables, a truncated tile, YCbCr with LZW,
+  and old-style JPEG. 2000 mutated JPEG TIFFs on a safety-checked build all
+  end in an error.
+
 ### Separate-Plane TIFF Input
 
 - PlanarConfiguration 2, where every component has its own strips or tiles,

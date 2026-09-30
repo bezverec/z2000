@@ -6110,7 +6110,7 @@ test "TIFF parser fails closed for unsupported narrow RGB variants" {
             .expected = tiff.TiffError.UnsupportedCompression,
             .mutate = struct {
                 fn mutate(bytes: []u8) !void {
-                    try writeTiffIfdInlineU16ForTest(bytes, 259, 7);
+                    try writeTiffIfdInlineU16ForTest(bytes, 259, 3);
                 }
             }.mutate,
         },
@@ -6554,7 +6554,7 @@ test "TIFF compressed strips and their tags fail closed" {
             .expected = tiff.TiffError.UnsupportedCompression,
             .mutate = struct {
                 fn mutate(bytes: []u8) !void {
-                    try writeTiffIfdInlineU16ForTest(bytes, 259, 7);
+                    try writeTiffIfdInlineU16ForTest(bytes, 259, 3);
                 }
             }.mutate,
         },
@@ -6783,6 +6783,163 @@ test "TIFF parser reads separate component planes" {
     defer allocator.free(chunky);
     try writeTiffIfdInlineU16ForTest(chunky, 284, 1);
     try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.parseAlpha(allocator, chunky));
+}
+
+/// JPEG decoders may differ within the IDCT and colour-conversion rounding;
+/// the bounds match the standalone JPEG oracle test: a few LSB at most, and
+/// a mean well under one.
+fn expectTiffJpegFixture(bytes: []const u8, raw: []const u8, width: usize, height: usize, components: usize, max_difference: u16) !void {
+    const allocator = std.testing.allocator;
+    var decoded = try tiff.parse(allocator, bytes);
+    defer decoded.deinit();
+    const samples, const decoded_width, const decoded_height, const decoded_depth = switch (decoded) {
+        .rgb => |rgb| .{ rgb.samples, rgb.width, rgb.height, rgb.bit_depth },
+        .grayscale => |gray| .{ gray.samples, gray.width, gray.height, gray.bit_depth },
+        .alpha => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(width, decoded_width);
+    try std.testing.expectEqual(height, decoded_height);
+    try std.testing.expectEqual(@as(u8, 8), decoded_depth);
+    try std.testing.expectEqual(width * height * components, samples.len);
+    try std.testing.expectEqual(samples.len, raw.len);
+    var total: usize = 0;
+    for (samples, raw) |actual, expected| {
+        const difference = if (actual > expected) actual - expected else expected - actual;
+        try std.testing.expect(difference <= max_difference);
+        total += difference;
+    }
+    try std.testing.expect(total * 4 <= samples.len);
+}
+
+test "TIFF parser decodes JPEG-compressed strips and tiles" {
+    // Compression 7 (TIFF Technical Note 2) was refused. Every strip or
+    // tile is an abbreviated JPEG stream whose tables come from JPEGTables;
+    // formats/jpeg.zig decodes it as a baseline frame, and Photometric, not
+    // a JFIF or Adobe marker, says whether the components are gray, RGB, or
+    // YCbCr (converted to RGB). Oracles are libtiff with libjpeg through
+    // ImageMagick.
+    //
+    // ImageMagick writes Photometric RGB: libtiff stores the components
+    // unconverted at full resolution. 45x37 in 16x16 tiles.
+    try expectTiffJpegFixture(
+        @embedFile("testdata/imagemagick-tiff-rgb8-jpeg-tiles.tif"),
+        @embedFile("testdata/imagemagick-tiff-rgb8-jpeg-tiles.raw"),
+        45,
+        37,
+        3,
+        1,
+    );
+    try expectTiffJpegFixture(
+        @embedFile("testdata/pillow-tiff-gray8-jpeg.tif"),
+        @embedFile("testdata/pillow-tiff-gray8-jpeg.raw"),
+        45,
+        37,
+        1,
+        1,
+    );
+    // Neither ImageMagick nor Pillow writes subsampled YCbCr correctly, so
+    // tools/make_tiff_jpeg_ycbcr.py wraps libjpeg's own JPEGs (one per strip
+    // or tile, tables moved to JPEGTables) in a TIFF; libtiff decodes the
+    // result exactly as libjpeg decodes the chunks. YCbCr 2x2 in 16-row
+    // strips, the last one 5 rows.
+    try expectTiffJpegFixture(
+        @embedFile("testdata/libjpeg-tiff-ycbcr22-jpeg-strips.tif"),
+        @embedFile("testdata/libjpeg-tiff-ycbcr22-jpeg-strips.raw"),
+        45,
+        37,
+        3,
+        3,
+    );
+    // YCbCr 2x1 in padded 32x16 tiles, with the default ReferenceBlackWhite
+    // written out.
+    try expectTiffJpegFixture(
+        @embedFile("testdata/libjpeg-tiff-ycbcr21-jpeg-tiles-refbw.tif"),
+        @embedFile("testdata/libjpeg-tiff-ycbcr21-jpeg-tiles-refbw.raw"),
+        45,
+        37,
+        3,
+        3,
+    );
+}
+
+test "TIFF JPEG tags and streams fail closed" {
+    const allocator = std.testing.allocator;
+    const ycbcr = @embedFile("testdata/libjpeg-tiff-ycbcr21-jpeg-tiles-refbw.tif");
+    const Mutation = struct {
+        label: []const u8,
+        expected: anyerror,
+        mutate: *const fn ([]u8) anyerror!void,
+    };
+    const cases = [_]Mutation{
+        .{
+            // The tiles are 2x1; the tag must say so.
+            .label = "YCbCrSubSampling disagreeing with the JPEG frame",
+            .expected = tiff.TiffError.UnsupportedCompression,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    const entry = try tiffIfdEntryOffsetForTest(bytes, 530);
+                    writeU16LeTest(bytes, entry + 10, 2);
+                }
+            }.mutate,
+        },
+        .{
+            // Studio-range YCbCr (black at 16) would need another conversion.
+            .label = "non-default ReferenceBlackWhite",
+            .expected = tiff.TiffError.UnsupportedPhotometric,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    writeU32LeTest(bytes, try readTiffIfdValueOffsetForTest(bytes, 532), 16);
+                }
+            }.mutate,
+        },
+        .{
+            // The tiles hold no tables of their own.
+            .label = "missing JPEGTables",
+            .expected = tiff.TiffError.InvalidCompressedData,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    writeU16LeTest(bytes, try tiffIfdEntryOffsetForTest(bytes, 347), 65000);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "truncated JPEG tile",
+            .expected = tiff.TiffError.InvalidCompressedData,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    const counts = try readTiffIfdValueOffsetForTest(bytes, 325);
+                    writeU32LeTest(bytes, counts, readU32LeTest(bytes, counts) - 20);
+                }
+            }.mutate,
+        },
+        .{
+            // YCbCr is accepted only as JPEG data.
+            .label = "YCbCr with LZW",
+            .expected = tiff.TiffError.UnsupportedPhotometric,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 259, 5);
+                }
+            }.mutate,
+        },
+        .{
+            // Old-style JPEG (compression 6) stays unsupported.
+            .label = "old-style JPEG",
+            .expected = tiff.TiffError.UnsupportedCompression,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 259, 6);
+                }
+            }.mutate,
+        },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("TIFF JPEG case failed: {s}\n", .{case.label});
+        const mutated = try allocator.dupe(u8, ycbcr);
+        defer allocator.free(mutated);
+        try case.mutate(mutated);
+        try std.testing.expectError(case.expected, tiff.parseRgb(allocator, mutated));
+    }
 }
 
 test "TIFF strip decoders match the TIFF 6.0 definitions" {
@@ -7195,7 +7352,7 @@ test "TIFF grayscale adapters and writer fail closed" {
         value: u16,
         expected: anyerror,
     }{
-        .{ .tag = 259, .value = 7, .expected = tiff.TiffError.UnsupportedCompression },
+        .{ .tag = 259, .value = 3, .expected = tiff.TiffError.UnsupportedCompression },
         // Depths 1..16 are read (packed below 16 bits); 17 is not TIFF-able here.
         .{ .tag = 258, .value = 17, .expected = tiff.TiffError.UnsupportedBitsPerSample },
         // A packed depth whose raster size disagrees with the strip counts.
@@ -33013,6 +33170,10 @@ fn readU32BeTest(bytes: []const u8, offset: usize) u32 {
         (@as(u32, bytes[offset + 1]) << 16) |
         (@as(u32, bytes[offset + 2]) << 8) |
         bytes[offset + 3];
+}
+
+fn writeU32LeTest(bytes: []u8, offset: usize, value: u32) void {
+    std.mem.writeInt(u32, bytes[offset..][0..4], value, .little);
 }
 
 fn readU32LeTest(bytes: []const u8, offset: usize) u32 {

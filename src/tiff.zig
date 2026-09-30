@@ -4,6 +4,7 @@ const color = @import("color.zig");
 const image = @import("image.zig");
 const simd = @import("simd.zig");
 const tiff_compression = @import("tiff_compression.zig");
+const jpeg = @import("formats/jpeg.zig");
 
 pub const TiffError = error{
     InvalidHeader,
@@ -1305,6 +1306,10 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     var tile_length: ?u32 = null;
     var tile_offsets_ref: ?ValueRef = null;
     var tile_counts_ref: ?ValueRef = null;
+    var jpeg_tables_ref: ?ValueRef = null;
+    var ycbcr_coefficients_ref: ?ValueRef = null;
+    var ycbcr_subsampling_ref: ?ValueRef = null;
+    var reference_black_white_ref: ?ValueRef = null;
     var extra_samples_ref: ?ValueRef = null;
     var icc_profile_ref: ?ValueRef = null;
 
@@ -1327,6 +1332,10 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             323 => tile_length = try readSingleU32(bytes, endian, entry),
             324 => tile_offsets_ref = try valueRef(bytes, entry),
             325 => tile_counts_ref = try valueRef(bytes, entry),
+            347 => jpeg_tables_ref = try valueRef(bytes, entry),
+            529 => ycbcr_coefficients_ref = try valueRef(bytes, entry),
+            530 => ycbcr_subsampling_ref = try valueRef(bytes, entry),
+            532 => reference_black_white_ref = try valueRef(bytes, entry),
             338 => {
                 if (extra_samples_ref != null) return TiffError.InvalidIfd;
                 extra_samples_ref = try valueRef(bytes, entry);
@@ -1356,6 +1365,8 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     const color_component_count: usize = switch (photo) {
         0, 1 => 1,
         2 => 3,
+        // YCbCr is read only as JPEG-compressed data, which decodes to RGB.
+        6 => if (codec == .jpeg) 3 else return TiffError.UnsupportedPhotometric,
         else => return TiffError.UnsupportedPhotometric,
     };
     const component_count = @as(usize, samples_per_pixel);
@@ -1418,6 +1429,26 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         return TiffError.InvalidTagValue;
     }
 
+    var jpeg_layout: ?JpegLayout = null;
+    if (codec == .jpeg) {
+        // Baseline JPEG carries one or three 8-bit components; alpha, other
+        // depths, and one JPEG per component plane are outside it.
+        if (bit_depth != 8 or alpha_mode != null or separate_planes) return TiffError.UnsupportedCompression;
+        jpeg_layout = .{
+            .tables = if (jpeg_tables_ref) |ref| try byteSlice(bytes, ref) else null,
+            .color = switch (photo) {
+                0, 1 => .gray,
+                2 => .rgb,
+                6 => .ycbcr,
+                else => unreachable,
+            },
+        };
+        if (photo == 6) {
+            jpeg_layout.?.subsampling = try readYcbcrSubsampling(bytes, endian, ycbcr_subsampling_ref);
+            try requireDefaultYcbcr(bytes, endian, ycbcr_coefficients_ref, reference_black_white_ref);
+        }
+    }
+
     if (codec != .none or tiled or separate_planes) {
         var layout = ChunkLayout{
             .codec = codec,
@@ -1426,6 +1457,7 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             .chunk_height = rows_per_strip,
             .padded = false,
             .separate_planes = separate_planes,
+            .jpeg = jpeg_layout,
             .offsets = offsets_ref,
             .counts = counts_ref,
             .width = width_usize,
@@ -1446,7 +1478,8 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             .width = width_usize,
             .height = height_usize,
             .bit_depth = @as(u8, @intCast(bit_depth)),
-            .photometric = photo,
+            // JPEG YCbCr has been converted to RGB.
+            .photometric = if (photo == 6) 2 else photo,
             .alpha_mode = alpha_mode,
             .samples = samples,
             .icc_profile = icc_profile,
@@ -1527,6 +1560,7 @@ const ChunkLayout = struct {
     /// chunks of component 0 come first, then those of component 1, and so
     /// on (TIFF 6.0 section 3).
     separate_planes: bool,
+    jpeg: ?JpegLayout = null,
     offsets: ValueRef,
     counts: ValueRef,
     width: usize,
@@ -1535,6 +1569,62 @@ const ChunkLayout = struct {
     bit_depth: u8,
     sample_count: usize,
 };
+
+const JpegLayout = struct {
+    tables: ?[]const u8,
+    color: jpeg.TiffColor,
+    subsampling: [2]u8 = .{ 1, 1 },
+};
+
+/// YCbCrSubSampling defaults to 2,2 (TIFF 6.0 section 21); baseline JPEG
+/// allows luma factors of 1 or 2 with the vertical one at most the
+/// horizontal one.
+fn readYcbcrSubsampling(bytes: []const u8, endian: Endian, ref: ?ValueRef) ![2]u8 {
+    const value = ref orelse return .{ 2, 2 };
+    if (value.count != 2) return TiffError.InvalidTagValue;
+    const horizontal = try readU16Value(bytes, endian, value, 0);
+    const vertical = try readU16Value(bytes, endian, value, 1);
+    if (horizontal < 1 or horizontal > 2 or vertical < 1 or vertical > 2 or vertical > horizontal) {
+        return TiffError.UnsupportedCompression;
+    }
+    return .{ @intCast(horizontal), @intCast(vertical) };
+}
+
+/// JPEG decoding converts YCbCr with the JFIF (ITU-R BT.601 full-range)
+/// equations. YCbCrCoefficients or ReferenceBlackWhite that say otherwise
+/// would need a different conversion, so they fail closed.
+fn requireDefaultYcbcr(bytes: []const u8, endian: Endian, coefficients: ?ValueRef, reference: ?ValueRef) !void {
+    if (coefficients) |ref| {
+        const expected = [_]f64{ 0.299, 0.587, 0.114 };
+        if (ref.count != expected.len) return TiffError.InvalidTagValue;
+        for (expected, 0..) |value, index| {
+            if (@abs(try readRational(bytes, endian, ref, index) - value) > 0.0005) return TiffError.UnsupportedPhotometric;
+        }
+    }
+    if (reference) |ref| {
+        const expected = [_]f64{ 0, 255, 128, 255, 128, 255 };
+        if (ref.count != expected.len) return TiffError.InvalidTagValue;
+        for (expected, 0..) |value, index| {
+            if (@abs(try readRational(bytes, endian, ref, index) - value) > 0.5) return TiffError.UnsupportedPhotometric;
+        }
+    }
+}
+
+fn readRational(bytes: []const u8, endian: Endian, ref: ValueRef, index: usize) !f64 {
+    if (ref.field_type != 5 or index >= ref.count) return TiffError.InvalidTagValue;
+    const offset = ref.offset orelse return TiffError.InvalidTagValue;
+    const numerator = try readU32(bytes, offset + index * 8, endian);
+    const denominator = try readU32(bytes, offset + index * 8 + 4, endian);
+    if (denominator == 0) return TiffError.InvalidTagValue;
+    return @as(f64, @floatFromInt(numerator)) / @as(f64, @floatFromInt(denominator));
+}
+
+/// The bytes of an UNDEFINED or BYTE tag stored out of line.
+fn byteSlice(bytes: []const u8, ref: ValueRef) ![]const u8 {
+    if (ref.field_type != 1 and ref.field_type != 7) return TiffError.InvalidTagValue;
+    const offset = ref.offset orelse return TiffError.InvalidTagValue;
+    return bytes[offset..][0..ref.count];
+}
 
 /// Decodes every compressed strip, or every tile, on its own: decompress
 /// into a chunk raster laid out as uncompressed data, reverse the predictor
@@ -1602,7 +1692,27 @@ fn readChunks(
             const visible_rows = @min(chunk_height, layout.height - y0);
             const rows = if (layout.padded) chunk_height else visible_rows;
             const out = raster[0 .. rows * chunk_row_bytes];
-            tiff_compression.decompressStrip(layout.codec, bytes[offset..][0..length], out) catch
+            if (layout.jpeg) |jpeg_layout| {
+                jpeg.decodeTiffChunk(allocator, bytes[offset..][0..length], .{
+                    .tables = jpeg_layout.tables,
+                    .color = jpeg_layout.color,
+                    .subsampling = jpeg_layout.subsampling,
+                    .width = chunk_width,
+                    .rows = rows,
+                }, out) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    jpeg.JpegError.UnsupportedFrame,
+                    jpeg.JpegError.UnsupportedPrecision,
+                    jpeg.JpegError.UnsupportedComponents,
+                    jpeg.JpegError.UnsupportedSampling,
+                    jpeg.JpegError.UnsupportedMultipleScans,
+                    jpeg.JpegError.UnsupportedArithmeticCoding,
+                    jpeg.JpegError.UnsupportedProgressive,
+                    jpeg.JpegError.UnsupportedLossless,
+                    => TiffError.UnsupportedCompression,
+                    else => TiffError.InvalidCompressedData,
+                };
+            } else tiff_compression.decompressStrip(layout.codec, bytes[offset..][0..length], out) catch
                 return TiffError.InvalidCompressedData;
             if (layout.predictor == 2 and layout.codec.usesPredictor()) {
                 tiff_compression.undoHorizontalDifferencing(
@@ -1746,6 +1856,7 @@ fn typeSize(field_type: u16) ?usize {
         1, 2, 7 => 1,
         3 => 2,
         4 => 4,
+        5 => 8,
         else => null,
     };
 }

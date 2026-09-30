@@ -685,25 +685,7 @@ fn finishImage(allocator: std.mem.Allocator, decoder: *Decoder) !tiff.DecodedIma
     };
     const samples = try allocator.alloc(u16, try std.math.mul(usize, try std.math.mul(usize, frame.width, frame.height), 3));
     errdefer allocator.free(samples);
-    for (0..frame.height) |y| {
-        for (0..frame.width) |x| {
-            var source: [3]u8 = undefined;
-            for (frame.components[0..3], 0..) |component, index| {
-                source[index] = sampledComponent(component, frame.max_h, frame.max_v, x, y);
-            }
-            const target = (y * frame.width + x) * 3;
-            if (direct_rgb) {
-                samples[target] = source[0];
-                samples[target + 1] = source[1];
-                samples[target + 2] = source[2];
-            } else {
-                const rgb = ycbcrToRgb(source[0], source[1], source[2]);
-                samples[target] = rgb[0];
-                samples[target + 1] = rgb[1];
-                samples[target + 2] = rgb[2];
-            }
-        }
-    }
+    writeColorSamples(u16, frame, direct_rgb, frame.width, frame.height, samples);
     return .{ .rgb = .{
         .allocator = allocator,
         .width = frame.width,
@@ -711,6 +693,123 @@ fn finishImage(allocator: std.mem.Allocator, decoder: *Decoder) !tiff.DecodedIma
         .bit_depth = 8,
         .samples = samples,
     } };
+}
+
+/// Upsamples and, unless `direct_rgb`, converts the three planes of
+/// `frame` into `width` x `height` interleaved RGB samples.
+fn writeColorSamples(comptime T: type, frame: Frame, direct_rgb: bool, width: usize, height: usize, out: []T) void {
+    std.debug.assert(out.len == width * height * 3 and width <= frame.width and height <= frame.height);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            var source: [3]u8 = undefined;
+            for (frame.components[0..3], 0..) |component, index| {
+                source[index] = sampledComponent(component, frame.max_h, frame.max_v, x, y);
+            }
+            const rgb = if (direct_rgb) source else ycbcrToRgb(source[0], source[1], source[2]);
+            const target = (y * width + x) * 3;
+            out[target] = rgb[0];
+            out[target + 1] = rgb[1];
+            out[target + 2] = rgb[2];
+        }
+    }
+}
+
+/// How a TIFF with Compression 7 interprets the JPEG components; it is set
+/// by the TIFF's Photometric tag, not by JFIF or Adobe markers, which libtiff
+/// does not write.
+pub const TiffColor = enum { gray, ycbcr, rgb };
+
+pub const TiffChunk = struct {
+    /// The JPEGTables tag: an abbreviated table-specification stream
+    /// (SOI, DQT/DHT, EOI) shared by every strip or tile.
+    tables: ?[]const u8,
+    color: TiffColor,
+    /// YCbCrSubSampling: the luma sampling factors a YCbCr stream must use.
+    subsampling: [2]u8 = .{ 1, 1 },
+    /// Width of the strip or tile in pixels; the frame must match it.
+    width: usize,
+    /// Rows the caller needs; the frame must hold at least this many.
+    rows: usize,
+};
+
+/// Decodes one strip or tile of a TIFF with Compression 7 (TIFF Technical
+/// Note 2, "new-style" JPEG) into 8-bit interleaved samples: one per pixel
+/// for gray, RGB triples otherwise, `chunk.rows` rows of `chunk.width`.
+pub fn decodeTiffChunk(allocator: std.mem.Allocator, bytes: []const u8, chunk: TiffChunk, out: []u8) !void {
+    var decoder = Decoder{ .allocator = allocator };
+    defer decoder.deinit();
+    if (chunk.tables) |tables| try parseTiffStream(&decoder, tables, .tables);
+    try parseTiffStream(&decoder, bytes, .image);
+
+    const frame = decoder.frame orelse return JpegError.InvalidMarkerOrder;
+    if (frame.width != chunk.width or frame.height < chunk.rows) return JpegError.InvalidDimensions;
+    const components: usize = if (chunk.color == .gray) 1 else 3;
+    if (frame.component_count != components) return JpegError.UnsupportedComponents;
+    switch (chunk.color) {
+        .gray => {},
+        // libtiff writes RGB with every component at full resolution.
+        .rgb => if (frame.max_h != 1 or frame.max_v != 1) return JpegError.UnsupportedSampling,
+        .ycbcr => if (frame.max_h != chunk.subsampling[0] or frame.max_v != chunk.subsampling[1]) {
+            return JpegError.UnsupportedSampling;
+        },
+    }
+    if (out.len != chunk.width * chunk.rows * components) return JpegError.InvalidDimensions;
+    if (components == 1) {
+        const component = frame.components[0];
+        for (0..chunk.rows) |y| {
+            @memcpy(out[y * chunk.width ..][0..chunk.width], component.plane.?[y * component.plane_width ..][0..chunk.width]);
+        }
+        return;
+    }
+    writeColorSamples(u8, frame, chunk.color == .rgb, chunk.width, chunk.rows, out);
+}
+
+const TiffStream = enum { tables, image };
+
+/// A table stream holds only tables; an image stream holds one baseline
+/// frame and scan, with tables of its own or from JPEGTables. Application
+/// and comment segments carry nothing the TIFF tags do not decide, so they
+/// are skipped.
+fn parseTiffStream(decoder: *Decoder, bytes: []const u8, kind: TiffStream) !void {
+    if (bytes.len < 4 or bytes[0] != 0xff or bytes[1] != 0xd8) return JpegError.InvalidSignature;
+    var cursor: usize = 2;
+    var saw_scan = false;
+    while (cursor < bytes.len) {
+        const marker = try nextMarker(bytes, &cursor);
+        if (saw_scan and marker != 0xd9) {
+            if (marker == 0xda) return JpegError.UnsupportedMultipleScans;
+            return JpegError.InvalidMarkerOrder;
+        }
+        switch (marker) {
+            0xd9 => {
+                if (cursor != bytes.len) return JpegError.InvalidMarkerOrder;
+                if (kind == .image and !saw_scan) return JpegError.InvalidMarkerOrder;
+                return;
+            },
+            0xdb => try parseQuantization(decoder, try markerPayload(bytes, &cursor)),
+            0xc4 => try parseHuffman(decoder, try markerPayload(bytes, &cursor)),
+            0xdd => try parseRestartInterval(decoder, try markerPayload(bytes, &cursor)),
+            0xe0...0xef, 0xfe => _ = try markerPayload(bytes, &cursor),
+            0xc0 => {
+                if (kind == .tables or decoder.frame != null) return JpegError.InvalidMarkerOrder;
+                try parseFrame(decoder, try markerPayload(bytes, &cursor));
+            },
+            0xda => {
+                if (kind == .tables) return JpegError.InvalidMarkerOrder;
+                const payload = try markerPayload(bytes, &cursor);
+                try decodeScan(decoder, bytes, payload, &cursor);
+                saw_scan = true;
+            },
+            0xc1, 0xc5, 0xc8, 0xdc, 0xde, 0xdf => return JpegError.UnsupportedFrame,
+            0xc2, 0xc6 => return JpegError.UnsupportedProgressive,
+            0xc3, 0xc7 => return JpegError.UnsupportedLossless,
+            0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf => return JpegError.UnsupportedArithmeticCoding,
+            0xd0...0xd7, 0xd8 => return JpegError.InvalidMarkerOrder,
+            0x01 => {},
+            else => return JpegError.UnsupportedFrame,
+        }
+    }
+    return JpegError.MissingEndMarker;
 }
 
 const AxisWeights = struct {

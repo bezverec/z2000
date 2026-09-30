@@ -15,11 +15,16 @@ pub const Compression = enum(u16) {
     deflate = 8,
     packbits = 32773,
     adobe_deflate = 32946,
+    /// TIFF Technical Note 2 JPEG; tiff.zig decodes it through
+    /// formats/jpeg.zig, since it needs the Photometric and JPEGTables tags.
+    /// The obsolete compression 6 stays unsupported.
+    jpeg = 7,
 
     pub fn fromTag(value: u16) ?Compression {
         return switch (value) {
             1 => .none,
             5 => .lzw,
+            7 => .jpeg,
             8 => .deflate,
             32773 => .packbits,
             32946 => .adobe_deflate,
@@ -43,6 +48,7 @@ pub fn decompressStrip(compression: Compression, input: []const u8, out: []u8) E
         .lzw => try decodeLzw(input, out),
         .deflate, .adobe_deflate => try inflateZlib(input, out),
         .packbits => try decodePackBits(input, out),
+        .jpeg => unreachable,
     }
 }
 
