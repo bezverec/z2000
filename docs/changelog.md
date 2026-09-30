@@ -5,6 +5,16 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Toolchain Notes
+
+- `docs/toolchain_notes.md` records the Zig 0.16.0 flate overrun that
+  `zlib_inflate.zig` works around: symptom per build mode (Debug and
+  ReleaseSafe panic, ReleaseFast dies with an access violation), the
+  mis-signed check in `tossBitsShort`, where it reached z2000, the
+  workaround, and how to tell when it can go.
+  `tools/zig_flate_truncation_repro.zig` reproduces it with an 11-byte
+  stream and `std` alone, ready to attach to an upstream report.
+
 ### Truncated zlib Streams No Longer Crash PNG Input
 
 - Zig 0.16's `std.compress.flate.Decompress` steps past the end of its

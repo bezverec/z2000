@@ -14,6 +14,8 @@ The active documentation is intentionally split by purpose. Only
 - [`reference_tools.md`](reference_tools.md) — measured Kakadu/OpenJPEG/Grok
   behaviour: what they cannot emit, where they disagree, and what each sweep
   found.
+- [`toolchain_notes.md`](toolchain_notes.md) — Zig compiler and standard
+  library defects z2000 works around, with reproductions and removal checks.
 - [`architecture.md`](architecture.md) — current design and data flow.
 - [`api.md`](api.md) — CLI and library surfaces.
 

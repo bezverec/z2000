@@ -225,7 +225,8 @@ supported envelope.
 
 Requirements:
 
-- Zig 0.16.x
+- Zig 0.16.x (known standard-library defects and their workarounds:
+  [toolchain notes](docs/toolchain_notes.md))
 - Git
 
 ```sh
@@ -640,6 +641,7 @@ Detailed notes live in `docs/`:
 - [ISO coverage scorecard](docs/iso_coverage.md)
 - [Part 1 corpus gate](docs/part1_corpus.md)
 - [Reference tool behaviour](docs/reference_tools.md)
+- [Toolchain notes](docs/toolchain_notes.md)
 - [Roadmap](docs/roadmap.md)
 - [Next steps](docs/next_steps.md)
 - [Optimization plan](docs/optimization_plan.md)

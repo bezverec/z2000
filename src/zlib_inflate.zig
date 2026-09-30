@@ -12,6 +12,9 @@
 //! buffered data. Whatever the decompressor then does with the zeros, it
 //! stops within the requested output plus one byte, and any stream that
 //! consumed even one bit of the zero tail is rejected as truncated.
+//!
+//! docs/toolchain_notes.md records the defect, its reproduction
+//! (tools/zig_flate_truncation_repro.zig), and when this can go.
 
 const std = @import("std");
 
