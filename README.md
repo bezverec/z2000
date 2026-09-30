@@ -17,8 +17,8 @@ Neither figure is a formal ISO conformance certification.
 
 ## Features
 
-- TIFF 6.0 RGB, grayscale, gray+alpha, and RGBA input: chunky strips,
-  uncompressed or LZW, Deflate (8 and 32946), or PackBits compressed, with
+- TIFF 6.0 RGB, grayscale, gray+alpha, and RGBA input: chunky strips or
+  tiles, uncompressed or LZW, Deflate (8 and 32946), or PackBits compressed, with
   horizontal-differencing prediction, at any uniform unsigned depth from 1
   to 16 bits (depths other than 8 and 16 packed MSB-first, as libtiff writes
   them), including optional ICC profile preservation and
@@ -583,7 +583,7 @@ The production `tiff-to-jp2` path is deliberately narrow:
 - chunky/interleaved samples;
 - 1 to 16 unsigned bits per channel, the same for every channel, with
   FillOrder 1;
-- strip storage, uncompressed or LZW, Deflate (8 or 32946), or PackBits,
+- strip or tile storage, uncompressed or LZW, Deflate (8 or 32946), or PackBits,
   with Predictor 1, or 2 on 8- and 16-bit samples;
 - optional ICC tag 34675 copied into JP2 restricted ICC `colr`.
 
@@ -627,7 +627,7 @@ library encoder accepts absolute SIZ origins through
 `LosslessOptions.image_origin_x/y` and `tile_origin_x/y`; the TIFF CLI
 continues to emit zero-origin images.
 
-Unsupported compression, palette color, planar RGB, CMYK, tiled TIFF,
+Unsupported compression, palette color, planar RGB, CMYK,
 floating-point samples, unspecified or multiple auxiliary channels, mixed bit
 depth, signed sample formats, and multipage handling fail closed.
 

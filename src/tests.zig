@@ -6171,9 +6171,14 @@ test "TIFF parser fails closed for unsupported narrow RGB variants" {
         try std.testing.expectError(case.expected, tiff.parseRgb(allocator, mutated));
     }
 
+    // A tiled image with no strips is read through its tiles now; a 2x1
+    // tile is outside TIFF 6.0's multiple-of-16 rule, which libtiff also
+    // only warns about.
     const tile_only = try makeTileOnlyRgbTiffForTest(allocator);
     defer allocator.free(tile_only);
-    try std.testing.expectError(tiff.TiffError.MissingRequiredTag, tiff.parseRgb(allocator, tile_only));
+    var tiled_rgb = try tiff.parseRgb(allocator, tile_only);
+    defer tiled_rgb.deinit();
+    try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, tiled_rgb.samples);
 }
 
 test "TIFF writer roundtrips optimized 8-bit and 16-bit raster paths" {
@@ -6623,6 +6628,129 @@ test "truncated zlib streams fail closed in PNG and TIFF" {
         defer allocator.free(truncated);
         writeU16LeTest(truncated, counts, length);
         try std.testing.expectError(tiff.TiffError.InvalidCompressedData, tiff.parseGray(allocator, truncated));
+    }
+}
+
+test "TIFF parser reads tiled images, padded tiles included" {
+    // Tiled TIFFs (TileWidth/TileLength/TileOffsets/TileByteCounts) had no
+    // strips, so they were refused as MissingRequiredTag. Tiles are decoded
+    // one at a time through the same chunk path as compressed strips; the
+    // tiles on the right and bottom edges extend past the image and their
+    // padding is dropped.
+    //
+    // 45x37 16-bit big-endian RGB, LZW with Predictor 2 in 16x16 tiles: a
+    // 3x3 grid whose last column holds 13 of 16 pixels and whose last row
+    // holds 5 of 16 rows. Oracle: libtiff through ImageMagick.
+    try expectTiffRawFixture(
+        @embedFile("testdata/imagemagick-tiff-rgb16-tiles-lzw-msb.tif"),
+        @embedFile("testdata/imagemagick-tiff-rgb16-tiles-lzw-msb.raw"),
+        45,
+        37,
+        16,
+        3,
+    );
+    // 37x21 bilevel, uncompressed 16x16 tiles: two bytes per tile row, so
+    // the last tile column carries 11 padding bits per row. Oracle: libtiff,
+    // confirmed by tifffile.
+    try expectTiffRawFixture(
+        @embedFile("testdata/imagemagick-tiff-gray1-tiles.tif"),
+        @embedFile("testdata/imagemagick-tiff-gray1-tiles.raw"),
+        37,
+        21,
+        1,
+        1,
+    );
+    // tifffile, which does not use libtiff: 45x37 RGBA in 32-wide, 16-tall
+    // tiles, Deflate with Predictor 2. Oracle: the array tifffile wrote.
+    try expectTiffRawFixture(
+        @embedFile("testdata/tifffile-tiff-rgba8-tiles-deflate-pred.tif"),
+        @embedFile("testdata/tifffile-tiff-rgba8-tiles-deflate-pred.raw"),
+        45,
+        37,
+        8,
+        4,
+    );
+}
+
+test "TIFF tile layout tags fail closed" {
+    const allocator = std.testing.allocator;
+    const tiled = @embedFile("testdata/imagemagick-tiff-gray1-tiles.tif");
+    const Mutation = struct {
+        label: []const u8,
+        expected: anyerror,
+        mutate: *const fn ([]u8) anyerror!void,
+    };
+    const cases = [_]Mutation{
+        .{
+            // 16-pixel tiles over 37x21 make a 3x2 grid; 32-pixel tiles
+            // would make 2x2, which no longer matches the six offsets.
+            .label = "TileWidth disagreeing with the tile count",
+            .expected = tiff.TiffError.InvalidTagValue,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 322, 32);
+                }
+            }.mutate,
+        },
+        .{
+            // 4096x4096 tiles on a 37x21 image would allocate 16M samples
+            // before reading a byte of tile data.
+            .label = "tile far larger than the image",
+            .expected = tiff.TiffError.ImageTooLarge,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 322, 4096);
+                    try writeTiffIfdInlineU16ForTest(bytes, 323, 4096);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "zero TileLength",
+            .expected = tiff.TiffError.InvalidTagValue,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    try writeTiffIfdInlineU16ForTest(bytes, 323, 0);
+                }
+            }.mutate,
+        },
+        .{
+            // An uncompressed tile must hold the whole padded tile.
+            .label = "short uncompressed tile",
+            .expected = tiff.TiffError.InvalidCompressedData,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    const counts = try readTiffIfdValueOffsetForTest(bytes, 325);
+                    writeU16LeTest(bytes, counts, readU16LeTest(bytes, counts) - 1);
+                }
+            }.mutate,
+        },
+        .{
+            // Strips and tiles together are ambiguous; the PlanarConfiguration
+            // entry is repurposed as a StripOffsets tag.
+            .label = "strip and tile tags together",
+            .expected = tiff.TiffError.InvalidTagValue,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    writeU16LeTest(bytes, try tiffIfdEntryOffsetForTest(bytes, 284), 273);
+                }
+            }.mutate,
+        },
+        .{
+            .label = "tile offsets without tile byte counts",
+            .expected = tiff.TiffError.MissingRequiredTag,
+            .mutate = struct {
+                fn mutate(bytes: []u8) !void {
+                    writeU16LeTest(bytes, try tiffIfdEntryOffsetForTest(bytes, 325), 65000);
+                }
+            }.mutate,
+        },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("tiled TIFF case failed: {s}\n", .{case.label});
+        const mutated = try allocator.dupe(u8, tiled);
+        defer allocator.free(mutated);
+        try case.mutate(mutated);
+        try std.testing.expectError(case.expected, tiff.parseGray(allocator, mutated));
     }
 }
 

@@ -5,6 +5,40 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tiled TIFF Input
+
+- A tiled TIFF (TileWidth, TileLength, TileOffsets, TileByteCounts) has no
+  strips, so `tiff-to-jp2` refused it as `MissingRequiredTag`. Large
+  archival and scanner TIFFs are often tiled.
+- Strips and tiles now share one chunk decoder: each chunk is decompressed
+  on its own, the predictor is reversed over its rows, and its samples are
+  placed in the image. A tile always holds its full size, padded past the
+  right and bottom edges, and the padding is dropped; packed depths are
+  unpacked per tile row, so a 1-bit 16x16 tile at the edge works like any
+  other. Strips still decode straight into place, and uncompressed strips
+  keep their previous path; LZW strip reading of a 72 MB image is as fast
+  as before, and the output is byte-identical.
+- The tile count must match the grid the tile size implies, strip and tile
+  tags together are refused, and an uncompressed tile must hold the whole
+  padded tile. A tile is allocated before its data is read, so its area may
+  not exceed 2048x2048 or the image area, whichever is larger; a few header
+  bytes can no longer ask for gigabytes.
+- Measured end to end (TIFF -> JP2 -> strict decode -> compare): ImageMagick
+  tiles of 16x16 to 512x512 over a 301x203 image, uncompressed, LZW, Zip,
+  and PackBits, 8-bit RGB and RGBA, 16-bit RGB in both byte orders, 12- and
+  1-bit gray, with and without Predictor 2, and tifffile rectangular tiles
+  (Deflate with and without prediction, big-endian 16-bit) are lossless,
+  27 files in all. The same image stored in LZW strips and in 256x256 LZW
+  tiles gives a byte-identical JP2.
+- Three fixtures: 16-bit big-endian RGB LZW with prediction in a 3x3 grid of
+  16x16 tiles over 45x37 (libtiff oracle), 1-bit uncompressed 16x16 tiles
+  over 37x21 (libtiff, confirmed by tifffile), and tifffile RGBA Deflate
+  with prediction in 32x16 tiles (oracle: the array tifffile wrote). Tests
+  cover a tile size that disagrees with the tile count, a zero tile length,
+  an oversized tile, a short uncompressed tile, strip and tile tags
+  together, and a missing TileByteCounts. 1400 mutated tiled TIFFs on a
+  safety-checked build all end in an error.
+
 ### Toolchain Notes
 
 - `docs/toolchain_notes.md` records the Zig 0.16.0 flate overrun that

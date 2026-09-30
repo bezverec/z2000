@@ -24,6 +24,7 @@ pub const TiffError = error{
 const max_file_size = 1024 * 1024 * 1024;
 const max_pixels = 268_435_456;
 const max_icc_profile_bytes = 16 * 1024 * 1024;
+const max_default_tile_pixels = 2048 * 2048;
 const sample_lanes = simd.i32_lanes;
 const SampleU8Vector = @Vector(sample_lanes, u8);
 const SampleU16Vector = @Vector(sample_lanes, u16);
@@ -1300,6 +1301,10 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     var fill_order: u16 = 1;
     var rows_per_strip: u32 = std.math.maxInt(u32);
     var predictor: u16 = 1;
+    var tile_width: ?u32 = null;
+    var tile_length: ?u32 = null;
+    var tile_offsets_ref: ?ValueRef = null;
+    var tile_counts_ref: ?ValueRef = null;
     var extra_samples_ref: ?ValueRef = null;
     var icc_profile_ref: ?ValueRef = null;
 
@@ -1318,6 +1323,10 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
             279 => strip_counts_ref = try valueRef(bytes, entry),
             284 => planar_config = try readSingleU16(bytes, endian, entry),
             317 => predictor = try readSingleU16(bytes, endian, entry),
+            322 => tile_width = try readSingleU32(bytes, endian, entry),
+            323 => tile_length = try readSingleU32(bytes, endian, entry),
+            324 => tile_offsets_ref = try valueRef(bytes, entry),
+            325 => tile_counts_ref = try valueRef(bytes, entry),
             338 => {
                 if (extra_samples_ref != null) return TiffError.InvalidIfd;
                 extra_samples_ref = try valueRef(bytes, entry);
@@ -1331,8 +1340,15 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     const w = width orelse return TiffError.MissingRequiredTag;
     const h = height orelse return TiffError.MissingRequiredTag;
     const photo = photometric orelse return TiffError.MissingRequiredTag;
-    const offsets_ref = strip_offsets_ref orelse return TiffError.MissingRequiredTag;
-    const counts_ref = strip_counts_ref orelse return TiffError.MissingRequiredTag;
+    // An image is stored either in strips or in tiles (TIFF 6.0 section
+    // 15), never both.
+    const tiled = tile_width != null or tile_length != null or
+        tile_offsets_ref != null or tile_counts_ref != null;
+    if (tiled and (strip_offsets_ref != null or strip_counts_ref != null)) return TiffError.InvalidTagValue;
+    const offsets_ref = (if (tiled) tile_offsets_ref else strip_offsets_ref) orelse
+        return TiffError.MissingRequiredTag;
+    const counts_ref = (if (tiled) tile_counts_ref else strip_counts_ref) orelse
+        return TiffError.MissingRequiredTag;
 
     if (w == 0 or h == 0) return TiffError.InvalidTagValue;
     const codec = tiff_compression.Compression.fromTag(compression) orelse
@@ -1399,20 +1415,27 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
         return TiffError.InvalidTagValue;
     }
 
-    if (codec != .none) {
-        const samples = try readCompressedStrips(allocator, bytes, endian, .{
+    if (codec != .none or tiled) {
+        var layout = ChunkLayout{
             .codec = codec,
             .predictor = predictor,
-            .rows_per_strip = rows_per_strip,
+            .chunk_width = w,
+            .chunk_height = rows_per_strip,
+            .padded = false,
             .offsets = offsets_ref,
             .counts = counts_ref,
+            .width = width_usize,
             .height = height_usize,
-            .row_samples = row_samples,
             .samples_per_pixel = component_count,
             .bit_depth = @intCast(bit_depth),
-            .raster_bytes = expected_raster_bytes,
             .sample_count = sample_count,
-        });
+        };
+        if (tiled) {
+            layout.chunk_width = tile_width orelse return TiffError.MissingRequiredTag;
+            layout.chunk_height = tile_length orelse return TiffError.MissingRequiredTag;
+            layout.padded = true;
+        }
+        const samples = try readChunks(allocator, bytes, endian, layout);
         errdefer allocator.free(samples);
         const icc_profile = if (icc_profile_ref) |ref| try readIccProfile(allocator, bytes, endian, ref) else null;
         return .{
@@ -1485,29 +1508,36 @@ fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyIma
     };
 }
 
-const CompressedStrips = struct {
+/// Strips and tiles are both rectangles of the image laid out in a grid
+/// (TIFF 6.0 sections 3 and 15): a strip is a chunk as wide as the image,
+/// and the last strip is only as tall as the rows left. A tile always holds
+/// its full width and length, padded past the right and bottom edges of the
+/// image, and the padding is decoded and dropped.
+const ChunkLayout = struct {
     codec: tiff_compression.Compression,
     predictor: u16,
-    rows_per_strip: u32,
+    chunk_width: u32,
+    chunk_height: u32,
+    padded: bool,
     offsets: ValueRef,
     counts: ValueRef,
+    width: usize,
     height: usize,
-    row_samples: usize,
     samples_per_pixel: usize,
     bit_depth: u8,
-    raster_bytes: usize,
     sample_count: usize,
 };
 
-/// Decompresses every strip into one raster laid out as an uncompressed
-/// image would be, reverses the predictor, then converts it to samples.
-/// Unlike uncompressed data, a compressed strip's decoded size comes only
-/// from RowsPerStrip, so the strip count must match it exactly.
-fn readCompressedStrips(
+/// Decodes every compressed strip, or every tile, on its own: decompress
+/// into a chunk raster laid out as uncompressed data, reverse the predictor
+/// over the rows of the chunk, convert to samples, and copy the part inside
+/// the image into place. A compressed chunk has no size of its own, only
+/// the one the layout tags give, so the chunk count must match them.
+fn readChunks(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     endian: Endian,
-    layout: CompressedStrips,
+    layout: ChunkLayout,
 ) ![]u16 {
     const packed_depth = layout.bit_depth != 8 and layout.bit_depth != 16;
     switch (layout.predictor) {
@@ -1518,45 +1548,77 @@ fn readCompressedStrips(
         // Floating-point prediction needs floating-point samples.
         else => return TiffError.UnsupportedCompression,
     }
-    if (layout.rows_per_strip == 0) return TiffError.InvalidTagValue;
-    const rows_per_strip: usize = @min(layout.rows_per_strip, layout.height);
-    const strip_count = (layout.height + rows_per_strip - 1) / rows_per_strip;
-    if (layout.offsets.count != strip_count) return TiffError.InvalidTagValue;
-    const row_bytes = try rasterRowBytes(layout.row_samples, layout.bit_depth);
-    std.debug.assert(row_bytes * layout.height == layout.raster_bytes);
+    if (layout.chunk_width == 0 or layout.chunk_height == 0) return TiffError.InvalidTagValue;
+    // Strips never extend past the image; a tile may, up to its own size.
+    const chunk_width: usize = if (layout.padded) layout.chunk_width else layout.width;
+    const chunk_height: usize = if (layout.padded) layout.chunk_height else @min(layout.chunk_height, layout.height);
+    // A tile is allocated whole before its data is read, so a few header
+    // bytes could otherwise ask for gigabytes. Tiles up to 2048x2048 are
+    // always taken; a larger one only when the image itself is as large.
+    const chunk_pixels = try std.math.mul(usize, chunk_width, chunk_height);
+    if (chunk_pixels > @max(layout.width * layout.height, max_default_tile_pixels)) return TiffError.ImageTooLarge;
+    const across = (layout.width + chunk_width - 1) / chunk_width;
+    const down = (layout.height + chunk_height - 1) / chunk_height;
+    if (layout.offsets.count != try std.math.mul(usize, across, down)) return TiffError.InvalidTagValue;
 
-    const raster = try allocator.alloc(u8, layout.raster_bytes);
+    const chunk_row_samples = try std.math.mul(usize, chunk_width, layout.samples_per_pixel);
+    const chunk_row_bytes = try rasterRowBytes(chunk_row_samples, layout.bit_depth);
+    const raster = try allocator.alloc(u8, try std.math.mul(usize, chunk_row_bytes, chunk_height));
     defer allocator.free(raster);
-    for (0..strip_count) |strip| {
-        const strip_offset = @as(usize, try readU32Value(bytes, endian, layout.offsets, strip));
-        const strip_length = @as(usize, try readU32Value(bytes, endian, layout.counts, strip));
-        if (strip_offset > bytes.len or bytes.len - strip_offset < strip_length) {
-            return TiffError.TruncatedData;
-        }
-        const first_row = strip * rows_per_strip;
-        const rows = @min(rows_per_strip, layout.height - first_row);
-        const out = raster[first_row * row_bytes ..][0 .. rows * row_bytes];
-        tiff_compression.decompressStrip(layout.codec, bytes[strip_offset..][0..strip_length], out) catch
-            return TiffError.InvalidCompressedData;
-    }
-    if (layout.predictor == 2 and layout.codec.usesPredictor()) {
-        tiff_compression.undoHorizontalDifferencing(
-            raster,
-            row_bytes,
-            layout.samples_per_pixel,
-            layout.bit_depth,
-            endian == .big,
-        );
-    }
-
+    // A strip spans the full image width, so its samples go straight into
+    // place; only tiles need a staging buffer to drop their padding.
+    const chunk_samples: []u16 = if (layout.padded)
+        try allocator.alloc(u16, try std.math.mul(usize, chunk_row_samples, chunk_height))
+    else
+        &.{};
+    defer if (layout.padded) allocator.free(chunk_samples);
     const samples = try allocator.alloc(u16, layout.sample_count);
     errdefer allocator.free(samples);
-    if (packed_depth) {
-        unpackRasterPacked(samples, raster, layout.row_samples, layout.bit_depth);
-    } else if (layout.bit_depth == 8) {
-        _ = widenU8Samples(samples, 0, raster);
-    } else {
-        _ = try readU16Samples(samples, 0, raster, endian);
+
+    const image_row_samples = layout.width * layout.samples_per_pixel;
+    for (0..down) |chunk_y| {
+        for (0..across) |chunk_x| {
+            const index = chunk_y * across + chunk_x;
+            const offset = @as(usize, try readU32Value(bytes, endian, layout.offsets, index));
+            const length = @as(usize, try readU32Value(bytes, endian, layout.counts, index));
+            if (offset > bytes.len or bytes.len - offset < length) return TiffError.TruncatedData;
+
+            const y0 = chunk_y * chunk_height;
+            const x0 = chunk_x * chunk_width;
+            const visible_rows = @min(chunk_height, layout.height - y0);
+            const rows = if (layout.padded) chunk_height else visible_rows;
+            const out = raster[0 .. rows * chunk_row_bytes];
+            tiff_compression.decompressStrip(layout.codec, bytes[offset..][0..length], out) catch
+                return TiffError.InvalidCompressedData;
+            if (layout.predictor == 2 and layout.codec.usesPredictor()) {
+                tiff_compression.undoHorizontalDifferencing(
+                    out,
+                    chunk_row_bytes,
+                    layout.samples_per_pixel,
+                    layout.bit_depth,
+                    endian == .big,
+                );
+            }
+
+            const decoded = if (layout.padded)
+                chunk_samples[0 .. rows * chunk_row_samples]
+            else
+                samples[y0 * image_row_samples ..][0 .. rows * chunk_row_samples];
+            if (packed_depth) {
+                unpackRasterPacked(decoded, out, chunk_row_samples, layout.bit_depth);
+            } else if (layout.bit_depth == 8) {
+                _ = widenU8Samples(decoded, 0, out);
+            } else {
+                _ = try readU16Samples(decoded, 0, out, endian);
+            }
+
+            if (!layout.padded) continue;
+            const visible_samples = @min(chunk_width, layout.width - x0) * layout.samples_per_pixel;
+            for (0..visible_rows) |row| {
+                const target = (y0 + row) * image_row_samples + x0 * layout.samples_per_pixel;
+                @memcpy(samples[target..][0..visible_samples], decoded[row * chunk_row_samples ..][0..visible_samples]);
+            }
+        }
     }
     return samples;
 }
