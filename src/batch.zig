@@ -163,6 +163,22 @@ pub fn matches(pattern: []const u8, name: []const u8) bool {
     return pattern_index == pattern.len;
 }
 
+/// `scan.jp2` page 7 of 12 -> `scan-p007.jp2`; at least three digits, more
+/// when the page count needs them, so names sort in page order.
+pub fn pageOutputPath(allocator: std.mem.Allocator, output: []const u8, number: usize, count: usize) ![]u8 {
+    const extension = std.fs.path.extension(output);
+    const stem = output[0 .. output.len - extension.len];
+    var digits: usize = 1;
+    var remaining = count;
+    while (remaining >= 10) : (remaining /= 10) digits += 1;
+    return std.fmt.allocPrint(allocator, "{[stem]s}-p{[number]d:0>[width]}{[extension]s}", .{
+        .stem = stem,
+        .number = number,
+        .width = @max(digits, 3),
+        .extension = extension,
+    });
+}
+
 pub fn replaceExtension(
     allocator: std.mem.Allocator,
     path: []const u8,

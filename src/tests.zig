@@ -6942,6 +6942,79 @@ test "TIFF JPEG tags and streams fail closed" {
     }
 }
 
+test "TIFF pages are found along the whole IFD chain" {
+    const allocator = std.testing.allocator;
+    // Only the first IFD was read, so tiff-to-jp2 silently dropped every
+    // later page of a multi-page TIFF. pageOffsets walks the chain and
+    // parsePage reads any page. Pillow: RGB 5x4, gray 4x3, RGBA 3x2, with
+    // IFDs at 8, 216, and 360 and next-IFD pointers at 130, 326, and 494.
+    const valid = @embedFile("testdata/pillow-tiff-3pages.tif");
+    const offsets = try tiff.pageOffsets(allocator, valid);
+    defer allocator.free(offsets);
+    try std.testing.expectEqualSlices(usize, &.{ 8, 216, 360 }, offsets);
+
+    var first = try tiff.parsePage(allocator, valid, offsets[0]);
+    defer first.deinit();
+    try std.testing.expectEqual(@as(usize, 5), first.rgb.width);
+    for (0..20) |pixel| try std.testing.expectEqualSlices(u16, &.{ 200, 10, 20 }, first.rgb.samples[pixel * 3 ..][0..3]);
+    var second = try tiff.parsePage(allocator, valid, offsets[1]);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(usize, 4), second.grayscale.width);
+    for (second.grayscale.samples, 0..) |sample, index| try std.testing.expectEqual(@as(u16, @intCast(index * 20)), sample);
+    var third = try tiff.parsePage(allocator, valid, offsets[2]);
+    defer third.deinit();
+    try std.testing.expectEqual(color.AlphaMode.unassociated, third.alpha.alpha_mode);
+    try std.testing.expectEqualSlices(u16, &.{ 1, 2, 3, 128 }, third.alpha.samples[0..4]);
+    // parse() still reads the first IFD.
+    var parsed = try tiff.parse(allocator, valid);
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(u16, first.rgb.samples, parsed.rgb.samples);
+
+    // A reduced-resolution copy (NewSubfileType bit 0, or SubfileType 2)
+    // is not a page. The second IFD's Compression entry, which says 1 like
+    // the default, is repurposed.
+    const reduced_tags = [_][2]u16{ .{ 254, 1 }, .{ 255, 2 } };
+    for (reduced_tags) |tag_value| {
+        const reduced = try allocator.dupe(u8, valid);
+        defer allocator.free(reduced);
+        var entry: usize = 216 + 2;
+        while (readU16LeTest(reduced, entry) != 259) entry += 12;
+        writeU16LeTest(reduced, entry, tag_value[0]);
+        writeU16LeTest(reduced, entry + 8, tag_value[1]);
+        const pages = try tiff.pageOffsets(allocator, reduced);
+        defer allocator.free(pages);
+        try std.testing.expectEqualSlices(usize, &.{ 8, 360 }, pages);
+    }
+
+    // A chain that loops back, or points past the file, fails closed
+    // rather than losing the pages after the break.
+    for ([_]u32{ 8, 216, 100_000, 543 }) |next| {
+        errdefer std.debug.print("next IFD {d} accepted\n", .{next});
+        const broken = try allocator.dupe(u8, valid);
+        defer allocator.free(broken);
+        writeU32LeTest(broken, 494, next);
+        try std.testing.expectError(tiff.TiffError.InvalidIfd, tiff.pageOffsets(allocator, broken));
+    }
+}
+
+test "multi-page output names keep page order" {
+    const allocator = std.testing.allocator;
+    const Case = struct { output: []const u8, number: usize, count: usize, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .output = "scan.jp2", .number = 7, .count = 12, .expected = "scan-p007.jp2" },
+        .{ .output = "out/scan.JP2", .number = 12, .count = 12, .expected = "out/scan-p012.JP2" },
+        // More than 999 pages widen every number alike.
+        .{ .output = "big.jp2", .number = 42, .count = 1500, .expected = "big-p0042.jp2" },
+        // A dot in a directory name is not an extension.
+        .{ .output = "a.b/c", .number = 1, .count = 2, .expected = "a.b/c-p001" },
+    };
+    for (cases) |case| {
+        const path = try batch.pageOutputPath(allocator, case.output, case.number, case.count);
+        defer allocator.free(path);
+        try std.testing.expectEqualStrings(case.expected, path);
+    }
+}
+
 test "TIFF strip decoders match the TIFF 6.0 definitions" {
     // PackBits: the example stream from TIFF 6.0 section 9.
     const packbits_input = [_]u8{ 0xfe, 0xaa, 0x02, 0x80, 0x00, 0x2a, 0xfd, 0xaa, 0x03, 0x80, 0x00, 0x2a, 0x22, 0xf7, 0xaa };

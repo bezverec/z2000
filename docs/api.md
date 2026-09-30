@@ -57,7 +57,11 @@ zig build run -- *.j2c .zraw [j2k-to-zraw options]
 its Git-derived build number and revision. It does not describe the internal
 legacy `.z2000` payload version or JPEG2000 marker/profile syntax.
 
-The TIFF module exposes `read`/`parse` for tagged RGB, grayscale, or alpha
+`tiff.pageOffsets(allocator, bytes)` walks the whole IFD chain (failing
+closed on a loop or an out-of-file pointer) and returns the offsets of the
+full-resolution pages; `tiff.parsePage(allocator, bytes, offset)` reads one,
+and `tiff.readBytes` loads a file under the reader's size limit. `parse`
+still reads the first IFD. The TIFF module exposes `read`/`parse` for tagged RGB, grayscale, or alpha
 dispatch over uncompressed, LZW, Deflate (8/32946), PackBits, and baseline JPEG
 (compression 7, through `jpeg.decodeTiffChunk`) strips or tiles, chunky or in
 separate component planes

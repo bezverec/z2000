@@ -169,6 +169,12 @@ pub const DecodedImage = union(enum) {
     }
 };
 
+/// The whole file, under the same size limit `read` applies; pair it with
+/// `pageOffsets` and `parsePage` for multi-page input.
+pub fn readBytes(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_size));
+}
+
 pub fn read(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !DecodedImage {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
         io,
@@ -1171,7 +1177,72 @@ const ParsedChunkyImage = struct {
 };
 
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !DecodedImage {
-    const parsed = try parseChunky(allocator, bytes);
+    return decodedImage(allocator, try parseChunky(allocator, bytes));
+}
+
+/// Reads the page whose IFD starts at `ifd_offset`, one of the offsets
+/// `pageOffsets` returns.
+pub fn parsePage(allocator: std.mem.Allocator, bytes: []const u8, ifd_offset: usize) !DecodedImage {
+    const endian = try headerEndian(bytes);
+    return decodedImage(allocator, try parseChunkyAt(allocator, bytes, endian, ifd_offset));
+}
+
+const max_ifds = 65536;
+
+/// The IFD offsets of the pages of a TIFF, in file order. The whole IFD
+/// chain is walked, so a chain that loops or points outside the file fails
+/// closed rather than dropping the pages after the break. IFDs holding a
+/// reduced-resolution copy (a thumbnail or pyramid level) or a transparency
+/// mask, marked by NewSubfileType bits 0 and 2 or SubfileType 2, are not
+/// pages and are skipped, as viewers skip them.
+pub fn pageOffsets(allocator: std.mem.Allocator, bytes: []const u8) ![]usize {
+    const endian = try headerEndian(bytes);
+    var pages: std.ArrayList(usize) = .empty;
+    errdefer pages.deinit(allocator);
+    var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    defer seen.deinit(allocator);
+
+    var offset = @as(usize, try readU32(bytes, 4, endian));
+    if (offset == 0) return TiffError.InvalidIfd;
+    while (offset != 0) {
+        if (seen.count() >= max_ifds) return TiffError.InvalidIfd;
+        const entry = try seen.getOrPut(allocator, offset);
+        if (entry.found_existing) return TiffError.InvalidIfd;
+        if (offset > bytes.len or bytes.len - offset < 2) return TiffError.InvalidIfd;
+        const entry_count = try readU16(bytes, offset, endian);
+        const entries_offset = offset + 2;
+        const entries_bytes = @as(usize, entry_count) * 12;
+        if (bytes.len - entries_offset < entries_bytes + 4) return TiffError.InvalidIfd;
+
+        var reduced = false;
+        for (0..entry_count) |index| {
+            const ifd_entry = try readEntry(bytes, entries_offset + index * 12, endian);
+            switch (ifd_entry.tag) {
+                254 => reduced = reduced or (try readSingleU32(bytes, endian, ifd_entry)) & 0b101 != 0,
+                255 => reduced = reduced or (try readSingleU32(bytes, endian, ifd_entry)) == 2,
+                else => {},
+            }
+        }
+        if (!reduced) try pages.append(allocator, offset);
+        offset = try readU32(bytes, entries_offset + entries_bytes, endian);
+    }
+    if (pages.items.len == 0) return TiffError.MissingRequiredTag;
+    return pages.toOwnedSlice(allocator);
+}
+
+fn headerEndian(bytes: []const u8) !Endian {
+    if (bytes.len < 8) return TiffError.InvalidHeader;
+    const endian: Endian = if (std.mem.eql(u8, bytes[0..2], "II"))
+        .little
+    else if (std.mem.eql(u8, bytes[0..2], "MM"))
+        .big
+    else
+        return TiffError.InvalidHeader;
+    if (try readU16(bytes, 2, endian) != 42) return TiffError.InvalidHeader;
+    return endian;
+}
+
+fn decodedImage(allocator: std.mem.Allocator, parsed: ParsedChunkyImage) DecodedImage {
     if (parsed.alpha_mode) |alpha_mode| {
         return .{ .alpha = .{
             .allocator = allocator,
@@ -1268,18 +1339,11 @@ pub fn parseAlpha(allocator: std.mem.Allocator, bytes: []const u8) !AlphaImage {
 }
 
 fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyImage {
-    if (bytes.len < 8) return TiffError.InvalidHeader;
+    const endian = try headerEndian(bytes);
+    return parseChunkyAt(allocator, bytes, endian, @as(usize, try readU32(bytes, 4, endian)));
+}
 
-    const endian: Endian = if (std.mem.eql(u8, bytes[0..2], "II"))
-        .little
-    else if (std.mem.eql(u8, bytes[0..2], "MM"))
-        .big
-    else
-        return TiffError.InvalidHeader;
-
-    if (try readU16(bytes, 2, endian) != 42) return TiffError.InvalidHeader;
-
-    const ifd_offset = @as(usize, try readU32(bytes, 4, endian));
+fn parseChunkyAt(allocator: std.mem.Allocator, bytes: []const u8, endian: Endian, ifd_offset: usize) !ParsedChunkyImage {
     if (ifd_offset > bytes.len - 2) return TiffError.InvalidIfd;
 
     const entry_count = try readU16(bytes, ifd_offset, endian);

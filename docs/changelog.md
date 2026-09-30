@@ -5,6 +5,34 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Page TIFF Input
+
+- `tiff-to-jp2` read the first IFD and ignored the rest, so a multi-page
+  TIFF lost every page after the first without a word, although the README
+  said multi-page input failed closed.
+- `tiff.pageOffsets` walks the whole IFD chain and lists the full-resolution
+  pages; IFDs marked as reduced-resolution copies (NewSubfileType bit 0,
+  SubfileType 2) or transparency masks (bit 2) are skipped, as viewers skip
+  them. A chain that loops or points outside the file fails closed rather
+  than losing the pages after the break; this now also applies to one-page
+  files whose next-IFD pointer is corrupt.
+- A JP2 holds one image, so a multi-page TIFF is written as one JP2 per
+  page, `out-p001.jp2`, `out-p002.jp2`, ... (more digits past 999 pages),
+  and `--page N` writes only that page to the output. One-page TIFFs, the
+  library `parse`, and batch naming for them are unchanged; batch
+  conversion splits multi-page inputs the same way. `tiff-info` reports the
+  page count.
+- Measured: ImageMagick 3-page (RGB of two sizes, gray) and 2-page
+  big-endian Zip files, a 12-page Pillow LZW file mixing RGB, gray, and
+  RGBA, and an ImageMagick pyramid TIFF (whose levels ImageMagick marks as
+  pages, so all three are written) convert page by page losslessly.
+- Tests cover the page offsets and contents of a Pillow 3-page fixture,
+  `parse` still reading the first IFD, reduced-resolution IFDs under both
+  tags, a chain looping to the first or second IFD or pointing past the
+  file, and the output names. 1000 mutated multi-page TIFFs through
+  `tiff-to-jp2` and `tiff-info` on a safety-checked build all end in an
+  error or a conversion (387 of them multi-page).
+
 ### JPEG-Compressed TIFF Input
 
 - Compression 7 (TIFF Technical Note 2) was refused. Each strip or tile is

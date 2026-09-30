@@ -292,7 +292,12 @@ fn tiffInfoCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
         return error.InvalidCommand;
     }
 
-    var decoded = try tiff.read(io, allocator, args[0]);
+    const bytes = try tiff.readBytes(io, allocator, args[0]);
+    defer allocator.free(bytes);
+    const pages = try tiff.pageOffsets(allocator, bytes);
+    defer allocator.free(pages);
+    if (pages.len != 1) std.debug.print("TIFF pages: {}; page 1:\n", .{pages.len});
+    var decoded = try tiff.parsePage(allocator, bytes, pages[0]);
     defer decoded.deinit();
 
     switch (decoded) {
@@ -445,12 +450,19 @@ fn rasterToJp2Command(
     var tile_parts_explicit = false;
     var mct_explicit = false;
     var show_timings = false;
+    var page: ?usize = null;
     var index: usize = 2;
     while (index < args.len) {
         if (std.mem.eql(u8, args[index], "--levels")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.levels = try std.fmt.parseInt(u8, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--page")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            if (input != .tiff) return error.InvalidValue;
+            page = try std.fmt.parseInt(usize, args[index], 10);
+            if (page.? == 0) return error.InvalidValue;
         } else if (std.mem.eql(u8, args[index], "--block")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -594,10 +606,17 @@ fn rasterToJp2Command(
         options.tile_part_divisions = null;
     }
 
-    var command_timings = RasterToJp2Timings{};
+    const conversion = RasterConversion{
+        .input = input,
+        .options = options,
+        .mct_explicit = mct_explicit,
+        .show_timings = show_timings,
+    };
+    if (input == .tiff) return tiffPagesToJp2(io, allocator, args[0], args[1], page, conversion);
+
     const read_start = monotonicNs();
     var decoded: tiff.DecodedImage = switch (input) {
-        .tiff => try tiff.read(io, allocator, args[0]),
+        .tiff => unreachable,
         .bmp => .{ .rgb = try bmp.read(io, allocator, args[0]) },
         .png => try png.read(io, allocator, args[0]),
         .jpeg => try jpeg.readPreservingMetadata(io, allocator, args[0]),
@@ -605,7 +624,90 @@ fn rasterToJp2Command(
         .openexr => .{ .rgb = try openexr.read(io, allocator, args[0]) },
     };
     defer decoded.deinit();
-    command_timings.input_read_ns = elapsedNs(read_start);
+    try encodeRasterToJp2(io, allocator, decoded, args[0], args[1], conversion, elapsedNs(read_start));
+}
+
+const RasterConversion = struct {
+    input: RasterInput,
+    options: codestream.LosslessOptions,
+    mct_explicit: bool,
+    show_timings: bool,
+};
+
+/// A TIFF may hold several pages, and a JP2 holds one image. With `--page N`
+/// only that page is written, to `output`; otherwise a one-page TIFF goes to
+/// `output` and every page of a longer one to its own file, `output` with
+/// `-p001`, `-p002`, ... before the extension. Reduced-resolution IFDs are
+/// not pages (`tiff.pageOffsets`).
+fn tiffPagesToJp2(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    output: []const u8,
+    page: ?usize,
+    conversion: RasterConversion,
+) !void {
+    const read_start = monotonicNs();
+    const bytes = try tiff.readBytes(io, allocator, input_path);
+    defer allocator.free(bytes);
+    const pages = try tiff.pageOffsets(allocator, bytes);
+    defer allocator.free(pages);
+    const file_read_ns = elapsedNs(read_start);
+
+    if (page) |number| {
+        if (number > pages.len) {
+            std.debug.print("{s} has {} page{s}; --page {} is out of range\n", .{
+                input_path,
+                pages.len,
+                if (pages.len == 1) "" else "s",
+                number,
+            });
+            return error.InvalidValue;
+        }
+        return tiffPageToJp2(io, allocator, bytes, pages[number - 1], input_path, output, conversion, file_read_ns);
+    }
+    if (pages.len == 1) {
+        return tiffPageToJp2(io, allocator, bytes, pages[0], input_path, output, conversion, file_read_ns);
+    }
+    for (pages, 1..) |offset, number| {
+        const page_output = try batch.pageOutputPath(allocator, output, number, pages.len);
+        defer allocator.free(page_output);
+        try tiffPageToJp2(io, allocator, bytes, offset, input_path, page_output, conversion, if (number == 1) file_read_ns else 0);
+    }
+    std.debug.print("wrote {} pages of {s}\n", .{ pages.len, input_path });
+}
+
+fn tiffPageToJp2(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    ifd_offset: usize,
+    input_path: []const u8,
+    output: []const u8,
+    conversion: RasterConversion,
+    file_read_ns: u64,
+) !void {
+    const parse_start = monotonicNs();
+    var decoded = try tiff.parsePage(allocator, bytes, ifd_offset);
+    defer decoded.deinit();
+    try encodeRasterToJp2(io, allocator, decoded, input_path, output, conversion, file_read_ns + elapsedNs(parse_start));
+}
+
+fn encodeRasterToJp2(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    decoded: tiff.DecodedImage,
+    input_path: []const u8,
+    output: []const u8,
+    conversion: RasterConversion,
+    input_read_ns: u64,
+) !void {
+    var options = conversion.options;
+    const mct_explicit = conversion.mct_explicit;
+    const show_timings = conversion.show_timings;
+    const input = conversion.input;
+    var command_timings = RasterToJp2Timings{};
+    command_timings.input_read_ns = input_read_ns;
 
     var encode_timings = codestream.EncodeTimings{};
     var width: usize = 0;
@@ -704,7 +806,7 @@ fn rasterToJp2Command(
     const output_bytes = metadata_wrapped orelse wrapped;
 
     const write_start = monotonicNs();
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = output_bytes });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = output, .data = output_bytes });
     command_timings.write_ns = elapsedNs(write_start);
     command_timings.total_ns = command_timings.input_read_ns +
         command_timings.codestream_ns +
@@ -714,8 +816,8 @@ fn rasterToJp2Command(
     std.debug.print(
         "wrote JP2 {s} -> {s} ({}x{}, {} component{s}, {} bits/component, levels {}, tile {}x{}, block {}x{}, progression {s}, POC records {} ({s}), layers {}, MCT {s}, transform {s}, QCD {s}/guard {}, tile-parts {s}, TLM {}, PPM {}, PPT {}, T1 {s}, threads {}, debug sidecar {})\n",
         .{
-            args[0],
-            args[1],
+            input_path,
+            output,
             width,
             height,
             components,
@@ -1797,7 +1899,7 @@ fn usage() void {
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
         \\  z2000 dng-info <input.dng>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL|LRCP|RLCP|PCRL|CPRL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--page N] [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL|LRCP|RLCP|PCRL|CPRL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
         \\  z2000 bmp-to-jp2 <input.bmp> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 png-to-jp2 <input.png> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jpeg-to-jp2 <input.jpg> <output.jp2> [tiff-to-jp2 options]
@@ -1816,6 +1918,7 @@ fn usage() void {
         \\  Raw PGX diagnostics write one selected codestream component; --component defaults to 0 and --pgx-order defaults to ML.
         \\  ZRAW diagnostics preserve every native component, signedness, precision, sampling geometry, and origin in canonical big-endian form.
         \\  .z2000 is an educational codestream, not ISO JPEG2000 yet.
+        \\  A multi-page TIFF writes one JP2 per page (out-p001.jp2, out-p002.jp2, ...); --page N (from 1) writes only that page to the given output.
         \\  tiff-to-jp2 writes the selected checked progression profile; --debug-temp-sidecar adds the legacy BP8 COM payload for diagnostics.
         \\  --poc uses quoted ISO records: RSpoc,CSpoc,LYEpoc,REpoc,CEpoc,ORDER;... and supports tile-parts none or compatible R/L/C/P; --poc-location defaults to main.
         \\

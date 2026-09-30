@@ -506,6 +506,16 @@ Boolean marker and style options also accept a **--no-...** form.
 - **--predictable-termination**: Enable ER-TERM predictable termination.
 - **--segmentation-symbols**: Append cleanup-pass segmentation symbols.
 
+### Multi-Page TIFF
+
+- A TIFF with several pages is written as one JP2 per page, named after the
+  output with `-p001`, `-p002`, ... before the extension (four or more
+  digits past 999 pages). A one-page TIFF is written to the output as given.
+  Batch conversion splits multi-page inputs the same way.
+- **--page N**: Write only page N (counting from 1) to the output. TIFF input
+  only.
+- `tiff-info` reports the page count of a multi-page file.
+
 ### Runtime And Diagnostics
 
 - **--threads N**: Worker count. The default already uses all logical CPU
@@ -576,7 +586,9 @@ restored by the JP2-to-TIFF command.
 
 The production `tiff-to-jp2` path is deliberately narrow:
 
-- one TIFF image / first IFD;
+- every page of a multi-page TIFF, one JP2 each (`out-p001.jp2`, ...), or
+  the single page `--page N` selects; reduced-resolution IFDs (thumbnails,
+  pyramid levels marked by NewSubfileType) are not pages;
 - RGB, BlackIsZero grayscale, or WhiteIsZero grayscale photometric
   interpretation, optionally with one final associated or unassociated alpha
   sample;
@@ -631,7 +643,8 @@ continues to emit zero-origin images.
 
 Unsupported compression, palette color, CMYK,
 floating-point samples, unspecified or multiple auxiliary channels, mixed bit
-depth, signed sample formats, and multipage handling fail closed.
+depth, signed sample formats, and a broken IFD chain (a loop, or a next-IFD
+pointer outside the file) fail closed.
 
 ## Documentation
 
