@@ -2858,6 +2858,13 @@ test "shell-expanded batch plan accepts unquoted explicit inputs" {
         batch.BatchError.OutputCollision,
         batch.buildExplicitPlan(allocator, &collision, ".jp2"),
     );
+    // Scan.tif and scan.tiff can coexist, but Scan.jp2 and scan.jp2 are one
+    // file on Windows and macOS; output names are compared ignoring case.
+    const case_collision = [_][]const u8{ "Scan.tif", "scan.tiff" };
+    try std.testing.expectError(
+        batch.BatchError.OutputCollision,
+        batch.buildExplicitPlan(allocator, &case_collision, ".jp2"),
+    );
     try std.testing.expectError(
         batch.BatchError.InvalidPattern,
         batch.buildExplicitPlan(allocator, &.{"*.tif"}, ".jp2"),

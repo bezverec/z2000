@@ -344,8 +344,11 @@ and must have a concrete parent directory. The target is a bare extension.
 Quotes are not part of the syntax: PowerShell passes the pattern to z2000 for
 internal expansion, while shells such as Bash may expand it to an explicit
 input list that z2000 accepts as the same batch. All normal conversion options
-apply to every match. Output-name collisions are rejected before conversion;
-existing target files retain the single-file overwrite behavior.
+apply to every match. Output-name collisions, including the per-page names of
+multi-page TIFFs, are rejected before conversion; names are compared ignoring
+case, as Windows and macOS file systems do, so `Scan.tif` and `scan.tiff`
+collide on `scan.jp2`. Existing target files retain the single-file overwrite
+behavior.
 
 Convert TIFF to a rate-layered JP2 (the `--rates` list sets the layer count;
 the final layer always carries the complete stream, so a trailing `1` makes

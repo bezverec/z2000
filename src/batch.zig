@@ -26,6 +26,38 @@ pub const Plan = struct {
     }
 };
 
+/// Output names a batch has claimed, compared ignoring ASCII case:
+/// `Scan.tif` and `scan.tiff` may sit side by side, yet `Scan.jp2` and
+/// `scan.jp2` are one file on Windows and macOS. On a case-sensitive file
+/// system this refuses some batches that would have been safe, which is the
+/// side to err on.
+const OutputNames = struct {
+    allocator: std.mem.Allocator,
+    owners: std.StringHashMapUnmanaged(usize) = .empty,
+
+    fn deinit(self: *OutputNames) void {
+        var keys = self.owners.keyIterator();
+        while (keys.next()) |key| self.allocator.free(key.*);
+        self.owners.deinit(self.allocator);
+    }
+
+    /// Claims `path` for item `owner`, or returns the item that already
+    /// holds it.
+    fn claim(self: *OutputNames, path: []const u8, owner: usize) !?usize {
+        const key = try std.ascii.allocLowerString(self.allocator, path);
+        const entry = self.owners.getOrPut(self.allocator, key) catch |err| {
+            self.allocator.free(key);
+            return err;
+        };
+        if (entry.found_existing) {
+            self.allocator.free(key);
+            return entry.value_ptr.*;
+        }
+        entry.value_ptr.* = owner;
+        return null;
+    }
+};
+
 /// Builds a deterministic, non-recursive conversion plan for a filename glob.
 /// Only the basename may contain `*` and `?`; the directory itself must be a
 /// concrete path. Matching is ASCII case-insensitive so `*.tif` also finds
@@ -57,7 +89,7 @@ pub fn buildPlan(
         }
         items.deinit(allocator);
     }
-    var outputs: std.StringHashMap(void) = .init(allocator);
+    var outputs: OutputNames = .{ .allocator = allocator };
     defer outputs.deinit();
 
     while (try iterator.next(io)) |entry| {
@@ -69,8 +101,7 @@ pub fn buildPlan(
         errdefer allocator.free(input_path);
         const output_path = try replaceExtension(allocator, input_path, target_extension);
         errdefer allocator.free(output_path);
-        const output = try outputs.getOrPut(output_path);
-        if (output.found_existing) return BatchError.OutputCollision;
+        if (try outputs.claim(output_path, items.items.len) != null) return BatchError.OutputCollision;
         try items.append(allocator, .{
             .input_path = input_path,
             .output_path = output_path,
@@ -102,7 +133,7 @@ pub fn buildExplicitPlan(
         }
         items.deinit(allocator);
     }
-    var outputs: std.StringHashMap(void) = .init(allocator);
+    var outputs: OutputNames = .{ .allocator = allocator };
     defer outputs.deinit();
 
     for (input_paths) |path| {
@@ -111,8 +142,7 @@ pub fn buildExplicitPlan(
         errdefer allocator.free(input_path);
         const output_path = try replaceExtension(allocator, input_path, target_extension);
         errdefer allocator.free(output_path);
-        const output = try outputs.getOrPut(output_path);
-        if (output.found_existing) return BatchError.OutputCollision;
+        if (try outputs.claim(output_path, items.items.len) != null) return BatchError.OutputCollision;
         try items.append(allocator, .{
             .input_path = input_path,
             .output_path = output_path,
@@ -196,21 +226,16 @@ pub const PageCollision = struct {
 /// the plan's one-output-per-input check cannot see: `scan.tif` with two
 /// pages and a separate `scan-p001.tif` would both write `scan-p001.jp2`,
 /// and the later one would overwrite the earlier. Given every item's page
-/// count, finds the first name two outputs share. Names are compared
-/// ignoring ASCII case, as Windows and macOS file systems compare them.
+/// count, finds the first name two outputs share, compared as
+/// `OutputNames` compares them.
 pub fn findPageOutputCollision(
     allocator: std.mem.Allocator,
     items: []const Item,
     page_counts: []const usize,
 ) !?PageCollision {
     std.debug.assert(items.len == page_counts.len);
-    var keys: std.ArrayList([]u8) = .empty;
-    defer {
-        for (keys.items) |key| allocator.free(key);
-        keys.deinit(allocator);
-    }
-    var owners: std.StringHashMapUnmanaged(usize) = .empty;
-    defer owners.deinit(allocator);
+    var outputs: OutputNames = .{ .allocator = allocator };
+    defer outputs.deinit();
 
     for (items, page_counts, 0..) |item, pages, index| {
         for (1..pages + 1) |page| {
@@ -219,14 +244,9 @@ pub fn findPageOutputCollision(
             else
                 try pageOutputPath(allocator, item.output_path, page, pages);
             errdefer allocator.free(path);
-            const key = try std.ascii.allocLowerString(allocator, path);
-            errdefer allocator.free(key);
-            try keys.append(allocator, key);
-            const entry = try owners.getOrPut(allocator, key);
-            if (entry.found_existing) {
-                return .{ .first = entry.value_ptr.*, .second = index, .output = path };
+            if (try outputs.claim(path, index)) |first| {
+                return .{ .first = first, .second = index, .output = path };
             }
-            entry.value_ptr.* = index;
             allocator.free(path);
         }
     }

@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Batch Output Names Compared Ignoring Case
+
+- The batch plan compared output names exactly, so `Scan.tif` and
+  `scan.tiff`, which can sit side by side, were planned to `Scan.jp2` and
+  `scan.jp2`: one file on Windows and macOS, so one conversion overwrote the
+  other. Input matching already ignored case; the page-collision check from
+  the previous entry did too.
+- One `OutputNames` set in `batch.zig` now serves the glob plan, the
+  shell-expanded plan, and the page check, all ignoring ASCII case. On a
+  case-sensitive file system this refuses a few batches that would have
+  been safe, which is the side to err on.
+- A test plans `Scan.tif` with `scan.tiff` and expects `OutputCollision`;
+  it fails on the previous commit. Through the CLI the batch stops with
+  nothing written.
+
 ### Batch Refuses Colliding Page Outputs
 
 - Splitting multi-page TIFFs could make two outputs of one batch share a
