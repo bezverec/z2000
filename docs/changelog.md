@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Batch Refuses Colliding Page Outputs
+
+- Splitting multi-page TIFFs could make two outputs of one batch share a
+  name: a two-page `scan.tif` writes `scan-p001.jp2`, as does a separate
+  `scan-p001.tif`, and the later conversion overwrote the earlier one. The
+  plan's collision check sees one output per input and could not catch it.
+- Before converting anything, a TIFF batch without `--page` now counts
+  every input's pages with `tiff.filePageCount`, which reads only the
+  header and the IFDs (positional reads, not the whole file), and
+  `batch.findPageOutputCollision` checks the full set of output names,
+  ignoring ASCII case as Windows and macOS file systems do. A collision
+  stops the batch with both inputs named and nothing written; an input
+  whose pages cannot be read stops it the same way, where before the
+  batch stopped at that file after converting the ones before it.
+- The IFD walk is shared: `pageOffsets` and `filePageCount` run the same
+  code over bytes in memory or a file, so loops and out-of-file pointers
+  fail closed in both.
+- Tests cover a collision across case, one-page inputs keeping their plan
+  names, doubly suffixed names from a multi-page input named like a page,
+  and the file-based page count with a looping and a truncated chain.
+  Measured through the CLI on glob and shell-expanded batches.
+
 ### Multi-Page TIFF Input
 
 - `tiff-to-jp2` read the first IFD and ignored the rest, so a multi-page

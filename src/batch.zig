@@ -179,6 +179,60 @@ pub fn pageOutputPath(allocator: std.mem.Allocator, output: []const u8, number: 
     });
 }
 
+pub const PageCollision = struct {
+    /// Indices into the plan's items, `first < second`.
+    first: usize,
+    second: usize,
+    /// The shared output name, as the second item would write it.
+    output: []u8,
+
+    pub fn deinit(self: *PageCollision, allocator: std.mem.Allocator) void {
+        allocator.free(self.output);
+        self.* = undefined;
+    }
+};
+
+/// A multi-page TIFF writes `name-p001.jp2` and on (`pageOutputPath`), which
+/// the plan's one-output-per-input check cannot see: `scan.tif` with two
+/// pages and a separate `scan-p001.tif` would both write `scan-p001.jp2`,
+/// and the later one would overwrite the earlier. Given every item's page
+/// count, finds the first name two outputs share. Names are compared
+/// ignoring ASCII case, as Windows and macOS file systems compare them.
+pub fn findPageOutputCollision(
+    allocator: std.mem.Allocator,
+    items: []const Item,
+    page_counts: []const usize,
+) !?PageCollision {
+    std.debug.assert(items.len == page_counts.len);
+    var keys: std.ArrayList([]u8) = .empty;
+    defer {
+        for (keys.items) |key| allocator.free(key);
+        keys.deinit(allocator);
+    }
+    var owners: std.StringHashMapUnmanaged(usize) = .empty;
+    defer owners.deinit(allocator);
+
+    for (items, page_counts, 0..) |item, pages, index| {
+        for (1..pages + 1) |page| {
+            const path = if (pages == 1)
+                try allocator.dupe(u8, item.output_path)
+            else
+                try pageOutputPath(allocator, item.output_path, page, pages);
+            errdefer allocator.free(path);
+            const key = try std.ascii.allocLowerString(allocator, path);
+            errdefer allocator.free(key);
+            try keys.append(allocator, key);
+            const entry = try owners.getOrPut(allocator, key);
+            if (entry.found_existing) {
+                return .{ .first = entry.value_ptr.*, .second = index, .output = path };
+            }
+            entry.value_ptr.* = index;
+            allocator.free(path);
+        }
+    }
+    return null;
+}
+
 pub fn replaceExtension(
     allocator: std.mem.Allocator,
     path: []const u8,

@@ -1196,35 +1196,81 @@ const max_ifds = 65536;
 /// mask, marked by NewSubfileType bits 0 and 2 or SubfileType 2, are not
 /// pages and are skipped, as viewers skip them.
 pub fn pageOffsets(allocator: std.mem.Allocator, bytes: []const u8) ![]usize {
-    const endian = try headerEndian(bytes);
+    return walkPages(allocator, ByteSource{ .bytes = bytes }, bytes.len);
+}
+
+/// The number of pages `pageOffsets` would find, reading only the header and
+/// the IFDs rather than the whole file; a batch uses it to plan the names of
+/// every output before converting anything.
+pub fn filePageCount(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !usize {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const size = try file.length(io);
+    const pages = try walkPages(allocator, FileSource{ .io = io, .file = file }, size);
+    defer allocator.free(pages);
+    return pages.len;
+}
+
+const ByteSource = struct {
+    bytes: []const u8,
+
+    fn readAt(self: ByteSource, offset: u64, out: []u8) !void {
+        @memcpy(out, self.bytes[@intCast(offset)..][0..out.len]);
+    }
+};
+
+const FileSource = struct {
+    io: std.Io,
+    file: std.Io.File,
+
+    fn readAt(self: FileSource, offset: u64, out: []u8) !void {
+        if (try self.file.readPositionalAll(self.io, out, offset) != out.len) return TiffError.TruncatedData;
+    }
+};
+
+/// Walks the IFD chain of a TIFF of `size` bytes through `source`, whose
+/// `readAt` is only asked for ranges inside the file.
+fn walkPages(allocator: std.mem.Allocator, source: anytype, size: u64) ![]usize {
+    var header: [8]u8 = undefined;
+    if (size < header.len) return TiffError.InvalidHeader;
+    try source.readAt(0, &header);
+    const endian = try headerEndian(&header);
+
     var pages: std.ArrayList(usize) = .empty;
     errdefer pages.deinit(allocator);
     var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
     defer seen.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
 
-    var offset = @as(usize, try readU32(bytes, 4, endian));
+    var offset = @as(usize, try readU32(&header, 4, endian));
     if (offset == 0) return TiffError.InvalidIfd;
     while (offset != 0) {
         if (seen.count() >= max_ifds) return TiffError.InvalidIfd;
         const entry = try seen.getOrPut(allocator, offset);
         if (entry.found_existing) return TiffError.InvalidIfd;
-        if (offset > bytes.len or bytes.len - offset < 2) return TiffError.InvalidIfd;
-        const entry_count = try readU16(bytes, offset, endian);
-        const entries_offset = offset + 2;
-        const entries_bytes = @as(usize, entry_count) * 12;
-        if (bytes.len - entries_offset < entries_bytes + 4) return TiffError.InvalidIfd;
+        if (offset > size or size - offset < 2) return TiffError.InvalidIfd;
+        var count_bytes: [2]u8 = undefined;
+        try source.readAt(offset, &count_bytes);
+        const entry_count = try readU16(&count_bytes, 0, endian);
+        // The entries and the next-IFD pointer, read as one block.
+        const block_len = @as(usize, entry_count) * 12 + 4;
+        if (size - offset - 2 < block_len) return TiffError.InvalidIfd;
+        try block.resize(allocator, block_len);
+        try source.readAt(offset + 2, block.items);
 
         var reduced = false;
         for (0..entry_count) |index| {
-            const ifd_entry = try readEntry(bytes, entries_offset + index * 12, endian);
+            // Only inline single values are read, so the block is enough.
+            const ifd_entry = try readEntry(block.items, index * 12, endian);
             switch (ifd_entry.tag) {
-                254 => reduced = reduced or (try readSingleU32(bytes, endian, ifd_entry)) & 0b101 != 0,
-                255 => reduced = reduced or (try readSingleU32(bytes, endian, ifd_entry)) == 2,
+                254 => reduced = reduced or (try readSingleU32(block.items, endian, ifd_entry)) & 0b101 != 0,
+                255 => reduced = reduced or (try readSingleU32(block.items, endian, ifd_entry)) == 2,
                 else => {},
             }
         }
         if (!reduced) try pages.append(allocator, offset);
-        offset = try readU32(bytes, entries_offset + entries_bytes, endian);
+        offset = try readU32(block.items, block_len - 4, endian);
     }
     if (pages.items.len == 0) return TiffError.MissingRequiredTag;
     return pages.toOwnedSlice(allocator);

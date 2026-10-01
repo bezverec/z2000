@@ -190,6 +190,8 @@ fn executeBatchPlan(
     conversion: InferredConversion,
     options: []const []const u8,
 ) !void {
+    if (conversion == .tiff_to_jp2) try checkTiffPageOutputs(io, allocator, items, options);
+
     var file_args: std.ArrayList([]const u8) = .empty;
     defer file_args.deinit(allocator);
     try file_args.ensureTotalCapacity(allocator, options.len + 2);
@@ -213,6 +215,39 @@ fn executeBatchPlan(
         items.len,
         if (items.len == 1) "" else "s",
     });
+}
+
+/// Counts the pages of every TIFF in the plan and refuses the batch, before
+/// anything is written, when two outputs would share a name
+/// (`batch.findPageOutputCollision`). With `--page` every input writes its
+/// plan name, which the plan already checked.
+fn checkTiffPageOutputs(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    items: []const batch.Item,
+    options: []const []const u8,
+) !void {
+    for (options) |option| {
+        if (std.mem.eql(u8, option, "--page")) return;
+    }
+    const page_counts = try allocator.alloc(usize, items.len);
+    defer allocator.free(page_counts);
+    for (items, page_counts) |item, *count| {
+        count.* = tiff.filePageCount(io, allocator, item.input_path) catch |err| {
+            std.debug.print("batch: cannot read the pages of '{s}' ({t}); nothing was converted\n", .{ item.input_path, err });
+            return err;
+        };
+    }
+    var collision = (try batch.findPageOutputCollision(allocator, items, page_counts)) orelse return;
+    defer collision.deinit(allocator);
+    std.debug.print("batch: '{s}'{s} and '{s}'{s} would both write '{s}'; nothing was converted\n", .{
+        items[collision.first].input_path,
+        if (page_counts[collision.first] == 1) "" else " (a page)",
+        items[collision.second].input_path,
+        if (page_counts[collision.second] == 1) "" else " (a page)",
+        collision.output,
+    });
+    return batch.BatchError.OutputCollision;
 }
 
 fn encodeCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {

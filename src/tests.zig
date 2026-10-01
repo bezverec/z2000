@@ -7015,6 +7015,61 @@ test "multi-page output names keep page order" {
     }
 }
 
+test "batch refuses multi-page outputs that collide" {
+    const allocator = std.testing.allocator;
+    // A two-page scan.tif writes scan-p001.jp2 and scan-p002.jp2, so a
+    // scan-p001.tif beside it would be overwritten (or overwrite).
+    const names = [_][]u8{
+        try allocator.dupe(u8, "scan.tif"),
+        try allocator.dupe(u8, "scan.jp2"),
+        try allocator.dupe(u8, "SCAN-P001.tif"),
+        try allocator.dupe(u8, "SCAN-P001.jp2"),
+        try allocator.dupe(u8, "other.tif"),
+        try allocator.dupe(u8, "other.jp2"),
+    };
+    defer for (names) |name| allocator.free(name);
+    const items = [_]batch.Item{
+        .{ .input_path = names[0], .output_path = names[1] },
+        .{ .input_path = names[2], .output_path = names[3] },
+        .{ .input_path = names[4], .output_path = names[5] },
+    };
+
+    // Case is ignored, as on Windows and macOS.
+    var collision = (try batch.findPageOutputCollision(allocator, &items, &.{ 2, 1, 3 })).?;
+    defer collision.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), collision.first);
+    try std.testing.expectEqual(@as(usize, 1), collision.second);
+    try std.testing.expectEqualStrings("SCAN-P001.jp2", collision.output);
+
+    // One-page inputs keep their plan names; nothing collides then, and a
+    // multi-page input's own names never collide with each other.
+    try std.testing.expect((try batch.findPageOutputCollision(allocator, &items, &.{ 1, 1, 3 })) == null);
+    // Another multi-page input named like a page writes doubly suffixed
+    // names, which are distinct.
+    try std.testing.expect((try batch.findPageOutputCollision(allocator, &items, &.{ 2, 3, 1 })) == null);
+}
+
+test "TIFF page count reads only the IFD chain of a file" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/pages.tif", .{tmp.sub_path});
+    const valid = @embedFile("testdata/pillow-tiff-3pages.tif");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = valid });
+    try std.testing.expectEqual(@as(usize, 3), try tiff.filePageCount(io, allocator, path));
+
+    // The same chain checks as pageOffsets: a loop fails closed.
+    var looping: [valid.len]u8 = valid.*;
+    writeU32LeTest(&looping, 494, 216);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = &looping });
+    try std.testing.expectError(tiff.TiffError.InvalidIfd, tiff.filePageCount(io, allocator, path));
+    // So does a file cut inside the last IFD.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = valid[0..480] });
+    try std.testing.expectError(tiff.TiffError.InvalidIfd, tiff.filePageCount(io, allocator, path));
+}
+
 test "TIFF strip decoders match the TIFF 6.0 definitions" {
     // PackBits: the example stream from TIFF 6.0 section 9.
     const packbits_input = [_]u8{ 0xfe, 0xaa, 0x02, 0x80, 0x00, 0x2a, 0xfd, 0xaa, 0x03, 0x80, 0x00, 0x2a, 0x22, 0xf7, 0xaa };

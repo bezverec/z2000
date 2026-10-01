@@ -511,7 +511,10 @@ Boolean marker and style options also accept a **--no-...** form.
 - A TIFF with several pages is written as one JP2 per page, named after the
   output with `-p001`, `-p002`, ... before the extension (four or more
   digits past 999 pages). A one-page TIFF is written to the output as given.
-  Batch conversion splits multi-page inputs the same way.
+  Batch conversion splits multi-page inputs the same way, and first counts
+  every input's pages: if two outputs would share a name (`scan.tif` with
+  two pages beside `scan-p001.tif`, compared ignoring case), it stops
+  before writing anything and names both inputs.
 - **--page N**: Write only page N (counting from 1) to the output. TIFF input
   only.
 - `tiff-info` reports the page count of a multi-page file.
