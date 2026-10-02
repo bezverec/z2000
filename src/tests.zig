@@ -2830,6 +2830,18 @@ test "batch plan sorts matches derives targets and rejects collisions" {
         batch.BatchError.OutputCollision,
         batch.buildPlan(io, allocator, collision_pattern, ".jp2"),
     );
+    // Directory order decides which input comes first; both are named.
+    var report: batch.PlanCollision = .{};
+    defer report.deinit();
+    try std.testing.expectError(
+        batch.BatchError.OutputCollision,
+        batch.buildPlanReporting(io, allocator, collision_pattern, ".jp2", &report),
+    );
+    const first_name = std.fs.path.basename(report.first_input);
+    const second_name = std.fs.path.basename(report.second_input);
+    try std.testing.expect((std.mem.eql(u8, first_name, "a.tif") and std.mem.eql(u8, second_name, "a.tiff")) or
+        (std.mem.eql(u8, first_name, "a.tiff") and std.mem.eql(u8, second_name, "a.tif")));
+    try std.testing.expectEqualStrings("a.jp2", std.fs.path.basename(report.output));
     try std.testing.expectError(
         batch.BatchError.InvalidTargetExtension,
         batch.buildPlan(io, allocator, tif_pattern, "jp2"),
@@ -2865,6 +2877,16 @@ test "shell-expanded batch plan accepts unquoted explicit inputs" {
         batch.BatchError.OutputCollision,
         batch.buildExplicitPlan(allocator, &case_collision, ".jp2"),
     );
+    // The refusal names both inputs and the name they share.
+    var report: batch.PlanCollision = .{};
+    defer report.deinit();
+    try std.testing.expectError(
+        batch.BatchError.OutputCollision,
+        batch.buildExplicitPlanReporting(allocator, &case_collision, ".jp2", &report),
+    );
+    try std.testing.expectEqualStrings("Scan.tif", report.first_input);
+    try std.testing.expectEqualStrings("scan.tiff", report.second_input);
+    try std.testing.expectEqualStrings("scan.jp2", report.output);
     try std.testing.expectError(
         batch.BatchError.InvalidPattern,
         batch.buildExplicitPlan(allocator, &.{"*.tif"}, ".jp2"),

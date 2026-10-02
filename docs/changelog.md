@@ -19,6 +19,13 @@ entries are grouped by development milestone rather than semantic version.
 - A test plans `Scan.tif` with `scan.tiff` and expects `OutputCollision`;
   it fails on the previous commit. Through the CLI the batch stops with
   nothing written.
+- The refusal now names both inputs and the shared output, in the same
+  words as the multi-page check (`batch: 'Scan.tif' and 'scan.tiff' would
+  both write 'scan.jp2'; nothing was converted`), instead of "multiple
+  inputs map to the same target extension". `buildPlanReporting` and
+  `buildExplicitPlanReporting` fill a `PlanCollision`; `buildPlan` and
+  `buildExplicitPlan` keep their signatures. Tests check the names for the
+  shell-expanded and the glob plan.
 
 ### Batch Refuses Colliding Page Outputs
 

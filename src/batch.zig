@@ -58,6 +58,45 @@ const OutputNames = struct {
     }
 };
 
+/// Which two inputs a plan refused for sharing an output name; filled in
+/// when planning fails with `OutputCollision`, so the message can name them.
+pub const PlanCollision = struct {
+    allocator: ?std.mem.Allocator = null,
+    first_input: []u8 = &.{},
+    second_input: []u8 = &.{},
+    /// The shared name, as the second input would write it.
+    output: []u8 = &.{},
+
+    pub fn deinit(self: *PlanCollision) void {
+        if (self.allocator) |allocator| {
+            allocator.free(self.first_input);
+            allocator.free(self.second_input);
+            allocator.free(self.output);
+        }
+        self.* = .{};
+    }
+
+    fn record(
+        self: *PlanCollision,
+        allocator: std.mem.Allocator,
+        first_input: []const u8,
+        second_input: []const u8,
+        output: []const u8,
+    ) !void {
+        self.deinit();
+        const first = try allocator.dupe(u8, first_input);
+        errdefer allocator.free(first);
+        const second = try allocator.dupe(u8, second_input);
+        errdefer allocator.free(second);
+        self.* = .{
+            .allocator = allocator,
+            .first_input = first,
+            .second_input = second,
+            .output = try allocator.dupe(u8, output),
+        };
+    }
+};
+
 /// Builds a deterministic, non-recursive conversion plan for a filename glob.
 /// Only the basename may contain `*` and `?`; the directory itself must be a
 /// concrete path. Matching is ASCII case-insensitive so `*.tif` also finds
@@ -67,6 +106,18 @@ pub fn buildPlan(
     allocator: std.mem.Allocator,
     pattern: []const u8,
     target_extension: []const u8,
+) !Plan {
+    return buildPlanReporting(io, allocator, pattern, target_extension, null);
+}
+
+/// `buildPlan`, recording the colliding inputs in `collision` when the plan
+/// is refused for an output-name collision.
+pub fn buildPlanReporting(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    target_extension: []const u8,
+    collision: ?*PlanCollision,
 ) !Plan {
     if (!isTargetExtension(target_extension)) return BatchError.InvalidTargetExtension;
     const filename_pattern = std.fs.path.basename(pattern);
@@ -101,7 +152,10 @@ pub fn buildPlan(
         errdefer allocator.free(input_path);
         const output_path = try replaceExtension(allocator, input_path, target_extension);
         errdefer allocator.free(output_path);
-        if (try outputs.claim(output_path, items.items.len) != null) return BatchError.OutputCollision;
+        if (try outputs.claim(output_path, items.items.len)) |first| {
+            if (collision) |report| try report.record(allocator, items.items[first].input_path, input_path, output_path);
+            return BatchError.OutputCollision;
+        }
         try items.append(allocator, .{
             .input_path = input_path,
             .output_path = output_path,
@@ -121,6 +175,17 @@ pub fn buildExplicitPlan(
     allocator: std.mem.Allocator,
     input_paths: []const []const u8,
     target_extension: []const u8,
+) !Plan {
+    return buildExplicitPlanReporting(allocator, input_paths, target_extension, null);
+}
+
+/// `buildExplicitPlan`, recording the colliding inputs in `collision` when
+/// the plan is refused for an output-name collision.
+pub fn buildExplicitPlanReporting(
+    allocator: std.mem.Allocator,
+    input_paths: []const []const u8,
+    target_extension: []const u8,
+    collision: ?*PlanCollision,
 ) !Plan {
     if (!isTargetExtension(target_extension)) return BatchError.InvalidTargetExtension;
     if (input_paths.len == 0) return BatchError.NoMatchingFiles;
@@ -142,7 +207,10 @@ pub fn buildExplicitPlan(
         errdefer allocator.free(input_path);
         const output_path = try replaceExtension(allocator, input_path, target_extension);
         errdefer allocator.free(output_path);
-        if (try outputs.claim(output_path, items.items.len) != null) return BatchError.OutputCollision;
+        if (try outputs.claim(output_path, items.items.len)) |first| {
+            if (collision) |report| try report.record(allocator, items.items[first].input_path, input_path, output_path);
+            return BatchError.OutputCollision;
+        }
         try items.append(allocator, .{
             .input_path = input_path,
             .output_path = output_path,

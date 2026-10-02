@@ -131,10 +131,12 @@ fn batchConversionCommand(
         usage();
         return error.InvalidCommand;
     };
-    var plan = batch.buildPlan(io, allocator, args[0], args[1]) catch |err| {
+    var collision: batch.PlanCollision = .{};
+    defer collision.deinit();
+    var plan = batch.buildPlanReporting(io, allocator, args[0], args[1], &collision) catch |err| {
         switch (err) {
             batch.BatchError.NoMatchingFiles => std.debug.print("batch: no files matched '{s}'\n", .{args[0]}),
-            batch.BatchError.OutputCollision => std.debug.print("batch: multiple inputs map to the same target extension '{s}'\n", .{args[1]}),
+            batch.BatchError.OutputCollision => printPlanCollision(collision),
             else => {},
         }
         return err;
@@ -173,14 +175,23 @@ fn expandedBatchConversionCommand(
         }
     }
 
-    var plan = batch.buildExplicitPlan(allocator, input_paths, target_extension) catch |err| {
-        if (err == batch.BatchError.OutputCollision) {
-            std.debug.print("batch: multiple inputs map to the same target extension '{s}'\n", .{target_extension});
-        }
+    var collision: batch.PlanCollision = .{};
+    defer collision.deinit();
+    var plan = batch.buildExplicitPlanReporting(allocator, input_paths, target_extension, &collision) catch |err| {
+        if (err == batch.BatchError.OutputCollision) printPlanCollision(collision);
         return err;
     };
     defer plan.deinit();
     try executeBatchPlan(io, allocator, plan.items, conversion, args[target_index + 1 ..]);
+}
+
+/// Names both inputs, in the same words as the multi-page check.
+fn printPlanCollision(collision: batch.PlanCollision) void {
+    std.debug.print("batch: '{s}' and '{s}' would both write '{s}'; nothing was converted\n", .{
+        collision.first_input,
+        collision.second_input,
+        collision.output,
+    });
 }
 
 fn executeBatchPlan(
