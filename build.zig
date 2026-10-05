@@ -100,6 +100,15 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
+    // Builds and installs the unit-test executable without running it, so a
+    // foreign target's suite can be run elsewhere (tools/release_local.ps1
+    // runs the RISC-V one in a Linux container under QEMU).
+    const install_tests = b.addInstallArtifact(unit_tests, .{
+        .dest_sub_path = if (target.result.os.tag == .windows) "z2000-tests.exe" else "z2000-tests",
+    });
+    const test_bin_step = b.step("test-bin", "Build and install the unit-test executable without running it");
+    test_bin_step.dependOn(&install_tests.step);
+
     const corpus_module = b.createModule(.{
         .root_source_file = b.path("src/part1_corpus.zig"),
         .target = target,
