@@ -42,7 +42,9 @@ param(
     [switch]$SkipMacos,
     [switch]$SkipGates,
     [switch]$SkipRiscvTests,
-    [switch]$CreateDraft
+    [switch]$CreateDraft,
+    # For trying the script from a local commit; refused with -CreateDraft.
+    [switch]$AllowUnpushed
 )
 
 $ErrorActionPreference = "Stop"
@@ -93,7 +95,9 @@ $version = $Tag.Substring(1)
 $versionFile = (Get-Content -LiteralPath (Join-Path $root "VERSION") -Raw).Trim()
 if ($versionFile -ne $baseVersion) { throw "VERSION is $versionFile, but $Tag needs $baseVersion" }
 $notesPath = Join-Path $root "docs\releases\$Tag.md"
-if (-not (Test-Path -LiteralPath $notesPath)) { throw "missing docs\releases\$Tag.md" }
+# The archives carry the committed notes, so they must be part of HEAD.
+& git cat-file -e "HEAD:docs/releases/$Tag.md" 2>$null
+if ($LASTEXITCODE -ne 0) { throw "docs/releases/$Tag.md is not committed in HEAD" }
 
 $macosSources = @($MacosRunId, $MacosArchive) | Where-Object { $_ -ne "" }
 if (($macosSources.Count + [int][bool]$SkipMacos) -ne 1) {
@@ -103,8 +107,11 @@ if (($macosSources.Count + [int][bool]$SkipMacos) -ne 1) {
 $dirty = Get-NativeOutput "git" @("status", "--porcelain", "--untracked-files=no")
 if ($dirty) { throw "tracked files differ from HEAD; commit or stash them first:`n$dirty" }
 $head = Get-NativeOutput "git" @("rev-parse", "HEAD")
-$upstream = Get-NativeOutput "git" @("rev-parse", "@{u}")
-if ($head -ne $upstream) { throw "HEAD $head is not the pushed upstream $upstream; push first" }
+if ($AllowUnpushed -and $CreateDraft) { throw "-AllowUnpushed is for trial runs and cannot be combined with -CreateDraft" }
+if (-not $AllowUnpushed) {
+    $upstream = Get-NativeOutput "git" @("rev-parse", "@{u}")
+    if ($head -ne $upstream) { throw "HEAD $head is not the pushed upstream $upstream; push first" }
+}
 $tagCommit = (& git rev-parse -q --verify "refs/tags/$Tag^{commit}" 2>$null | Out-String).Trim()
 if ($tagCommit -and $tagCommit -ne $head) { throw "tag $Tag already points to $tagCommit, not HEAD $head" }
 
