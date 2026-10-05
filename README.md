@@ -12,7 +12,7 @@ of 2026-08-05, both the narrow RGB lossless JP2 target and the broader bounded
 Part 1 engineering scorecard are estimated at **100/100 within their declared
 profiles**. This is separate from the general-purpose G0-G7 plan, estimated at
 about 57% (+/- 8 points) in [the roadmap](docs/roadmap.md) as of 2026-07-31.
-The current prerelease is [`v0.2.0-rc.1`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.1).
+The current prerelease is [`v0.2.0-rc.2`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.2).
 Neither figure is a formal ISO conformance certification.
 
 ## Features

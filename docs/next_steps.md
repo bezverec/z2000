@@ -134,15 +134,21 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
-`v0.2.0-rc.1` was published on 2026-07-16 from commit `7b8c01c`. Windows and
-Linux x86-64 passed local Debug/ReleaseFast gates; the portable RISC-V
-ReleaseFast suite ran locally under QEMU; macOS arm64 passed its dedicated
-hosted Debug/ReleaseFast job. Every archive contains both CLI names and is
-covered by the published `SHA256SUMS`. Substantial codec and corpus work has
-landed since that candidate, so the next publication should be
-`v0.2.0-rc.2` from a new clean cross-platform candidate rather than promoting
-the rc.1 commit family directly to final. Release maintenance may run in
-parallel; general codec development resumes at item 4.
+`v0.2.0-rc.2` was published on 2026-10-05 from commit `6435591`, built with
+Zig 0.17.0. Windows x86-64 passed local Debug/ReleaseFast gates and was built
+locally; Linux x86-64 and RISC-V 64 (musl) were cross-built locally and
+checked in a local Docker Linux container, where the full RISC-V ReleaseFast
+suite (607 tests) passed under the Docker VM's binfmt QEMU; macOS arm64 was
+built and tested natively by the hosted `Release` workflow, whose archive was
+used as is. Linux x86-64, Windows, and macOS also passed the hosted native
+gates. The hosted RISC-V job failed with SIGSEGV under the runner's
+`qemu-riscv64`, while the same tests pass locally, so the hosted workflow
+cannot assemble a release until that runner difference is understood; local
+assembly is the publication path. Every archive contains both CLI names,
+reports `0.2.0-rc.2+build.575.g64355911` without `.dirty`, and is covered by
+the published `SHA256SUMS`. The next release action is to collect candidate
+feedback and decide between a final `v0.2.0` and `v0.2.0-rc.3`. Release
+maintenance may run in parallel; general codec development resumes at item 4.
 
 ### 4. General Part 1 Decode Foundation — Next Active
 

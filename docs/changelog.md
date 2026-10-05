@@ -5,6 +5,10 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+No changes yet.
+
+## 0.2.0-rc.2 — 2026-10-05
+
 ### Zig 0.17
 
 - z2000 now builds with Zig 0.17.0, and the release workflows install it
