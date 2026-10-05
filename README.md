@@ -225,7 +225,8 @@ supported envelope.
 
 Requirements:
 
-- Zig 0.16.x (known standard-library defects and their workarounds:
+- Zig 0.17.x (the build script and sources use 0.17 APIs; migration notes
+  and standard-library defects are in the
   [toolchain notes](docs/toolchain_notes.md))
 - Git
 

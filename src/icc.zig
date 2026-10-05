@@ -17,7 +17,7 @@ pub const Matrix = [3][3]f64;
 
 const ParametricCurve = struct {
     function_type: u16,
-    parameters: [7]f64 = [_]f64{0} ** 7,
+    parameters: [7]f64 = @splat(0),
 };
 
 const Curve = union(enum) {
@@ -191,7 +191,7 @@ fn parseMatrixTrcProfile(bytes: []const u8) !MatrixTrcProfile {
         return IccError.InvalidProfile;
     if (table_end > bytes.len) return IccError.InvalidProfile;
 
-    var required: [6]?Tag = [_]?Tag{null} ** 6;
+    var required: [6]?Tag = @splat(null);
     const signatures = [_]u32{
         fourcc("rXYZ"), fourcc("gXYZ"), fourcc("bXYZ"),
         fourcc("rTRC"), fourcc("gTRC"), fourcc("bTRC"),

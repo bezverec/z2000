@@ -1737,7 +1737,7 @@ fn parsePocRecords(value: []const u8, storage: []codestream.PocRecord) ![]const 
             .layer_end = try std.fmt.parseInt(u16, fields[2], 10),
             .resolution_end = try std.fmt.parseInt(u8, fields[3], 10),
             .component_end = try std.fmt.parseInt(u16, fields[4], 10),
-            .progression = @enumFromInt(@intFromEnum(progression)),
+            .progression = @fromBackingInt(@intCast(@backingInt(progression))),
         };
         count += 1;
     }

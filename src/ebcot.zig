@@ -11,7 +11,7 @@ pub const EbcotError = error{
 };
 
 const max_codeblock_area = 4096;
-pub const mq_context_count = @typeInfo(Context).@"enum".fields.len;
+pub const mq_context_count = @typeInfo(Context).@"enum".field_names.len;
 
 pub const PassKind = enum(u8) {
     significance = 0,
@@ -20,12 +20,12 @@ pub const PassKind = enum(u8) {
 };
 
 pub const EncodePassStats = struct {
-    mq_passes: [3]u64 = .{0} ** 3,
-    mq_symbols: [3]u64 = .{0} ** 3,
-    mq_ns: [3]u64 = .{0} ** 3,
-    raw_passes: [3]u64 = .{0} ** 3,
-    raw_symbols: [3]u64 = .{0} ** 3,
-    raw_ns: [3]u64 = .{0} ** 3,
+    mq_passes: [3]u64 = @splat(0),
+    mq_symbols: [3]u64 = @splat(0),
+    mq_ns: [3]u64 = @splat(0),
+    raw_passes: [3]u64 = @splat(0),
+    raw_symbols: [3]u64 = @splat(0),
+    raw_ns: [3]u64 = @splat(0),
 
     fn add(self: *EncodePassStats, kind: PassKind, raw: bool, symbols: usize, ns: u64) void {
         const index = passKindIndex(kind);
@@ -42,17 +42,17 @@ pub const EncodePassStats = struct {
 };
 
 pub const DecodePassStats = struct {
-    mq_passes: [3]u64 = .{0} ** 3,
-    mq_symbols: [3]u64 = .{0} ** 3,
-    mq_ns: [3]u64 = .{0} ** 3,
-    mq_fast_mps: [3]u64 = .{0} ** 3,
-    mq_lps: [3]u64 = .{0} ** 3,
-    mq_renorm_mps: [3]u64 = .{0} ** 3,
-    mq_renorm_shifts: [3]u64 = .{0} ** 3,
-    mq_byte_in: [3]u64 = .{0} ** 3,
-    raw_passes: [3]u64 = .{0} ** 3,
-    raw_symbols: [3]u64 = .{0} ** 3,
-    raw_ns: [3]u64 = .{0} ** 3,
+    mq_passes: [3]u64 = @splat(0),
+    mq_symbols: [3]u64 = @splat(0),
+    mq_ns: [3]u64 = @splat(0),
+    mq_fast_mps: [3]u64 = @splat(0),
+    mq_lps: [3]u64 = @splat(0),
+    mq_renorm_mps: [3]u64 = @splat(0),
+    mq_renorm_shifts: [3]u64 = @splat(0),
+    mq_byte_in: [3]u64 = @splat(0),
+    raw_passes: [3]u64 = @splat(0),
+    raw_symbols: [3]u64 = @splat(0),
+    raw_ns: [3]u64 = @splat(0),
 
     pub fn addMq(self: *DecodePassStats, kind: PassKind, symbols: usize, ns: u64) void {
         const index = passKindIndex(kind);
@@ -95,7 +95,7 @@ pub const DecodePassStats = struct {
 };
 
 fn passKindIndex(kind: PassKind) usize {
-    return @intFromEnum(kind);
+    return @backingInt(kind);
 }
 
 pub const Context = enum(u8) {
@@ -437,7 +437,7 @@ fn makeNbfZcLut() [4][256]Context {
     @setEvalBranchQuota(100000);
     var lut: [4][256]Context = undefined;
     for (0..4) |band| {
-        const kind: subband.Kind = @enumFromInt(band);
+        const kind: subband.Kind = @fromBackingInt(@intCast(band));
         for (0..256) |pattern| {
             const counts = NeighborCounts{
                 .horizontal = nbfBit(pattern, nbf_sig_e) + nbfBit(pattern, nbf_sig_w),
@@ -478,7 +478,7 @@ fn nbfScIndex(word: u16) u8 {
 // words; Debug and ReleaseSafe maintain this buffer as shadow state and assert
 // parity at T1 loop boundaries.
 const use_packed_t1_context_flags = build_options.packed_t1_context_flags;
-const debug_check_packed_t1_context_flags = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+const debug_check_packed_t1_context_flags = builtin.mode == .debug or builtin.mode == .safe;
 const maintain_packed_t1_context_flags = use_packed_t1_context_flags or debug_check_packed_t1_context_flags;
 
 fn pcfStripeCount(height: usize) usize {
@@ -512,7 +512,7 @@ fn directCanUseRunStripeFast(scratch: *const DirectBlockScratch, x: usize, strip
             stripe_y,
             style,
         );
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) std.debug.assert(expected == actual);
+        if (builtin.mode == .debug or builtin.mode == .safe) std.debug.assert(expected == actual);
     }
     return expected;
 }
@@ -540,7 +540,7 @@ fn decodeCanUseRunStripeFast(scratch: *const DecodeBlockScratch, x: usize, strip
             stripe_y,
             style,
         );
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) std.debug.assert(expected == actual);
+        if (builtin.mode == .debug or builtin.mode == .safe) std.debug.assert(expected == actual);
     }
     return expected;
 }
@@ -829,7 +829,7 @@ fn packedScNbfIndexCausal(fx: u32, prev_fx: u32, next_fx: u32, ci: usize, causal
 }
 
 fn packedZeroContext(word: u32, ci: usize, band_kind: subband.Kind, causal_row: bool) Context {
-    return nbf_zc_lut[@intFromEnum(band_kind)][packedSigmaNbfPatternCausal(word, ci, causal_row)];
+    return nbf_zc_lut[@backingInt(band_kind)][packedSigmaNbfPatternCausal(word, ci, causal_row)];
 }
 
 fn packedSignCoding(fx: u32, prev_fx: u32, next_fx: u32, ci: usize, causal_row: bool) SignCoding {
@@ -899,7 +899,7 @@ fn nbfT1DecisionFromWord(word: u16, style: CodeBlockStyle, causal_row: bool) Pac
     const f = if (causal_row) word & nbf_causal_mask else word;
     const pattern = f & nbf_sig8;
     return .{
-        .zero_context = nbf_zc_lut[@intFromEnum(style.band_kind)][pattern],
+        .zero_context = nbf_zc_lut[@backingInt(style.band_kind)][pattern],
         .sign = nbf_sc_lut[nbfScIndex(f)],
         .significance_candidate = (f & nbf_sig_self) == 0 and (f & nbf_visit) == 0 and pattern != 0,
         .refinement_candidate = (f & nbf_sig_self) != 0 and (f & nbf_visit) == 0,
@@ -912,13 +912,13 @@ fn nbfT1SignificanceDecisionFromWord(word: u16, style: CodeBlockStyle, causal_ro
     const pattern = f & nbf_sig8;
     return .{
         .candidate = (f & nbf_sig_self) == 0 and (f & nbf_visit) == 0 and pattern != 0,
-        .zero_context = nbf_zc_lut[@intFromEnum(style.band_kind)][pattern],
+        .zero_context = nbf_zc_lut[@backingInt(style.band_kind)][pattern],
     };
 }
 
 inline fn nbfT1ZeroContextFromWord(word: u16, style: CodeBlockStyle, causal_row: bool) Context {
     const f = if (causal_row) word & nbf_causal_mask else word;
-    return nbf_zc_lut[@intFromEnum(style.band_kind)][f & nbf_sig8];
+    return nbf_zc_lut[@backingInt(style.band_kind)][f & nbf_sig8];
 }
 
 inline fn nbfT1SignificanceCandidateFromWord(word: u16, causal_row: bool) bool {
@@ -949,7 +949,7 @@ fn directT1Decision(scratch: *const DirectBlockScratch, x: usize, y: usize, styl
     const expected = nbfT1DecisionFromWord(scratch.nb_flags.items[nbfIndex(scratch.nb_stride, x, y)], style, causal_row);
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedT1DecisionFromColumns(scratch.packed_t1_flags.items, scratch.width, x, stripe_y, ci, style);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(packedT1DecisionEquals(expected, actual));
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -963,7 +963,7 @@ inline fn directT1SignificanceCandidate(scratch: *const DirectBlockScratch, x: u
     const expected = nbfT1SignificanceCandidateFromWord(sample_flags, causal_row);
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedSignificanceCandidateCausal(scratch.packed_t1_flags.items[pcfIndex(scratch.width, x, y)], ci, causal_row);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected == actual);
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -977,7 +977,7 @@ inline fn directT1SignificanceDecision(scratch: *const DirectBlockScratch, x: us
     const expected = nbfT1SignificanceDecisionFromWord(sample_flags, style, causal_row);
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedT1SignificanceDecisionFromColumns(scratch.packed_t1_flags.items, scratch.width, x, y, style);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected.candidate == actual.candidate);
             std.debug.assert(expected.zero_context == actual.zero_context);
         }
@@ -997,7 +997,7 @@ inline fn directT1ZeroContext(scratch: *const DirectBlockScratch, x: usize, y: u
             style.band_kind,
             causal_row,
         );
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected == actual);
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -1017,7 +1017,7 @@ inline fn directT1SignCoding(scratch: *const DirectBlockScratch, x: usize, y: us
             const next_fx = if (x + 1 == scratch.width) 0 else scratch.packed_t1_flags.items[pcfIndex(scratch.width, x + 1, y)];
             break :blk packedSignCoding(fx, prev_fx, next_fx, ci, causal_row);
         };
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(std.meta.eql(expected, actual));
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -1031,7 +1031,7 @@ inline fn directT1RefinementDecision(scratch: *const DirectBlockScratch, x: usiz
     const expected = nbfT1RefinementDecisionFromWord(sample_flags, causal_row);
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedT1RefinementDecisionFromColumns(scratch.packed_t1_flags.items, scratch.width, x, y, style);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected.candidate == actual.candidate);
             std.debug.assert(expected.context == actual.context);
         }
@@ -1047,7 +1047,7 @@ fn decodeT1Decision(scratch: *const DecodeBlockScratch, x: usize, y: usize, styl
     const expected = nbfT1DecisionFromWord(scratch.nb_flags.items[nbfIndex(scratch.nb_stride, x, y)], style, causal_row);
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedT1DecisionFromColumns(scratch.packed_t1_flags.items, scratch.width, x, stripe_y, ci, style);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(packedT1DecisionEquals(expected, actual));
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -1061,7 +1061,7 @@ inline fn decodeT1SignificanceCandidate(scratch: *const DecodeBlockScratch, x: u
     const expected = nbfT1SignificanceCandidateFromWord(sample_flags, causal_row);
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedSignificanceCandidateCausal(scratch.packed_t1_flags.items[pcfIndex(scratch.width, x, y)], ci, causal_row);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected == actual);
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -1075,7 +1075,7 @@ inline fn decodeT1SignificanceDecision(scratch: *const DecodeBlockScratch, x: us
     const expected = nbfT1SignificanceDecisionFromWord(sample_flags, style, causal_row);
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedT1SignificanceDecisionFromColumns(scratch.packed_t1_flags.items, scratch.width, x, y, style);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected.candidate == actual.candidate);
             std.debug.assert(expected.zero_context == actual.zero_context);
         }
@@ -1095,7 +1095,7 @@ inline fn decodeT1ZeroContext(scratch: *const DecodeBlockScratch, x: usize, y: u
             style.band_kind,
             causal_row,
         );
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected == actual);
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -1115,7 +1115,7 @@ inline fn decodeT1SignCoding(scratch: *const DecodeBlockScratch, x: usize, y: us
             const next_fx = if (x + 1 == scratch.width) 0 else scratch.packed_t1_flags.items[pcfIndex(scratch.width, x + 1, y)];
             break :blk packedSignCoding(fx, prev_fx, next_fx, ci, causal_row);
         };
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(std.meta.eql(expected, actual));
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -1129,7 +1129,7 @@ inline fn decodeT1RefinementDecision(scratch: *const DecodeBlockScratch, x: usiz
     const expected = nbfT1RefinementDecisionFromWord(sample_flags, causal_row);
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedT1RefinementDecisionFromColumns(scratch.packed_t1_flags.items, scratch.width, x, y, style);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected.candidate == actual.candidate);
             std.debug.assert(expected.context == actual.context);
         }
@@ -1142,7 +1142,7 @@ inline fn decodeT1RefinementCandidate(scratch: *const DecodeBlockScratch, x: usi
     const expected = (sample_flags & nbf_sig_self) != 0 and (sample_flags & nbf_visit) == 0;
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedRefinementCandidate(scratch.packed_t1_flags.items[pcfIndex(scratch.width, x, y)], y & 3);
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
             std.debug.assert(expected == actual);
         }
         if (comptime use_packed_t1_context_flags) return actual;
@@ -1194,7 +1194,7 @@ fn packedT1CanUseRunStripeChecked(
     style: CodeBlockStyle,
 ) bool {
     const packed_clean = packedT1CanUseRunStripe(packed_flags, width, x, stripe_y, style);
-    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+    if (builtin.mode == .debug or builtin.mode == .safe) {
         std.debug.assert(packed_clean == nbfCanUseRunStripe(nb_flags, nb_stride, x, stripe_y, style));
     }
     return packed_clean;
@@ -1990,7 +1990,7 @@ pub fn encodeBlockScratchWithStyle(
 }
 
 pub fn mqContextIndex(context: Context) usize {
-    return @intFromEnum(context);
+    return @backingInt(context);
 }
 
 pub fn encodeSymbolsMq(allocator: std.mem.Allocator, symbols: []const Symbol) !MqEncoded {
@@ -4150,7 +4150,7 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
         continuous_decoder = try mq.Decoder.init(scratch.allocator, mq_context_count, segment.bytes, total_symbols);
         continuous_decoder_active = true;
     }
-    var terminated_contexts: [mq_context_count]mq.ContextSnapshot = [_]mq.ContextSnapshot{.{}} ** mq_context_count;
+    var terminated_contexts: [mq_context_count]mq.ContextSnapshot = @splat(.{});
 
     var pass_index: u16 = 0;
     var bitplane_index = segment.bitplanes;
@@ -4503,7 +4503,7 @@ fn decodeSignificancePassInferredPlain(
                 x = x_end;
                 continue;
             }
-            const band_index = @intFromEnum(band_kind);
+            const band_index = @backingInt(band_kind);
             while (x < x_end) : (x += 1) {
                 // Strength-reduce the per-sample nbf index down the stripe
                 // column (mirrors decodeRefinementPassRaw): p advances by nbs.
@@ -4946,7 +4946,7 @@ fn decodeCleanupPassInferredPlain(
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    const band_index = @intFromEnum(band_kind);
+    const band_index = @backingInt(band_kind);
     var symbol_count: usize = 0;
 
     var stripe_y: usize = 0;
@@ -5301,7 +5301,7 @@ fn nbfDecodeCleanupSamplePlain(
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    return nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, y, bitplane, @intFromEnum(band_kind));
+    return nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, y, bitplane, @backingInt(band_kind));
 }
 
 inline fn nbfDecodeCleanupSamplePlainKnown(
@@ -6155,7 +6155,7 @@ fn emitDirectIsoSignificancePassPlain(
                     if (raw) {
                         try encoder.writeBit(bit);
                     } else {
-                        const zero_context = nbf_zc_lut[@intFromEnum(band_kind)][pattern];
+                        const zero_context = nbf_zc_lut[@backingInt(band_kind)][pattern];
                         try encoder.write(mqContextIndex(zero_context), bit);
                     }
                     symbol_count += 1;
@@ -6359,7 +6359,7 @@ fn emitDirectIsoCleanupPassPlain(
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    const band_index = @intFromEnum(band_kind);
+    const band_index = @backingInt(band_kind);
     var symbol_count: usize = 0;
     var stripe_y: usize = 0;
     while (stripe_y < rect.height) : (stripe_y += 4) {
@@ -6486,7 +6486,7 @@ fn nbfEmitCleanupSamplePlain(
 ) !usize {
     const flags = scratch.nb_flags.items;
     const nbs = scratch.nb_stride;
-    return nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, y, bitplane, @intFromEnum(band_kind));
+    return nbfEmitCleanupSamplePlainKnown(scratch, encoder, plane, stride, rect, flags, nbs, x, y, bitplane, @backingInt(band_kind));
 }
 
 inline fn nbfEmitCleanupSamplePlainKnown(
@@ -6835,7 +6835,7 @@ fn refinementContext(already_refined: bool, neighbors: u4) Context {
 fn makeZeroContextLut() [9]Context {
     var lut: [9]Context = undefined;
     for (&lut, 0..) |*context, index| {
-        context.* = @enumFromInt(index);
+        context.* = @fromBackingInt(@intCast(index));
     }
     return lut;
 }

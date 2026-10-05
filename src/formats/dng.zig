@@ -57,7 +57,7 @@ pub fn parseInfo(bytes: []const u8) !Info {
     var info = Info{
         .endian = document.endian,
         .ifd_count = 0,
-        .ifds = [_]IfdSummary{.{ .offset = 0 }} ** max_ifds,
+        .ifds = @as([max_ifds]IfdSummary, @splat(.{ .offset = 0 })),
     };
 
     var ifd_offset = document.first_ifd_offset;
@@ -330,7 +330,7 @@ fn normalizeSamples(
         }
     }
 
-    var black = [_]f64{0.0} ** 3;
+    var black: [3]f64 = @splat(0.0);
     if (try findUniqueEntry(document, ifd, 50714)) |entry| {
         const values = try entry.ref(document);
         if (values.count != 1 and values.count != 3) return DngError.UnsupportedDng;
@@ -340,7 +340,7 @@ fn normalizeSamples(
     }
 
     const native_max: u32 = (@as(u32, 1) << @intCast(bit_depth)) - 1;
-    var white = [_]f64{@floatFromInt(native_max)} ** 3;
+    var white: [3]f64 = @splat(@floatFromInt(native_max));
     if (try findUniqueEntry(document, ifd, 50717)) |entry| {
         const values = try entry.ref(document);
         if (values.count != 1 and values.count != 3) return DngError.UnsupportedDng;
@@ -357,7 +357,7 @@ fn normalizeSamples(
     var linearization: ?tiff_ifd.ValueRef = null;
     if (try findUniqueEntry(document, ifd, 50712)) |entry| {
         const table = try entry.ref(document);
-        if (table.count == 0 or table.field_type != @intFromEnum(tiff_ifd.FieldType.short)) {
+        if (table.count == 0 or table.field_type != @backingInt(tiff_ifd.FieldType.short)) {
             return DngError.UnsupportedDng;
         }
         linearization = table;
@@ -405,8 +405,8 @@ fn cameraToXyzMatrix(document: tiff_ifd.Document, ifd0: tiff_ifd.Ifd) !icc.Matri
 
 fn unsignedNumberAt(values: tiff_ifd.ValueRef, document: tiff_ifd.Document, index: usize) !f64 {
     return switch (values.field_type) {
-        @intFromEnum(tiff_ifd.FieldType.short), @intFromEnum(tiff_ifd.FieldType.long) => @floatFromInt(try values.u32At(document, index)),
-        @intFromEnum(tiff_ifd.FieldType.rational) => try values.rationalAt(document, index),
+        @backingInt(tiff_ifd.FieldType.short), @backingInt(tiff_ifd.FieldType.long) => @floatFromInt(try values.u32At(document, index)),
+        @backingInt(tiff_ifd.FieldType.rational) => try values.rationalAt(document, index),
         else => DngError.InvalidDng,
     };
 }
@@ -506,7 +506,7 @@ fn readPrimaryDngTags(document: tiff_ifd.Document, ifd: tiff_ifd.Ifd, info: *Inf
         const value_ref = try entry.ref(document);
         const count = @min(value_ref.count, 4);
         if (count > 0) {
-            var pattern = [_]u8{0} ** 4;
+            var pattern: [4]u8 = @splat(0);
             var index: usize = 0;
             while (index < count) : (index += 1) {
                 pattern[index] = try value_ref.byteAt(document, index);

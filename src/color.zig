@@ -40,9 +40,9 @@ pub fn ComponentPlanesOf(comptime Sample: type) type {
         height: usize,
         /// Common precision, or zero for a mixed-precision sample carrier.
         bit_depth: u8,
-        component_bit_depths: [max_components]u8 = [_]u8{0} ** max_components,
-        component_widths: [max_components]usize = [_]usize{0} ** max_components,
-        component_heights: [max_components]usize = [_]usize{0} ** max_components,
+        component_bit_depths: [max_components]u8 = @splat(0),
+        component_widths: [max_components]usize = @splat(0),
+        component_heights: [max_components]usize = @splat(0),
         planes: [][]Sample,
 
         pub fn init(
@@ -63,10 +63,10 @@ pub fn ComponentPlanesOf(comptime Sample: type) type {
             while (allocated < component_count) : (allocated += 1) {
                 planes[allocated] = try allocator.alloc(Sample, pixels);
             }
-            var component_bit_depths = [_]u8{0} ** max_components;
+            var component_bit_depths: [max_components]u8 = @splat(0);
             @memset(component_bit_depths[0..component_count], bit_depth);
-            var component_widths = [_]usize{0} ** max_components;
-            var component_heights = [_]usize{0} ** max_components;
+            var component_widths: [max_components]usize = @splat(0);
+            var component_heights: [max_components]usize = @splat(0);
             @memset(component_widths[0..component_count], width);
             @memset(component_heights[0..component_count], height);
             return .{
@@ -120,9 +120,9 @@ pub fn ComponentPlanesOf(comptime Sample: type) type {
             var allocated: usize = 0;
             errdefer for (planes[0..allocated]) |plane_slice| allocator.free(plane_slice);
 
-            var stored_depths = [_]u8{0} ** max_components;
-            var stored_widths = [_]usize{0} ** max_components;
-            var stored_heights = [_]usize{0} ** max_components;
+            var stored_depths: [max_components]u8 = @splat(0);
+            var stored_widths: [max_components]usize = @splat(0);
+            var stored_heights: [max_components]usize = @splat(0);
             while (allocated < bit_depths.len) : (allocated += 1) {
                 const component_depth = bit_depths[allocated];
                 const component_width = component_widths[allocated];

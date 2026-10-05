@@ -43,13 +43,13 @@ pub const JpegError = error{
 
 const QuantTable = struct {
     present: bool = false,
-    values: [64]u16 = [_]u16{0} ** 64,
+    values: [64]u16 = @splat(0),
 };
 
 const HuffmanTable = struct {
     present: bool = false,
-    counts: [16]u8 = [_]u8{0} ** 16,
-    symbols: [256]u8 = [_]u8{0} ** 256,
+    counts: [16]u8 = @splat(0),
+    symbols: [256]u8 = @splat(0),
     symbol_count: usize = 0,
 
     fn decode(self: HuffmanTable, reader: *EntropyReader) !u8 {
@@ -95,9 +95,9 @@ const Frame = struct {
 
 const Decoder = struct {
     allocator: std.mem.Allocator,
-    quant: [4]QuantTable = [_]QuantTable{.{}} ** 4,
-    dc_huffman: [4]HuffmanTable = [_]HuffmanTable{.{}} ** 4,
-    ac_huffman: [4]HuffmanTable = [_]HuffmanTable{.{}} ** 4,
+    quant: [4]QuantTable = @splat(.{}),
+    dc_huffman: [4]HuffmanTable = @splat(.{}),
+    ac_huffman: [4]HuffmanTable = @splat(.{}),
     frame: ?Frame = null,
     restart_interval: usize = 0,
     saw_jfif: bool = false,
@@ -495,7 +495,7 @@ fn decodeScan(decoder: *Decoder, bytes: []const u8, payload: []const u8, cursor:
     if (scan_components != frame.component_count or payload.len != 1 + scan_components * 2 + 3) {
         return JpegError.UnsupportedMultipleScans;
     }
-    var seen = [_]bool{false} ** 3;
+    var seen: [3]bool = @splat(false);
     for (0..scan_components) |scan_index| {
         const id = payload[1 + scan_index * 2];
         const table_spec = payload[2 + scan_index * 2];
@@ -571,7 +571,7 @@ fn decodeBlock(
     block_x: usize,
     block_y: usize,
 ) !void {
-    var coefficients = [_]i32{0} ** 64;
+    var coefficients: [64]i32 = @splat(0);
     const dc_size = try decoder.dc_huffman[component.dc_table].decode(reader);
     const dc_delta = try receiveExtend(reader, dc_size);
     component.dc_predictor = std.math.add(i32, component.dc_predictor, dc_delta) catch
@@ -883,7 +883,7 @@ fn readU16(bytes: []const u8, offset: usize) u16 {
 }
 
 test "JPEG floating IDCT reconstructs a DC-only block" {
-    var coefficients = [_]i32{0} ** 64;
+    var coefficients: [64]i32 = @splat(0);
     coefficients[0] = 80;
     var pixels: [64]u8 = undefined;
     inverseDct(coefficients, &pixels);

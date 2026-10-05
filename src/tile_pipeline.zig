@@ -43,20 +43,20 @@ pub const PacketScaffoldOptions = struct {
     components: u16 = 3,
     /// RCT, or the DC level shift alone, for RGB tiles without a front end.
     rgb_transform: RgbTileTransform = .rct,
-    component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
+    component_bit_depths: [color.max_components]u8 = @splat(0),
     layers: u16 = 1,
     block_width: usize = 64,
     block_height: usize = 64,
     precincts: []const packet_plan.Precinct,
     packet_order: PacketOrder = .rpcl,
-    rates: [rate_alloc.max_layers]f64 = [_]f64{0} ** rate_alloc.max_layers,
+    rates: [rate_alloc.max_layers]f64 = @splat(0),
     rate_count: u8 = 0,
     /// Per-band nominal bitplane (Mb) overrides for irreversible tiles,
-    /// indexed [band_level][@intFromEnum(kind)]; null keeps the reversible
+    /// indexed [band_level][@backingInt(kind)]; null keeps the reversible
     /// 5/3 rule (bit_depth + gain + 1).
     nominal_bitplanes: ?[33][4]u8 = null,
     /// Per-band PCRD distortion weights (squared reconstruction step x norm)
-    /// indexed [band_level][@intFromEnum(kind)]; null keeps the reversible
+    /// indexed [band_level][@backingInt(kind)]; null keeps the reversible
     /// 5/3 squared-norm weight. Used only when rate targets are requested.
     band_weights: ?[33][4]f64 = null,
     front_end: ?TileFrontEnd = null,
@@ -67,7 +67,7 @@ pub const PacketScaffold = struct {
     tile: tile_grid.Tile,
     levels: u8,
     components: u16,
-    component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
+    component_bit_depths: [color.max_components]u8 = @splat(0),
     layers: u16,
     block_width: usize,
     block_height: usize,
@@ -739,8 +739,8 @@ pub const TilePartCodestreamFragment = struct {
 
     pub fn validate(self: TilePartCodestreamFragment) !void {
         if (self.bytes.len < 4) return PacketScaffoldError.InvalidPacket;
-        if (readU16Be(self.bytes, 0) != @intFromEnum(TilePartMarker.soc)) return PacketScaffoldError.InvalidPacket;
-        if (readU16Be(self.bytes, self.bytes.len - 2) != @intFromEnum(TilePartMarker.eoc)) {
+        if (readU16Be(self.bytes, 0) != @backingInt(TilePartMarker.soc)) return PacketScaffoldError.InvalidPacket;
+        if (readU16Be(self.bytes, self.bytes.len - 2) != @backingInt(TilePartMarker.eoc)) {
             return PacketScaffoldError.InvalidPacket;
         }
         if (self.tile_part_sequence_offset != 2) return PacketScaffoldError.InvalidPacket;
@@ -751,7 +751,7 @@ pub const TilePartCodestreamFragment = struct {
             if (offset != previous_offset) return PacketScaffoldError.InvalidPacket;
             const tile_part = try self.tilePartSlice(index);
             if (tile_part.len < 12) return PacketScaffoldError.InvalidPacket;
-            if (readU16Be(tile_part, 0) != @intFromEnum(TilePartMarker.sot)) {
+            if (readU16Be(tile_part, 0) != @backingInt(TilePartMarker.sot)) {
                 return PacketScaffoldError.InvalidPacket;
             }
             if (readU16Be(tile_part, 2) != 10) return PacketScaffoldError.InvalidPacket;
@@ -1014,7 +1014,7 @@ pub const RpclPacketBandGroups = struct {
             // the reversible path derives Mb from the bit depth and gain.
             const component_bit_depth = try scaffold.componentBitDepth(self.packet.component, bit_depth);
             const nominal_bitplanes = if (scaffold.nominal_bitplanes) |table|
-                table[encoded.job.band.level][@intFromEnum(encoded.job.band.kind)]
+                table[encoded.job.band.level][@backingInt(encoded.job.band.kind)]
             else
                 try reversible53NominalBitplanes(component_bit_depth, encoded.job.band.kind);
             out_block.* = try encoded.asEncodedLayerBlock(scaffold, nominal_bitplanes);
@@ -1370,7 +1370,7 @@ fn appendTilePartSodPayload(
         if (packet_end > stream.bytes.len) return PacketScaffoldError.InvalidPacket;
 
         if (options.sop) {
-            try appendU16Be(allocator, out, @intFromEnum(TilePartMarker.sop));
+            try appendU16Be(allocator, out, @backingInt(TilePartMarker.sop));
             try appendU16Be(allocator, out, 4);
             try appendU16Be(allocator, out, @as(u16, @intCast(packet_index & 0xffff)));
         }
@@ -1380,7 +1380,7 @@ fn appendTilePartSodPayload(
         const header_end = packet_offset + header_length;
         try out.appendSlice(allocator, stream.bytes[packet_offset..header_end]);
         if (options.eph) {
-            try appendU16Be(allocator, out, @intFromEnum(TilePartMarker.eph));
+            try appendU16Be(allocator, out, @backingInt(TilePartMarker.eph));
         }
         try out.appendSlice(allocator, stream.bytes[header_end..packet_end]);
         packet_offset = packet_end;
@@ -1396,7 +1396,7 @@ fn flushPltMarkerSegment(
     lengths: []const u8,
 ) !void {
     if (lengths.len == 0 or lengths.len > 65532) return PacketScaffoldError.InvalidPacket;
-    try appendU16Be(allocator, out, @intFromEnum(TilePartMarker.plt));
+    try appendU16Be(allocator, out, @backingInt(TilePartMarker.plt));
     const lplt = try std.math.add(u16, 3, @as(u16, @intCast(lengths.len)));
     try appendU16Be(allocator, out, lplt);
     try out.append(allocator, marker_index);
@@ -1451,11 +1451,11 @@ fn tilePartSodOffset(tile_part: []const u8) !usize {
     while (cursor < tile_part.len) {
         if (tile_part.len - cursor < 2) return PacketScaffoldError.InvalidPacket;
         const marker = readU16Be(tile_part, cursor);
-        if (marker == @intFromEnum(TilePartMarker.sod)) {
+        if (marker == @backingInt(TilePartMarker.sod)) {
             if (cursor + 2 > tile_part.len) return PacketScaffoldError.InvalidPacket;
             return cursor;
         }
-        if (marker != @intFromEnum(TilePartMarker.plt)) return PacketScaffoldError.InvalidPacket;
+        if (marker != @backingInt(TilePartMarker.plt)) return PacketScaffoldError.InvalidPacket;
         if (tile_part.len - cursor < 4) return PacketScaffoldError.InvalidPacket;
         const length = readU16Be(tile_part, cursor + 2);
         if (length < 3) return PacketScaffoldError.InvalidPacket;
@@ -1753,7 +1753,7 @@ fn storeCatalogPassDistortions(
         // squared error into the reconstruction domain; the reversible
         // path uses the squared 5/3 norm (unit step).
         const weight = if (band_weights) |table|
-            table[encoded.job.band.level][@intFromEnum(encoded.job.band.kind)]
+            table[encoded.job.band.level][@backingInt(encoded.job.band.kind)]
         else
             pcrdBandWeight(encoded.job.band);
         if (encoded.pass_distortions.len == pass_count) {
@@ -2281,7 +2281,7 @@ fn buildPlanarTileRpclEncodeArtifactsIsoMqInternal(
     defer transformed.deinit();
     const levels = requested_levels;
 
-    var component_bit_depths = [_]u8{0} ** color.max_components;
+    var component_bit_depths: [color.max_components]u8 = @splat(0);
     for (0..source.planes.len) |component| {
         component_bit_depths[component] = source.componentBitDepth(component) orelse return PacketScaffoldError.InvalidPlane;
     }
@@ -2322,7 +2322,7 @@ pub fn forwardPlanarTile(
         return PacketScaffoldError.InvalidPlane;
     }
     const pixels = try std.math.mul(usize, source.width, source.height);
-    var component_bit_depths = [_]u8{0} ** color.max_components;
+    var component_bit_depths: [color.max_components]u8 = @splat(0);
     for (source.planes, 0..) |plane, component| {
         if (plane.len != pixels) return PacketScaffoldError.InvalidPlane;
         const component_depth = source.componentBitDepth(component) orelse return PacketScaffoldError.InvalidPlane;
@@ -2618,7 +2618,7 @@ pub fn writeTilePartTlmMarkerSegment(
     var segment: usize = 0;
     while (start < plan.entries.len) : (segment += 1) {
         const end = @min(plan.entries.len, start + tile_part_tlm_entries_per_segment);
-        try appendU16Be(allocator, &out, @intFromEnum(TilePartMarker.tlm));
+        try appendU16Be(allocator, &out, @backingInt(TilePartMarker.tlm));
         const ltlm: u16 = @intCast(4 + (end - start) * tile_part_tlm_entry_bytes);
         try appendU16Be(allocator, &out, ltlm);
         try out.append(allocator, @intCast(segment));
@@ -2758,14 +2758,14 @@ pub fn writeTilePartBytesForEntry(
     var out = try std.ArrayList(u8).initCapacity(allocator, layout_entry.psot);
     errdefer out.deinit(allocator);
 
-    try appendU16Be(allocator, &out, @intFromEnum(TilePartMarker.sot));
+    try appendU16Be(allocator, &out, @backingInt(TilePartMarker.sot));
     try appendU16Be(allocator, &out, 10);
     try appendU16Be(allocator, &out, layout_entry.tile_index);
     try appendU32Be(allocator, &out, layout_entry.psot);
     try out.append(allocator, layout_entry.tile_part_index);
     try out.append(allocator, layout_entry.tile_part_count);
     try out.appendSlice(allocator, plt_bytes);
-    try appendU16Be(allocator, &out, @intFromEnum(TilePartMarker.sod));
+    try appendU16Be(allocator, &out, @backingInt(TilePartMarker.sod));
     try appendTilePartSodPayload(allocator, &out, tile_artifacts.stream, options);
 
     if (out.items.len != layout_entry.psot) return PacketScaffoldError.InvalidPacket;
@@ -2860,12 +2860,12 @@ pub fn buildTilePartCodestreamFragment(
 ) !TilePartCodestreamFragment {
     const bytes = try allocator.alloc(u8, try std.math.add(usize, sequence.bytes.len, 4));
     errdefer allocator.free(bytes);
-    bytes[0] = @as(u8, @truncate(@intFromEnum(TilePartMarker.soc) >> 8));
-    bytes[1] = @as(u8, @truncate(@intFromEnum(TilePartMarker.soc)));
+    bytes[0] = @as(u8, @truncate(@backingInt(TilePartMarker.soc) >> 8));
+    bytes[1] = @as(u8, @truncate(@backingInt(TilePartMarker.soc)));
     @memcpy(bytes[2..][0..sequence.bytes.len], sequence.bytes);
     const eoc_offset = bytes.len - 2;
-    bytes[eoc_offset] = @as(u8, @truncate(@intFromEnum(TilePartMarker.eoc) >> 8));
-    bytes[eoc_offset + 1] = @as(u8, @truncate(@intFromEnum(TilePartMarker.eoc)));
+    bytes[eoc_offset] = @as(u8, @truncate(@backingInt(TilePartMarker.eoc) >> 8));
+    bytes[eoc_offset + 1] = @as(u8, @truncate(@backingInt(TilePartMarker.eoc)));
 
     const tile_part_offsets = try allocator.alloc(usize, sequence.tile_part_offsets.len);
     errdefer allocator.free(tile_part_offsets);
@@ -2890,8 +2890,8 @@ pub fn parseTilePartCodestreamFragment(
     bytes: []const u8,
 ) !TilePartCodestreamFragment {
     if (bytes.len < 16) return PacketScaffoldError.InvalidPacket;
-    if (readU16Be(bytes, 0) != @intFromEnum(TilePartMarker.soc)) return PacketScaffoldError.InvalidPacket;
-    if (readU16Be(bytes, bytes.len - 2) != @intFromEnum(TilePartMarker.eoc)) {
+    if (readU16Be(bytes, 0) != @backingInt(TilePartMarker.soc)) return PacketScaffoldError.InvalidPacket;
+    if (readU16Be(bytes, bytes.len - 2) != @backingInt(TilePartMarker.eoc)) {
         return PacketScaffoldError.InvalidPacket;
     }
 
@@ -2902,7 +2902,7 @@ pub fn parseTilePartCodestreamFragment(
     while (cursor < eoc_offset) {
         if (eoc_offset - cursor < 2) return PacketScaffoldError.InvalidPacket;
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(TilePartMarker.tlm)) {
+        if (marker == @backingInt(TilePartMarker.tlm)) {
             if (eoc_offset - cursor < 4) return PacketScaffoldError.InvalidPacket;
             const length = readU16Be(bytes, cursor + 2);
             if (length < 4) return PacketScaffoldError.InvalidPacket;
@@ -2927,7 +2927,7 @@ pub fn parseTilePartCodestreamFragment(
     errdefer offsets.deinit(allocator);
     while (cursor < eoc_offset) {
         if (eoc_offset - cursor < 12) return PacketScaffoldError.InvalidPacket;
-        if (readU16Be(bytes, cursor) != @intFromEnum(TilePartMarker.sot)) {
+        if (readU16Be(bytes, cursor) != @backingInt(TilePartMarker.sot)) {
             return PacketScaffoldError.InvalidPacket;
         }
         if (readU16Be(bytes, cursor + 2) != 10) return PacketScaffoldError.InvalidPacket;
@@ -2970,7 +2970,7 @@ pub fn parseTilePartTlmEntries(
     var expected_marker_index: u8 = 0;
     while (cursor < tlm_bytes.len) {
         if (tlm_bytes.len - cursor < 6) return PacketScaffoldError.InvalidPacket;
-        if (readU16Be(tlm_bytes, cursor) != @intFromEnum(TilePartMarker.tlm)) {
+        if (readU16Be(tlm_bytes, cursor) != @backingInt(TilePartMarker.tlm)) {
             return PacketScaffoldError.InvalidPacket;
         }
         const ltlm = readU16Be(tlm_bytes, cursor + 2);
@@ -3016,11 +3016,11 @@ pub fn parseTilePartPltLengthsFromBytes(
     while (cursor < tile_part.len) {
         if (tile_part.len - cursor < 2) return PacketScaffoldError.InvalidPacket;
         const marker = readU16Be(tile_part, cursor);
-        if (marker == @intFromEnum(TilePartMarker.sod)) {
+        if (marker == @backingInt(TilePartMarker.sod)) {
             if (lengths.items.len == 0) return PacketScaffoldError.InvalidPacket;
             return lengths.toOwnedSlice(allocator);
         }
-        if (marker != @intFromEnum(TilePartMarker.plt)) return PacketScaffoldError.InvalidPacket;
+        if (marker != @backingInt(TilePartMarker.plt)) return PacketScaffoldError.InvalidPacket;
         if (tile_part.len - cursor < 5) return PacketScaffoldError.InvalidPacket;
 
         const lplt = readU16Be(tile_part, cursor + 2);
@@ -3186,7 +3186,7 @@ fn appendRawPacketFromFramedTilePart(
     var cursor: usize = 0;
     if (options.sop) {
         if (framed_packet.len - cursor < 6) return PacketScaffoldError.InvalidPacket;
-        if (readU16Be(framed_packet, cursor) != @intFromEnum(TilePartMarker.sop)) return PacketScaffoldError.InvalidPacket;
+        if (readU16Be(framed_packet, cursor) != @backingInt(TilePartMarker.sop)) return PacketScaffoldError.InvalidPacket;
         if (readU16Be(framed_packet, cursor + 2) != 4) return PacketScaffoldError.InvalidPacket;
         if (readU16Be(framed_packet, cursor + 4) != @as(u16, @intCast(packet_index & 0xffff))) {
             return PacketScaffoldError.InvalidPacket;
@@ -3201,7 +3201,7 @@ fn appendRawPacketFromFramedTilePart(
     cursor = header_end;
     if (options.eph) {
         if (framed_packet.len - cursor < 2) return PacketScaffoldError.InvalidPacket;
-        if (readU16Be(framed_packet, cursor) != @intFromEnum(TilePartMarker.eph)) return PacketScaffoldError.InvalidPacket;
+        if (readU16Be(framed_packet, cursor) != @backingInt(TilePartMarker.eph)) return PacketScaffoldError.InvalidPacket;
         cursor += 2;
     }
     try out.appendSlice(allocator, framed_packet[cursor..]);
@@ -3219,7 +3219,7 @@ fn validateFramedPacketMatchesStreamForTilePart(
     var cursor: usize = 0;
     if (options.sop) {
         if (framed_packet.len - cursor < 6) return PacketScaffoldError.InvalidPacket;
-        if (readU16Be(framed_packet, cursor) != @intFromEnum(TilePartMarker.sop)) return PacketScaffoldError.InvalidPacket;
+        if (readU16Be(framed_packet, cursor) != @backingInt(TilePartMarker.sop)) return PacketScaffoldError.InvalidPacket;
         if (readU16Be(framed_packet, cursor + 2) != 4) return PacketScaffoldError.InvalidPacket;
         if (readU16Be(framed_packet, cursor + 4) != @as(u16, @intCast(packet_index & 0xffff))) {
             return PacketScaffoldError.InvalidPacket;
@@ -3243,7 +3243,7 @@ fn validateFramedPacketMatchesStreamForTilePart(
     cursor = framed_header_end;
     if (options.eph) {
         if (framed_packet.len - cursor < 2) return PacketScaffoldError.InvalidPacket;
-        if (readU16Be(framed_packet, cursor) != @intFromEnum(TilePartMarker.eph)) return PacketScaffoldError.InvalidPacket;
+        if (readU16Be(framed_packet, cursor) != @backingInt(TilePartMarker.eph)) return PacketScaffoldError.InvalidPacket;
         cursor += 2;
     }
     const body_length = raw_packet_length - raw_header_length;

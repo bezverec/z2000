@@ -240,13 +240,13 @@ const CodestreamShape = struct {
     height: u32,
     components: u16,
     bits_per_component: u8,
-    component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
+    component_bit_depths: [color.max_components]u8 = @splat(0),
     require_unit_sampling: bool = true,
 };
 
 const CodestreamGeometry = struct {
-    xrsiz: [color.max_components]u8 = [_]u8{0} ** color.max_components,
-    yrsiz: [color.max_components]u8 = [_]u8{0} ** color.max_components,
+    xrsiz: [color.max_components]u8 = @splat(0),
+    yrsiz: [color.max_components]u8 = @splat(0),
     image_origin_x: u32 = 0,
     image_origin_y: u32 = 0,
     tile_origin_x: u32 = 0,
@@ -407,7 +407,7 @@ fn wrapPlanarEnumeratedCodestream(
         return Jp2Error.UnsupportedProfile;
     }
     const pixels = std.math.mul(usize, input.width, input.height) catch return Jp2Error.ImageTooLarge;
-    var component_bit_depths = [_]u8{0} ** color.max_components;
+    var component_bit_depths: [color.max_components]u8 = @splat(0);
     for (input.planes, 0..) |plane, component| {
         if (plane.len != pixels) return Jp2Error.InvalidBox;
         const component_depth = input.componentBitDepth(component) orelse return Jp2Error.UnsupportedProfile;
@@ -526,7 +526,7 @@ const WrapProfile = struct {
     height: u32,
     components: u16,
     bits_per_component: u8,
-    component_bit_depths: [color.max_components]u8 = [_]u8{0} ** color.max_components,
+    component_bit_depths: [color.max_components]u8 = @splat(0),
     enumerated_color_space: u32,
     icc_profile: ?[]const u8,
     palette: ?Palette = null,
@@ -669,9 +669,9 @@ pub fn parseInfo(allocator: std.mem.Allocator, bytes: []const u8) !Info {
         .components = 0,
         .output_components = 0,
         .bits_per_component = 0,
-        .component_bit_depths = [_]u8{0} ** color.max_components,
-        .component_xrsiz = [_]u8{0} ** color.max_components,
-        .component_yrsiz = [_]u8{0} ** color.max_components,
+        .component_bit_depths = @as([color.max_components]u8, @splat(0)),
+        .component_xrsiz = @as([color.max_components]u8, @splat(0)),
+        .component_yrsiz = @as([color.max_components]u8, @splat(0)),
         .image_origin_x = 0,
         .image_origin_y = 0,
         .tile_origin_x = 0,
@@ -688,10 +688,10 @@ pub fn parseInfo(allocator: std.mem.Allocator, bytes: []const u8) !Info {
 
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, true);
-        if (box_index == 0 and box.kind != @intFromEnum(BoxType.signature)) return Jp2Error.InvalidBox;
-        if (box_index == 1 and box.kind != @intFromEnum(BoxType.file_type)) return Jp2Error.InvalidBox;
+        if (box_index == 0 and box.kind != @backingInt(BoxType.signature)) return Jp2Error.InvalidBox;
+        if (box_index == 1 and box.kind != @backingInt(BoxType.file_type)) return Jp2Error.InvalidBox;
         switch (box.kind) {
-            @intFromEnum(BoxType.signature) => {
+            @backingInt(BoxType.signature) => {
                 if (box_index != 0 or saw_signature) return Jp2Error.InvalidBox;
                 if (box.payload.len != signature_payload.len or
                     !std.mem.eql(u8, box.payload, signature_payload[0..]))
@@ -700,17 +700,17 @@ pub fn parseInfo(allocator: std.mem.Allocator, bytes: []const u8) !Info {
                 }
                 saw_signature = true;
             },
-            @intFromEnum(BoxType.file_type) => {
+            @backingInt(BoxType.file_type) => {
                 if (box_index != 1 or saw_ftyp) return Jp2Error.InvalidBox;
                 try validateFileTypeBox(box.payload);
                 saw_ftyp = true;
             },
-            @intFromEnum(BoxType.jp2_header) => {
+            @backingInt(BoxType.jp2_header) => {
                 if (!saw_ftyp or saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
                 try parseJp2Header(box.payload, &info);
                 saw_jp2h = true;
             },
-            @intFromEnum(BoxType.contiguous_codestream) => {
+            @backingInt(BoxType.contiguous_codestream) => {
                 if (!saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
                 var geometry = CodestreamGeometry{};
                 try validateCodestreamPayload(allocator, box.payload, .{
@@ -735,12 +735,12 @@ pub fn parseInfo(allocator: std.mem.Allocator, bytes: []const u8) !Info {
             // content is opaque to the codec; the box framing is validated
             // by nextBox and a uuid payload must at least carry its 16-byte
             // identifier.
-            @intFromEnum(BoxType.xml),
-            @intFromEnum(BoxType.uuid_info),
+            @backingInt(BoxType.xml),
+            @backingInt(BoxType.uuid_info),
             => {
                 if (!saw_ftyp) return Jp2Error.InvalidBox;
             },
-            @intFromEnum(BoxType.uuid) => {
+            @backingInt(BoxType.uuid) => {
                 if (!saw_ftyp) return Jp2Error.InvalidBox;
                 if (box.payload.len < 16) return Jp2Error.InvalidBox;
             },
@@ -761,7 +761,7 @@ pub fn extractCodestream(allocator: std.mem.Allocator, bytes: []const u8) ![]con
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, true);
-        if (box.kind == @intFromEnum(BoxType.contiguous_codestream)) {
+        if (box.kind == @backingInt(BoxType.contiguous_codestream)) {
             return box.payload;
         }
     }
@@ -787,10 +787,10 @@ pub fn attachMetadata(
     while (cursor < bytes.len) {
         const box_offset = cursor;
         const box = try nextBox(bytes, &cursor, true);
-        if (box.kind == @intFromEnum(BoxType.uuid)) {
+        if (box.kind == @backingInt(BoxType.uuid)) {
             if (managedMetadataKind(box.payload) != null) return Jp2Error.InvalidBox;
         }
-        if (box.kind == @intFromEnum(BoxType.contiguous_codestream)) {
+        if (box.kind == @backingInt(BoxType.contiguous_codestream)) {
             codestream_box_offset = box_offset;
         }
     }
@@ -819,7 +819,7 @@ pub fn extractMetadata(allocator: std.mem.Allocator, bytes: []const u8) !OwnedMe
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, true);
-        if (box.kind != @intFromEnum(BoxType.uuid)) continue;
+        if (box.kind != @backingInt(BoxType.uuid)) continue;
         const kind = managedMetadataKind(box.payload) orelse continue;
         const payload = box.payload[16..];
         switch (kind) {
@@ -930,7 +930,7 @@ pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, true);
-        if (box.kind == @intFromEnum(BoxType.jp2_header)) {
+        if (box.kind == @backingInt(BoxType.jp2_header)) {
             return extractIccProfileFromJp2Header(
                 allocator,
                 box.payload,
@@ -948,12 +948,12 @@ pub fn extractPalette(allocator: std.mem.Allocator, bytes: []const u8) !?Palette
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, true);
-        if (box.kind != @intFromEnum(BoxType.jp2_header)) continue;
+        if (box.kind != @backingInt(BoxType.jp2_header)) continue;
 
         var child_cursor: usize = 0;
         while (child_cursor < box.payload.len) {
             const child = try nextBox(box.payload, &child_cursor, false);
-            if (child.kind != @intFromEnum(BoxType.palette)) continue;
+            if (child.kind != @backingInt(BoxType.palette)) continue;
             const header = try parsePaletteHeader(child.payload);
             const sample_count = std.math.mul(usize, header.entries, 3) catch
                 return Jp2Error.ImageTooLarge;
@@ -1003,7 +1003,7 @@ fn extractIccProfileFromJp2Header(
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, false);
-        if (box.kind != @intFromEnum(BoxType.color)) continue;
+        if (box.kind != @backingInt(BoxType.color)) continue;
         if (box.payload.len < 3) return Jp2Error.InvalidBox;
         switch (box.payload[0]) {
             1 => {
@@ -1043,9 +1043,9 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var box_index: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, false);
-        if (box_index == 0 and box.kind != @intFromEnum(BoxType.image_header)) return Jp2Error.InvalidBox;
+        if (box_index == 0 and box.kind != @backingInt(BoxType.image_header)) return Jp2Error.InvalidBox;
         switch (box.kind) {
-            @intFromEnum(BoxType.image_header) => {
+            @backingInt(BoxType.image_header) => {
                 if (box_index != 0 or saw_ihdr) return Jp2Error.InvalidBox;
                 if (box.payload.len != 14) return Jp2Error.InvalidBox;
                 info.height = try readU32Be(box.payload, 0);
@@ -1083,7 +1083,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 }
                 saw_ihdr = true;
             },
-            @intFromEnum(BoxType.bits_per_component) => {
+            @backingInt(BoxType.bits_per_component) => {
                 if (!saw_ihdr or saw_bpcc or saw_colr) return Jp2Error.InvalidBox;
                 if (!requires_bpcc) return Jp2Error.InvalidBox;
                 if (box.payload.len != info.components) return Jp2Error.InvalidBox;
@@ -1106,7 +1106,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 info.bits_per_component = if (mixed_precision) 0 else bits_per_component;
                 saw_bpcc = true;
             },
-            @intFromEnum(BoxType.color) => {
+            @backingInt(BoxType.color) => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
                 if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
                 if (box.payload.len < 3) return Jp2Error.InvalidBox;
@@ -1158,7 +1158,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                     else => {},
                 }
             },
-            @intFromEnum(BoxType.channel_definition) => {
+            @backingInt(BoxType.channel_definition) => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
                 if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
                 if (saw_channel_definition) return Jp2Error.InvalidBox;
@@ -1169,7 +1169,7 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 );
                 saw_channel_definition = true;
             },
-            @intFromEnum(BoxType.palette) => {
+            @backingInt(BoxType.palette) => {
                 if (!saw_ihdr or !saw_colr or saw_palette or saw_component_mapping or saw_channel_definition) {
                     return Jp2Error.InvalidBox;
                 }
@@ -1182,14 +1182,14 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 info.output_components = 3;
                 saw_palette = true;
             },
-            @intFromEnum(BoxType.component_mapping) => {
+            @backingInt(BoxType.component_mapping) => {
                 if (!saw_palette or saw_component_mapping or saw_channel_definition) {
                     return Jp2Error.InvalidBox;
                 }
                 try validatePaletteComponentMapping(box.payload);
                 saw_component_mapping = true;
             },
-            @intFromEnum(BoxType.resolution) => {
+            @backingInt(BoxType.resolution) => {
                 if (!saw_ihdr) return Jp2Error.InvalidBox;
                 if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
                 try validateResolutionBox(box.payload);
@@ -1341,7 +1341,7 @@ fn validateChannelDefinition(payload: []const u8, components: u16) !?AlphaMode {
     }
     const has_alpha = components == 2 or components == 4;
     const color_components = if (has_alpha) components - 1 else components;
-    var seen = [_]bool{false} ** color.max_components;
+    var seen: [color.max_components]bool = @splat(false);
     var alpha_mode: ?AlphaMode = null;
     var index: usize = 0;
     while (index < entry_count) : (index += 1) {
@@ -1469,11 +1469,11 @@ fn validateResolutionBox(payload: []const u8) !void {
     while (cursor < payload.len) {
         const box = try nextBox(payload, &cursor, false);
         switch (box.kind) {
-            @intFromEnum(BoxType.capture_resolution) => {
+            @backingInt(BoxType.capture_resolution) => {
                 if (saw_capture) return Jp2Error.InvalidBox;
                 saw_capture = true;
             },
-            @intFromEnum(BoxType.display_resolution) => {
+            @backingInt(BoxType.display_resolution) => {
                 if (saw_display) return Jp2Error.InvalidBox;
                 saw_display = true;
             },
@@ -2200,9 +2200,9 @@ fn validateCodeBlockStyleByte(code_block_style: u8) !void {
 /// strict codestream validation consumes and checks every signalled table.
 /// The fixed storage follows the bounded 1..4-component JP2 boundary.
 const ComponentOverrideState = struct {
-    coc_seen: [color.max_components]bool = [_]bool{false} ** color.max_components,
+    coc_seen: [color.max_components]bool = @splat(false),
     coc_first: []const u8 = &.{},
-    qcc_seen: [color.max_components]bool = [_]bool{false} ** color.max_components,
+    qcc_seen: [color.max_components]bool = @splat(false),
     qcc_first: []const u8 = &.{},
 };
 
@@ -2593,7 +2593,7 @@ fn appendBox(
 ) !void {
     const length = try std.math.add(u32, 8, @as(u32, @intCast(payload.len)));
     try appendU32Be(allocator, out, length);
-    try appendU32Be(allocator, out, @intFromEnum(box_type));
+    try appendU32Be(allocator, out, @backingInt(box_type));
     try out.appendSlice(allocator, payload);
 }
 

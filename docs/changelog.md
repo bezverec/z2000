@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Zig 0.17
+
+- z2000 now builds with Zig 0.17.0, and the release workflows install it
+  (checksums from ziglang.org's release index, whose 0.16.0 entries match
+  the previous pins). 0.17 split the build into a cached configure phase
+  and a make phase, removed array repetition (`**`), renamed the enum
+  type-information fields and optimize-mode tags, and deprecated the enum
+  cast builtins; docs/toolchain_notes.md lists each change and its fix.
+  The build script declares its read of `VERSION` and poisons the
+  configure cache when it asks Git for the revision, so the embedded
+  version stays current.
+- Debug and ReleaseFast tests (607 each) and the Part 1 corpus pass. The
+  x86_64-linux-musl, riscv64-linux-musl, and aarch64-macos cross-builds
+  succeed, and a release-style build embeds the expected version. Outputs
+  of 0.16 and 0.17 builds are byte-identical on every conversion compared,
+  and timings are within 2%.
+- Zig 0.17.0 fixed the `std.compress.flate` overrun recorded in the
+  toolchain notes; the reproduction and a sweep of every truncation now
+  end in errors. The guard in `zlib_inflate.zig` stays for now.
+
 ### Batch Output Names Compared Ignoring Case
 
 - The batch plan compared output names exactly, so `Scan.tif` and

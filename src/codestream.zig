@@ -159,13 +159,13 @@ pub const ComponentStats = struct {
     max_bitplanes: u8 = 0,
     coding_passes: u64 = 0,
     ebcot_segments: EbcotSegmentStats = .{},
-    quality_layers: [max_quality_layers]QualityLayerStats = [_]QualityLayerStats{.{}} ** max_quality_layers,
-    pass_streams: [3]EntropyStreamStats = [_]EntropyStreamStats{.{}} ** 3,
-    method_streams: [4]EntropyStreamStats = [_]EntropyStreamStats{.{}} ** 4,
+    quality_layers: [max_quality_layers]QualityLayerStats = @splat(.{}),
+    pass_streams: [3]EntropyStreamStats = @splat(.{}),
+    method_streams: [4]EntropyStreamStats = @splat(.{}),
 
     fn addStream(self: *ComponentStats, pass: PassKind, info: EntropyStreamInfo) void {
-        self.pass_streams[@intFromEnum(pass)].add(info);
-        self.method_streams[@intFromEnum(info.method)].add(info);
+        self.pass_streams[@backingInt(pass)].add(info);
+        self.method_streams[@backingInt(info.method)].add(info);
     }
 };
 
@@ -284,7 +284,7 @@ const strict_guard_bits: u8 = 2;
 pub const LosslessOptions = struct {
     levels: u8 = 5,
     layers: u16 = 1,
-    rates: [max_quality_layers]f64 = [_]f64{0} ** max_quality_layers,
+    rates: [max_quality_layers]f64 = @splat(0),
     rate_count: u8 = 0,
     progression: ProgressionOrder = .rpcl,
     poc_records: []const PocRecord = &.{},
@@ -666,7 +666,7 @@ pub fn encodeLosslessPlanarWithOptions(
     if (planar.planes.len == 0 or planar.planes.len > color.max_components) {
         return CodestreamError.UnsupportedPayload;
     }
-    var component_bit_depths = [_]u8{0} ** max_codestream_components;
+    var component_bit_depths: [max_codestream_components]u8 = @splat(0);
     var mixed_component_precision = false;
     for (0..planar.planes.len) |component| {
         const component_depth = planar.componentBitDepth(component) orelse return CodestreamError.UnsupportedPayload;
@@ -1055,9 +1055,9 @@ pub fn encodeLosslessSampledPlanarWithOptions(
 
     const reference_levels = actualDwtLevels(planar.width, planar.height, options.levels);
 
-    var component_xrsiz = [_]u8{1} ** max_codestream_components;
-    var component_yrsiz = [_]u8{1} ** max_codestream_components;
-    var component_bit_depths = [_]u8{0} ** max_codestream_components;
+    var component_xrsiz: [max_codestream_components]u8 = @splat(1);
+    var component_yrsiz: [max_codestream_components]u8 = @splat(1);
+    var component_bit_depths: [max_codestream_components]u8 = @splat(0);
     var any_subsampled = false;
     for (0..component_count) |component| {
         const xrsiz = sampling[component].xrsiz;
@@ -1916,12 +1916,12 @@ fn irreversibleNominalBitplaneTable(
     guard_bits: u8,
     quantization: QuantizationStyle,
 ) ![33][4]u8 {
-    var table = [_][4]u8{.{ 0, 0, 0, 0 }} ** 33;
+    var table: [33][4]u8 = @splat(.{ 0, 0, 0, 0 });
     if (levels > 32) return CodestreamError.UnsupportedPayload;
     var level: u8 = 1;
     while (level <= levels) : (level += 1) {
         inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
-            table[level][@intFromEnum(kind)] = try bandNominalBitplanesForTransform(
+            table[level][@backingInt(kind)] = try bandNominalBitplanesForTransform(
                 bit_depth,
                 kind,
                 level,
@@ -1932,7 +1932,7 @@ fn irreversibleNominalBitplaneTable(
             );
         }
     }
-    table[levels][@intFromEnum(subband.Kind.ll)] = try bandNominalBitplanesForTransform(
+    table[levels][@backingInt(subband.Kind.ll)] = try bandNominalBitplanesForTransform(
         bit_depth,
         .ll,
         levels,
@@ -1955,7 +1955,7 @@ fn irreversibleBandWeightTable(
     levels: u8,
     quantization: QuantizationStyle,
 ) ![33][4]f64 {
-    var table = [_][4]f64{.{ 0, 0, 0, 0 }} ** 33;
+    var table: [33][4]f64 = @splat(.{ 0, 0, 0, 0 });
     if (levels > 32) return CodestreamError.UnsupportedPayload;
     const kinds = [_]subband.Kind{ .ll, .hl, .lh, .hh };
     var level: u8 = 1;
@@ -1963,7 +1963,7 @@ fn irreversibleBandWeightTable(
         for (kinds) |kind| {
             if (kind == .ll and level != levels) continue;
             const opj_level: usize = if (kind == .ll) level else @as(usize, level) - 1;
-            const orient: usize = @intFromEnum(kind);
+            const orient: usize = @backingInt(kind);
             const step = try irreversibleBandStepSizeFor(quantization, bit_depth, kind, level, levels);
             const weighted = irreversiblePcrdDelta(bit_depth, kind, step) * dwt97Norm(opj_level, orient);
             table[level][orient] = weighted * weighted;
@@ -2161,7 +2161,7 @@ test "component job runner exceeds the legacy slot count" {
             job.completed = true;
         }
     };
-    var jobs = [_]Job{.{}} ** (max_codestream_components + 3);
+    var jobs: [max_codestream_components + 3]Job = @splat(.{});
     try runComponentJobs(Job, std.testing.allocator, &jobs, 8, Job.run);
     for (jobs) |job| try std.testing.expect(job.completed);
 }
@@ -2451,7 +2451,7 @@ pub const StrictPacketBlock = struct {
     /// support.
     region_required: bool = true,
     segment_count: u8 = 0,
-    segment_lengths: [ebcot.max_block_segments]u64 = [_]u64{0} ** ebcot.max_block_segments,
+    segment_lengths: [ebcot.max_block_segments]u64 = @splat(0),
 };
 
 pub const StrictPacketBlockCatalog = struct {
@@ -2536,7 +2536,7 @@ const StrictSotInfo = struct {
 
 const StrictTilePartPacketPlan = struct {
     count: usize = 0,
-    packet_counts: [256]usize = [_]usize{0} ** 256,
+    packet_counts: [256]usize = @splat(0),
     /// True when any tile-part carried no PLT: per-part packet counts are then
     /// unknown until the catalog stage decodes headers in stream order
     /// (foreign-stream Stage B), so the R-division plan validation is skipped.
@@ -2750,7 +2750,7 @@ const StrictRpclBlockAssembly = struct {
     encoded_bitplanes: u8 = 0,
     code_block_style: ebcot.CodeBlockStyle = .{},
     segment_count: u8 = 0,
-    segment_lengths: [ebcot.max_block_segments]u64 = [_]u64{0} ** ebcot.max_block_segments,
+    segment_lengths: [ebcot.max_block_segments]u64 = @splat(0),
     /// BYPASS only: the last recorded length is a partial codeword segment that
     /// a later quality layer continues.
     open_segment: bool = false,
@@ -2883,7 +2883,7 @@ const StrictComponentAssemblySet = struct {
 
 test "strict component assembly and packet catalog storage is dynamically sized" {
     const component_count = max_codestream_components + 3;
-    const block_counts = [_]usize{0} ** component_count;
+    const block_counts: [component_count]usize = @splat(0);
     var assemblies = try StrictComponentAssemblySet.init(
         std.testing.allocator,
         component_count,
@@ -2910,7 +2910,7 @@ test "strict component packet planning exceeds the legacy slot count" {
         .{ .width = 8, .height = 8 },
     };
     const reference = try packet_plan.rpclTileRegion(0, 0, 16, 16, 1, 1, 1, &precincts);
-    const sampling = [_]u8{1} ** component_count;
+    const sampling: [component_count]u8 = @splat(1);
 
     var plans = try StrictComponentPacketPlans.init(
         std.testing.allocator,
@@ -2974,10 +2974,10 @@ test "strict stateful precinct groups exceed the legacy component slots" {
         .{ .width = 8, .height = 8 },
     };
     const reference = try packet_plan.rpclTileRegion(0, 0, 16, 16, 1, 1, 1, &precincts);
-    const component_bit_depths = [_]u8{8} ** component_count;
-    const component_signed = [_]bool{false} ** component_count;
-    const component_sampling = [_]u8{1} ** component_count;
-    const component_qcd = [_]StrictQcdInfo{empty_strict_qcd_info} ** component_count;
+    const component_bit_depths: [component_count]u8 = @splat(8);
+    const component_signed: [component_count]bool = @splat(false);
+    const component_sampling: [component_count]u8 = @splat(1);
+    const component_qcd: [component_count]StrictQcdInfo = @splat(empty_strict_qcd_info);
     const tile_parts = emptyTilePartPlan();
     const header = TemporaryHeader{
         .version = 8,
@@ -3037,7 +3037,7 @@ const RpclBlockIndex = struct {
 
     fn init(allocator: std.mem.Allocator, plan: packet_plan.Plan, component_count: u16) !RpclBlockIndex {
         if (component_count < 1) return CodestreamError.UnsupportedPayload;
-        var resolution_offsets: [33]usize = [_]usize{0} ** 33;
+        var resolution_offsets: [33]usize = @splat(0);
         var cell_count: usize = 0;
         var resolution_index: usize = 0;
         while (resolution_index < plan.resolution_count) : (resolution_index += 1) {
@@ -3261,7 +3261,7 @@ const StrictComponentPacketPlans = struct {
     components: []packet_plan.SampledComponentPlan,
     component_count: u16,
     packet_count: u64,
-    resolution_packets: [33]u64 = [_]u64{0} ** 33,
+    resolution_packets: [33]u64 = @splat(0),
 
     fn init(
         allocator: std.mem.Allocator,
@@ -3711,7 +3711,7 @@ const SingleTileAssemblyInput = struct {
     width: usize,
     height: usize,
     bit_depth: u8,
-    component_bit_depths: [max_codestream_components]u8 = [_]u8{0} ** max_codestream_components,
+    component_bit_depths: [max_codestream_components]u8 = @splat(0),
     components: u16,
     levels: u8,
     packet_lengths: []const u32,
@@ -3795,7 +3795,7 @@ fn assembleSingleTileCodestream(
     }
 
     if (encode_options.tlm) try appendTlm(allocator, &out, psots[0..tile_parts]);
-    var ppm_groups: [33][]u8 = [_][]u8{&.{}} ** 33;
+    var ppm_groups: [33][]u8 = @splat(&.{});
     defer for (ppm_groups[0..tile_parts]) |group| if (group.len != 0) allocator.free(group);
     if (encode_options.ppm) {
         tile_part_index = 0;
@@ -5552,9 +5552,9 @@ fn decodeMixedTransformPlanarFromBlockCatalogMeasured(
         return CodestreamError.UnsupportedPayload;
     }
 
-    var component_depths = [_]u8{0} ** max_codestream_components;
-    var output_widths = [_]usize{0} ** max_codestream_components;
-    var output_heights = [_]usize{0} ** max_codestream_components;
+    var component_depths: [max_codestream_components]u8 = @splat(0);
+    var output_widths: [max_codestream_components]usize = @splat(0);
+    var output_heights: [max_codestream_components]usize = @splat(0);
     var max_component_dimension: usize = 0;
     for (0..header.component_count) |component| {
         const coding = component_coding[component];
@@ -5780,8 +5780,8 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
     var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
     defer workspace.deinit();
     const coefficient_planes = try allocator.alloc([]i32, header.component_count);
-    var decoded_component_widths = [_]usize{0} ** color.max_components;
-    var decoded_component_heights = [_]usize{0} ** color.max_components;
+    var decoded_component_widths: [color.max_components]usize = @splat(0);
+    var decoded_component_heights: [color.max_components]usize = @splat(0);
     @memcpy(
         decoded_component_widths[0..header.component_count],
         catalog.component_widths[0..header.component_count],
@@ -5896,9 +5896,9 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
             color.inverseRctPlanarSaturated(allocator, transformed);
     }
 
-    var output_bit_depths = [_]u8{0} ** max_codestream_components;
-    var output_widths = [_]usize{0} ** max_codestream_components;
-    var output_heights = [_]usize{0} ** max_codestream_components;
+    var output_bit_depths: [max_codestream_components]u8 = @splat(0);
+    var output_widths: [max_codestream_components]usize = @splat(0);
+    var output_heights: [max_codestream_components]usize = @splat(0);
     for (output_bit_depths[0..header.component_count], 0..) |*component_depth, component| {
         component_depth.* = componentBitDepthForHeader(header, component);
         output_widths[component] = decoded_component_widths[component];
@@ -6167,7 +6167,7 @@ fn analyzeTemporaryPayloadBytes(
         .rpcl_shadow_bytes = 0,
         .payload_bytes = payload.len,
         .codestream_bytes = codestream_bytes.len,
-        .components = [_]ComponentStats{.{}} ** 3,
+        .components = @as([3]ComponentStats, @splat(.{})),
     };
 
     try readComponentStats(&cursor, &stats.components[0], 0, header.version, header.layers);
@@ -6225,7 +6225,7 @@ fn analyzeStrictPacketStats(allocator: std.mem.Allocator, bytes: []const u8) !Te
         .rpcl_shadow_bytes = 0,
         .payload_bytes = 0,
         .codestream_bytes = bytes.len,
-        .components = [_]ComponentStats{.{}} ** 3,
+        .components = @as([3]ComponentStats, @splat(.{})),
     };
 }
 
@@ -6272,7 +6272,7 @@ fn analyzeStrictMultiTilePacketStats(
         .rpcl_shadow_bytes = 0,
         .payload_bytes = 0,
         .codestream_bytes = bytes.len,
-        .components = [_]ComponentStats{.{}} ** 3,
+        .components = @as([3]ComponentStats, @splat(.{})),
     };
 }
 
@@ -6414,7 +6414,7 @@ fn readStrictCodestreamMetadataForProfile(
     bytes: []const u8,
     precision_profile: StrictPayloadPrecisionProfile,
 ) !TemporaryHeader {
-    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -6448,9 +6448,9 @@ fn readStrictCodestreamMetadataForProfile(
     var parsed_progression: ProgressionOrder = .rpcl;
     var parsed_quantization: QuantizationStyle = .none;
     var parsed_guard_bits: u8 = strict_guard_bits;
-    var parsed_qcd_exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands;
+    var parsed_qcd_exponents: [max_qcd_bands]u8 = @splat(0);
     var parsed_qcd_exponent_count: u8 = 0;
-    var parsed_qcd_steps: [max_qcd_bands]BandStepSize = [_]BandStepSize{.{ .exponent = 0, .mantissa = 0 }} ** max_qcd_bands;
+    var parsed_qcd_steps: [max_qcd_bands]BandStepSize = @splat(.{ .exponent = 0, .mantissa = 0 });
     var parsed_qcd_step_count: u8 = 0;
     var precincts = defaultPrecincts();
     var precinct_count: u8 = 0;
@@ -6493,8 +6493,8 @@ fn readStrictCodestreamMetadataForProfile(
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(Marker.sot)) break;
-        if (marker == @intFromEnum(Marker.eoc) or marker == @intFromEnum(Marker.sod)) {
+        if (marker == @backingInt(Marker.sot)) break;
+        if (marker == @backingInt(Marker.eoc) or marker == @backingInt(Marker.sod)) {
             return CodestreamError.InvalidCodestream;
         }
         // ISO/IEC 15444-1 reserves FF30..FF3F as segment-less marker codes.
@@ -6512,11 +6512,11 @@ fn readStrictCodestreamMetadataForProfile(
             return CodestreamError.TruncatedData;
         }
         const segment = bytes[cursor + 2 .. cursor + segment_length];
-        if (!saw_siz and marker != @intFromEnum(Marker.siz)) return CodestreamError.InvalidCodestream;
+        if (!saw_siz and marker != @backingInt(Marker.siz)) return CodestreamError.InvalidCodestream;
         if (saw_siz) {
             if (profile_state) |*state| try state.observeMarker(marker);
         }
-        if (marker == @intFromEnum(Marker.siz)) {
+        if (marker == @backingInt(Marker.siz)) {
             if (saw_siz) return CodestreamError.InvalidCodestream;
             if (segment.len < 36) return CodestreamError.InvalidCodestream;
             profile_state = profile_signaling.State.init(readU16Be(segment, 0));
@@ -6596,28 +6596,28 @@ fn readStrictCodestreamMetadataForProfile(
                 }
             }
             saw_siz = true;
-        } else if (marker == @intFromEnum(Marker.cap)) {
+        } else if (marker == @backingInt(Marker.cap)) {
             try profile_signaling.validateCap(segment);
-        } else if (marker == @intFromEnum(Marker.prf)) {
+        } else if (marker == @backingInt(Marker.prf)) {
             try profile_signaling.validatePrf(segment);
-        } else if (marker == @intFromEnum(Marker.cod)) {
+        } else if (marker == @backingInt(Marker.cod)) {
             if (!saw_siz or saw_cod) return CodestreamError.InvalidCodestream;
             if (segment.len < 10) return CodestreamError.InvalidCodestream;
             const scod = segment[0];
             if ((scod & ~@as(u8, 0x07)) != 0) return CodestreamError.InvalidCodestream;
             parsed_progression = switch (segment[1]) {
-                @intFromEnum(ProgressionOrder.rpcl) => .rpcl,
-                @intFromEnum(ProgressionOrder.lrcp) => .lrcp,
-                @intFromEnum(ProgressionOrder.rlcp) => .rlcp,
-                @intFromEnum(ProgressionOrder.pcrl) => .pcrl,
-                @intFromEnum(ProgressionOrder.cprl) => .cprl,
+                @backingInt(ProgressionOrder.rpcl) => .rpcl,
+                @backingInt(ProgressionOrder.lrcp) => .lrcp,
+                @backingInt(ProgressionOrder.rlcp) => .rlcp,
+                @backingInt(ProgressionOrder.pcrl) => .pcrl,
+                @backingInt(ProgressionOrder.cprl) => .cprl,
                 else => return CodestreamError.UnsupportedPayload,
             };
             layers = readU16Be(segment, 2);
             if (layers == 0 or layers > max_quality_layers) return CodestreamError.InvalidCodestream;
             parsed_mct = switch (segment[4]) {
-                @intFromEnum(MultipleComponentTransform.rct) => .rct,
-                @intFromEnum(MultipleComponentTransform.none) => .none,
+                @backingInt(MultipleComponentTransform.rct) => .rct,
+                @backingInt(MultipleComponentTransform.none) => .none,
                 else => return CodestreamError.UnsupportedPayload,
             };
             levels = segment[5];
@@ -6627,8 +6627,8 @@ fn readStrictCodestreamMetadataForProfile(
             try validateBlockSize(block_width, block_height);
             parsed_code_block_style = try parseCodeBlockStyleByte(segment[8]);
             parsed_transform = switch (segment[9]) {
-                @intFromEnum(WaveletTransform.irreversible_9_7) => .irreversible_9_7,
-                @intFromEnum(WaveletTransform.reversible_5_3) => .reversible_5_3,
+                @backingInt(WaveletTransform.irreversible_9_7) => .irreversible_9_7,
+                @backingInt(WaveletTransform.reversible_5_3) => .reversible_5_3,
                 else => return CodestreamError.InvalidCodestream,
             };
             const wire_precinct_count: usize = if ((scod & 0x01) != 0) @as(usize, levels) + 1 else 0;
@@ -6672,11 +6672,11 @@ fn readStrictCodestreamMetadataForProfile(
                 coding.transform = parsed_transform;
             }
             saw_cod = true;
-        } else if (marker == @intFromEnum(Marker.qcd)) {
+        } else if (marker == @backingInt(Marker.qcd)) {
             if (saw_qcd) return CodestreamError.InvalidCodestream;
             qcd_payload = segment;
             saw_qcd = true;
-        } else if (marker == @intFromEnum(Marker.coc)) {
+        } else if (marker == @backingInt(Marker.coc)) {
             // ISO 15444-1 A.6.2 component-specific coding style. Bounded
             // profiles accept component-local decomposition, precinct,
             // block/style, and single-tile transform choices; the profile
@@ -6698,7 +6698,7 @@ fn readStrictCodestreamMetadataForProfile(
             coding.block_width = try codeBlockSizeFromCodExponent(spcoc[1]);
             coding.block_height = try codeBlockSizeFromCodExponent(spcoc[2]);
             coding.code_block_style = try parseCodeBlockStyleByte(spcoc[3]);
-            coding.transform = @enumFromInt(spcoc[4]);
+            coding.transform = @fromBackingInt(@intCast(spcoc[4]));
             if ((segment[1] & 0x01) == 0) {
                 for (coding.precincts[0..coding.precinct_count]) |*precinct| {
                     precinct.* = .{ .width = 32768, .height = 32768 };
@@ -6716,7 +6716,7 @@ fn readStrictCodestreamMetadataForProfile(
             } else if (!std.mem.eql(u8, segment[1..], coc_payload_first)) {
                 coc_payloads_uniform = false;
             }
-        } else if (marker == @intFromEnum(Marker.qcc)) {
+        } else if (marker == @backingInt(Marker.qcc)) {
             // ISO 15444-1 A.6.5: component-specific quantization. Reversible
             // and general layouts retain the COC-like uniform-override policy.
             // The bounded three-component ICT/9-7 profile keeps each effective
@@ -6741,40 +6741,40 @@ fn readStrictCodestreamMetadataForProfile(
                 // every component coding override is known.
                 qcc_payloads_uniform = false;
             }
-        } else if (marker == @intFromEnum(Marker.rgn)) {
+        } else if (marker == @backingInt(Marker.rgn)) {
             if (!saw_siz) return CodestreamError.InvalidCodestream;
             const rgn = try parseStrictRgnSegment(segment, component_count);
             if (rgn_component_seen[rgn.component]) return CodestreamError.InvalidCodestream;
             rgn_component_seen[rgn.component] = true;
             component_coding[rgn.component].roi_shift = rgn.shift;
-        } else if (marker == @intFromEnum(Marker.crg)) {
+        } else if (marker == @backingInt(Marker.crg)) {
             if (!saw_siz or saw_crg) return CodestreamError.InvalidCodestream;
             try validateStrictCrgSegment(segment, component_count);
             saw_crg = true;
-        } else if (marker == @intFromEnum(Marker.tlm)) {
+        } else if (marker == @backingInt(Marker.tlm)) {
             if (!saw_cod or !saw_qcd) return CodestreamError.InvalidCodestream;
             try appendStrictTlmEntries(allocator, &tlm_entries, segment, next_tlm_index);
             saw_tlm = true;
             next_tlm_index += 1;
-        } else if (marker == @intFromEnum(Marker.ppm)) {
+        } else if (marker == @backingInt(Marker.ppm)) {
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
             ppm_collector.append(segment) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
-        } else if (marker == @intFromEnum(Marker.plm)) {
+        } else if (marker == @backingInt(Marker.plm)) {
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
             plm_collector.append(segment) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
-        } else if (marker == @intFromEnum(Marker.poc)) {
+        } else if (marker == @backingInt(Marker.poc)) {
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
             poc.appendSegment(allocator, &poc_records, segment, component_count, levels + 1, layers) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
-        } else if (marker == @intFromEnum(Marker.com)) {
+        } else if (marker == @backingInt(Marker.com)) {
             // COM is ignored by the restricted decoder profile.
         } else {
             return CodestreamError.InvalidCodestream;
@@ -6849,7 +6849,7 @@ fn readStrictCodestreamMetadataForProfile(
         const override_block_width = try codeBlockSizeFromCodExponent(spcoc[1]);
         const override_block_height = try codeBlockSizeFromCodExponent(spcoc[2]);
         const override_style = try parseCodeBlockStyleByte(spcoc[3]);
-        const override_transform: WaveletTransform = @enumFromInt(spcoc[4]);
+        const override_transform: WaveletTransform = @fromBackingInt(@intCast(spcoc[4]));
         var all_components_overridden = true;
         for (coc_component_seen[0..component_count]) |seen| {
             all_components_overridden = all_components_overridden and seen;
@@ -7297,7 +7297,7 @@ fn readStrictCodestreamMetadataForProfile(
                 .rlcp => null,
             } else null,
             .tile_part_plan_count = 0,
-            .tile_part_plan = [_]u8{0} ** 33,
+            .tile_part_plan = @as([33]u8, @splat(0)),
             .packet_plan_count = plan.resolution_count,
             .packet_plan = plan.resolutions,
             .packet_count = verified_packet_count,
@@ -7399,7 +7399,7 @@ fn strictProfileSignalingFixture(
     rsiz: u16,
     prefix: []const u8,
 ) ![]u8 {
-    if (base.len < 8 or readU16Be(base, 2) != @intFromEnum(Marker.siz)) {
+    if (base.len < 8 or readU16Be(base, 2) != @backingInt(Marker.siz)) {
         return CodestreamError.InvalidCodestream;
     }
     const after_siz = std.math.add(usize, 4, readU16Be(base, 4)) catch
@@ -7584,10 +7584,10 @@ fn allowsComponentSpecificIrreversibleQcc(
 
 fn isUnsupportedTilePartHeaderMarker(marker: u16) bool {
     return switch (marker) {
-        @intFromEnum(Marker.cod),
-        @intFromEnum(Marker.coc),
-        @intFromEnum(Marker.qcd),
-        @intFromEnum(Marker.qcc),
+        @backingInt(Marker.cod),
+        @backingInt(Marker.coc),
+        @backingInt(Marker.qcd),
+        @backingInt(Marker.qcc),
         => true,
         else => false,
     };
@@ -7607,8 +7607,8 @@ fn validateStrictCocCodingPayload(segment: []const u8, scoc: u8) !void {
     try validateBlockSize(block_width, block_height);
     _ = try parseCodeBlockStyleByte(segment[3]);
     switch (segment[4]) {
-        @intFromEnum(WaveletTransform.irreversible_9_7),
-        @intFromEnum(WaveletTransform.reversible_5_3),
+        @backingInt(WaveletTransform.irreversible_9_7),
+        @backingInt(WaveletTransform.reversible_5_3),
         => {},
         else => return CodestreamError.InvalidCodestream,
     }
@@ -7642,13 +7642,13 @@ const StrictQcdInfo = struct {
     /// HL/LH/HH per decomposition level from `levels` down to 1.
     /// Scalar-derived stores the single LL value and derives the rest via E-5.
     /// Zero count means "derive from the z2000 formula" (sidecar path).
-    exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands,
+    exponents: [max_qcd_bands]u8 = @splat(0),
     exponent_count: u8 = 0,
     /// Signalled irreversible (epsilon_b, mu_b) QCD step sizes. Scalar-
     /// expounded stores one value per band; scalar-derived stores the single
     /// LL value and derives the other bands via E-5. Reversible streams leave
     /// this empty.
-    steps: [max_qcd_bands]BandStepSize = [_]BandStepSize{.{ .exponent = 0, .mantissa = 0 }} ** max_qcd_bands,
+    steps: [max_qcd_bands]BandStepSize = @splat(.{ .exponent = 0, .mantissa = 0 }),
     step_count: u8 = 0,
 };
 
@@ -7658,9 +7658,9 @@ fn validateStrictQcdWireShape(segment: []const u8, levels: u8) !void {
     if (bands > max_qcd_bands) return CodestreamError.InvalidCodestream;
     const quantization_value = segment[0] & 0x1f;
     const expected_size: usize = switch (quantization_value) {
-        @intFromEnum(QuantizationStyle.none) => 1 + bands,
-        @intFromEnum(QuantizationStyle.scalar_derived) => 3,
-        @intFromEnum(QuantizationStyle.scalar_expounded) => 1 + 2 * bands,
+        @backingInt(QuantizationStyle.none) => 1 + bands,
+        @backingInt(QuantizationStyle.scalar_derived) => 3,
+        @backingInt(QuantizationStyle.scalar_expounded) => 1 + 2 * bands,
         else => return CodestreamError.InvalidCodestream,
     };
     if (segment.len != expected_size) return CodestreamError.InvalidCodestream;
@@ -7673,8 +7673,8 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
     if (bands > max_qcd_bands) return CodestreamError.InvalidCodestream;
     const style = segment[0];
     const quantization_value = style & 0x1f;
-    if (quantization_value > @intFromEnum(QuantizationStyle.scalar_expounded)) return CodestreamError.InvalidCodestream;
-    const quantization: QuantizationStyle = @enumFromInt(quantization_value);
+    if (quantization_value > @backingInt(QuantizationStyle.scalar_expounded)) return CodestreamError.InvalidCodestream;
+    const quantization: QuantizationStyle = @fromBackingInt(@intCast(quantization_value));
     const guard_bits = style >> 5;
 
     if (transform == .irreversible_9_7) {
@@ -8175,11 +8175,11 @@ pub fn hasMarker(bytes: []const u8, marker: u16) bool {
 }
 
 pub fn markerValue(comptime name: []const u8) u16 {
-    return @intFromEnum(@field(Marker, name));
+    return @backingInt(@field(Marker, name));
 }
 
 pub fn firstSotPsot(bytes: []const u8) !u32 {
-    if (bytes.len < 2 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+    if (bytes.len < 2 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -8188,7 +8188,7 @@ pub fn firstSotPsot(bytes: []const u8) !u32 {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         cursor += 2;
-        if (marker == @intFromEnum(Marker.sot)) {
+        if (marker == @backingInt(Marker.sot)) {
             if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
             const segment_length = readU16Be(bytes, cursor);
             if (segment_length != 10 or bytes.len - cursor < segment_length) {
@@ -8196,7 +8196,7 @@ pub fn firstSotPsot(bytes: []const u8) !u32 {
             }
             return readU32Be(bytes, cursor + 4);
         }
-        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.sod) or marker == @backingInt(Marker.eoc)) {
             return CodestreamError.InvalidCodestream;
         }
         if (isReservedSegmentlessMarker(marker)) continue;
@@ -8213,7 +8213,7 @@ pub fn firstSotPsot(bytes: []const u8) !u32 {
 }
 
 pub fn firstTlmPtlm(bytes: []const u8) !u32 {
-    if (bytes.len < 2 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+    if (bytes.len < 2 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -8222,7 +8222,7 @@ pub fn firstTlmPtlm(bytes: []const u8) !u32 {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         cursor += 2;
-        if (marker == @intFromEnum(Marker.tlm)) {
+        if (marker == @backingInt(Marker.tlm)) {
             if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
             const segment_length = readU16Be(bytes, cursor);
             if (segment_length < 6 or bytes.len - cursor < segment_length) {
@@ -8245,7 +8245,7 @@ pub fn firstTlmPtlm(bytes: []const u8) !u32 {
                 else => unreachable,
             };
         }
-        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.sod) or marker == @backingInt(Marker.eoc)) {
             return CodestreamError.InvalidCodestream;
         }
         if (isReservedSegmentlessMarker(marker)) continue;
@@ -8269,7 +8269,7 @@ fn temporaryPayload(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 }
 
 fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
-    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -8282,11 +8282,11 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         cursor += 2;
-        if (marker == @intFromEnum(Marker.sot)) {
+        if (marker == @backingInt(Marker.sot)) {
             cursor -= 2;
             break;
         }
-        if (marker == @intFromEnum(Marker.eoc)) return CodestreamError.InvalidCodestream;
+        if (marker == @backingInt(Marker.eoc)) return CodestreamError.InvalidCodestream;
         if (isReservedSegmentlessMarker(marker)) continue;
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, cursor);
@@ -8310,7 +8310,7 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
             // A tile-level PLT that outlives its tile is an overrun.
@@ -8318,7 +8318,7 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
             try validateStrictTilePartSequenceFinished(tile_part_index, expected_tile_part_count);
             return out.toOwnedSlice(allocator);
         }
-        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (marker != @backingInt(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null, null, &plt_carry);
@@ -8340,7 +8340,7 @@ fn temporaryPayloadRaw(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 }
 
 fn temporaryPayloadFromComments(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
-    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -8355,8 +8355,8 @@ fn temporaryPayloadFromComments(allocator: std.mem.Allocator, bytes: []const u8)
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         cursor += 2;
-        if (marker == @intFromEnum(Marker.sot)) break;
-        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.sot)) break;
+        if (marker == @backingInt(Marker.sod) or marker == @backingInt(Marker.eoc)) {
             return CodestreamError.InvalidCodestream;
         }
         if (isReservedSegmentlessMarker(marker)) continue;
@@ -8366,7 +8366,7 @@ fn temporaryPayloadFromComments(allocator: std.mem.Allocator, bytes: []const u8)
             return CodestreamError.TruncatedData;
         }
         const segment = bytes[cursor + 2 .. cursor + segment_length];
-        if (marker == @intFromEnum(Marker.com)) {
+        if (marker == @backingInt(Marker.com)) {
             try appendTemporaryPayloadCommentChunk(allocator, &out, segment, &saw_payload, &expected_total, &next_chunk);
         }
         cursor += segment_length;
@@ -8412,11 +8412,11 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         cursor += 2;
-        if (marker == @intFromEnum(Marker.sot)) {
+        if (marker == @backingInt(Marker.sot)) {
             cursor -= 2;
             break;
         }
-        if (marker == @intFromEnum(Marker.eoc)) return CodestreamError.InvalidCodestream;
+        if (marker == @backingInt(Marker.eoc)) return CodestreamError.InvalidCodestream;
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, cursor);
         if (segment_length < 2 or bytes.len - cursor < segment_length) {
@@ -8436,7 +8436,7 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
             // A tile-level PLT that outlives its tile is an overrun.
@@ -8444,7 +8444,7 @@ fn validateTilePartPayloads(allocator: std.mem.Allocator, bytes: []const u8) !vo
             try validateStrictTilePartSequenceFinished(tile_part_index, expected_tile_part_count);
             return;
         }
-        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (marker != @backingInt(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         {
             var tile_part = try readStrictTilePartHeader(allocator, bytes, cursor, tile_part_index, &expected_tile_part_count, null, &expected_ppt_index, null, null, null, null, &plt_carry);
@@ -8892,8 +8892,8 @@ fn readTemporaryComponentRpclCatalog(
     var band_index: usize = 0;
     while (band_index < band_count) : (band_index += 1) {
         const kind_value = try cursor.readU8();
-        if (kind_value > @intFromEnum(subband.Kind.hh)) return CodestreamError.InvalidCodestream;
-        const kind: subband.Kind = @enumFromInt(kind_value);
+        if (kind_value > @backingInt(subband.Kind.hh)) return CodestreamError.InvalidCodestream;
+        const kind: subband.Kind = @fromBackingInt(@intCast(kind_value));
         const level = try cursor.readU8();
         const rect = try cursor.readRect();
         const expected = expected_bands[band_index];
@@ -8932,7 +8932,7 @@ fn readTemporaryComponentRpclCatalog(
         const payload_len = std.math.cast(usize, ebcot_segment.stats.mq_bytes) orelse return CodestreamError.InvalidCodestream;
         const payload = if (payload_version >= 7) try cursor.readBytes(payload_len) else &.{};
 
-        var converted_layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+        var converted_layers: [max_quality_layers]t2.LayerTruncation = @splat(.{ .cumulative_passes = 0, .cumulative_bytes = 0 });
         for (layers[0..@as(usize, @intCast(layer_count))], 0..) |layer, index| {
             converted_layers[index] = .{
                 .cumulative_passes = layer.cumulative_passes,
@@ -10417,7 +10417,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
                 var packet_start = cursor;
                 if (marker_policy.sop) {
                     if (span.end - packet_start < 6) return CodestreamError.TruncatedData;
-                    if (readU16Be(bytes, packet_start) != @intFromEnum(Marker.sop)) return CodestreamError.InvalidCodestream;
+                    if (readU16Be(bytes, packet_start) != @backingInt(Marker.sop)) return CodestreamError.InvalidCodestream;
                     if (readU16Be(bytes, packet_start + 2) != 4) return CodestreamError.InvalidCodestream;
                     if (readU16Be(bytes, packet_start + 4) != packet_sequence) return CodestreamError.InvalidCodestream;
                     packet_sequence +%= 1;
@@ -10430,7 +10430,7 @@ fn readStrictMultiTileTilePartPacketCatalog(
                 var body_start = header_end;
                 if (marker_policy.eph) {
                     if (span.end - body_start < 2) return CodestreamError.TruncatedData;
-                    if (readU16Be(bytes, body_start) != @intFromEnum(Marker.eph)) return CodestreamError.InvalidCodestream;
+                    if (readU16Be(bytes, body_start) != @backingInt(Marker.eph)) return CodestreamError.InvalidCodestream;
                     body_start += 2;
                 }
                 const packet_end = try std.math.add(usize, body_start, packet_span.payload_length);
@@ -10794,7 +10794,7 @@ const StrictMultiTileContext = struct {
         tile_header.tile_height = 0;
         tile_header.tile_part_divisions = null;
         tile_header.tile_part_plan_count = 0;
-        tile_header.tile_part_plan = [_]u8{0} ** 33;
+        tile_header.tile_part_plan = @as([33]u8, @splat(0));
         tile_header.packet_plan_count = tile_plan.resolution_count;
         tile_header.packet_plan = tile_plan.resolutions;
         tile_header.packet_count = tile_plan.packets;
@@ -11316,13 +11316,13 @@ const AssemblingPlanarTileSink = struct {
     /// everywhere else. The sink reproduces that instead of exposing it.
     raster_extent: enum { reference_grid, first_component },
     planes: ?color.SamplePlanes = null,
-    origin_x: [color.max_components]u32 = [_]u32{0} ** color.max_components,
-    origin_y: [color.max_components]u32 = [_]u32{0} ** color.max_components,
+    origin_x: [color.max_components]u32 = @splat(0),
+    origin_y: [color.max_components]u32 = @splat(0),
 
     fn begin(self: *AssemblingPlanarTileSink, info: TileSinkInfo) !void {
-        var depths = [_]u8{0} ** color.max_components;
-        var widths = [_]usize{0} ** color.max_components;
-        var heights = [_]usize{0} ** color.max_components;
+        var depths: [color.max_components]u8 = @splat(0);
+        var widths: [color.max_components]usize = @splat(0);
+        var heights: [color.max_components]usize = @splat(0);
         if (info.components.len == 0 or info.components.len > color.max_components) {
             return CodestreamError.InvalidCodestream;
         }
@@ -14088,7 +14088,7 @@ fn readStrictSodRpclPacketStream(
     bytes: []const u8,
     component_count: u16,
 ) !RpclPacketStream {
-    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -14110,7 +14110,7 @@ fn readStrictSodRpclPacketStream(
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
             // A tile-level PLT that outlives its tile is an overrun.
@@ -14133,7 +14133,7 @@ fn readStrictSodRpclPacketStream(
                 .packet_bytes = owned_packet_bytes,
             };
         }
-        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (marker != @backingInt(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         const entries = if (main_header.tlm_entries) |tlm_slice| tlm_slice else null;
         {
@@ -14723,7 +14723,7 @@ pub fn collectStrictInlinePacketSpans(
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.eoc)) {
             eoc_offset = cursor;
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
@@ -14731,7 +14731,7 @@ pub fn collectStrictInlinePacketSpans(
             if (plt_carry.items.len != 0) return CodestreamError.InvalidCodestream;
             break;
         }
-        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (marker != @backingInt(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         const sot_offset = cursor;
         var tile_part = try readStrictTilePartHeader(
@@ -14998,7 +14998,7 @@ fn collectStrictInlineMultiTileSpans(
         }
     }
 
-    if (bytes.len < stream_end + 2 or readU16Be(bytes, stream_end) != @intFromEnum(Marker.eoc)) {
+    if (bytes.len < stream_end + 2 or readU16Be(bytes, stream_end) != @backingInt(Marker.eoc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -15023,7 +15023,7 @@ fn readStrictSodPacketCatalog(
     progression: ProgressionOrder,
     prefer_borrowed_packet_bytes: bool,
 ) !StrictPacketCatalog {
-    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -15094,7 +15094,7 @@ fn readStrictSodPacketCatalog(
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.eoc)) {
             cursor += 2;
             if (cursor != bytes.len) return CodestreamError.InvalidCodestream;
             // A tile-level PLT that outlives its tile is an overrun.
@@ -15132,7 +15132,7 @@ fn readStrictSodPacketCatalog(
                 .owns_packet_bytes = !borrowing_packet_bytes,
             };
         }
-        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (marker != @backingInt(Marker.sot)) return CodestreamError.InvalidCodestream;
 
         const tlm_entries = if (main_header.tlm_entries) |tlm_slice| tlm_slice else null;
         {
@@ -15218,7 +15218,7 @@ fn readStrictSodPacketCatalog(
                         var packet_start = cursor;
                         if (main_header.packet_markers.sop) {
                             if (tile_part.end - packet_start < 6) return CodestreamError.TruncatedData;
-                            if (readU16Be(bytes, packet_start) != @intFromEnum(Marker.sop)) return CodestreamError.InvalidCodestream;
+                            if (readU16Be(bytes, packet_start) != @backingInt(Marker.sop)) return CodestreamError.InvalidCodestream;
                             if (readU16Be(bytes, packet_start + 2) != 4) return CodestreamError.InvalidCodestream;
                             if (readU16Be(bytes, packet_start + 4) != packet_sequence) return CodestreamError.InvalidCodestream;
                             packet_sequence +%= 1;
@@ -15231,7 +15231,7 @@ fn readStrictSodPacketCatalog(
                         var body_start = header_end;
                         if (main_header.packet_markers.eph) {
                             if (tile_part.end - body_start < 2) return CodestreamError.TruncatedData;
-                            if (readU16Be(bytes, body_start) != @intFromEnum(Marker.eph)) return CodestreamError.InvalidCodestream;
+                            if (readU16Be(bytes, body_start) != @backingInt(Marker.eph)) return CodestreamError.InvalidCodestream;
                             body_start += 2;
                         }
                         const packet_end = try std.math.add(usize, body_start, span.payload_length);
@@ -15395,7 +15395,7 @@ fn readStrictTilePartPacketPlan(
     while (scan < bytes.len) {
         if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, scan);
-        if (marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.eoc)) {
             scan += 2;
             if (scan != bytes.len) return CodestreamError.InvalidCodestream;
             // A tile-level PLT that outlives its tile is an overrun.
@@ -15415,7 +15415,7 @@ fn readStrictTilePartPacketPlan(
             }
             return result;
         }
-        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (marker != @backingInt(Marker.sot)) return CodestreamError.InvalidCodestream;
         if (result.count == result.packet_counts.len) return CodestreamError.InvalidCodestream;
 
         {
@@ -15693,7 +15693,7 @@ fn readStrictMultiTileTilePartSpans(
     while (scan < bytes.len) {
         if (bytes.len - scan < 2) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, scan);
-        if (marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.eoc)) {
             scan += 2;
             if (scan != bytes.len) return CodestreamError.InvalidCodestream;
             for (completed_tiles, 0..) |completed, index| {
@@ -15722,7 +15722,7 @@ fn readStrictMultiTileTilePartSpans(
             }
             return spans;
         }
-        if (marker != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+        if (marker != @backingInt(Marker.sot)) return CodestreamError.InvalidCodestream;
         const sot = try readStrictSotInfo(bytes, scan);
         if (tlm_entries) |entries| {
             try validateStrictTlmEntry(entries, tile_part_index, sot.tile_index, sot.psot);
@@ -16117,7 +16117,7 @@ fn validateStrictTilePartPacketPlan(
 
 fn readStrictSotInfo(bytes: []const u8, marker_start: usize) !StrictSotInfo {
     if (bytes.len - marker_start < 12) return CodestreamError.TruncatedData;
-    if (readU16Be(bytes, marker_start) != @intFromEnum(Marker.sot)) return CodestreamError.InvalidCodestream;
+    if (readU16Be(bytes, marker_start) != @backingInt(Marker.sot)) return CodestreamError.InvalidCodestream;
     const segment_length = readU16Be(bytes, marker_start + 2);
     if (segment_length != 10) return CodestreamError.InvalidCodestream;
     const psot = readU32Be(bytes, marker_start + 6);
@@ -16158,7 +16158,7 @@ fn readStrictMainHeaderIndex(
     component_count: u16,
 ) !StrictMainHeaderIndex {
     if (component_count < 1 or component_count > max_strict_metadata_components) return CodestreamError.UnsupportedPayload;
-    if (bytes.len < 4 or readU16Be(bytes, 0) != @intFromEnum(Marker.soc)) {
+    if (bytes.len < 4 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
     }
 
@@ -16181,7 +16181,7 @@ fn readStrictMainHeaderIndex(
         if (bytes.len - cursor < 4) return CodestreamError.TruncatedData;
         const marker = readU16Be(bytes, cursor);
         cursor += 2;
-        if (marker == @intFromEnum(Marker.sot)) {
+        if (marker == @backingInt(Marker.sot)) {
             const markers = packet_markers orelse return CodestreamError.InvalidCodestream;
             const owned_entries = if (saw_tlm) try entries.toOwnedSlice(allocator) else null;
             errdefer if (owned_entries) |owned| allocator.free(owned);
@@ -16212,7 +16212,7 @@ fn readStrictMainHeaderIndex(
                 .poc_records = owned_poc,
             };
         }
-        if (marker == @intFromEnum(Marker.sod) or marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.sod) or marker == @backingInt(Marker.eoc)) {
             return CodestreamError.InvalidCodestream;
         }
         if (isReservedSegmentlessMarker(marker)) {
@@ -16225,7 +16225,7 @@ fn readStrictMainHeaderIndex(
             return CodestreamError.TruncatedData;
         }
         const segment = bytes[cursor + 2 .. cursor + segment_length];
-        if (marker == @intFromEnum(Marker.cod)) {
+        if (marker == @backingInt(Marker.cod)) {
             if (packet_markers != null or segment.len < 10) return CodestreamError.InvalidCodestream;
             packet_markers = .{
                 .sop = (segment[0] & 0x02) != 0,
@@ -16233,21 +16233,21 @@ fn readStrictMainHeaderIndex(
             };
             cod_layers = readU16Be(segment, 2);
             cod_levels = segment[5];
-        } else if (marker == @intFromEnum(Marker.tlm)) {
+        } else if (marker == @backingInt(Marker.tlm)) {
             try appendStrictTlmEntries(allocator, &entries, segment, next_tlm_index);
             saw_tlm = true;
             next_tlm_index += 1;
-        } else if (marker == @intFromEnum(Marker.ppm)) {
+        } else if (marker == @backingInt(Marker.ppm)) {
             ppm_collector.append(segment) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
-        } else if (marker == @intFromEnum(Marker.plm)) {
+        } else if (marker == @backingInt(Marker.plm)) {
             plm_collector.append(segment) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
             };
-        } else if (marker == @intFromEnum(Marker.poc)) {
+        } else if (marker == @backingInt(Marker.poc)) {
             const levels = cod_levels orelse return CodestreamError.InvalidCodestream;
             const layers = cod_layers orelse return CodestreamError.InvalidCodestream;
             poc.appendSegment(allocator, &poc_records, segment, component_count, levels + 1, layers) catch |err| switch (err) {
@@ -16288,8 +16288,8 @@ fn packetEphOffsetRejectingSop(bytes: []const u8, start: usize, end: usize) !?us
         const relative = std.mem.indexOfScalar(u8, searchable, 0xff) orelse break;
         const offset = cursor + relative;
         const marker = readU16Be(bytes, offset);
-        if (marker == @intFromEnum(Marker.sop)) return CodestreamError.InvalidCodestream;
-        if (marker == @intFromEnum(Marker.eph)) {
+        if (marker == @backingInt(Marker.sop)) return CodestreamError.InvalidCodestream;
+        if (marker == @backingInt(Marker.eph)) {
             if (eph_offset != null) return CodestreamError.InvalidCodestream;
             eph_offset = offset;
         }
@@ -16355,7 +16355,7 @@ fn appendStrictSodPacketPayload(
     var packet_start = frame_start;
     if (marker_policy.sop) {
         if (packet_end - frame_start < 6) return CodestreamError.TruncatedData;
-        if (readU16Be(bytes, frame_start) != @intFromEnum(Marker.sop)) return CodestreamError.InvalidCodestream;
+        if (readU16Be(bytes, frame_start) != @backingInt(Marker.sop)) return CodestreamError.InvalidCodestream;
         const segment_length = readU16Be(bytes, packet_start + 2);
         if (segment_length != 4) return CodestreamError.InvalidCodestream;
         const sequence = readU16Be(bytes, packet_start + 4);
@@ -16421,12 +16421,12 @@ fn appendStrictPackedPacketPayload(
     var next_header = header_end;
     if (marker_policy.eph) {
         if (packed_headers.len - next_header < 2) return CodestreamError.TruncatedData;
-        if (readU16Be(packed_headers, next_header) != @intFromEnum(Marker.eph)) {
+        if (readU16Be(packed_headers, next_header) != @backingInt(Marker.eph)) {
             return CodestreamError.InvalidCodestream;
         }
         next_header += 2;
     } else if (packed_headers.len - next_header >= 2 and
-        readU16Be(packed_headers, next_header) == @intFromEnum(Marker.eph))
+        readU16Be(packed_headers, next_header) == @backingInt(Marker.eph))
     {
         return CodestreamError.InvalidCodestream;
     }
@@ -16434,7 +16434,7 @@ fn appendStrictPackedPacketPayload(
     var body_start = body_cursor.*;
     if (marker_policy.sop) {
         if (body_end - body_start < 6) return CodestreamError.TruncatedData;
-        if (readU16Be(bytes, body_start) != @intFromEnum(Marker.sop) or
+        if (readU16Be(bytes, body_start) != @backingInt(Marker.sop) or
             readU16Be(bytes, body_start + 2) != 4 or
             readU16Be(bytes, body_start + 4) != packet_sequence.*)
         {
@@ -16443,7 +16443,7 @@ fn appendStrictPackedPacketPayload(
         packet_sequence.* +%= 1;
         body_start += 6;
     } else if (body_end - body_start >= 2 and
-        readU16Be(bytes, body_start) == @intFromEnum(Marker.sop))
+        readU16Be(bytes, body_start) == @backingInt(Marker.sop))
     {
         return CodestreamError.InvalidCodestream;
     }
@@ -16616,11 +16616,11 @@ const empty_strict_qcd_info = StrictQcdInfo{
     .bands = 0,
     .quantization = .none,
 };
-const temporary_component_bit_depths = [_]u8{0} ** max_codestream_components;
-const temporary_component_signed = [_]bool{false} ** max_codestream_components;
-const temporary_component_xrsiz = [_]u8{1} ** max_codestream_components;
-const temporary_component_yrsiz = [_]u8{1} ** max_codestream_components;
-const temporary_component_qcd = [_]StrictQcdInfo{empty_strict_qcd_info} ** max_codestream_components;
+const temporary_component_bit_depths: [max_codestream_components]u8 = @splat(0);
+const temporary_component_signed: [max_codestream_components]bool = @splat(false);
+const temporary_component_xrsiz: [max_codestream_components]u8 = @splat(1);
+const temporary_component_yrsiz: [max_codestream_components]u8 = @splat(1);
+const temporary_component_qcd: [max_codestream_components]StrictQcdInfo = @splat(empty_strict_qcd_info);
 
 const StrictComponentCoding = struct {
     levels: u8 = 0,
@@ -16635,7 +16635,7 @@ const StrictComponentCoding = struct {
     roi_shift: u8 = 0,
 };
 
-const temporary_component_coding = [_]StrictComponentCoding{.{}} ** max_codestream_components;
+const temporary_component_coding: [max_codestream_components]StrictComponentCoding = @splat(.{});
 
 const TemporaryHeader = struct {
     component_allocator: ?std.mem.Allocator = null,
@@ -16678,9 +16678,9 @@ const TemporaryHeader = struct {
     /// and legacy paths). Irreversible streams also carry step mantissas below
     /// so dequantization follows the wire values instead of z2000 defaults.
     guard_bits: u8 = strict_guard_bits,
-    qcd_exponents: [max_qcd_bands]u8 = [_]u8{0} ** max_qcd_bands,
+    qcd_exponents: [max_qcd_bands]u8 = @splat(0),
     qcd_exponent_count: u8 = 0,
-    qcd_steps: [max_qcd_bands]BandStepSize = [_]BandStepSize{.{ .exponent = 0, .mantissa = 0 }} ** max_qcd_bands,
+    qcd_steps: [max_qcd_bands]BandStepSize = @splat(.{ .exponent = 0, .mantissa = 0 }),
     qcd_step_count: u8 = 0,
     tile_part_divisions: ?u8,
     tile_part_plan_count: u8,
@@ -16779,7 +16779,7 @@ const TilePartPlan = struct {
 fn emptyTilePartPlan() TilePartPlan {
     return .{
         .count = 0,
-        .entries = [_]u8{0} ** 33,
+        .entries = @as([33]u8, @splat(0)),
     };
 }
 
@@ -16810,7 +16810,7 @@ fn readTilePartPlan(cursor: *Cursor) !TilePartPlan {
 fn emptyPacketPlan() packet_plan.Plan {
     return .{
         .resolution_count = 0,
-        .resolutions = [_]packet_plan.Resolution{.{
+        .resolutions = @as([33]packet_plan.Resolution, @splat(.{
             .width = 0,
             .height = 0,
             .precinct_width = 0,
@@ -16819,7 +16819,7 @@ fn emptyPacketPlan() packet_plan.Plan {
             .precincts_y = 0,
             .precincts = 0,
             .packets = 0,
-        }} ** 33,
+        })),
         .packets = 0,
     };
 }
@@ -16864,7 +16864,7 @@ fn readLayerAllocation(
     expected_layers: u16,
     coding_passes: u16,
 ) ![max_quality_layers]rate_alloc.Truncation {
-    var layers = [_]rate_alloc.Truncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+    var layers: [max_quality_layers]rate_alloc.Truncation = @splat(.{ .cumulative_passes = 0, .cumulative_bytes = 0 });
     if (payload_version < 5) return layers;
 
     const layer_count = try cursor.readU16();
@@ -16936,7 +16936,7 @@ fn readEbcotSegmentInfoWithPasses(
         stats.symbols += @as(u64, symbol_count);
         if (passes.len > 0) {
             passes[pass_index] = .{
-                .kind = @enumFromInt(kind),
+                .kind = @fromBackingInt(@intCast(kind)),
                 .magnitude_bitplane = magnitude_bitplane,
                 .symbol_count = symbol_count,
                 .byte_offset = @intCast(byte_offset),
@@ -17079,9 +17079,9 @@ const SizProfile = struct {
     image_origin_x: u32 = 0,
     image_origin_y: u32 = 0,
     bit_depth: u8,
-    component_bit_depths: [max_codestream_components]u8 = [_]u8{0} ** max_codestream_components,
-    component_xrsiz: [max_codestream_components]u8 = [_]u8{1} ** max_codestream_components,
-    component_yrsiz: [max_codestream_components]u8 = [_]u8{1} ** max_codestream_components,
+    component_bit_depths: [max_codestream_components]u8 = @splat(0),
+    component_xrsiz: [max_codestream_components]u8 = @splat(1),
+    component_yrsiz: [max_codestream_components]u8 = @splat(1),
     components: u16,
     tile_width: u32,
     tile_height: u32,
@@ -17150,7 +17150,7 @@ fn appendCod(
     const lcod = 12 + if (uses_precincts) @as(u16, levels) + 1 else 0;
     try appendU16Be(allocator, out, lcod);
     try out.append(allocator, codingStyleFlags(options));
-    try out.append(allocator, @intFromEnum(options.progression));
+    try out.append(allocator, @backingInt(options.progression));
     try appendU16Be(allocator, out, options.layers);
     // ISO A.6.1 SGcod: the MCT field is 0 (none) or 1 (transform used); RCT
     // vs ICT follows from the wavelet transform byte.
@@ -17159,7 +17159,7 @@ fn appendCod(
     try out.append(allocator, codeBlockExponent(options.block_width));
     try out.append(allocator, codeBlockExponent(options.block_height));
     try out.append(allocator, codeBlockStyle(options));
-    try out.append(allocator, @intFromEnum(options.transform));
+    try out.append(allocator, @backingInt(options.transform));
     if (uses_precincts) {
         var resolution: usize = 0;
         while (resolution <= levels) : (resolution += 1) {
@@ -17289,12 +17289,12 @@ fn appendQcdScalarValue(
 
 fn skipPacketBoundaryMarkers(bytes: []const u8, start: usize, end: usize) !usize {
     var cursor = start;
-    while (end - cursor >= 2 and readU16Be(bytes, cursor) == @intFromEnum(Marker.sop)) {
+    while (end - cursor >= 2 and readU16Be(bytes, cursor) == @backingInt(Marker.sop)) {
         if (end - cursor < 6) return CodestreamError.TruncatedData;
         const segment_length = readU16Be(bytes, cursor + 2);
         if (segment_length != 4) return CodestreamError.InvalidCodestream;
         cursor += 6;
-        if (end - cursor >= 2 and readU16Be(bytes, cursor) == @intFromEnum(Marker.eph)) {
+        if (end - cursor >= 2 and readU16Be(bytes, cursor) == @backingInt(Marker.eph)) {
             cursor += 2;
         }
     }
@@ -17359,11 +17359,11 @@ fn readTilePartHeaderMarkers(
     var saw_ppt = false;
     while (cursor + 1 < end) {
         const marker = readU16Be(bytes, cursor);
-        if (marker == @intFromEnum(Marker.sod)) {
+        if (marker == @backingInt(Marker.sod)) {
             if (saw_ppt and packed_headers.items.len == 0) return CodestreamError.InvalidCodestream;
             return cursor;
         }
-        if (marker == @intFromEnum(Marker.sot) or marker == @intFromEnum(Marker.eoc)) {
+        if (marker == @backingInt(Marker.sot) or marker == @backingInt(Marker.eoc)) {
             return CodestreamError.InvalidCodestream;
         }
         cursor += 2;
@@ -17372,11 +17372,11 @@ fn readTilePartHeaderMarkers(
         if (segment_length < 2 or end - cursor < segment_length) {
             return CodestreamError.TruncatedData;
         }
-        if (marker == @intFromEnum(Marker.plt)) {
+        if (marker == @backingInt(Marker.plt)) {
             try appendPltSegmentLengths(allocator, bytes[cursor + 2 .. cursor + segment_length], expected_plt_index, packet_lengths);
             if (expected_plt_index == std.math.maxInt(u8)) return CodestreamError.InvalidCodestream;
             expected_plt_index += 1;
-        } else if (marker == @intFromEnum(Marker.ppt)) {
+        } else if (marker == @backingInt(Marker.ppt)) {
             const segment = bytes[cursor + 2 .. cursor + segment_length];
             if (expected_ppt_index.* > std.math.maxInt(u8) or
                 segment.len < 2 or segment[0] != @as(u8, @intCast(expected_ppt_index.*)))
@@ -17386,9 +17386,9 @@ fn readTilePartHeaderMarkers(
             try packed_headers.appendSlice(allocator, segment[1..]);
             saw_ppt = true;
             expected_ppt_index.* += 1;
-        } else if (marker == @intFromEnum(Marker.com)) {
+        } else if (marker == @backingInt(Marker.com)) {
             // Tile-part comments are metadata only and do not affect packet spans.
-        } else if (marker == @intFromEnum(Marker.poc)) {
+        } else if (marker == @backingInt(Marker.poc)) {
             if (poc_target) |target| {
                 if (!target.allowed) return CodestreamError.InvalidCodestream;
                 const limits = target.limits;
@@ -17404,7 +17404,7 @@ fn readTilePartHeaderMarkers(
                     else => return CodestreamError.InvalidCodestream,
                 };
             }
-        } else if (marker == @intFromEnum(Marker.cod)) {
+        } else if (marker == @backingInt(Marker.cod)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
             if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
@@ -17412,7 +17412,7 @@ fn readTilePartHeaderMarkers(
             const segment = bytes[cursor + 2 .. cursor + segment_length];
             target.override.coding = try parseStrictTileCodSegment(segment, target);
             target.override.saw_cod = true;
-        } else if (marker == @intFromEnum(Marker.qcd)) {
+        } else if (marker == @backingInt(Marker.qcd)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
             if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
@@ -17426,7 +17426,7 @@ fn readTilePartHeaderMarkers(
                 transform,
             );
             target.override.saw_qcd = true;
-        } else if (marker == @intFromEnum(Marker.coc)) {
+        } else if (marker == @backingInt(Marker.coc)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
             if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
@@ -17440,7 +17440,7 @@ fn readTilePartHeaderMarkers(
             if (component_override.saw_coc) return CodestreamError.InvalidCodestream;
             component_override.coding = try parseStrictTileComponentCoding(segment[2..], scoc, target);
             component_override.saw_coc = true;
-        } else if (marker == @intFromEnum(Marker.qcc)) {
+        } else if (marker == @backingInt(Marker.qcc)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
             if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
@@ -17469,7 +17469,7 @@ fn readTilePartHeaderMarkers(
                 transform,
             );
             component_override.saw_qcc = true;
-        } else if (marker == @intFromEnum(Marker.rgn)) {
+        } else if (marker == @backingInt(Marker.rgn)) {
             const segment = bytes[cursor + 2 .. cursor + segment_length];
             if (coding_target) |target| {
                 if (!target.allowed) return CodestreamError.InvalidCodestream;
@@ -17511,7 +17511,7 @@ fn parseStrictTileComponentCoding(
     target: TilePartCodingTarget,
 ) !StrictComponentCoding {
     try validateStrictCocCodingPayload(spcoc, scoc);
-    const transform: WaveletTransform = @enumFromInt(spcoc[4]);
+    const transform: WaveletTransform = @fromBackingInt(@intCast(spcoc[4]));
     if ((transform != target.transform and
         (target.mct != .none or target.progression != .rpcl)) or
         spcoc[0] > target.levels)
@@ -17547,17 +17547,17 @@ fn parseStrictTileCodSegment(segment: []const u8, target: TilePartCodingTarget) 
     if ((scod & ~@as(u8, 0x07)) != 0) return CodestreamError.InvalidCodestream;
     if ((scod & 0x06) != 0) return CodestreamError.UnsupportedPayload;
     const progression: ProgressionOrder = switch (segment[1]) {
-        @intFromEnum(ProgressionOrder.rpcl) => .rpcl,
-        @intFromEnum(ProgressionOrder.lrcp) => .lrcp,
-        @intFromEnum(ProgressionOrder.rlcp) => .rlcp,
-        @intFromEnum(ProgressionOrder.pcrl) => .pcrl,
-        @intFromEnum(ProgressionOrder.cprl) => .cprl,
+        @backingInt(ProgressionOrder.rpcl) => .rpcl,
+        @backingInt(ProgressionOrder.lrcp) => .lrcp,
+        @backingInt(ProgressionOrder.rlcp) => .rlcp,
+        @backingInt(ProgressionOrder.pcrl) => .pcrl,
+        @backingInt(ProgressionOrder.cprl) => .cprl,
         else => return CodestreamError.UnsupportedPayload,
     };
     const layers = readU16Be(segment, 2);
     const mct: MultipleComponentTransform = switch (segment[4]) {
-        @intFromEnum(MultipleComponentTransform.rct) => .rct,
-        @intFromEnum(MultipleComponentTransform.none) => .none,
+        @backingInt(MultipleComponentTransform.rct) => .rct,
+        @backingInt(MultipleComponentTransform.none) => .none,
         else => return CodestreamError.UnsupportedPayload,
     };
     if (progression != target.progression or layers != target.layers or mct != target.mct) {
@@ -17566,7 +17566,7 @@ fn parseStrictTileCodSegment(segment: []const u8, target: TilePartCodingTarget) 
 
     const spcod = segment[5..];
     try validateStrictCocCodingPayload(spcod, scod);
-    const transform: WaveletTransform = @enumFromInt(spcod[4]);
+    const transform: WaveletTransform = @fromBackingInt(@intCast(spcod[4]));
     if (transform != target.transform and
         (target.mct != .none or target.progression != .rpcl))
     {
@@ -17632,7 +17632,7 @@ fn appendTemporaryPacketPayloads(
         if (packet_end > end) return CodestreamError.TruncatedData;
 
         var packet_cursor = cursor;
-        if (packet_end - packet_cursor >= 2 and readU16Be(bytes, packet_cursor) == @intFromEnum(Marker.sop)) {
+        if (packet_end - packet_cursor >= 2 and readU16Be(bytes, packet_cursor) == @backingInt(Marker.sop)) {
             if (packet_end - packet_cursor < 6) return CodestreamError.TruncatedData;
             const segment_length = readU16Be(bytes, packet_cursor + 2);
             if (segment_length != 4) return CodestreamError.InvalidCodestream;
@@ -17654,7 +17654,7 @@ fn appendTemporaryPacketPayloads(
             continue;
         };
 
-        if (packet_end - packet_cursor >= 2 and readU16Be(bytes, packet_cursor) == @intFromEnum(Marker.eph)) {
+        if (packet_end - packet_cursor >= 2 and readU16Be(bytes, packet_cursor) == @backingInt(Marker.eph)) {
             packet_cursor += 2;
         }
 
@@ -17683,7 +17683,7 @@ fn appendLegacyTemporaryPacketPayload(
     header: u8,
 ) !void {
     var cursor = start;
-    if (end - cursor >= 2 and readU16Be(bytes, cursor) == @intFromEnum(Marker.eph)) {
+    if (end - cursor >= 2 and readU16Be(bytes, cursor) == @backingInt(Marker.eph)) {
         cursor += 2;
     } else if (header != temporary_packet_header_empty) {
         return CodestreamError.InvalidCodestream;
@@ -18109,7 +18109,7 @@ fn appendTemporaryPayload(
         var probe_stream: RpclPacketStream = .{};
         defer probe_stream.deinit();
         try appendRpclShadowStream(allocator, null, planes, bands, blocks, catalogs, levels, options, &probe_stream);
-        var header_overhead = [_]u64{0} ** max_quality_layers;
+        var header_overhead: [max_quality_layers]u64 = @splat(0);
         // The probe stream is in RPCL order (layer innermost), so packet k
         // belongs to layer k % layers.
         for (probe_stream.packet_header_lengths, 0..) |header_length, packet_index| {
@@ -18927,7 +18927,7 @@ fn buildRpclShadowBlock(
         if (segment.pass_count != coding_passes) return CodestreamError.InvalidCodestream;
     }
 
-    var layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+    var layers: [max_quality_layers]t2.LayerTruncation = @splat(.{ .cumulative_passes = 0, .cumulative_bytes = 0 });
     try computeLayerTruncations(&layers, options, segment);
 
     return .{
@@ -19790,7 +19790,7 @@ fn appendTilePartPlan(
 }
 
 fn appendMarker(allocator: std.mem.Allocator, out: *std.ArrayList(u8), marker: Marker) !void {
-    try appendU16Be(allocator, out, @intFromEnum(marker));
+    try appendU16Be(allocator, out, @backingInt(marker));
 }
 
 fn appendComponentPayload(
@@ -19808,7 +19808,7 @@ fn appendComponentPayload(
     try appendU32Be(allocator, out, @as(u32, @intCast(blocks.len)));
 
     for (bands) |band| {
-        try out.append(allocator, @intFromEnum(band.kind));
+        try out.append(allocator, @backingInt(band.kind));
         try out.append(allocator, band.level);
         try appendRect(allocator, out, band.rect);
     }
@@ -20111,7 +20111,7 @@ fn appendEntropyStream(
     bytes: []const u8,
 ) !void {
     if (bytes.len == 0) {
-        try out.append(allocator, @intFromEnum(entropy.Method.raw));
+        try out.append(allocator, @backingInt(entropy.Method.raw));
         try appendU32Be(allocator, out, 0);
         try appendU32Be(allocator, out, 0);
         return;
@@ -20119,7 +20119,7 @@ fn appendEntropyStream(
 
     const encoded = try entropy.encodeAutoBorrowingRawScratch(scratch, bytes);
 
-    try out.append(allocator, @intFromEnum(encoded.method));
+    try out.append(allocator, @backingInt(encoded.method));
     try appendU32Be(allocator, out, encoded.raw_len);
     try appendU32Be(allocator, out, @as(u32, @intCast(encoded.bytes.len)));
     try out.appendSlice(allocator, encoded.bytes);
@@ -20133,7 +20133,7 @@ fn appendEbcotSegmentInfo(
     try appendU16Be(allocator, out, segment.pass_count);
     try appendU64Be(allocator, out, segment.byte_length);
     for (segment.passes) |pass| {
-        try out.append(allocator, @intFromEnum(pass.kind));
+        try out.append(allocator, @backingInt(pass.kind));
         try out.append(allocator, pass.magnitude_bitplane);
         try appendU32Be(allocator, out, @intCast(pass.symbol_count));
         try appendU64Be(allocator, out, @intCast(pass.byte_offset));
@@ -20157,7 +20157,7 @@ fn appendLayerAllocation(
     options: LosslessOptions,
     segment: ebcot.CodeBlockSegment,
 ) !void {
-    var layers = [_]t2.LayerTruncation{.{ .cumulative_passes = 0, .cumulative_bytes = 0 }} ** max_quality_layers;
+    var layers: [max_quality_layers]t2.LayerTruncation = @splat(.{ .cumulative_passes = 0, .cumulative_bytes = 0 });
     try computeLayerTruncations(&layers, options, segment);
 
     try appendU16Be(allocator, out, options.layers);
@@ -20172,7 +20172,7 @@ fn rectArea(rect: subband.Rect) u64 {
 }
 
 fn defaultPrecincts() [33]PrecinctSize {
-    var precincts = [_]PrecinctSize{.{ .width = 128, .height = 128 }} ** 33;
+    var precincts: [33]PrecinctSize = @splat(.{ .width = 128, .height = 128 });
     precincts[0] = .{ .width = 256, .height = 256 };
     precincts[1] = .{ .width = 256, .height = 256 };
     return precincts;
@@ -21323,7 +21323,7 @@ fn parseCodeBlockStyleByte(style: u8) !ebcot.CodeBlockStyle {
 }
 
 fn qcdStyleByte(options: LosslessOptions) u8 {
-    return (options.guard_bits << 5) | @intFromEnum(options.quantization);
+    return (options.guard_bits << 5) | @backingInt(options.quantization);
 }
 
 fn qcdReversibleExponentByteForBand(bit_depth: u8, kind: subband.Kind) !u8 {

@@ -552,7 +552,7 @@ test "Kakadu divergent COC levels and precinct geometry decode exactly" {
 
     const divergent_transform = try allocator.dupe(u8, bytes);
     defer allocator.free(divergent_transform);
-    divergent_transform[first_coc + 10] = @intFromEnum(codestream.WaveletTransform.irreversible_9_7);
+    divergent_transform[first_coc + 10] = @backingInt(codestream.WaveletTransform.irreversible_9_7);
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.decodeLosslessNative(allocator, divergent_transform, .{}),
@@ -579,7 +579,7 @@ test "Kakadu component-local 5/3 and 9/7 transforms decode native planes" {
     const qcc = findMarker(bytes, codestream.markerValue("qcc")) orelse return error.MissingQcc;
     try std.testing.expectEqual(@as(u8, 1), bytes[coc + 4]);
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(codestream.WaveletTransform.irreversible_9_7)),
+        @as(u8, @backingInt(codestream.WaveletTransform.irreversible_9_7)),
         bytes[coc + 10],
     );
     try std.testing.expectEqual(@as(u8, 1), bytes[qcc + 4]);
@@ -674,7 +674,7 @@ test "Kakadu component-local transforms with divergent geometry decode native pl
     try std.testing.expectEqual(@as(u8, 1), bytes[coc + 7]);
     try std.testing.expectEqual(@as(u8, 1), bytes[coc + 8]);
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(codestream.WaveletTransform.irreversible_9_7)),
+        @as(u8, @backingInt(codestream.WaveletTransform.irreversible_9_7)),
         bytes[coc + 10],
     );
     try std.testing.expectEqual(@as(u8, 1), bytes[qcc + 4]);
@@ -755,11 +755,11 @@ test "Kakadu tile-local 5/3 and 9/7 transforms decode native planes" {
     try std.testing.expectEqual(@as(usize, 2), countMarker(bytes, codestream.markerValue("cod")));
     try std.testing.expectEqual(@as(usize, 2), countMarker(bytes, codestream.markerValue("qcd")));
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(codestream.WaveletTransform.reversible_5_3)),
+        @as(u8, @backingInt(codestream.WaveletTransform.reversible_5_3)),
         bytes[main_cod + 13],
     );
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(codestream.WaveletTransform.irreversible_9_7)),
+        @as(u8, @backingInt(codestream.WaveletTransform.irreversible_9_7)),
         bytes[tile_cod + 13],
     );
     try std.testing.expectEqual(@as(u8, 0), bytes[main_qcd + 4] & 0x1f);
@@ -814,7 +814,7 @@ test "Kakadu tile-local 5/3 and 9/7 transforms decode native planes" {
 
     const mismatched_qcd = try allocator.dupe(u8, bytes);
     defer allocator.free(mismatched_qcd);
-    mismatched_qcd[tile_cod + 13] = @intFromEnum(codestream.WaveletTransform.reversible_5_3);
+    mismatched_qcd[tile_cod + 13] = @backingInt(codestream.WaveletTransform.reversible_5_3);
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.decodeLosslessPlanar(allocator, mismatched_qcd),
@@ -848,16 +848,16 @@ test "Kakadu tile-component transform precedence decodes native planes" {
     try std.testing.expectEqual(@as(usize, 2), countMarker(bytes, codestream.markerValue("qcd")));
     try std.testing.expectEqual(@as(usize, 1), countMarker(bytes, codestream.markerValue("qcc")));
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(codestream.WaveletTransform.reversible_5_3)),
+        @as(u8, @backingInt(codestream.WaveletTransform.reversible_5_3)),
         bytes[main_cod + 13],
     );
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(codestream.WaveletTransform.irreversible_9_7)),
+        @as(u8, @backingInt(codestream.WaveletTransform.irreversible_9_7)),
         bytes[tile_cod + 13],
     );
     try std.testing.expectEqual(@as(u8, 1), bytes[tile_coc + 4]);
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(codestream.WaveletTransform.reversible_5_3)),
+        @as(u8, @backingInt(codestream.WaveletTransform.reversible_5_3)),
         bytes[tile_coc + 10],
     );
     try std.testing.expectEqual(@as(u8, 0), bytes[main_qcd + 4] & 0x1f);
@@ -1213,7 +1213,7 @@ test "Kakadu tile-header COD and QCD overrides decode exactly" {
 
     const divergent_transform = try allocator.dupe(u8, bytes);
     defer allocator.free(divergent_transform);
-    divergent_transform[tile_cod + 13] = @intFromEnum(codestream.WaveletTransform.irreversible_9_7);
+    divergent_transform[tile_cod + 13] = @backingInt(codestream.WaveletTransform.irreversible_9_7);
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.decodeLosslessNative(allocator, divergent_transform, .{}),
@@ -1310,7 +1310,7 @@ test "Kakadu tile-header COC and QCC overrides decode exactly" {
 
     const divergent_transform = try allocator.dupe(u8, bytes);
     defer allocator.free(divergent_transform);
-    divergent_transform[tile_coc + 10] = @intFromEnum(codestream.WaveletTransform.irreversible_9_7);
+    divergent_transform[tile_coc + 10] = @backingInt(codestream.WaveletTransform.irreversible_9_7);
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.decodeLosslessNative(allocator, divergent_transform, .{}),
@@ -1986,7 +1986,7 @@ fn putBmpI32(bytes: []u8, offset: usize, value: i32) void {
 }
 
 fn bmp24Fixture() [70]u8 {
-    var bytes = [_]u8{0} ** 70;
+    var bytes: [70]u8 = @splat(0);
     bytes[0] = 'B';
     bytes[1] = 'M';
     putBmpU32(&bytes, 2, bytes.len);
@@ -2023,7 +2023,7 @@ test "BMP 24-bit BI_RGB decodes bottom-up BGR rows and padding" {
 
 test "BMP 32-bit BI_RGB decodes top-down and ignores reserved byte" {
     const allocator = std.testing.allocator;
-    var bytes = [_]u8{0} ** 62;
+    var bytes: [62]u8 = @splat(0);
     bytes[0] = 'B';
     bytes[1] = 'M';
     putBmpU32(&bytes, 2, bytes.len);
@@ -3043,7 +3043,7 @@ test "POC parser and scheduler compose overlapping progression intervals" {
         .precincts_y = 1,
         .precincts = 2,
         .packets = 12,
-    }} ++ [_]packet_plan.Resolution{.{
+    }} ++ @as([32]packet_plan.Resolution, @splat(.{
         .width = 0,
         .height = 0,
         .precinct_width = 1,
@@ -3052,7 +3052,7 @@ test "POC parser and scheduler compose overlapping progression intervals" {
         .precincts_y = 0,
         .precincts = 0,
         .packets = 0,
-    }} ** 32;
+    }));
     resolutions[1] = resolutions[0];
     resolutions[2] = resolutions[0];
     const plan = packet_plan.Plan{
@@ -3080,7 +3080,7 @@ test "POC parser and scheduler fail closed on malformed or incomplete ranges" {
         poc.appendSegment(allocator, &records, &.{ 0, 0, 0, 1, 3, 3, 9 }, 3, 3, 2),
     );
 
-    var resolutions = [_]packet_plan.Resolution{.{
+    var resolutions: [33]packet_plan.Resolution = @splat(.{
         .width = 0,
         .height = 0,
         .precinct_width = 1,
@@ -3089,7 +3089,7 @@ test "POC parser and scheduler fail closed on malformed or incomplete ranges" {
         .precincts_y = 0,
         .precincts = 0,
         .packets = 0,
-    }} ** 33;
+    });
     resolutions[0] = .{
         .width = 1,
         .height = 1,
@@ -3138,7 +3138,7 @@ test "strict decode consumes single- and multi-tile main-header POC schedules" {
         .progression = .lrcp,
         .block_width = 4,
         .block_height = 4,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
         .precinct_count = 3,
     });
     defer allocator.free(base);
@@ -3182,7 +3182,7 @@ test "strict decode consumes single- and multi-tile main-header POC schedules" {
         .tile_part_divisions = null,
         .block_width = 4,
         .block_height = 4,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
         .precinct_count = 3,
     });
     defer allocator.free(multi_tile_base);
@@ -3211,7 +3211,7 @@ test "strict decode consumes single- and multi-tile main-header POC schedules" {
         .tile_part_divisions = 'R',
         .block_width = 4,
         .block_height = 4,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
         .precinct_count = 3,
     });
     defer allocator.free(divided_base);
@@ -3257,7 +3257,7 @@ test "strict decode consumes tile-part-header POC schedules" {
         .tlm = false,
         .block_width = 4,
         .block_height = 4,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
         .precinct_count = 3,
     };
 
@@ -3389,7 +3389,7 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
         .tile_part_divisions = null,
         .block_width = 4,
         .block_height = 4,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
         .precinct_count = 3,
     };
     const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
@@ -4165,7 +4165,7 @@ test "T2 multi-segment length coder preserves zero-byte terminated segments" {
     try write_state.writeSegments(&writer, segments[0..]);
     try writer.finish();
 
-    var pass_counts = [_]u16{1} ** segments.len;
+    var pass_counts: [segments.len]u16 = @splat(1);
     var lengths: [segments.len]u64 = undefined;
     var reader = t2.PacketHeaderReader.init(bytes.items);
     var read_state = t2.SegmentLengthState{};
@@ -4329,7 +4329,7 @@ test "T2 precinct packet header roundtrips first and continued layers" {
     defer inclusion_encoder.deinit();
     var zero_encoder = try t2.TagTreeEncoder.init(allocator, 2, 2, zero_bitplane_values[0..]);
     defer zero_encoder.deinit();
-    var write_states = [_]t2.CodeBlockPacketState{.{}} ** 4;
+    var write_states: [4]t2.CodeBlockPacketState = @splat(.{});
 
     {
         var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
@@ -4360,7 +4360,7 @@ test "T2 precinct packet header roundtrips first and continued layers" {
     defer inclusion_decoder.deinit();
     var zero_decoder = try t2.TagTreeDecoder.init(allocator, 2, 2);
     defer zero_decoder.deinit();
-    var read_states = [_]t2.CodeBlockPacketState{.{}} ** 4;
+    var read_states: [4]t2.CodeBlockPacketState = @splat(.{});
     var decoded: [4]t2.DecodedPacketBlock = undefined;
 
     var first_reader = t2.PacketHeaderReader.init(bytes.items[0..second_packet_offset]);
@@ -4932,7 +4932,7 @@ test "T2 single block packet header carries EBCOT layer payload deltas" {
     defer inclusion_encoder.deinit();
     var zero_encoder = try t2.TagTreeEncoder.init(allocator, 1, 1, &[_]u32{zero_bitplanes});
     defer zero_encoder.deinit();
-    var write_states = [_]t2.CodeBlockPacketState{.{}} ** 1;
+    var write_states: [1]t2.CodeBlockPacketState = @splat(.{});
 
     const first_payload = try t2.layerPayloadSlice(segment.bytes, zero, first);
     var writer = t2.PacketHeaderWriter.init(allocator, &packet);
@@ -4946,7 +4946,7 @@ test "T2 single block packet header carries EBCOT layer payload deltas" {
     defer inclusion_decoder.deinit();
     var zero_decoder = try t2.TagTreeDecoder.init(allocator, 1, 1);
     defer zero_decoder.deinit();
-    var read_states = [_]t2.CodeBlockPacketState{.{}} ** 1;
+    var read_states: [1]t2.CodeBlockPacketState = @splat(.{});
     var decoded: [1]t2.DecodedPacketBlock = undefined;
 
     var reader = t2.PacketHeaderReader.init(packet.items[0..first_header_len]);
@@ -5043,7 +5043,7 @@ test "T2 precinct layer packet assembles multiple EBCOT payload slices" {
     defer inclusion_encoder.deinit();
     var zero_encoder = try t2.TagTreeEncoder.init(allocator, 2, 1, zero_values[0..]);
     defer zero_encoder.deinit();
-    var write_states = [_]t2.CodeBlockPacketState{.{}} ** 2;
+    var write_states: [2]t2.CodeBlockPacketState = @splat(.{});
 
     const first_blocks = [_]t2.LayerPacketBlock{
         .{
@@ -5130,7 +5130,7 @@ test "T2 precinct layer packet assembles multiple EBCOT payload slices" {
     defer inclusion_decoder.deinit();
     var zero_decoder = try t2.TagTreeDecoder.init(allocator, 2, 1);
     defer zero_decoder.deinit();
-    var read_states = [_]t2.CodeBlockPacketState{.{}} ** 2;
+    var read_states: [2]t2.CodeBlockPacketState = @splat(.{});
     const locations = [_]t2.PacketBlockLocation{
         .{ .leaf_x = 0, .leaf_y = 0 },
         .{ .leaf_x = 1, .leaf_y = 0 },
@@ -5216,7 +5216,7 @@ test "T2 precinct layer reader rolls back state on truncated payload" {
     defer inclusion_encoder.deinit();
     var zero_encoder = try t2.TagTreeEncoder.init(allocator, 1, 1, &[_]u32{@as(u32, 8 - segment.bitplanes)});
     defer zero_encoder.deinit();
-    var write_states = [_]t2.CodeBlockPacketState{.{}} ** 1;
+    var write_states: [1]t2.CodeBlockPacketState = @splat(.{});
     const blocks = [_]t2.LayerPacketBlock{.{
         .location = .{ .leaf_x = 0, .leaf_y = 0 },
         .nominal_bitplanes = 8,
@@ -5240,7 +5240,7 @@ test "T2 precinct layer reader rolls back state on truncated payload" {
     defer inclusion_decoder.deinit();
     var zero_decoder = try t2.TagTreeDecoder.init(allocator, 1, 1);
     defer zero_decoder.deinit();
-    var read_states = [_]t2.CodeBlockPacketState{.{}} ** 1;
+    var read_states: [1]t2.CodeBlockPacketState = @splat(.{});
     var decoded: [1]t2.DecodedPacketBlock = undefined;
     var payloads: [1]?[]const u8 = undefined;
 
@@ -5281,7 +5281,7 @@ test "T2 packet state validates cumulative layer deltas" {
     defer inclusion_encoder.deinit();
     var zero_encoder = try t2.TagTreeEncoder.init(allocator, 1, 1, &[_]u32{5});
     defer zero_encoder.deinit();
-    var states = [_]t2.CodeBlockPacketState{.{}} ** 1;
+    var states: [1]t2.CodeBlockPacketState = @splat(.{});
 
     const first_blocks = [_]t2.LayerPacketBlock{.{
         .location = .{ .leaf_x = 0, .leaf_y = 0 },
@@ -7102,7 +7102,7 @@ test "TIFF page count reads only the IFD chain of a file" {
 test "TIFF strip decoders match the TIFF 6.0 definitions" {
     // PackBits: the example stream from TIFF 6.0 section 9.
     const packbits_input = [_]u8{ 0xfe, 0xaa, 0x02, 0x80, 0x00, 0x2a, 0xfd, 0xaa, 0x03, 0x80, 0x00, 0x2a, 0x22, 0xf7, 0xaa };
-    const packbits_expected = [_]u8{ 0xaa, 0xaa, 0xaa, 0x80, 0x00, 0x2a, 0xaa, 0xaa, 0xaa, 0xaa, 0x80, 0x00, 0x2a, 0x22 } ++ [_]u8{0xaa} ** 10;
+    const packbits_expected = [_]u8{ 0xaa, 0xaa, 0xaa, 0x80, 0x00, 0x2a, 0xaa, 0xaa, 0xaa, 0xaa, 0x80, 0x00, 0x2a, 0x22 } ++ @as([10]u8, @splat(0xaa));
     var packbits_out: [packbits_expected.len]u8 = undefined;
     try tiff_compression.decodePackBits(&packbits_input, &packbits_out);
     try std.testing.expectEqualSlices(u8, &packbits_expected, &packbits_out);
@@ -7112,7 +7112,7 @@ test "TIFF strip decoders match the TIFF 6.0 definitions" {
     // LZW "aaaaaa": Clear, 'a', then 258 and 259 each name the entry being
     // defined (the KwKwK case), then EndOfInformation; five 9-bit codes.
     const codes = [_]u16{ 256, 'a', 258, 259, 257 };
-    var lzw_input = [_]u8{0} ** 6;
+    var lzw_input: [6]u8 = @splat(0);
     for (codes, 0..) |code, index| {
         for (0..9) |bit| {
             if ((code >> @intCast(8 - bit)) & 1 != 0) {
@@ -10544,7 +10544,7 @@ test "subsampled strict decode rejects SIZ and PLT topology mismatch" {
         for (plane, 0..) |*sample, index| sample.* = @intCast((index + component * 29) & 0xff);
     }
 
-    const precincts = [_]codestream.PrecinctSize{.{ .width = 16, .height = 16 }} ** 33;
+    const precincts: [33]codestream.PrecinctSize = @splat(.{ .width = 16, .height = 16 });
     const encoded = try codestream.encodeLosslessPlanarWithOptions(allocator, source, .{
         .levels = 1,
         .mct = .none,
@@ -10622,7 +10622,7 @@ test "Kakadu sampled RPCL multi-precinct streams decode across origin and PLT va
     const unsupported_order = try allocator.dupe(u8, poc_source);
     defer allocator.free(unsupported_order);
     const poc_offset = findMarker(unsupported_order, codestream.markerValue("poc")) orelse return error.MissingMarker;
-    unsupported_order[poc_offset + 10] = @intFromEnum(codestream.ProgressionOrder.pcrl);
+    unsupported_order[poc_offset + 10] = @backingInt(codestream.ProgressionOrder.pcrl);
     try std.testing.expectError(
         codestream.CodestreamError.InvalidCodestream,
         codestream.decodeLosslessPlanar(allocator, unsupported_order),
@@ -16541,7 +16541,7 @@ test "entropy auto borrowed raw avoids copying incompressible streams" {
 
 test "arithmetic entropy codec roundtrips biased stream" {
     const allocator = std.testing.allocator;
-    var input = [_]u8{0} ** 128;
+    var input: [128]u8 = @splat(0);
     for (&input, 0..) |*byte, i| {
         byte.* = if (i % 7 == 0) 0x10 else if (i % 11 == 0) 0x01 else 0x00;
     }
@@ -16581,8 +16581,8 @@ test "MQ coder roundtrips short multi-context symbol stream" {
 
 test "MQ coder roundtrips all-zero and all-one streams" {
     const allocator = std.testing.allocator;
-    const zeros = [_]mq.Symbol{.{ .context = 0, .bit = false }} ** 256;
-    const ones = [_]mq.Symbol{.{ .context = 0, .bit = true }} ** 256;
+    const zeros: [256]mq.Symbol = @splat(.{ .context = 0, .bit = false });
+    const ones: [256]mq.Symbol = @splat(.{ .context = 0, .bit = true });
 
     var encoded_zeros = try mq.encode(allocator, 1, zeros[0..]);
     defer encoded_zeros.deinit(allocator);
@@ -16991,7 +16991,7 @@ test "EBCOT symbol oracle scans block stats across vector tails" {
     const allocator = std.testing.allocator;
     const width = 11;
     const height = 3;
-    var plane = [_]i32{0} ** (width * height);
+    var plane: [width * height]i32 = @splat(0);
     plane[0] = 1;
     plane[7] = -2;
     plane[8] = 3;
@@ -17030,7 +17030,7 @@ test "EBCOT rejects 32-bitplane coefficients in scalar and SIMD stats paths" {
     );
 
     const width = simd.i32_lanes;
-    var vector_plane = [_]i32{0} ** width;
+    var vector_plane: [width]i32 = @splat(0);
     vector_plane[width - 1] = std.math.minInt(i32);
     const rect_vector = subband.Rect{ .x = 0, .y = 0, .width = width, .height = 1 };
 
@@ -17798,9 +17798,9 @@ test "EBCOT direct encode pass profile counts passes and symbols" {
 
     try std.testing.expectEqual(@as(u64, segment.pass_count), pass_count);
     try std.testing.expectEqual(expected_symbols, symbol_count);
-    try std.testing.expect(stats.mq_passes[@intFromEnum(ebcot.PassKind.cleanup)] > 0);
-    try std.testing.expect(stats.raw_passes[@intFromEnum(ebcot.PassKind.significance)] > 0);
-    try std.testing.expect(stats.raw_passes[@intFromEnum(ebcot.PassKind.refinement)] > 0);
+    try std.testing.expect(stats.mq_passes[@backingInt(ebcot.PassKind.cleanup)] > 0);
+    try std.testing.expect(stats.raw_passes[@backingInt(ebcot.PassKind.significance)] > 0);
+    try std.testing.expect(stats.raw_passes[@backingInt(ebcot.PassKind.refinement)] > 0);
 }
 
 test "EBCOT ISO MQ symbol segment preserves pass metadata" {
@@ -18002,7 +18002,7 @@ test "EBCOT direct MQ row masks match oracle across word boundaries" {
     const allocator = std.testing.allocator;
     const width = 70;
     const height = 4;
-    var plane = [_]i32{0} ** (width * height);
+    var plane: [width * height]i32 = @splat(0);
     plane[63] = 5;
     plane[64] = -7;
     plane[65] = 3;
@@ -18090,7 +18090,7 @@ test "EBCOT direct MQ coefficient decoder handles empty code-blocks" {
     const allocator = std.testing.allocator;
     const width = 4;
     const height = 3;
-    const plane = [_]i32{0} ** (width * height);
+    const plane: [width * height]i32 = @splat(0);
 
     var segment = try ebcot.encodeCodeBlockSegmentDirect(allocator, plane[0..], width, .{ .x = 0, .y = 0, .width = width, .height = height });
     defer segment.deinit(allocator);
@@ -18152,7 +18152,7 @@ test "raw bitplane block writer roundtrips a block" {
         0, 0,   0,  0,
         9, -12, 0,  4,
     };
-    var decoded = [_]i32{0} ** original.len;
+    var decoded: [original.len]i32 = @splat(0);
 
     var encoded = try bitplane.encodeBlock(allocator, original[0..], 4, .{
         .x = 0,
@@ -18182,7 +18182,7 @@ test "bitplane refinement packing roundtrips full vector groups" {
         9,  -10, 11,  -12,
         13, -14, 127, -128,
     };
-    var decoded = [_]i32{0} ** original.len;
+    var decoded: [original.len]i32 = @splat(0);
 
     var encoded = try bitplane.encodeBlock(allocator, original[0..], 4, .{
         .x = 0,
@@ -18214,7 +18214,7 @@ test "bitplane significance writer preserves unaligned zero SIMD groups" {
         0, 0, 0, 0,
         0, 0, 0, 1,
     };
-    var decoded = [_]i32{0} ** original.len;
+    var decoded: [original.len]i32 = @splat(0);
 
     var encoded = try bitplane.encodeBlock(allocator, original[0..], 12, .{
         .x = 0,
@@ -18489,10 +18489,10 @@ test "temporary codestream analyzer reports block and stream stats" {
     try std.testing.expect(stats.components[0].quality_layers[1].cumulative_passes >= stats.components[0].quality_layers[0].cumulative_passes);
     try std.testing.expectEqual(stats.components[0].coding_passes, stats.components[0].quality_layers[2].cumulative_passes);
     try std.testing.expectEqual(stats.components[0].ebcot_segments.mq_bytes, stats.components[0].quality_layers[2].cumulative_bytes);
-    try std.testing.expect(stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.significance)].streams > 0);
+    try std.testing.expect(stats.components[0].pass_streams[@backingInt(codestream.PassKind.significance)].streams > 0);
     try std.testing.expectEqual(
         @as(u64, 0),
-        stats.components[0].pass_streams[@intFromEnum(codestream.PassKind.cleanup)].raw_bytes,
+        stats.components[0].pass_streams[@backingInt(codestream.PassKind.cleanup)].raw_bytes,
     );
 }
 
@@ -19637,7 +19637,7 @@ test "strict decode accepts an edge-clipped block inside one precinct span" {
         .mct = .none,
         .block_width = 64,
         .block_height = 64,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 128, .height = 128 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 128, .height = 128 })),
         .precinct_count = 1,
         .segmentation_symbols = true,
         .sop = false,
@@ -19685,7 +19685,7 @@ test "strict decode applies B.7 code-block clamping" {
         .levels = 2,
         .block_width = 32,
         .block_height = 32,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 64, .height = 64 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 64, .height = 64 })),
         .precinct_count = 1,
     });
     defer allocator.free(bytes);
@@ -20577,7 +20577,7 @@ test "precinct-less COD maps to maximal precincts and decodes byte-exactly" {
     // precinct-less COD implies (one precinct per resolution, ISO B.6).
     const bytes = try codestream.encodeLosslessWithOptions(allocator, rgb, .{
         .levels = 2,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 32768, .height = 32768 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 32768, .height = 32768 })),
         .precinct_count = 1,
     });
     defer allocator.free(bytes);
@@ -20740,7 +20740,7 @@ fn reorderTilePartsForTest(allocator: std.mem.Allocator, bytes: []const u8, orde
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, bytes[0..first_sot]);
-    var seen = [_]bool{false} ** 256;
+    var seen: [256]bool = @splat(false);
     for (order) |index| {
         if (index >= count or seen[index]) return error.InvalidOrder;
         seen[index] = true;
@@ -20772,7 +20772,7 @@ test "PLT-less streams decode via in-stream-order packet header spans" {
     // Small explicit precincts force several precincts per resolution, so the
     // non-RPCL cases genuinely interleave per-precinct reader states across
     // the stream; block 8 <= precinct/2 keeps B.7 satisfied.
-    const small_precincts = [_]codestream.PrecinctSize{.{ .width = 16, .height = 16 }} ** 33;
+    const small_precincts: [33]codestream.PrecinctSize = @splat(.{ .width = 16, .height = 16 });
 
     const Case = struct {
         label: []const u8,
@@ -23093,7 +23093,7 @@ test "lossless options are reflected in SIZ and COD marker skeleton" {
     const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingMarker;
     try std.testing.expectEqual(@as(u16, 18), readU16BeTest(bytes, cod + 2));
     try std.testing.expectEqual(@as(u8, 0x07), bytes[cod + 4]);
-    try std.testing.expectEqual(@intFromEnum(codestream.ProgressionOrder.rpcl), bytes[cod + 5]);
+    try std.testing.expectEqual(@backingInt(codestream.ProgressionOrder.rpcl), bytes[cod + 5]);
     try std.testing.expectEqual(@as(u16, 1), readU16BeTest(bytes, cod + 6));
     try std.testing.expectEqual(@as(u8, 1), bytes[cod + 8]);
     try std.testing.expectEqual(@as(u8, 5), bytes[cod + 9]);
@@ -24350,7 +24350,7 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
             .tile_height = 32,
             .block_width = 4,
             .block_height = 4,
-            .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+            .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
             .precinct_count = 1,
             .sop = true,
             .eph = true,
@@ -24443,7 +24443,7 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
             .tile_height = 32,
             .block_width = 4,
             .block_height = 4,
-            .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+            .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
             .precinct_count = 1,
             .terminate_all = true,
             .sop = true,
@@ -24469,7 +24469,7 @@ test "malformed codestream corruption sweep never panics or reads out of bounds"
             .tile_height = 32,
             .block_width = 4,
             .block_height = 4,
-            .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+            .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
             .precinct_count = 1,
             .progression = .cprl,
             .tile_part_divisions = null,
@@ -24640,7 +24640,7 @@ test "LRCP iterator emits layer-major packets that map back to RPCL slots" {
     const plan = try packet_plan.rpclSingleTile(17, 9, 2, 3, 2, &precincts);
     const total = std.math.cast(usize, plan.packets).?;
 
-    var seen = [_]bool{false} ** 64;
+    var seen: [64]bool = @splat(false);
     try std.testing.expect(total <= seen.len);
 
     var iterator = try packet_plan.LrcpIterator.init(plan, 3, 2);
@@ -24675,7 +24675,7 @@ test "RLCP iterator emits resolution-major layer-second packets that map back to
     const plan = try packet_plan.rpclSingleTile(17, 9, 2, 3, 2, &precincts);
     const total = std.math.cast(usize, plan.packets).?;
 
-    var seen = [_]bool{false} ** 64;
+    var seen: [64]bool = @splat(false);
     try std.testing.expect(total <= seen.len);
 
     var iterator = try packet_plan.RlcpIterator.init(plan, 3, 2);
@@ -24720,7 +24720,7 @@ test "position-ordered packet sequences cover all RPCL slots in reference-grid o
         defer allocator.free(sequence);
         try std.testing.expectEqual(total, sequence.len);
 
-        var seen = [_]bool{false} ** 64;
+        var seen: [64]bool = @splat(false);
         try std.testing.expect(total <= seen.len);
         var previous_key: u64 = 0;
         var previous_component: u16 = 0;
@@ -24795,7 +24795,7 @@ test "permuted progression orders roundtrip losslessly and permute the RPCL pack
             .layers = layers,
             .block_width = 4,
             .block_height = 4,
-            .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+            .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
             .precinct_count = 1,
         };
         const rpcl = try codestream.encodeLosslessWithOptions(allocator, rgb, base);
@@ -24853,7 +24853,7 @@ const multi_tile_test_options = codestream.LosslessOptions{
     .tile_height = 32,
     .block_width = 4,
     .block_height = 4,
-    .precincts = [_]codestream.PrecinctSize{.{ .width = 8, .height = 8 }} ** 33,
+    .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
     .precinct_count = 1,
     .tile_part_divisions = null,
 };
@@ -25385,7 +25385,7 @@ test "reference-region block pruning matches the full decode at every offset" {
         .quantization = .scalar_expounded,
         .block_width = 8,
         .block_height = 8,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 16, .height = 16 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 16, .height = 16 })),
         .precinct_count = 1,
         .tile_part_divisions = null,
     });
@@ -26852,8 +26852,8 @@ test "multi-tile rate targets allocate one global budget across tiles" {
     defer artifacts.deinit();
     try std.testing.expectEqual(@as(usize, 4), artifacts.tiles.len);
 
-    var tile_layer0 = [_]u64{0} ** 4;
-    var tile_total = [_]u64{0} ** 4;
+    var tile_layer0: [4]u64 = @splat(0);
+    var tile_total: [4]u64 = @splat(0);
     for (artifacts.tiles, 0..) |tile, tile_index| {
         for (tile.catalog.blocks) |encoded| {
             tile_layer0[tile_index] += encoded.layers[0].cumulative_bytes;
@@ -27403,7 +27403,7 @@ test "planar encode covers 9/7 and every single-tile layout" {
         defer allocator.free(bytes);
 
         const cod = findMarker(bytes, codestream.markerValue("cod")) orelse return error.MissingCod;
-        try std.testing.expectEqual(@intFromEnum(case.progression), bytes[cod + 5]);
+        try std.testing.expectEqual(@backingInt(case.progression), bytes[cod + 5]);
         try std.testing.expectEqual(@as(u8, if (case.mct == .none) 0 else 1), bytes[cod + 8]);
         try std.testing.expectEqual(@as(u8, if (case.transform == .irreversible_9_7) 0 else 1), bytes[cod + 13]);
 
@@ -29230,7 +29230,7 @@ test "lossless encoder applies B.7 effective code-block clamping" {
         .levels = 2,
         .block_width = 64,
         .block_height = 64,
-        .precincts = [_]codestream.PrecinctSize{.{ .width = 64, .height = 64 }} ** 33,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 64, .height = 64 })),
         .precinct_count = 1,
         .tile_part_divisions = null,
     };
@@ -30501,7 +30501,7 @@ test "tile pipeline tile-grid work order prioritizes larger tiles" {
     try std.testing.expectEqual(@as(usize, @intCast(grid.tileCount())), order.len);
     try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 3, 4, 2, 5, 6, 7, 8 }, order);
 
-    var seen = [_]bool{false} ** 9;
+    var seen: [9]bool = @splat(false);
     var previous_cost: u64 = std.math.maxInt(u64);
     for (order) |tile_index| {
         try std.testing.expect(tile_index < seen.len);
@@ -30662,7 +30662,7 @@ test "tile pipeline derives TLM plan from tile-part layout" {
 
     const marker = try tile_pipeline.writeTilePartTlmMarkerSegment(allocator, tlm);
     defer allocator.free(marker);
-    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.tlm), readU16BeTest(marker, 0));
+    try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.tlm), readU16BeTest(marker, 0));
     try std.testing.expectEqual(@as(u16, @intCast(4 + tlm.entries.len * 6)), readU16BeTest(marker, 2));
     try std.testing.expectEqual(@as(u8, 0), marker[4]);
     try std.testing.expectEqual(@as(u8, 0x60), marker[5]);
@@ -30816,7 +30816,7 @@ test "tile pipeline writes standalone SOT/SOD tile-part bytes from layout" {
         );
         defer allocator.free(bytes);
 
-        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sot), readU16BeTest(bytes, 0));
+        try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.sot), readU16BeTest(bytes, 0));
         try std.testing.expectEqual(@as(u16, 10), readU16BeTest(bytes, 2));
         try std.testing.expectEqual(entry.tile_index, readU16BeTest(bytes, 4));
         try std.testing.expectEqual(entry.psot, readU32BeTest(bytes, 6));
@@ -30826,12 +30826,12 @@ test "tile pipeline writes standalone SOT/SOD tile-part bytes from layout" {
 
         const plt_start: usize = 12;
         const plt_end = plt_start + entry.plt_bytes;
-        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.plt), readU16BeTest(bytes, plt_start));
+        try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.plt), readU16BeTest(bytes, plt_start));
         const decoded_lengths = try decodePltMarkerLengthsForTest(allocator, bytes[plt_start..plt_end]);
         defer allocator.free(decoded_lengths);
         try std.testing.expectEqualSlices(u32, try plt.packetLengthsForEntry(entry_index), decoded_lengths);
 
-        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sod), readU16BeTest(bytes, plt_end));
+        try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.sod), readU16BeTest(bytes, plt_end));
         try expectTilePartPayloadMatchesStreamForTest(bytes[plt_end + 2 ..], tile_artifacts.stream, options);
     }
 }
@@ -30923,7 +30923,7 @@ test "tile pipeline writes standalone tile-part sequence bytes" {
         const end = cursor + @as(usize, entry.psot);
         try std.testing.expectEqual(cursor, indexed_sequence.tile_part_offsets[entry_index]);
         try std.testing.expect(end <= sequence.len);
-        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sot), readU16BeTest(sequence, cursor));
+        try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.sot), readU16BeTest(sequence, cursor));
         try std.testing.expectEqual(entry.tile_index, readU16BeTest(sequence, cursor + 4));
         try std.testing.expectEqual(entry.psot, readU32BeTest(sequence, cursor + 6));
 
@@ -30946,9 +30946,9 @@ test "tile pipeline writes standalone tile-part sequence bytes" {
     defer fragment.deinit();
     try fragment.validate();
     try std.testing.expectEqual(sequence.len + 4, fragment.bytes.len);
-    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.soc), readU16BeTest(fragment.bytes, 0));
+    try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.soc), readU16BeTest(fragment.bytes, 0));
     try std.testing.expectEqual(
-        @intFromEnum(tile_pipeline.TilePartMarker.eoc),
+        @backingInt(tile_pipeline.TilePartMarker.eoc),
         readU16BeTest(fragment.bytes, fragment.bytes.len - 2),
     );
     try std.testing.expectEqual(@as(usize, 2), fragment.tile_part_sequence_offset);
@@ -30957,7 +30957,7 @@ test "tile pipeline writes standalone tile-part sequence bytes" {
     for (layout.entries, 0..) |entry, entry_index| {
         try std.testing.expectEqual(indexed_sequence.tile_part_offsets[entry_index] + 2, fragment.tile_part_offsets[entry_index]);
         const tile_part = try fragment.tilePartSlice(entry_index);
-        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sot), readU16BeTest(tile_part, 0));
+        try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.sot), readU16BeTest(tile_part, 0));
         try std.testing.expectEqual(entry.psot, readU32BeTest(tile_part, 6));
         try std.testing.expectEqualSlices(u8, try indexed_sequence.tilePartSlice(entry_index), tile_part);
     }
@@ -31074,7 +31074,7 @@ test "tile pipeline writes standalone tile-part sequence bytes" {
     );
 
     const first_plt = fragment.tile_part_offsets[0] + 12;
-    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.plt), readU16BeTest(fragment.bytes, first_plt));
+    try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.plt), readU16BeTest(fragment.bytes, first_plt));
     const bad_plt_z = try allocator.dupe(u8, fragment.bytes);
     defer allocator.free(bad_plt_z);
     bad_plt_z[first_plt + 4] +%= 1;
@@ -31142,7 +31142,7 @@ test "tile pipeline writes standalone tile-part sequence bytes" {
     const bad_sod = try allocator.dupe(u8, fragment.bytes);
     defer allocator.free(bad_sod);
     const first_sod = fragment.tile_part_offsets[0] + 12 + layout.entries[0].plt_bytes;
-    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sod), readU16BeTest(bad_sod, first_sod));
+    try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.sod), readU16BeTest(bad_sod, first_sod));
     bad_sod[first_sod + 1] ^= 0x01;
     try std.testing.expectError(
         tile_pipeline.PacketScaffoldError.InvalidPacket,
@@ -31169,7 +31169,7 @@ test "tile pipeline writes standalone tile-part sequence bytes" {
     );
     defer allocator.free(no_tlm);
     try std.testing.expectEqual(try layout.totalPsotBytes(), no_tlm.len);
-    try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sot), readU16BeTest(no_tlm, 0));
+    try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.sot), readU16BeTest(no_tlm, 0));
     var no_tlm_sequence = try tile_pipeline.buildTilePartSequence(
         allocator,
         artifacts,
@@ -31493,7 +31493,7 @@ fn decodePltMarkerLengthsForTest(allocator: std.mem.Allocator, bytes: []const u8
     var expected_marker_index: u8 = 0;
     while (cursor < bytes.len) {
         if (bytes.len - cursor < 5) return error.InvalidPlt;
-        try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.plt), readU16BeTest(bytes, cursor));
+        try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.plt), readU16BeTest(bytes, cursor));
         const lplt = readU16BeTest(bytes, cursor + 2);
         if (lplt < 3) return error.InvalidPlt;
         const segment_end = cursor + 2 + @as(usize, lplt);
@@ -31532,7 +31532,7 @@ fn expectTilePartPayloadMatchesStreamForTest(
         const packet_length = @as(usize, @intCast(packet_length_u32));
         if (options.sop) {
             if (payload.len - cursor < 6) return error.Truncated;
-            try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.sop), readU16BeTest(payload, cursor));
+            try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.sop), readU16BeTest(payload, cursor));
             try std.testing.expectEqual(@as(u16, 4), readU16BeTest(payload, cursor + 2));
             try std.testing.expectEqual(@as(u16, @intCast(packet_index & 0xffff)), readU16BeTest(payload, cursor + 4));
             cursor += 6;
@@ -31551,7 +31551,7 @@ fn expectTilePartPayloadMatchesStreamForTest(
         cursor += header_length;
         if (options.eph) {
             if (payload.len - cursor < 2) return error.Truncated;
-            try std.testing.expectEqual(@intFromEnum(tile_pipeline.TilePartMarker.eph), readU16BeTest(payload, cursor));
+            try std.testing.expectEqual(@backingInt(tile_pipeline.TilePartMarker.eph), readU16BeTest(payload, cursor));
             cursor += 2;
         }
         const body_length = packet_length - header_length;
@@ -36044,8 +36044,8 @@ const ReassemblingTileSink = struct {
     reject_at_tile: ?u64 = null,
     component_count: usize = 0,
     layouts: [color.max_components]codestream.TileSinkComponentLayout = undefined,
-    planes: [color.max_components][]u16 = .{&.{}} ** color.max_components,
-    writes: [color.max_components][]u8 = .{&.{}} ** color.max_components,
+    planes: [color.max_components][]u16 = @splat(&.{}),
+    writes: [color.max_components][]u8 = @splat(&.{}),
 
     const SinkError = error{SinkRejected};
 
@@ -37364,8 +37364,8 @@ const ReassemblingBandSink = struct {
     reject_at_band: ?u64 = null,
     component_count: usize = 0,
     layouts: [color.max_components]codestream.TileSinkComponentLayout = undefined,
-    planes: [color.max_components][]u16 = .{&.{}} ** color.max_components,
-    writes: [color.max_components][]u8 = .{&.{}} ** color.max_components,
+    planes: [color.max_components][]u16 = @splat(&.{}),
+    writes: [color.max_components][]u8 = @splat(&.{}),
 
     const SinkError = error{SinkRejected};
 

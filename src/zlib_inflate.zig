@@ -13,8 +13,9 @@
 //! stops within the requested output plus one byte, and any stream that
 //! consumed even one bit of the zero tail is rejected as truncated.
 //!
-//! docs/toolchain_notes.md records the defect, its reproduction
-//! (tools/zig_flate_truncation_repro.zig), and when this can go.
+//! Zig 0.17.0 fixed the check; this reader is kept as a guard. See
+//! docs/toolchain_notes.md for the defect, its reproduction
+//! (tools/zig_flate_truncation_repro.zig), and how to remove it.
 
 const std = @import("std");
 

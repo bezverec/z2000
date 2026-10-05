@@ -162,7 +162,7 @@ pub const ValueRef = struct {
     pub fn byteAt(self: ValueRef, document: Document, index: usize) Error!u8 {
         if (index >= self.count) return Error.InvalidTagValue;
         return switch (self.field_type) {
-            @intFromEnum(FieldType.byte), @intFromEnum(FieldType.ascii), @intFromEnum(FieldType.undefined) => self.bytes(document)[index],
+            @backingInt(FieldType.byte), @backingInt(FieldType.ascii), @backingInt(FieldType.undefined) => self.bytes(document)[index],
             else => Error.InvalidTagValue,
         };
     }
@@ -170,7 +170,7 @@ pub const ValueRef = struct {
     pub fn u16At(self: ValueRef, document: Document, index: usize) Error!u16 {
         if (index >= self.count) return Error.InvalidTagValue;
         return switch (self.field_type) {
-            @intFromEnum(FieldType.short) => try readU16(self.bytes(document), index * 2, document.endian),
+            @backingInt(FieldType.short) => try readU16(self.bytes(document), index * 2, document.endian),
             else => Error.InvalidTagValue,
         };
     }
@@ -178,14 +178,14 @@ pub const ValueRef = struct {
     pub fn u32At(self: ValueRef, document: Document, index: usize) Error!u32 {
         if (index >= self.count) return Error.InvalidTagValue;
         return switch (self.field_type) {
-            @intFromEnum(FieldType.short) => try self.u16At(document, index),
-            @intFromEnum(FieldType.long) => try readU32(self.bytes(document), index * 4, document.endian),
+            @backingInt(FieldType.short) => try self.u16At(document, index),
+            @backingInt(FieldType.long) => try readU32(self.bytes(document), index * 4, document.endian),
             else => Error.InvalidTagValue,
         };
     }
 
     pub fn rationalAt(self: ValueRef, document: Document, index: usize) Error!f64 {
-        if (index >= self.count or self.field_type != @intFromEnum(FieldType.rational)) {
+        if (index >= self.count or self.field_type != @backingInt(FieldType.rational)) {
             return Error.InvalidTagValue;
         }
         const value_bytes = self.bytes(document);
@@ -196,7 +196,7 @@ pub const ValueRef = struct {
     }
 
     pub fn srationalAt(self: ValueRef, document: Document, index: usize) Error!f64 {
-        if (index >= self.count or self.field_type != @intFromEnum(FieldType.srational)) {
+        if (index >= self.count or self.field_type != @backingInt(FieldType.srational)) {
             return Error.InvalidTagValue;
         }
         const value_bytes = self.bytes(document);
@@ -207,28 +207,28 @@ pub const ValueRef = struct {
     }
 
     pub fn ascii(self: ValueRef, document: Document) Error![]const u8 {
-        if (self.field_type != @intFromEnum(FieldType.ascii)) return Error.InvalidTagValue;
+        if (self.field_type != @backingInt(FieldType.ascii)) return Error.InvalidTagValue;
         return std.mem.sliceTo(self.bytes(document), 0);
     }
 };
 
 pub fn typeSize(field_type: u16) ?usize {
     return switch (field_type) {
-        @intFromEnum(FieldType.byte),
-        @intFromEnum(FieldType.ascii),
-        @intFromEnum(FieldType.sbyte),
-        @intFromEnum(FieldType.undefined),
+        @backingInt(FieldType.byte),
+        @backingInt(FieldType.ascii),
+        @backingInt(FieldType.sbyte),
+        @backingInt(FieldType.undefined),
         => 1,
-        @intFromEnum(FieldType.short),
-        @intFromEnum(FieldType.sshort),
+        @backingInt(FieldType.short),
+        @backingInt(FieldType.sshort),
         => 2,
-        @intFromEnum(FieldType.long),
-        @intFromEnum(FieldType.slong),
-        @intFromEnum(FieldType.float),
+        @backingInt(FieldType.long),
+        @backingInt(FieldType.slong),
+        @backingInt(FieldType.float),
         => 4,
-        @intFromEnum(FieldType.rational),
-        @intFromEnum(FieldType.srational),
-        @intFromEnum(FieldType.double),
+        @backingInt(FieldType.rational),
+        @backingInt(FieldType.srational),
+        @backingInt(FieldType.double),
         => 8,
         else => null,
     };

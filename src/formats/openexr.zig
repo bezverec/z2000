@@ -349,7 +349,7 @@ fn chromaticitiesToD50(chroma: Chromaticities) !icc.Matrix {
     const d50: [3]f64 = .{ 0.9642, 1.0, 0.8249 };
     const source_cone = multiplyMatrixVector(bradford, source_white);
     const d50_cone = multiplyMatrixVector(bradford, d50);
-    var diagonal: icc.Matrix = [_][3]f64{[_]f64{0.0} ** 3} ** 3;
+    var diagonal: icc.Matrix = @splat(@splat(0.0));
     for (0..3) |index| {
         if (!std.math.isFinite(source_cone[index]) or @abs(source_cone[index]) < 0.000000001) {
             return OpenExrError.InvalidHeader;

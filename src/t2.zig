@@ -673,7 +673,7 @@ pub const DecodedPacketBlock = struct {
     /// Per-segment byte lengths when the code-block uses BYPASS-style
     /// terminated segments; segment_count == 0 means one continuous segment.
     segment_count: u8 = 0,
-    segment_lengths: [max_block_segments]u64 = [_]u64{0} ** max_block_segments,
+    segment_lengths: [max_block_segments]u64 = @splat(0),
 };
 
 pub const LayerTruncation = struct {

@@ -59,7 +59,7 @@ pub fn encodeImage(allocator: std.mem.Allocator, input: image.Image, options: Op
 
     try out.appendSlice(allocator, magic);
     try out.append(allocator, version);
-    try out.append(allocator, @intFromEnum(options.wavelet));
+    try out.append(allocator, @backingInt(options.wavelet));
     try out.append(allocator, levels_written);
     try out.append(allocator, 0);
     try appendU32Le(allocator, &out, @as(u32, @intCast(input.width)));

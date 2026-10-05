@@ -615,7 +615,7 @@ pub fn rpclTileRegion(
 
     var plan = Plan{
         .resolution_count = levels + 1,
-        .resolutions = [_]Resolution{emptyResolution()} ** 33,
+        .resolutions = @as([33]Resolution, @splat(emptyResolution())),
         .packets = 0,
     };
 

@@ -82,9 +82,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the codec CLI");
     run_step.dependOn(&run_cmd.step);
@@ -112,15 +110,19 @@ pub fn build(b: *std.Build) void {
         .root_module = corpus_module,
     });
     const corpus_run = b.addRunArtifact(corpus_exe);
-    if (b.args) |args| corpus_run.addArgs(args);
+    corpus_run.addPassthruArgs();
     const corpus_step = b.step("part1-corpus", "Run the strict JPEG 2000 Part 1 corpus manifest");
     corpus_step.dependOn(&corpus_run.step);
 }
 
 fn readBaseVersion(b: *std.Build) []const u8 {
-    const raw = b.build_root.handle.readFileAlloc(
+    // Zig caches the configure phase; declaring the read makes an edited
+    // VERSION re-run it.
+    b.dependOnFileContents(b.path("VERSION"));
+    const path = b.root.joinString(b.allocator, "VERSION") catch @panic("OOM");
+    const raw = std.Io.Dir.cwd().readFileAlloc(
         b.graph.io,
-        "VERSION",
+        path,
         b.allocator,
         .limited(128),
     ) catch |err| std.debug.panic("cannot read VERSION: {s}", .{@errorName(err)});
@@ -152,12 +154,18 @@ fn gitWorktreeDirty(b: *std.Build) bool {
 }
 
 fn runGit(b: *std.Build, arguments: []const []const u8) ?[]const u8 {
+    // The revision, commit count, and dirty state change without any file
+    // the configure cache could watch, so the configuration must not be
+    // reused; otherwise the embedded version would go stale.
+    b.graph.poisonCache();
+    const root = b.root.toString(b.allocator) catch @panic("OOM");
     var argv: std.ArrayList([]const u8) = .empty;
-    argv.appendSlice(b.allocator, &.{ "git", "-C", b.pathFromRoot(".") }) catch @panic("OOM");
+    argv.appendSlice(b.allocator, &.{ "git", "-C", if (root.len == 0) "." else root }) catch @panic("OOM");
     argv.appendSlice(b.allocator, arguments) catch @panic("OOM");
-    var exit_code: u8 = 0;
-    const output = b.runAllowFail(argv.items, &exit_code, .ignore) catch return null;
-    return std.mem.trim(u8, output, " \t\r\n");
+    return switch (b.runFallible(argv.items, .{ .stderr_behavior = .ignore })) {
+        .success => |output| std.mem.trim(u8, output, " \t\r\n"),
+        else => null,
+    };
 }
 
 fn validGitRevision(revision: []const u8) bool {

@@ -6,7 +6,7 @@
 //! Measured on Zig 0.16.0 (x86_64-windows): Debug panics on the assertion in
 //! `std.Io.Reader.toss`, ReleaseSafe panics on an `unreachable` in
 //! `Decompress.streamInner`, and ReleaseFast dies with an access violation.
-//! A correct decoder returns an error for this input.
+//! A correct decoder returns an error for this input, as Zig 0.17.0 does.
 
 const std = @import("std");
 
