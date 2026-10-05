@@ -5,7 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
-No changes yet.
+### Local Release Script
+
+- `tools/release_local.ps1` turns the hand-run `v0.2.0-rc.2` assembly into
+  one command: precondition checks (tag form, `VERSION`, committed notes,
+  clean and pushed HEAD, Zig 0.17, Docker), native tests and corpus, the
+  Linux x86-64 and RISC-V ReleaseFast suites in a Docker Linux container,
+  release builds with version checks for both CLI names, an identical-output
+  conversion on every platform, a checked macOS archive from a hosted run or
+  a file, workflow-identical packaging, and `SHA256SUMS`; `-CreateDraft`
+  then tags, pushes, and creates a draft release. `docs/versioning.md`
+  describes it.
+- `zig build test-bin` builds and installs the unit-test executable without
+  running it, so a foreign target's suite can run elsewhere.
+- Tried end to end on a local trial tag: the full run (native gates, both
+  Linux suites, all builds, a cross-built stand-in for the macOS archive)
+  produced four archives and a checked `SHA256SUMS`, and a macOS archive for
+  another version, a missing macOS choice, and `-AllowUnpushed` with
+  `-CreateDraft` were each refused.
 
 ## 0.2.0-rc.2 — 2026-10-05
 

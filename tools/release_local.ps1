@@ -223,6 +223,11 @@ if (-not $SkipMacos) {
     New-Item -ItemType Directory -Force -Path $extract | Out-Null
     Invoke-NativeChecked "unpack macOS archive" "tar" @("-xzf", $MacosArchive, "-C", $extract)
     $macosPackage = Join-Path $extract "z2000-$Tag-macos-aarch64"
+    foreach ($file in @("z2000", "z2k", "RELEASE_NOTES.md")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $macosPackage $file))) {
+            throw "the macOS archive has no z2000-$Tag-macos-aarch64/$file; is it the archive for $Tag?"
+        }
+    }
     $macosMain = [System.IO.File]::ReadAllBytes((Join-Path $macosPackage "z2000"))
     $macosAlias = [System.IO.File]::ReadAllBytes((Join-Path $macosPackage "z2k"))
     if ([BitConverter]::ToString($macosMain[0..3]) -ne "CF-FA-ED-FE") { throw "macOS z2000 is not a 64-bit Mach-O executable" }

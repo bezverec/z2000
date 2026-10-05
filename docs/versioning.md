@@ -123,8 +123,33 @@ release, advance it to the next planned pre-1.0 line in a normal commit.
    omit `--prerelease`. Uploading local assets does not require a hosted build
    workflow.
 
+`tools/release_local.ps1` runs steps 3 to 7 on Windows with Zig 0.17, Git,
+Docker Desktop, and the GitHub CLI; `v0.2.0-rc.2` was assembled this way by
+hand. From a clean, pushed checkout whose `VERSION` and committed
+`docs/releases/TAG.md` match the tag, it runs the native Debug and
+ReleaseFast tests and the Part 1 corpus; runs the ReleaseFast suite for
+x86_64-linux-musl and, under the Docker VM's binfmt QEMU, riscv64-linux-musl
+in a Linux container (`zig build test-bin` installs the suite without
+running it); builds the Windows, Linux x86-64, and RISC-V binaries with the
+release flags and checks both CLI names' versions; requires every platform
+to convert one fixture to identical bytes; takes the macOS archive from a
+hosted `Release` run (`-MacosRunId`) or a file (`-MacosArchive`) and checks
+its binaries, embedded version, and notes; packages every archive like the
+workflow; and writes and checks `SHA256SUMS` under `zig-out\release\TAG`.
+`-CreateDraft` then tags HEAD, pushes the tag, and creates the draft
+release; publishing it stays a manual step. `-SkipGates` and
+`-SkipRiscvTests` shorten trial runs, and `-AllowUnpushed` allows a trial
+run from a local commit but cannot be combined with `-CreateDraft`.
+
+```powershell
+.\tools\release_local.ps1 -Tag v0.2.0-rc.3 -MacosRunId <run id> -CreateDraft
+```
+
 The `Release` GitHub Actions workflow remains an optional reproducibility
-fallback, not the default publication path. A separate `macOS Release Artifact`
+fallback, not the default publication path. Its RISC-V job failed with
+SIGSEGV under the hosted runner's `qemu-riscv64` for `v0.2.0-rc.2` while the
+same suite passes locally, so it currently cannot assemble a release; its
+native macOS job still provides the macOS archive. A separate `macOS Release Artifact`
 workflow builds only the native macOS arm64 archive when no trusted local Mac
 is available. Ordinary commits and tag pushes do not publish a release. The
 portable RISC-V build does not require RVV; its ReleaseFast functional suite
