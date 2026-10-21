@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### T.803 p0_08 And p0_15
+
+- Main-header QCD is now sized by the components it actually serves, those
+  without a QCC, using their effective COC or COD level count. It used to
+  take component 0's levels whenever every component had a COC, so
+  T.803 `p0_08` (component levels 6/7/8, QCD serving only the 7-level one)
+  failed as `InvalidCodestream`. Components served by one QCD but coded
+  with different level counts or transforms fail closed as unsupported.
+- With divergent component coding, the header's quantization summary now
+  follows the deepest component, which sets the header level count. It used
+  to keep QCD's band count, so an ordinary Kakadu 8.4.1 stream whose COD
+  level count is below one component's COC failed as `InvalidCodestream`;
+  `kakadu-qcd-shallow-component` pins that stream losslessly against its
+  source planes, and fails on the previous code.
+- `p0_08` now decodes bit-exactly against Kakadu 8.4.1 in all three
+  components at full resolution and at reduction 5, and within its T.803
+  class-0 bounds (peak 5 of 7, MSE 2.61 of 6.72). `p0_15`, which the `Rsiz`
+  gate had masked, matches both class-0 references exactly. With
+  `Z2000_PART4_ROOT` the corpus reports 96 passes, 22 expected rejections,
+  and no mismatch; 13 of the 16 T.803 profile-0 streams pass.
+
 ### Part 1 Profiles Decode Again
 
 - Fixed a regression from the CAP/PRF gate (July 2026): it rejected every

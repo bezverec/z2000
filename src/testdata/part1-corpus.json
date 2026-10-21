@@ -1547,10 +1547,10 @@
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
         "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "legal T.803 profile-0 codestream; signed sample transport and RGN remain unsupported",
-      "features": ["siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "oracle": "T.803 class-0 c0p0_15 PGX references, pixel-exact: the top-left 128x128 crop at reduction 0 and the whole image at reduction 1",
+      "features": ["siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
+      "expectation": "decode_pass",
+      "decoder": "native",
       "references": [
         {
           "path": "reference_class0_profile0/c0p0_15r0.pgx",
@@ -1558,6 +1558,7 @@
           "format": "pgx",
           "component": 0,
           "resolution_reduction": 0,
+          "crop": { "x": 0, "y": 0 },
           "max_peak_error": 0,
           "max_mse": 0
         },
@@ -1671,15 +1672,16 @@
         "redistribution": "optional local asset; not redistributed by z2000"
       },
       "oracle": "T.803 class-0 c0p0_08.pgx at reduction 5, signed 8-bit formatted output, peak error <= 7, MSE <= 6.72",
-      "features": ["siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "reversible-53"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "features": ["siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "reversible-53"],
+      "expectation": "decode_pass",
+      "decoder": "native",
       "references": [{
         "path": "reference_class0_profile0/c0p0_08.pgx",
         "sha256": "ad58ffadc846fc3ce72d1280ef3f2300c3697bfa754c6eb292167f9f835716a6",
         "format": "pgx",
         "component": 0,
         "resolution_reduction": 5,
+        "sample_shift": 4,
         "max_peak_error": 7,
         "max_mse": 6.72
       }]
@@ -3899,6 +3901,54 @@
           "resolution_reduction": 0,
           "max_peak_error": 1,
           "max_mse": 0.05
+        }
+      ]
+    },
+    {
+      "id": "kakadu-qcd-shallow-component",
+      "path": "src/testdata/kakadu-qcd-shallow-component.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "a285596c3310f509fae1d8167c10ba967c6e64bef12fd7421be356e33cda1b0a",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "40x24 three-component 8-bit, reversible, no MCT; COD has two levels, COC gives component 0 one and component 2 three, so QCD serves only component 1 and QCC covers the other two. The header summary used to take QCD's band count against the deepest component's levels and reject the stream as InvalidCodestream",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and source PGX planes committed; producer application not redistributed",
+        "command": "magick -seed 5 -size 40x24 plasma:fractal -depth 8 -separate g%d.pgm; kdu_compress -i g0.pgm,g1.pgm,g2.pgm -o src/testdata/kakadu-qcd-shallow-component.j2c Creversible=yes Cycc=no Clevels=2 Clevels:C0=1 Clevels:C2=3 -num_threads 0"
+      },
+      "oracle": "lossless: every native plane equals its encoder input exactly",
+      "features": ["cod-qcd-component-overrides", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-qcd-shallow-component-source-c0.pgx",
+          "sha256": "6c0d271016ba9cb06e5b1ea41362aca459784daa7a92d6020f08d8c8b3e10e7c",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-qcd-shallow-component-source-c1.pgx",
+          "sha256": "0e87b3533dd545d4fbd309e480dbfef08224015023ad1e0efa55b5a27d983d58",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-qcd-shallow-component-source-c2.pgx",
+          "sha256": "b1b108d2963ab62fca506395f087fd425ad8c154bc7204500a22a2a1348ceb0b",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
         }
       ]
     }

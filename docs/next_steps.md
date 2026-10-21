@@ -190,9 +190,9 @@ The foundation landed on 2026-07-17:
 - The official WG1 T.803 corpus is pinned at commit `f6b9ede0` through
   `tools/setup_part1_corpus.ps1` and remains local under its conformance-use
   terms. All 16 profile-0 inputs and 18 class-0 PGX references now run with
-  `Z2000_PART4_ROOT`: `p0_01`, `p0_02`, `p0_11`, `p0_12`, `p0_16`, `p0_04`,
-  `p0_09`, `p0_10`, and `p0_14` pass their class-0 references; seven broader legal
-  profiles pin the current fail-closed boundary. QCD-before-COD moved `p0_01`
+  `Z2000_PART4_ROOT`: thirteen pass their class-0 references (`p0_01` to
+  `p0_04`, `p0_06`, and `p0_08` to `p0_16` except `p0_13`), and `p0_05`,
+  `p0_07`, and `p0_13` pin the current fail-closed boundary. QCD-before-COD moved `p0_01`
   to an exact pass;
   uniform full COC, LRCP layers, SOP/EPH, T1 termination styles, and reserved
   segment-less marker handling move `p0_02` to an exact pass;
@@ -424,11 +424,9 @@ The active G0/G4 corpus expansion is:
    reason: it requires no MCT, and they carry RCT.
 6. Map the remaining public profiles to manifested decode and malformed cases.
    `tools/release_local.ps1` runs the optional assets with
-   `--require-optional` whenever `Z2000_PART4_ROOT` is set. Of the five T.803
-   profile-0 streams still pinned fail-closed, `p0_15` now decodes through the
-   native path and needs its references checked, and `p0_08` fails as
-   `InvalidCodestream` in QCD length validation, which a legal stream must not;
-   both are the next corpus slice.
+   `--require-optional` whenever `Z2000_PART4_ROOT` is set. `p0_15` (exact) and
+   `p0_08` (bit-exact against Kakadu, within its T.803 bounds) now pass; the
+   remaining fail-closed T.803 streams are `p0_05`, `p0_07`, and `p0_13`.
 
 Exit when every existing public profile maps to the new matrix and the runner
 can evaluate the relevant T.803 references and tolerances without inflating

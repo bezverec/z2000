@@ -6795,10 +6795,29 @@ fn readStrictCodestreamMetadataForProfile(
     for (coc_component_seen[0..component_count]) |seen| {
         all_components_have_coc = all_components_have_coc and seen;
     }
-    // When every component has a COC override, QCD describes that effective
-    // all-component coding style rather than an otherwise unused COD default.
-    // T.803 p0_02 exercises a 9/7 COD followed by an all-component 5/3 COC.
-    if (all_components_have_coc) {
+    // QCD quantizes exactly the components without a QCC, so its band count
+    // and step style follow their effective coding style (COC when present,
+    // otherwise COD). T.803 p0_02 exercises a 9/7 COD followed by an
+    // all-component 5/3 COC; p0_08 gives each component its own level count
+    // and a QCC to every component but the one that QCD serves.
+    var qcd_component: ?usize = null;
+    for (qcc_component_seen[0..component_count], 0..) |seen, component| {
+        if (seen) continue;
+        const coding = component_coding[component];
+        if (qcd_component) |first| {
+            if (coding.levels != component_coding[first].levels or
+                coding.transform != component_coding[first].transform)
+            {
+                return CodestreamError.UnsupportedPayload;
+            }
+        } else qcd_component = component;
+    }
+    if (qcd_component) |component| {
+        default_qcd_levels = component_coding[component].levels;
+        default_qcd_transform = component_coding[component].transform;
+    } else if (all_components_have_coc) {
+        // Every component has both overrides; the unused default is checked
+        // against the first component's style.
         default_qcd_levels = component_coding[0].levels;
         default_qcd_transform = component_coding[0].transform;
     }
@@ -6961,6 +6980,16 @@ fn readStrictCodestreamMetadataForProfile(
                         return CodestreamError.UnsupportedPayload;
                     }
                 }
+                // The header summary describes the component that sets
+                // `levels`; QCD itself may serve a shallower one (T.803 p0_08).
+                const deepest = component_qcd[max_levels_component];
+                qcd_band_count = deepest.bands;
+                parsed_quantization = deepest.quantization;
+                parsed_guard_bits = deepest.guard_bits;
+                parsed_qcd_exponents = deepest.exponents;
+                parsed_qcd_exponent_count = deepest.exponent_count;
+                parsed_qcd_steps = deepest.steps;
+                parsed_qcd_step_count = deepest.step_count;
             } else if (allowsComponentSpecificIrreversibleQcc(
                 component_count,
                 parsed_transform,
