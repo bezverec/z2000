@@ -19,9 +19,12 @@ quantization, T1, T2, tile, and container behavior agree end to end.
 `src/profile_signaling.zig` centralizes the main-header `Rsiz`/`CAP`/`PRF`
 prefix used by both raw codestream and JP2 validation. It enforces marker
 ordering, exact capability-word cardinality, canonical extended-profile words,
-and the `Rsiz` bit-14 CAP requirement. Only unrestricted Part 1 `Rsiz == 0`
-currently reaches payload decode; all structurally valid extension/profile
-declarations fail closed before reconstruction.
+and the `Rsiz` bit-14 CAP requirement. Unrestricted Part 1 and the Part 1
+profiles of ISO/IEC 15444-1 Table A.10 (Profile 0/1, digital cinema, long-term
+storage, broadcast, IMF) reach payload decode, because a profile only limits
+what an encoder may emit; `restrictsPart1` lists the accepted numbers.
+Part 2, CAP, PRF, and reserved declarations fail closed before
+reconstruction.
 
 `src/main.zig` owns CLI routing and option parsing, while
 `src/cli_dispatch.zig` keeps extension inference independently testable and

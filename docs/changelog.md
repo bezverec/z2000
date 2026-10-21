@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Part 1 Profiles Decode Again
+
+- Fixed a regression from the CAP/PRF gate (July 2026): it rejected every
+  stream with a nonzero `Rsiz`, so Profile 0 and Profile 1 streams, and
+  digital cinema, broadcast, and IMF streams, failed with
+  `UnsupportedPayload` even though these profiles only restrict Part 1
+  syntax. Eight official T.803 streams that had passed before (`p0_01`,
+  `p0_02`, `p0_03`, `p0_04`, `p0_06`, `p0_10`, `p0_11`, `p0_12`) were
+  affected. `v0.2.0-rc.2` shipped with it, because the T.803 streams are
+  optional corpus assets and that release was not run with them.
+- `profile_signaling.restrictsPart1` now accepts the Part 1 profile numbers
+  of ISO/IEC 15444-1 Table A.10: 0 to 7 (unrestricted, Profile 0/1, 2K/4K
+  and scalable digital cinema, long-term storage), broadcast `0x01xx` to
+  `0x03xx` with main level 0 to 11, and IMF `0x04xx` to `0x09xx` with
+  sublevel 0 to 9 and main level 0 to 11. Whether a stream keeps within its
+  declared profile is not checked. Part 2 (bit 15), CAP, PRF, and reserved
+  numbers still fail closed, in raw codestreams and in JP2.
+- The default corpus now carries four committed streams with profile
+  declarations: Kakadu Profile 1 gray and broadcast RGB, and OpenJPEG IMF
+  2K reversible and 2K cinema RGB. The two reversible ones equal their
+  encoder input exactly, and the two irreversible ones are within one LSB of
+  Kakadu. Against the previous gate all four fail, so the plain corpus run
+  catches this regression now. With `Z2000_PART4_ROOT` the corpus reports 89
+  passes, 24 expected rejections, and no mismatch.
+- `tools/release_local.ps1` runs the corpus with `--require-optional` when
+  `Z2000_PART4_ROOT` is set, and warns when it is not.
+
 ### Local Release Script
 
 - `tools/release_local.ps1` turns the hand-run `v0.2.0-rc.2` assembly into

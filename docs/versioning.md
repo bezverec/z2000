@@ -127,7 +127,8 @@ release, advance it to the next planned pre-1.0 line in a normal commit.
 Docker Desktop, and the GitHub CLI; `v0.2.0-rc.2` was assembled this way by
 hand. From a clean, pushed checkout whose `VERSION` and committed
 `docs/releases/TAG.md` match the tag, it runs the native Debug and
-ReleaseFast tests and the Part 1 corpus; runs the ReleaseFast suite for
+ReleaseFast tests and the Part 1 corpus, with `--require-optional` when
+`Z2000_PART4_ROOT` points at the T.803 checkout (it warns otherwise); runs the ReleaseFast suite for
 x86_64-linux-musl and, under the Docker VM's binfmt QEMU, riscv64-linux-musl
 in a Linux container (`zig build test-bin` installs the suite without
 running it); builds the Windows, Linux x86-64, and RISC-V binaries with the

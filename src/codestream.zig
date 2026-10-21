@@ -7436,12 +7436,24 @@ test "strict main-header profile signaling validates CAP PRF and Rsiz" {
     var baseline = try readStrictCodestreamMetadata(allocator, base);
     baseline.deinit();
 
-    const profile_one = try strictProfileSignalingFixture(allocator, base, 1, &.{});
-    defer allocator.free(profile_one);
-    try std.testing.expectError(
-        CodestreamError.UnsupportedPayload,
-        readStrictCodestreamMetadata(allocator, profile_one),
-    );
+    // Restriction-only Part 1 profiles decode exactly like Rsiz 0.
+    var baseline_decoded = try decodeLosslessNativeWithOptions(allocator, base, .{}, .{});
+    defer baseline_decoded.deinit();
+    for ([_]u16{ 1, 2, 3, 0x0101, 0x0700 }) |rsiz| {
+        const restricted = try strictProfileSignalingFixture(allocator, base, rsiz, &.{});
+        defer allocator.free(restricted);
+        var decoded = try decodeLosslessNativeWithOptions(allocator, restricted, .{}, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(i64, baseline_decoded.planes[0].samples, decoded.planes[0].samples);
+    }
+    for ([_]u16{ 8, 0x0a00, 0x8000 }) |rsiz| {
+        const unsupported = try strictProfileSignalingFixture(allocator, base, rsiz, &.{});
+        defer allocator.free(unsupported);
+        try std.testing.expectError(
+            CodestreamError.UnsupportedPayload,
+            readStrictCodestreamMetadata(allocator, unsupported),
+        );
+    }
 
     const missing_cap = try strictProfileSignalingFixture(
         allocator,

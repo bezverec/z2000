@@ -11596,10 +11596,25 @@ test "JP2 reader rejects non-basic box ordering and duplicates" {
     }
 
     {
-        const unsupported_rsiz = try allocator.dupe(u8, wrapped);
-        defer allocator.free(unsupported_rsiz);
-        unsupported_rsiz[jp2c_payload.start + 7] = 1;
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(std.testing.allocator, unsupported_rsiz));
+        // Profile 0 restricts Part 1 and parses like the unrestricted stream;
+        // a reserved profile number and a Part 2 declaration do not.
+        const profile_zero = try allocator.dupe(u8, wrapped);
+        defer allocator.free(profile_zero);
+        profile_zero[jp2c_payload.start + 7] = 1;
+        const restricted = try jp2.parseInfo(std.testing.allocator, profile_zero);
+        const unrestricted = try jp2.parseInfo(std.testing.allocator, wrapped);
+        try std.testing.expectEqual(unrestricted.width, restricted.width);
+        try std.testing.expectEqual(unrestricted.components, restricted.components);
+
+        const reserved_rsiz = try allocator.dupe(u8, wrapped);
+        defer allocator.free(reserved_rsiz);
+        reserved_rsiz[jp2c_payload.start + 7] = 8;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(std.testing.allocator, reserved_rsiz));
+
+        const part2_rsiz = try allocator.dupe(u8, wrapped);
+        defer allocator.free(part2_rsiz);
+        part2_rsiz[jp2c_payload.start + 6] = 0x80;
+        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(std.testing.allocator, part2_rsiz));
     }
 
     {

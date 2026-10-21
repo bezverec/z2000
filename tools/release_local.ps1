@@ -8,7 +8,8 @@ RISC-V binaries through binfmt QEMU), plus the GitHub CLI for -MacosRunId and
 -CreateDraft. From a clean, pushed checkout whose VERSION and
 docs/releases/<tag>.md match the tag, it:
 
-  1. runs the native Debug and ReleaseFast tests and the Part 1 corpus;
+  1. runs the native Debug and ReleaseFast tests and the Part 1 corpus,
+     including the optional T.803 streams when Z2000_PART4_ROOT is set;
   2. runs the ReleaseFast test suite for x86_64-linux-musl and, under QEMU,
      riscv64-linux-musl in a Linux container;
   3. builds the Windows x86-64, Linux x86-64, and Linux RISC-V 64 release
@@ -144,7 +145,15 @@ if ($prerelease) { $releaseFlags += "-Dprerelease=$prerelease" }
 if (-not $SkipGates) {
     Invoke-NativeChecked "native Debug tests" $Zig @("build", "test", "--summary", "all")
     Invoke-NativeChecked "native ReleaseFast tests" $Zig @("build", "test", "-Doptimize=ReleaseFast", "--summary", "all")
-    Invoke-NativeChecked "Part 1 corpus" $Zig @("build", "part1-corpus", "-Doptimize=ReleaseFast")
+    # The official T.803 streams are optional assets that the plain corpus run
+    # skips; release evidence must include them (tools/setup_part1_corpus.ps1).
+    $corpusArgs = @("build", "part1-corpus", "-Doptimize=ReleaseFast")
+    if ($env:Z2000_PART4_ROOT) {
+        $corpusArgs += @("--", "--require-optional")
+    } else {
+        Write-Warning "Z2000_PART4_ROOT is not set; the T.803 corpus entries are skipped"
+    }
+    Invoke-NativeChecked "Part 1 corpus" $Zig $corpusArgs
 }
 
 $linuxTargets = @(@{ Target = "x86_64-linux-musl"; Platform = "linux-x86_64" })

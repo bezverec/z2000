@@ -142,7 +142,7 @@
       "malformed": "bounded",
       "interop": "bounded",
       "evidence": ["PLM-framed Kakadu single-/multi-tile streams", "PLM+PLT payload cross-check", "ordered/continued/corrupt PLM tests"],
-      "note": "Bounded PLM decode is implemented for inline, PLT-coexisting, and existing packed-header paths over foreign Kakadu packet/T1 bytes. Valid PLM placement is test-produced, so independent valid-marker promotion evidence, PLM emission, and applicable CAP/PRF signalling remain future work."
+      "note": "Bounded PLM decode is implemented for inline, PLT-coexisting, and existing packed-header paths over foreign Kakadu packet/T1 bytes. Valid PLM placement is test-produced, so independent valid-marker promotion evidence and PLM emission remain future work. Rsiz values naming Part 1 profiles decode like unrestricted Part 1; CAP, PRF, Part 2, and reserved Rsiz values fail closed."
     },
     {
       "id": "jp2-core-container",
@@ -3715,6 +3715,192 @@
       ],
       "expectation": "fail_closed",
       "expected_error": "InvalidCodestream"
+    },
+    {
+      "id": "kakadu-profile1-gray8",
+      "path": "src/testdata/kakadu-profile1-gray8.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "f136e008c855c65af3e53a3fbaa215b051c6ddae9746fb078f9edb7cee96dcd4",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "48x32 8-bit gray, reversible, Sprofile=PROFILE1 (Rsiz 2); ISO/IEC 15444-1 Profile 1 only restricts the syntax, and the Rsiz gate used to reject it",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and source PGX committed; producer application not redistributed",
+        "command": "magick -seed 11 -size 48x32 plasma:fractal -depth 16 -endian MSB rgb:src16.raw, shifted right by 4 into big-endian 12-bit planes c0..c2.raw (planar12.raw concatenated); the gray source is plane 1 reduced to 8 bits; kdu_compress -i gray8.pgm -o src/testdata/kakadu-profile1-gray8.j2c Sprofile=PROFILE1 Creversible=yes -num_threads 0"
+      },
+      "oracle": "lossless: the native plane equals the encoder input exactly",
+      "features": [
+        "plm-cap-prf",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-profile1-gray8-source.pgx",
+          "sha256": "f28d4c0d9ed67b9a84356a69fcdef65233179493bbdb506b9d5e0352eaa59b49",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "openjpeg-imf2kr-rgb12",
+      "path": "src/testdata/openjpeg-imf2kr-rgb12.j2k",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "interleaved_rgb",
+      "sha256": "423c916f9674f799db6b26a2741f4771e318b9d731c65cfe05f1a858d5abbd53",
+      "source": {
+        "producer": "OpenJPEG 2.5.4 opj_compress",
+        "version": "2.5.4",
+        "origin": "48x32 12-bit RGB, reversible RCT, -IMF 2K_R (Rsiz 0x0700, IMF 2K reversible, main level 0)",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and source PGX planes committed; producer application not redistributed",
+        "command": "magick -seed 11 -size 48x32 plasma:fractal -depth 16 -endian MSB rgb:src16.raw, shifted right by 4 into big-endian 12-bit planes c0..c2.raw (planar12.raw concatenated); the gray source is plane 1 reduced to 8 bits; opj_compress -i planar12.raw -F 48,32,3,12,u -o src/testdata/openjpeg-imf2kr-rgb12.j2k -IMF 2K_R"
+      },
+      "oracle": "lossless: every component equals the encoder input exactly; kdu_expand 8.4.1 agrees",
+      "features": [
+        "plm-cap-prf",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/profile-rgb12-source-c0.pgx",
+          "sha256": "22e3259f033bacffdc837ad8558ccf7195e53904a92029fb49a09d711d53daf0",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/profile-rgb12-source-c1.pgx",
+          "sha256": "a266d21968d59b8cf3b4fa490fc7c915db90c7abc94cc6b39d0c09152a819b74",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/profile-rgb12-source-c2.pgx",
+          "sha256": "9825334d196d79011b9ceab1ef20ddb078fa68fec6f6c6dba40548bd7846a93a",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-broadcast-rgb12",
+      "path": "src/testdata/kakadu-broadcast-rgb12.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "interleaved_rgb",
+      "sha256": "df4959d6687c6e4d51029b02385c5a74519719226c1f09bc2ba43b6c90ebd5ab",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "48x32 12-bit RGB, irreversible ICT/9-7 at 4 bpp, Sprofile=BROADCAST (Rsiz 0x0101, broadcast single-tile, main level 1)",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 11 -size 48x32 plasma:fractal -depth 16 -endian MSB rgb:src16.raw, shifted right by 4 into big-endian 12-bit planes c0..c2.raw (planar12.raw concatenated); the gray source is plane 1 reduced to 8 bits; kdu_compress -i c0.raw,c1.raw,c2.raw -o src/testdata/kakadu-broadcast-rgb12.j2c Sdims={32,48} Nprecision=12 Nsigned=no Sprofile=BROADCAST -rate 4 -num_threads 0; kdu_expand -i src/testdata/kakadu-broadcast-rgb12.j2c -o <full-c0,c1,c2>.pgx -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes within one LSB; OpenJPEG 2.5.4 is itself one LSB from Kakadu",
+      "features": [
+        "plm-cap-prf",
+        "irreversible-97"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-broadcast-rgb12-full-c0.pgx",
+          "sha256": "adcbc1b87f0101155516873d9efc440aae956574278bbc47c2fa158949f0d2dc",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.05
+        },
+        {
+          "path": "src/testdata/kakadu-broadcast-rgb12-full-c1.pgx",
+          "sha256": "40afb35f476f998b33a5923b211318972553a67c5c6ead6fd7ac06bcb562e156",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.05
+        },
+        {
+          "path": "src/testdata/kakadu-broadcast-rgb12-full-c2.pgx",
+          "sha256": "8eb2ac461fbe796c5384b9f0e7c5594ae9678e4e58122acb10d0838dabfa309d",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.05
+        }
+      ]
+    },
+    {
+      "id": "openjpeg-cinema2k-rgb12",
+      "path": "src/testdata/openjpeg-cinema2k-rgb12.j2k",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "interleaved_rgb",
+      "sha256": "78159702fd98acda2670bdb83c262cf8ad6f5a57bbfb1f25c37c9ac96f612b57",
+      "source": {
+        "producer": "OpenJPEG 2.5.4 opj_compress",
+        "version": "2.5.4",
+        "origin": "48x32 12-bit RGB, irreversible ICT/9-7, -cinema2K 24 (Rsiz 3, 2K digital cinema)",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 11 -size 48x32 plasma:fractal -depth 16 -endian MSB rgb:src16.raw, shifted right by 4 into big-endian 12-bit planes c0..c2.raw (planar12.raw concatenated); the gray source is plane 1 reduced to 8 bits; opj_compress -i planar12.raw -F 48,32,3,12,u -o src/testdata/openjpeg-cinema2k-rgb12.j2k -cinema2K 24; kdu_expand -i src/testdata/openjpeg-cinema2k-rgb12.j2k -o <full-c0,c1,c2>.pgx -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes within one LSB; OpenJPEG 2.5.4 is itself one LSB from Kakadu",
+      "features": [
+        "plm-cap-prf",
+        "irreversible-97"
+      ],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/openjpeg-cinema2k-rgb12-full-c0.pgx",
+          "sha256": "b7f6d1992d5cdb1949491f21bc1a7efaaf210e9877626b4269123fc8e1e5b4b7",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.05
+        },
+        {
+          "path": "src/testdata/openjpeg-cinema2k-rgb12-full-c1.pgx",
+          "sha256": "7c9c2779a2adb2c9c4cb6b325fb0ab2192006eb7d4debd897348b1f786a6d463",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.05
+        },
+        {
+          "path": "src/testdata/openjpeg-cinema2k-rgb12-full-c2.pgx",
+          "sha256": "a675e54896a2c9bcdcc235cbbb6bb1772bcf8ae4b4b661b14a88805d3dd1d66d",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.05
+        }
+      ]
     }
   ]
 }

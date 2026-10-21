@@ -21,9 +21,11 @@ const Phase = enum {
 };
 
 /// Tracks the strictly ordered profile/capability prefix of a main header.
-/// z2000 currently decodes only the unrestricted Part 1 `Rsiz == 0` profile;
-/// other declarations are parsed and consistency-checked before failing
-/// closed as unsupported.
+/// z2000 decodes unrestricted Part 1 (`Rsiz == 0`) and the Part 1 profiles of
+/// ISO/IEC 15444-1 Table A.10, which only restrict the syntax an encoder may
+/// use; see `restrictsPart1`. Part 2 extensions, CAP, PRF, and reserved
+/// profile numbers are parsed and consistency-checked before failing closed as
+/// unsupported.
 pub const State = struct {
     rsiz: u16,
     phase: Phase = .after_siz,
@@ -63,18 +65,41 @@ pub const State = struct {
         }
     }
 
-    /// Complete the main-header profile gate. Nonzero Rsiz values and all CAP
-    /// or PRF declarations describe profiles/extensions that are not wired to
-    /// the current Part 1 MQ payload implementation.
+    /// Complete the main-header profile gate. CAP and PRF declarations and
+    /// Rsiz values outside `restrictsPart1` describe extensions that are not
+    /// wired to the current Part 1 MQ payload implementation.
     pub fn finish(self: State) Error!void {
         if ((self.rsiz & rsiz_cap_present) != 0 and !self.saw_cap) {
             return Error.InvalidCodestream;
         }
-        if (self.rsiz != 0 or self.saw_cap or self.saw_prf) {
+        if (!restrictsPart1(self.rsiz) or self.saw_cap or self.saw_prf) {
             return Error.UnsupportedPayload;
         }
     }
 };
+
+/// Whether `rsiz` names unrestricted Part 1 or one of its restricted profiles
+/// (ISO/IEC 15444-1 Table A.10). A profile only limits what an encoder may
+/// emit, so such a stream decodes exactly like an unrestricted one; whether it
+/// honours its declared limits is not checked. Bit 15 (Part 2), bit 14 (CAP),
+/// and reserved numbers return false.
+pub fn restrictsPart1(rsiz: u16) bool {
+    // 0: unrestricted; 1/2: Profile 0/1; 3/4: 2K/4K digital cinema; 5/6:
+    // scalable 2K/4K digital cinema; 7: long-term storage.
+    if (rsiz <= 7) return true;
+    const family = rsiz >> 8;
+    const sublevel = (rsiz >> 4) & 0xf;
+    const mainlevel = rsiz & 0xf;
+    return switch (family) {
+        // Broadcast single-tile, multi-tile, and multi-tile reversible, with
+        // the main level in the low nibble.
+        1...3 => sublevel == 0 and mainlevel <= 11,
+        // IMF 2K/4K/8K and their reversible variants, with the sublevel in
+        // bits 4..7 and the main level in bits 0..3.
+        4...9 => sublevel <= 9 and mainlevel <= 11,
+        else => false,
+    };
+}
 
 /// Validate a CAP payload excluding Lcap. Pcap is followed by exactly one
 /// 16-bit Ccap word for each set Pcap bit, in most-significant-bit order.
@@ -115,6 +140,16 @@ test "CAP payload count follows Pcap population" {
     try std.testing.expectError(Error.InvalidCodestream, validateCap(&.{ 0x80, 0, 0, 0, 0, 1, 0 }));
 }
 
+test "Part 1 profile numbers follow Table A.10" {
+    for ([_]u16{ 0, 1, 2, 3, 4, 5, 6, 7, 0x0100, 0x0101, 0x010b, 0x0200, 0x030b, 0x0400, 0x0500, 0x0600, 0x0700, 0x0800, 0x0900, 0x099b }) |rsiz| {
+        try std.testing.expect(restrictsPart1(rsiz));
+    }
+    // Reserved numbers, out-of-range levels, Part 2, CAP, and the PRF escape.
+    for ([_]u16{ 8, 0x00ff, 0x010c, 0x0110, 0x0a00, 0x04a0, 0x040c, 0x0fff, 0x8000, 0x8001, 0x4000, 0x4001 }) |rsiz| {
+        try std.testing.expect(!restrictsPart1(rsiz));
+    }
+}
+
 test "PRF requires canonical nonempty little-word sequence" {
     try validatePrf(&.{ 0, 1 });
     try validatePrf(&.{ 0, 0, 0, 1 });
@@ -127,6 +162,16 @@ test "profile prefix enforces CAP PRF order and Rsiz consistency" {
     var baseline = State.init(0);
     try baseline.observeMarker(0xff52);
     try baseline.finish();
+
+    // Profile 0 and the IMF 2K reversible profile restrict Part 1 only.
+    for ([_]u16{ 1, 0x0700 }) |rsiz| {
+        var restricted = State.init(rsiz);
+        try restricted.observeMarker(0xff52);
+        try restricted.finish();
+    }
+    var part2 = State.init(0x8000);
+    try part2.observeMarker(0xff52);
+    try std.testing.expectError(Error.UnsupportedPayload, part2.finish());
 
     var missing_cap = State.init(rsiz_cap_present);
     try std.testing.expectError(Error.InvalidCodestream, missing_cap.observeMarker(0xff52));

@@ -102,9 +102,11 @@ Neither figure is a formal ISO conformance certification.
   PPM, and PPT packet headers on their documented profiles. Bounded main-
   header PLM decode cross-checks ordered tile-part packet lengths against
   `Psot`, decoded packet framing, and any coexisting PLT; PLM emission remains
-  future work. `CAP`/`PRF` and nonzero `Rsiz` declarations are structurally
-  validated, ordered, and kept fail-closed until their declared extension or
-  profile is implemented end to end.
+  future work. Streams declaring a Part 1 profile in `Rsiz` (Profile 0/1,
+  digital cinema, broadcast, IMF) decode like unrestricted ones; `CAP`/`PRF`,
+  Part 2, and reserved `Rsiz` declarations are structurally validated,
+  ordered, and kept fail-closed until their extension is implemented end to
+  end.
 - Marker evidence from independent writers, not only from repacks by this
   project's own tests: `kdu_maketlm` chooses `ST=1`/`SP=0` TLM entry widths
   itself, and `kdu_makeppm` writes multi-tile PPM framing with and without a

@@ -422,8 +422,13 @@ The active G0/G4 corpus expansion is:
    reference spread. Reduced-resolution native decode of this geometry stays
    untested because the native profile rejects these streams for an unrelated
    reason: it requires no MCT, and they carry RCT.
-6. Map the remaining public profiles to manifested decode and malformed cases,
-   then run optional assets with `--require-optional` in release evidence.
+6. Map the remaining public profiles to manifested decode and malformed cases.
+   `tools/release_local.ps1` runs the optional assets with
+   `--require-optional` whenever `Z2000_PART4_ROOT` is set. Of the five T.803
+   profile-0 streams still pinned fail-closed, `p0_15` now decodes through the
+   native path and needs its references checked, and `p0_08` fails as
+   `InvalidCodestream` in QCD length validation, which a legal stream must not;
+   both are the next corpus slice.
 
 Exit when every existing public profile maps to the new matrix and the runner
 can evaluate the relevant T.803 references and tolerances without inflating
@@ -716,7 +721,12 @@ Implement in small marker-to-raster slices:
    capability-word count, canonical PRF words, and `Rsiz` consistency. No CAP
    capability or extended PRF profile is accepted for reconstruction until
    its external specification and actual payload behavior are implemented and
-   independently evidenced.
+   independently evidenced. `Rsiz` values naming Part 1 profiles (Profile 0/1,
+   digital cinema, long-term storage, broadcast, IMF) decode like unrestricted
+   Part 1. The first version of this gate rejected them, which silently broke
+   eight T.803 streams until an optional-asset corpus run found it; four
+   committed Kakadu/OpenJPEG profile streams now keep that in the default
+   gate.
 4. General legal tile-part ordering and repetition beyond the landed inline
    PLT-less state machine and bounded COC/QCC PPT-resolution-part profile.
    **The TLM width sub-slice is complete.** Raw and JP2 paths share all six
