@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Component-Local Coding With Component Sampling
+
+- Native single-tile decode accepted component-local COC/QCC only when no
+  component was subsampled. Native planes already keep component-local
+  precinct and block geometry on each sampled grid, so the restriction is
+  gone.
+- T.803 `p1_07` (a 4x1-sampled component and a COC with its own precincts)
+  now matches its class-1 references, Kakadu, and OpenJPEG exactly, so all
+  seven T.803 profile-1 streams pass. A Kakadu stream with the same
+  combination is committed, decodes losslessly, and fails on the previous
+  code.
+
 ### Tile Coding Overrides In Every Progression Order
 
 - Tile-header COD/COC/QCD/QCC overrides on multi-tile streams were accepted

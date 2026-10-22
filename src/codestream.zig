@@ -7070,9 +7070,11 @@ fn readStrictCodestreamMetadataForProfile(
         parsed_transform == .reversible_5_3 and parsed_quantization == .none and
         !component_transforms_match_main;
     // RCT is allowed: the native decoder checks that the three transformed
-    // components reconstruct onto one grid before inverting it.
+    // components reconstruct onto one grid before inverting it. Component
+    // sampling is allowed too: native planes keep component-local precinct
+    // and block geometry on each sampled grid (T.803 p1_07).
     const native_reversible_component_local = precision_profile == .native and
-        parsed_grid_value.isSingleTile() and parsed_mct != .ict and !subsampled_components and
+        parsed_grid_value.isSingleTile() and parsed_mct != .ict and
         parsed_transform == .reversible_5_3 and parsed_quantization == .none and
         component_transforms_match_main;
     const general_component_local_mixed_transform = parsed_grid_value.isSingleTile() and

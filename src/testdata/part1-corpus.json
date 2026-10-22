@@ -4629,14 +4629,14 @@
       "source": {
         "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
         "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-1 test p1_07, 12x12 at image offset (4,0), two components, the first sampled 4x1, a COC giving the second its own precincts, RPCL, SOP/EPH",
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
-        "redistribution": "optional local asset; not redistributed by z2000",
-        "origin": "Profile-1 test p1_07, 12x12, two components, the first sampled 4x1"
+        "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "legal T.803 profile-1 codestream; 4x1 component sampling with two components is outside the current sampled profiles",
-      "features": ["siz-subsampled-components", "reversible-53"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "oracle": "T.803 class-1 c1p1_07-0..1.pgx, exact; Kakadu 8.4.1 and OpenJPEG 2.5.4 agree",
+      "features": ["siz-subsampled-components", "cod-qcd-component-overrides", "reversible-53"],
+      "expectation": "decode_pass",
+      "decoder": "native",
       "references": [
         {
           "path": "reference_class1_profile1/c1p1_07-0.pgx",
@@ -4886,6 +4886,45 @@
           "sha256": "f1a6ee9e7ec681aabe8759ea478a8c743597097d33a0e6a2ec821c9b351caf14",
           "format": "pgx",
           "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-sampled-4x1-coc-precincts",
+      "path": "src/testdata/kakadu-sampled-4x1-coc-precincts.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "00ce5c706509c48a53babb9a2b8c4d8f9a5420d69ebf978508a49d1434e17386",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "48x24, two 8-bit components, the first sampled 4x1, reversible, two levels, RPCL, SOP/EPH, 8x8 precincts with a COC giving the second component 16x16. Component-local coding with component sampling used to be rejected",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and source PGX planes committed; producer application not redistributed",
+        "command": "magick -seed 91 -size 12x24 plasma:fractal -depth 8 -colorspace gray c0.pgm; magick -seed 92 -size 48x24 plasma:fractal -depth 8 -colorspace gray c1.pgm; kdu_compress -i c0.pgm,c1.pgm -o src/testdata/kakadu-sampled-4x1-coc-precincts.j2c Ssampling={1,4},{1,1} Creversible=yes Clevels=2 Corder=RPCL Cprecincts={8,8} Cprecincts:C1={16,16} Cuse_sop=yes Cuse_eph=yes -num_threads 0"
+      },
+      "oracle": "lossless: both native planes equal their encoder input; kdu_expand 8.4.1 agrees",
+      "features": ["siz-subsampled-components", "cod-qcd-component-overrides", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-sampled-4x1-coc-precincts-source-c0.pgx",
+          "sha256": "90ad056ff25fc7139fcee4bc5062b9e89b3094a65b7b7baf6b54c1ece3e922d9",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-sampled-4x1-coc-precincts-source-c1.pgx",
+          "sha256": "aeffedb7cfc077a3877873d6e0de6d905edb35c8cc7e058420a3005cd02de886",
+          "format": "pgx",
+          "component": 1,
           "resolution_reduction": 0,
           "max_peak_error": 0,
           "max_mse": 0.0

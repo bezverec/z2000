@@ -104,7 +104,8 @@ that spread. `p1_02` (PPT without PLT, ending in empty packets) passes since
 the tile's last part reads every remaining PPT header, within the peak-2
 spread Kakadu and OpenJPEG show. `p1_04` (tile QCD under LRCP) passes its
 class-0 references; its class-1 reference is 253 from Kakadu, OpenJPEG, and
-z2000 alike and is not pinned. `p1_07` is pinned fail-closed.
+z2000 alike and is not pinned. `p1_07` (4x1 sampling with a component COC)
+is exact, so every profile-1 stream passes.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
 8-bit reversible/no-MCT codestreams. The corpus selects the native `i64`
