@@ -5014,6 +5014,207 @@
           "max_mse": 0.1
         }
       ]
+    },
+    {
+      "id": "kakadu-multitile-coc-pcrl",
+      "path": "src/testdata/kakadu-multitile-coc-pcrl.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "e0351e39a007b573cfe341098f867dc7b0425c2f8abeeaecbe23ce2d05150e2c",
+      "source": {
+        "producer": "Kakadu 8.4.1",
+        "version": "8.4.1",
+        "origin": "72x56, three 8-bit components without MCT on 32x32 tiles, reversible, two layers, PCRL; main-header COC gives component 1 two levels and 8x8 precincts and component 2 16x16 blocks. Main-header component coding used to be accepted on single-tile streams only; the same command under LRCP, RLCP, RPCL, and CPRL also decodes exactly at full resolution and reduction 1",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 111 -size 72x56 plasma:fractal -depth 8 -separate m%d.pgm; kdu_compress -i m0.pgm,m1.pgm,m2.pgm -o src/testdata/kakadu-multitile-coc-pcrl.j2c Stiles={32,32} Cycc=no Creversible=yes Clevels=3 Clevels:C1=2 Cblk:C2={16,16} Cprecincts={16,16} Cprecincts:C1={8,8} Clayers=2 Corder=PCRL -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, exact",
+      "features": ["tiles-and-tile-parts", "cod-qcd-component-overrides", "progression-poc", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-multitile-coc-pcrl-full-c0.pgx",
+          "sha256": "129a9b9d7f17888b3d3bed83d1d80dd19707d211f746ac7442b0e1355f317141",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-pcrl-full-c1.pgx",
+          "sha256": "95d0e1a316e8aa8c1c083f4d6dcce0a5c6afb88c9712c54dee04d6c505a1d31d",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-pcrl-full-c2.pgx",
+          "sha256": "4247817b91db691069affe2208553df6c3d3bd810a972b42f59b841133a5dfee",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-pcrl-r1-c1.pgx",
+          "sha256": "d3ee09ef12f5fd7ae10f3155d5998e57ebeae505d54240b951361a9ad1867beb",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-multitile-coc-rct",
+      "path": "src/testdata/kakadu-multitile-coc-rct.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "3d17666bc245cdd93c513d3a793e4c93e88ecd4aa4d3ea7f0c1cf67938ce7f9c",
+      "source": {
+        "producer": "Kakadu 8.4.1",
+        "version": "8.4.1",
+        "origin": "72x56 RGB on 32x32 tiles, reversible with RCT, main-header COC giving component 1 16x16 blocks and component 2 its own 16x16 precincts while COD has none; COC precincts used to be refused unless COD signalled precincts as well",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 111 -size 72x56 plasma:fractal -depth 8 -separate m%d.pgm; kdu_compress -i m0.pgm,m1.pgm,m2.pgm -o src/testdata/kakadu-multitile-coc-rct.j2c Stiles={32,32} Cycc=yes Creversible=yes Cblk:C1={16,16} Cprecincts:C2={16,16} -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, exact",
+      "features": ["tiles-and-tile-parts", "cod-qcd-component-overrides", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-multitile-coc-rct-full-c0.pgx",
+          "sha256": "129a9b9d7f17888b3d3bed83d1d80dd19707d211f746ac7442b0e1355f317141",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-rct-full-c1.pgx",
+          "sha256": "95d0e1a316e8aa8c1c083f4d6dcce0a5c6afb88c9712c54dee04d6c505a1d31d",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-rct-full-c2.pgx",
+          "sha256": "4247817b91db691069affe2208553df6c3d3bd810a972b42f59b841133a5dfee",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-multitile-coc-ict",
+      "path": "src/testdata/kakadu-multitile-coc-ict.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "10e695ad9eab0f452f9675124e1ac72834eda55170d7ce280014310c6f91b28e",
+      "source": {
+        "producer": "Kakadu 8.4.1",
+        "version": "8.4.1",
+        "origin": "72x56 RGB on 32x32 tiles, irreversible with ICT at 3 bpp, main-header COC giving component 1 16x16 blocks",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 111 -size 72x56 plasma:fractal -depth 8 -separate m%d.pgm; kdu_compress -i m0.pgm,m1.pgm,m2.pgm -o src/testdata/kakadu-multitile-coc-ict.j2c Stiles={32,32} Cycc=yes Cblk:C1={16,16} -rate 3 -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, within one LSB",
+      "features": ["tiles-and-tile-parts", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-multitile-coc-ict-full-c0.pgx",
+          "sha256": "6f255847f32dc415dbce11624ae2636ace597250bc7b3cfaca10eff30ad7c2e0",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-ict-full-c1.pgx",
+          "sha256": "64a96b0f7c19b3d8b47c6a277c79ab15b3dae0264bc652e1db12bee25acf9d50",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-ict-full-c2.pgx",
+          "sha256": "d9ad304942c508387645f4909a5d2d9d7b6e879cb6cea14432283026569fa822",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.2
+        }
+      ]
+    },
+    {
+      "id": "kakadu-multitile-coc-ppm",
+      "path": "src/testdata/kakadu-multitile-coc-ppm.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "3655f31e7c7ae79f674a3c3a17d2ba94b0161fa4bcc85fa09ce8eb412a8abc2e",
+      "source": {
+        "producer": "Kakadu 8.4.1",
+        "version": "8.4.1",
+        "origin": "72x56, three components without MCT, reversible, image origin (9,5), 23x27 tiles from (4,3), component 2 with one level by main-header COC, SOP/EPH, then packed into PPM by kdu_makeppm",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 111 -size 72x56 plasma:fractal -depth 8 -separate m%d.pgm; kdu_compress -i m0.pgm,m1.pgm,m2.pgm -o origin-noplt.j2c Sorigin={5,9} Stile_origin={3,4} Stiles={27,23} Cycc=no Creversible=yes Clevels=3 Clevels:C2=1 Cuse_sop=yes Cuse_eph=yes -num_threads 0; kdu_makeppm origin-noplt.j2c src/testdata/kakadu-multitile-coc-ppm.j2c; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, exact",
+      "features": ["tiles-and-tile-parts", "cod-qcd-component-overrides", "packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-multitile-coc-ppm-full-c0.pgx",
+          "sha256": "129a9b9d7f17888b3d3bed83d1d80dd19707d211f746ac7442b0e1355f317141",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-ppm-full-c1.pgx",
+          "sha256": "95d0e1a316e8aa8c1c083f4d6dcce0a5c6afb88c9712c54dee04d6c505a1d31d",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-multitile-coc-ppm-full-c2.pgx",
+          "sha256": "4247817b91db691069affe2208553df6c3d3bd810a972b42f59b841133a5dfee",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
     }
   ]
 }

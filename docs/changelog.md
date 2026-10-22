@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Main-Header Component Coding On Multi-Tile Streams
+
+- Native decode accepted main-header COC/QCC that give components different
+  levels, blocks, precincts, or transforms only on single-tile streams. The
+  multi-tile path already decodes every component of every tile with its own
+  effective coding (tile headers could override it), so the restriction is
+  gone for the native profile; the legacy planar and RGB paths keep theirs.
+- A COC may now signal its own precincts when COD signals none, or the
+  reverse; Scoc bit 0 is per component (ISO/IEC 15444-1 A.6.2) and used to be
+  required to match COD.
+- Kakadu multi-tile streams decode exactly (reversible) or within one LSB
+  (9/7) at full resolution and reduction 1 under all five progression
+  orders, with RCT, ICT, component sampling, odd image and tile origins with
+  PLT and SOP/EPH, and PPM from `kdu_makeppm`; tile and region selection
+  equal crops of the full decode. Four of them are committed and fail on the
+  previous code.
+
 ### Native ICT
 
 - The native decoder (`decodeLosslessNative`, `j2k-to-pgx`, `j2k-to-zraw`)

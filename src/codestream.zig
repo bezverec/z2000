@@ -6729,7 +6729,6 @@ fn readStrictCodestreamMetadataForProfile(
     var profile_state: ?profile_signaling.State = null;
     // Captured COD/QCD payload slices (into `bytes`) let the bounded reader
     // distinguish redundant markers from uniform all-component overrides.
-    var cod_scod: u8 = 0;
     var qcd_payload: []const u8 = &.{};
     var coc_component_seen: []bool = &.{};
     defer if (coc_component_seen.len != 0) allocator.free(coc_component_seen);
@@ -6928,7 +6927,6 @@ fn readStrictCodestreamMetadataForProfile(
                 }
             }
             precinct_count = levels + 1;
-            cod_scod = scod;
             for (component_coding[0..component_count]) |*coding| {
                 coding.levels = levels;
                 coding.precinct_count = precinct_count;
@@ -6956,7 +6954,8 @@ fn readStrictCodestreamMetadataForProfile(
             if (selected.component >= component_count) return CodestreamError.UnsupportedPayload;
             const scoc = coc_payload[0];
             if ((scoc & ~@as(u8, 0x01)) != 0) return CodestreamError.InvalidCodestream;
-            if ((scoc & 0x01) != (cod_scod & 0x01)) return CodestreamError.UnsupportedPayload;
+            // Scoc bit 0 says whether this component signals its own
+            // precincts; it need not match COD (ISO/IEC 15444-1 A.6.2).
             try validateStrictCocCodingPayload(coc_payload[1..], scoc);
             const coc_component = selected.component;
             if (coc_component_seen[coc_component]) return CodestreamError.InvalidCodestream;
@@ -7206,19 +7205,18 @@ fn readStrictCodestreamMetadataForProfile(
         parsed_progression == .rpcl and !mixed_component_precision and !subsampled_components and
         parsed_transform == .reversible_5_3 and parsed_quantization == .none and
         !component_transforms_match_main;
-    // RCT is allowed: the native decoder checks that the three transformed
-    // components reconstruct onto one grid before inverting it. Component
-    // sampling is allowed too: native planes keep component-local precinct
-    // and block geometry on each sampled grid (T.803 p1_07).
-    const native_reversible_component_local = precision_profile == .native and
-        parsed_grid_value.isSingleTile() and parsed_mct != .ict and
-        parsed_transform == .reversible_5_3 and parsed_quantization == .none and
-        component_transforms_match_main;
+    // The native decoder synthesizes every component of every tile with its
+    // own effective coding, which tile headers can already override, so
+    // main-header component coding may diverge on any grid. Component
+    // sampling is fine too: native planes keep component-local precinct and
+    // block geometry on each sampled grid (T.803 p1_07). The native profile
+    // check and the RCT/ICT step validate the transforms.
+    const native_component_local = precision_profile == .native;
     const general_component_local_mixed_transform = parsed_grid_value.isSingleTile() and
         parsed_mct == .none and
         !component_transforms_match_main;
     if (component_coding_divergent and
-        !component_local_mixed_transform and !native_reversible_component_local and
+        !component_local_mixed_transform and !native_component_local and
         !general_component_local_mixed_transform)
     {
         return CodestreamError.UnsupportedPayload;
