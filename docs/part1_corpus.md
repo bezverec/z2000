@@ -50,11 +50,18 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-07-26 gate contains 60 entries: 44 committed entries plus all 16
-optional T.803 profile-0 inputs. All 16 original inputs and their 18 class-0
-PGX references are independently checksummed. `p0_01`, `p0_02`, `p0_03`, `p0_11`,
-`p0_12`, `p0_16`, `p0_04`, `p0_09`, `p0_10`, and `p0_14` now pass their declared
-references. `p0_03` is exact both for the published upper-left 128x128 crop of
+The 2026-10-22 gate contains 125 entries: 109 committed entries plus all 16
+optional T.803 profile-0 inputs, and **all 16 T.803 inputs pass**. Every input
+and every declared reference is independently checksummed. `p0_13` is checked
+against its class-1 references for components 0 to 3, because its class-0
+reference holds component 1's value in z2000, OpenJPEG, and Kakadu alike; the
+other fifteen use their class-0 references. With the optional root present the
+result is 106 decode passes, 19 expected fail-closed cases, zero mismatches,
+and zero skips. The paragraphs below record how each stream was promoted; the
+history up to 2026-07-26, when ten passed, comes first.
+
+`p0_01`, `p0_02`, `p0_03`, `p0_11`, `p0_12`, `p0_16`, `p0_04`, `p0_09`,
+`p0_10`, and `p0_14` were the first to pass their declared references. `p0_03` is exact both for the published upper-left 128x128 crop of
 the 256x256 full output and for the complete 128x128 reduction-1 output. It
 pins signed 4-bit native decode, QCC, POC, TLM, RGN, and CRG across four tiles.
 The other original reduction-0 cases are exact; `p0_02` additionally
@@ -67,11 +74,22 @@ SEGMARK;
 scalar-expounded QCC steps in pre-ICT codestream-component space,
 `p0_09` covers reduced irreversible 9/7,
 `p0_10` covers uniform 4x4-sampled RCT across interleaved PLT-less tile-parts,
-and `p0_14` covers exact reduced reversible saturation. The `p0_01` result
-also pins legal QCD-before-COD ordering. The other five optional profiles
-remain at their declared fail-closed boundary. The complete result is therefore
-40 decode passes, 20 expected fail-closed cases, zero mismatches, and zero skips
-when the optional root is present.
+and `p0_14` covers exact reduced reversible saturation (and, since native RCT,
+matches its class-1 references exactly at full resolution too). The `p0_01`
+result also pins legal QCD-before-COD ordering. `p0_06` followed with RGN.
+
+In October 2026 the remaining five were promoted: `p0_15` (signed 4-bit RGN
+and POC, exact), `p0_08` (component levels 6/7/8 with a QCD serving only the
+7-level component; bit-exact against Kakadu), `p0_07` (multipart POC under a
+main RLCP progression; exact), `p0_13` (257 components, two-byte component
+selectors, RCT), and `p0_05` (four components mixing 5/3 and 9/7, with one QCD
+serving a 3-level and a 6-level component; within one LSB of Kakadu and
+OpenJPEG). The same run exposed a regression: from July to October the
+`Rsiz` gate rejected every Profile 0/1 stream, so eight previously passing
+inputs failed while the default corpus, which skips optional assets, stayed
+green. Committed Kakadu/OpenJPEG profile streams now keep that case in the
+default gate, and `tools/release_local.ps1` runs `--require-optional` when the
+root is set.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
 8-bit reversible/no-MCT codestreams. The corpus selects the native `i64`

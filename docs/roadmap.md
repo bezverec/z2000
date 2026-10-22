@@ -108,7 +108,8 @@ is to exceed Grok and then Kakadu without relaxing correctness or safety.
 Keep prereleases intentional rather than commit-triggered. Prefer locally
 assembled and verified release archives so the RISC-V functional gate does not
 consume hosted Actions minutes. A release candidate still requires Windows,
-Linux, macOS, and RISC-V evidence, the full corruption suite, deterministic
+Linux, and RISC-V evidence, and macOS evidence for any macOS archive it ships
+(`v0.2.0-rc.3` shipped none because no macOS build could be tested), the full corruption suite, deterministic
 threaded output, current four-codec interop, documented CLI/API boundaries, and
 reproducible benchmark provenance. The detailed policy is in
 [`versioning.md`](versioning.md).
@@ -143,27 +144,33 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 ### Current Completion Estimate
 
-As of 2026-07-31, the general-purpose G0-G7 program is estimated at **about
-57% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
+As of 2026-10-22, the general-purpose G0-G7 program is estimated at **about
+61% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
 This is a planning estimate, not a conformance score. It gives every phase
 equal weight because the remaining effort is too uncertain for a more precise
 cost model; the headline is the rounded mean of the phase estimates below.
-The decode-first foundation G0-G4 is approximately **68% complete** by the same
+The decode-first foundation G0-G4 is approximately **73% complete** by the same
 method. Neither number changes the bounded 100/100 scorecards.
 
 | Phase | Estimate | Evidence already landed | Largest remaining work |
 | --- | ---: | --- | --- |
-| G0 | 78% | Manifest, differential runner, 60 cases, all profile-0 assets integrated, 11/16 optional profiles decoding | Map every claimed public profile and expand independent/class-1 references |
-| G1 | 70% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, 256-component metadata boundary | 30..38-bit T1 carrier, remaining generic irreversible and legacy-fixed assumptions |
+| G0 | 85% | Manifest, differential runner, 125 cases, all 16 T.803 profile-0 streams decoding against their references, optional assets run in release evidence | Map every claimed public profile, add profile-1 and class-1 references for every component |
+| G1 | 75% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, the Part 1 maximum of 16384 components with two-byte selectors, native RCT, per-component 5/3 and 9/7 | 30..38-bit T1 carrier, native ICT, multi-tile divergent component coding, remaining legacy-fixed assumptions |
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
-| G3 | 50% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, and a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate | Independently emitted PLM marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, POC emission for general tile-part divisions, and confirming the empirically derived multipart POC semantics against ISO/IEC 15444-1 A.6.6 |
+| G3 | 53% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate, and decode of every Part 1 profile in Table A.10 (Profile 0/1, cinema, broadcast, IMF) with T.803, Kakadu, and OpenJPEG evidence | Independently emitted PLM marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, POC emission for general tile-part divisions, and confirming the empirically derived multipart POC semantics against ISO/IEC 15444-1 A.6.6 |
 | G4 | 70% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, single-/multi-tile reference-region selection whose intra-tile pruning reaches packet assembly, selected and reduced reference-grid upsampling, selected sampled sYCC conversion, push-based tile and band output sinks on every bounded decode shape with streaming bounded-TIFF conversion, plus T1 skipping, catalog compaction, and borrowed packet spans | Incremental codestream input, tile-local synthesis planes, and the remaining conversion layouts |
 | G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder | Generic signed/components, per-component controls, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
-| G7 | 35% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
+| G7 | 37% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence assembled and tested locally, a defined clamping policy for lossy versus exact decode | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
 
 These values should move only when a phase promotion criterion changes state,
-not after every small fixture. The CAP/PRF syntax-consistency gate deliberately does
+not after every small fixture. The 2026-10-22 re-estimate rests on three such
+changes: every T.803 profile-0 stream now decodes against its references with
+optional assets in release evidence (G0); the native carrier reaches the Part 1
+component maximum with RCT and per-component wavelets (G1); and the Part 1
+profiles of Table A.10 decode with independent T.803, Kakadu, and OpenJPEG
+evidence (G3). G7 moved for locally assembled, fully tested release archives
+and an explicit exact-versus-lossy clamping rule. The CAP/PRF syntax-consistency gate deliberately does
 not move G3 because it exposes no new decoded profile. The TLM width parser was
 withheld for the same reason until `kdu_maketlm` supplied an independently
 emitted alternate-width stream; that evidence has now landed, so the sub-slice
@@ -306,10 +313,10 @@ assembly, the public block catalog, component
 packet plans, geometry/index state, RPCL indexes, strict metadata, and
 persistent precinct groups, parallel job handles, and generic irreversible
 working tables now own exact-length allocator-backed slices.
-Metadata parsing is independently capped at 256 components, with 19-component
-storage, planning, SIZ, active precinct-state, and full/reduced multi-tile
-native regressions. Reversible native decode is caller-limited through that
-metadata boundary; a direct 19-job regression also crosses the former runner
+Metadata parsing is independently capped at the Part 1 maximum of 16384
+components, with 19-, 257-, and 260-component storage, planning, SIZ, active
+precinct-state, and full/reduced native regressions. Reversible native decode
+is caller-limited through that metadata boundary; a direct 19-job regression also crosses the former runner
 limit. Legacy colour and encode carriers remain intentionally narrower, so the
 generic irreversible output is not yet a public high-component profile.
 Further fixed-array removal belongs to the continuing G1 audit rather than the

@@ -8,11 +8,15 @@ This is the only active implementation queue. Strategic policy is in
 
 - The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
-- The separate general-purpose G0-G7 program is estimated at about 57%
+- The separate general-purpose G0-G7 program is estimated at about 61%
   complete (+/- 8 points), with the decode-first G0-G4 foundation at about
-  68%. The phase method and remaining-work table live in
+  73%. The phase method and remaining-work table live in
   [`roadmap.md`](roadmap.md); these figures are not derived from the bounded
   100/100 scorecards.
+- All 16 official T.803 profile-0 streams decode against their references
+  (2026-10-22); Part 1 profile streams (Profile 0/1, cinema, broadcast, IMF)
+  decode; rate-truncated reversible streams clamp like any lossy decode,
+  while a provably complete reversible decode stays strict.
 - Sampled RPCL/no-MCT/reversible-5/3 strict decode supports native planes,
   PLT/PLT-less inline headers, PPT, PPM, SOP/EPH, matching shifted origins,
   single/multi-tile streams, canonical main/tile-header POC, and explicit
@@ -134,6 +138,21 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
+`v0.2.0-rc.3` was published on 2026-10-22 from commit `14dfa4a` (build 586).
+It replaces rc.2, which rejected Part 1 profile streams and rate-truncated
+reversible files. `tools/release_local.ps1` assembled it end to end: native
+Windows Debug and ReleaseFast suites (609 tests each), the corpus with all
+optional T.803 streams (106 passes, 19 expected rejections, no mismatch), and
+the Linux x86-64 and RISC-V 64 ReleaseFast suites in an `alpine:3.22`
+container (RISC-V under the Docker VM's QEMU). Every binary reports
+`0.2.0-rc.3+build.586.g14dfa4a6` under both CLI names, one fixture converts to
+identical bytes on all three platforms, and `SHA256SUMS` covers the Windows,
+Linux x86-64, and Linux RISC-V archives. No macOS archive was published:
+hosted Actions minutes were exhausted and a cross-built binary could not be
+tested locally. The next release action is to collect feedback and decide
+between a final `v0.2.0` and `v0.2.0-rc.4`, with a macOS archive when one
+can be built and tested.
+
 `v0.2.0-rc.2` was published on 2026-10-05 from commit `6435591`, built with
 Zig 0.17.0. Windows x86-64 passed local Debug/ReleaseFast gates and was built
 locally; Linux x86-64 and RISC-V 64 (musl) were cross-built locally and
@@ -146,8 +165,7 @@ gates. The hosted RISC-V job failed with SIGSEGV under the runner's
 cannot assemble a release until that runner difference is understood; local
 assembly is the publication path. Every archive contains both CLI names,
 reports `0.2.0-rc.2+build.575.g64355911` without `.dirty`, and is covered by
-the published `SHA256SUMS`. The next release action is to collect candidate
-feedback and decide between a final `v0.2.0` and `v0.2.0-rc.3`. Release
+the published `SHA256SUMS`. Release
 maintenance may run in parallel; general codec development resumes at item 4.
 
 ### 4. General Part 1 Decode Foundation — Next Active
@@ -453,7 +471,8 @@ fourth fixture carries signed 20-bit samples, including both extrema and zero,
 and matches Kakadu at full and reduction-1 resolution. A fifth Kakadu stream combines signed
 8/16/20-bit components and matches all six full/reduction-1 PGX references,
 proving that T2/T1/DWT reconstruction retains component-local precision. The
-bounded native payload path is reversible 5/3, no-MCT, caller-limited up to
+bounded native payload path (since extended to RCT, per-component 9/7, and
+16384 components) started as reversible 5/3, no-MCT, caller-limited up to
 256 components at every precision from 1 through 29 bits, including mixed
 precision and independent component sampling, with exact
 1/8-thread output and caller-controlled lower limits. A 19-component,
@@ -479,7 +498,7 @@ irreversible component working tables now allocate exact-length component
 slices rather than reserving 16 slots. Direct 19-component storage, planning,
 SIZ-parser, active precinct-state, end-to-end 19-component multi-tile, and
 19-job tests pin this foundation. Metadata and reversible native decode are
-bounded at 256 components; legacy colour/encode APIs retain their narrower
+now bounded at the Part 1 maximum of 16384 components; legacy colour/encode APIs retain their narrower
 contracts, and generic irreversible output remains on that legacy carrier.
 
 1. Continue the audit of every `u16`, RGB, three/four-component, and common-
@@ -686,10 +705,10 @@ emission remains open.
 The following G3 profile-signalling gate is complete without broadening the
 decoded profile: raw codestream and JP2 paths share strict SIZ/CAP/PRF order,
 exact `Pcap`/`Ccap` cardinality, canonical PRF word framing, the `Rsiz` bit-14
-CAP requirement, and the PRF extended-profile range. Only `Rsiz == 0` reaches
-the current Part 1 payload decoder. Structurally valid nonzero profiles and
-external capabilities return unsupported because their payload semantics are
-not implemented; syntax recognition alone is not a raster capability.
+CAP requirement, and the PRF extended-profile range. Unrestricted Part 1 and
+the Part 1 profiles of Table A.10 reach the payload decoder; Part 2, CAP, PRF,
+and reserved declarations return unsupported because their payload semantics
+are not implemented; syntax recognition alone is not a raster capability.
 
 Implement genuinely divergent main- and tile-header `COD`, `COC`, `QCD`, and
 `QCC` semantics. Cover per-component decomposition, code-block, precinct,

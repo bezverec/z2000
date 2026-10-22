@@ -11,9 +11,14 @@ Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
 of 2026-08-05, both the narrow RGB lossless JP2 target and the broader bounded
 Part 1 engineering scorecard are estimated at **100/100 within their declared
 profiles**. This is separate from the general-purpose G0-G7 plan, estimated at
-about 57% (+/- 8 points) in [the roadmap](docs/roadmap.md) as of 2026-07-31.
-The current prerelease is [`v0.2.0-rc.3`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.3).
-Neither figure is a formal ISO conformance certification.
+about 61% (+/- 8 points) in [the roadmap](docs/roadmap.md) as of 2026-10-22.
+All 16 official T.803 profile-0 conformance streams decode against their
+references ([Part 1 corpus](docs/part1_corpus.md)). Neither figure nor that
+result is a formal ISO conformance certification.
+
+The current prerelease is [`v0.2.0-rc.3`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.3),
+with binaries for Windows x86-64, Linux x86-64, and Linux RISC-V 64. It has no
+macOS archive; on macOS, build from source with Zig 0.17.
 
 ## Features
 
