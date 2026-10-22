@@ -3,7 +3,7 @@
 This file tracks notable project changes. The repository is still pre-release;
 entries are grouped by development milestone rather than semantic version.
 
-## Unreleased
+## 0.2.0-rc.3 — 2026-10-22
 
 ### Clamping Policy For Truncated Reversible Streams
 

@@ -95,9 +95,10 @@ should prefer a full clone so the default commit count remains meaningful.
 - Keep release tags in the form `vMAJOR.MINOR.PATCH`; the current line is
   `v0.2.0`.
 - Keep prerelease tags in the form `vMAJOR.MINOR.PATCH-rc.N`; the current
-  candidate line began with `v0.2.0-rc.1`, and `v0.2.0-rc.2` is the current
-  candidate. A final `v0.2.0` follows from the rc.2 commit family if candidate
-  feedback needs no fixes; otherwise the next publication is `v0.2.0-rc.3`.
+  candidate line began with `v0.2.0-rc.1`, and `v0.2.0-rc.3` is the current
+  candidate; it replaced rc.2 because rc.2 rejected Part 1 profile streams.
+  A final `v0.2.0` follows from the rc.3 commit family if candidate feedback
+  needs no fixes; otherwise the next publication is `v0.2.0-rc.4`.
 - Do not reset or hand-edit `BUILD`; it is derived from repository history.
 
 The `VERSION` file names the next release line during development. After a
@@ -143,14 +144,16 @@ release; publishing it stays a manual step. `-SkipGates` and
 run from a local commit but cannot be combined with `-CreateDraft`.
 
 ```powershell
-.\tools\release_local.ps1 -Tag v0.2.0-rc.3 -MacosRunId <run id> -CreateDraft
+.\tools\release_local.ps1 -Tag v0.2.0-rc.4 -MacosRunId <run id> -CreateDraft
 ```
 
 The `Release` GitHub Actions workflow remains an optional reproducibility
 fallback, not the default publication path. Its RISC-V job failed with
 SIGSEGV under the hosted runner's `qemu-riscv64` for `v0.2.0-rc.2` while the
 same suite passes locally, so it currently cannot assemble a release; its
-native macOS job still provides the macOS archive. A separate `macOS Release Artifact`
+native macOS job still provides the macOS archive. When hosted minutes are
+unavailable, as for `v0.2.0-rc.3`, the release ships without a macOS archive
+(`-SkipMacos`) rather than with an untested cross-built one. A separate `macOS Release Artifact`
 workflow builds only the native macOS arm64 archive when no trusted local Mac
 is available. Ordinary commits and tag pushes do not publish a release. The
 portable RISC-V build does not require RVV; its ReleaseFast functional suite
