@@ -102,7 +102,9 @@ precinct; after the fix it is within one LSB of Kakadu and OpenJPEG, while all
 three decoders are 7 to 15 from the class-1 reference, so its bounds record
 that spread. `p1_02` (PPT without PLT, ending in empty packets) passes since
 the tile's last part reads every remaining PPT header, within the peak-2
-spread Kakadu and OpenJPEG show. `p1_04` and `p1_07` are pinned fail-closed.
+spread Kakadu and OpenJPEG show. `p1_04` (tile QCD under LRCP) passes its
+class-0 references; its class-1 reference is 253 from Kakadu, OpenJPEG, and
+z2000 alike and is not pinned. `p1_07` is pinned fail-closed.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
 8-bit reversible/no-MCT codestreams. The corpus selects the native `i64`

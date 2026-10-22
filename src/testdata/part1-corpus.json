@@ -4587,21 +4587,33 @@
       "source": {
         "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
         "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-1 test p1_04, 1024x1024 12-bit gray, 9/7, LRCP, 64 tiles of 128x128 with a QCD in every tile header, no PLT",
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
-        "redistribution": "optional local asset; not redistributed by z2000",
-        "origin": "Profile-1 test p1_04, 1024x1024 12-bit gray, 9/7, 128x128 tiles"
+        "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "legal T.803 profile-1 codestream; its tile-part layout is outside the current multi-tile span reader",
-      "features": ["tiles-and-tile-parts", "irreversible-97"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "oracle": "T.803 class-0 c0p1_04r0 (top-left 128x128 crop) within one LSB and c0p1_04r3 exact, both in 8-bit formatted output; all 1024x1024 samples are within one LSB of Kakadu 8.4.1 and OpenJPEG 2.5.4. The class-1 reference is 253 from all three decoders alike, so it is not pinned",
+      "features": ["tiles-and-tile-parts", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "decoder": "native",
       "references": [
         {
-          "path": "reference_class1_profile1/c1p1_04-0.pgx",
-          "sha256": "46208571732cee8d274ec11629da785c6358599a040ddeb3d5e8f0b76e38594a",
+          "path": "reference_class0_profile1/c0p1_04r0.pgx",
+          "sha256": "b393a2f5de9966f3b6908721751e69b0e60e7938cd713226a884210f9caf00f0",
           "format": "pgx",
           "component": 0,
           "resolution_reduction": 0,
+          "crop": { "x": 0, "y": 0 },
+          "sample_shift": 4,
+          "max_peak_error": 1,
+          "max_mse": 0.01
+        },
+        {
+          "path": "reference_class0_profile1/c0p1_04r3.pgx",
+          "sha256": "caddf11fa88f7ca8bc80ad11188203e69496d1437f7edb3930370b862cfd5489",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 3,
+          "sample_shift": 4,
           "max_peak_error": 0,
           "max_mse": 0
         }
@@ -4799,6 +4811,84 @@
           "resolution_reduction": 0,
           "max_peak_error": 1,
           "max_mse": 0.15
+        }
+      ]
+    },
+    {
+      "id": "kakadu-tile-qcd-lrcp",
+      "path": "src/testdata/kakadu-tile-qcd-lrcp.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "8194112bac5cb0ced7b0b2c8d2082a3a1970c440d385d233a68da9e07000bd05",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "64x64 8-bit gray, 9/7, LRCP, 2x2 tiles, tile-header QCD for tiles 1 and 2, no PLT. Tile coding overrides used to be accepted under RPCL only",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX reference committed; producer application not redistributed",
+        "command": "magick -seed 81 -size 64x64 plasma:fractal -depth 8 -colorspace gray g.pgm; kdu_compress -i g.pgm -o src/testdata/kakadu-tile-qcd-lrcp.j2c Corder=LRCP Stiles={32,32} Clevels=3 Qstep=0.004 Qstep:T1=0.02 Qstep:T2=0.01 -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX plane within one LSB",
+      "features": ["tiles-and-tile-parts", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-tile-qcd-lrcp-full.pgx",
+          "sha256": "db0e6f820e10c29dfc0ff7ec877658a3ac6e03a3b5033b5bbb02b285adc9bb86",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        }
+      ]
+    },
+    {
+      "id": "kakadu-tile-cod-pcrl",
+      "path": "src/testdata/kakadu-tile-cod-pcrl.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "7879b88313f5375d89dfd2f2aefd6da48bfec1c854e5646f05b12c1a374c868c",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "64x64 8-bit RGB without MCT, reversible, PCRL, two layers, 16x16 precincts, 2x2 tiles with tile COD giving tile 1 two levels and tile 2 one level. The same command under LRCP, RLCP, RPCL, and CPRL also decodes exactly",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 82 -size 64x64 plasma:fractal -depth 8 src.ppm; kdu_compress -i src.ppm -o src/testdata/kakadu-tile-cod-pcrl.j2c Cycc=no Corder=PCRL Stiles={32,32} Clevels=3 Clevels:T1=2 Clevels:T2=1 Clayers=2 Creversible=yes Cprecincts={16,16} -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, exact",
+      "features": ["tiles-and-tile-parts", "cod-qcd-component-overrides", "progression-poc", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-tile-cod-pcrl-full-c0.pgx",
+          "sha256": "a55f1857e7b7f57ea3f481d46033d5eb60aa1723856c9688681c446f4ee108da",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-tile-cod-pcrl-full-c1.pgx",
+          "sha256": "92b7d340f0678b8c9e02e0abf6c476e238439d0aa7340e60996e49fe082ed67e",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-tile-cod-pcrl-full-c2.pgx",
+          "sha256": "f1a6ee9e7ec681aabe8759ea478a8c743597097d33a0e6a2ec821c9b351caf14",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
         }
       ]
     }

@@ -16089,8 +16089,7 @@ fn readStrictMultiTileTilePartSpans(
         const coding_override = if (tile_coding_overrides) |overrides| overrides[tile_index] else StrictTileCodingOverride{};
         const has_coding_override = strictTileOverrideChangesCoding(coding_override);
         if (has_coding_override and
-            (tile_poc_records[tile_index].items.len != 0 or
-                mct != .none or options.progression != .rpcl))
+            (tile_poc_records[tile_index].items.len != 0 or mct != .none))
         {
             return CodestreamError.UnsupportedPayload;
         }

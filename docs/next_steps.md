@@ -444,8 +444,8 @@ The active G0/G4 corpus expansion is:
    `--require-optional` whenever `Z2000_PART4_ROOT` is set. `p0_15` (exact) and
    `p0_08` (bit-exact against Kakadu, within its T.803 bounds) now pass, and
    The profile-1 streams now run as well: `p1_01`, `p1_02`, `p1_03`, `p1_05`,
-   and `p1_06` pass, and `p1_04` (tile-part layout) and `p1_07` (4x1
-   sampling) are pinned fail-closed. The JP2 wrapper audit now leaves
+   `p1_06`, and `p1_04` (tile overrides under LRCP) pass, and `p1_07` (4x1
+   sampling) is pinned fail-closed. The JP2 wrapper audit now leaves
    component QCC to strict decode, so `p1_02` also converts as JP2.
    So do `p0_07` (RLCP multipart POC), `p0_13` (257 components with RCT), and
    `p0_05` (mixed 5/3 and 9/7 with a QCD shared across level counts), so every

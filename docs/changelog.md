@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Tile Coding Overrides In Every Progression Order
+
+- Tile-header COD/COC/QCD/QCC overrides on multi-tile streams were accepted
+  under RPCL only. Each tile builds its own packet plan and sequence from its
+  effective coding, so the restriction protected nothing; it is gone (tile
+  POC or MCT combined with an override stays unsupported).
+- T.803 `p1_04` (64 tiles, a QCD in every tile header, LRCP) now decodes:
+  within one LSB of Kakadu and OpenJPEG over all 1024x1024 samples, within
+  one LSB of its class-0 full-resolution crop, and exact at reduction 3. Its
+  class-1 reference is 253 from all three decoders alike and is not pinned.
+- Kakadu streams with tile QCD under LRCP and tile COD (levels 3/2/1) under
+  all five orders decode exactly or within one LSB; the LRCP QCD and PCRL
+  COD variants are committed and fail on the previous code.
+
 ### JP2 Accepts QCC For Some Components
 
 - The JP2 wrapper audit required a QCC for every component or for none,
