@@ -4237,6 +4237,132 @@
           "max_mse": 0.1
         }
       ]
+    },
+    {
+      "id": "kakadu-rate-truncated-rct",
+      "path": "src/testdata/kakadu-rate-truncated-rct.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "12c7ee2808ee569515eb7796ff40fdc948d3cf9292102ac368ceea0e5cf240c0",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "64x48 8-bit RGB, reversible 5/3 with RCT, layers truncated to 3 bpp by rate control. Its truncated components reconstruct slightly out of range, which the strict decoder used to report as SampleOutOfRange instead of clamping",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 41 -size 64x48 plasma:fractal -depth 8 src.ppm; kdu_compress -i src.ppm -o src/testdata/kakadu-rate-truncated-rct.jp2 Creversible=yes -rate 3 -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, exact",
+      "features": ["jp2-core-container", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-rate-truncated-rct-full-c0.pgx",
+          "sha256": "e73a1b50f858b935ebc4f0a33c54ca7a5fd2ad4538dd1e404b71acad80bcac5d",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rate-truncated-rct-full-c1.pgx",
+          "sha256": "b03b7c777391dd15c00c7e91fc47a30577c6c650b63c26599caec275309c1335",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-rate-truncated-rct-full-c2.pgx",
+          "sha256": "22d466181808871d09f5e83d7879f14fae6216e4d423500cc39258c78c639c54",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "openjpeg-rate-truncated-rct",
+      "path": "src/testdata/openjpeg-rate-truncated-rct.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "068481de27d9dae53407088c0a843d1790b42be353966244e7f60192232c8b68",
+      "source": {
+        "producer": "OpenJPEG 2.5.4 opj_compress",
+        "version": "2.5.4",
+        "origin": "64x48 8-bit RGB with OpenJPEG's default reversible 5/3 and RCT, compressed 20:1, so every component is truncated",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and Kakadu PGX references committed; producer applications not redistributed",
+        "command": "magick -seed 41 -size 64x48 plasma:fractal -depth 8 src.ppm; opj_compress -i src.ppm -o src/testdata/openjpeg-rate-truncated-rct.jp2 -r 20; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes, exact",
+      "features": ["jp2-core-container", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/openjpeg-rate-truncated-rct-full-c0.pgx",
+          "sha256": "0739834eb25639ca2dcba88cfb8a25c2c1a3e66958cb234c738e8c8a0f046c1d",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/openjpeg-rate-truncated-rct-full-c1.pgx",
+          "sha256": "9d46c0ea9295535dcac64a7764b42097fea6c2e0e1da2e1711e58bb592e3a82d",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/openjpeg-rate-truncated-rct-full-c2.pgx",
+          "sha256": "bcc49d006af1e3ab61677bdf68cfa26b06c27ca2f73185bc44055558f41f028a",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-rate-truncated-gray",
+      "path": "src/testdata/kakadu-rate-truncated-gray.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "0caa1e83d341689e927b6edd4a3af6e2fbef63f574befbe24d72c7ac01cfb84d",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "64x48 8-bit gray, reversible 5/3, truncated to 1 bpp by rate control; exercises clamping on the native path",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX reference committed; producer application not redistributed",
+        "command": "magick -seed 41 -size 64x48 plasma:fractal -depth 8 src.ppm; magick src.ppm -colorspace gray gray.pgm; kdu_compress -i gray.pgm -o src/testdata/kakadu-rate-truncated-gray.j2c Creversible=yes -rate 1 -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX plane, exact",
+      "features": ["reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-rate-truncated-gray-full.pgx",
+          "sha256": "122c0041a734b99ace4fcb520a2fe999c42534534160db49b1a43d8618b53fe5",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
     }
   ]
 }

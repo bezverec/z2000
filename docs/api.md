@@ -410,8 +410,12 @@ Primary public functions:
   range-checked `i64` samples on the way out, so windows are materialized per
   tile rather than borrowed from a tile raster; the buffers are tile-sized. That
   conversion also enforces the declared sample range — an exact decode fails
-  closed, a reduced or layer-limited decode clamps — so each window carries the
-  guarantee `validateSamples` gives the whole-plane shape. A single-tile stream
+  closed, a lossy one clamps — so each window carries the guarantee
+  `validateSamples` gives the whole-plane shape. A decode is exact only when
+  it is reversible, at full resolution with every layer, and every code block
+  provably carries all its coding passes (3 per encoded bitplane, less 2);
+  irreversible, reduced, layer-limited, region-selected, and encoder-truncated
+  decodes are lossy. A single-tile stream
   is reported as one region
 - `NativeSamplePlanes.encodeRawPlanar(allocator)` /
   `decodeNativeRawPlanar(allocator, bytes, limits)` — serialize or parse the

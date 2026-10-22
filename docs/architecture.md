@@ -81,7 +81,15 @@ absolute component grid during independent synthesis and checked assembly.
 Full and requested lower DWT resolutions preserve reduced reference/component
 origins and dimensions while pruning discarded packet bodies before partial
 synthesis. Signed output receives no DC level shift; unsigned output receives
-`2^(precision-1)`. Reversible native decode is caller-limited up to the
+`2^(precision-1)`. Out-of-range samples follow one rule on every strict
+path (`strictDecodeSaturates` and `strictComponentBlocksComplete`): a decode
+is exact, and an out-of-range sample is malformed input, only when it is
+reversible, at full resolution with every layer, and every code block carries
+all coding passes of its encoded bitplanes. Anything else is lossy and is
+clamped to the component range, as Kakadu and OpenJPEG do. A block that was
+never included cannot prove it is complete, so it makes the decode lossy;
+clamping is a no-op on a valid lossless stream, so this costs only the
+corruption check. Reversible native decode is caller-limited up to the
 Part 1 maximum of 16384 components and is independently pinned at 19
 components across four tiles and at 260 components. With RCT, components 0..2
 of each tile are reconstructed first, checked to share one grid, and inverted

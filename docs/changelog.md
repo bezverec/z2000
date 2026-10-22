@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Clamping Policy For Truncated Reversible Streams
+
+- Decision: a decode is exact, and an out-of-range sample is reported as
+  malformed (`SampleOutOfRange`), only when it is reversible, at full
+  resolution with every layer, and every code block provably carries all
+  coding passes of its encoded bitplanes. Every other decode is lossy and
+  clamps to the component range, as Kakadu and OpenJPEG do. Before this, the
+  exact/lossy split looked only at the decode options, so a reversible
+  stream whose encoder truncated its layers was rejected.
+- That rejected ordinary files: Kakadu `Creversible=yes -rate N` and
+  OpenJPEG's default reversible output with `-r N` both failed JP2-to-TIFF
+  and native decode. Single- and multi-tile RGB, gray, 16-bit, multi-layer,
+  and OpenJPEG variants now match `kdu_expand` exactly. Three committed
+  fixtures (Kakadu and OpenJPEG RGB JP2, a Kakadu gray codestream) pin this
+  and fail on the previous code; corrupt complete streams such as
+  `grok-roi-shift-below-bitplanes` still fail as `SampleOutOfRange`.
+- T.803 `p0_14` already passed at full resolution with its class-1
+  references, since its blocks are complete; nothing in the conformance set
+  needed clamping on an exact decode.
+
 ### T.803 p0_05: Mixed Transforms And Shallow QCD Users
 
 - A main QCD may now serve components with different level counts: it is

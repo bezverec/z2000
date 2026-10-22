@@ -4402,7 +4402,11 @@ fn checkStrictNativeProfile(header: TemporaryHeader, options: DecodeOptions) !vo
 /// -- run through the float 9/7 synthesis, and rounded back into the plane.
 /// The reconstructed samples occupy the returned top-left shape; `lossy`
 /// tells the caller to clamp to the component range instead of treating an
-/// out-of-range sample as malformed.
+/// out-of-range sample as malformed. A reversible component is exact only
+/// when every code block provably carries all its coding passes
+/// (`strictComponentBlocksComplete`); a stream whose encoder truncated layers
+/// may legitimately reconstruct slightly out of range, and is clamped like
+/// any other lossy decode.
 const NativeComponentInverse = struct {
     shape: wavelet_int.ResolutionShape,
     lossy: bool,
@@ -4429,13 +4433,16 @@ fn inverseNativeComponentPlane(
                     wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
                     else => return err,
                 };
-                return .{ .shape = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 }, .lossy = false };
+                return .{
+                    .shape = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 },
+                    .lossy = !strictComponentBlocksComplete(catalog, component),
+                };
             }
             const reduced = wavelet_int.inverse53ReducedCheckedWithWorkspaceOrigin(workspace, coefficients, width, height, levels, reduction, x0, y0) catch |err| switch (err) {
                 wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
                 else => return err,
             };
-            return .{ .shape = reduced, .lossy = false };
+            return .{ .shape = reduced, .lossy = true };
         },
         .irreversible_9_7 => {
             const width_u32 = std.math.cast(u32, width) orelse return CodestreamError.InvalidCodestream;
@@ -4569,6 +4576,9 @@ fn reconstructNativeRctComponents(
             return CodestreamError.UnsupportedPayload;
         }
     }
+    // An error in any transformed component reaches all three outputs.
+    const lossy = planes[0].inverse.lossy or planes[1].inverse.lossy or planes[2].inverse.lossy;
+    for (&planes) |*plane| plane.inverse.lossy = lossy;
     for (0..shape.height) |row| {
         const luma = planes[0].coefficients[row * planes[0].stride ..][0..shape.width];
         const blue_difference = planes[1].coefficients[row * planes[1].stride ..][0..shape.width];
@@ -4583,6 +4593,20 @@ fn reconstructNativeRctComponents(
         }
     }
     return planes;
+}
+
+/// Whether every code block of `component` carries all coding passes of its
+/// encoded bitplanes (3 * bitplanes - 2), the only case in which reversible
+/// reconstruction is provably exact. A block never included in any packet is
+/// not provable: it may be all zero or dropped by rate control.
+fn strictComponentBlocksComplete(catalog: StrictPacketBlockCatalog, component: usize) bool {
+    for (catalog.components[component]) |block| {
+        if (!block.metadata_ready) return false;
+        if (block.encoded_bitplanes == 0) continue;
+        const complete_passes = 3 * @as(u16, block.encoded_bitplanes) - 2;
+        if (block.cumulative_passes < complete_passes) return false;
+    }
+    return true;
 }
 
 fn decodeStrictSingleTileNative(
@@ -5766,7 +5790,7 @@ fn decodeMixedTransformPlanarFromBlockCatalogMeasured(
                 for (0..actual_height) |row| {
                     for (0..actual_width) |column| {
                         const value = coefficients[row * component_width + column] + level_shift;
-                        output.planes[component][row * actual_width + column] = if (!strictDecodeIsPartial(options)) value: {
+                        output.planes[component][row * actual_width + column] = if (!strictDecodeSaturates(options, catalog)) value: {
                             if (value < 0 or value > max_sample) return CodestreamError.InvalidCodestream;
                             break :value @intCast(value);
                         } else @intCast(std.math.clamp(value, 0, max_sample));
@@ -5980,7 +6004,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
     if (output_mode == .output_components and rct_alpha) {
-        return if (!strictDecodeIsPartial(options))
+        return if (!strictDecodeSaturates(options, catalog))
             color.inverseRctAlpha(allocator, transformed)
         else
             color.inverseRctAlphaSaturated(allocator, transformed);
@@ -5996,7 +6020,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
         }
         transformed.width = decoded_component_widths[0];
         transformed.height = decoded_component_heights[0];
-        return if (!strictDecodeIsPartial(options))
+        return if (!strictDecodeSaturates(options, catalog))
             color.inverseRctPlanar(allocator, transformed)
         else
             color.inverseRctPlanarSaturated(allocator, transformed);
@@ -6024,7 +6048,7 @@ fn decodeStrictPlanarFromBlockCatalogMeasured(
         const component_depth = output_bit_depths[component];
         const max_sample = (@as(i32, 1) << @as(u5, @intCast(component_depth))) - 1;
         const level_shift = @as(i32, 1) << @as(u5, @intCast(component_depth - 1));
-        const format_with_saturation = strictDecodeIsPartial(options) or
+        const format_with_saturation = strictDecodeSaturates(options, catalog) or
             (output_mode == .codestream_components and header.mct != .none);
         for (coefficients, samples) |coefficient, *sample| {
             const value = coefficient + level_shift;
@@ -10442,7 +10466,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     defer {
         if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
     }
-    if (strictDecodeIsPartial(options) and header.mct == .none) {
+    if (strictDecodeSaturates(options, catalog) and header.mct == .none) {
         const max_sample = (@as(i32, 1) << @as(u5, @intCast(header.bit_depth))) - 1;
         const level_shift = @as(i32, 1) << @as(u5, @intCast(header.bit_depth - 1));
         for (strict_planes.planes) |plane| {
@@ -10453,7 +10477,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     }
     return if (header.mct == .none)
         color.inverseNoTransform(allocator, strict_planes)
-    else if (strictDecodeIsPartial(options))
+    else if (strictDecodeSaturates(options, catalog))
         color.inverseRctSaturatedThreaded(allocator, strict_planes, options.threads)
     else
         color.inverseRctThreaded(allocator, strict_planes, options.threads);
@@ -13717,6 +13741,19 @@ fn strictBlocksRequireZeroInitializedPlane(blocks: []const StrictPacketBlock) bo
 fn strictDecodeIsPartial(options: DecodeOptions) bool {
     return options.resolution_reduction != 0 or options.quality_layer_limit != 0 or
         options.reference_region != null;
+}
+
+/// Whether reconstructed samples are clamped to the component range. Partial
+/// decodes and streams whose code blocks do not provably carry every coding
+/// pass (an encoder may truncate a reversible stream's layers) are lossy, and
+/// lossy samples may legitimately land slightly out of range; only a complete
+/// reversible decode treats an out-of-range sample as malformed.
+fn strictDecodeSaturates(options: DecodeOptions, catalog: StrictPacketBlockCatalog) bool {
+    if (strictDecodeIsPartial(options)) return true;
+    for (0..catalog.component_count) |component| {
+        if (!strictComponentBlocksComplete(catalog, component)) return true;
+    }
+    return false;
 }
 
 fn strictBlocksHaveRegionPruning(blocks: []const StrictPacketBlock) bool {

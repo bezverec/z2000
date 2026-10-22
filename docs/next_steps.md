@@ -427,10 +427,10 @@ The active G0/G4 corpus expansion is:
    `p0_08` (bit-exact against Kakadu, within its T.803 bounds) now pass, and
    so do `p0_07` (RLCP multipart POC), `p0_13` (257 components with RCT), and
    `p0_05` (mixed 5/3 and 9/7 with a QCD shared across level counts), so every
-   T.803 profile-0 stream passes. Strict full-resolution native decode still
-   reports a rate-truncated reversible component that reconstructs out of
-   range as `SampleOutOfRange` instead of clamping; decide that policy
-   explicitly before claiming class-1 profile-0 decode.
+   T.803 profile-0 stream passes. The clamping policy is decided: only a
+   provably complete reversible decode treats out-of-range samples as
+   malformed, and encoder-truncated reversible streams clamp like any lossy
+   decode (see `architecture.md`).
 
 Exit when every existing public profile maps to the new matrix and the runner
 can evaluate the relevant T.803 references and tolerances without inflating
