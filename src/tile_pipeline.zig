@@ -2191,7 +2191,15 @@ pub fn buildWideTileRpclEncodeArtifacts(
     var stream = try buildTileRpclPacketStream(allocator, scaffold, catalog, index, bit_depth);
     var stream_moved = false;
     errdefer if (!stream_moved) stream.deinit();
-    try validateTilePacketStream(allocator, scaffold, catalog, index, stream, bit_depth, .rpcl);
+    try reorderTilePacketStreamFromRpcl(
+        allocator,
+        &stream,
+        scaffold.plan,
+        scaffold.components,
+        scaffold.layers,
+        options.packet_order,
+    );
+    try validateTilePacketStream(allocator, scaffold, catalog, index, stream, bit_depth, options.packet_order);
 
     scaffold_moved = true;
     catalog_moved = true;

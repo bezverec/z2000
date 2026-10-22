@@ -801,10 +801,14 @@ pub fn encodeLosslessPlanarWithOptions(
 pub const max_wide_encode_precision: u8 = 38;
 
 /// Reversible encode of native integer components, signed or unsigned, up to
-/// `max_wide_encode_precision` bits, through i64 coefficients: an i64 5/3
-/// transform, the i64 T1 symbol generator, and the shared scaffold, packet,
-/// and codestream writers. One tile, no MCT, RPCL, and one to four
-/// components of one precision on the reference grid at the origin.
+/// `max_wide_encode_precision` bits, through i64 coefficients: an i64 RCT and
+/// 5/3 transform, the i64 T1 symbol generator, and the shared scaffold,
+/// packet, and codestream writers. One to four components of one precision on
+/// the reference grid at the origin, without MCT or with RCT over the first
+/// three. Requests the single-tile writer carries (one tile, RPCL, no POC or
+/// packed headers) stay there; a tile grid, another progression order, POC,
+/// PPM/PPT, and other tile-part divisions go through the multi-tile writer of
+/// the main encoder, as `encodeLosslessPlanarWithOptions` routes them.
 pub fn encodeNativeLosslessWithOptions(
     allocator: std.mem.Allocator,
     source: NativeSamplePlanes,
@@ -831,26 +835,31 @@ pub fn encodeNativeLosslessWithOptions(
         component_bit_depths[component] = precision;
         component_signed[component] = layout.signed;
     }
-    if (options.transform != .reversible_5_3 or options.quantization != .none or options.mct != .none or
-        options.progression != .rpcl or options.poc_records.len != 0 or options.poc_in_tile_header or
-        options.ppm or options.ppt or options.emit_temporary_payload_sidecar or options.rate_count != 0 or
-        options.t1_backend != .iso_mq or options.tile_width < width or options.tile_height < height or
-        options.image_origin_x != 0 or options.image_origin_y != 0 or
-        options.tile_origin_x != 0 or options.tile_origin_y != 0)
+    if (options.transform != .reversible_5_3 or options.quantization != .none or
+        options.emit_temporary_payload_sidecar or options.rate_count != 0 or options.t1_backend != .iso_mq)
     {
         return CodestreamError.UnsupportedPayload;
+    }
+    switch (options.mct) {
+        .none => {},
+        // RCT over the first three components (ISO/IEC 15444-1 G.2); a fourth
+        // passes through.
+        .rct => if (component_count != 3 and component_count != 4) return CodestreamError.UnsupportedPayload,
+        .ict => return CodestreamError.UnsupportedPayload,
     }
     if (options.levels > 32) return CodestreamError.TooManyLevels;
     if (options.layers == 0 or options.layers > max_quality_layers) return CodestreamError.InvalidCodestream;
     try validateBlockSize(options.block_width, options.block_height);
-    try validatePrecincts(options);
-    try validateTilePartDivisions(options.tile_part_divisions);
+    const grid = tile_grid.Grid.fromImageSize(width, height, options.tile_width, options.tile_height) catch |err| switch (err) {
+        tile_grid.TileGridError.ImageTooLarge => return CodestreamError.ImageTooLarge,
+        tile_grid.TileGridError.InvalidImage, tile_grid.TileGridError.InvalidTileGrid => return CodestreamError.InvalidCodestream,
+    };
+    try validateLosslessRequest(grid, options);
 
     const levels = actualDwtLevels(width, height, options.levels);
-    const encode_options = normalizedEncodePrecinctOptions(options, levels);
     const quantization = try WideReversibleQuantization.forPrecision(precision);
 
-    // ISO B.1.1 DC level shift for unsigned components, then the i64 5/3.
+    // ISO B.1.1 DC level shift for unsigned components, then the RCT.
     const planes = try allocator.alloc([]i64, component_count);
     var built: usize = 0;
     defer {
@@ -865,47 +874,49 @@ pub fn encodeNativeLosslessWithOptions(
             const shift = @as(i64, 1) << @as(u6, @intCast(precision - 1));
             for (coefficients) |*value| value.* -= shift;
         }
-        _ = try wavelet_int.forward53WideOrigin(allocator, coefficients, width, height, levels, 0, 0);
+    }
+    if (options.mct == .rct) forwardRctWide(planes[0..3]);
+
+    const single_tile_profile = grid.isSingleTile() and options.progression == .rpcl and
+        options.poc_records.len == 0 and !options.poc_in_tile_header and
+        !options.ppm and !options.ppt and
+        (options.tile_part_divisions == null or options.tile_part_divisions == 'R');
+    if (!single_tile_profile) {
+        var routed = options;
+        // One tile in another progression order is written as one part, as
+        // the main planar encoder does; `R` parts need RPCL.
+        if (grid.isSingleTile() and routed.tile_part_divisions == 'R' and routed.progression != .rpcl) {
+            routed.tile_part_divisions = null;
+        }
+        return encodeNativeWideMultiTile(allocator, planes, grid, levels, quantization, .{
+            .siz = .{
+                .width = @intCast(width),
+                .height = @intCast(height),
+                .bit_depth = precision,
+                .component_bit_depths = component_bit_depths,
+                .component_signed = component_signed,
+                .components = @intCast(component_count),
+                .tile_width = routed.tile_width,
+                .tile_height = routed.tile_height,
+            },
+            .bit_depth = precision,
+            .wide_quantization = quantization,
+        }, routed);
     }
 
-    var scaffold_precincts: [33]packet_plan.Precinct = undefined;
-    for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {
-        scaffold_precincts[index] = .{ .width = precinct.width, .height = precinct.height };
+    const encode_options = normalizedEncodePrecinctOptions(options, levels);
+    for (planes) |plane| {
+        _ = try wavelet_int.forward53WideOrigin(allocator, plane, width, height, levels, 0, 0);
     }
-    const block_style = ebcot.CodeBlockStyle{
-        .bypass = encode_options.bypass,
-        .reset_context = encode_options.reset_context,
-        .terminate_all = encode_options.terminate_all,
-        .vertical_causal = encode_options.vertical_causal,
-        .predictable_termination = encode_options.predictable_termination,
-        .segmentation_symbols = encode_options.segmentation_symbols,
-    };
-    var color_depths: [color.max_components]u8 = @splat(0);
-    for (color_depths[0..component_count]) |*depth| depth.* = precision;
-    const grid = tile_grid.Grid.fromImageSize(width, height, @intCast(width), @intCast(height)) catch
-        return CodestreamError.InvalidCodestream;
-    var artifacts = tile_pipeline.buildWideTileRpclEncodeArtifacts(
+    var scaffold_precincts: [33]packet_plan.Precinct = undefined;
+    var artifacts = try buildWideTileArtifacts(
         allocator,
         try grid.tile(0),
-        width,
-        height,
         planes,
         levels,
-        .{
-            .layers = encode_options.layers,
-            .block_width = encode_options.block_width,
-            .block_height = encode_options.block_height,
-            .precincts = scaffold_precincts[0..encode_options.precinct_count],
-            .components = @intCast(component_count),
-            .component_bit_depths = color_depths,
-            .nominal_bitplanes = quantization.table(),
-        },
-        block_style,
-    ) catch |err| switch (err) {
-        // A coefficient needs more than the 37 bitplanes Part 1 can signal.
-        tile_pipeline.PacketScaffoldError.InvalidLayer => return CodestreamError.UnsupportedPayload,
-        else => return err,
-    };
+        wideScaffoldOptions(encode_options, &scaffold_precincts, component_count, precision, quantization, .rpcl),
+        wideBlockStyle(encode_options),
+    );
     defer artifacts.deinit();
 
     return assembleSingleTileCodestream(allocator, .{
@@ -922,6 +933,229 @@ pub fn encodeNativeLosslessWithOptions(
         .wide_quantization = quantization,
     }, encode_options);
 }
+
+/// Forward RCT (ISO/IEC 15444-1 G.2.1) over three level-shifted planes, in
+/// place from R/G/B to Y/Db/Dr.
+fn forwardRctWide(planes: []const []i64) void {
+    for (planes[0], planes[1], planes[2]) |*red, *green, *blue| {
+        const y = @divFloor(red.* + 2 * green.* + blue.*, 4);
+        const blue_difference = blue.* - green.*;
+        const red_difference = red.* - green.*;
+        red.* = y;
+        green.* = blue_difference;
+        blue.* = red_difference;
+    }
+}
+
+fn wideBlockStyle(encode_options: LosslessOptions) ebcot.CodeBlockStyle {
+    return .{
+        .bypass = encode_options.bypass,
+        .reset_context = encode_options.reset_context,
+        .terminate_all = encode_options.terminate_all,
+        .vertical_causal = encode_options.vertical_causal,
+        .predictable_termination = encode_options.predictable_termination,
+        .segmentation_symbols = encode_options.segmentation_symbols,
+    };
+}
+
+fn wideScaffoldOptions(
+    encode_options: LosslessOptions,
+    precincts: *[33]packet_plan.Precinct,
+    component_count: usize,
+    precision: u8,
+    quantization: WideReversibleQuantization,
+    packet_order: tile_pipeline.PacketOrder,
+) tile_pipeline.PacketScaffoldOptions {
+    for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {
+        precincts[index] = .{ .width = precinct.width, .height = precinct.height };
+    }
+    var depths: [color.max_components]u8 = @splat(0);
+    for (depths[0..component_count]) |*depth| depth.* = precision;
+    return .{
+        .layers = encode_options.layers,
+        .block_width = encode_options.block_width,
+        .block_height = encode_options.block_height,
+        .precincts = precincts[0..encode_options.precinct_count],
+        .packet_order = packet_order,
+        .components = @intCast(component_count),
+        .component_bit_depths = depths,
+        .nominal_bitplanes = quantization.table(),
+    };
+}
+
+/// One tile's packet artifacts from its transformed i64 planes. A coefficient
+/// needing more than the 37 bitplanes Part 1 can signal refuses the image.
+fn buildWideTileArtifacts(
+    allocator: std.mem.Allocator,
+    tile: tile_grid.Tile,
+    planes: []const []const i64,
+    levels: u8,
+    scaffold_options: tile_pipeline.PacketScaffoldOptions,
+    block_style: ebcot.CodeBlockStyle,
+) !tile_pipeline.TileRpclEncodeArtifacts {
+    return tile_pipeline.buildWideTileRpclEncodeArtifacts(
+        allocator,
+        tile,
+        tile.rect.width(),
+        tile.rect.height(),
+        planes,
+        levels,
+        scaffold_options,
+        block_style,
+    ) catch |err| switch (err) {
+        tile_pipeline.PacketScaffoldError.InvalidLayer => return CodestreamError.UnsupportedPayload,
+        else => return err,
+    };
+}
+
+/// The wide encoder's multi-tile path: each tile is cut from the level-shifted
+/// (and RCT-transformed) planes, given its own origin-aware i64 5/3 and T1,
+/// and the tiles are written by `assembleMultiTileArtifactsCodestream`. Tiles
+/// are built on `options.threads` workers.
+fn encodeNativeWideMultiTile(
+    allocator: std.mem.Allocator,
+    planes: []const []const i64,
+    grid: tile_grid.Grid,
+    levels: u8,
+    quantization: WideReversibleQuantization,
+    main_header: MultiTileMainHeader,
+    options: LosslessOptions,
+) ![]u8 {
+    const total_start = monotonicNs();
+    const components: u16 = @intCast(planes.len);
+    try validateMultiTileCodingPath(options, components);
+    const encode_options = normalizedEncodePrecinctOptions(options, levels);
+    try validateMultiTileGeometry(grid, levels);
+
+    const packet_order: tile_pipeline.PacketOrder = if (encode_options.poc_records.len != 0)
+        .rpcl
+    else switch (encode_options.progression) {
+        .rpcl => .rpcl,
+        .lrcp => .lrcp,
+        .rlcp => .rlcp,
+        .pcrl => .pcrl,
+        .cprl => .cprl,
+    };
+    var scaffold_precincts: [33]packet_plan.Precinct = undefined;
+    const tile_count = std.math.cast(usize, grid.tileCount()) orelse return CodestreamError.ImageTooLarge;
+    const tiles = try allocator.alloc(tile_pipeline.TileRpclEncodeArtifacts, tile_count);
+    var tiles_moved = false;
+    errdefer if (!tiles_moved) allocator.free(tiles);
+    const initialized = try allocator.alloc(bool, tile_count);
+    defer allocator.free(initialized);
+    @memset(initialized, false);
+    errdefer if (!tiles_moved) {
+        for (tiles, initialized) |*tile, is_initialized| {
+            if (is_initialized) tile.deinit();
+        }
+    };
+
+    var next_tile = std.atomic.Value(usize).init(0);
+    const worker_count = @max(@as(usize, 1), @min(@as(usize, options.threads), tile_count));
+    const jobs = try allocator.alloc(WideTileEncodeJob, worker_count);
+    defer allocator.free(jobs);
+    for (jobs) |*job| {
+        job.* = .{
+            .allocator = allocator,
+            .planes = planes,
+            .image_width = grid.params.xsiz,
+            .grid = grid,
+            .levels = levels,
+            .scaffold_options = wideScaffoldOptions(encode_options, &scaffold_precincts, planes.len, main_header.bit_depth, quantization, packet_order),
+            .block_style = wideBlockStyle(encode_options),
+            .tiles = tiles,
+            .initialized = initialized,
+            .next_tile = &next_tile,
+        };
+    }
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < threads.len) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, WideTileEncodeJob.run, .{&jobs[spawned]}) catch |err| {
+            next_tile.store(tile_count, .release);
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+    jobs[worker_count - 1].run();
+    for (threads[0..spawned]) |thread| thread.join();
+    for (jobs) |job| try job.result;
+    for (initialized) |is_initialized| {
+        if (!is_initialized) return CodestreamError.InvalidCodestream;
+    }
+
+    var artifacts = tile_pipeline.TileRpclEncodeGridArtifacts{
+        .allocator = allocator,
+        .grid = grid,
+        .tiles = tiles,
+    };
+    tiles_moved = true;
+    defer artifacts.deinit();
+    return assembleMultiTileArtifactsCodestream(
+        allocator,
+        artifacts,
+        main_header,
+        components,
+        levels,
+        encode_options,
+        null,
+        total_start,
+    );
+}
+
+const WideTileEncodeJob = struct {
+    allocator: std.mem.Allocator,
+    planes: []const []const i64,
+    image_width: usize,
+    grid: tile_grid.Grid,
+    levels: u8,
+    scaffold_options: tile_pipeline.PacketScaffoldOptions,
+    block_style: ebcot.CodeBlockStyle,
+    tiles: []tile_pipeline.TileRpclEncodeArtifacts,
+    initialized: []bool,
+    next_tile: *std.atomic.Value(usize),
+    result: anyerror!void = {},
+
+    fn run(self: *WideTileEncodeJob) void {
+        while (true) {
+            const index = self.next_tile.fetchAdd(1, .monotonic);
+            if (index >= self.tiles.len) return;
+            self.tiles[index] = self.buildTile(index) catch |err| {
+                self.result = err;
+                // Stop the other workers at their next tile.
+                self.next_tile.store(self.tiles.len, .monotonic);
+                return;
+            };
+            self.initialized[index] = true;
+        }
+    }
+
+    fn buildTile(self: *WideTileEncodeJob, index: usize) !tile_pipeline.TileRpclEncodeArtifacts {
+        const allocator = self.allocator;
+        const tile = try self.grid.tile(@intCast(index));
+        const tile_width: usize = tile.rect.width();
+        const tile_height: usize = tile.rect.height();
+        const tile_planes = try allocator.alloc([]i64, self.planes.len);
+        var built: usize = 0;
+        defer {
+            for (tile_planes[0..built]) |plane| allocator.free(plane);
+            allocator.free(tile_planes);
+        }
+        for (self.planes) |plane| {
+            const region = try allocator.alloc(i64, tile_width * tile_height);
+            tile_planes[built] = region;
+            built += 1;
+            for (0..tile_height) |row| {
+                const start = (@as(usize, tile.rect.y0) + row) * self.image_width + tile.rect.x0;
+                @memcpy(region[row * tile_width ..][0..tile_width], plane[start..][0..tile_width]);
+            }
+            const achieved = try wavelet_int.forward53WideOrigin(allocator, region, tile_width, tile_height, self.levels, tile.rect.x0, tile.rect.y0);
+            if (achieved != self.levels) return CodestreamError.InvalidCodestream;
+        }
+        return buildWideTileArtifacts(allocator, tile, tile_planes, self.levels, self.scaffold_options, self.block_style);
+    }
+};
 
 /// Multi-tile planar encode: grayscale, gray+alpha, and RGBA (with RCT over
 /// the colour planes or without MCT) through the same tile pipeline, tile-part
@@ -17693,23 +17927,6 @@ fn readComponentStats(cursor: *Cursor, stats: *ComponentStats, expected_componen
     }
 }
 
-fn appendMultiTileSiz(
-    allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
-    rgb: image.RgbImage,
-    components: u16,
-    options: LosslessOptions,
-) !void {
-    return appendSizForComponents(allocator, out, .{
-        .width = @intCast(rgb.width),
-        .height = @intCast(rgb.height),
-        .bit_depth = rgb.bit_depth,
-        .components = components,
-        .tile_width = options.tile_width,
-        .tile_height = options.tile_height,
-    });
-}
-
 fn appendSiz(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -21735,6 +21952,66 @@ fn encodeLosslessMultiTileMeasured(
         encode_options.threads,
     );
     defer artifacts.deinit();
+    if (timings) |t| t.payload_ns = elapsedNs(payload_start);
+    return assembleMultiTileArtifactsCodestream(
+        allocator,
+        artifacts,
+        .{
+            .siz = .{
+                .width = @intCast(rgb.width),
+                .height = @intCast(rgb.height),
+                .bit_depth = rgb.bit_depth,
+                .components = components,
+                .tile_width = encode_options.tile_width,
+                .tile_height = encode_options.tile_height,
+            },
+            .bit_depth = rgb.bit_depth,
+        },
+        components,
+        levels,
+        encode_options,
+        timings,
+        total_start,
+    );
+}
+
+/// The main header of a multi-tile codestream: SIZ, COD, and QCD, the last
+/// either by bit depth or, for the wide encoder, `WideReversibleQuantization`.
+const MultiTileMainHeader = struct {
+    siz: SizProfile,
+    bit_depth: u8,
+    wide_quantization: ?WideReversibleQuantization = null,
+};
+
+fn appendMultiTileMainHeader(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    header: MultiTileMainHeader,
+    levels: u8,
+    encode_options: LosslessOptions,
+) !void {
+    try appendSizForComponents(allocator, out, header.siz);
+    try appendCod(allocator, out, levels, encode_options);
+    if (header.wide_quantization) |quantization| {
+        try appendQcdWideReversible(allocator, out, levels, quantization);
+    } else {
+        try appendQcd(allocator, out, levels, header.bit_depth, encode_options);
+    }
+}
+
+/// Writes a codestream from per-tile packet artifacts: POC reordering, R/L/C/P
+/// tile-part divisions, TLM, PPM, PLT, and SOP/EPH, shared by the main
+/// multi-tile encoder and the wide native encoder.
+fn assembleMultiTileArtifactsCodestream(
+    allocator: std.mem.Allocator,
+    artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
+    main_header: MultiTileMainHeader,
+    components: u16,
+    levels: u8,
+    encode_options: LosslessOptions,
+    timings: ?*EncodeTimings,
+    total_start: u64,
+) ![]u8 {
     // COD advertises one global NL; the geometry guard above should make
     // per-tile clamping impossible, but verify what the pipeline achieved.
     for (artifacts.tiles) |tile_artifacts| {
@@ -21776,7 +22053,6 @@ fn encodeLosslessMultiTileMeasured(
             );
         }
     }
-    if (timings) |t| t.payload_ns = elapsedNs(payload_start);
 
     const marker_start = monotonicNs();
     const division = encode_options.tile_part_divisions;
@@ -21798,9 +22074,7 @@ fn encodeLosslessMultiTileMeasured(
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
         try appendMarker(allocator, &out, .soc);
-        try appendMultiTileSiz(allocator, &out, rgb, components, encode_options);
-        try appendCod(allocator, &out, levels, encode_options);
-        try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+        try appendMultiTileMainHeader(allocator, &out, main_header, levels, encode_options);
         if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
             try appendPocForComponents(allocator, &out, levels, components, encode_options);
         }
@@ -21843,9 +22117,7 @@ fn encodeLosslessMultiTileMeasured(
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendMarker(allocator, &out, .soc);
-    try appendMultiTileSiz(allocator, &out, rgb, components, encode_options);
-    try appendCod(allocator, &out, levels, encode_options);
-    try appendQcd(allocator, &out, levels, rgb.bit_depth, encode_options);
+    try appendMultiTileMainHeader(allocator, &out, main_header, levels, encode_options);
     if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
         try appendPocForComponents(allocator, &out, levels, components, encode_options);
     }

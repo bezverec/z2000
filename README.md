@@ -435,7 +435,7 @@ z2000 input.j2k output.pgx [--component N] [--tile-index N|--region X,Y,W,H] [--
 z2000 j2k-to-pgx input.j2c output.pgx [options]
 z2000 input.j2k output.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND]
 z2000 j2k-to-zraw input.j2c output.zraw [options]
-z2000 zraw-to-j2k input.zraw output.j2k [--levels N] [--layers N] [--block N] [code-block style flags]
+z2000 zraw-to-j2k input.zraw output.j2k [--tile W,H] [--mct none|rct] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--levels N] [--layers N] [--block N] [framing and code-block style flags]
 ```
 
 The DNG adapter accepts exactly one uncompressed, chunky, unsigned 8/16-bit
@@ -571,13 +571,18 @@ Other commands:
   and non-recursive batch forms.
 - **zraw-to-j2k INPUT OUTPUT**: Reversible encode of a canonical ZRAW (one to
   four components of one precision, signed or unsigned, 1 to 38 bits) into a
-  raw codestream: one tile, no MCT, RPCL. `--levels`, `--layers`, `--block`,
-  `--sop`/`--no-sop`, `--eph`/`--no-eph`, and the code-block style flags of
-  `tiff-to-jp2` apply. It is the only encoder for signed or more than 16-bit
-  samples and works through i64 coefficients. Any image up to 34 bits encodes;
-  from 35 bits a band can need more than the 37 magnitude bitplanes QCD can
-  signal (opposite extremes side by side, for instance), and such an image is
-  refused rather than truncated.
+  raw codestream, on one tile or a tile grid (`--tile W,H`, tiles encoded on
+  `--threads` workers), without MCT or with RCT over the first three
+  components (`--mct rct`), in every progression order with POC, R/L/C/P
+  tile-parts, TLM, PPM/PPT, SOP/EPH, layers, and the code-block style flags of
+  `tiff-to-jp2`. It is the only encoder for signed or more than 16-bit samples
+  and works through i64 coefficients; at 8 and 16 bits its output is byte for
+  byte that of the RGB, planar, and gray encoders. Up to 34 bits (33 with RCT,
+  whose colour differences carry one more bit) every band keeps the main
+  encoder's two guard bits; above that the guard shrinks toward the 37
+  magnitude bitplanes QCD can signal, and an image whose coefficients outgrow
+  them (a flat region at the extreme of a small tile, opposite extremes side
+  by side) is refused rather than truncated.
 
 The full profile matrix and internal API surface are documented in
 [API notes](docs/api.md).

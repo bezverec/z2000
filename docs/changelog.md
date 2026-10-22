@@ -5,6 +5,43 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Wide Encoder: Tile Grids, RCT, And Every Progression
+
+- `zraw-to-j2k` / `encodeNativeLosslessWithOptions` now take tile grids
+  (`--tile`), RCT over the first three components (`--mct rct`), every
+  progression order, POC in the main or tile header, R/L/C/P tile-parts,
+  TLM, PPM, and PPT, from 1 to 38 bits. It routes requests like the planar
+  encoder: one RPCL tile without POC or packed headers stays on the
+  single-tile writer, everything else goes to the multi-tile writer.
+- The multi-tile writer of the main encoder is now one function,
+  `assembleMultiTileArtifactsCodestream`, fed by per-tile artifacts and a
+  `MultiTileMainHeader` (SIZ with signedness, COD, and QCD by depth or the
+  wide signalling); the main encoder's bytes are unchanged on 13 tested
+  option sets (tiles, every division, PPM, PPT, POC in both headers, 9/7
+  with ICT, rates). Wide tiles are built on `options.threads` workers;
+  `buildWideTileRpclEncodeArtifacts` reorders its packets into the
+  requested progression.
+- A 2000x1500 three-component 34-bit image encodes in 1.9 s on 512x512
+  tiles with 20 threads instead of 11.7 s on one tile; with RCT the stream
+  shrinks from 18.0 MB to 7.6 MB. Every result decodes exactly.
+- Evidence: at 8 and 16 bits the wide encoder writes byte for byte the RGB
+  encoder's stream (RCT), the planar encoder's RGBA stream (RCT), and the
+  gray encoder's stream on tile grids with default parts, LRCP with `L`
+  parts and SOP, PCRL with `P` parts and BYPASS, PPM with EPH, PPT without
+  TLM, POC on 13x7 tiles, and one tile in RPCL and CPRL (the RGB encoder
+  writes one CPRL tile with its own single-tile writer, so that case is
+  compared for RGBA and gray only); tile grids round-trip with RCT from 17 to
+  37 bits and without MCT at 38; RCT on two components is refused.
+  `tools/wide_encode_interop.py` with tiles and RCT decodes exactly through
+  Kakadu up to 24 bits, OpenJPEG up to 30, Grok at 16, and z2000 to 38,
+  across every progression, division, PPM, PPT, POC, and style combination
+  tried. Kakadu refuses POC in a tile header with two layers, as it does for
+  the same stream from the RGB encoder (a known Kakadu refusal); OpenJPEG,
+  Grok, and z2000 decode it exactly.
+- With RCT the colour differences carry one more bit, so the bound up to
+  which every band keeps two guard bits is 33 bits instead of 34; above it,
+  images whose coefficients outgrow 37 bitplanes are refused, as before.
+
 ### Block-Parallel Wide Decode
 
 - Wide (i64) components now decode their code blocks on the block-parallel

@@ -39274,3 +39274,253 @@ test "the i32 decode paths refuse QCD bands deeper than 31 bitplanes" {
         try std.testing.expect(err == ebcot.EbcotError.InvalidBlock or err == codestream.CodestreamError.InvalidCodestream);
     }
 }
+
+fn wideSourceFromU16Planes(
+    allocator: std.mem.Allocator,
+    planes: []const []const u16,
+    width: u32,
+    height: u32,
+    precision: u8,
+) !native_samples.SamplePlanes {
+    var components: [4]native_samples.ComponentLayout = undefined;
+    for (components[0..planes.len]) |*layout| layout.* = .{
+        .precision = precision,
+        .signed = false,
+        .x0 = 0,
+        .y0 = 0,
+        .x_step = 1,
+        .y_step = 1,
+        .width = width,
+        .height = height,
+    };
+    var source = try native_samples.SamplePlanes.initFromLayout(allocator, .{
+        .allocator = allocator,
+        .capabilities = 0,
+        .reference_x0 = 0,
+        .reference_y0 = 0,
+        .reference_x1 = width,
+        .reference_y1 = height,
+        .tile_width = width,
+        .tile_height = height,
+        .tile_origin_x = 0,
+        .tile_origin_y = 0,
+        .components = components[0..planes.len],
+    }, .{});
+    errdefer source.deinit();
+    for (source.planes, planes) |destination, plane| {
+        for (destination.samples, plane) |*sample, value| sample.* = value;
+    }
+    return source;
+}
+
+test "wide encoder writes the main encoders' bytes on tile grids and with RCT" {
+    const allocator = std.testing.allocator;
+    const width = 37;
+    const height = 23;
+    var prng = std.Random.DefaultPrng.init(0x2000_7c7);
+    const random = prng.random();
+    var plane_storage: [4][width * height]u16 = undefined;
+
+    const poc_records = [_]codestream.PocRecord{
+        .{ .resolution_start = 0, .component_start = 0, .layer_end = 2, .resolution_end = 2, .component_end = 4, .progression = .rpcl },
+        .{ .resolution_start = 2, .component_start = 0, .layer_end = 2, .resolution_end = 6, .component_end = 4, .progression = .lrcp },
+    };
+    const tiled = codestream.LosslessOptions{ .tile_width = 16, .tile_height = 10 };
+    const variants = [_]codestream.LosslessOptions{
+        tiled,
+        .{ .tile_width = 16, .tile_height = 10, .progression = .lrcp, .layers = 2, .tile_part_divisions = 'L', .sop = true },
+        .{ .tile_width = 16, .tile_height = 10, .progression = .pcrl, .tile_part_divisions = 'P', .bypass = true, .block_width = 8, .block_height = 8 },
+        .{ .tile_width = 16, .tile_height = 10, .ppm = true, .eph = true },
+        .{ .tile_width = 16, .tile_height = 10, .ppt = true, .tlm = false },
+        .{ .tile_width = 13, .tile_height = 7, .layers = 2, .poc_records = &poc_records, .tile_part_divisions = null },
+        .{},
+        .{ .progression = .cprl, .layers = 2, .tile_part_divisions = null, .threads = 4 },
+    };
+    for ([_]u8{ 8, 16 }) |depth| {
+        const maximum: u16 = @intCast((@as(u32, 1) << @intCast(depth)) - 1);
+        for (&plane_storage) |*plane| {
+            for (plane) |*sample| sample.* = random.intRangeAtMost(u16, 0, maximum);
+        }
+        for (variants, 0..) |variant, variant_index| {
+            // A POC schedule covers every component of the stream it orders.
+            var poc_rgb = poc_records;
+            var poc_rgba = poc_records;
+            var poc_gray = poc_records;
+            for (&poc_rgb, &poc_rgba, &poc_gray) |*rgb, *rgba, *gray| {
+                rgb.component_end = 3;
+                rgba.component_end = 4;
+                gray.component_end = 1;
+            }
+            const scheduled = variant.poc_records.len != 0;
+            var with_rct = variant;
+            with_rct.mct = .rct;
+            var without_mct = variant;
+            without_mct.mct = .none;
+            if (scheduled) without_mct.poc_records = &poc_gray;
+
+            // RGB with RCT against the RGB encoder.
+            if (scheduled) with_rct.poc_records = &poc_rgb;
+            const interleaved = try allocator.alloc(u16, width * height * 3);
+            defer allocator.free(interleaved);
+            for (0..width * height) |pixel| {
+                for (0..3) |component| interleaved[pixel * 3 + component] = plane_storage[component][pixel];
+            }
+            const rgb_stream = try codestream.encodeLosslessWithOptions(allocator, .{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = depth,
+                .samples = interleaved,
+            }, with_rct);
+            defer allocator.free(rgb_stream);
+            var rgb_source = try wideSourceFromU16Planes(allocator, &.{ &plane_storage[0], &plane_storage[1], &plane_storage[2] }, width, height, depth);
+            defer rgb_source.deinit();
+            const wide_rgb = try codestream.encodeNativeLosslessWithOptions(allocator, rgb_source, with_rct);
+            defer allocator.free(wide_rgb);
+            // One CPRL tile is written by the RGB encoder's own single-tile
+            // writer; the wide encoder routes it like the planar encoder.
+            if (variant_index != variants.len - 1) {
+                try std.testing.expectEqualSlices(u8, rgb_stream, wide_rgb);
+            }
+
+            // RGBA with RCT over the colour planes against the planar encoder.
+            if (scheduled) with_rct.poc_records = &poc_rgba;
+            var rgba = try color.SamplePlanes.init(allocator, width, height, depth, 4);
+            defer rgba.deinit();
+            for (rgba.planes, 0..) |plane, component| @memcpy(plane, &plane_storage[component]);
+            const rgba_stream = try codestream.encodeLosslessPlanarWithOptions(allocator, rgba, with_rct);
+            defer allocator.free(rgba_stream);
+            var rgba_source = try wideSourceFromU16Planes(allocator, &.{ &plane_storage[0], &plane_storage[1], &plane_storage[2], &plane_storage[3] }, width, height, depth);
+            defer rgba_source.deinit();
+            const wide_rgba = try codestream.encodeNativeLosslessWithOptions(allocator, rgba_source, with_rct);
+            defer allocator.free(wide_rgba);
+            try std.testing.expectEqualSlices(u8, rgba_stream, wide_rgba);
+
+            // Gray without MCT against the gray encoder.
+            const gray_stream = try codestream.encodeLosslessGrayWithOptions(allocator, .{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = depth,
+                .samples = &plane_storage[0],
+            }, without_mct);
+            defer allocator.free(gray_stream);
+            var gray_source = try wideSourceFromU16Planes(allocator, &.{&plane_storage[0]}, width, height, depth);
+            defer gray_source.deinit();
+            const wide_gray = try codestream.encodeNativeLosslessWithOptions(allocator, gray_source, without_mct);
+            defer allocator.free(wide_gray);
+            try std.testing.expectEqualSlices(u8, gray_stream, wide_gray);
+        }
+    }
+}
+
+test "wide encoder round-trips tile grids with RCT from 17 to 38 bits" {
+    const allocator = std.testing.allocator;
+    const width = 37;
+    const height = 23;
+    var prng = std.Random.DefaultPrng.init(0x2000_7c38);
+    const random = prng.random();
+    const Case = struct { precision: u8, signed: bool, components: usize, mct: codestream.MultipleComponentTransform, options: codestream.LosslessOptions };
+    const cases = [_]Case{
+        .{ .precision = 17, .signed = true, .components = 3, .mct = .rct, .options = .{ .tile_width = 16, .tile_height = 10 } },
+        .{ .precision = 24, .signed = false, .components = 4, .mct = .rct, .options = .{ .tile_width = 9, .tile_height = 11, .progression = .rlcp, .layers = 3, .tile_part_divisions = null } },
+        .{ .precision = 30, .signed = true, .components = 2, .mct = .none, .options = .{ .tile_width = 16, .tile_height = 10, .ppt = true, .threads = 3 } },
+        .{ .precision = 33, .signed = false, .components = 3, .mct = .rct, .options = .{ .tile_width = 20, .tile_height = 12, .progression = .cprl, .tile_part_divisions = 'C', .terminate_all = true } },
+        .{ .precision = 36, .signed = true, .components = 3, .mct = .rct, .options = .{ .tile_width = 16, .tile_height = 16, .ppm = true } },
+        .{ .precision = 37, .signed = false, .components = 4, .mct = .rct, .options = .{ .tile_width = 32, .tile_height = 8, .layers = 2, .threads = 4 } },
+        // The ramp climbs about 2^31 per sample; at a tile edge the symmetric
+        // extension turns it into a high-pass step that doubles per level,
+        // so this steep 38-bit case keeps two levels.
+        .{ .precision = 38, .signed = true, .components = 1, .mct = .none, .options = .{ .tile_width = 16, .tile_height = 16, .levels = 2, .progression = .pcrl, .tile_part_divisions = 'P' } },
+    };
+    for (cases) |case| {
+        var components: [4]native_samples.ComponentLayout = undefined;
+        for (components[0..case.components]) |*layout| layout.* = .{
+            .precision = case.precision,
+            .signed = case.signed,
+            .x0 = 0,
+            .y0 = 0,
+            .x_step = 1,
+            .y_step = 1,
+            .width = width,
+            .height = height,
+        };
+        var source = try native_samples.SamplePlanes.initFromLayout(allocator, .{
+            .allocator = allocator,
+            .capabilities = 0,
+            .reference_x0 = 0,
+            .reference_y0 = 0,
+            .reference_x1 = width,
+            .reference_y1 = height,
+            .tile_width = width,
+            .tile_height = height,
+            .tile_origin_x = 0,
+            .tile_origin_y = 0,
+            .components = components[0..case.components],
+        }, .{});
+        defer source.deinit();
+        const minimum: i64 = if (case.signed) -(@as(i64, 1) << @intCast(case.precision - 1)) else 0;
+        const maximum: i64 = minimum + (@as(i64, 1) << @intCast(case.precision)) - 1;
+        // Full-range noise up to 33 bits (one more for the RCT differences);
+        // a ramp with modest noise above, where 37 bitplanes bound the bands.
+        // The ramp keeps an eighth of the range clear at each end: a small
+        // corner tile flat at -2^37 would itself need 38 bitplanes.
+        const noisy = case.precision <= 33;
+        const margin = @divFloor(maximum - minimum, 8);
+        for (source.planes, 0..) |plane, component| {
+            for (plane.samples, 0..) |*sample, index| {
+                if (noisy) {
+                    sample.* = random.intRangeAtMost(i64, minimum, maximum);
+                } else {
+                    const position: i64 = @intCast((index % width) * 3 + (index / width) * 5 + component);
+                    const span = (width - 1) * 3 + (height - 1) * 5 + 4;
+                    const ramp: i64 = @intCast(minimum + margin + @divFloor(@as(i128, maximum - minimum - 2 * margin) * position, span));
+                    sample.* = ramp + random.intRangeAtMost(i64, -(1 << 24), 1 << 24);
+                }
+            }
+        }
+        var options = case.options;
+        options.mct = case.mct;
+        const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, options);
+        defer allocator.free(encoded);
+        try std.testing.expect(codestream.hasMarker(encoded, codestream.markerValue("sot")));
+
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .threads = 4 }, .{});
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqual(expected.layout.signed, actual.layout.signed);
+            try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+        }
+    }
+
+    // RCT needs three components.
+    var components: [2]native_samples.ComponentLayout = @splat(.{
+        .precision = 20,
+        .signed = false,
+        .x0 = 0,
+        .y0 = 0,
+        .x_step = 1,
+        .y_step = 1,
+        .width = width,
+        .height = height,
+    });
+    var two = try native_samples.SamplePlanes.initFromLayout(allocator, .{
+        .allocator = allocator,
+        .capabilities = 0,
+        .reference_x0 = 0,
+        .reference_y0 = 0,
+        .reference_x1 = width,
+        .reference_y1 = height,
+        .tile_width = width,
+        .tile_height = height,
+        .tile_origin_x = 0,
+        .tile_origin_y = 0,
+        .components = &components,
+    }, .{});
+    defer two.deinit();
+    for (two.planes) |plane| @memset(plane.samples, 7);
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeNativeLosslessWithOptions(allocator, two, .{ .mct = .rct, .tile_width = 16, .tile_height = 10 }),
+    );
+}
