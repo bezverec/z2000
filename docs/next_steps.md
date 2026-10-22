@@ -517,7 +517,7 @@ contracts, and generic irreversible output remains on that legacy carrier.
    runner now pass beyond 16 components. The reversible native T1/DWT path now
    carries every 1..38-bit precision without clipping or bias ambiguity: i32
    up to 29 bits and 31 bitplanes, an i64 T1/5/3 carrier beyond, up to the
-   QCD ceiling of 37 bitplanes. Open: a block-parallel wide decode, and
+   QCD ceiling of 37 bitplanes, with block-parallel T1 on both. Open:
    irreversible components above 24 bits (f32 synthesis).
 3. The landed PGX writer is wired into direct raw `.j2k`/`.j2c` CLI
    decode without a JP2 wrapper. Explicit, extension-inferred, and unquoted

@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Block-Parallel Wide Decode
+
+- Wide (i64) components now decode their code blocks on the block-parallel
+  scheduler like i32 components: the job and worker are generic over the
+  coefficient type (`StrictBlockDecodeJobFor(i32 | i64)`), and the
+  single-thread restriction of the previous slice is gone.
+- A 2000x1500 three-component signed 34-bit stream decodes in about 0.44 to
+  0.59 s with 20 threads instead of 2.2 s, exactly; one thread and the i32
+  path are unchanged within run-to-run noise.
+- Evidence: an internal test decodes a 34-bit component with four threads,
+  requires four block workers (`DecodeTimings.block_worker_jobs`, zero on the
+  previous build) and coefficients beyond the i32 range, and equality with
+  the serial decode; the 29- to 38-bit codec test runs with one and four
+  threads.
+
 ### Wide Native Decoder: Every Part 1 Precision, 1 To 38 Bits
 
 - `decodeLosslessNative` and `j2k-to-zraw` decode reversible components of
@@ -26,8 +41,8 @@ entries are grouped by development milestone rather than semantic version.
   (`nativeComponentNeedsWidePlane`): i64 for a reversible component above 29
   bits or with any block Mb above 31, through the checked
   `wavelet_int.inverse53WideReducedOrigin`, RCT in i64 when any of its three
-  components is wide, and single-threaded block decode. Single- and
-  multi-tile, reduced resolution, regions, and layers all apply.
+  components is wide, and (in this slice) single-threaded block decode.
+  Single- and multi-tile, reduced resolution, regions, and layers all apply.
 - `ebcot.max_block_segments` grows from 64 to 109 (3 * 37 - 2), the most
   terminated segments a 37-bitplane block can carry under TERMALL; BYPASS at
   37 bitplanes needs 67. QCD exponents and ROI-shifted Mb are accepted up to

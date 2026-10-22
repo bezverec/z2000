@@ -13443,27 +13443,38 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
     return output;
 }
 
-const StrictBlockDecodeJob = struct {
-    width: usize,
-    height: usize,
-    catalog: *const StrictPacketBlockCatalog,
-    component: usize,
-    next_block: *std.atomic.Value(usize),
-    blocks: []const StrictPacketBlock,
-    bands: []const subband.Band,
-    block_order: []const usize,
-    options: DecodeOptions,
-    plane: []i32,
-    profile_worker: bool = false,
-    collect_t1_stats: bool = false,
-    t1_stats: ebcot.DecodePassStats = .{},
-    worker_stats: StrictBlockWorkerStats = .{},
-    result: anyerror!void = {},
-};
+/// One worker of the block-parallel T1 scheduler over i32 coefficients or, on
+/// the wide native path, i64.
+fn StrictBlockDecodeJobFor(comptime Coefficient: type) type {
+    return struct {
+        const Self = @This();
 
-fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
+        width: usize,
+        height: usize,
+        catalog: *const StrictPacketBlockCatalog,
+        component: usize,
+        next_block: *std.atomic.Value(usize),
+        blocks: []const StrictPacketBlock,
+        bands: []const subband.Band,
+        block_order: []const usize,
+        options: DecodeOptions,
+        plane: []Coefficient,
+        profile_worker: bool = false,
+        collect_t1_stats: bool = false,
+        t1_stats: ebcot.DecodePassStats = .{},
+        worker_stats: StrictBlockWorkerStats = .{},
+        result: anyerror!void = {},
+
+        fn run(self: *Self) void {
+            strictBlockDecodeWorker(self);
+        }
+    };
+}
+
+fn strictBlockDecodeWorker(job: anytype) void {
+    const Coefficient = std.meta.Elem(@TypeOf(job.plane));
     const worker_start = if (job.profile_worker) monotonicNs() else 0;
-    var scratch = ebcot.DecodeBlockScratch.init(std.heap.smp_allocator);
+    var scratch = ebcot.DecodeBlockScratchFor(Coefficient).init(std.heap.smp_allocator);
     defer scratch.deinit();
     defer if (job.profile_worker) {
         job.worker_stats.ns = elapsedNs(worker_start);
@@ -13576,6 +13587,10 @@ fn strictBlockDecodeWorker(job: *StrictBlockDecodeJob) void {
 
         switch (job.options.t1_backend) {
             .legacy_mq => {
+                if (Coefficient != i32) {
+                    job.result = CodestreamError.UnsupportedPayload;
+                    return;
+                }
                 const decoded = ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
                     std.heap.smp_allocator,
                     block.encoded_bitplanes,
@@ -13751,10 +13766,8 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     {
         @memset(plane, 0);
     }
-    // The block-parallel workers carry i32 coefficients; the wide path is
-    // single-threaded.
-    const worker_count = if (Coefficient == i32) strictDecodeBlockThreadCount(options, blocks.len) else 1;
-    if (Coefficient == i32 and worker_count > 1) {
+    const worker_count = strictDecodeBlockThreadCount(options, blocks.len);
+    if (worker_count > 1) {
         try validateStrictBlockCatalogCoverageBits(
             allocator,
             width,
@@ -14425,17 +14438,18 @@ fn reconstructStrictComponentBlocksParallel(
     blocks: []const StrictPacketBlock,
     bands: []const subband.Band,
     options: DecodeOptions,
-    plane: []i32,
+    plane: anytype,
     worker_count: usize,
     t1_stats: ?*ebcot.DecodePassStats,
     timings: ?*DecodeTimings,
 ) !void {
+    const Job = StrictBlockDecodeJobFor(std.meta.Elem(@TypeOf(plane)));
     const block_order = try allocator.alloc(usize, blocks.len);
     defer allocator.free(block_order);
     for (block_order, 0..) |*entry, index| entry.* = index;
     std.mem.sort(usize, block_order, blocks, strictDecodeBlockHeavierThan);
 
-    var jobs = try allocator.alloc(StrictBlockDecodeJob, worker_count);
+    var jobs = try allocator.alloc(Job, worker_count);
     defer allocator.free(jobs);
     var next_block = std.atomic.Value(usize).init(0);
     for (jobs) |*job| {
@@ -14460,13 +14474,13 @@ fn reconstructStrictComponentBlocksParallel(
     defer allocator.free(threads);
     var spawned: usize = 0;
     while (spawned < spawn_count) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, strictBlockDecodeWorker, .{&jobs[spawned]}) catch |err| {
+        threads[spawned] = std.Thread.spawn(.{}, Job.run, .{&jobs[spawned]}) catch |err| {
             for (threads[0..spawned]) |thread| thread.join();
             return err;
         };
     }
 
-    strictBlockDecodeWorker(&jobs[spawn_count]);
+    Job.run(&jobs[spawn_count]);
     for (threads[0..spawned]) |thread| thread.join();
 
     for (jobs) |job| try job.result;
@@ -14632,11 +14646,11 @@ fn scatterStrictDecodedBlock(
 }
 
 fn scatterStrictDecodedBlockUnchecked(
-    plane: []i32,
+    plane: anytype,
     plane_width: usize,
     plane_height: usize,
     rect: subband.Rect,
-    decoded: []const i32,
+    decoded: []const std.meta.Elem(@TypeOf(plane)),
 ) !void {
     if (decoded.len != rectArea(rect)) return CodestreamError.InvalidCodestream;
     const end_x = try std.math.add(usize, rect.x, rect.width);
@@ -22220,4 +22234,58 @@ fn bandNominalBitplanesForTransform(
     const total = sum - 1;
     if (total == 0 or total > 31) return CodestreamError.InvalidCodestream;
     return @intCast(total);
+}
+
+test "wide i64 block decode runs on the block-parallel scheduler" {
+    const allocator = std.testing.allocator;
+    const width = 40;
+    const height = 30;
+    var components = [_]native_samples.ComponentLayout{.{
+        .precision = 34,
+        .signed = true,
+        .x0 = 0,
+        .y0 = 0,
+        .x_step = 1,
+        .y_step = 1,
+        .width = width,
+        .height = height,
+    }};
+    var source = try NativeSamplePlanes.initFromLayout(allocator, .{
+        .allocator = allocator,
+        .capabilities = 0,
+        .reference_x0 = 0,
+        .reference_y0 = 0,
+        .reference_x1 = width,
+        .reference_y1 = height,
+        .tile_width = width,
+        .tile_height = height,
+        .tile_origin_x = 0,
+        .tile_origin_y = 0,
+        .components = &components,
+    }, .{});
+    defer source.deinit();
+    var prng = std.Random.DefaultPrng.init(0x2000_7034);
+    const random = prng.random();
+    for (source.planes[0].samples) |*sample| sample.* = random.intRangeAtMost(i64, -(1 << 33), (1 << 33) - 1);
+    const bytes = try encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .block_width = 8, .block_height = 8 });
+    defer allocator.free(bytes);
+
+    var header = try readStrictNativeCodestreamMetadata(allocator, bytes);
+    defer header.deinit();
+    var catalog = try readStrictPacketBlockCatalogWithHeader(allocator, bytes, header);
+    defer catalog.deinit();
+    const roi_shift = componentRoiShiftForHeader(header, 0);
+    try std.testing.expect(nativeComponentNeedsWidePlane(header, catalog, 0));
+
+    const serial = try reconstructStrictComponentCoefficientsAs(i64, allocator, width, height, header.levels, catalog, 0, roi_shift, .{ .threads = 1 }, null);
+    defer allocator.free(serial);
+    var timings = DecodeTimings{};
+    const parallel = try reconstructStrictComponentCoefficientsAs(i64, allocator, width, height, header.levels, catalog, 0, roi_shift, .{ .threads = 4 }, &timings);
+    defer allocator.free(parallel);
+    try std.testing.expectEqual(@as(u64, 4), timings.block_worker_jobs);
+    try std.testing.expectEqualSlices(i64, serial, parallel);
+    // The coefficients really need the wide carrier.
+    var widest: i64 = 0;
+    for (serial) |coefficient| widest = @max(widest, @as(i64, @intCast(@abs(coefficient))));
+    try std.testing.expect(widest > std.math.maxInt(i32));
 }

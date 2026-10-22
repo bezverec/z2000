@@ -454,8 +454,9 @@ Primary public functions:
   (`max_native_payload_precision`), or with a band whose Mb exceeds 31, takes
   the wide path instead: `ebcot.WideDecodeBlockScratch` (T1 over i64, up to
   `ebcot.max_wide_magnitude_bitplanes` = 37) and the checked
-  `wavelet_int.inverse53WideReducedOrigin`, single-threaded per component;
-  RCT over a wide component runs in i64 too. QCD is accepted up to Mb = 37
+  `wavelet_int.inverse53WideReducedOrigin`; its code blocks go through the
+  same block-parallel scheduler as the i32 path (`options.threads`), and RCT
+  over a wide component runs in i64 too. QCD is accepted up to Mb = 37
   and ROI-shifted Mb up to 37; every i32 decode path refuses deeper blocks
   (`EbcotError.InvalidBlock`).
   `options.resolution_reduction`

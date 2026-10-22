@@ -111,9 +111,10 @@ reversible component above 29 bits or with any block Mb above 31, and
 `NativeCoefficientPlane` carries either width through inverse DWT, RCT, and
 level shifting. The T1 decoder is one generic implementation,
 `DecodeBlockScratchFor(i32 | i64)`, whose entry points refuse more bitplanes
-than the coefficient type holds; the i32 instantiation, its SIMD paths, and
-the block-parallel scheduler are unchanged, and the wide path decodes
-single-threaded. The QCD ceiling of Part 1 (Mb = G + epsilon - 1 <= 37) is
+than the coefficient type holds. The block-parallel scheduler is generic the
+same way (`StrictBlockDecodeJobFor(i32 | i64)`), so wide code blocks decode on
+every requested thread; the i32 instantiation and its SIMD paths are
+unchanged. The QCD ceiling of Part 1 (Mb = G + epsilon - 1 <= 37) is
 the wide limit; the same mutated 29-bit fixture relabelled as 30 bits now
 decodes to identical samples on one and four tiles. The legacy `u16`
 decode surface deliberately still rejects signed input, accepts only 8/16-bit
