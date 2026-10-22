@@ -86,9 +86,10 @@ const Marker = enum(u16) {
 /// `color.max_components` (four).
 pub const max_codestream_components = 16;
 /// Metadata parsing is independently bounded from the remaining legacy
-/// strict-pipeline tables. Part 1 uses one-byte COC/QCC component selectors
-/// through 256 components, which is also the default native-sample limit.
-const max_strict_metadata_components: usize = 256;
+/// strict-pipeline tables, up to the Part 1 Csiz maximum. COC, QCC, RGN, and
+/// POC select a component with one byte through 256 components and with two
+/// bytes above that (`splitComponentSelector`).
+const max_strict_metadata_components: usize = 16384;
 /// The i32 T1 carrier supports at most 31 magnitude bitplanes. Reversible
 /// HH coefficients can require two more bits than SIZ precision, so 29 is the
 /// highest native precision admitted by this generation of the pipeline.
@@ -4362,8 +4363,16 @@ fn checkStrictNativeProfile(header: TemporaryHeader, options: DecodeOptions) !vo
             if (options.resolution_reduction > component.levels) return CodestreamError.InvalidCodestream;
         }
     }
-    if (header.mct != .none or headerHasMixedComponentTransforms(header)) {
-        return CodestreamError.UnsupportedPayload;
+    if (headerHasMixedComponentTransforms(header)) return CodestreamError.UnsupportedPayload;
+    switch (header.mct) {
+        .none => {},
+        // RCT over the first three components; every other component passes
+        // through (ISO/IEC 15444-1 G.2). ICT stays closed: native 9/7 rounds
+        // each component before a float colour transform could be applied.
+        .rct => if (header.component_count < 3 or header.transform != .reversible_5_3) {
+            return CodestreamError.UnsupportedPayload;
+        },
+        .ict => return CodestreamError.UnsupportedPayload,
     }
     switch (header.transform) {
         .reversible_5_3 => if (header.quantization != .none) return CodestreamError.UnsupportedPayload,
@@ -4467,6 +4476,104 @@ fn inverseNativeComponentPlane(
     }
 }
 
+/// One native component after inverse DWT and before level shifting. The
+/// reconstructed samples occupy the top-left `inverse.shape` of
+/// `coefficients`, whose row stride is `stride`.
+const NativeReconstructedComponent = struct {
+    coefficients: []i32,
+    stride: usize,
+    inverse: NativeComponentInverse,
+};
+
+fn reconstructNativeComponent(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    component: usize,
+    options: DecodeOptions,
+    workspace: *wavelet_int.Workspace,
+) !NativeReconstructedComponent {
+    const levels = componentLevelsForHeader(header, component);
+    const width = catalog.component_widths[component];
+    const height = catalog.component_heights[component];
+    const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+        allocator,
+        width,
+        height,
+        levels,
+        catalog,
+        component,
+        componentRoiShiftForHeader(header, component),
+        options,
+        null,
+    );
+    errdefer allocator.free(coefficients);
+    const inverse = try inverseNativeComponentPlane(
+        allocator,
+        header,
+        catalog,
+        component,
+        coefficients,
+        width,
+        height,
+        levels,
+        options.resolution_reduction,
+        workspace,
+    );
+    return .{ .coefficients = coefficients, .stride = width, .inverse = inverse };
+}
+
+/// Components 0..2 of a tile coded with the reversible component transform,
+/// reconstructed and returned from Y/Db/Dr to their R/G/B values (ISO/IEC
+/// 15444-1 G.2.2); null when the tile has no component transform. The caller
+/// owns the returned coefficient planes.
+fn reconstructNativeRctComponents(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+    workspace: *wavelet_int.Workspace,
+) !?[3]NativeReconstructedComponent {
+    switch (header.mct) {
+        .none => return null,
+        .ict => return CodestreamError.UnsupportedPayload,
+        .rct => {},
+    }
+    if (header.component_count < 3 or header.transform != .reversible_5_3) {
+        return CodestreamError.UnsupportedPayload;
+    }
+    var planes: [3]NativeReconstructedComponent = undefined;
+    var built: usize = 0;
+    errdefer for (planes[0..built]) |plane| allocator.free(plane.coefficients);
+    while (built < planes.len) : (built += 1) {
+        planes[built] = try reconstructNativeComponent(allocator, header, catalog, built, options, workspace);
+    }
+    // The transformed components share one grid, so their reconstructions
+    // must coincide sample for sample.
+    const shape = planes[0].inverse.shape;
+    for (planes[1..]) |plane| {
+        if (plane.inverse.shape.width != shape.width or plane.inverse.shape.height != shape.height or
+            plane.inverse.shape.x0 != shape.x0 or plane.inverse.shape.y0 != shape.y0)
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+    for (0..shape.height) |row| {
+        const luma = planes[0].coefficients[row * planes[0].stride ..][0..shape.width];
+        const blue_difference = planes[1].coefficients[row * planes[1].stride ..][0..shape.width];
+        const red_difference = planes[2].coefficients[row * planes[2].stride ..][0..shape.width];
+        for (luma, blue_difference, red_difference) |*y0, *y1, *y2| {
+            const green = @as(i64, y0.*) - @divFloor(@as(i64, y1.*) + y2.*, 4);
+            const red = @as(i64, y2.*) + green;
+            const blue = @as(i64, y1.*) + green;
+            y0.* = std.math.cast(i32, red) orelse return CodestreamError.InvalidCodestream;
+            y1.* = std.math.cast(i32, green) orelse return CodestreamError.InvalidCodestream;
+            y2.* = std.math.cast(i32, blue) orelse return CodestreamError.InvalidCodestream;
+        }
+    }
+    return planes;
+}
+
 fn decodeStrictSingleTileNative(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -4528,8 +4635,10 @@ fn decodeStrictSingleTileNative(
     var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
     defer workspace.deinit();
 
+    const rct_components = try reconstructNativeRctComponents(allocator, header, catalog, options, &workspace);
+    defer if (rct_components) |planes| for (planes) |plane| allocator.free(plane.coefficients);
+
     for (0..header.component_count) |component| {
-        const component_levels = componentLevelsForHeader(header, component);
         const component_width = catalog.component_widths[component];
         const component_height = catalog.component_heights[component];
         const plane_layout = output.planes[component].layout;
@@ -4538,32 +4647,18 @@ fn decodeStrictSingleTileNative(
         {
             return CodestreamError.InvalidCodestream;
         }
-        var coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
-            allocator,
-            component_width,
-            component_height,
-            component_levels,
-            catalog,
-            component,
-            componentRoiShiftForHeader(header, component),
-            options,
-            null,
-        );
-        defer allocator.free(coefficients);
+        const from_rct = rct_components != null and component < 3;
+        const reconstructed = if (from_rct)
+            rct_components.?[component]
+        else
+            try reconstructNativeComponent(allocator, header, catalog, component, options, &workspace);
+        defer if (!from_rct) allocator.free(reconstructed.coefficients);
+        const inverse = reconstructed.inverse;
+        var coefficients = reconstructed.coefficients;
         var decoded_width = component_width;
         var decoded_height = component_height;
-        const inverse = try inverseNativeComponentPlane(
-            allocator,
-            header,
-            catalog,
-            component,
-            coefficients,
-            component_width,
-            component_height,
-            component_levels,
-            options.resolution_reduction,
-            &workspace,
-        );
+        var compacted: ?[]i32 = null;
+        defer if (compacted) |plane| allocator.free(plane);
         if (options.resolution_reduction != 0) {
             const compact = try compactTopLeftCoefficientPlane(
                 allocator,
@@ -4573,7 +4668,7 @@ fn decodeStrictSingleTileNative(
                 inverse.shape.width,
                 inverse.shape.height,
             );
-            allocator.free(coefficients);
+            compacted = compact;
             coefficients = compact;
             decoded_width = inverse.shape.width;
             decoded_height = inverse.shape.height;
@@ -6683,15 +6778,18 @@ fn readStrictCodestreamMetadataForProfile(
             // gates below validate each effective coding/QCC pair. Layout:
             // Ccoc(1) Scoc(1) SPcoc(NL,xcb,ycb,cblk,transform,precincts).
             if (!saw_cod) return CodestreamError.InvalidCodestream;
-            if (segment.len < 3) return CodestreamError.InvalidCodestream;
-            if (segment[0] >= component_count) return CodestreamError.UnsupportedPayload;
-            if ((segment[1] & ~@as(u8, 0x01)) != 0) return CodestreamError.InvalidCodestream;
-            if ((segment[1] & 0x01) != (cod_scod & 0x01)) return CodestreamError.UnsupportedPayload;
-            try validateStrictCocCodingPayload(segment[2..], segment[1]);
-            const coc_component = segment[0];
+            const selected = try splitComponentSelector(segment, component_count);
+            const coc_payload = selected.rest;
+            if (coc_payload.len < 2) return CodestreamError.InvalidCodestream;
+            if (selected.component >= component_count) return CodestreamError.UnsupportedPayload;
+            const scoc = coc_payload[0];
+            if ((scoc & ~@as(u8, 0x01)) != 0) return CodestreamError.InvalidCodestream;
+            if ((scoc & 0x01) != (cod_scod & 0x01)) return CodestreamError.UnsupportedPayload;
+            try validateStrictCocCodingPayload(coc_payload[1..], scoc);
+            const coc_component = selected.component;
             if (coc_component_seen[coc_component]) return CodestreamError.InvalidCodestream;
             coc_component_seen[coc_component] = true;
-            const spcoc = segment[2..];
+            const spcoc = coc_payload[1..];
             const coding = &component_coding[coc_component];
             coding.levels = spcoc[0];
             coding.precinct_count = coding.levels + 1;
@@ -6699,7 +6797,7 @@ fn readStrictCodestreamMetadataForProfile(
             coding.block_height = try codeBlockSizeFromCodExponent(spcoc[2]);
             coding.code_block_style = try parseCodeBlockStyleByte(spcoc[3]);
             coding.transform = @fromBackingInt(@intCast(spcoc[4]));
-            if ((segment[1] & 0x01) == 0) {
+            if ((scoc & 0x01) == 0) {
                 for (coding.precincts[0..coding.precinct_count]) |*precinct| {
                     precinct.* = .{ .width = 32768, .height = 32768 };
                 }
@@ -6712,8 +6810,8 @@ fn readStrictCodestreamMetadataForProfile(
                 }
             }
             if (coc_payload_first.len == 0) {
-                coc_payload_first = segment[1..];
-            } else if (!std.mem.eql(u8, segment[1..], coc_payload_first)) {
+                coc_payload_first = coc_payload;
+            } else if (!std.mem.eql(u8, coc_payload, coc_payload_first)) {
                 coc_payloads_uniform = false;
             }
         } else if (marker == @backingInt(Marker.qcc)) {
@@ -6723,19 +6821,20 @@ fn readStrictCodestreamMetadataForProfile(
             // QCD/QCC independently because T1 Mb and dequantization consume
             // component-local exponents and step mantissas.
             if (!saw_cod or !saw_qcd) return CodestreamError.InvalidCodestream;
-            if (segment.len < 1) return CodestreamError.InvalidCodestream;
-            if (segment[0] >= component_count) return CodestreamError.UnsupportedPayload;
-            const qcc_component = segment[0];
+            const selected = try splitComponentSelector(segment, component_count);
+            const qcc_payload = selected.rest;
+            if (selected.component >= component_count) return CodestreamError.UnsupportedPayload;
+            const qcc_component = selected.component;
             if (qcc_component_seen[qcc_component]) return CodestreamError.InvalidCodestream;
             qcc_component_seen[qcc_component] = true;
-            qcc_component_payloads[qcc_component] = segment[1..];
+            qcc_component_payloads[qcc_component] = qcc_payload;
             if (mixed_component_precision) {
                 // Mixed reversible components legitimately carry different
                 // QCC exponents. Keep each override instead of collapsing it
                 // into the historical uniform-QCC policy below.
             } else if (qcc_payload_first.len == 0) {
-                qcc_payload_first = segment[1..];
-            } else if (!std.mem.eql(u8, segment[1..], qcc_payload_first)) {
+                qcc_payload_first = qcc_payload;
+            } else if (!std.mem.eql(u8, qcc_payload, qcc_payload_first)) {
                 // COC may legally follow QCC in the main header (T.803 p0_06
                 // does this). Defer the divergent-QCC profile decision until
                 // every component coding override is known.
@@ -6910,8 +7009,12 @@ fn readStrictCodestreamMetadataForProfile(
         precincts[0..precinct_count],
         component_coding[max_levels_component].precincts[0..precinct_count],
     );
-    // Four components with MCT: RCT or ICT over the first three, alpha independent.
-    if (parsed_mct != .none and component_count != 3 and component_count != 4) {
+    // Four components with MCT: RCT or ICT over the first three, alpha
+    // independent. The native profile applies RCT to the first three of any
+    // component count.
+    if (parsed_mct != .none and component_count != 3 and component_count != 4 and
+        !(precision_profile == .native and parsed_mct == .rct and component_count > 4))
+    {
         return CodestreamError.UnsupportedPayload;
     }
     const parsed_grid_value = parsed_grid orelse return CodestreamError.InvalidCodestream;
@@ -6920,8 +7023,10 @@ fn readStrictCodestreamMetadataForProfile(
         parsed_progression == .rpcl and !mixed_component_precision and !subsampled_components and
         parsed_transform == .reversible_5_3 and parsed_quantization == .none and
         !component_transforms_match_main;
+    // RCT is allowed: the native decoder checks that the three transformed
+    // components reconstruct onto one grid before inverting it.
     const native_reversible_component_local = precision_profile == .native and
-        parsed_grid_value.isSingleTile() and parsed_mct == .none and !subsampled_components and
+        parsed_grid_value.isSingleTile() and parsed_mct != .ict and !subsampled_components and
         parsed_transform == .reversible_5_3 and parsed_quantization == .none and
         component_transforms_match_main;
     const general_component_local_mixed_transform = parsed_grid_value.isSingleTile() and
@@ -7532,18 +7637,35 @@ test "strict main-header profile signaling validates CAP PRF and Rsiz" {
 }
 
 const StrictRgnInfo = struct {
-    component: u8,
+    component: u16,
     shift: u8,
 };
 
 /// Parses the Part 1 RGN layout used while Csiz <= 256. Only the Maxshift
 /// implicit ROI style (Srgn=0) belongs to the bounded native decode profile.
 fn parseStrictRgnSegment(segment: []const u8, component_count: u16) !StrictRgnInfo {
-    if (segment.len != 3) return CodestreamError.InvalidCodestream;
-    const component = segment[0];
-    if (component >= component_count) return CodestreamError.InvalidCodestream;
-    if (segment[1] != 0) return CodestreamError.UnsupportedPayload;
-    return .{ .component = component, .shift = segment[2] };
+    const selected = try splitComponentSelector(segment, component_count);
+    if (selected.rest.len != 2) return CodestreamError.InvalidCodestream;
+    if (selected.component >= component_count) return CodestreamError.InvalidCodestream;
+    if (selected.rest[0] != 0) return CodestreamError.UnsupportedPayload;
+    return .{ .component = selected.component, .shift = selected.rest[1] };
+}
+
+const ComponentSelector = struct {
+    component: u16,
+    rest: []const u8,
+};
+
+/// Splits a COC, QCC, or RGN payload into its component index and the rest.
+/// The index is one byte when Csiz <= 256 and two bytes otherwise
+/// (ISO/IEC 15444-1 A.6.2, A.6.3, A.6.5).
+fn splitComponentSelector(segment: []const u8, component_count: u16) !ComponentSelector {
+    const width: usize = if (component_count <= 256) 1 else 2;
+    if (segment.len < width) return CodestreamError.InvalidCodestream;
+    return .{
+        .component = if (width == 1) segment[0] else readU16Be(segment, 0),
+        .rest = segment[width..],
+    };
 }
 
 test "strict RGN parser accepts Maxshift and rejects malformed styles" {
@@ -7553,6 +7675,13 @@ test "strict RGN parser accepts Maxshift and rejects malformed styles" {
     try std.testing.expectError(CodestreamError.InvalidCodestream, parseStrictRgnSegment(&.{ 0, 0 }, 3));
     try std.testing.expectError(CodestreamError.InvalidCodestream, parseStrictRgnSegment(&.{ 3, 0, 9 }, 3));
     try std.testing.expectError(CodestreamError.UnsupportedPayload, parseStrictRgnSegment(&.{ 0, 1, 9 }, 3));
+
+    // Above 256 components the selector takes two bytes.
+    const wide = try parseStrictRgnSegment(&.{ 1, 0, 0, 11 }, 300);
+    try std.testing.expectEqual(@as(u16, 256), wide.component);
+    try std.testing.expectEqual(@as(u8, 11), wide.shift);
+    try std.testing.expectError(CodestreamError.InvalidCodestream, parseStrictRgnSegment(&.{ 0, 0, 11 }, 300));
+    try std.testing.expectError(CodestreamError.InvalidCodestream, parseStrictRgnSegment(&.{ 1, 44, 0, 11 }, 300));
 }
 
 test "tile RGN overrides inherited main-header Maxshift" {
@@ -12020,34 +12149,18 @@ fn decodeStrictMultiTileNativeToSink(
         const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
             return CodestreamError.InvalidCodestream;
         windows.release();
+        const rct_components = try reconstructNativeRctComponents(allocator, tile_header, block_catalog, options, &workspace);
+        defer if (rct_components) |planes| for (planes) |plane| allocator.free(plane.coefficients);
         for (0..header.component_count) |component| {
-            const component_levels = componentLevelsForHeader(tile_header, component);
             const source_width = block_catalog.component_widths[component];
-            const source_height = block_catalog.component_heights[component];
-            const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
-                allocator,
-                source_width,
-                source_height,
-                component_levels,
-                block_catalog,
-                component,
-                componentRoiShiftForHeader(tile_header, component),
-                options,
-                null,
-            );
-            defer allocator.free(coefficients);
-            const inverse = try inverseNativeComponentPlane(
-                allocator,
-                tile_header,
-                block_catalog,
-                component,
-                coefficients,
-                source_width,
-                source_height,
-                component_levels,
-                options.resolution_reduction,
-                &workspace,
-            );
+            const from_rct = rct_components != null and component < 3;
+            const reconstructed = if (from_rct)
+                rct_components.?[component]
+            else
+                try reconstructNativeComponent(allocator, tile_header, block_catalog, component, options, &workspace);
+            defer if (!from_rct) allocator.free(reconstructed.coefficients);
+            const coefficients = reconstructed.coefficients;
+            const inverse = reconstructed.inverse;
             const tile_width = inverse.shape.width;
             const tile_height = inverse.shape.height;
 
@@ -17465,23 +17578,23 @@ fn readTilePartHeaderMarkers(
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
             if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
-            const segment = bytes[cursor + 2 .. cursor + segment_length];
-            if (segment.len < 3) return CodestreamError.InvalidCodestream;
-            const component = @as(u16, segment[0]);
+            const selected = try splitComponentSelector(bytes[cursor + 2 .. cursor + segment_length], target.component_count);
+            if (selected.rest.len < 2) return CodestreamError.InvalidCodestream;
+            const component = selected.component;
             if (component >= target.component_count) return CodestreamError.UnsupportedPayload;
-            const scoc = segment[1];
+            const scoc = selected.rest[0];
             if ((scoc & ~@as(u8, 0x01)) != 0) return CodestreamError.InvalidCodestream;
             const component_override = try strictTileComponentOverride(allocator, target.override, component);
             if (component_override.saw_coc) return CodestreamError.InvalidCodestream;
-            component_override.coding = try parseStrictTileComponentCoding(segment[2..], scoc, target);
+            component_override.coding = try parseStrictTileComponentCoding(selected.rest[1..], scoc, target);
             component_override.saw_coc = true;
         } else if (marker == @backingInt(Marker.qcc)) {
             const target = coding_target orelse return CodestreamError.UnsupportedPayload;
             if (!target.allow_coding_markers) return CodestreamError.UnsupportedPayload;
             if (!target.allowed) return CodestreamError.InvalidCodestream;
-            const segment = bytes[cursor + 2 .. cursor + segment_length];
-            if (segment.len < 2) return CodestreamError.InvalidCodestream;
-            const component = @as(u16, segment[0]);
+            const selected = try splitComponentSelector(bytes[cursor + 2 .. cursor + segment_length], target.component_count);
+            if (selected.rest.len < 1) return CodestreamError.InvalidCodestream;
+            const component = selected.component;
             if (component >= target.component_count) return CodestreamError.UnsupportedPayload;
             const component_override = try strictTileComponentOverride(allocator, target.override, component);
             if (component_override.saw_qcc) return CodestreamError.InvalidCodestream;
@@ -17498,7 +17611,7 @@ fn readTilePartHeaderMarkers(
             else
                 target.transform;
             component_override.qcd = try validateStrictQcdSegment(
-                segment[1..],
+                selected.rest,
                 target.bit_depth,
                 levels,
                 transform,
@@ -17516,7 +17629,10 @@ fn readTilePartHeaderMarkers(
             } else {
                 // Replay walks consume the already validated effective header;
                 // retain structural/style validation without rebuilding state.
-                _ = try parseStrictRgnSegment(segment, @intCast(max_strict_metadata_components));
+                // The component count is not known here, so either selector
+                // width is accepted.
+                if (segment.len != 3 and segment.len != 4) return CodestreamError.InvalidCodestream;
+                if (segment[segment.len - 2] != 0) return CodestreamError.UnsupportedPayload;
             }
         } else if (isUnsupportedTilePartHeaderMarker(marker)) {
             return CodestreamError.UnsupportedPayload;

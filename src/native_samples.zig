@@ -17,7 +17,9 @@ pub const NativeSampleError = error{
 };
 
 pub const Limits = struct {
-    max_components: usize = 256,
+    // Part 1 allows up to 16384 components (Csiz); sample totals stay bounded
+    // by the two limits below.
+    max_components: usize = 16384,
     max_reference_pixels: u64 = 1 << 32,
     max_total_component_samples: u64 = 1 << 32,
 };

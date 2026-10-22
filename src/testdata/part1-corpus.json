@@ -1519,19 +1519,48 @@
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
         "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "legal T.803 profile-0 codestream; component counts above the current four-component public envelope fail closed",
-      "features": ["siz-bounded-unsigned-components"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
-      "references": [{
-        "path": "reference_class0_profile0/c0p0_13.pgx",
-        "sha256": "7f2bc12d19df4b2dd7b651c48d87c419ba8caa0cb7ec76424f672ba0ab53261c",
-        "format": "pgx",
-        "component": 0,
-        "resolution_reduction": 0,
-        "max_peak_error": 0,
-        "max_mse": 0
-      }]
+      "oracle": "T.803 class-1 c1p0_13-0..3 PGX references for components 0 to 3, exact; all 257 components also equal OpenJPEG 2.5.4 and Kakadu 8.4.1. The class-0 c0p0_13.pgx holds 1, which is component 1 in all three decoders, so it is not pinned to component 0 here",
+      "features": ["siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
+      "expectation": "decode_pass",
+      "decoder": "native",
+      "references": [
+        {
+          "path": "reference_class1_profile0/c1p0_13-0.pgx",
+          "sha256": "a3250795aa7c31d0caf0a9ad706e21652060768b404210624e5dd695787dbc07",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class1_profile0/c1p0_13-1.pgx",
+          "sha256": "ff079e7fe2ca5fd542f6b85bda838fa9f11428a59d7584f6523cb649cb8b79c7",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class1_profile0/c1p0_13-2.pgx",
+          "sha256": "83d2079dcfaee85fcd75e8a23d6dd69686b966ba334d2c8ca9a25b2bbc7079b0",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class1_profile0/c1p0_13-3.pgx",
+          "sha256": "d1bb447c46cf81b0673ff570eb5d5f940aeebd8e6fee68f21e061c6d5cb064ae",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
     },
     {
       "id": "t803-profile0-15-signed-rgn-poc",
@@ -3979,6 +4008,174 @@
           "format": "pgx",
           "component": 0,
           "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-260-component-rct",
+      "path": "src/testdata/kakadu-260-component-rct.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "b5374ead00a6be2ddca269dd5790673433f473f1375cf269fe70747007f32ca2",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "8x6, 260 unsigned 8-bit components, reversible with RCT over components 0..2, two levels except component 258, whose COC and QCC carry the two-byte component selector Part 1 uses above 256 components. The native path used to stop at 256 components, read one-byte selectors only, and reject MCT",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and seven source PGX planes committed; producer application not redistributed",
+        "command": "seeded Python writes c000..c259.pgm (random samples, every seventh component a ramp); kdu_compress -i c000.pgm,...,c259.pgm -o src/testdata/kakadu-260-component-rct.j2c Creversible=yes Cycc=yes Clevels=2 Clevels:C258=1 -num_threads 0"
+      },
+      "oracle": "lossless: all 260 components equal the encoder input; components 0-3 and 257-259 are pinned",
+      "features": ["siz-bounded-unsigned-components", "cod-qcd-component-overrides", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-260-component-rct-source-c0.pgx",
+          "sha256": "1162c41b64c710ebc8c14ea44dee44bb8fe9df3b2e8cf8d9174a74f6d8671fcc",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-260-component-rct-source-c1.pgx",
+          "sha256": "f4cdb15e51ecedd4e676c52a934052bddf726fc9e1fe7de5f181965ba336334e",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-260-component-rct-source-c2.pgx",
+          "sha256": "d7e3aa3c922b7c8f4587f3a80a6f4123c2a764027a0805aeb0bf42bf564d2fe7",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-260-component-rct-source-c3.pgx",
+          "sha256": "c549aa3366eedebc1eb02920476ede1653467afda699576db64319743831fe81",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-260-component-rct-source-c257.pgx",
+          "sha256": "267378e8b9424ef68c686332d09683e00d73b4bac7474c65e1aaeefa20ce9ee3",
+          "format": "pgx",
+          "component": 257,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-260-component-rct-source-c258.pgx",
+          "sha256": "e6b9fd3c306e902f6e148fcdcddb38e24e000dd2f3dbcde635a0fea6401764af",
+          "format": "pgx",
+          "component": 258,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-260-component-rct-source-c259.pgx",
+          "sha256": "db7b357df43549812ab8535d06f50812cce6a8aa774f6717d8801dda3ed1334b",
+          "format": "pgx",
+          "component": 259,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-five-component-rct-tiles",
+      "path": "src/testdata/kakadu-five-component-rct-tiles.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "16b97c9d19f7a9911023585b4c978829fa0a794132999763223d586bb0d5dfb4",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "40x24, five unsigned 8-bit components on 16x16 tiles, reversible with RCT over components 0..2 and components 3 and 4 untransformed",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream, source PGX planes, and Kakadu reduction-1 PGX planes committed; producer application not redistributed",
+        "command": "magick -seed 21 -size 40x24 plasma:fractal -depth 8 -separate p%d.pgm; magick -seed 22 ... q%d.pgm; components p0 p1 p2 q0 q1; kdu_compress -i c0.pgm,...,c4.pgm -o src/testdata/kakadu-five-component-rct-tiles.j2c Creversible=yes Cycc=yes Clevels=2 Stiles={16,16} -num_threads 0; kdu_expand -reduce 1 -num_threads 0"
+      },
+      "oracle": "lossless: every component equals the encoder input; at reduction 1 components 0 and 3 equal kdu_expand 8.4.1",
+      "features": ["tiles-and-tile-parts", "reversible-53", "selective-streaming-decode"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-five-component-rct-tiles-source-c0.pgx",
+          "sha256": "655ee48df41ac660dc1cf4b92c0502cc4ceeb038682767f78a0dec434a71921a",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-rct-tiles-source-c1.pgx",
+          "sha256": "135f30e8d569365599a5498dac90fa5dd9e19bf7b1e32d94aab21bbd842fb4df",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-rct-tiles-source-c2.pgx",
+          "sha256": "cfb2d9ba449e731456858fa528b50d9cf3d6b07c77af70849d81ea1f20f70871",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-rct-tiles-source-c3.pgx",
+          "sha256": "f28b9ba1e1e3967e0c1b7ed03f044008527bf7362a7588d3103d87f8f89d42c8",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-rct-tiles-source-c4.pgx",
+          "sha256": "3ea57440032ece2b861db0a1fe3199b32ffd06a9c8f7a1d97c28d86d44c047b0",
+          "format": "pgx",
+          "component": 4,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-rct-tiles-r1-c0.pgx",
+          "sha256": "f0405dee86c14a6afb8bf80862ee652022215e17835d34eccc3d61729e30b529",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-rct-tiles-r1-c3.pgx",
+          "sha256": "107b738fc995c22d513fe07121983a0b98eec849d0504bdd9cf6ab9c387cb22d",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 1,
           "max_peak_error": 0,
           "max_mse": 0.0
         }

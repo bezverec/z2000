@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### T.803 p0_13: 257 Components And Native RCT
+
+- The native decoder now accepts the Part 1 maximum of 16384 components
+  (Csiz) instead of 256, and `NativeSampleLimits.max_components` defaults to
+  it; the sample and pixel totals stay bounded as before. Above 256
+  components COC, QCC, and RGN read their two-byte component selector
+  (`splitComponentSelector`); POC already did.
+- The native path applies RCT to components 0..2 when COD signals a
+  component transform on a reversible stream, for any component count from
+  three up, on single- and multi-tile streams and at reduced resolution. The
+  three components are reconstructed first and must share one grid; the
+  others pass through. ICT stays closed on this path.
+- T.803 `p0_13` (one pixel, 257 components, RCT, a component COC/QCC, RGN,
+  and POC) now decodes; all 257 components equal OpenJPEG 2.5.4 and Kakadu
+  8.4.1, and components 0 to 3 equal the class-1 references. The class-0
+  reference holds 1, which is component 1 in all three decoders, so it is not
+  pinned to component 0. Two committed Kakadu streams fail on the previous
+  code: 260 components with RCT and a two-byte-selector COC/QCC, lossless in
+  all 260 components, and five components with RCT on 16x16 tiles, lossless
+  and equal to Kakadu at reduction 1. 15 of the 16 T.803 profile-0 streams
+  pass; `p0_05` remains.
+
 ### Multipart POC Under RLCP
 
 - A POC schedule over multiple tile-parts was accepted under every main

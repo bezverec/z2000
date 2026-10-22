@@ -82,16 +82,20 @@ Full and requested lower DWT resolutions preserve reduced reference/component
 origins and dimensions while pruning discarded packet bodies before partial
 synthesis. Signed output receives no DC level shift; unsigned output receives
 `2^(precision-1)`. Reversible native decode is caller-limited up to the
-256-component strict metadata boundary and is independently pinned at 19
-components across four tiles. Independent Kakadu fixtures pin
+Part 1 maximum of 16384 components and is independently pinned at 19
+components across four tiles and at 260 components. With RCT, components 0..2
+of each tile are reconstructed first, checked to share one grid, and inverted
+from Y/Db/Dr before level shifting; every other component passes through. ICT
+stays closed because native 9/7 rounds each component before a float colour
+transform could apply. Independent Kakadu fixtures pin
 5/7/8/12/13/16/19/20/23/29-bit T1/DWT payload reconstruction. The signed
 7/13/23-bit four-tile fixture also pins 1x1, 2x1, and 2x2 component sampling
 at full and reduced resolution. The 29-bit four-tile
 fixture reaches the current `i32` T1 boundary: reversible HH can add two
 magnitude bits, while T1 admits at most 31. Native inverse lifting therefore
 uses `i64` sums with checked `i32` stores for both full and reduced synthesis.
-Component counts above 256 and precisions beyond 29 bits remain fail-closed
-rather than being silently truncated; a 30-bit mutation pins the precision boundary. The legacy `u16`
+Precisions beyond 29 bits remain fail-closed rather than being silently
+truncated; a 30-bit mutation pins the precision boundary. The legacy `u16`
 decode surface deliberately still rejects signed input, accepts only 8/16-bit
 precision, and retains `color.max_components` (four).
 
@@ -107,8 +111,9 @@ outer collections after all nested state. Precinct groups release every active
 tag-tree/lblock group before their per-component and outer slot slices. Direct
 19-component tests pin storage, planning, SIZ parsing, persistent precinct
 state, and full/reduced multi-tile native assembly beyond the historical slot count. Metadata
-parsing is bounded at 256 components, matching the default native-sample limit
-and the Part 1 one-byte COC/QCC selector range. A direct 19-job regression pins
+parsing is bounded at the Part 1 maximum of 16384 components, matching the
+default native-sample limit; COC, QCC, RGN, and POC switch to two-byte
+component selectors above 256 components (`splitComponentSelector`). A direct 19-job regression pins
 the parallel runner beyond its historical slot count. Legacy colour and encode
 carriers retain their intentional narrower bounds; the generic irreversible
 output still uses the bounded legacy colour carrier and is not yet a public
