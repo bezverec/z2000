@@ -7,6 +7,11 @@ Kakadu, OpenJPEG, and Grok, and compares every sample with the input.
 Usage: python -I tools/wide_encode_interop.py <workdir> <precision,...> [encoder flags...]
 Tool paths default to this machine's installs and can be overridden with the
 Z2000_BIN, KDU_EXPAND, OPJ_DECOMPRESS, and GRK_DECOMPRESS environment variables.
+Z2000_WIDE_CONTENT=smooth swaps the default content (a ramp with noise of
+2^(precision-3) and both extremes next to each other) for a ramp with 2^24
+noise and the extremes far apart: from 35 bits the default content can need
+more than the 37 magnitude bitplanes Part 1 can signal, which the encoder
+refuses, while smooth content fits up to 38 bits.
 """
 import os, random, struct, subprocess, sys
 
@@ -14,6 +19,7 @@ Z = os.path.abspath(os.environ.get('Z2000_BIN', os.path.join('zig-out', 'bin', '
 KDU = os.environ.get('KDU_EXPAND', r'C:/Program Files/Kakadu/Kakadu Demo-Apps/kdu_expand.exe')
 OPJ = os.environ.get('OPJ_DECOMPRESS', r'C:/tools/openjpeg-v2.5.4-windows-x64/bin/opj_decompress.exe')
 GRK = os.environ.get('GRK_DECOMPRESS', r'C:/tools/grok-windows-20.4.12/bin/grk_decompress.exe')
+SMOOTH = os.environ.get('Z2000_WIDE_CONTENT') == 'smooth'
 
 
 def bytes_per_sample(precision):
@@ -100,9 +106,13 @@ def main():
                     for y in range(height):
                         for x in range(width):
                             base = lo + ((x * 7 + y * 13 + c * 5) * (hi - lo)) // (width * 7 + height * 13 + 15)
-                            noise = rng.randint(-(1 << max(0, precision - 3)), 1 << max(0, precision - 3))
+                            spread = 24 if SMOOTH else max(0, precision - 3)
+                            noise = rng.randint(-(1 << spread), 1 << spread)
                             samples.append(min(hi, max(lo, base + noise)))
-                    samples[0], samples[1] = lo, hi
+                    if SMOOTH:
+                        samples[0], samples[-1] = lo, hi
+                    else:
+                        samples[0], samples[1] = lo, hi
                     comps.append((precision, signed, samples))
                 write_zraw(name + '.zraw', width, height, comps)
                 enc = run([Z, 'zraw-to-j2k', name + '.zraw', name + '.j2k'] + extra)

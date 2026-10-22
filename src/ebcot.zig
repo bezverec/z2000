@@ -517,7 +517,7 @@ fn directCanUseRunStripeFast(scratch: *const DirectBlockScratch, x: usize, strip
     return expected;
 }
 
-fn decodeCanUseRunStripeFast(scratch: *const DecodeBlockScratch, x: usize, stripe_y: usize, style: CodeBlockStyle) bool {
+fn decodeCanUseRunStripeFast(scratch: anytype, x: usize, stripe_y: usize, style: CodeBlockStyle) bool {
     const expected = nbfCanUseRunStripe(scratch.nb_flags.items, scratch.nb_stride, x, stripe_y, style);
     if (comptime use_packed_t1_context_flags) {
         return packedT1CanUseRunStripeChecked(
@@ -763,7 +763,7 @@ fn directClearNbfVisit(scratch: *DirectBlockScratch) void {
     if (comptime maintain_packed_t1_context_flags) packedT1ClearVisited(scratch.packed_t1_flags.items);
 }
 
-fn decodeClearNbfVisit(scratch: *DecodeBlockScratch) void {
+fn decodeClearNbfVisit(scratch: anytype) void {
     nbfClearVisit(scratch.nb_flags.items);
     if (comptime maintain_packed_t1_context_flags) packedT1ClearVisited(scratch.packed_t1_flags.items);
 }
@@ -772,7 +772,7 @@ fn directMarkPackedT1Visited(scratch: *DirectBlockScratch, x: usize, y: usize) v
     if (comptime maintain_packed_t1_context_flags) packedT1MarkVisited(scratch.packed_t1_flags.items, scratch.width, x, y);
 }
 
-fn decodeMarkPackedT1Visited(scratch: *DecodeBlockScratch, x: usize, y: usize) void {
+fn decodeMarkPackedT1Visited(scratch: anytype, x: usize, y: usize) void {
     if (comptime maintain_packed_t1_context_flags) packedT1MarkVisited(scratch.packed_t1_flags.items, scratch.width, x, y);
 }
 
@@ -780,7 +780,7 @@ fn directMarkPackedT1Refined(scratch: *DirectBlockScratch, x: usize, y: usize) v
     if (comptime maintain_packed_t1_context_flags) packedT1MarkRefined(scratch.packed_t1_flags.items, scratch.width, x, y);
 }
 
-fn decodeMarkPackedT1Refined(scratch: *DecodeBlockScratch, x: usize, y: usize) void {
+fn decodeMarkPackedT1Refined(scratch: anytype, x: usize, y: usize) void {
     if (comptime maintain_packed_t1_context_flags) packedT1MarkRefined(scratch.packed_t1_flags.items, scratch.width, x, y);
 }
 
@@ -788,7 +788,7 @@ fn directMarkPackedT1Significant(scratch: *DirectBlockScratch, x: usize, y: usiz
     if (comptime maintain_packed_t1_context_flags) packedT1MarkSignificant(scratch.packed_t1_flags.items, scratch.width, scratch.height, x, y, negative);
 }
 
-fn decodeMarkPackedT1Significant(scratch: *DecodeBlockScratch, x: usize, y: usize, negative: bool) void {
+fn decodeMarkPackedT1Significant(scratch: anytype, x: usize, y: usize, negative: bool) void {
     if (comptime maintain_packed_t1_context_flags) packedT1MarkSignificant(scratch.packed_t1_flags.items, scratch.width, scratch.height, x, y, negative);
 }
 
@@ -1040,7 +1040,7 @@ inline fn directT1RefinementDecision(scratch: *const DirectBlockScratch, x: usiz
     return expected;
 }
 
-fn decodeT1Decision(scratch: *const DecodeBlockScratch, x: usize, y: usize, style: CodeBlockStyle) PackedT1Decision {
+fn decodeT1Decision(scratch: anytype, x: usize, y: usize, style: CodeBlockStyle) PackedT1Decision {
     const ci = y & 3;
     const stripe_y = y & ~@as(usize, 3);
     const causal_row = style.vertical_causal and ci == 3;
@@ -1055,7 +1055,7 @@ fn decodeT1Decision(scratch: *const DecodeBlockScratch, x: usize, y: usize, styl
     return expected;
 }
 
-inline fn decodeT1SignificanceCandidate(scratch: *const DecodeBlockScratch, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) bool {
+inline fn decodeT1SignificanceCandidate(scratch: anytype, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) bool {
     const ci = y & 3;
     const causal_row = style.vertical_causal and ci == 3;
     const expected = nbfT1SignificanceCandidateFromWord(sample_flags, causal_row);
@@ -1069,7 +1069,7 @@ inline fn decodeT1SignificanceCandidate(scratch: *const DecodeBlockScratch, x: u
     return expected;
 }
 
-inline fn decodeT1SignificanceDecision(scratch: *const DecodeBlockScratch, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) T1SignificanceDecision {
+inline fn decodeT1SignificanceDecision(scratch: anytype, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) T1SignificanceDecision {
     const ci = y & 3;
     const causal_row = style.vertical_causal and ci == 3;
     const expected = nbfT1SignificanceDecisionFromWord(sample_flags, style, causal_row);
@@ -1084,7 +1084,7 @@ inline fn decodeT1SignificanceDecision(scratch: *const DecodeBlockScratch, x: us
     return expected;
 }
 
-inline fn decodeT1ZeroContext(scratch: *const DecodeBlockScratch, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) Context {
+inline fn decodeT1ZeroContext(scratch: anytype, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) Context {
     const ci = y & 3;
     const causal_row = style.vertical_causal and ci == 3;
     const expected = nbfT1ZeroContextFromWord(sample_flags, style, causal_row);
@@ -1103,7 +1103,7 @@ inline fn decodeT1ZeroContext(scratch: *const DecodeBlockScratch, x: usize, y: u
     return expected;
 }
 
-inline fn decodeT1SignCoding(scratch: *const DecodeBlockScratch, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) SignCoding {
+inline fn decodeT1SignCoding(scratch: anytype, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) SignCoding {
     const ci = y & 3;
     const causal_row = style.vertical_causal and ci == 3;
     const f = if (causal_row) sample_flags & nbf_causal_mask else sample_flags;
@@ -1123,7 +1123,7 @@ inline fn decodeT1SignCoding(scratch: *const DecodeBlockScratch, x: usize, y: us
     return expected;
 }
 
-inline fn decodeT1RefinementDecision(scratch: *const DecodeBlockScratch, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) T1RefinementDecision {
+inline fn decodeT1RefinementDecision(scratch: anytype, x: usize, y: usize, sample_flags: u16, style: CodeBlockStyle) T1RefinementDecision {
     const ci = y & 3;
     const causal_row = style.vertical_causal and ci == 3;
     const expected = nbfT1RefinementDecisionFromWord(sample_flags, causal_row);
@@ -1138,7 +1138,7 @@ inline fn decodeT1RefinementDecision(scratch: *const DecodeBlockScratch, x: usiz
     return expected;
 }
 
-inline fn decodeT1RefinementCandidate(scratch: *const DecodeBlockScratch, x: usize, y: usize, sample_flags: u16) bool {
+inline fn decodeT1RefinementCandidate(scratch: anytype, x: usize, y: usize, sample_flags: u16) bool {
     const expected = (sample_flags & nbf_sig_self) != 0 and (sample_flags & nbf_visit) == 0;
     if (comptime maintain_packed_t1_context_flags) {
         const actual = packedRefinementCandidate(scratch.packed_t1_flags.items[pcfIndex(scratch.width, x, y)], y & 3);
@@ -1718,61 +1718,84 @@ pub const DirectBlockScratch = struct {
     }
 };
 
-pub const DecodeBlockScratch = struct {
-    allocator: std.mem.Allocator,
-    flags: std.ArrayList(u8) = .empty,
-    significant_words: std.ArrayList(u64) = .empty,
-    coeffs: std.ArrayList(i32) = .empty,
-    row_words: usize = 0,
-    width: usize = 0,
-    height: usize = 0,
-    nb_flags: std.ArrayList(u16) = .empty,
-    nb_stride: usize = 0,
-    packed_t1_flags: std.ArrayList(u32) = .empty,
-    iso_decoder: ?mq_iso.Decoder = null,
+/// Reusable T1 decode state over a coefficient type: i32 for blocks of up to
+/// 31 magnitude bitplanes, i64 for the wide path up to the Part 1 ceiling of
+/// 37 (`max_wide_magnitude_bitplanes`).
+pub fn DecodeBlockScratchFor(comptime CoefficientType: type) type {
+    return struct {
+        const Self = @This();
+        pub const Coefficient = CoefficientType;
+        /// Deepest magnitude bitplane count the coefficient type holds.
+        pub const max_bitplanes: u8 = if (CoefficientType == i32) 31 else max_wide_magnitude_bitplanes;
 
-    pub fn init(allocator: std.mem.Allocator) DecodeBlockScratch {
-        return .{ .allocator = allocator };
-    }
+        allocator: std.mem.Allocator,
+        flags: std.ArrayList(u8) = .empty,
+        significant_words: std.ArrayList(u64) = .empty,
+        coeffs: std.ArrayList(Coefficient) = .empty,
+        row_words: usize = 0,
+        width: usize = 0,
+        height: usize = 0,
+        nb_flags: std.ArrayList(u16) = .empty,
+        nb_stride: usize = 0,
+        packed_t1_flags: std.ArrayList(u32) = .empty,
+        iso_decoder: ?mq_iso.Decoder = null,
 
-    pub fn deinit(self: *DecodeBlockScratch) void {
-        if (self.iso_decoder) |*decoder| decoder.deinit();
-        self.flags.deinit(self.allocator);
-        self.significant_words.deinit(self.allocator);
-        self.coeffs.deinit(self.allocator);
-        self.nb_flags.deinit(self.allocator);
-        self.packed_t1_flags.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    /// Reusable ISO MQ decoder: INITDEC on the given segment and reset the
-    /// JPEG2000 context states, without reallocating the context array.
-    fn isoMqDecoder(self: *DecodeBlockScratch, bytes: []const u8) !*mq_iso.Decoder {
-        if (self.iso_decoder) |*decoder| {
-            decoder.reinitStream(bytes);
-            try decoder.resetJpeg2000Contexts();
-            return decoder;
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{ .allocator = allocator };
         }
-        self.iso_decoder = try mq_iso.Decoder.init(self.allocator, mq_context_count, bytes);
-        try self.iso_decoder.?.resetJpeg2000Contexts();
-        return &self.iso_decoder.?;
-    }
 
-    fn ensureBlockState(self: *DecodeBlockScratch, width: usize, height: usize, area: usize) !void {
-        try self.flags.resize(self.allocator, area);
-        try self.coeffs.resize(self.allocator, area);
-        const row_words = rowWordCount(width);
-        try self.significant_words.resize(self.allocator, try std.math.mul(usize, row_words, height));
-        self.row_words = row_words;
-        self.width = width;
-        self.height = height;
-        self.nb_stride = nbfStride(width);
-        try self.nb_flags.resize(self.allocator, try std.math.mul(usize, self.nb_stride, height + 2));
-        if (comptime maintain_packed_t1_context_flags) {
-            try self.packed_t1_flags.resize(self.allocator, try std.math.mul(usize, width, pcfStripeCount(height)));
+        pub fn deinit(self: *Self) void {
+            if (self.iso_decoder) |*decoder| decoder.deinit();
+            self.flags.deinit(self.allocator);
+            self.significant_words.deinit(self.allocator);
+            self.coeffs.deinit(self.allocator);
+            self.nb_flags.deinit(self.allocator);
+            self.packed_t1_flags.deinit(self.allocator);
+            self.* = undefined;
         }
-    }
-};
+
+        /// Reusable ISO MQ decoder: INITDEC on the given segment and reset the
+        /// JPEG2000 context states, without reallocating the context array.
+        fn isoMqDecoder(self: *Self, bytes: []const u8) !*mq_iso.Decoder {
+            if (self.iso_decoder) |*decoder| {
+                decoder.reinitStream(bytes);
+                try decoder.resetJpeg2000Contexts();
+                return decoder;
+            }
+            self.iso_decoder = try mq_iso.Decoder.init(self.allocator, mq_context_count, bytes);
+            try self.iso_decoder.?.resetJpeg2000Contexts();
+            return &self.iso_decoder.?;
+        }
+
+        fn ensureBlockState(self: *Self, width: usize, height: usize, area: usize) !void {
+            try self.flags.resize(self.allocator, area);
+            try self.coeffs.resize(self.allocator, area);
+            const row_words = rowWordCount(width);
+            try self.significant_words.resize(self.allocator, try std.math.mul(usize, row_words, height));
+            self.row_words = row_words;
+            self.width = width;
+            self.height = height;
+            self.nb_stride = nbfStride(width);
+            try self.nb_flags.resize(self.allocator, try std.math.mul(usize, self.nb_stride, height + 2));
+            if (comptime maintain_packed_t1_context_flags) {
+                try self.packed_t1_flags.resize(self.allocator, try std.math.mul(usize, width, pcfStripeCount(height)));
+            }
+        }
+    };
+}
+
+pub const DecodeBlockScratch = DecodeBlockScratchFor(i32);
+pub const WideDecodeBlockScratch = DecodeBlockScratchFor(i64);
+
+/// Refuses more magnitude bitplanes than the scratch's coefficient type holds.
+fn checkScratchBitplanes(scratch: anytype, bitplanes: u8) !void {
+    if (bitplanes > std.meta.Child(@TypeOf(scratch)).max_bitplanes) return EbcotError.InvalidBlock;
+}
+
+/// The coefficient type of a `DecodeBlockScratchFor` pointer.
+fn ScratchCoefficient(comptime ScratchPointer: type) type {
+    return std.meta.Child(ScratchPointer).Coefficient;
+}
 
 const SignCoding = struct {
     context: Context,
@@ -3278,20 +3301,20 @@ pub fn decodeCodeBlockSegmentCoefficientsContinuousPartialWithStyle(
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsScratch(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .direct, true, .{});
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuousScratch(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .continuous, true, .{});
 }
 
@@ -3317,12 +3340,12 @@ pub fn decodeCodeBlockSegmentCoefficientsIsoMqWithStyle(
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsIsoMqScratchWithStyle(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
     style: CodeBlockStyle,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     // Continuous MQ decode is flush-independent: an ER-TERM tail decodes with
     // the standard byte-in padding, so standalone ERTERM is accepted here.
     // BYPASS payloads need the segment-aware readers.
@@ -3334,7 +3357,7 @@ pub fn decodeCodeBlockSegmentCoefficientsIsoMqScratchWithStyle(
     if (segment.byte_length != segment.bytes.len) return EbcotError.InvalidBlock;
     if (segment.bitplanes == 0) {
         if (segment.pass_count != 0 or segment.bytes.len != 0) return EbcotError.InvalidBlock;
-        const out = try scratch.allocator.alloc(i32, area);
+        const out = try scratch.allocator.alloc(ScratchCoefficient(@TypeOf(scratch)), area);
         @memset(out, 0);
         return out;
     }
@@ -3342,6 +3365,7 @@ pub fn decodeCodeBlockSegmentCoefficientsIsoMqScratchWithStyle(
     const expected_passes = expectedCodingPasses(segment.bitplanes);
     if (segment.pass_count != expected_passes) return EbcotError.InvalidBlock;
 
+    try checkScratchBitplanes(scratch, segment.bitplanes);
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
@@ -3377,29 +3401,29 @@ pub fn decodeCodeBlockSegmentCoefficientsIsoMqScratchWithStyle(
     }
     if (pass_index != segment.pass_count) return EbcotError.InvalidBlock;
 
-    return scratch.allocator.dupe(i32, scratch.coeffs.items);
+    return scratch.allocator.dupe(ScratchCoefficient(@TypeOf(scratch)), scratch.coeffs.items);
 }
 
 pub fn decodeCodeBlockPayloadContinuousInferredScratch(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
     width: usize,
     height: usize,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockPayloadContinuousInferredScratchWithStyle(scratch, bitplanes, pass_count, bytes, width, height, .{});
 }
 
 pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
     width: usize,
     height: usize,
     style: CodeBlockStyle,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     try validateImplementedStyle(style);
     if (style.terminate_all) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
@@ -3407,7 +3431,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
     if (bitplanes == 0) {
         if (pass_count != 0 or bytes.len != 0) return EbcotError.InvalidBlock;
-        const out = try scratch.allocator.alloc(i32, area);
+        const out = try scratch.allocator.alloc(ScratchCoefficient(@TypeOf(scratch)), area);
         @memset(out, 0);
         return out;
     }
@@ -3415,6 +3439,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     const expected_passes = expectedCodingPasses(bitplanes);
     if (pass_count > expected_passes) return EbcotError.InvalidBlock;
 
+    try checkScratchBitplanes(scratch, bitplanes);
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
@@ -3456,23 +3481,23 @@ pub fn decodeCodeBlockPayloadContinuousInferredScratchWithStyle(
     }
     if (pass_index != pass_count or decoded_symbols == 0) return EbcotError.InvalidBlock;
 
-    return scratch.allocator.dupe(i32, scratch.coeffs.items);
+    return scratch.allocator.dupe(ScratchCoefficient(@TypeOf(scratch)), scratch.coeffs.items);
 }
 
 pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyle(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
     width: usize,
     height: usize,
     style: CodeBlockStyle,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiled(scratch, bitplanes, pass_count, bytes, width, height, style, null);
 }
 
 pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiled(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
@@ -3480,15 +3505,15 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiled(
     height: usize,
     style: CodeBlockStyle,
     stats: ?*DecodePassStats,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     const decoded = try decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorrowed(scratch, bitplanes, pass_count, bytes, width, height, style, stats);
-    return scratch.allocator.dupe(i32, decoded);
+    return scratch.allocator.dupe(ScratchCoefficient(@TypeOf(scratch)), decoded);
 }
 
 /// Decode into `scratch.coeffs` and return a view that remains valid only until
 /// the next call that reuses the same `DecodeBlockScratch`.
 pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorrowed(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
@@ -3496,7 +3521,8 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorr
     height: usize,
     style: CodeBlockStyle,
     stats: ?*DecodePassStats,
-) ![]const i32 {
+) ![]const ScratchCoefficient(@TypeOf(scratch)) {
+    try checkScratchBitplanes(scratch, bitplanes);
     // Continuous MQ decode is flush-independent: an ER-TERM tail decodes with
     // the standard byte-in padding, so standalone ERTERM is accepted here.
     // BYPASS payloads need the segment-aware readers.
@@ -3507,6 +3533,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorr
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
     if (bitplanes == 0) {
         if (pass_count != 0 or bytes.len != 0) return EbcotError.InvalidBlock;
+        try checkScratchBitplanes(scratch, bitplanes);
         try scratch.ensureBlockState(width, height, area);
         @memset(scratch.coeffs.items, 0);
         return scratch.coeffs.items;
@@ -3515,6 +3542,7 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorr
     const expected_passes = expectedCodingPasses(bitplanes);
     if (pass_count > expected_passes) return EbcotError.InvalidBlock;
 
+    try checkScratchBitplanes(scratch, bitplanes);
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.significant_words.items, 0);
     @memset(scratch.nb_flags.items, 0);
@@ -3576,7 +3604,9 @@ pub fn decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorr
     return scratch.coeffs.items;
 }
 
-pub const max_block_segments = 64;
+/// Terminated codeword segments a block can carry: TERMALL ends one per
+/// coding pass, and a block of `max_wide_magnitude_bitplanes` has 3 * 37 - 2.
+pub const max_block_segments = 3 * @as(usize, max_wide_magnitude_bitplanes) - 2;
 
 /// True when a terminated codeword segment ends after the zero-based coding
 /// pass `index` in BYPASS mode without RESTART: the first ten passes form one
@@ -3620,7 +3650,7 @@ pub fn bypassSegmentPassCounts(bitplanes: u8, pass_count: u16, out: *[max_block_
 /// persist across MQ segments; every segment is independently terminated and
 /// its byte length comes from the packet header.
 pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
@@ -3628,12 +3658,12 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyle(
     width: usize,
     height: usize,
     style: CodeBlockStyle,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiled(scratch, bitplanes, pass_count, bytes, segment_lengths, width, height, style, null);
 }
 
 pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiled(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
@@ -3642,15 +3672,15 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiled(
     height: usize,
     style: CodeBlockStyle,
     stats: ?*DecodePassStats,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     const decoded = try decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(scratch, bitplanes, pass_count, bytes, segment_lengths, width, height, style, stats);
-    return scratch.allocator.dupe(i32, decoded);
+    return scratch.allocator.dupe(ScratchCoefficient(@TypeOf(scratch)), decoded);
 }
 
 /// Decode into `scratch.coeffs` and return a view that remains valid only until
 /// the next call that reuses the same `DecodeBlockScratch`.
 pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
@@ -3659,7 +3689,8 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
     height: usize,
     style: CodeBlockStyle,
     stats: ?*DecodePassStats,
-) ![]const i32 {
+) ![]const ScratchCoefficient(@TypeOf(scratch)) {
+    try checkScratchBitplanes(scratch, bitplanes);
     try validateImplementedStyleAllowBypass(style);
     if (style.bypass and style.terminate_all) {
         return decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrowed(scratch, bitplanes, pass_count, bytes, segment_lengths, width, height, style, stats);
@@ -3670,6 +3701,7 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
     if (bitplanes == 0) {
         if (pass_count != 0 or bytes.len != 0 or segment_lengths.len != 0) return EbcotError.InvalidBlock;
+        try checkScratchBitplanes(scratch, bitplanes);
         try scratch.ensureBlockState(width, height, area);
         @memset(scratch.coeffs.items, 0);
         return scratch.coeffs.items;
@@ -3688,6 +3720,7 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
     for (segment_lengths) |len| total_bytes = try std.math.add(u64, total_bytes, len);
     if (total_bytes != bytes.len) return EbcotError.InvalidBlock;
 
+    try checkScratchBitplanes(scratch, bitplanes);
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
@@ -3791,7 +3824,7 @@ pub fn decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
 /// BYPASS+TERMALL decode: packet headers provide one terminated segment length
 /// per pass; each pass is decoded through the BYPASS raw/MQ choice.
 pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrowed(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
@@ -3800,7 +3833,7 @@ pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrow
     height: usize,
     style: CodeBlockStyle,
     stats: ?*DecodePassStats,
-) ![]const i32 {
+) ![]const ScratchCoefficient(@TypeOf(scratch)) {
     try validateImplementedStyleAllowBypass(style);
     if (!style.bypass or !style.terminate_all) return EbcotError.InvalidBlock;
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
@@ -3808,6 +3841,7 @@ pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrow
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
     if (bitplanes == 0) {
         if (pass_count != 0 or bytes.len != 0 or segment_lengths.len != 0) return EbcotError.InvalidBlock;
+        try checkScratchBitplanes(scratch, bitplanes);
         try scratch.ensureBlockState(width, height, area);
         @memset(scratch.coeffs.items, 0);
         return scratch.coeffs.items;
@@ -3821,6 +3855,7 @@ pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrow
     for (segment_lengths) |len| total_bytes = try std.math.add(u64, total_bytes, len);
     if (total_bytes != bytes.len) return EbcotError.InvalidBlock;
 
+    try checkScratchBitplanes(scratch, bitplanes);
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
@@ -3916,7 +3951,7 @@ pub fn decodeCodeBlockPayloadBypassTerminatedIsoMqScratchWithStyleProfiledBorrow
 /// so it needs no per-pass symbol counts — only the packet-coded per-pass
 /// lengths, which the terminate_all encoder records via its segment table.
 pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     bitplanes: u8,
     pass_count: u16,
     bytes: []const u8,
@@ -3925,7 +3960,8 @@ pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
     height: usize,
     style: CodeBlockStyle,
     stats: ?*DecodePassStats,
-) ![]const i32 {
+) ![]const ScratchCoefficient(@TypeOf(scratch)) {
+    try checkScratchBitplanes(scratch, bitplanes);
     // predictable_termination (ER-TERM flush) is permitted here with
     // terminate_all: each per-pass segment is a self-contained MQ stream that
     // the standard decoder reads back. RESET is also safe in this path because
@@ -3938,6 +3974,7 @@ pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
     if (area > max_codeblock_area) return EbcotError.InvalidBlock;
     if (bitplanes == 0) {
         if (pass_count != 0 or bytes.len != 0 or segment_lengths.len != 0) return EbcotError.InvalidBlock;
+        try checkScratchBitplanes(scratch, bitplanes);
         try scratch.ensureBlockState(width, height, area);
         @memset(scratch.coeffs.items, 0);
         return scratch.coeffs.items;
@@ -3951,6 +3988,7 @@ pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
     for (segment_lengths) |len| total_bytes = try std.math.add(u64, total_bytes, len);
     if (total_bytes != bytes.len) return EbcotError.InvalidBlock;
 
+    try checkScratchBitplanes(scratch, bitplanes);
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
@@ -4022,7 +4060,7 @@ pub fn decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(
 }
 
 fn decodeSignificancePassRaw(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     reader: *RawBitReader,
     bitplane: u8,
     style: CodeBlockStyle,
@@ -4064,7 +4102,7 @@ fn decodeSignificancePassRaw(
 }
 
 fn decodeRefinementPassRaw(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     reader: *RawBitReader,
     bitplane: u8,
 ) !usize {
@@ -4104,40 +4142,40 @@ fn decodeRefinementPassRaw(
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsPartialScratch(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockSegmentCoefficientsPartialScratchWithStyle(scratch, segment, width, height, .{});
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsPartialScratchWithStyle(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
     style: CodeBlockStyle,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .direct, false, style);
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuousPartialScratch(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockSegmentCoefficientsContinuousPartialScratchWithStyle(scratch, segment, width, height, .{});
 }
 
 pub fn decodeCodeBlockSegmentCoefficientsContinuousPartialScratchWithStyle(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
     style: CodeBlockStyle,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     return decodeCodeBlockSegmentCoefficientsBoundedScratch(scratch, segment, width, height, .continuous, false, style);
 }
 
@@ -4147,14 +4185,14 @@ const SegmentMqMode = enum {
 };
 
 fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     segment: CodeBlockSegment,
     width: usize,
     height: usize,
     mode: SegmentMqMode,
     require_complete: bool,
     style: CodeBlockStyle,
-) ![]i32 {
+) ![]ScratchCoefficient(@TypeOf(scratch)) {
     try validateImplementedStyle(style);
     if (width == 0 or height == 0) return EbcotError.InvalidBlock;
     const area = std.math.mul(usize, width, height) catch return EbcotError.InvalidBlock;
@@ -4163,11 +4201,12 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
     if (segment.byte_length != segment.bytes.len) return EbcotError.InvalidBlock;
     if (segment.bitplanes == 0) {
         if (segment.pass_count != 0 or segment.bytes.len != 0) return EbcotError.InvalidBlock;
-        const out = try scratch.allocator.alloc(i32, area);
+        const out = try scratch.allocator.alloc(ScratchCoefficient(@TypeOf(scratch)), area);
         @memset(out, 0);
         return out;
     }
 
+    try checkScratchBitplanes(scratch, segment.bitplanes);
     try scratch.ensureBlockState(width, height, area);
     @memset(scratch.flags.items, 0);
     @memset(scratch.significant_words.items, 0);
@@ -4183,7 +4222,7 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
     }
 
     if (segment.pass_count == 0) {
-        const out = try scratch.allocator.dupe(i32, scratch.coeffs.items);
+        const out = try scratch.allocator.dupe(ScratchCoefficient(@TypeOf(scratch)), scratch.coeffs.items);
         return out;
     }
 
@@ -4257,7 +4296,7 @@ fn decodeCodeBlockSegmentCoefficientsBoundedScratch(
     if (pass_index != segment.pass_count) return EbcotError.InvalidBlock;
     if (effective_mode == .continuous and continuous_decoder.remaining != 0) return EbcotError.InvalidBlock;
 
-    const out = try scratch.allocator.dupe(i32, scratch.coeffs.items);
+    const out = try scratch.allocator.dupe(ScratchCoefficient(@TypeOf(scratch)), scratch.coeffs.items);
     return out;
 }
 
@@ -4334,7 +4373,7 @@ fn emitSignificancePass(
 }
 
 fn decodeSignificancePass(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4347,7 +4386,7 @@ fn decodeSignificancePass(
 }
 
 fn decodeSignificancePassIsoMq(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4360,7 +4399,7 @@ fn decodeSignificancePassIsoMq(
 }
 
 fn decodeSignificancePassWithContexts(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4375,7 +4414,7 @@ fn decodeSignificancePassWithContexts(
 }
 
 fn decodeSignificancePassContinuous(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     decoder: *mq.Decoder,
@@ -4387,7 +4426,7 @@ fn decodeSignificancePassContinuous(
 }
 
 fn decodeSignificancePassSymbols(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     decoder: anytype,
     bitplane: u8,
@@ -4415,7 +4454,7 @@ fn decodeSignificancePassSymbols(
     if (symbol_count != pass.symbol_count) return EbcotError.InvalidBlock;
 }
 
-fn stripeHasSignificanceDecode(scratch: *const DecodeBlockScratch, stripe_y: usize, stripe_height: usize) bool {
+fn stripeHasSignificanceDecode(scratch: anytype, stripe_y: usize, stripe_height: usize) bool {
     const first_row = if (stripe_y == 0) 0 else stripe_y - 1;
     const last_row = @min(scratch.height - 1, stripe_y + stripe_height);
     var acc: u64 = 0;
@@ -4428,7 +4467,7 @@ fn stripeHasSignificanceDecode(scratch: *const DecodeBlockScratch, stripe_y: usi
 }
 
 fn stripeHasSignificanceDecodeRange(
-    scratch: *const DecodeBlockScratch,
+    scratch: anytype,
     stripe_y: usize,
     stripe_height: usize,
     x_begin: usize,
@@ -4446,7 +4485,7 @@ fn stripeHasSignificanceDecodeRange(
     );
 }
 
-fn stripeRowsSignificantDecode(scratch: *const DecodeBlockScratch, stripe_y: usize, stripe_height: usize) bool {
+fn stripeRowsSignificantDecode(scratch: anytype, stripe_y: usize, stripe_height: usize) bool {
     var acc: u64 = 0;
     var row = stripe_y;
     while (row < stripe_y + stripe_height) : (row += 1) {
@@ -4457,7 +4496,7 @@ fn stripeRowsSignificantDecode(scratch: *const DecodeBlockScratch, stripe_y: usi
 }
 
 fn stripeRowsSignificantDecodeRange(
-    scratch: *const DecodeBlockScratch,
+    scratch: anytype,
     stripe_y: usize,
     stripe_height: usize,
     x_begin: usize,
@@ -4475,7 +4514,7 @@ fn stripeRowsSignificantDecodeRange(
 }
 
 fn decodeSignificancePassInferred(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     bitplane: u8,
     style: CodeBlockStyle,
@@ -4531,7 +4570,7 @@ fn decodeSignificancePassInferred(
 }
 
 fn decodeSignificancePassInferredPlain(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     bitplane: u8,
     band_kind: subband.Kind,
@@ -4619,7 +4658,7 @@ fn emitRefinementPass(
 }
 
 fn decodeRefinementPass(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4632,7 +4671,7 @@ fn decodeRefinementPass(
 }
 
 fn decodeRefinementPassIsoMq(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4645,7 +4684,7 @@ fn decodeRefinementPassIsoMq(
 }
 
 fn decodeRefinementPassWithContexts(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4660,7 +4699,7 @@ fn decodeRefinementPassWithContexts(
 }
 
 fn decodeRefinementPassContinuous(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     decoder: *mq.Decoder,
@@ -4672,7 +4711,7 @@ fn decodeRefinementPassContinuous(
 }
 
 fn decodeRefinementPassSymbols(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     decoder: anytype,
     bitplane: u8,
@@ -4694,7 +4733,7 @@ fn decodeRefinementPassSymbols(
 }
 
 fn decodeRefinementPassInferred(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     bitplane: u8,
     style: CodeBlockStyle,
@@ -4742,7 +4781,7 @@ fn decodeRefinementPassInferred(
 }
 
 fn decodeRefinementPassInferredPlain(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     bitplane: u8,
 ) !usize {
@@ -4838,7 +4877,7 @@ fn emitCleanupPass(
 }
 
 fn decodeCleanupPass(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4851,7 +4890,7 @@ fn decodeCleanupPass(
 }
 
 fn decodeCleanupPassIsoMq(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4864,7 +4903,7 @@ fn decodeCleanupPassIsoMq(
 }
 
 fn decodeCleanupPassWithContexts(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     bitplane: u8,
@@ -4879,7 +4918,7 @@ fn decodeCleanupPassWithContexts(
 }
 
 fn decodeCleanupPassContinuous(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     decoder: *mq.Decoder,
@@ -4891,7 +4930,7 @@ fn decodeCleanupPassContinuous(
 }
 
 fn decodeCleanupPassSymbols(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     decoder: anytype,
     bitplane: u8,
@@ -4935,7 +4974,7 @@ fn decodeCleanupPassSymbols(
 }
 
 fn decodeCleanupPassInferred(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     bitplane: u8,
     style: CodeBlockStyle,
@@ -4986,7 +5025,7 @@ fn decodeCleanupPassInferred(
 }
 
 fn decodeCleanupPassInferredPlain(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     bitplane: u8,
     band_kind: subband.Kind,
@@ -5172,7 +5211,7 @@ fn cleanupRunLength(
     return 4;
 }
 
-fn canUseCleanupRunStripeDecode(scratch: *const DecodeBlockScratch, x: usize, stripe_y: usize, style: CodeBlockStyle) bool {
+fn canUseCleanupRunStripeDecode(scratch: anytype, x: usize, stripe_y: usize, style: CodeBlockStyle) bool {
     var dy: usize = 0;
     while (dy < 4) : (dy += 1) {
         const y = stripe_y + dy;
@@ -5235,7 +5274,7 @@ fn profileMqPass(stats: ?*DecodePassStats, kind: PassKind, symbols: usize, profi
 }
 
 fn decodeSignificancePassInferredProfiled(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: *mq_iso.Decoder,
     bitplane: u8,
     style: CodeBlockStyle,
@@ -5248,7 +5287,7 @@ fn decodeSignificancePassInferredProfiled(
 }
 
 fn decodeRefinementPassInferredProfiled(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: *mq_iso.Decoder,
     bitplane: u8,
     style: CodeBlockStyle,
@@ -5261,7 +5300,7 @@ fn decodeRefinementPassInferredProfiled(
 }
 
 fn decodeCleanupPassInferredProfiled(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: *mq_iso.Decoder,
     bitplane: u8,
     style: CodeBlockStyle,
@@ -5298,7 +5337,7 @@ fn profileNs() u64 {
 }
 
 fn nbfDecodeCleanupSample(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     x: usize,
     y: usize,
@@ -5322,7 +5361,7 @@ fn nbfDecodeCleanupSample(
 }
 
 inline fn nbfDecodeCleanupSampleRange(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     x: usize,
     stripe_y: usize,
@@ -5340,7 +5379,7 @@ inline fn nbfDecodeCleanupSampleRange(
 }
 
 fn nbfDecodeCleanupSamplePlain(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     x: usize,
     y: usize,
@@ -5353,7 +5392,7 @@ fn nbfDecodeCleanupSamplePlain(
 }
 
 inline fn nbfDecodeCleanupSamplePlainKnown(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     flags: []u16,
     nbs: usize,
@@ -5375,7 +5414,7 @@ inline fn nbfDecodeCleanupSamplePlainKnown(
 }
 
 inline fn decodeCleanupSampleRangePlainKnown(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     flags: []u16,
     nbs: usize,
@@ -5395,7 +5434,7 @@ inline fn decodeCleanupSampleRangePlainKnown(
 }
 
 inline fn decodeCleanupSignPlainKnown(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     flags: []u16,
     nbs: usize,
@@ -5411,7 +5450,7 @@ inline fn decodeCleanupSignPlainKnown(
 }
 
 fn decodeCleanupSample(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     x: usize,
     y: usize,
@@ -5433,7 +5472,7 @@ fn decodeCleanupSample(
 }
 
 fn decodeCleanupSampleRange(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     decoder: anytype,
     x: usize,
     stripe_y: usize,
@@ -6781,7 +6820,7 @@ fn zeroContextRows(scratch: *const DirectBlockScratch, x: usize, y: usize, style
     return zeroContextFromCounts(neighborCountsRows(scratch, x, y, style), style.band_kind);
 }
 
-fn zeroContextRowsDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize, style: CodeBlockStyle) Context {
+fn zeroContextRowsDecode(scratch: anytype, x: usize, y: usize, style: CodeBlockStyle) Context {
     return zeroContextFromCounts(neighborCountsRowsDecode(scratch, x, y, style), style.band_kind);
 }
 
@@ -6873,7 +6912,7 @@ fn neighborCountsRows(scratch: *const DirectBlockScratch, x: usize, y: usize, st
     return counts;
 }
 
-fn neighborCountsRowsDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize, style: CodeBlockStyle) NeighborCounts {
+fn neighborCountsRowsDecode(scratch: anytype, x: usize, y: usize, style: CodeBlockStyle) NeighborCounts {
     var counts = NeighborCounts{};
     if (x > 0 and hasSignificantRowDecode(scratch, x - 1, y)) counts.horizontal += 1;
     if (x + 1 < scratch.width and hasSignificantRowDecode(scratch, x + 1, y)) counts.horizontal += 1;
@@ -7001,7 +7040,7 @@ fn signContribution(value: anytype) i8 {
     return if (value < 0) -1 else 1;
 }
 
-fn signCodingRowsDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize, style: CodeBlockStyle) SignCoding {
+fn signCodingRowsDecode(scratch: anytype, x: usize, y: usize, style: CodeBlockStyle) SignCoding {
     var horizontal: i8 = 0;
     var vertical: i8 = 0;
     if (x > 0 and hasSignificantRowDecode(scratch, x - 1, y)) {
@@ -7073,15 +7112,15 @@ inline fn setSignificantRow(scratch: *DirectBlockScratch, x: usize, y: usize) vo
     scratch.significant_words.items[significantWordIndex(scratch, x, y)] |= significantBit(x);
 }
 
-inline fn significantWordIndexDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) usize {
+inline fn significantWordIndexDecode(scratch: anytype, x: usize, y: usize) usize {
     return y * scratch.row_words + x / significant_word_bits;
 }
 
-inline fn hasSignificantRowDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize) bool {
+inline fn hasSignificantRowDecode(scratch: anytype, x: usize, y: usize) bool {
     return (scratch.significant_words.items[significantWordIndexDecode(scratch, x, y)] & significantBit(x)) != 0;
 }
 
-inline fn setSignificantRowDecode(scratch: *DecodeBlockScratch, x: usize, y: usize) void {
+inline fn setSignificantRowDecode(scratch: anytype, x: usize, y: usize) void {
     scratch.significant_words.items[significantWordIndexDecode(scratch, x, y)] |= significantBit(x);
 }
 
@@ -7110,7 +7149,7 @@ fn neighborSignificanceRows(scratch: *const DirectBlockScratch, x: usize, y: usi
     return count;
 }
 
-fn neighborSignificanceRowsDecode(scratch: *const DecodeBlockScratch, x: usize, y: usize, style: CodeBlockStyle) u4 {
+fn neighborSignificanceRowsDecode(scratch: anytype, x: usize, y: usize, style: CodeBlockStyle) u4 {
     var count: u4 = 0;
     const min_y = if (y == 0) 0 else y - 1;
     const max_y = neighborMaxY(scratch.height, y, style);
@@ -7135,15 +7174,16 @@ fn neighborSignificanceRowsDecode(scratch: *const DecodeBlockScratch, x: usize, 
     return count;
 }
 
-fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitplane: u8, negative: bool) void {
+fn markDecodedSignificant(scratch: anytype, x: usize, y: usize, bitplane: u8, negative: bool) void {
+    const C = ScratchCoefficient(@TypeOf(scratch));
     const index = localIndex(scratch.width, x, y);
     // ISO-conventional midpoint reconstruction (matches OpenJPEG): a newly
     // significant sample at plane p is reconstructed at 1.5 * 2^p, the
     // midpoint of its uncertainty interval [2^p, 2^(p+1)). Each refinement
     // re-centers the half at the new plane, so a fully decoded sample ends
     // exact (half = 0 at plane 0) and a truncated one carries m + 2^(p-1).
-    const one = @as(i32, 1) << @as(u5, @intCast(bitplane));
-    const half = if (bitplane > 0) @as(i32, 1) << @as(u5, @intCast(bitplane - 1)) else 0;
+    const one = @as(C, 1) << @as(std.math.Log2Int(C), @intCast(bitplane));
+    const half = if (bitplane > 0) @as(C, 1) << @as(std.math.Log2Int(C), @intCast(bitplane - 1)) else 0;
     const magnitude_bit = one | half;
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setFlag(scratch.flags.items, index, .significant);
@@ -7153,15 +7193,16 @@ fn markDecodedSignificant(scratch: *DecodeBlockScratch, x: usize, y: usize, bitp
     decodeMarkPackedT1Significant(scratch, x, y, negative);
 }
 
-fn markDecodedSignificantNbf(scratch: *DecodeBlockScratch, x: usize, y: usize, bitplane: u8, negative: bool) void {
+fn markDecodedSignificantNbf(scratch: anytype, x: usize, y: usize, bitplane: u8, negative: bool) void {
+    const C = ScratchCoefficient(@TypeOf(scratch));
     const index = localIndex(scratch.width, x, y);
     // ISO-conventional midpoint reconstruction (matches OpenJPEG): a newly
     // significant sample at plane p is reconstructed at 1.5 * 2^p, the
     // midpoint of its uncertainty interval [2^p, 2^(p+1)). Each refinement
     // re-centers the half at the new plane, so a fully decoded sample ends
     // exact (half = 0 at plane 0) and a truncated one carries m + 2^(p-1).
-    const one = @as(i32, 1) << @as(u5, @intCast(bitplane));
-    const half = if (bitplane > 0) @as(i32, 1) << @as(u5, @intCast(bitplane - 1)) else 0;
+    const one = @as(C, 1) << @as(std.math.Log2Int(C), @intCast(bitplane));
+    const half = if (bitplane > 0) @as(C, 1) << @as(std.math.Log2Int(C), @intCast(bitplane - 1)) else 0;
     const magnitude_bit = one | half;
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
@@ -7170,7 +7211,7 @@ fn markDecodedSignificantNbf(scratch: *DecodeBlockScratch, x: usize, y: usize, b
 }
 
 inline fn markDecodedSignificantNbfKnown(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     flags: []u16,
     nbs: usize,
     x: usize,
@@ -7178,14 +7219,15 @@ inline fn markDecodedSignificantNbfKnown(
     bitplane: u8,
     negative: bool,
 ) void {
+    const C = ScratchCoefficient(@TypeOf(scratch));
     const index = localIndex(scratch.width, x, y);
     // ISO-conventional midpoint reconstruction (matches OpenJPEG): a newly
     // significant sample at plane p is reconstructed at 1.5 * 2^p, the
     // midpoint of its uncertainty interval [2^p, 2^(p+1)). Each refinement
     // re-centers the half at the new plane, so a fully decoded sample ends
     // exact (half = 0 at plane 0) and a truncated one carries m + 2^(p-1).
-    const one = @as(i32, 1) << @as(u5, @intCast(bitplane));
-    const half = if (bitplane > 0) @as(i32, 1) << @as(u5, @intCast(bitplane - 1)) else 0;
+    const one = @as(C, 1) << @as(std.math.Log2Int(C), @intCast(bitplane));
+    const half = if (bitplane > 0) @as(C, 1) << @as(std.math.Log2Int(C), @intCast(bitplane - 1)) else 0;
     const magnitude_bit = one | half;
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
@@ -7198,9 +7240,10 @@ inline fn markDecodedSignificantNbfKnown(
 /// reading bit b at plane p the new midpoint is m_hi + b*2^p + 2^(p-1), a
 /// delta of +2^(p-1) for b = 1 and -2^(p-1) for b = 0. At plane 0 the value
 /// becomes exact: +0 for b = 1, -1 for b = 0.
-inline fn refineMagnitude(scratch: *DecodeBlockScratch, index: usize, bitplane: u8, bit: bool) void {
-    const delta: i32 = if (bitplane > 0)
-        (if (bit) @as(i32, 1) << @as(u5, @intCast(bitplane - 1)) else -(@as(i32, 1) << @as(u5, @intCast(bitplane - 1))))
+inline fn refineMagnitude(scratch: anytype, index: usize, bitplane: u8, bit: bool) void {
+    const C = ScratchCoefficient(@TypeOf(scratch));
+    const delta: C = if (bitplane > 0)
+        (if (bit) @as(C, 1) << @as(std.math.Log2Int(C), @intCast(bitplane - 1)) else -(@as(C, 1) << @as(std.math.Log2Int(C), @intCast(bitplane - 1))))
     else
         (if (bit) 0 else -1);
     if (scratch.coeffs.items[index] < 0) {
@@ -7223,7 +7266,7 @@ fn validatePassPayload(
 }
 
 fn isoPassDecoder(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
 ) !mq_iso.Decoder {
@@ -7237,7 +7280,7 @@ fn isoPassDecoder(
 }
 
 fn passDecoderWithContexts(
-    scratch: *DecodeBlockScratch,
+    scratch: anytype,
     pass: CodeBlockPassPayload,
     bytes: []const u8,
     contexts: []mq.ContextSnapshot,
@@ -7365,4 +7408,56 @@ test "wide symbol encoder matches the i32 encoders and reaches 37 bitplanes" {
     try std.testing.expectEqual(@as(u16, 3 * 37 - 2), deepest.pass_count);
     wide[0] = @as(i64, 1) << 37;
     try std.testing.expectError(EbcotError.InvalidBlock, encodeCodeBlockSegmentIsoMqWideWithStyle(allocator, &wide, width, rect, .{}));
+}
+
+test "wide T1 decode recovers 37-bitplane blocks and the i32 decode refuses them" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed_d37);
+    const random = prng.random();
+    const width = 21;
+    const height = 18;
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    var wide: [width * height]i64 = undefined;
+    const styles = [_]CodeBlockStyle{
+        .{},
+        .{ .bypass = true, .vertical_causal = true, .band_kind = .hl },
+        .{ .terminate_all = true, .band_kind = .hh },
+        .{ .bypass = true, .terminate_all = true, .reset_context = true },
+    };
+    for (styles) |style| {
+        const max_bits: u6 = 37;
+        for (&wide) |*value| {
+            const bits = random.intRangeAtMost(u6, 0, max_bits);
+            const limit = @as(i64, 1) << bits;
+            value.* = random.intRangeLessThan(i64, -limit + 1, limit);
+        }
+        wide[3] = (@as(i64, 1) << max_bits) - 1;
+        var segment = try encodeCodeBlockSegmentIsoMqWideWithStyle(allocator, &wide, width, rect, style);
+        defer segment.deinit(allocator);
+        try std.testing.expectEqual(@as(u8, max_bits), segment.bitplanes);
+
+        var scratch = WideDecodeBlockScratch.init(allocator);
+        defer scratch.deinit();
+        var lengths: [max_block_segments]u64 = undefined;
+        const segment_lengths: []const u64 = if (segment.segments) |spans| blk: {
+            for (spans, 0..) |span, index| lengths[index] = span.byte_length;
+            break :blk lengths[0..spans.len];
+        } else &.{};
+        const decoded = if (style.terminate_all)
+            try decodeCodeBlockPayloadTerminatedIsoMqScratchWithStyleProfiledBorrowed(&scratch, segment.bitplanes, segment.pass_count, segment.bytes, segment_lengths, width, height, style, null)
+        else if (style.bypass)
+            try decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(&scratch, segment.bitplanes, segment.pass_count, segment.bytes, segment_lengths, width, height, style, null)
+        else
+            try decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorrowed(&scratch, segment.bitplanes, segment.pass_count, segment.bytes, width, height, style, null);
+        try std.testing.expectEqualSlices(i64, &wide, decoded);
+
+        if (segment.bitplanes > 31 and !style.bypass) {
+            var narrow = DecodeBlockScratch.init(allocator);
+            defer narrow.deinit();
+            try std.testing.expectError(
+                EbcotError.InvalidBlock,
+                decodeCodeBlockPayloadContinuousInferredIsoMqScratchWithStyleProfiledBorrowed(&narrow, segment.bitplanes, segment.pass_count, segment.bytes, width, height, style, null),
+            );
+        }
+    }
 }

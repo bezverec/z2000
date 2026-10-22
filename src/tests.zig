@@ -1645,14 +1645,25 @@ test "Kakadu signed 20-bit codestream decodes only through the native payload pa
     defer parallel.deinit();
     try std.testing.expectEqualSlices(i64, reduced.planes[0].samples, parallel.planes[0].samples);
 
-    const unsupported_precision = try allocator.dupe(u8, bytes);
-    defer allocator.free(unsupported_precision);
-    const siz = findMarker(unsupported_precision, codestream.markerValue("siz")) orelse
+    // Relabelled as signed 30-bit, the stream takes the wide i64 path and its
+    // samples, which fit either range, are unchanged.
+    const relabelled = try allocator.dupe(u8, bytes);
+    defer allocator.free(relabelled);
+    const siz = findMarker(relabelled, codestream.markerValue("siz")) orelse
         return error.MissingMarker;
-    unsupported_precision[siz + 40] = 0x9d;
+    relabelled[siz + 40] = 0x9d;
+    var wide = try codestream.decodeLosslessNative(allocator, relabelled, .{});
+    defer wide.deinit();
+    var narrow = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer narrow.deinit();
+    try std.testing.expectEqual(@as(u8, 30), wide.planes[0].layout.precision);
+    try std.testing.expectEqualSlices(i64, narrow.planes[0].samples, wide.planes[0].samples);
+
+    // 39 bits is past the Part 1 SIZ ceiling.
+    relabelled[siz + 40] = 0xa6;
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessNative(allocator, unsupported_precision, .{}),
+        codestream.decodeLosslessNative(allocator, relabelled, .{}),
     );
 }
 
@@ -1716,6 +1727,25 @@ test "Kakadu signed 29-bit multitile codestream reaches the checked i32 boundary
         reduced_serial.planes[0].samples,
         reduced.planes[0].samples,
     );
+
+    // Relabelled as 30 bits, every tile takes the wide i64 path, with the
+    // same samples at full and reduced resolution.
+    const relabelled = try allocator.dupe(u8, bytes);
+    defer allocator.free(relabelled);
+    const siz = findMarker(relabelled, codestream.markerValue("siz")) orelse
+        return error.MissingMarker;
+    relabelled[siz + 40] = 0x9d;
+    var wide_full = try codestream.decodeLosslessNativeWithOptions(allocator, relabelled, .{ .threads = 8 }, .{});
+    defer wide_full.deinit();
+    try std.testing.expectEqualSlices(i64, full.planes[0].samples, wide_full.planes[0].samples);
+    var wide_reduced = try codestream.decodeLosslessNativeWithOptions(
+        allocator,
+        relabelled,
+        .{ .threads = 8, .resolution_reduction = 1 },
+        .{},
+    );
+    defer wide_reduced.deinit();
+    try std.testing.expectEqualSlices(i64, reduced.planes[0].samples, wide_reduced.planes[0].samples);
 }
 
 test "Kakadu independently sampled signed components preserve native grids" {
@@ -39081,5 +39111,166 @@ test "wide native encoder writes the gray encoder's bytes and round-trips 1 to 2
             defer allocator.free(gray_stream);
             try std.testing.expectEqualSlices(u8, gray_stream, encoded);
         }
+    }
+}
+
+test "wide native codec round-trips 29 to 38 bits and refuses coefficients past 37 bitplanes" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_3738);
+    const random = prng.random();
+    const width = 31;
+    const height = 19;
+    const Case = struct {
+        precision: u8,
+        signed: bool,
+        components: usize,
+        /// Full-range noise needs Mb = precision + 3 within 37 bitplanes,
+        /// so from 35 bits the content is a ramp with modest noise.
+        noisy: bool,
+        options: codestream.LosslessOptions = .{ .mct = .none },
+    };
+    const cases = [_]Case{
+        .{ .precision = 29, .signed = false, .components = 1, .noisy = true },
+        .{ .precision = 30, .signed = true, .components = 3, .noisy = true },
+        .{ .precision = 32, .signed = false, .components = 2, .noisy = true, .options = .{ .mct = .none, .layers = 3, .bypass = true, .block_width = 16, .block_height = 16 } },
+        .{ .precision = 34, .signed = true, .components = 1, .noisy = true, .options = .{ .mct = .none, .terminate_all = true, .vertical_causal = true, .segmentation_symbols = true, .block_width = 8, .block_height = 8 } },
+        .{ .precision = 36, .signed = false, .components = 4, .noisy = false, .options = .{ .mct = .none, .reset_context = true, .levels = 3 } },
+        .{ .precision = 37, .signed = true, .components = 3, .noisy = false, .options = .{ .mct = .none, .bypass = true, .terminate_all = true } },
+        .{ .precision = 38, .signed = false, .components = 1, .noisy = false },
+        .{ .precision = 38, .signed = true, .components = 2, .noisy = false, .options = .{ .mct = .none, .layers = 2, .sop = true, .eph = true } },
+    };
+    for (cases) |case| {
+        var components: [4]native_samples.ComponentLayout = undefined;
+        for (components[0..case.components]) |*layout| layout.* = .{
+            .precision = case.precision,
+            .signed = case.signed,
+            .x0 = 0,
+            .y0 = 0,
+            .x_step = 1,
+            .y_step = 1,
+            .width = width,
+            .height = height,
+        };
+        const layout = native_samples.CodestreamLayout{
+            .allocator = allocator,
+            .capabilities = 0,
+            .reference_x0 = 0,
+            .reference_y0 = 0,
+            .reference_x1 = width,
+            .reference_y1 = height,
+            .tile_width = width,
+            .tile_height = height,
+            .tile_origin_x = 0,
+            .tile_origin_y = 0,
+            .components = components[0..case.components],
+        };
+        var source = try native_samples.SamplePlanes.initFromLayout(allocator, layout, .{});
+        defer source.deinit();
+        const minimum: i64 = if (case.signed) -(@as(i64, 1) << @intCast(case.precision - 1)) else 0;
+        const maximum: i64 = minimum + (@as(i64, 1) << @intCast(case.precision)) - 1;
+        for (source.planes, 0..) |plane, component| {
+            for (plane.samples, 0..) |*sample, index| {
+                if (case.noisy) {
+                    sample.* = random.intRangeAtMost(i64, minimum, maximum);
+                } else {
+                    const x: i64 = @intCast(index % width);
+                    const y: i64 = @intCast(index / width);
+                    const position = x * 3 + y * 5 + @as(i64, @intCast(component));
+                    const span = (width - 1) * 3 + (height - 1) * 5 + 3;
+                    const ramp = minimum + @divFloor(@as(i128, maximum - minimum) * position, span);
+                    sample.* = std.math.clamp(@as(i64, @intCast(ramp)) + random.intRangeAtMost(i64, -(1 << 24), 1 << 24), minimum, maximum);
+                }
+            }
+            // The extremes, far enough apart that no band sees them as an edge.
+            plane.samples[0] = minimum;
+            plane.samples[plane.samples.len - 1] = maximum;
+        }
+        const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, case.options);
+        defer allocator.free(encoded);
+
+        for ([_]u8{ 1, 4 }) |threads| {
+            var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .threads = threads }, .{});
+            defer decoded.deinit();
+            for (source.planes, decoded.planes) |expected, actual| {
+                try std.testing.expectEqual(case.precision, actual.layout.precision);
+                try std.testing.expectEqual(expected.layout.signed, actual.layout.signed);
+                try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+            }
+        }
+        // A reduced decode stays within the component range.
+        var reduced = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .resolution_reduction = 1 }, .{});
+        defer reduced.deinit();
+        try reduced.validateSamples();
+        // The u16 planar decoder never reaches these streams.
+        try std.testing.expectError(
+            codestream.CodestreamError.UnsupportedPayload,
+            codestream.decodeLosslessPlanar(allocator, encoded),
+        );
+    }
+
+    // Opposite extremes side by side at 38 bits drive HL/HH coefficients past
+    // the 37 magnitude bitplanes QCD can signal: refused, never truncated.
+    var components = [_]native_samples.ComponentLayout{.{
+        .precision = 38,
+        .signed = true,
+        .x0 = 0,
+        .y0 = 0,
+        .x_step = 1,
+        .y_step = 1,
+        .width = width,
+        .height = height,
+    }};
+    var source = try native_samples.SamplePlanes.initFromLayout(allocator, .{
+        .allocator = allocator,
+        .capabilities = 0,
+        .reference_x0 = 0,
+        .reference_y0 = 0,
+        .reference_x1 = width,
+        .reference_y1 = height,
+        .tile_width = width,
+        .tile_height = height,
+        .tile_origin_x = 0,
+        .tile_origin_y = 0,
+        .components = &components,
+    }, .{});
+    defer source.deinit();
+    for (source.planes[0].samples, 0..) |*sample, index| {
+        sample.* = if ((index % width + index / width) % 2 == 0) -(@as(i64, 1) << 37) else (@as(i64, 1) << 37) - 1;
+    }
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none }),
+    );
+}
+
+test "the i32 decode paths refuse QCD bands deeper than 31 bitplanes" {
+    const allocator = std.testing.allocator;
+    const width = 24;
+    const height = 20;
+    const samples = try allocator.alloc(u16, width * height);
+    defer allocator.free(samples);
+    for (samples, 0..) |*sample, index| sample.* = @truncate(index *% 2654435761);
+    const encoded = try codestream.encodeLosslessGrayWithOptions(allocator, .{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 16,
+        .samples = samples,
+    }, .{ .levels = 2, .mct = .none });
+    defer allocator.free(encoded);
+    // Seven guard bits and every exponent raised by 10 put each band's Mb
+    // between 32 and 34: past the i32 carrier, within the Part 1 ceiling of 37.
+    const patched = try allocator.dupe(u8, encoded);
+    defer allocator.free(patched);
+    const qcd = findMarker(patched, codestream.markerValue("qcd")) orelse return error.MissingMarker;
+    const length = (@as(usize, patched[qcd + 2]) << 8) | patched[qcd + 3];
+    patched[qcd + 4] = (7 << 5) | (patched[qcd + 4] & 0x1f);
+    for (patched[qcd + 5 .. qcd + 2 + length]) |*exponent| exponent.* += 10 << 3;
+    if (codestream.decodeLosslessPlanar(allocator, patched)) |decoded| {
+        var owned = decoded;
+        owned.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try std.testing.expect(err == ebcot.EbcotError.InvalidBlock or err == codestream.CodestreamError.InvalidCodestream);
     }
 }

@@ -92,8 +92,13 @@ pub const max_codestream_components = 16;
 const max_strict_metadata_components: usize = 16384;
 /// The i32 T1 carrier supports at most 31 magnitude bitplanes. Reversible
 /// HH coefficients can require two more bits than SIZ precision, so 29 is the
-/// highest native precision admitted by this generation of the pipeline.
+/// highest precision the i32 pipeline carries.
 pub const max_native_payload_precision: u8 = 29;
+/// Highest precision of the native decode. Reversible components above
+/// `max_native_payload_precision`, or with bands deeper than 31 magnitude
+/// bitplanes, decode through i64 coefficients up to the Part 1 ceilings: 38
+/// bits in SIZ and 37 bitplanes in QCD (`ebcot.max_wide_magnitude_bitplanes`).
+pub const max_native_decode_precision: u8 = 38;
 
 const temporary_magic_v0 = "ZJ2K-CBLK-BP0";
 const temporary_magic_v1 = "ZJ2K-CBLK-BP1";
@@ -788,10 +793,12 @@ pub fn encodeLosslessPlanarWithOptions(
     }, encode_options);
 }
 
-/// Highest precision the wide encoder accepts. From 29 bits the HH band needs
-/// more than 31 magnitude bitplanes, which the strict decoder does not read
-/// yet, so those precisions stay refused until the wide decode path lands.
-pub const max_wide_encode_precision: u8 = 28;
+/// Highest precision the wide encoder accepts: the Part 1 SIZ ceiling. From
+/// 29 bits the HH band needs more than 31 magnitude bitplanes, which the
+/// native decoder reads through i64 coefficients. Bands are capped at the 37
+/// bitplanes QCD can signal, so from 35 bits an image whose coefficients
+/// outgrow them is refused rather than truncated.
+pub const max_wide_encode_precision: u8 = 38;
 
 /// Reversible encode of native integer components, signed or unsigned, up to
 /// `max_wide_encode_precision` bits, through i64 coefficients: an i64 5/3
@@ -4555,7 +4562,7 @@ fn inverseNativeComponentPlane(
     header: TemporaryHeader,
     catalog: StrictPacketBlockCatalog,
     component: usize,
-    coefficients: []i32,
+    plane: NativeCoefficientPlane,
     width: usize,
     height: usize,
     levels: u8,
@@ -4564,6 +4571,22 @@ fn inverseNativeComponentPlane(
 ) !NativeComponentInverse {
     const x0 = catalog.component_x0[component];
     const y0 = catalog.component_y0[component];
+    const coefficients = switch (plane) {
+        .narrow => |narrow| narrow,
+        // Only reversible components take the wide path, through the checked
+        // scalar i64 5/3.
+        .wide => |wide| {
+            if (componentTransformForHeader(header, component) != .reversible_5_3) return CodestreamError.UnsupportedPayload;
+            const shape = wavelet_int.inverse53WideReducedOrigin(allocator, wide, width, height, levels, reduction, x0, y0) catch |err| switch (err) {
+                wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
+                else => return err,
+            };
+            return .{
+                .shape = shape,
+                .lossy = reduction != 0 or !strictComponentBlocksComplete(catalog, component),
+            };
+        },
+    };
     switch (componentTransformForHeader(header, component)) {
         .reversible_5_3 => {
             if (reduction == 0) {
@@ -4675,11 +4698,49 @@ fn roundNativeIrreversibleSample(value: f32, level_shift: f32) i32 {
     return @intFromFloat(std.math.clamp(@round(value + level_shift) - level_shift, -limit, limit));
 }
 
+/// A native component's coefficient plane: i32, or i64 for a reversible
+/// component the i32 carrier cannot hold (`nativeComponentNeedsWidePlane`).
+const NativeCoefficientPlane = union(enum) {
+    narrow: []i32,
+    wide: []i64,
+
+    fn deinit(self: NativeCoefficientPlane, allocator: std.mem.Allocator) void {
+        switch (self) {
+            inline else => |plane| allocator.free(plane),
+        }
+    }
+
+    /// The plane as i64, consuming the i32 one.
+    fn widen(self: NativeCoefficientPlane, allocator: std.mem.Allocator) !NativeCoefficientPlane {
+        switch (self) {
+            .wide => return self,
+            .narrow => |narrow| {
+                const wide = try allocator.alloc(i64, narrow.len);
+                for (wide, narrow) |*destination, value| destination.* = value;
+                allocator.free(narrow);
+                return .{ .wide = wide };
+            },
+        }
+    }
+};
+
+/// Whether a reversible component needs i64 coefficients: a precision above
+/// `max_native_payload_precision`, or a code block whose Mb (with any ROI
+/// shift) exceeds the 31 magnitude bitplanes of the i32 T1.
+fn nativeComponentNeedsWidePlane(header: TemporaryHeader, catalog: StrictPacketBlockCatalog, component: usize) bool {
+    if (componentTransformForHeader(header, component) != .reversible_5_3) return false;
+    if (componentBitDepthForHeader(header, component) > max_native_payload_precision) return true;
+    for (catalog.components[component]) |block| {
+        if (block.nominal_bitplanes > ebcot.DecodeBlockScratch.max_bitplanes) return true;
+    }
+    return false;
+}
+
 /// One native component after inverse DWT and before level shifting. The
-/// reconstructed samples occupy the top-left `inverse.shape` of
-/// `coefficients`, whose row stride is `stride`.
+/// reconstructed samples occupy the top-left `inverse.shape` of `plane`,
+/// whose row stride is `stride`.
 const NativeReconstructedComponent = struct {
-    coefficients: []i32,
+    plane: NativeCoefficientPlane,
     stride: usize,
     inverse: NativeComponentInverse,
 };
@@ -4695,31 +4756,52 @@ fn reconstructNativeComponent(
     const levels = componentLevelsForHeader(header, component);
     const width = catalog.component_widths[component];
     const height = catalog.component_heights[component];
-    const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
-        allocator,
-        width,
-        height,
-        levels,
-        catalog,
-        component,
-        componentRoiShiftForHeader(header, component),
-        options,
-        null,
-    );
-    errdefer allocator.free(coefficients);
+    const roi_shift = componentRoiShiftForHeader(header, component);
+    const plane: NativeCoefficientPlane = if (nativeComponentNeedsWidePlane(header, catalog, component))
+        .{ .wide = try reconstructStrictComponentCoefficientsAs(i64, allocator, width, height, levels, catalog, component, roi_shift, options, null) }
+    else
+        .{ .narrow = try reconstructStrictComponentCoefficientsAs(i32, allocator, width, height, levels, catalog, component, roi_shift, options, null) };
+    errdefer plane.deinit(allocator);
     const inverse = try inverseNativeComponentPlane(
         allocator,
         header,
         catalog,
         component,
-        coefficients,
+        plane,
         width,
         height,
         levels,
         options.resolution_reduction,
         workspace,
     );
-    return .{ .coefficients = coefficients, .stride = width, .inverse = inverse };
+    return .{ .plane = plane, .stride = width, .inverse = inverse };
+}
+
+/// The inverse RCT (ISO/IEC 15444-1 G.2.2) over reconstructed Y/Db/Dr planes
+/// of one coefficient type, in place to R/G/B.
+fn inverseNativeRctRows(
+    comptime Coefficient: type,
+    planes: *[3]NativeReconstructedComponent,
+    shape: wavelet_int.ResolutionShape,
+) !void {
+    const tag = comptime if (Coefficient == i32) "narrow" else "wide";
+    const luma_plane = @field(planes[0].plane, tag);
+    const blue_plane = @field(planes[1].plane, tag);
+    const red_plane = @field(planes[2].plane, tag);
+    for (0..shape.height) |row| {
+        const luma = luma_plane[row * planes[0].stride ..][0..shape.width];
+        const blue_difference = blue_plane[row * planes[1].stride ..][0..shape.width];
+        const red_difference = red_plane[row * planes[2].stride ..][0..shape.width];
+        for (luma, blue_difference, red_difference) |*y0, *y1, *y2| {
+            const green = std.math.sub(i64, y0.*, @divFloor(std.math.add(i64, y1.*, y2.*) catch return CodestreamError.InvalidCodestream, 4)) catch
+                return CodestreamError.InvalidCodestream;
+            const red = std.math.add(i64, y2.*, green) catch return CodestreamError.InvalidCodestream;
+            const blue = std.math.add(i64, y1.*, green) catch return CodestreamError.InvalidCodestream;
+            y0.* = std.math.cast(Coefficient, red) orelse return CodestreamError.InvalidCodestream;
+            y1.* = std.math.cast(Coefficient, green) orelse return CodestreamError.InvalidCodestream;
+            y2.* = std.math.cast(Coefficient, blue) orelse return CodestreamError.InvalidCodestream;
+        }
+    }
 }
 
 /// Components 0..2 of a tile coded with a component transform, reconstructed
@@ -4745,9 +4827,14 @@ fn reconstructNativeTransformedComponents(
     }
     var planes: [3]NativeReconstructedComponent = undefined;
     var built: usize = 0;
-    errdefer for (planes[0..built]) |plane| allocator.free(plane.coefficients);
+    errdefer for (planes[0..built]) |plane| plane.plane.deinit(allocator);
     while (built < planes.len) : (built += 1) {
         planes[built] = try reconstructNativeComponent(allocator, header, catalog, built, options, workspace);
+    }
+    // One wide component takes the transform to i64 for all three.
+    const wide = planes[0].plane == .wide or planes[1].plane == .wide or planes[2].plane == .wide;
+    if (wide) {
+        for (&planes) |*plane| plane.plane = try plane.plane.widen(allocator);
     }
     // The transformed components share one grid, so their reconstructions
     // must coincide sample for sample.
@@ -4762,19 +4849,7 @@ fn reconstructNativeTransformedComponents(
     // An error in any transformed component reaches all three outputs.
     const lossy = planes[0].inverse.lossy or planes[1].inverse.lossy or planes[2].inverse.lossy;
     for (&planes) |*plane| plane.inverse.lossy = lossy;
-    for (0..shape.height) |row| {
-        const luma = planes[0].coefficients[row * planes[0].stride ..][0..shape.width];
-        const blue_difference = planes[1].coefficients[row * planes[1].stride ..][0..shape.width];
-        const red_difference = planes[2].coefficients[row * planes[2].stride ..][0..shape.width];
-        for (luma, blue_difference, red_difference) |*y0, *y1, *y2| {
-            const green = @as(i64, y0.*) - @divFloor(@as(i64, y1.*) + y2.*, 4);
-            const red = @as(i64, y2.*) + green;
-            const blue = @as(i64, y1.*) + green;
-            y0.* = std.math.cast(i32, red) orelse return CodestreamError.InvalidCodestream;
-            y1.* = std.math.cast(i32, green) orelse return CodestreamError.InvalidCodestream;
-            y2.* = std.math.cast(i32, blue) orelse return CodestreamError.InvalidCodestream;
-        }
-    }
+    if (wide) try inverseNativeRctRows(i64, &planes, shape) else try inverseNativeRctRows(i32, &planes, shape);
     return planes;
 }
 
@@ -4803,7 +4878,7 @@ fn reconstructNativeIctComponents(
     var floats: [3][]f32 = undefined;
     var built: usize = 0;
     defer for (floats[0..built]) |plane| allocator.free(plane);
-    errdefer for (planes[0..built]) |plane| allocator.free(plane.coefficients);
+    errdefer for (planes[0..built]) |plane| plane.plane.deinit(allocator);
     while (built < planes.len) : (built += 1) {
         const component = built;
         const levels = componentLevelsForHeader(header, component);
@@ -4835,7 +4910,7 @@ fn reconstructNativeIctComponents(
             return err;
         };
         planes[component] = .{
-            .coefficients = coefficients,
+            .plane = .{ .narrow = coefficients },
             .stride = width,
             .inverse = .{ .shape = synthesized.shape, .lossy = true },
         };
@@ -4858,11 +4933,11 @@ fn reconstructNativeIctComponents(
             const y = floats[0][row * planes[0].stride + column];
             const cb = floats[1][row * planes[1].stride + column];
             const cr = floats[2][row * planes[2].stride + column];
-            planes[0].coefficients[row * planes[0].stride + column] =
+            planes[0].plane.narrow[row * planes[0].stride + column] =
                 roundNativeIrreversibleSample(y + 1.402 * cr, level_shift);
-            planes[1].coefficients[row * planes[1].stride + column] =
+            planes[1].plane.narrow[row * planes[1].stride + column] =
                 roundNativeIrreversibleSample(y - 0.34413 * cb - 0.71414 * cr, level_shift);
-            planes[2].coefficients[row * planes[2].stride + column] =
+            planes[2].plane.narrow[row * planes[2].stride + column] =
                 roundNativeIrreversibleSample(y + 1.772 * cb, level_shift);
         }
     }
@@ -4945,7 +5020,7 @@ fn decodeStrictSingleTileNative(
     defer workspace.deinit();
 
     const rct_components = try reconstructNativeTransformedComponents(allocator, header, catalog, options, &workspace);
-    defer if (rct_components) |planes| for (planes) |plane| allocator.free(plane.coefficients);
+    defer if (rct_components) |planes| for (planes) |plane| plane.plane.deinit(allocator);
 
     for (0..header.component_count) |component| {
         const component_width = catalog.component_widths[component];
@@ -4961,30 +5036,19 @@ fn decodeStrictSingleTileNative(
             rct_components.?[component]
         else
             try reconstructNativeComponent(allocator, header, catalog, component, options, &workspace);
-        defer if (!from_rct) allocator.free(reconstructed.coefficients);
+        defer if (!from_rct) reconstructed.plane.deinit(allocator);
         const inverse = reconstructed.inverse;
-        var coefficients = reconstructed.coefficients;
-        var decoded_width = component_width;
-        var decoded_height = component_height;
-        var compacted: ?[]i32 = null;
-        defer if (compacted) |plane| allocator.free(plane);
-        if (options.resolution_reduction != 0) {
-            const compact = try compactTopLeftCoefficientPlane(
-                allocator,
-                coefficients,
-                component_width,
-                component_height,
-                inverse.shape.width,
-                inverse.shape.height,
-            );
-            compacted = compact;
-            coefficients = compact;
-            decoded_width = inverse.shape.width;
-            decoded_height = inverse.shape.height;
+        // The reconstruction occupies the top-left `inverse.shape` of the
+        // component plane, row stride `component_width`.
+        const decoded_width = inverse.shape.width;
+        const decoded_height = inverse.shape.height;
+        if (decoded_width > component_width or decoded_height > component_height or
+            reconstructed.stride != component_width)
+        {
+            return CodestreamError.InvalidCodestream;
         }
         if (requested_region == null and
-            (plane_layout.width != decoded_width or plane_layout.height != decoded_height or
-                coefficients.len != output.planes[component].samples.len))
+            (plane_layout.width != decoded_width or plane_layout.height != decoded_height))
         {
             return CodestreamError.InvalidCodestream;
         }
@@ -5016,16 +5080,18 @@ fn decodeStrictSingleTileNative(
             @as(i64, 1) << @as(u6, @intCast(plane_layout.precision - 1));
         const minimum = try plane_layout.minimumSample();
         const maximum = try plane_layout.maximumSample();
-        for (0..plane_layout.height) |row| {
-            const source_row = coefficients[(source_y + row) * decoded_width + source_x ..][0..plane_layout.width];
-            const destination_row = output.planes[component].samples[row * plane_layout.width ..][0..plane_layout.width];
-            for (source_row, destination_row) |coefficient, *sample| {
-                const value = @as(i64, coefficient) + level_shift;
-                sample.* = if (!inverse.lossy and options.resolution_reduction == 0 and options.quality_layer_limit == 0)
-                    value
-                else
-                    std.math.clamp(value, minimum, maximum);
-            }
+        switch (reconstructed.plane) {
+            inline else => |coefficients| for (0..plane_layout.height) |row| {
+                const source_row = coefficients[(source_y + row) * component_width + source_x ..][0..plane_layout.width];
+                const destination_row = output.planes[component].samples[row * plane_layout.width ..][0..plane_layout.width];
+                for (source_row, destination_row) |coefficient, *sample| {
+                    const value = @as(i64, coefficient) + level_shift;
+                    sample.* = if (!inverse.lossy and options.resolution_reduction == 0 and options.quality_layer_limit == 0)
+                        value
+                    else
+                        std.math.clamp(value, minimum, maximum);
+                }
+            },
         }
     }
     try output.validateSamples();
@@ -8256,7 +8322,8 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
     // bits instead of requiring z2000's exact profile — foreign encoders
     // choose different legal values (Kakadu: 1 guard bit, RCT-widened
     // exponents), and E-2 obliges the decoder to derive Mb from what the
-    // stream says. Bounds keep Mb in 1..31.
+    // stream says. Bounds keep Mb in 1..37, the Part 1 ceiling; bands deeper
+    // than 31 decode only on the wide native path, and the i32 T1 refuses them.
     if (guard_bits > 7) return CodestreamError.InvalidCodestream;
 
     var info = StrictQcdInfo{
@@ -8274,7 +8341,7 @@ fn validateStrictQcdSegment(segment: []const u8, bit_depth: u8, levels: u8, tran
         const epsilon = value >> 3;
         if (epsilon == 0) return CodestreamError.InvalidCodestream;
         const nominal = @as(u16, epsilon) + guard_bits - 1;
-        if (nominal == 0 or nominal > 31) return CodestreamError.InvalidCodestream;
+        if (nominal == 0 or nominal > ebcot.max_wide_magnitude_bitplanes) return CodestreamError.InvalidCodestream;
         info.exponents[band_index] = epsilon;
         cursor += 1;
     }
@@ -8469,7 +8536,7 @@ fn componentRoiShiftForHeader(header: TemporaryHeader, component: usize) u8 {
 fn addRoiShiftToNominalBitplanes(nominal: u16, roi_shift: u8) !u8 {
     if (nominal == 0) return CodestreamError.InvalidCodestream;
     const total = std.math.add(u16, nominal, roi_shift) catch return CodestreamError.InvalidCodestream;
-    if (total > 31) return CodestreamError.InvalidCodestream;
+    if (total > ebcot.max_wide_magnitude_bitplanes) return CodestreamError.InvalidCodestream;
     return @intCast(total);
 }
 
@@ -8565,7 +8632,7 @@ fn isSupportedStrictPayloadPrecisionForProfile(
 ) bool {
     return switch (profile) {
         .legacy => isSupportedStrictPayloadPrecision(precision),
-        .native => precision >= 1 and precision <= max_native_payload_precision,
+        .native => precision >= 1 and precision <= max_native_decode_precision,
     };
 }
 
@@ -12535,7 +12602,7 @@ fn decodeStrictMultiTileNativeToSink(
             return CodestreamError.InvalidCodestream;
         windows.release();
         const rct_components = try reconstructNativeTransformedComponents(allocator, tile_header, block_catalog, options, &workspace);
-        defer if (rct_components) |planes| for (planes) |plane| allocator.free(plane.coefficients);
+        defer if (rct_components) |planes| for (planes) |plane| plane.plane.deinit(allocator);
         for (0..header.component_count) |component| {
             const source_width = block_catalog.component_widths[component];
             const from_rct = rct_components != null and component < 3;
@@ -12543,8 +12610,7 @@ fn decodeStrictMultiTileNativeToSink(
                 rct_components.?[component]
             else
                 try reconstructNativeComponent(allocator, tile_header, block_catalog, component, options, &workspace);
-            defer if (!from_rct) allocator.free(reconstructed.coefficients);
-            const coefficients = reconstructed.coefficients;
+            defer if (!from_rct) reconstructed.plane.deinit(allocator);
             const inverse = reconstructed.inverse;
             const tile_width = inverse.shape.width;
             const tile_height = inverse.shape.height;
@@ -12616,18 +12682,20 @@ fn decodeStrictMultiTileNativeToSink(
                 @as(i64, 1) << @as(u6, @intCast(plane_layout.precision - 1));
             const minimum = try plane_layout.minimumSample();
             const maximum = try plane_layout.maximumSample();
-            for (0..copy_height) |row| {
-                const source_start = (source_y + row) * source_width + source_x;
-                const source_row = coefficients[source_start..][0..copy_width];
-                const destination_row = samples[row * copy_width ..][0..copy_width];
-                for (source_row, destination_row) |coefficient, *sample| {
-                    const value = @as(i64, coefficient) + level_shift;
-                    const exact = !inverse.lossy and options.resolution_reduction == 0 and options.quality_layer_limit == 0;
-                    if (exact and (value < minimum or value > maximum)) {
-                        return native_samples.NativeSampleError.SampleOutOfRange;
+            switch (reconstructed.plane) {
+                inline else => |coefficients| for (0..copy_height) |row| {
+                    const source_start = (source_y + row) * source_width + source_x;
+                    const source_row = coefficients[source_start..][0..copy_width];
+                    const destination_row = samples[row * copy_width ..][0..copy_width];
+                    for (source_row, destination_row) |coefficient, *sample| {
+                        const value = @as(i64, coefficient) + level_shift;
+                        const exact = !inverse.lossy and options.resolution_reduction == 0 and options.quality_layer_limit == 0;
+                        if (exact and (value < minimum or value > maximum)) {
+                            return native_samples.NativeSampleError.SampleOutOfRange;
+                        }
+                        sample.* = if (exact) value else std.math.clamp(value, minimum, maximum);
                     }
-                    sample.* = if (exact) value else std.math.clamp(value, minimum, maximum);
-                }
+                },
             }
         }
 
@@ -13604,9 +13672,26 @@ fn reconstructStrictComponentCoefficientsFromBlockCatalog(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) ![]i32 {
+    return reconstructStrictComponentCoefficientsAs(i32, allocator, width, height, levels, catalog, component, roi_shift, options, timings);
+}
+
+/// `reconstructStrictComponentCoefficientsFromBlockCatalog` over i32 or, for
+/// blocks deeper than 31 magnitude bitplanes, i64 coefficients.
+fn reconstructStrictComponentCoefficientsAs(
+    comptime Coefficient: type,
+    allocator: std.mem.Allocator,
+    width: usize,
+    height: usize,
+    levels: u8,
+    catalog: StrictPacketBlockCatalog,
+    component: usize,
+    roi_shift: u8,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+) ![]Coefficient {
     if (component >= catalog.component_count) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
-    const plane = try allocator.alloc(i32, pixels);
+    const plane = try allocator.alloc(Coefficient, pixels);
     errdefer allocator.free(plane);
     try fillStrictComponentCoefficientsFromBlockCatalog(
         allocator,
@@ -13633,10 +13718,11 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     component: usize,
     roi_shift: u8,
     options: DecodeOptions,
-    plane: []i32,
+    plane: anytype,
     t1_stats: ?*ebcot.DecodePassStats,
     timings: ?*DecodeTimings,
 ) !void {
+    const Coefficient = std.meta.Elem(@TypeOf(plane));
     if (component >= catalog.component_count) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
     if (plane.len != pixels) return CodestreamError.InvalidCodestream;
@@ -13665,8 +13751,10 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     {
         @memset(plane, 0);
     }
-    const worker_count = strictDecodeBlockThreadCount(options, blocks.len);
-    if (worker_count > 1) {
+    // The block-parallel workers carry i32 coefficients; the wide path is
+    // single-threaded.
+    const worker_count = if (Coefficient == i32) strictDecodeBlockThreadCount(options, blocks.len) else 1;
+    if (Coefficient == i32 and worker_count > 1) {
         try validateStrictBlockCatalogCoverageBits(
             allocator,
             width,
@@ -13701,7 +13789,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
 
     // One reusable T1 scratch per component keeps the hot decode loop free
     // of per-block allocations.
-    var scratch = ebcot.DecodeBlockScratch.init(allocator);
+    var scratch = ebcot.DecodeBlockScratchFor(Coefficient).init(allocator);
     defer scratch.deinit();
 
     for (blocks, 0..) |block, block_index| {
@@ -13773,6 +13861,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
 
         switch (options.t1_backend) {
             .legacy_mq => {
+                if (Coefficient != i32) return CodestreamError.UnsupportedPayload;
                 const decoded = try ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
                     allocator,
                     block.encoded_bitplanes,
@@ -13812,7 +13901,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
 /// ISO/IEC 15444-1 E.3.3 Maxshift reconstruction. Coefficients whose
 /// magnitude reaches the ROI threshold are shifted back before dequantization
 /// and inverse DWT; background coefficients retain their decoded magnitude.
-fn undoMaxshiftRoi(coefficients: []i32, roi_shift: u8) void {
+fn undoMaxshiftRoi(coefficients: anytype, roi_shift: u8) void {
     if (roi_shift == 0) return;
     const threshold = @as(i64, 1) << @as(u6, @intCast(roi_shift));
     for (coefficients) |*coefficient| {
@@ -14510,12 +14599,12 @@ fn markStrictZeroBlockCovered(
 }
 
 fn scatterStrictDecodedBlock(
-    plane: []i32,
+    plane: anytype,
     covered: []bool,
     plane_width: usize,
     plane_height: usize,
     rect: subband.Rect,
-    decoded: []const i32,
+    decoded: []const std.meta.Elem(@TypeOf(plane)),
 ) !void {
     if (plane.len != covered.len) return CodestreamError.InvalidCodestream;
     if (decoded.len != rectArea(rect)) return CodestreamError.InvalidCodestream;

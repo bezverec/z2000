@@ -515,17 +515,18 @@ contracts, and generic irreversible output remains on that legacy carrier.
    precinct groups, parallel component jobs, and generic irreversible working
    tables are complete; reversible native tile output/assembly and the job
    runner now pass beyond 16 components. The reversible native T1/DWT path now
-   carries every 1..29-bit precision without clipping or bias ambiguity.
-   The coefficient audit and checked inverse-lifting migration are complete;
-   widening beyond 29 bits requires an `i64` T1 coefficient carrier.
+   carries every 1..38-bit precision without clipping or bias ambiguity: i32
+   up to 29 bits and 31 bitplanes, an i64 T1/5/3 carrier beyond, up to the
+   QCD ceiling of 37 bitplanes. Open: a block-parallel wide decode, and
+   irreversible components above 24 bits (f32 synthesis).
 3. The landed PGX writer is wired into direct raw `.j2k`/`.j2c` CLI
    decode without a JP2 wrapper. Explicit, extension-inferred, and unquoted
    batch forms select one component, resolution reduction, threads, T1
    backend, and `ML`/`LM` byte order. Canonical ZRAW now covers the exact all-
    component case through the same three CLI forms, retaining signedness,
    component grids, and origins with a bounded round-trip parser. The ZRAW
-   API/container spans 1..38 bits; direct codestream payload decode currently
-   supplies the landed continuous 1..29-bit profile. A future PAM adapter
+   API/container spans 1..38 bits, and so does direct reversible codestream
+   payload decode. A future PAM adapter
    should be added only for the subset
    PAM can represent faithfully; it must not replace ZRAW or silently narrow.
 4. **Complete:** independently subsampled signed components without MCT now

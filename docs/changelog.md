@@ -5,6 +5,51 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Wide Native Decoder: Every Part 1 Precision, 1 To 38 Bits
+
+- `decodeLosslessNative` and `j2k-to-zraw` decode reversible components of
+  30 to 38 bits, and any reversible component whose bands need more than 31
+  magnitude bitplanes, up to the Part 1 QCD ceiling of 37 (Mb = G + epsilon
+  - 1 with G <= 7, epsilon <= 31). Until now the native path stopped at 29
+  bits. None of the codecs we test reach this range: OpenJPEG 2.5.4 decodes
+  up to 30 bits, Kakadu 8.4.1 up to 28 (not lossless there), and Grok
+  20.4.12 up to 16.
+- The T1 decoder is generic over its coefficient type
+  (`ebcot.DecodeBlockScratchFor(i32 | i64)`, aliases `DecodeBlockScratch` and
+  `WideDecodeBlockScratch`); every entry point refuses more bitplanes than
+  the type holds, so the i32 paths now fail a deeper block closed
+  (`EbcotError.InvalidBlock`) instead of relying on the header check. The
+  i32 instantiation, its SIMD paths, and the block-parallel scheduler are
+  unchanged; timing of a 3000x2000 three-component 16-bit native decode is
+  within run-to-run noise of the previous build.
+- The native decoder chooses the carrier per component
+  (`nativeComponentNeedsWidePlane`): i64 for a reversible component above 29
+  bits or with any block Mb above 31, through the checked
+  `wavelet_int.inverse53WideReducedOrigin`, RCT in i64 when any of its three
+  components is wide, and single-threaded block decode. Single- and
+  multi-tile, reduced resolution, regions, and layers all apply.
+- `ebcot.max_block_segments` grows from 64 to 109 (3 * 37 - 2), the most
+  terminated segments a 37-bitplane block can carry under TERMALL; BYPASS at
+  37 bitplanes needs 67. QCD exponents and ROI-shifted Mb are accepted up to
+  37 instead of 31.
+- The wide encoder (`zraw-to-j2k`) now accepts 1 to 38 bits
+  (`max_wide_encode_precision`). Any image up to 34 bits fits; from 35 bits a
+  band can need more than 37 bitplanes (opposite extremes side by side), and
+  such an image is refused, never truncated.
+- Evidence: a T1 unit test decodes random 37-bitplane blocks through
+  `WideDecodeBlockScratch` exactly in continuous, BYPASS, TERMALL, and
+  BYPASS+TERMALL styles while the i32 scratch refuses them; a codec test
+  round-trips 29 to 38 bits (signed and unsigned, one to four components,
+  layers, BYPASS, TERMALL, causal, segmentation symbols, RESET, SOP/EPH,
+  block sizes, one and four threads) and checks that a 38-bit checkerboard
+  of extremes is refused; the Kakadu 20-bit and 29-bit four-tile fixtures
+  relabelled as 30 bits decode to identical samples at full and reduced
+  resolution on the wide path; a 16-bit stream whose QCD is pushed to
+  Mb 32..34 fails closed on the u16 path. `tools/wide_encode_interop.py`
+  confirms z2000 exact for 1 to 37 bits on noisy content and 38 bits on
+  smooth content, `--reduce 1` equal to OpenJPEG for 29 and 30 bits, and
+  `--region` equal to the cropped full decode at 30, 34, and 37 bits.
+
 ### Wide Native Encoder (Signed And 17- To 28-Bit Samples)
 
 - `zraw-to-j2k` and `codestream.encodeNativeLosslessWithOptions` encode
@@ -29,8 +74,9 @@ entries are grouped by development milestone rather than semantic version.
   bits before the cap), and Grok 20.4.12 (exact, which supports up to 16 bits),
   for signed and unsigned inputs, one and three components, and the bypass,
   TERMALL, causal, segmentation-symbol, EPH, layer, and block-size options.
-- Precisions from 29 bits are refused for now: their HH bands need more than
-  31 magnitude bitplanes, which the strict decoder does not read yet.
+- Precisions from 29 bits were refused at first: their HH bands need more
+  than 31 magnitude bitplanes, which the strict decoder did not read yet (see
+  the wide native decoder above).
 
 ### Main-Header Component Coding On Multi-Tile Streams
 

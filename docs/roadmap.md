@@ -145,21 +145,21 @@ decoded, encoded, malformed-tested, and independently reproduced.
 ### Current Completion Estimate
 
 As of 2026-10-22, the general-purpose G0-G7 program is estimated at **about
-61% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
+62% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
 This is a planning estimate, not a conformance score. It gives every phase
 equal weight because the remaining effort is too uncertain for a more precise
 cost model; the headline is the rounded mean of the phase estimates below.
-The decode-first foundation G0-G4 is approximately **73% complete** by the same
+The decode-first foundation G0-G4 is approximately **74% complete** by the same
 method. Neither number changes the bounded 100/100 scorecards.
 
 | Phase | Estimate | Evidence already landed | Largest remaining work |
 | --- | ---: | --- | --- |
 | G0 | 85% | Manifest, differential runner, 125 cases, all 16 T.803 profile-0 streams decoding against their references, optional assets run in release evidence | Map every claimed public profile, add profile-1 and class-1 references for every component |
-| G1 | 75% | Dynamic native carrier, signed/mixed sampling, 1..29-bit payload decode, the Part 1 maximum of 16384 components with two-byte selectors, native RCT and ICT, per-component 5/3 and 9/7 and other component-local coding on single- and multi-tile grids | 30..38-bit T1 carrier, remaining legacy-fixed assumptions |
+| G1 | 82% | Dynamic native carrier, signed/mixed sampling, reversible payload decode at every Part 1 precision (1..38 bits, i64 T1/5/3 beyond 29 bits or 31 bitplanes), the Part 1 maximum of 16384 components with two-byte selectors, native RCT and ICT, per-component 5/3 and 9/7 and other component-local coding on single- and multi-tile grids | Parallel wide decode, 9/7 above 24 bits, remaining legacy-fixed assumptions |
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
 | G3 | 53% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate, and decode of every Part 1 profile in Table A.10 (Profile 0/1, cinema, broadcast, IMF) with T.803, Kakadu, and OpenJPEG evidence | Independently emitted PLM marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, POC emission for general tile-part divisions, and confirming the empirically derived multipart POC semantics against ISO/IEC 15444-1 A.6.6 |
 | G4 | 70% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, single-/multi-tile reference-region selection whose intra-tile pruning reaches packet assembly, selected and reduced reference-grid upsampling, selected sampled sYCC conversion, push-based tile and band output sinks on every bounded decode shape with streaming bounded-TIFF conversion, plus T1 skipping, catalog compaction, and borrowed packet spans | Incremental codestream input, tile-local synthesis planes, and the remaining conversion layouts |
-| G5 | 35% | Strong bounded multi-tile, progression, style, and rate-control encoder; a wide i64 encoder for signed and up to 28-bit samples | Generic components on the main encoder, 29- to 38-bit encode, per-component controls, ROI, and streaming encode |
+| G5 | 37% | Strong bounded multi-tile, progression, style, and rate-control encoder; a wide i64 encoder for signed 1- to 38-bit samples | Generic components on the main encoder, multi-tile and MCT on the wide encoder, per-component controls, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
 | G7 | 37% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence assembled and tested locally, a defined clamping policy for lossy versus exact decode | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
 
@@ -307,7 +307,10 @@ reconstructs mixed signed 7/13/23-bit components on independent 1x1, 2x1, and
 2x2 grids across four tiles, with
 exact full/reduction-1 Kakadu PGX and ZRAW round-trip evidence. Caller limits and the
 legacy four-component, unsigned 8/16-bit `u16` surface remain intact.
-Precisions above 29 bits require a wider T1 coefficient carrier. The first
+Precisions above 29 bits, and bands deeper than 31 bitplanes, now decode
+through an i64 T1/5/3 carrier up to the Part 1 ceilings of 38 bits and 37
+bitplanes; the same 29-bit fixture relabelled as 30 bits decodes identically
+on that path. The first
 dynamic strict-storage campaign has reached its documented exit: component
 assembly, the public block catalog, component
 packet plans, geometry/index state, RPCL indexes, strict metadata, and
@@ -433,8 +436,9 @@ formal certification must remain distinct from internal test success.
 
 ## Still Outside The Bounded Baseline Today
 
-- precision above 29 bits in the T1/DWT payload path, generic irreversible
-  high-component output, and encoder controls for the native component model,
+- irreversible components above 24 bits, a block-parallel wide (i64) decode,
+  generic irreversible high-component output, and encoder controls for the
+  native component model,
   remaining under G1/G7;
 - broader divergent component/tile coding-style combinations, remaining Part 1
   ROI/registration markers, broad tile-part schedules, and selective decode,

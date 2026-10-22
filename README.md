@@ -145,13 +145,17 @@ macOS archive; on macOS, build from source with Zig 0.17.
   layouts with caller-provided resource limits and preserves 1..38-bit
   signedness, arbitrary component counts, origins, and subsampling in dynamic
   `i64` planes. The bounded native payload path decodes single- and multi-tile
-  signed/unsigned 1..29-bit streams without MCT or with RCT or ICT over the
+  signed/unsigned reversible streams of every Part 1 precision, 1..38 bits
+  (9/7 components up to 24 bits), without MCT or with RCT or ICT over the
   first three components, including mixed component precision and independent
   component sampling, with caller-limited counts up to the Part 1 maximum of
   16384 components at full or requested lower DWT resolutions
-  without DC-bias ambiguity. Native
-  inverse 5/3 lifting uses checked `i64` intermediates before storing `i32`
-  coefficients; 29 bits is the T1/HH boundary and 30 bits fails closed. The
+  without DC-bias ambiguity. Up to 29 bits and 31 magnitude bitplanes the
+  coefficients stay in `i32` (with checked `i64` lifting sums); a reversible
+  component of more than 29 bits, or with any band deeper than 31 bitplanes,
+  decodes through `i64` T1 and 5/3 up to the QCD ceiling of 37 bitplanes. No
+  other codec we test decodes above 30 bits (OpenJPEG 2.5.4 stops there,
+  Kakadu 8.4.1 stops at 28 and is not lossless there, Grok 20.4.12 at 16). The
   legacy `u16` planar API remains unsigned-only and now accepts component
   precision across 1..16 bits. Checked PGX diagnostics cover one component up to 32-bit
   storage; canonical ZRAW preserves all components, signedness, 1..38-bit
@@ -566,11 +570,14 @@ Other commands:
   `--tile-index`, `--region`, `--layers`, `--reduce`, `--threads`, and `--t1-backend` work in explicit, shorthand,
   and non-recursive batch forms.
 - **zraw-to-j2k INPUT OUTPUT**: Reversible encode of a canonical ZRAW (one to
-  four components of one precision, signed or unsigned, 1 to 28 bits) into a
+  four components of one precision, signed or unsigned, 1 to 38 bits) into a
   raw codestream: one tile, no MCT, RPCL. `--levels`, `--layers`, `--block`,
   `--sop`/`--no-sop`, `--eph`/`--no-eph`, and the code-block style flags of
   `tiff-to-jp2` apply. It is the only encoder for signed or more than 16-bit
-  samples, and works through i64 coefficients so it can grow to 38 bits.
+  samples and works through i64 coefficients. Any image up to 34 bits encodes;
+  from 35 bits a band can need more than the 37 magnitude bitplanes QCD can
+  signal (opposite extremes side by side, for instance), and such an image is
+  refused rather than truncated.
 
 The full profile matrix and internal API surface are documented in
 [API notes](docs/api.md).

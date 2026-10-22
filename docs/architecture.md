@@ -74,7 +74,7 @@ big-endian 1/2/4/8-byte words, preserving the complete 1..38-bit native model.
 Its bounded parser validates reserved fields, dimensions, counts, sample
 ranges, and exact end-of-file before returning owned planes. The strict payload
 slice reconstructs single- and multi-tile reversible no-MCT signed/unsigned
-1..29-bit components, including mixed component precision and independently
+1..38-bit components, including mixed component precision and independently
 sampled component grids, through
 the production T2/T1/5/3 path directly into these planes. Each tile retains its
 absolute component grid during independent synthesis and checked assembly.
@@ -102,11 +102,20 @@ so native and interleaved output agree sample for sample. Independent Kakadu fix
 5/7/8/12/13/16/19/20/23/29-bit T1/DWT payload reconstruction. The signed
 7/13/23-bit four-tile fixture also pins 1x1, 2x1, and 2x2 component sampling
 at full and reduced resolution. The 29-bit four-tile
-fixture reaches the current `i32` T1 boundary: reversible HH can add two
-magnitude bits, while T1 admits at most 31. Native inverse lifting therefore
-uses `i64` sums with checked `i32` stores for both full and reduced synthesis.
-Precisions beyond 29 bits remain fail-closed rather than being silently
-truncated; a 30-bit mutation pins the precision boundary. The legacy `u16`
+fixture reaches the `i32` T1 boundary: reversible HH can add two
+magnitude bits, while the i32 T1 admits at most 31. Native inverse lifting
+therefore uses `i64` sums with checked `i32` stores for both full and reduced
+synthesis. Beyond that boundary a component switches carrier rather than
+failing: `nativeComponentNeedsWidePlane` picks i64 coefficients for a
+reversible component above 29 bits or with any block Mb above 31, and
+`NativeCoefficientPlane` carries either width through inverse DWT, RCT, and
+level shifting. The T1 decoder is one generic implementation,
+`DecodeBlockScratchFor(i32 | i64)`, whose entry points refuse more bitplanes
+than the coefficient type holds; the i32 instantiation, its SIMD paths, and
+the block-parallel scheduler are unchanged, and the wide path decodes
+single-threaded. The QCD ceiling of Part 1 (Mb = G + epsilon - 1 <= 37) is
+the wide limit; the same mutated 29-bit fixture relabelled as 30 bits now
+decodes to identical samples on one and four tiles. The legacy `u16`
 decode surface deliberately still rejects signed input, accepts only 8/16-bit
 precision, and retains `color.max_components` (four).
 

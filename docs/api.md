@@ -424,7 +424,7 @@ Primary public functions:
   boundary validation
 - `encodeNativeLosslessWithOptions(allocator, source, options)` — reversible
   encode of `NativeSamplePlanes` (one to four components of one precision,
-  signed or unsigned, up to `max_wide_encode_precision`, currently 28 bits) on
+  signed or unsigned, up to `max_wide_encode_precision`, 38 bits) on
   one tile at the origin, without MCT, in RPCL, with no rate targets. Samples
   go through i64 throughout: the DC level shift, `wavelet_int.forward53WideOrigin`,
   and `ebcot.encodeCodeBlockSegmentIsoMqWideWithStyle`; scaffold, layers,
@@ -432,7 +432,9 @@ Primary public functions:
   `WideReversibleQuantization`: Mb = precision + gain + 1 per band within the
   Part 1 ceiling of 37, with the guard bits raised above 2 only where epsilon
   would not fit 5 bits. Up to 16 bits a one-component unsigned stream is
-  byte-identical to `encodeLosslessGrayWithOptions`.
+  byte-identical to `encodeLosslessGrayWithOptions`. From 35 bits a band can
+  need more than 37 bitplanes for some images; those return
+  `UnsupportedPayload` rather than a truncated stream.
 - `decodeLosslessNative(allocator, bytes, limits)` /
   `decodeLosslessNativeWithOptions(allocator, bytes, options, limits)` — first
   native payload profile: strict single- and multi-tile reversible 5/3 or
@@ -440,15 +442,22 @@ Primary public functions:
   overrides the transform, no MCT or a component transform over the first
   three components (RCT when they are 5/3, ICT when they are 9/7 with equal
   precision), and caller-limited signed or unsigned
-  1..29-bit components, including mixed component precision, independent SIZ
+  1..38-bit components (`max_native_decode_precision`), including mixed
+  component precision, independent SIZ
   sampling grids, and counts up to the Part 1 maximum of 16384 components,
   additionally bounded by `limits.max_components` (default 16384). ICT output
   equals the interleaved RGB decode sample for sample. Multi-tile T2/T1/DWT runs
   independently per tile and assembles by absolute component coordinates.
   Native inverse 5/3 synthesis forms every lifting sum in `i64`, checks the
   result before storing it in the `i32` T1/DWT plane, and fails malformed
-  overflow cases closed. The 29-bit ceiling follows the 31-magnitude-bitplane
-  T1 limit after the reversible HH gain; 30-bit SIZ payloads are unsupported.
+  overflow cases closed. A reversible component of more than 29 bits
+  (`max_native_payload_precision`), or with a band whose Mb exceeds 31, takes
+  the wide path instead: `ebcot.WideDecodeBlockScratch` (T1 over i64, up to
+  `ebcot.max_wide_magnitude_bitplanes` = 37) and the checked
+  `wavelet_int.inverse53WideReducedOrigin`, single-threaded per component;
+  RCT over a wide component runs in i64 too. QCD is accepted up to Mb = 37
+  and ROI-shifted Mb up to 37; every i32 decode path refuses deeper blocks
+  (`EbcotError.InvalidBlock`).
   `options.resolution_reduction`
   selects full or lower DWT resolutions through the production packet-pruning
   and partial-synthesis path; values above COD/NL fail as invalid. Signed
