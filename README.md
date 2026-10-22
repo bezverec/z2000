@@ -145,7 +145,7 @@ macOS archive; on macOS, build from source with Zig 0.17.
   layouts with caller-provided resource limits and preserves 1..38-bit
   signedness, arbitrary component counts, origins, and subsampling in dynamic
   `i64` planes. The bounded native payload path decodes single- and multi-tile
-  reversible signed/unsigned 1..29-bit streams without MCT or with RCT over the
+  signed/unsigned 1..29-bit streams without MCT or with RCT or ICT over the
   first three components, including mixed component precision and independent
   component sampling, with caller-limited counts up to the Part 1 maximum of
   16384 components at full or requested lower DWT resolutions

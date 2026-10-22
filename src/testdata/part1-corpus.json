@@ -4930,6 +4930,90 @@
           "max_mse": 0.0
         }
       ]
+    },
+    {
+      "id": "kakadu-five-component-ict-tiles",
+      "path": "src/testdata/kakadu-five-component-ict-tiles.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "67ed351fab37392e15f8fbd9e40f3e8465a4c103066b5d402efdc945fc4372ba",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "56x40, five 8-bit components on 32x32 tiles, irreversible 9/7 with ICT over components 0..2 and components 3 and 4 untransformed, 3 bpp. Native decode used to reject ICT, and the interleaved RGB path takes three or four components only",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 101 -size 56x40 plasma:fractal -depth 8 -separate a%d.pgm; magick -seed 102 -size 56x40 plasma:fractal -depth 8 -separate b%d.pgm; kdu_compress -i a0.pgm,a1.pgm,a2.pgm,b0.pgm,b1.pgm -o src/testdata/kakadu-five-component-ict-tiles.j2c Cycc=yes Stiles={32,32} Clevels=3 -rate 3 -num_threads 0; kdu_expand -num_threads 0 (and -reduce 1)"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes within one LSB, all five components at full resolution and components 0 and 3 at reduction 1",
+      "features": ["tiles-and-tile-parts", "irreversible-97", "selective-streaming-decode"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-five-component-ict-tiles-full-c0.pgx",
+          "sha256": "1589f0db1979e48b64eaa5c0b24bd710c5debd6ff1088b203a73cdd8a956975f",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-ict-tiles-full-c1.pgx",
+          "sha256": "8a9c5398106a96ebcdf5f468ede98fb7afd58f2c3263ca4c5a1d4e06f901ba63",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-ict-tiles-full-c2.pgx",
+          "sha256": "de135b83275329d2eb369e6f53c68b1a940b3bada88a94cb9958a4070f94aa75",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-ict-tiles-full-c3.pgx",
+          "sha256": "faae799516ac2231348efb59b4623f38467ae6c0f938739eebbad54d03d9d0ef",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-ict-tiles-full-c4.pgx",
+          "sha256": "2a6abd8d038be68368175cd32fbdd041f7c46d280b1f5517bce67dbd180ca961",
+          "format": "pgx",
+          "component": 4,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-ict-tiles-r1-c0.pgx",
+          "sha256": "be216e6654b54ac933acfd39a90da705690df2cf6676cbc9ce89020eaba5e00a",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "src/testdata/kakadu-five-component-ict-tiles-r1-c3.pgx",
+          "sha256": "59b534cfa13474c0cdc5c161460afd0ee5fad13ada07fab16b88d6ed63d81296",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        }
+      ]
     }
   ]
 }

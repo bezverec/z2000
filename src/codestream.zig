@@ -4365,18 +4365,19 @@ fn checkStrictNativeProfile(header: TemporaryHeader, options: DecodeOptions) !vo
     }
     switch (header.mct) {
         .none => {},
-        // RCT over the first three components; every other component passes
-        // through (ISO/IEC 15444-1 G.2). ICT stays closed: native 9/7 rounds
-        // each component before a float colour transform could be applied.
-        .rct => {
+        // A component transform over the first three components; every other
+        // component passes through. COD signals only that one is used: it is
+        // RCT when the three are 5/3 and ICT when they are 9/7 (ISO/IEC
+        // 15444-1 G.2, G.3), and a mixture has no defined transform.
+        .rct, .ict => {
             if (header.component_count < 3) return CodestreamError.UnsupportedPayload;
-            for (0..3) |component| {
-                if (componentTransformForHeader(header, component) != .reversible_5_3) {
+            const transform = componentTransformForHeader(header, 0);
+            for (1..3) |component| {
+                if (componentTransformForHeader(header, component) != transform) {
                     return CodestreamError.UnsupportedPayload;
                 }
             }
         },
-        .ict => return CodestreamError.UnsupportedPayload,
     }
     // Each component is synthesized on its own, so components may mix 5/3
     // and 9/7 (T.803 p0_05).
@@ -4445,50 +4446,96 @@ fn inverseNativeComponentPlane(
             return .{ .shape = reduced, .lossy = true };
         },
         .irreversible_9_7 => {
-            const width_u32 = std.math.cast(u32, width) orelse return CodestreamError.InvalidCodestream;
-            const height_u32 = std.math.cast(u32, height) orelse return CodestreamError.InvalidCodestream;
-            const x1 = std.math.add(u32, x0, width_u32) catch return CodestreamError.InvalidCodestream;
-            const y1 = std.math.add(u32, y0, height_u32) catch return CodestreamError.InvalidCodestream;
-            const bands = try subband.makeBandsForRegion(allocator, x0, y0, x1, y1, levels);
-            defer allocator.free(bands);
-            const deltas = try allocator.alloc(f64, bands.len);
-            defer allocator.free(deltas);
-            const depth = componentBitDepthForHeader(header, component);
-            if (component >= header.component_qcd.len) return CodestreamError.InvalidCodestream;
-            const component_qcd = &header.component_qcd[component];
-            for (bands, deltas) |band, *delta| {
-                const step = signalledQcdBandStep(component_qcd, levels, band.kind, band.level) orelse
-                    signalledHeaderBandStep(header, band.kind, band.level) orelse
-                    try irreversibleBandStepSizeFor(header.quantization, depth, band.kind, band.level, levels);
-                delta.* = irreversibleBandDelta(depth, band.kind, step);
-            }
-            const plane = try allocator.alloc(f32, try std.math.mul(usize, width, height));
-            defer allocator.free(plane);
-            var job = IrreversibleInversePlaneJob{
-                .quantized = coefficients,
-                .plane = plane,
-                .width = width,
-                .height = height,
-                .levels = levels,
-                .x0 = x0,
-                .y0 = y0,
-                .bands = bands,
-                .deltas = deltas,
-                .reduction = reduction,
-                .blocks = irreversibleMidpointBlocks(header, catalog, component),
-            };
-            try irreversibleInversePlane(&job);
-            const limit: f32 = @floatFromInt(std.math.maxInt(i32));
-            for (0..job.shape.height) |row| {
+            const synthesized = try inverseNativeIrreversiblePlane(
+                allocator,
+                header,
+                catalog,
+                component,
+                coefficients,
+                width,
+                height,
+                levels,
+                reduction,
+            );
+            defer allocator.free(synthesized.plane);
+            for (0..synthesized.shape.height) |row| {
                 const base = row * width;
-                for (coefficients[base..][0..job.shape.width], plane[base..][0..job.shape.width]) |*coefficient, value| {
-                    const rounded = if (std.math.isNan(value)) 0 else std.math.clamp(@round(value), -limit, limit);
-                    coefficient.* = @intFromFloat(rounded);
+                for (coefficients[base..][0..synthesized.shape.width], synthesized.plane[base..][0..synthesized.shape.width]) |*coefficient, value| {
+                    coefficient.* = roundNativeIrreversibleSample(value, 0);
                 }
             }
-            return .{ .shape = .{ .width = job.shape.width, .height = job.shape.height, .x0 = job.shape.x0, .y0 = job.shape.y0 }, .lossy = true };
+            return .{ .shape = synthesized.shape, .lossy = true };
         },
     }
+}
+
+/// One irreversible component after dequantization and 9/7 synthesis, before
+/// rounding. The samples occupy the top-left `shape` of `plane` (row stride is
+/// the component width); the caller owns `plane`.
+const NativeIrreversiblePlane = struct {
+    plane: []f32,
+    shape: wavelet_int.ResolutionShape,
+};
+
+fn inverseNativeIrreversiblePlane(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    component: usize,
+    coefficients: []const i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+) !NativeIrreversiblePlane {
+    const x0 = catalog.component_x0[component];
+    const y0 = catalog.component_y0[component];
+    const width_u32 = std.math.cast(u32, width) orelse return CodestreamError.InvalidCodestream;
+    const height_u32 = std.math.cast(u32, height) orelse return CodestreamError.InvalidCodestream;
+    const x1 = std.math.add(u32, x0, width_u32) catch return CodestreamError.InvalidCodestream;
+    const y1 = std.math.add(u32, y0, height_u32) catch return CodestreamError.InvalidCodestream;
+    const bands = try subband.makeBandsForRegion(allocator, x0, y0, x1, y1, levels);
+    defer allocator.free(bands);
+    const deltas = try allocator.alloc(f64, bands.len);
+    defer allocator.free(deltas);
+    const depth = componentBitDepthForHeader(header, component);
+    if (component >= header.component_qcd.len) return CodestreamError.InvalidCodestream;
+    const component_qcd = &header.component_qcd[component];
+    for (bands, deltas) |band, *delta| {
+        const step = signalledQcdBandStep(component_qcd, levels, band.kind, band.level) orelse
+            signalledHeaderBandStep(header, band.kind, band.level) orelse
+            try irreversibleBandStepSizeFor(header.quantization, depth, band.kind, band.level, levels);
+        delta.* = irreversibleBandDelta(depth, band.kind, step);
+    }
+    const plane = try allocator.alloc(f32, try std.math.mul(usize, width, height));
+    errdefer allocator.free(plane);
+    var job = IrreversibleInversePlaneJob{
+        .quantized = coefficients,
+        .plane = plane,
+        .width = width,
+        .height = height,
+        .levels = levels,
+        .x0 = x0,
+        .y0 = y0,
+        .bands = bands,
+        .deltas = deltas,
+        .reduction = reduction,
+        .blocks = irreversibleMidpointBlocks(header, catalog, component),
+    };
+    try irreversibleInversePlane(&job);
+    return .{
+        .plane = plane,
+        .shape = .{ .width = job.shape.width, .height = job.shape.height, .x0 = job.shape.x0, .y0 = job.shape.y0 },
+    };
+}
+
+/// Rounds a reconstructed irreversible sample to the integer plane, before
+/// the component's DC level shift. `level_shift` makes ties round as they do
+/// on the shifted sample, which is where the interleaved RGB path rounds.
+fn roundNativeIrreversibleSample(value: f32, level_shift: f32) i32 {
+    if (std.math.isNan(value)) return 0;
+    const limit: f32 = @floatFromInt(std.math.maxInt(i32));
+    return @intFromFloat(std.math.clamp(@round(value + level_shift) - level_shift, -limit, limit));
 }
 
 /// One native component after inverse DWT and before level shifting. The
@@ -4538,23 +4585,22 @@ fn reconstructNativeComponent(
     return .{ .coefficients = coefficients, .stride = width, .inverse = inverse };
 }
 
-/// Components 0..2 of a tile coded with the reversible component transform,
-/// reconstructed and returned from Y/Db/Dr to their R/G/B values (ISO/IEC
-/// 15444-1 G.2.2); null when the tile has no component transform. The caller
-/// owns the returned coefficient planes.
-fn reconstructNativeRctComponents(
+/// Components 0..2 of a tile coded with a component transform, reconstructed
+/// and returned to their R/G/B values: RCT from Y/Db/Dr (ISO/IEC 15444-1
+/// G.2.2) or ICT from Y/Cb/Cr (G.3.2); null when the tile has no component
+/// transform. The caller owns the returned coefficient planes.
+fn reconstructNativeTransformedComponents(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
     workspace: *wavelet_int.Workspace,
 ) !?[3]NativeReconstructedComponent {
-    switch (header.mct) {
-        .none => return null,
-        .ict => return CodestreamError.UnsupportedPayload,
-        .rct => {},
-    }
+    if (header.mct == .none) return null;
     if (header.component_count < 3) return CodestreamError.UnsupportedPayload;
+    if (componentTransformForHeader(header, 0) == .irreversible_9_7) {
+        return try reconstructNativeIctComponents(allocator, header, catalog, options);
+    }
     for (0..3) |component| {
         if (componentTransformForHeader(header, component) != .reversible_5_3) {
             return CodestreamError.UnsupportedPayload;
@@ -4590,6 +4636,97 @@ fn reconstructNativeRctComponents(
             y0.* = std.math.cast(i32, red) orelse return CodestreamError.InvalidCodestream;
             y1.* = std.math.cast(i32, green) orelse return CodestreamError.InvalidCodestream;
             y2.* = std.math.cast(i32, blue) orelse return CodestreamError.InvalidCodestream;
+        }
+    }
+    return planes;
+}
+
+/// The ICT branch of `reconstructNativeTransformedComponents`. The 9/7
+/// synthesis of components 0..2 stays in f32 until the inverse ICT has run,
+/// with the constants and rounding of the interleaved RGB path, so the colour
+/// transform never sees rounded samples.
+fn reconstructNativeIctComponents(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+) ![3]NativeReconstructedComponent {
+    if (header.component_count < 3) return CodestreamError.UnsupportedPayload;
+    // ICT is defined over one sample range (G.3).
+    const depth = componentBitDepthForHeader(header, 0);
+    for (0..3) |component| {
+        if (componentTransformForHeader(header, component) != .irreversible_9_7 or
+            componentBitDepthForHeader(header, component) != depth or
+            header.component_signed[component] != header.component_signed[0])
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+    var planes: [3]NativeReconstructedComponent = undefined;
+    var floats: [3][]f32 = undefined;
+    var built: usize = 0;
+    defer for (floats[0..built]) |plane| allocator.free(plane);
+    errdefer for (planes[0..built]) |plane| allocator.free(plane.coefficients);
+    while (built < planes.len) : (built += 1) {
+        const component = built;
+        const levels = componentLevelsForHeader(header, component);
+        const width = catalog.component_widths[component];
+        const height = catalog.component_heights[component];
+        const coefficients = try reconstructStrictComponentCoefficientsFromBlockCatalog(
+            allocator,
+            width,
+            height,
+            levels,
+            catalog,
+            component,
+            componentRoiShiftForHeader(header, component),
+            options,
+            null,
+        );
+        const synthesized = inverseNativeIrreversiblePlane(
+            allocator,
+            header,
+            catalog,
+            component,
+            coefficients,
+            width,
+            height,
+            levels,
+            options.resolution_reduction,
+        ) catch |err| {
+            allocator.free(coefficients);
+            return err;
+        };
+        planes[component] = .{
+            .coefficients = coefficients,
+            .stride = width,
+            .inverse = .{ .shape = synthesized.shape, .lossy = true },
+        };
+        floats[component] = synthesized.plane;
+    }
+    const shape = planes[0].inverse.shape;
+    for (planes[1..]) |plane| {
+        if (plane.inverse.shape.width != shape.width or plane.inverse.shape.height != shape.height or
+            plane.inverse.shape.x0 != shape.x0 or plane.inverse.shape.y0 != shape.y0)
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+    const level_shift: f32 = if (header.component_signed[0])
+        0
+    else
+        @floatFromInt(@as(i64, 1) << @as(u6, @intCast(depth - 1)));
+    for (0..shape.height) |row| {
+        for (0..shape.width) |column| {
+            const y = floats[0][row * planes[0].stride + column];
+            const cb = floats[1][row * planes[1].stride + column];
+            const cr = floats[2][row * planes[2].stride + column];
+            planes[0].coefficients[row * planes[0].stride + column] =
+                roundNativeIrreversibleSample(y + 1.402 * cr, level_shift);
+            planes[1].coefficients[row * planes[1].stride + column] =
+                roundNativeIrreversibleSample(y - 0.34413 * cb - 0.71414 * cr, level_shift);
+            planes[2].coefficients[row * planes[2].stride + column] =
+                roundNativeIrreversibleSample(y + 1.772 * cb, level_shift);
         }
     }
     return planes;
@@ -4670,7 +4807,7 @@ fn decodeStrictSingleTileNative(
     var workspace = try wavelet_int.Workspace.init(allocator, max_component_dimension);
     defer workspace.deinit();
 
-    const rct_components = try reconstructNativeRctComponents(allocator, header, catalog, options, &workspace);
+    const rct_components = try reconstructNativeTransformedComponents(allocator, header, catalog, options, &workspace);
     defer if (rct_components) |planes| for (planes) |plane| allocator.free(plane.coefficients);
 
     for (0..header.component_count) |component| {
@@ -7056,10 +7193,10 @@ fn readStrictCodestreamMetadataForProfile(
         component_coding[max_levels_component].precincts[0..precinct_count],
     );
     // Four components with MCT: RCT or ICT over the first three, alpha
-    // independent. The native profile applies RCT to the first three of any
+    // independent. The native profile applies RCT or ICT to the first three of any
     // component count.
     if (parsed_mct != .none and component_count != 3 and component_count != 4 and
-        !(precision_profile == .native and parsed_mct == .rct and component_count > 4))
+        !(precision_profile == .native and component_count > 4))
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -12262,7 +12399,7 @@ fn decodeStrictMultiTileNativeToSink(
         const overlap = referenceRectIntersection(tile.rect, window.reference_rect) orelse
             return CodestreamError.InvalidCodestream;
         windows.release();
-        const rct_components = try reconstructNativeRctComponents(allocator, tile_header, block_catalog, options, &workspace);
+        const rct_components = try reconstructNativeTransformedComponents(allocator, tile_header, block_catalog, options, &workspace);
         defer if (rct_components) |planes| for (planes) |plane| allocator.free(plane.coefficients);
         for (0..header.component_count) |component| {
             const source_width = block_catalog.component_widths[component];

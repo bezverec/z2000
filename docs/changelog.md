@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Native ICT
+
+- The native decoder (`decodeLosslessNative`, `j2k-to-pgx`, `j2k-to-zraw`)
+  now applies ICT. COD signals only that a component transform is used; with
+  9/7 on components 0..2 it is ICT. Their synthesis stays in f32 until the
+  inverse ICT has run, with the constants and rounding of the interleaved RGB
+  path, and every other component passes through. Components 0..2 must share
+  precision and signedness.
+- Native ICT output equals the interleaved decode sample for sample on T.803
+  `p1_02`, `p1_05`, and `p1_06` (1.7 million samples) and on two committed
+  12-bit streams; a unit test pins the latter. It reaches layouts the
+  interleaved path does not take: five components on tiles, at full
+  resolution and reduction 1, and 12- and 16-bit RGB, all within one LSB of
+  Kakadu. `kakadu-five-component-ict-tiles` is committed and fails on the
+  previous code.
+
 ### Component-Local Coding With Component Sampling
 
 - Native single-tile decode accepted component-local COC/QCC only when no

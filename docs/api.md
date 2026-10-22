@@ -425,12 +425,13 @@ Primary public functions:
   `decodeLosslessNativeWithOptions(allocator, bytes, options, limits)` — first
   native payload profile: strict single- and multi-tile reversible 5/3 or
   irreversible 9/7 (components up to 24 bits), chosen per component where COC
-  overrides the transform, no MCT or RCT over the first three components when
-  those are 5/3, and caller-limited signed or unsigned
+  overrides the transform, no MCT or a component transform over the first
+  three components (RCT when they are 5/3, ICT when they are 9/7 with equal
+  precision), and caller-limited signed or unsigned
   1..29-bit components, including mixed component precision, independent SIZ
   sampling grids, and counts up to the Part 1 maximum of 16384 components,
-  additionally bounded by `limits.max_components` (default 16384). ICT stays
-  unsupported on this path. Multi-tile T2/T1/DWT runs
+  additionally bounded by `limits.max_components` (default 16384). ICT output
+  equals the interleaved RGB decode sample for sample. Multi-tile T2/T1/DWT runs
   independently per tile and assembles by absolute component coordinates.
   Native inverse 5/3 synthesis forms every lifting sum in `i64`, checks the
   result before storing it in the `i32` T1/DWT plane, and fails malformed

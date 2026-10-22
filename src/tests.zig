@@ -38983,3 +38983,26 @@ test "PPT headers of trailing empty packets belong to the tile's last part" {
         try std.testing.expectEqualSlices(i64, expected.planes[0].samples, actual.planes[0].samples);
     }
 }
+
+test "native ICT matches the interleaved RGB decode sample for sample" {
+    const allocator = std.testing.allocator;
+    // The native path keeps the 9/7 synthesis of components 0..2 in f32
+    // through the inverse ICT and rounds where the interleaved path does.
+    const streams = [_][]const u8{
+        @embedFile("testdata/kakadu-broadcast-rgb12.j2c"),
+        @embedFile("testdata/openjpeg-cinema2k-rgb12.j2k"),
+    };
+    for (streams) |stream| {
+        var rgb = try codestream.decodeLosslessTemporary(allocator, stream);
+        defer rgb.deinit();
+        var native = try codestream.decodeLosslessNative(allocator, stream, .{});
+        defer native.deinit();
+        try std.testing.expectEqual(@as(usize, 3), native.planes.len);
+        for (native.planes, 0..) |plane, component| {
+            try std.testing.expectEqual(rgb.width * rgb.height, plane.samples.len);
+            for (plane.samples, 0..) |sample, index| {
+                try std.testing.expectEqual(@as(i64, rgb.samples[index * 3 + component]), sample);
+            }
+        }
+    }
+}

@@ -93,9 +93,12 @@ corruption check. Reversible native decode is caller-limited up to the
 Part 1 maximum of 16384 components and is independently pinned at 19
 components across four tiles and at 260 components. With RCT, components 0..2
 of each tile are reconstructed first, checked to share one grid, and inverted
-from Y/Db/Dr before level shifting; every other component passes through. ICT
-stays closed because native 9/7 rounds each component before a float colour
-transform could apply. Independent Kakadu fixtures pin
+from Y/Db/Dr before level shifting; every other component passes through. COD
+only signals that a transform is used; it is ICT when the three components
+are 9/7. Their synthesis then stays in f32 (`inverseNativeIrreversiblePlane`)
+until the inverse ICT has run with the interleaved path's constants and
+rounding (`roundNativeIrreversibleSample` rounds on the level-shifted value),
+so native and interleaved output agree sample for sample. Independent Kakadu fixtures pin
 5/7/8/12/13/16/19/20/23/29-bit T1/DWT payload reconstruction. The signed
 7/13/23-bit four-tile fixture also pins 1x1, 2x1, and 2x2 component sampling
 at full and reduced resolution. The 29-bit four-tile
