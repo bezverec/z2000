@@ -1644,10 +1644,10 @@
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
         "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "T.803 class-0 c0p0_05.pgx at reduction 3, peak error <= 54, MSE <= 68",
+      "oracle": "T.803 class-0 c0p0_05.pgx at reduction 3, peak error <= 54, MSE <= 68; all four components are within one LSB of Kakadu 8.4.1 and OpenJPEG 2.5.4 at full resolution and reduction 3, and the 5/3 component equals both",
       "features": ["siz-subsampled-components", "cod-qcd-component-overrides", "tiles-and-tile-parts", "irreversible-97"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "expectation": "decode_pass",
+      "decoder": "native",
       "references": [{
         "path": "reference_class0_profile0/c0p0_05.pgx",
         "sha256": "008e9c31c4409706048d59d3dd9f79c87db0ea8c45eb49d53449c56c8919a2df",
@@ -4178,6 +4178,63 @@
           "resolution_reduction": 1,
           "max_peak_error": 0,
           "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-mixed-transform-levels",
+      "path": "src/testdata/kakadu-mixed-transform-levels.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "260a3aba5a6410403f09637be99a795a0cd51e2979140230645d3bd8cbd66845",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "48x40, three unsigned 8-bit components, one tile, no MCT: components 0 and 1 irreversible 9/7 with three and two levels, component 2 reversible 5/3 with three, through COC/QCC. The native path used to reject components with different wavelet transforms",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream, source PGX plane, and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 31 -size 48x40 plasma:fractal -depth 8 -separate m%d.pgm; kdu_compress -i m0.pgm,m1.pgm,m2.pgm -o src/testdata/kakadu-mixed-transform-levels.j2c Cycc=no Clevels=3 Clevels:C1=2 Creversible:C2=yes -num_threads 0; kdu_expand -num_threads 0 (and -reduce 1)"
+      },
+      "oracle": "the 5/3 component equals its encoder input exactly; the 9/7 components are within one LSB of kdu_expand 8.4.1 at full resolution and component 0 also at reduction 1",
+      "features": ["cod-qcd-component-overrides", "irreversible-97", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-mixed-transform-levels-full-c0.pgx",
+          "sha256": "cb49abd7f5b83bc01eb9bad0dc1d19f368671c2378740b1015bf4a9df81cb5a2",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "src/testdata/kakadu-mixed-transform-levels-full-c1.pgx",
+          "sha256": "d4f4d3f6cf0d45c336645cced062e6c3e7e150106ac5139ee74f276a10457ee1",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "src/testdata/kakadu-mixed-transform-levels-source-c2.pgx",
+          "sha256": "80b357401720d29fc62e9343a8ef5be0674a4db0399256e72dab1629a783fc5d",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        },
+        {
+          "path": "src/testdata/kakadu-mixed-transform-levels-r1-c0.pgx",
+          "sha256": "b6028df8819450a1b609e19c4bec593be4b0e4586947fa0d0d72ffbe04fa1df0",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 1,
+          "max_mse": 0.1
         }
       ]
     }

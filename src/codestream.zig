@@ -4363,28 +4363,36 @@ fn checkStrictNativeProfile(header: TemporaryHeader, options: DecodeOptions) !vo
             if (options.resolution_reduction > component.levels) return CodestreamError.InvalidCodestream;
         }
     }
-    if (headerHasMixedComponentTransforms(header)) return CodestreamError.UnsupportedPayload;
     switch (header.mct) {
         .none => {},
         // RCT over the first three components; every other component passes
         // through (ISO/IEC 15444-1 G.2). ICT stays closed: native 9/7 rounds
         // each component before a float colour transform could be applied.
-        .rct => if (header.component_count < 3 or header.transform != .reversible_5_3) {
-            return CodestreamError.UnsupportedPayload;
+        .rct => {
+            if (header.component_count < 3) return CodestreamError.UnsupportedPayload;
+            for (0..3) |component| {
+                if (componentTransformForHeader(header, component) != .reversible_5_3) {
+                    return CodestreamError.UnsupportedPayload;
+                }
+            }
         },
         .ict => return CodestreamError.UnsupportedPayload,
     }
-    switch (header.transform) {
-        .reversible_5_3 => if (header.quantization != .none) return CodestreamError.UnsupportedPayload,
-        // Irreversible samples are rounded from f32 synthesis, which carries
-        // them exactly only up to 24 significant bits; wider components stay
-        // unsupported rather than silently losing precision.
-        .irreversible_9_7 => {
-            if (header.quantization == .none) return CodestreamError.UnsupportedPayload;
-            for (0..header.component_count) |component| {
+    // Each component is synthesized on its own, so components may mix 5/3
+    // and 9/7 (T.803 p0_05).
+    for (0..header.component_count) |component| {
+        const quantization = componentQuantizationForHeader(header, component);
+        switch (componentTransformForHeader(header, component)) {
+            .reversible_5_3 => if (quantization != .none) return CodestreamError.UnsupportedPayload,
+            // Irreversible samples are rounded from f32 synthesis, which
+            // carries them exactly only up to 24 significant bits; wider
+            // components stay unsupported rather than silently losing
+            // precision.
+            .irreversible_9_7 => {
+                if (quantization == .none) return CodestreamError.UnsupportedPayload;
                 if (componentBitDepthForHeader(header, component) > 24) return CodestreamError.UnsupportedPayload;
-            }
-        },
+            },
+        }
     }
 }
 
@@ -4414,7 +4422,7 @@ fn inverseNativeComponentPlane(
 ) !NativeComponentInverse {
     const x0 = catalog.component_x0[component];
     const y0 = catalog.component_y0[component];
-    switch (header.transform) {
+    switch (componentTransformForHeader(header, component)) {
         .reversible_5_3 => {
             if (reduction == 0) {
                 wavelet_int.inverse53CheckedWithWorkspaceOrigin(workspace, coefficients, width, height, levels, x0, y0) catch |err| switch (err) {
@@ -4539,8 +4547,11 @@ fn reconstructNativeRctComponents(
         .ict => return CodestreamError.UnsupportedPayload,
         .rct => {},
     }
-    if (header.component_count < 3 or header.transform != .reversible_5_3) {
-        return CodestreamError.UnsupportedPayload;
+    if (header.component_count < 3) return CodestreamError.UnsupportedPayload;
+    for (0..3) |component| {
+        if (componentTransformForHeader(header, component) != .reversible_5_3) {
+            return CodestreamError.UnsupportedPayload;
+        }
     }
     var planes: [3]NativeReconstructedComponent = undefined;
     var built: usize = 0;
@@ -6894,21 +6905,22 @@ fn readStrictCodestreamMetadataForProfile(
     for (coc_component_seen[0..component_count]) |seen| {
         all_components_have_coc = all_components_have_coc and seen;
     }
-    // QCD quantizes exactly the components without a QCC, so its band count
-    // and step style follow their effective coding style (COC when present,
-    // otherwise COD). T.803 p0_02 exercises a 9/7 COD followed by an
-    // all-component 5/3 COC; p0_08 gives each component its own level count
-    // and a QCC to every component but the one that QCD serves.
+    // QCD quantizes exactly the components without a QCC, so its step style
+    // follows their effective transform (COC when present, otherwise COD) and
+    // its band count their deepest level count. A shallower component uses
+    // the leading bands, which are listed from the lowest resolution up.
+    // T.803 p0_02 exercises a 9/7 COD followed by an all-component 5/3 COC;
+    // p0_08 gives a QCC to every component but the one QCD serves; p0_05 has
+    // QCD serve a 3-level and a 6-level component.
     var qcd_component: ?usize = null;
     for (qcc_component_seen[0..component_count], 0..) |seen, component| {
         if (seen) continue;
         const coding = component_coding[component];
-        if (qcd_component) |first| {
-            if (coding.levels != component_coding[first].levels or
-                coding.transform != component_coding[first].transform)
-            {
+        if (qcd_component) |deepest| {
+            if (coding.transform != component_coding[deepest].transform) {
                 return CodestreamError.UnsupportedPayload;
             }
+            if (coding.levels > component_coding[deepest].levels) qcd_component = component;
         } else qcd_component = component;
     }
     if (qcd_component) |component| {
@@ -6945,7 +6957,17 @@ fn readStrictCodestreamMetadataForProfile(
         parsed_qcd_exponent_count = qcd_info.exponent_count;
         parsed_qcd_steps = qcd_info.steps;
         parsed_qcd_step_count = qcd_info.step_count;
-        for (component_qcd[0..component_count]) |*component_info| component_info.* = qcd_info;
+        for (component_qcd[0..component_count], component_coding[0..component_count]) |*component_info, coding| {
+            component_info.* = if (coding.levels < default_qcd_levels)
+                try validateStrictQcdSegment(
+                    strictQcdPrefix(qcd_payload, coding.levels),
+                    bit_depth,
+                    coding.levels,
+                    default_qcd_transform,
+                )
+            else
+                qcd_info;
+        }
     }
     var captured_first_qcc_info = false;
     for (qcc_component_seen[0..component_count], 0..) |seen, component| {
@@ -7543,6 +7565,39 @@ fn strictProfileSignalingFixture(
     return out.toOwnedSlice(allocator);
 }
 
+test "main QCD gives a shallower component its leading bands" {
+    const allocator = std.testing.allocator;
+    // Kakadu gives component 0 one level, component 1 the COD default of two,
+    // and component 2 three, with a QCC for components 0 and 2. Without the
+    // component-0 QCC, the two-level QCD quantizes both component 0 and
+    // component 1 (T.803 p0_05 has this shape). The packet structure is
+    // unchanged, so the header still validates.
+    const base = @embedFile("testdata/kakadu-qcd-shallow-component.j2c");
+    var cursor: usize = 2;
+    var qcc_start: usize = 0;
+    var qcc_end: usize = 0;
+    while (readU16Be(base, cursor) != @backingInt(Marker.sot)) {
+        const length = readU16Be(base, cursor + 2);
+        if (readU16Be(base, cursor) == @backingInt(Marker.qcc) and base[cursor + 4] == 0) {
+            qcc_start = cursor;
+            qcc_end = cursor + 2 + length;
+        }
+        cursor += 2 + length;
+    }
+    try std.testing.expect(qcc_end != 0);
+    const stream = try std.mem.concat(allocator, u8, &.{ base[0..qcc_start], base[qcc_end..] });
+    defer allocator.free(stream);
+
+    var header = try readStrictNativeCodestreamMetadata(allocator, stream);
+    defer header.deinit();
+    const shallow = header.component_qcd[0];
+    const full = header.component_qcd[1];
+    try std.testing.expectEqual(@as(usize, 4), shallow.bands);
+    try std.testing.expectEqual(@as(usize, 7), full.bands);
+    try std.testing.expectEqualSlices(u8, full.exponents[0..4], shallow.exponents[0..4]);
+    try std.testing.expectEqual(@as(usize, 10), header.component_qcd[2].bands);
+}
+
 test "strict main-header profile signaling validates CAP PRF and Rsiz" {
     const allocator = std.testing.allocator;
     var samples = [_]u16{ 0, 17, 255, 91 };
@@ -7815,6 +7870,18 @@ const StrictQcdInfo = struct {
     steps: [max_qcd_bands]BandStepSize = @splat(.{ .exponent = 0, .mantissa = 0 }),
     step_count: u8 = 0,
 };
+
+/// The leading part of a QCD/QCC payload that describes `levels`
+/// decomposition levels. `segment` must already be valid for at least that
+/// many levels; scalar-derived quantization has no per-band entries.
+fn strictQcdPrefix(segment: []const u8, levels: u8) []const u8 {
+    const bands = 1 + 3 * @as(usize, levels);
+    return switch (segment[0] & 0x1f) {
+        @backingInt(QuantizationStyle.none) => segment[0 .. 1 + bands],
+        @backingInt(QuantizationStyle.scalar_expounded) => segment[0 .. 1 + 2 * bands],
+        else => segment,
+    };
+}
 
 fn validateStrictQcdWireShape(segment: []const u8, levels: u8) !void {
     if (segment.len < 2) return CodestreamError.InvalidCodestream;
@@ -8230,6 +8297,22 @@ fn componentCodingSliceForHeader(header: TemporaryHeader) ?[]const StrictCompone
         }
     }
     return coding;
+}
+
+fn componentTransformForHeader(header: TemporaryHeader, component: usize) WaveletTransform {
+    if (componentCodingSliceForHeader(header)) |coding| {
+        if (component < coding.len) return coding[component].transform;
+    }
+    return header.transform;
+}
+
+fn componentQuantizationForHeader(header: TemporaryHeader, component: usize) QuantizationStyle {
+    if (component < header.component_count and component < header.component_qcd.len and
+        header.component_qcd[component].bands != 0)
+    {
+        return header.component_qcd[component].quantization;
+    }
+    return header.quantization;
 }
 
 fn componentLevelsForHeader(header: TemporaryHeader, component: usize) u8 {

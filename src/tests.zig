@@ -588,10 +588,17 @@ test "Kakadu component-local 5/3 and 9/7 transforms decode native planes" {
         codestream.CodestreamError.UnsupportedPayload,
         codestream.decodeLosslessTemporary(allocator, bytes),
     );
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessNative(allocator, bytes, .{}),
-    );
+    // The native path synthesizes each component with its own transform.
+    var native = try codestream.decodeLosslessNative(allocator, bytes, .{});
+    defer native.deinit();
+    for (native.planes, full_references) |plane, reference| {
+        const narrowed = try allocator.alloc(u16, plane.samples.len);
+        defer allocator.free(narrowed);
+        for (plane.samples, narrowed) |sample, *out| out.* = @intCast(sample);
+        const difference = try compareUnsigned8Pgx(narrowed, reference);
+        try std.testing.expect(difference.peak <= 1);
+        try std.testing.expect(difference.mse <= 0.04);
+    }
 
     var full = try codestream.decodeLosslessPlanarWithOptions(
         allocator,

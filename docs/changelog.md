@@ -5,6 +5,31 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### T.803 p0_05: Mixed Transforms And Shallow QCD Users
+
+- A main QCD may now serve components with different level counts: it is
+  sized by the deepest component it serves, and a shallower one uses its
+  leading bands, which are listed from the lowest resolution up. Components
+  served by one QCD must still share a transform. A unit test pins this on
+  the committed Kakadu stream with one QCC removed.
+- The native decoder synthesizes each component with the transform its COC
+  selects, so single-tile streams that mix 5/3 and 9/7 components decode
+  natively; RCT still requires 5/3 on components 0..2.
+- T.803 `p0_05` (four components, two subsampled 2x2, 9/7 on three and 5/3
+  on one, levels 6/3/6/6, QCD serving a 3-level and a 6-level component)
+  now decodes. Every component is within one LSB of Kakadu 8.4.1 and
+  OpenJPEG 2.5.4 at full resolution and reduction 3, the 5/3 component
+  equals both, and component 0 is 3 of the allowed 54 from its class-0
+  reference. `kakadu-mixed-transform-levels` (two 9/7 components with three
+  and two levels, one 5/3) pins native mixed transforms in the default
+  corpus and fails on the previous code. All 16 T.803 profile-0 streams now
+  pass; with `Z2000_PART4_ROOT` the corpus reports 103 passes, 19 expected
+  rejections, and no mismatch.
+- Found while building that fixture: a reversible component whose layers an
+  encoder truncated (`kdu_compress -rate`) can reconstruct slightly out of
+  range, which strict full-resolution native decode reports as
+  `SampleOutOfRange` rather than clamping. That policy is unchanged here.
+
 ### T.803 p0_13: 257 Components And Native RCT
 
 - The native decoder now accepts the Part 1 maximum of 16384 components
