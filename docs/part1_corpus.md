@@ -100,9 +100,9 @@ path. `p1_05` (odd image and tile origins, PCRL, 16x16 precincts, bypass,
 SOP/EPH, PPM) exposed a PCRL ordering defect on tiles that start inside a
 precinct; after the fix it is within one LSB of Kakadu and OpenJPEG, while all
 three decoders are 7 to 15 from the class-1 reference, so its bounds record
-that spread. `p1_04` and `p1_07` are pinned fail-closed. `p1_02` currently
-fails as `InvalidCodestream`, which a legal stream must not, and stays out of
-the manifest until it is fixed.
+that spread. `p1_02` (PPT without PLT, ending in empty packets) passes since
+the tile's last part reads every remaining PPT header, within the peak-2
+spread Kakadu and OpenJPEG show. `p1_04` and `p1_07` are pinned fail-closed.
 
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
 8-bit reversible/no-MCT codestreams. The corpus selects the native `i64`

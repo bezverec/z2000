@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Trailing Empty Packets Under PPT
+
+- Without PLT, a tile-part with carried PPT headers stopped reading headers
+  once its body was consumed, because headers may describe packets that a
+  later part holds. The tile's last part (known from `TNsot`) owns every
+  remaining header, however, and empty packets at the end of a tile have no
+  body to stop on, so their headers were left over and the stream failed as
+  `InvalidCodestream`. That last part now reads them all, on single- and
+  multi-tile paths. With `TNsot` 0 the old stop still applies.
+- T.803 `p1_02` (19 LRCP layers, PPT without PLT) now decodes, as close to its
+  class-1 reference as Kakadu and OpenJPEG (peak 2). A test repacks two
+  committed Kakadu streams whose last layers are empty into PLT-less PPT and
+  requires the same output as the inline originals; it fails on the previous
+  code. The test helper gained a PLT-less PPT mode.
+
 ### PCRL/CPRL Precinct Positions On Unaligned Tiles; T.803 Profile 1
 
 - Position-major orders (PCRL, CPRL) placed each precinct at its absolute
@@ -22,8 +37,8 @@ entries are grouped by development milestone rather than semantic version.
   (within one LSB), `p1_06`, and `p1_05` pass; `p1_05` needed the PCRL fix,
   and is within one LSB of Kakadu and OpenJPEG while all three decoders are
   7 to 15 from its class-1 reference. `p1_04` (tile-part layout) and `p1_07`
-  (two components, one sampled 4x1) remain fail-closed, and `p1_02` fails as
-  `InvalidCodestream` and is left out of the manifest until that is fixed.
+  (two components, one sampled 4x1) remain fail-closed; `p1_02` followed in
+  the next change.
 
 ## 0.2.0-rc.3 — 2026-10-22
 

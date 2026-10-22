@@ -4645,6 +4645,114 @@
           "max_mse": 0
         }
       ]
+    },
+    {
+      "id": "t803-profile1-02",
+      "path": "codestreams_profile1/p1_02.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "9fb9a26fbd769ea4fce1ca450ed605764af9931783eba49b3551b3a37b7a6f87",
+      "source": {
+        "producer": "ITU-T T.803 | ISO/IEC 15444-4 conformance corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Profile-1 test p1_02, 640x480 RGB with ICT/9-7, 19 LRCP layers, PPT without PLT, QCC for two components; its last packets are empty",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "T.803 class-1 c1p1_02-0..2.pgx within peak 2 and MSE 0.4, the spread Kakadu 8.4.1 and OpenJPEG 2.5.4 also show",
+      "features": ["packet-header-placement", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "decoder": "interleaved_rgb",
+      "references": [
+        {
+          "path": "reference_class1_profile1/c1p1_02-0.pgx",
+          "sha256": "0ed11a110b40f1f7174546decf075a12ba201e1d5bbba18dcfa638d6b320bc3f",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 2,
+          "max_mse": 0.4
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_02-1.pgx",
+          "sha256": "23551bc04b229de63344f7a7f4b0cc19d8512681ad3fbd5d7b3fbd55d23228dc",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 2,
+          "max_mse": 0.4
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_02-2.pgx",
+          "sha256": "46349e1ccb1df738b58ce7d0f706bd6c2937eb6457596e9ec9f858ed0d9b47a4",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 2,
+          "max_mse": 0.4
+        }
+      ]
+    },
+    {
+      "id": "kakadu-empty-tail-layers",
+      "path": "src/testdata/kakadu-empty-tail-layers.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "7c4a781779acb0ac9db92a800e04f02a75f58d52f46ded28e4586de4d420e235",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "24x20 8-bit gray, reversible, two levels, five layers rate-limited so the last two carry nothing; the stream ends in empty packets. src/tests.zig repacks it to PPT without PLT",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX reference committed; producer application not redistributed",
+        "command": "magick -seed 61 -size 24x20 plasma:fractal -depth 8 -colorspace gray g.pgm; kdu_compress -i g.pgm -o src/testdata/kakadu-empty-tail-layers.j2c Creversible=yes Clevels=2 Clayers=5 -rate 1,2,8,20,30 -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX plane, exact",
+      "features": ["packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-empty-tail-layers-full.pgx",
+          "sha256": "8c6024fd975a487e4495c22220f2b4406f249309fa6291997aad8dfd5c184caf",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-empty-tail-layers-tiles",
+      "path": "src/testdata/kakadu-empty-tail-layers-tiles.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "8dd9165a627bdc75c8691ec0b4dd3755d76a9bd69a014d43a850e8b64afb09ca",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "the same on 12x12 tiles, so every tile ends in empty packets",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and Kakadu PGX reference committed; producer application not redistributed",
+        "command": "magick -seed 61 -size 24x20 plasma:fractal -depth 8 -colorspace gray g.pgm; kdu_compress -i g.pgm -o src/testdata/kakadu-empty-tail-layers-tiles.j2c Creversible=yes Clevels=2 Clayers=5 -rate 1,2,8,20,30 Stiles={12,12} -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX plane, exact",
+      "features": ["packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-empty-tail-layers-tiles-full.pgx",
+          "sha256": "8c6024fd975a487e4495c22220f2b4406f249309fa6291997aad8dfd5c184caf",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
     }
   ]
 }

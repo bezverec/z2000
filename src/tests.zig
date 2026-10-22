@@ -33918,6 +33918,9 @@ const RepackedHeaderPlacement = enum { inline_headers, ppt, ppm };
 const RepackedMarkers = struct {
     sop: bool = false,
     eph: bool = false,
+    /// PPT tile-parts carry a PLT with the packet body lengths unless this is
+    /// cleared; PPM tile-parts never do.
+    plt: bool = true,
 };
 
 fn appendPltlessTestTilePart(
@@ -34249,7 +34252,8 @@ fn repackInlineHeadersToPacked(
         // encoder's layout).
         var plt_lengths: std.ArrayList(u8) = .empty;
         defer plt_lengths.deinit(allocator);
-        if (placement == .ppt) {
+        const emit_plt = placement == .ppt and markers.plt;
+        if (emit_plt) {
             for (report.spans) |span| {
                 if (span.tile_part_index != part_index) continue;
                 var value: usize = span.body_length + sop_frame;
@@ -34276,7 +34280,7 @@ fn repackInlineHeadersToPacked(
         if (plt_lengths.items.len + 3 > 65535) return error.TestUnexpectedResult;
         if (headers_len + 3 > 65535) return error.TestUnexpectedResult;
         const inter_header = bytes[tile_part.sot_offset + 12 .. tile_part.sod_offset];
-        const plt_bytes: usize = if (placement == .ppt) 2 + 2 + 1 + plt_lengths.items.len else 0;
+        const plt_bytes: usize = if (emit_plt) 2 + 2 + 1 + plt_lengths.items.len else 0;
         const packed_eph_bytes: usize = if (placement != .inline_headers) part_packets * eph_frame else 0;
         const ppt_bytes: usize = if (placement == .ppt) 2 + 2 + 1 + headers_len + packed_eph_bytes else 0;
         const sod_len: usize = switch (placement) {
@@ -34294,13 +34298,15 @@ fn repackInlineHeadersToPacked(
         // Anything the original carried between SOT and SOD (e.g. tile POC).
         try out.appendSlice(allocator, inter_header);
         if (placement == .ppt) {
-            // PLT with the packed-header body lengths.
-            try out.appendSlice(allocator, &.{ 0xff, 0x58 });
-            var lplt_be: [2]u8 = undefined;
-            std.mem.writeInt(u16, &lplt_be, @intCast(3 + plt_lengths.items.len), .big);
-            try out.appendSlice(allocator, &lplt_be);
-            try out.append(allocator, 0);
-            try out.appendSlice(allocator, plt_lengths.items);
+            if (emit_plt) {
+                // PLT with the packed-header body lengths.
+                try out.appendSlice(allocator, &.{ 0xff, 0x58 });
+                var lplt_be: [2]u8 = undefined;
+                std.mem.writeInt(u16, &lplt_be, @intCast(3 + plt_lengths.items.len), .big);
+                try out.appendSlice(allocator, &lplt_be);
+                try out.append(allocator, 0);
+                try out.appendSlice(allocator, plt_lengths.items);
+            }
             // PPT with the concatenated packet headers in stream order.
             try out.appendSlice(allocator, &.{ 0xff, 0x61 });
             var lppt_be: [2]u8 = undefined;
@@ -38948,4 +38954,28 @@ test "sampled reversible encode fails closed outside its envelope" {
     // A sampling factor that disagrees with the supplied plane dimensions.
     const wrong = [_]codestream.ComponentSampling{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 4, .yrsiz = 4 }, .{ .xrsiz = 2, .yrsiz = 2 } };
     try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeLosslessSampledPlanarWithOptions(allocator, planes, &wrong, base));
+}
+
+test "PPT headers of trailing empty packets belong to the tile's last part" {
+    const allocator = std.testing.allocator;
+    // Kakadu's last two layers carry nothing, so each tile ends in packets
+    // whose bodies are empty. Once their headers move into PPT, the tile's
+    // last part must still own them although its body is already consumed
+    // (T.803 p1_02 has this shape).
+    const fixtures = [_][]const u8{
+        @embedFile("testdata/kakadu-empty-tail-layers.j2c"),
+        @embedFile("testdata/kakadu-empty-tail-layers-tiles.j2c"),
+    };
+    for (fixtures) |inline_stream| {
+        const ppt_stream = try repackInlineHeadersToPacked(allocator, inline_stream, .ppt, .{ .plt = false });
+        defer allocator.free(ppt_stream);
+        try std.testing.expect(codestream.hasMarker(ppt_stream, codestream.markerValue("ppt")));
+        try std.testing.expect(!codestream.hasMarker(ppt_stream, codestream.markerValue("plt")));
+
+        var expected = try codestream.decodeLosslessNative(allocator, inline_stream, .{});
+        defer expected.deinit();
+        var actual = try codestream.decodeLosslessNative(allocator, ppt_stream, .{});
+        defer actual.deinit();
+        try std.testing.expectEqualSlices(i64, expected.planes[0].samples, actual.planes[0].samples);
+    }
 }

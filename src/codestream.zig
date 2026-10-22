@@ -10644,10 +10644,14 @@ fn readStrictMultiTileTilePartPacketCatalog(
             var packed_header_cursor: usize = 0;
             var sequence_index: usize = 0;
             // Carried headers may describe more packets than this part holds
-            // bodies for, so the part's own SOD body is the stopping point.
+            // bodies for, so the part's own SOD body is the stopping point,
+            // except in the tile's last part, which owns every remaining
+            // header including trailing empty packets.
+            const last_part_of_tile = span.tile_part_count != 0 and
+                span.tile_part_index + 1 == span.tile_part_count;
             while (packed_header_cursor < active_packed_headers.len and
                 sequence_index < sequence.len and
-                (!carry_packed_headers or cursor < span.end)) : (sequence_index += 1)
+                (!carry_packed_headers or cursor < span.end or last_part_of_tile)) : (sequence_index += 1)
             {
                 const packet = sequence[sequence_index];
                 const groups = try stateful.groupsFor(packet);
@@ -15431,9 +15435,14 @@ fn readStrictSodPacketCatalog(
                     if (stateful == null) stateful = try StrictStatefulPrecinctGroups.init(allocator, header);
                     var packed_header_cursor: usize = 0;
                     // Carried headers may describe more packets than this part
-                    // holds bodies for, so its own SOD body is the stop.
+                    // holds bodies for, so its own SOD body is the stop. The
+                    // tile's last part owns every remaining header, though:
+                    // its trailing empty packets have no body to stop on
+                    // (T.803 p1_02).
+                    const last_part_of_tile = tile_part.sot.tile_part_count != 0 and
+                        tile_part.sot.tile_part_index + 1 == tile_part.sot.tile_part_count;
                     while (packed_header_cursor < active_packed_headers.len and
-                        (!carry_packed_headers or cursor < tile_part.end))
+                        (!carry_packed_headers or cursor < tile_part.end or last_part_of_tile))
                     {
                         if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
                         const packet = sequence[sequence_index];
