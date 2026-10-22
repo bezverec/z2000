@@ -77,9 +77,14 @@ pub fn packetPosition(plan: Plan, packet: Packet) !Position {
     const levels: u8 = plan.resolution_count - 1;
     const resolution = plan.resolutions[packet.resolution];
     const shift: u6 = @intCast(levels - packet.resolution);
+    // Precinct indices are absolute, so the first precinct of a resolution
+    // may start before the tile. ISO B.12.1.4 visits such a precinct at the
+    // tile origin, which the full-resolution bounds hold (T.803 p1_05 places
+    // 37x37 tiles at an odd offset).
+    const tile = plan.resolutions[levels];
     return .{
-        .x_ref = (@as(u64, packet.precinct_x) * resolution.precinct_width) << shift,
-        .y_ref = (@as(u64, packet.precinct_y) * resolution.precinct_height) << shift,
+        .x_ref = @max((@as(u64, packet.precinct_x) * resolution.precinct_width) << shift, tile.x0),
+        .y_ref = @max((@as(u64, packet.precinct_y) * resolution.precinct_height) << shift, tile.y0),
     };
 }
 

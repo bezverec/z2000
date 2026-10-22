@@ -3,6 +3,28 @@
 This file tracks notable project changes. The repository is still pre-release;
 entries are grouped by development milestone rather than semantic version.
 
+## Unreleased
+
+### PCRL/CPRL Precinct Positions On Unaligned Tiles; T.803 Profile 1
+
+- Position-major orders (PCRL, CPRL) placed each precinct at its absolute
+  start on the reference grid. A precinct that starts before its tile, as
+  happens whenever a tile origin is not a multiple of the precinct size at
+  some resolution, belongs at the tile origin (ISO B.12.1.4), so packets were
+  misassigned: decode failed or, without SOP/EPH, could reconstruct wrong
+  samples. `packet_plan.packetPosition` now clamps to the tile origin, as the
+  sampled-component path already did. The z2000 encoder does not emit
+  explicit precincts on multi-tile grids, so its output was not affected.
+- `kakadu-pcrl-unaligned-tiles` (PCRL, 16x16 precincts, image origin (17,12),
+  37x37 tiles from (8,2)) matches `kdu_expand` exactly and fails on the
+  previous code.
+- The corpus now runs the T.803 profile-1 streams. `p1_01` (exact), `p1_03`
+  (within one LSB), `p1_06`, and `p1_05` pass; `p1_05` needed the PCRL fix,
+  and is within one LSB of Kakadu and OpenJPEG while all three decoders are
+  7 to 15 from its class-1 reference. `p1_04` (tile-part layout) and `p1_07`
+  (two components, one sampled 4x1) remain fail-closed, and `p1_02` fails as
+  `InvalidCodestream` and is left out of the manifest until that is fixed.
+
 ## 0.2.0-rc.3 — 2026-10-22
 
 ### Clamping Policy For Truncated Reversible Streams

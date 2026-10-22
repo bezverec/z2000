@@ -91,6 +91,19 @@ green. Committed Kakadu/OpenJPEG profile streams now keep that case in the
 default gate, and `tools/release_local.ps1` runs `--require-optional` when the
 root is set.
 
+### Profile 1
+
+The same checkout carries seven profile-1 streams with class-1 references for
+every component; the corpus pins them against those. `p1_01` is exact, `p1_03`
+is within one LSB, and `p1_06` and `p1_05` pass through the interleaved RGB
+path. `p1_05` (odd image and tile origins, PCRL, 16x16 precincts, bypass,
+SOP/EPH, PPM) exposed a PCRL ordering defect on tiles that start inside a
+precinct; after the fix it is within one LSB of Kakadu and OpenJPEG, while all
+three decoders are 7 to 15 from the class-1 reference, so its bounds record
+that spread. `p1_04` and `p1_07` are pinned fail-closed. `p1_02` currently
+fails as `InvalidCodestream`, which a legal stream must not, and stays out of
+the manifest until it is fixed.
+
 Two additional committed passes are Kakadu 8.4.1 single- and four-tile signed
 8-bit reversible/no-MCT codestreams. The corpus selects the native `i64`
 decoder and compares Kakadu's signed PGX output exactly at full and reduction-1
