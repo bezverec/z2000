@@ -445,8 +445,8 @@ The active G0/G4 corpus expansion is:
    `p0_08` (bit-exact against Kakadu, within its T.803 bounds) now pass, and
    The profile-1 streams now run as well: `p1_01`, `p1_02`, `p1_03`, `p1_05`,
    and `p1_06` pass, and `p1_04` (tile-part layout) and `p1_07` (4x1
-   sampling) are pinned fail-closed. The JP2 wrapper audit still rejects
-   `p1_02`'s QCC-for-some-components layout that the raw reader accepts.
+   sampling) are pinned fail-closed. The JP2 wrapper audit now leaves
+   component QCC to strict decode, so `p1_02` also converts as JP2.
    So do `p0_07` (RLCP multipart POC), `p0_13` (257 components with RCT), and
    `p0_05` (mixed 5/3 and 9/7 with a QCD shared across level counts), so every
    T.803 profile-0 stream passes. The clamping policy is decided: only a

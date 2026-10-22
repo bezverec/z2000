@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### JP2 Accepts QCC For Some Components
+
+- The JP2 wrapper audit required a QCC for every component or for none,
+  unless the file used variable bit depth, and rejected anything else as
+  `UnsupportedProfile`. QCC changes no packet structure that the audit
+  checks, and strict decode already decides whether the effective
+  quantization is supported, so the wrapper now bounds-checks each QCC and
+  leaves that decision to the decoder. Ordinary Kakadu JP2 files with
+  `Qstep:Cn` and T.803 `p1_02` wrapped as JP2 now convert to TIFF;
+  reversible streams with partial or divergent QCC still fail closed in
+  strict decode. COC uniformity stays in the audit, because COC can change
+  the packet structure.
+- `kakadu-partial-qcc-ict` pins this through the JP2 path, within the
+  Kakadu-to-OpenJPEG spread, and fails on the previous code.
+
 ### Trailing Empty Packets Under PPT
 
 - Without PLT, a tile-part with carried PPT headers stopped reading headers

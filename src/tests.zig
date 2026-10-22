@@ -19921,13 +19921,15 @@ test "redundant COC/QCC that byte-replicate the main COD/QCD decode byte-exactly
     const bad_qcc = findMarker(bad_qcc_stream, codestream.markerValue("qcc")) orelse return error.MissingQcc;
     bad_qcc_stream[bad_qcc + 6] ^= 0x08;
     try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.decodeLosslessTemporary(allocator, bad_qcc_stream));
-    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, rgb, bad_qcc_stream));
+    // The JP2 wrapper leaves that decision to strict decode: QCC changes no
+    // packet structure it audits.
+    allocator.free(try jp2.wrapRgbCodestream(allocator, rgb, bad_qcc_stream));
 
     const bad_wrapped_qcc = try allocator.dupe(u8, wrapped);
     defer allocator.free(bad_wrapped_qcc);
     const bad_wrapped_qcc_payload = try findJp2BoxPayload(bad_wrapped_qcc, "jp2c");
     bad_wrapped_qcc[bad_wrapped_qcc_payload.start + bad_qcc + 6] ^= 0x08;
-    try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.parseInfo(std.testing.allocator, bad_wrapped_qcc));
+    _ = try jp2.parseInfo(std.testing.allocator, bad_wrapped_qcc);
 
     // Structurally invalid QCC bytes are malformed codestream data, not merely
     // unsupported per-component overrides.
@@ -20247,8 +20249,9 @@ test "uniform COC/QCC overrides across all components decode via the signalled v
         allocator.free(wrapped);
     }
 
-    // A QCC override is only representable by the current uniform-component
-    // decode path when all RGB components carry the same payload.
+    // A reversible QCC override is only representable by the current
+    // uniform-component decode path when all RGB components carry the same
+    // payload; strict decode enforces that, not the JP2 wrapper.
     {
         const third_qcc_start = blk: {
             var offset: usize = 0;
@@ -20269,7 +20272,8 @@ test "uniform COC/QCC overrides across all components decode via the signalled v
             codestream.CodestreamError.UnsupportedPayload,
             codestream.decodeLosslessTemporary(allocator, partial.items),
         );
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, rgb, partial.items));
+        // Strict decode rejects it; the JP2 wrapper audits only structure.
+        allocator.free(try jp2.wrapRgbCodestream(allocator, rgb, partial.items));
     }
 
     {
@@ -20281,7 +20285,7 @@ test "uniform COC/QCC overrides across all components decode via the signalled v
             codestream.CodestreamError.UnsupportedPayload,
             codestream.decodeLosslessTemporary(allocator, divergent),
         );
-        try std.testing.expectError(jp2.Jp2Error.UnsupportedProfile, jp2.wrapRgbCodestream(allocator, rgb, divergent));
+        allocator.free(try jp2.wrapRgbCodestream(allocator, rgb, divergent));
     }
 }
 

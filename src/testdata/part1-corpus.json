@@ -4753,6 +4753,54 @@
           "max_mse": 0.0
         }
       ]
+    },
+    {
+      "id": "kakadu-partial-qcc-ict",
+      "path": "src/testdata/kakadu-partial-qcc-ict.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "ac92bf3a606c07367e972375ad789e9558862a7439490ab6cf895da0618a8d88",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "64x48 8-bit RGB JP2, ICT/9-7, with a QCC for component 1 only (Qstep:C1). The JP2 wrapper audit used to require a QCC for every component or none and rejected the file as UnsupportedProfile, although strict decode accepts it",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "JP2 and Kakadu PGX references committed; producer application not redistributed",
+        "command": "magick -seed 71 -size 64x48 plasma:fractal -depth 8 src.ppm; kdu_compress -i src.ppm -o src/testdata/kakadu-partial-qcc-ict.jp2 Qstep=0.004 Qstep:C1=0.02 -num_threads 0; kdu_expand -num_threads 0"
+      },
+      "oracle": "Kakadu 8.4.1 kdu_expand PGX planes within one LSB and MSE 0.15, the spread between Kakadu and OpenJPEG 2.5.4 themselves; z2000 matches OpenJPEG to MSE 0.002",
+      "features": ["jp2-core-container", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-partial-qcc-ict-full-c0.pgx",
+          "sha256": "88bd6a089ea7b01ef01d8c1a70d96f526baea3941821f9b91eb6cae83d5bbb21",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.15
+        },
+        {
+          "path": "src/testdata/kakadu-partial-qcc-ict-full-c1.pgx",
+          "sha256": "5ef7b85b6d20112ac75346d853e12e57c20e7ddf88b3b595959118ae8c435c46",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.15
+        },
+        {
+          "path": "src/testdata/kakadu-partial-qcc-ict-full-c2.pgx",
+          "sha256": "b8e5514c6e571b3498a205cc918aa25646d40dff5ebb126c22198a599a98a7eb",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.15
+        }
+      ]
     }
   ]
 }
