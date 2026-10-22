@@ -1553,19 +1553,37 @@ pub fn buildPacketScaffold(
     levels: u8,
     options: PacketScaffoldOptions,
 ) !PacketScaffold {
+    return buildPacketScaffoldForTile(
+        allocator,
+        rct_tile.tile,
+        rct_tile.planes.width,
+        rct_tile.planes.height,
+        levels,
+        options,
+    );
+}
+
+/// The packet scaffold of one tile whose transformed planes are
+/// `width` x `height`; independent of the coefficient carrier.
+pub fn buildPacketScaffoldForTile(
+    allocator: std.mem.Allocator,
+    tile: tile_grid.Tile,
+    width: usize,
+    height: usize,
+    levels: u8,
+    options: PacketScaffoldOptions,
+) !PacketScaffold {
     if (options.layers == 0 or options.precincts.len == 0) return packet_plan.PacketPlanError.InvalidDimensions;
     if (options.components < 1 or options.components > color.max_components) return packet_plan.PacketPlanError.InvalidDimensions;
-    const width = rct_tile.planes.width;
-    const height = rct_tile.planes.height;
-    if (width != rct_tile.tile.rect.width() or height != rct_tile.tile.rect.height()) {
+    if (width != tile.rect.width() or height != tile.rect.height()) {
         return packet_plan.PacketPlanError.InvalidDimensions;
     }
 
     const plan = try packet_plan.rpclTileRegion(
-        rct_tile.tile.rect.x0,
-        rct_tile.tile.rect.y0,
-        rct_tile.tile.rect.x1,
-        rct_tile.tile.rect.y1,
+        tile.rect.x0,
+        tile.rect.y0,
+        tile.rect.x1,
+        tile.rect.y1,
         levels,
         options.components,
         options.layers,
@@ -1573,10 +1591,10 @@ pub fn buildPacketScaffold(
     );
     const bands = try subband.makeBandsForRegion(
         allocator,
-        rct_tile.tile.rect.x0,
-        rct_tile.tile.rect.y0,
-        rct_tile.tile.rect.x1,
-        rct_tile.tile.rect.y1,
+        tile.rect.x0,
+        tile.rect.y0,
+        tile.rect.x1,
+        tile.rect.y1,
         levels,
     );
     errdefer allocator.free(bands);
@@ -1605,7 +1623,7 @@ pub fn buildPacketScaffold(
 
     return .{
         .allocator = allocator,
-        .tile = rct_tile.tile,
+        .tile = tile,
         .levels = levels,
         .components = options.components,
         .component_bit_depths = options.component_bit_depths,
@@ -2092,6 +2110,103 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
         options,
         style,
     );
+}
+
+/// Encode artifacts for one tile of wide (i64) reversible coefficients that
+/// are already level shifted and transformed (`wavelet_int.forward53WideOrigin`),
+/// for components of more bits than the i32 planes carry. T1 runs through the
+/// i64 symbol generator; scaffold, layers, and packets are those of the i32
+/// path. `options.nominal_bitplanes` must hold the signalled Mb table, and a
+/// code block that needs more bitplanes fails as `InvalidLayer`.
+pub fn buildWideTileRpclEncodeArtifacts(
+    allocator: std.mem.Allocator,
+    tile: tile_grid.Tile,
+    width: usize,
+    height: usize,
+    planes: []const []const i64,
+    levels: u8,
+    options: PacketScaffoldOptions,
+    style: ebcot.CodeBlockStyle,
+) !TileRpclEncodeArtifacts {
+    if (options.nominal_bitplanes == null or options.rate_count != 0) return PacketScaffoldError.InvalidLayer;
+    if (planes.len != options.components) return PacketScaffoldError.InvalidPlane;
+    for (planes) |plane| {
+        if (plane.len != try std.math.mul(usize, width, height)) return PacketScaffoldError.InvalidPlane;
+    }
+    const bit_depth = options.component_bit_depths[0];
+
+    var scaffold = try buildPacketScaffoldForTile(allocator, tile, width, height, levels, options);
+    var scaffold_moved = false;
+    errdefer if (!scaffold_moved) scaffold.deinit();
+
+    const total_blocks = try scaffold.componentBlockCount();
+    const blocks = try allocator.alloc(EncodedComponentBlock, total_blocks);
+    var initialized: usize = 0;
+    var blocks_moved = false;
+    errdefer if (!blocks_moved) {
+        for (blocks[0..initialized]) |*block| block.deinit(allocator);
+        allocator.free(blocks);
+    };
+    var iterator = scaffold.componentBlockIterator();
+    while (try iterator.next()) |job| {
+        try validateRectInPlane(job.rect, width, height);
+        var actual_style = style;
+        actual_style.band_kind = job.band.kind;
+        const segment = ebcot.encodeCodeBlockSegmentIsoMqWideWithStyle(
+            allocator,
+            planes[job.component],
+            width,
+            job.rect,
+            actual_style,
+        ) catch |err| switch (err) {
+            // More bitplanes than Part 1 can signal.
+            ebcot.EbcotError.InvalidBlock => return PacketScaffoldError.InvalidLayer,
+            else => return err,
+        };
+        var encoded = EncodedComponentBlock{ .job = job, .segment = segment, .bypass = actual_style.bypass };
+        var moved = false;
+        errdefer if (!moved) encoded.deinit(allocator);
+        encoded.layers = try computeLayerTruncations(allocator, encoded.segment, scaffold.layers);
+        blocks[initialized] = encoded;
+        moved = true;
+        initialized += 1;
+    }
+    if (initialized != total_blocks) return PacketScaffoldError.InvalidComponentBlock;
+    var catalog = EncodedBlockCatalog{
+        .allocator = allocator,
+        .tile = scaffold.tile,
+        .components = scaffold.components,
+        .component_block_count = scaffold.blocks.len,
+        .blocks = blocks,
+    };
+    blocks_moved = true;
+    var catalog_moved = false;
+    errdefer if (!catalog_moved) catalog.deinit();
+    try validateEncodedBlockCatalogCoversTile(allocator, scaffold, catalog);
+
+    var index = try buildRpclPacketIndex(allocator, scaffold);
+    var index_moved = false;
+    errdefer if (!index_moved) index.deinit();
+
+    var stream = try buildTileRpclPacketStream(allocator, scaffold, catalog, index, bit_depth);
+    var stream_moved = false;
+    errdefer if (!stream_moved) stream.deinit();
+    try validateTilePacketStream(allocator, scaffold, catalog, index, stream, bit_depth, .rpcl);
+
+    scaffold_moved = true;
+    catalog_moved = true;
+    index_moved = true;
+    stream_moved = true;
+    return .{
+        .allocator = allocator,
+        .tile = tile,
+        .bit_depth = bit_depth,
+        .levels = levels,
+        .scaffold = scaffold,
+        .catalog = catalog,
+        .index = index,
+        .stream = stream,
+    };
 }
 
 fn buildTileRpclEncodeArtifactsFromTransformedTile(

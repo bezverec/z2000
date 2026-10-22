@@ -6,6 +6,7 @@ const codec = @import("codec.zig");
 const color = @import("color.zig");
 const clock = @import("clock.zig");
 const codestream = @import("codestream.zig");
+const native_samples = @import("native_samples.zig");
 const convert = @import("convert.zig");
 const bmp = @import("formats/bmp.zig");
 const dng = @import("formats/dng.zig");
@@ -81,6 +82,8 @@ pub fn main(init: std.process.Init) !void {
         try j2kToPgxCommand(io, allocator, args[2..]);
     } else if (std.mem.eql(u8, args[1], "j2k-to-zraw")) {
         try j2kToZrawCommand(io, allocator, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "zraw-to-j2k")) {
+        try zrawToJ2kCommand(io, allocator, args[2..]);
     } else if (batch.hasWildcards(std.fs.path.basename(args[1]))) {
         try batchConversionCommand(io, allocator, args[1..]);
     } else if (expandedBatchTargetIndex(args[1..])) |target_index| {
@@ -1131,6 +1134,79 @@ fn j2kToPgxCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []con
     );
 }
 
+/// Reversible encode of a canonical ZRAW (native integer components, signed or
+/// unsigned) through the wide i64 encoder.
+fn zrawToJ2kCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        usage();
+        return error.InvalidCommand;
+    }
+    var options = codestream.LosslessOptions{};
+    options.mct = .none;
+    options.threads = defaultThreadCount();
+    var index: usize = 2;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--levels") or std.mem.eql(u8, arg, "--layers") or std.mem.eql(u8, arg, "--block")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            if (std.mem.eql(u8, arg, "--levels")) {
+                options.levels = try std.fmt.parseInt(u8, args[index], 10);
+            } else if (std.mem.eql(u8, arg, "--layers")) {
+                options.layers = try std.fmt.parseInt(u16, args[index], 10);
+            } else {
+                const edge = try std.fmt.parseInt(u16, args[index], 10);
+                options.block_width = edge;
+                options.block_height = edge;
+            }
+        } else if (std.mem.eql(u8, arg, "--sop")) {
+            options.sop = true;
+        } else if (std.mem.eql(u8, arg, "--no-sop")) {
+            options.sop = false;
+        } else if (std.mem.eql(u8, arg, "--eph")) {
+            options.eph = true;
+        } else if (std.mem.eql(u8, arg, "--no-eph")) {
+            options.eph = false;
+        } else if (std.mem.eql(u8, arg, "--bypass")) {
+            options.bypass = true;
+        } else if (std.mem.eql(u8, arg, "--reset-context")) {
+            options.reset_context = true;
+        } else if (std.mem.eql(u8, arg, "--terminate-all")) {
+            options.terminate_all = true;
+        } else if (std.mem.eql(u8, arg, "--vertical-causal")) {
+            options.vertical_causal = true;
+        } else if (std.mem.eql(u8, arg, "--segmentation-symbols")) {
+            options.segmentation_symbols = true;
+        } else {
+            return error.InvalidValue;
+        }
+    }
+
+    const max_file_size = 1024 * 1024 * 1024;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, args[0], allocator, .limited(max_file_size));
+    defer allocator.free(bytes);
+    var source = try native_samples.decodeRawPlanar(allocator, bytes, .{});
+    defer source.deinit();
+    const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, options);
+    defer allocator.free(encoded);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[1], .data = encoded });
+
+    std.debug.print(
+        "encoded ZRAW {s} -> {s} ({} components, {}x{}, {} bits {s}, levels {}, layers {})\n",
+        .{
+            args[0],
+            args[1],
+            source.componentCount(),
+            source.reference_x1 - source.reference_x0,
+            source.reference_y1 - source.reference_y0,
+            source.planes[0].layout.precision,
+            if (source.planes[0].layout.signed) "signed" else "unsigned",
+            options.levels,
+            options.layers,
+        },
+    );
+}
+
 fn j2kToZrawCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 2) {
         usage();
@@ -1956,6 +2032,7 @@ fn usage() void {
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--tile-index N|--region X,Y,W,H] [--layers N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
         \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
         \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
+        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--segmentation-symbols]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.

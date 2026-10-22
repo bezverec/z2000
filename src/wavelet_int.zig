@@ -1297,3 +1297,260 @@ inline fn inverse53PredictHorizontalGroup(data: []i32, odd_index: usize) void {
     const updated = odd + floorHalfHorizontal(left + right);
     storeHorizontalPair(data, odd_index - 1, interleaveHorizontal(left, updated));
 }
+
+// Wide reversible 5/3 -------------------------------------------------------
+//
+// Components of 30 to 38 bits need coefficients beyond the i32 planes above.
+// These scalar i64 transforms follow the same lifting steps, origin rules, and
+// level descent as `forward53WithWorkspaceOrigin` and
+// `inverse53ReducedCheckedWithWorkspaceOrigin`, so samples that both carry
+// transform to identical coefficients.
+
+/// Forward reversible 5/3 over an i64 plane, vertically then horizontally per
+/// level (ISO F.4.8). Returns the number of levels applied.
+pub fn forward53WideOrigin(
+    allocator: std.mem.Allocator,
+    data: []i64,
+    width: usize,
+    height: usize,
+    requested_levels: u8,
+    x0: u32,
+    y0: u32,
+) !u8 {
+    if (width == 0 or height == 0 or data.len != width * height) {
+        return TransformError.InvalidDimensions;
+    }
+    const scratch = try allocator.alloc(i64, 2 * @max(width, height));
+    defer allocator.free(scratch);
+
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    var done: u8 = 0;
+    while (done < requested_levels) : (done += 1) {
+        if (cur_width == 0 or cur_height == 0) return requested_levels;
+        if (cur_width == 1 and cur_height == 1 and cur_x0 == 0 and cur_y0 == 0) return requested_levels;
+        const next_width = lowCountOrigin(cur_width, cur_x0);
+        const next_height = lowCountOrigin(cur_height, cur_y0);
+        const line = scratch[0..cur_height];
+        const temp = scratch[cur_height .. 2 * cur_height];
+        for (0..cur_width) |col| {
+            for (0..cur_height) |row| line[row] = data[row * width + col];
+            forward53WideLine(line, temp, cur_y0);
+            for (0..cur_height) |row| data[row * width + col] = line[row];
+        }
+        for (0..cur_height) |row| {
+            forward53WideLine(data[row * width ..][0..cur_width], scratch[0..cur_width], cur_x0);
+        }
+        cur_width = next_width;
+        cur_height = next_height;
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+    }
+    return done;
+}
+
+/// Inverse reversible 5/3 over an i64 plane down to `reduction` levels below
+/// full resolution; returns the reconstructed top-left shape. Every lifting
+/// result is checked, so malformed coefficients fail instead of wrapping.
+pub fn inverse53WideReducedOrigin(
+    allocator: std.mem.Allocator,
+    data: []i64,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+    x0: u32,
+    y0: u32,
+) !ResolutionShape {
+    if (width == 0 or height == 0 or data.len != width * height) {
+        return TransformError.InvalidDimensions;
+    }
+    if (reduction > levels) return TransformError.InvalidDimensions;
+    if (levels > 32) return TransformError.TooManyLevels;
+
+    var shapes: [32]LevelShape = undefined;
+    var resolutions: [33]ResolutionShape = undefined;
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    resolutions[0] = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 };
+    for (0..levels) |level| {
+        shapes[level] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+        cur_width = lowCountOrigin(cur_width, cur_x0);
+        cur_height = lowCountOrigin(cur_height, cur_y0);
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+        resolutions[level + 1] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+    }
+
+    const scratch = try allocator.alloc(i64, 2 * @max(width, height));
+    defer allocator.free(scratch);
+    var level = levels;
+    while (level > reduction) {
+        level -= 1;
+        const shape = shapes[level];
+        if (shape.width == 0 or shape.height == 0) continue;
+        for (0..shape.height) |row| {
+            try inverse53WideLine(data[row * width ..][0..shape.width], scratch[0..shape.width], shape.x0);
+        }
+        const line = scratch[0..shape.height];
+        const temp = scratch[shape.height .. 2 * shape.height];
+        for (0..shape.width) |col| {
+            for (0..shape.height) |row| line[row] = data[row * width + col];
+            try inverse53WideLine(line, temp, shape.y0);
+            for (0..shape.height) |row| data[row * width + col] = line[row];
+        }
+    }
+    return resolutions[reduction];
+}
+
+fn forward53WideLine(data: []i64, scratch: []i64, origin: u32) void {
+    if ((origin & 1) == 0) {
+        if (data.len < 2) return;
+        var i: usize = 1;
+        while (i < data.len) : (i += 2) {
+            const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+            data[i] -= floorHalfWide(data[i - 1] + right);
+        }
+        i = 0;
+        while (i < data.len) : (i += 2) {
+            const left = if (i > 0) data[i - 1] else data[i + 1];
+            const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+            data[i] += floorQuarterBiasedWide(left + right);
+        }
+        packWide(data, scratch, 0);
+        return;
+    }
+    if (data.len == 1) {
+        data[0] *= 2;
+        return;
+    }
+    // Odd reference origin: local even indexes are high-pass samples.
+    var i: usize = 0;
+    while (i < data.len) : (i += 2) {
+        const left = if (i > 0) data[i - 1] else data[i + 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] -= floorHalfWide(left + right);
+    }
+    i = 1;
+    while (i < data.len) : (i += 2) {
+        const left = data[i - 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] += floorQuarterBiasedWide(left + right);
+    }
+    packWide(data, scratch, 1);
+}
+
+fn inverse53WideLine(data: []i64, scratch: []i64, origin: u32) !void {
+    if ((origin & 1) == 0) {
+        if (data.len < 2) return;
+        unpackWide(data, scratch, 0);
+        var i: usize = 0;
+        while (i < data.len) : (i += 2) {
+            const left = if (i > 0) data[i - 1] else data[i + 1];
+            const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+            data[i] = try checkedSubWide(data[i], floorQuarterBiasedWide(try checkedAddWide(left, right)));
+        }
+        i = 1;
+        while (i < data.len) : (i += 2) {
+            const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+            data[i] = try checkedAddWide(data[i], floorHalfWide(try checkedAddWide(data[i - 1], right)));
+        }
+        return;
+    }
+    if (data.len == 1) {
+        data[0] = @divFloor(data[0], 2);
+        return;
+    }
+    unpackWide(data, scratch, 1);
+    var i: usize = 1;
+    while (i < data.len) : (i += 2) {
+        const left = data[i - 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] = try checkedSubWide(data[i], floorQuarterBiasedWide(try checkedAddWide(left, right)));
+    }
+    i = 0;
+    while (i < data.len) : (i += 2) {
+        const left = if (i > 0) data[i - 1] else data[i + 1];
+        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
+        data[i] = try checkedAddWide(data[i], floorHalfWide(try checkedAddWide(left, right)));
+    }
+}
+
+/// Moves the low-pass samples (local index parity `low_parity`) ahead of the
+/// high-pass samples.
+fn packWide(data: []i64, scratch: []i64, low_parity: usize) void {
+    var out: usize = 0;
+    var i: usize = low_parity;
+    while (i < data.len) : (i += 2) {
+        scratch[out] = data[i];
+        out += 1;
+    }
+    i = 1 - low_parity;
+    while (i < data.len) : (i += 2) {
+        scratch[out] = data[i];
+        out += 1;
+    }
+    @memcpy(data, scratch[0..data.len]);
+}
+
+fn unpackWide(data: []i64, scratch: []i64, low_parity: usize) void {
+    const lows = if (low_parity == 0) lowCount(data.len) else data.len / 2;
+    var packed_index: usize = 0;
+    var i: usize = low_parity;
+    while (i < data.len) : (i += 2) {
+        scratch[i] = data[packed_index];
+        packed_index += 1;
+    }
+    packed_index = lows;
+    i = 1 - low_parity;
+    while (i < data.len) : (i += 2) {
+        scratch[i] = data[packed_index];
+        packed_index += 1;
+    }
+    @memcpy(data, scratch[0..data.len]);
+}
+
+fn checkedAddWide(a: i64, b: i64) TransformError!i64 {
+    return std.math.add(i64, a, b) catch TransformError.CoefficientOverflow;
+}
+
+fn checkedSubWide(a: i64, b: i64) TransformError!i64 {
+    return std.math.sub(i64, a, b) catch TransformError.CoefficientOverflow;
+}
+
+test "wide 5/3 matches the i32 transform and round-trips 38-bit samples" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed_0053);
+    const random = prng.random();
+    const shapes = [_][4]u32{ .{ 17, 13, 0, 0 }, .{ 9, 11, 3, 5 }, .{ 1, 7, 1, 0 }, .{ 32, 1, 0, 3 }, .{ 2, 2, 1, 1 } };
+    for (shapes) |shape| {
+        const width: usize = shape[0];
+        const height: usize = shape[1];
+        const narrow = try allocator.alloc(i32, width * height);
+        defer allocator.free(narrow);
+        const wide = try allocator.alloc(i64, width * height);
+        defer allocator.free(wide);
+        for (narrow, wide) |*n, *w| {
+            n.* = random.intRangeAtMost(i32, -(1 << 15), (1 << 15) - 1);
+            w.* = n.*;
+        }
+        var workspace = try Workspace.init(allocator, @max(width, height));
+        defer workspace.deinit();
+        const levels = try forward53WithWorkspaceOrigin(&workspace, narrow, width, height, 4, shape[2], shape[3]);
+        try std.testing.expectEqual(levels, try forward53WideOrigin(allocator, wide, width, height, 4, shape[2], shape[3]));
+        for (narrow, wide) |n, w| try std.testing.expectEqual(@as(i64, n), w);
+
+        // 38-bit signed samples round-trip exactly.
+        const original = try allocator.alloc(i64, width * height);
+        defer allocator.free(original);
+        for (original) |*value| value.* = random.intRangeAtMost(i64, -(1 << 37), (1 << 37) - 1);
+        @memcpy(wide, original);
+        const applied = try forward53WideOrigin(allocator, wide, width, height, 4, shape[2], shape[3]);
+        _ = try inverse53WideReducedOrigin(allocator, wide, width, height, applied, 0, shape[2], shape[3]);
+        try std.testing.expectEqualSlices(i64, original, wide);
+    }
+}

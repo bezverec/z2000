@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Wide Native Encoder (Signed And 17- To 28-Bit Samples)
+
+- `zraw-to-j2k` and `codestream.encodeNativeLosslessWithOptions` encode
+  canonical ZRAW / `NativeSamplePlanes` reversibly: one to four components of
+  one precision from 1 to 28 bits, signed or unsigned, one tile, no MCT,
+  RPCL, every code-block style, layers, SOP/EPH. Until now every encoder took
+  unsigned samples of at most 16 bits.
+- It runs on i64 coefficients end to end, the first step toward the Part 1
+  ceiling of 38 bits that no available codec reaches: a scalar i64 5/3
+  (`wavelet_int.forward53WideOrigin`, plus the matching checked inverse), the
+  T1 symbol generator made generic over its coefficient type
+  (`ebcot.encodeCodeBlockSegmentIsoMqWideWithStyle`, up to 37 magnitude
+  bitplanes), and QCD with raised guard bits where an exponent would not fit
+  (`WideReversibleQuantization`). The i32 hot paths are unchanged.
+- Evidence: unit tests require the i64 T1 output to equal both i32 encoders
+  byte for byte, the i64 5/3 to equal the i32 transform, and 38-bit samples
+  to round-trip through it; a one-component unsigned 8/16-bit stream equals
+  the gray encoder's bytes, and 1- to 28-bit streams round-trip through the
+  z2000 decoder. `tools/wide_encode_interop.py` decodes the output with
+  Kakadu 8.4.1 (exact for 1 to 24 bits; at 28 bits Kakadu is not lossless on
+  its own streams either), OpenJPEG 2.5.4 (exact for 1 to 28 bits, and for 29
+  bits before the cap), and Grok 20.4.12 (exact, which supports up to 16 bits),
+  for signed and unsigned inputs, one and three components, and the bypass,
+  TERMALL, causal, segmentation-symbol, EPH, layer, and block-size options.
+- Precisions from 29 bits are refused for now: their HH bands need more than
+  31 magnitude bitplanes, which the strict decoder does not read yet.
+
 ### Main-Header Component Coding On Multi-Tile Streams
 
 - Native decode accepted main-header COC/QCC that give components different

@@ -1879,11 +1879,59 @@ pub fn encodeBlockScratchWithStyle(
     rect: subband.Rect,
     style: CodeBlockStyle,
 ) !EncodedBlockView {
+    return encodeBlockScratchGeneric(scratch, plane, stride, rect, style);
+}
+
+/// The symbol generator over i64 coefficients, for samples whose code blocks
+/// need more than 31 magnitude bitplanes (30- to 38-bit components). It emits
+/// exactly the symbols the i32 generator would for coefficients both carry.
+pub fn encodeBlockScratchWideWithStyle(
+    scratch: *BlockScratch,
+    plane: []const i64,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !EncodedBlockView {
+    return encodeBlockScratchGeneric(scratch, plane, stride, rect, style);
+}
+
+/// One code block of i64 coefficients through the symbol generator and the
+/// ISO MQ writer matching `style` (continuous, bypass, or terminated).
+pub fn encodeCodeBlockSegmentIsoMqWideWithStyle(
+    allocator: std.mem.Allocator,
+    plane: []const i64,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
+    var scratch = BlockScratch.init(allocator);
+    defer scratch.deinit();
+    const block = try encodeBlockScratchWideWithStyle(&scratch, plane, stride, rect, style);
+    if (style.terminate_all) {
+        return if (style.bypass)
+            encodeBlockSymbolsSegmentIsoMqBypassTerminated(allocator, block, style)
+        else
+            encodeBlockSymbolsSegmentIsoMqTerminated(allocator, block, style);
+    }
+    if (style.bypass) return encodeBlockSymbolsSegmentIsoMqBypass(allocator, block, style);
+    return encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(allocator, block, style);
+}
+
+fn encodeBlockScratchGeneric(
+    scratch: *BlockScratch,
+    plane: anytype,
+    stride: usize,
+    rect: subband.Rect,
+    style: CodeBlockStyle,
+) !EncodedBlockView {
     try validateImplementedStyleAllowBypass(style);
     scratch.reset();
     try validateBlock(plane, stride, rect);
 
-    const stats = try blockStats(plane, stride, rect);
+    const stats = if (@TypeOf(plane) == []const i64)
+        try blockStatsWide(plane, stride, rect)
+    else
+        try blockStats(plane, stride, rect);
     const bitplanes = stats.bitplanes;
     if (bitplanes == 0) {
         return .{
@@ -4256,7 +4304,7 @@ fn emitSignificancePass(
     allocator: std.mem.Allocator,
     passes: *std.ArrayList(Pass),
     symbols: *std.ArrayList(Symbol),
-    plane: []const i32,
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     bitplane: u8,
@@ -4539,7 +4587,7 @@ fn emitRefinementPass(
     allocator: std.mem.Allocator,
     passes: *std.ArrayList(Pass),
     symbols: *std.ArrayList(Symbol),
-    plane: []const i32,
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     bitplane: u8,
@@ -4742,7 +4790,7 @@ fn emitCleanupPass(
     allocator: std.mem.Allocator,
     passes: *std.ArrayList(Pass),
     symbols: *std.ArrayList(Symbol),
-    plane: []const i32,
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     bitplane: u8,
@@ -4987,7 +5035,7 @@ fn decodeCleanupPassInferredPlain(
 fn emitCleanupSample(
     allocator: std.mem.Allocator,
     symbols: *std.ArrayList(Symbol),
-    plane: []const i32,
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     pos: ScanPos,
@@ -5110,7 +5158,7 @@ fn canUseCleanupRunStripe(
 }
 
 fn cleanupRunLength(
-    plane: []const i32,
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     x: usize,
@@ -5405,7 +5453,7 @@ fn decodeCleanupSampleRange(
 fn emitZeroCoding(
     allocator: std.mem.Allocator,
     symbols: *std.ArrayList(Symbol),
-    plane: []const i32,
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     pos: ScanPos,
@@ -5428,7 +5476,7 @@ fn emitZeroCoding(
 fn emitSign(
     allocator: std.mem.Allocator,
     symbols: *std.ArrayList(Symbol),
-    plane: []const i32,
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     pos: ScanPos,
@@ -6614,7 +6662,7 @@ const ScanIterator = struct {
     }
 };
 
-fn validateBlock(plane: []const i32, stride: usize, rect: subband.Rect) !void {
+fn validateBlock(plane: anytype, stride: usize, rect: subband.Rect) !void {
     if (stride == 0 or rect.width == 0 or rect.height == 0) return EbcotError.InvalidBlock;
     if (try blockArea(rect) > max_codeblock_area) return EbcotError.InvalidBlock;
     if (rect.y >= plane.len / stride or rect.x >= stride) return EbcotError.InvalidBlock;
@@ -6627,6 +6675,25 @@ const BlockStats = struct {
     bitplanes: u8,
     non_zero_count: u32,
 };
+
+/// Scalar statistics over i64 coefficients. Part 1 signals at most 37
+/// magnitude bitplanes (Mb = G + epsilon - 1 with G <= 7 and epsilon <= 31).
+fn blockStatsWide(plane: []const i64, stride: usize, rect: subband.Rect) !BlockStats {
+    var max_mag: u64 = 0;
+    var non_zero_count: u32 = 0;
+    for (0..rect.height) |y| {
+        for (plane[(rect.y + y) * stride + rect.x ..][0..rect.width]) |value| {
+            const mag = @abs(value);
+            max_mag = @max(max_mag, mag);
+            if (mag != 0) non_zero_count += 1;
+        }
+    }
+    const bitplanes: u8 = if (max_mag == 0) 0 else @intCast(64 - @clz(max_mag));
+    if (bitplanes > max_wide_magnitude_bitplanes) return EbcotError.InvalidBlock;
+    return .{ .bitplanes = bitplanes, .non_zero_count = non_zero_count };
+}
+
+pub const max_wide_magnitude_bitplanes: u8 = 37;
 
 fn blockStats(plane: []const i32, stride: usize, rect: subband.Rect) !BlockStats {
     var max_mag: u32 = 0;
@@ -6845,7 +6912,7 @@ fn makeSignContextLut() [5]Context {
 }
 
 fn signCoding(
-    plane: []const i32,
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     x: usize,
@@ -6930,7 +6997,7 @@ fn clampSignContribution(score: i8) i8 {
     return 0;
 }
 
-fn signContribution(value: i32) i8 {
+fn signContribution(value: anytype) i8 {
     return if (value < 0) -1 else 1;
 }
 
@@ -7231,6 +7298,71 @@ inline fn magnitude(value: i32) u32 {
     return @as(u32, @intCast(abs));
 }
 
-inline fn isMagnitudeBitSet(value: i32, bitplane: u8) bool {
+inline fn isMagnitudeBitSet(value: anytype, bitplane: u8) bool {
+    if (@TypeOf(value) == i64) return ((@abs(value) >> @as(u6, @intCast(bitplane))) & 1) != 0;
     return ((magnitude(value) >> @as(u5, @intCast(bitplane))) & 1) != 0;
+}
+
+test "wide symbol encoder matches the i32 encoders and reaches 37 bitplanes" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed_2000);
+    const random = prng.random();
+    const width = 23;
+    const height = 19;
+    const styles = [_]CodeBlockStyle{
+        .{},
+        .{ .vertical_causal = true, .band_kind = .hh },
+        .{ .bypass = true, .band_kind = .hl },
+        .{ .terminate_all = true, .reset_context = true, .band_kind = .lh },
+    };
+    var narrow: [width * height]i32 = undefined;
+    var wide: [width * height]i64 = undefined;
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    for (styles, 0..) |style, style_index| {
+        // TERMALL ends a segment per pass, and segments are capped at 64.
+        const max_bits: u5 = if (style.terminate_all) 20 else 30;
+        for (&narrow, &wide) |*n, *w| {
+            const magnitude_bits = random.intRangeAtMost(u5, 0, max_bits);
+            const limit = @as(i32, 1) << magnitude_bits;
+            n.* = random.intRangeLessThan(i32, -limit + 1, limit);
+            if (random.uintLessThan(u8, 4) == 0) n.* = 0;
+            w.* = n.*;
+        }
+        var expected = if (style.terminate_all)
+            try encodeCodeBlockSegmentIsoMqTerminatedWithStyle(allocator, &narrow, width, rect, style)
+        else blk: {
+            var scratch = BlockScratch.init(allocator);
+            defer scratch.deinit();
+            const block = try encodeBlockScratchWithStyle(&scratch, &narrow, width, rect, style);
+            break :blk if (style.bypass)
+                try encodeBlockSymbolsSegmentIsoMqBypass(allocator, block, style)
+            else
+                try encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(allocator, block, style);
+        };
+        defer expected.deinit(allocator);
+        var actual = try encodeCodeBlockSegmentIsoMqWideWithStyle(allocator, &wide, width, rect, style);
+        defer actual.deinit(allocator);
+        try std.testing.expectEqual(expected.bitplanes, actual.bitplanes);
+        try std.testing.expectEqual(expected.pass_count, actual.pass_count);
+        try std.testing.expectEqualSlices(u8, expected.bytes, actual.bytes);
+        if (style_index == 0) {
+            // The production hot path writes the same continuous segment.
+            var direct_scratch = DirectBlockScratch.init(allocator);
+            defer direct_scratch.deinit();
+            var direct = try encodeCodeBlockSegmentDirectIsoScratchWithStyle(&direct_scratch, &narrow, width, rect, style);
+            defer direct.deinit(allocator);
+            try std.testing.expectEqualSlices(u8, direct.bytes, actual.bytes);
+        }
+    }
+
+    // 37 magnitude bitplanes is the Part 1 ceiling; one more fails closed.
+    @memset(&wide, 0);
+    wide[0] = (@as(i64, 1) << 37) - 1;
+    wide[5] = -(@as(i64, 1) << 36);
+    var deepest = try encodeCodeBlockSegmentIsoMqWideWithStyle(allocator, &wide, width, rect, .{});
+    defer deepest.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 37), deepest.bitplanes);
+    try std.testing.expectEqual(@as(u16, 3 * 37 - 2), deepest.pass_count);
+    wide[0] = @as(i64, 1) << 37;
+    try std.testing.expectError(EbcotError.InvalidBlock, encodeCodeBlockSegmentIsoMqWideWithStyle(allocator, &wide, width, rect, .{}));
 }

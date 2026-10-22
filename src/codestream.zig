@@ -788,6 +788,134 @@ pub fn encodeLosslessPlanarWithOptions(
     }, encode_options);
 }
 
+/// Highest precision the wide encoder accepts. From 29 bits the HH band needs
+/// more than 31 magnitude bitplanes, which the strict decoder does not read
+/// yet, so those precisions stay refused until the wide decode path lands.
+pub const max_wide_encode_precision: u8 = 28;
+
+/// Reversible encode of native integer components, signed or unsigned, up to
+/// `max_wide_encode_precision` bits, through i64 coefficients: an i64 5/3
+/// transform, the i64 T1 symbol generator, and the shared scaffold, packet,
+/// and codestream writers. One tile, no MCT, RPCL, and one to four
+/// components of one precision on the reference grid at the origin.
+pub fn encodeNativeLosslessWithOptions(
+    allocator: std.mem.Allocator,
+    source: NativeSamplePlanes,
+    options: LosslessOptions,
+) ![]u8 {
+    const component_count = source.planes.len;
+    if (component_count == 0 or component_count > color.max_components) return CodestreamError.UnsupportedPayload;
+    if (source.reference_x0 != 0 or source.reference_y0 != 0) return CodestreamError.UnsupportedPayload;
+    const width: usize = source.reference_x1;
+    const height: usize = source.reference_y1;
+    if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
+    const precision = source.planes[0].layout.precision;
+    if (precision == 0 or precision > max_wide_encode_precision) return CodestreamError.UnsupportedPayload;
+    var component_bit_depths: [max_codestream_components]u8 = @splat(0);
+    var component_signed: [max_codestream_components]bool = @splat(false);
+    for (source.planes, 0..) |plane, component| {
+        const layout = plane.layout;
+        if (layout.precision != precision or layout.x0 != 0 or layout.y0 != 0 or
+            layout.x_step != 1 or layout.y_step != 1 or layout.width != width or layout.height != height or
+            plane.samples.len != width * height)
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+        component_bit_depths[component] = precision;
+        component_signed[component] = layout.signed;
+    }
+    if (options.transform != .reversible_5_3 or options.quantization != .none or options.mct != .none or
+        options.progression != .rpcl or options.poc_records.len != 0 or options.poc_in_tile_header or
+        options.ppm or options.ppt or options.emit_temporary_payload_sidecar or options.rate_count != 0 or
+        options.t1_backend != .iso_mq or options.tile_width < width or options.tile_height < height or
+        options.image_origin_x != 0 or options.image_origin_y != 0 or
+        options.tile_origin_x != 0 or options.tile_origin_y != 0)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (options.levels > 32) return CodestreamError.TooManyLevels;
+    if (options.layers == 0 or options.layers > max_quality_layers) return CodestreamError.InvalidCodestream;
+    try validateBlockSize(options.block_width, options.block_height);
+    try validatePrecincts(options);
+    try validateTilePartDivisions(options.tile_part_divisions);
+
+    const levels = actualDwtLevels(width, height, options.levels);
+    const encode_options = normalizedEncodePrecinctOptions(options, levels);
+    const quantization = try WideReversibleQuantization.forPrecision(precision);
+
+    // ISO B.1.1 DC level shift for unsigned components, then the i64 5/3.
+    const planes = try allocator.alloc([]i64, component_count);
+    var built: usize = 0;
+    defer {
+        for (planes[0..built]) |plane| allocator.free(plane);
+        allocator.free(planes);
+    }
+    for (source.planes) |plane| {
+        const coefficients = try allocator.dupe(i64, plane.samples);
+        planes[built] = coefficients;
+        built += 1;
+        if (!plane.layout.signed) {
+            const shift = @as(i64, 1) << @as(u6, @intCast(precision - 1));
+            for (coefficients) |*value| value.* -= shift;
+        }
+        _ = try wavelet_int.forward53WideOrigin(allocator, coefficients, width, height, levels, 0, 0);
+    }
+
+    var scaffold_precincts: [33]packet_plan.Precinct = undefined;
+    for (encode_options.precincts[0..encode_options.precinct_count], 0..) |precinct, index| {
+        scaffold_precincts[index] = .{ .width = precinct.width, .height = precinct.height };
+    }
+    const block_style = ebcot.CodeBlockStyle{
+        .bypass = encode_options.bypass,
+        .reset_context = encode_options.reset_context,
+        .terminate_all = encode_options.terminate_all,
+        .vertical_causal = encode_options.vertical_causal,
+        .predictable_termination = encode_options.predictable_termination,
+        .segmentation_symbols = encode_options.segmentation_symbols,
+    };
+    var color_depths: [color.max_components]u8 = @splat(0);
+    for (color_depths[0..component_count]) |*depth| depth.* = precision;
+    const grid = tile_grid.Grid.fromImageSize(width, height, @intCast(width), @intCast(height)) catch
+        return CodestreamError.InvalidCodestream;
+    var artifacts = tile_pipeline.buildWideTileRpclEncodeArtifacts(
+        allocator,
+        try grid.tile(0),
+        width,
+        height,
+        planes,
+        levels,
+        .{
+            .layers = encode_options.layers,
+            .block_width = encode_options.block_width,
+            .block_height = encode_options.block_height,
+            .precincts = scaffold_precincts[0..encode_options.precinct_count],
+            .components = @intCast(component_count),
+            .component_bit_depths = color_depths,
+            .nominal_bitplanes = quantization.table(),
+        },
+        block_style,
+    ) catch |err| switch (err) {
+        // A coefficient needs more than the 37 bitplanes Part 1 can signal.
+        tile_pipeline.PacketScaffoldError.InvalidLayer => return CodestreamError.UnsupportedPayload,
+        else => return err,
+    };
+    defer artifacts.deinit();
+
+    return assembleSingleTileCodestream(allocator, .{
+        .width = width,
+        .height = height,
+        .bit_depth = precision,
+        .component_bit_depths = component_bit_depths,
+        .components = @intCast(component_count),
+        .levels = levels,
+        .packet_lengths = artifacts.stream.packet_lengths,
+        .packet_header_lengths = artifacts.stream.packet_header_lengths,
+        .packet_bytes = artifacts.stream.bytes,
+        .component_signed = component_signed,
+        .wide_quantization = quantization,
+    }, encode_options);
+}
+
 /// Multi-tile planar encode: grayscale, gray+alpha, and RGBA (with RCT over
 /// the colour planes or without MCT) through the same tile pipeline, tile-part
 /// divisions, global PCRD, POC, and packed-header options as multi-tile RGB.
@@ -3719,6 +3847,10 @@ const SingleTileAssemblyInput = struct {
     packet_header_lengths: []const u32,
     packet_bytes: []const u8,
     sidecar_payload: []const u8 = &.{},
+    component_signed: [max_codestream_components]bool = @splat(false),
+    /// Set by the wide encoder, whose QCD carries its own guard bits and
+    /// exponents (`WideReversibleQuantization`) instead of QCD/QCC by depth.
+    wide_quantization: ?WideReversibleQuantization = null,
 };
 
 fn componentBitDepthForAssembly(input: SingleTileAssemblyInput, component: usize) u8 {
@@ -3744,16 +3876,21 @@ fn assembleSingleTileCodestream(
         .bit_depth = input.bit_depth,
         .component_bit_depths = input.component_bit_depths,
         .components = input.components,
+        .component_signed = input.component_signed,
         .tile_width = encode_options.tile_width,
         .tile_height = encode_options.tile_height,
     });
     try appendCod(allocator, &out, levels, encode_options);
-    const primary_bit_depth = componentBitDepthForAssembly(input, 0);
-    try appendQcd(allocator, &out, levels, primary_bit_depth, encode_options);
-    for (1..input.components) |component| {
-        const component_depth = componentBitDepthForAssembly(input, component);
-        if (component_depth != primary_bit_depth) {
-            try appendQccReversible(allocator, &out, levels, @intCast(component), component_depth, encode_options);
+    if (input.wide_quantization) |quantization| {
+        try appendQcdWideReversible(allocator, &out, levels, quantization);
+    } else {
+        const primary_bit_depth = componentBitDepthForAssembly(input, 0);
+        try appendQcd(allocator, &out, levels, primary_bit_depth, encode_options);
+        for (1..input.components) |component| {
+            const component_depth = componentBitDepthForAssembly(input, component);
+            if (component_depth != primary_bit_depth) {
+                try appendQccReversible(allocator, &out, levels, @intCast(component), component_depth, encode_options);
+            }
         }
     }
     if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
@@ -17495,6 +17632,7 @@ const SizProfile = struct {
     component_bit_depths: [max_codestream_components]u8 = @splat(0),
     component_xrsiz: [max_codestream_components]u8 = @splat(1),
     component_yrsiz: [max_codestream_components]u8 = @splat(1),
+    component_signed: [max_codestream_components]bool = @splat(false),
     components: u16,
     tile_width: u32,
     tile_height: u32,
@@ -17546,7 +17684,8 @@ fn appendSizForComponents(
         const xrsiz = profile.component_xrsiz[component];
         const yrsiz = profile.component_yrsiz[component];
         if (xrsiz == 0 or yrsiz == 0) return CodestreamError.InvalidCodestream;
-        try out.append(allocator, component_depth - 1);
+        const signed_flag: u8 = if (profile.component_signed[component]) 0x80 else 0;
+        try out.append(allocator, (component_depth - 1) | signed_flag);
         try out.append(allocator, xrsiz);
         try out.append(allocator, yrsiz);
     }
@@ -17617,6 +17756,59 @@ fn appendQcd(
     while (level < levels) : (level += 1) {
         inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
             try out.append(allocator, try qcdReversibleExponentByteForBand(bit_depth, kind));
+        }
+    }
+}
+
+/// Reversible signalling for the wide encoder. Part 1 gives a band
+/// Mb = G + epsilon - 1 magnitude bitplanes with G <= 7 and epsilon <= 31, so
+/// at most 37 (`ebcot.max_wide_magnitude_bitplanes`). Each band kind gets
+/// Mb = precision + gain + 1 within that ceiling, and G is the smallest value
+/// of at least 2 that keeps every epsilon within 5 bits. Up to 28 bits this is
+/// exactly the G = 2, epsilon = precision + gain signalling of `appendQcd`.
+pub const WideReversibleQuantization = struct {
+    guard_bits: u8,
+    /// Mb per `subband.Kind`, the same at every decomposition level.
+    bitplanes: [4]u8,
+
+    pub fn forPrecision(precision: u8) !WideReversibleQuantization {
+        if (precision == 0 or precision > 38) return CodestreamError.UnsupportedPayload;
+        const gains = [4]u8{ 0, 1, 1, 2 };
+        var bitplanes: [4]u8 = undefined;
+        var deepest: u8 = 0;
+        for (&bitplanes, gains) |*mb, gain| {
+            mb.* = @min(precision + gain + 1, ebcot.max_wide_magnitude_bitplanes);
+            deepest = @max(deepest, mb.*);
+        }
+        const guard_bits: u8 = @max(2, deepest -| 30);
+        if (guard_bits > 7) return CodestreamError.UnsupportedPayload;
+        return .{ .guard_bits = guard_bits, .bitplanes = bitplanes };
+    }
+
+    pub fn exponent(self: WideReversibleQuantization, kind: subband.Kind) u8 {
+        return self.bitplanes[@backingInt(kind)] + 1 - self.guard_bits;
+    }
+
+    /// The scaffold's per-level, per-band Mb table.
+    pub fn table(self: WideReversibleQuantization) [33][4]u8 {
+        return @splat(self.bitplanes);
+    }
+};
+
+fn appendQcdWideReversible(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    levels: u8,
+    quantization: WideReversibleQuantization,
+) !void {
+    const bands = 1 + 3 * @as(u16, levels);
+    try appendMarker(allocator, out, .qcd);
+    try appendU16Be(allocator, out, 3 + bands);
+    try out.append(allocator, (quantization.guard_bits << 5) | @backingInt(QuantizationStyle.none));
+    try out.append(allocator, quantization.exponent(.ll) << 3);
+    for (0..levels) |_| {
+        inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
+            try out.append(allocator, quantization.exponent(kind) << 3);
         }
     }
 }

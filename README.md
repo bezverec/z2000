@@ -431,6 +431,7 @@ z2000 input.j2k output.pgx [--component N] [--tile-index N|--region X,Y,W,H] [--
 z2000 j2k-to-pgx input.j2c output.pgx [options]
 z2000 input.j2k output.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND]
 z2000 j2k-to-zraw input.j2c output.zraw [options]
+z2000 zraw-to-j2k input.zraw output.j2k [--levels N] [--layers N] [--block N] [code-block style flags]
 ```
 
 The DNG adapter accepts exactly one uncompressed, chunky, unsigned 8/16-bit
@@ -564,6 +565,12 @@ Other commands:
   component-local dimensions, sampling steps, and origins are retained.
   `--tile-index`, `--region`, `--layers`, `--reduce`, `--threads`, and `--t1-backend` work in explicit, shorthand,
   and non-recursive batch forms.
+- **zraw-to-j2k INPUT OUTPUT**: Reversible encode of a canonical ZRAW (one to
+  four components of one precision, signed or unsigned, 1 to 28 bits) into a
+  raw codestream: one tile, no MCT, RPCL. `--levels`, `--layers`, `--block`,
+  `--sop`/`--no-sop`, `--eph`/`--no-eph`, and the code-block style flags of
+  `tiff-to-jp2` apply. It is the only encoder for signed or more than 16-bit
+  samples, and works through i64 coefficients so it can grow to 38 bits.
 
 The full profile matrix and internal API surface are documented in
 [API notes](docs/api.md).

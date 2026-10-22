@@ -51,6 +51,7 @@ zig build run -- j2k-to-pgx input.j2k component.pgx [--component N] [--tile-inde
 zig build run -- *.j2c .pgx [j2k-to-pgx options]
 zig build run -- j2k-to-zraw input.j2k components.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq]
 zig build run -- *.j2c .zraw [j2k-to-zraw options]
+zig build run -- zraw-to-j2k components.zraw output.j2k [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--segmentation-symbols]
 ```
 
 `--version` (or `-V`) prints the generated SemVer application version including
@@ -421,6 +422,17 @@ Primary public functions:
   `decodeNativeRawPlanar(allocator, bytes, limits)` — serialize or parse the
   exact ZRAW diagnostic carrier with allocation limits and exact payload-
   boundary validation
+- `encodeNativeLosslessWithOptions(allocator, source, options)` — reversible
+  encode of `NativeSamplePlanes` (one to four components of one precision,
+  signed or unsigned, up to `max_wide_encode_precision`, currently 28 bits) on
+  one tile at the origin, without MCT, in RPCL, with no rate targets. Samples
+  go through i64 throughout: the DC level shift, `wavelet_int.forward53WideOrigin`,
+  and `ebcot.encodeCodeBlockSegmentIsoMqWideWithStyle`; scaffold, layers,
+  packets, and markers are the i32 encoder's. QCD carries
+  `WideReversibleQuantization`: Mb = precision + gain + 1 per band within the
+  Part 1 ceiling of 37, with the guard bits raised above 2 only where epsilon
+  would not fit 5 bits. Up to 16 bits a one-component unsigned stream is
+  byte-identical to `encodeLosslessGrayWithOptions`.
 - `decodeLosslessNative(allocator, bytes, limits)` /
   `decodeLosslessNativeWithOptions(allocator, bytes, options, limits)` — first
   native payload profile: strict single- and multi-tile reversible 5/3 or

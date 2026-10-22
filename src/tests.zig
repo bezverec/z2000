@@ -39006,3 +39006,80 @@ test "native ICT matches the interleaved RGB decode sample for sample" {
         }
     }
 }
+
+test "wide native encoder writes the gray encoder's bytes and round-trips 1 to 28 bits" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_0038);
+    const random = prng.random();
+    const width = 29;
+    const height = 17;
+    const Case = struct { precision: u8, signed: bool, components: usize };
+    const cases = [_]Case{
+        .{ .precision = 8, .signed = false, .components = 1 },
+        .{ .precision = 16, .signed = false, .components = 1 },
+        .{ .precision = 1, .signed = false, .components = 2 },
+        .{ .precision = 20, .signed = true, .components = 3 },
+        .{ .precision = 28, .signed = false, .components = 1 },
+        .{ .precision = 28, .signed = true, .components = 4 },
+    };
+    for (cases) |case| {
+        var components: [4]native_samples.ComponentLayout = undefined;
+        for (components[0..case.components]) |*layout| layout.* = .{
+            .precision = case.precision,
+            .signed = case.signed,
+            .x0 = 0,
+            .y0 = 0,
+            .x_step = 1,
+            .y_step = 1,
+            .width = width,
+            .height = height,
+        };
+        const layout = native_samples.CodestreamLayout{
+            .allocator = allocator,
+            .capabilities = 0,
+            .reference_x0 = 0,
+            .reference_y0 = 0,
+            .reference_x1 = width,
+            .reference_y1 = height,
+            .tile_width = width,
+            .tile_height = height,
+            .tile_origin_x = 0,
+            .tile_origin_y = 0,
+            .components = components[0..case.components],
+        };
+        var source = try native_samples.SamplePlanes.initFromLayout(allocator, layout, .{});
+        defer source.deinit();
+        const minimum: i64 = if (case.signed) -(@as(i64, 1) << @intCast(case.precision - 1)) else 0;
+        const maximum: i64 = if (case.signed) (@as(i64, 1) << @intCast(case.precision - 1)) - 1 else (@as(i64, 1) << @intCast(case.precision)) - 1;
+        for (source.planes) |plane| {
+            for (plane.samples) |*sample| sample.* = random.intRangeAtMost(i64, minimum, maximum);
+            plane.samples[0] = minimum;
+            plane.samples[1] = maximum;
+        }
+        const options = codestream.LosslessOptions{ .mct = .none };
+        const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, options);
+        defer allocator.free(encoded);
+
+        var decoded = try codestream.decodeLosslessNative(allocator, encoded, .{});
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqual(expected.layout.signed, actual.layout.signed);
+            try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+        }
+
+        if (case.components == 1 and !case.signed and case.precision <= 16) {
+            const gray_samples = try allocator.alloc(u16, width * height);
+            defer allocator.free(gray_samples);
+            for (gray_samples, source.planes[0].samples) |*out, sample| out.* = @intCast(sample);
+            const gray_stream = try codestream.encodeLosslessGrayWithOptions(allocator, .{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = case.precision,
+                .samples = gray_samples,
+            }, options);
+            defer allocator.free(gray_stream);
+            try std.testing.expectEqualSlices(u8, gray_stream, encoded);
+        }
+    }
+}
