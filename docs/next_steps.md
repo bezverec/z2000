@@ -190,9 +190,8 @@ The foundation landed on 2026-07-17:
 - The official WG1 T.803 corpus is pinned at commit `f6b9ede0` through
   `tools/setup_part1_corpus.ps1` and remains local under its conformance-use
   terms. All 16 profile-0 inputs and 18 class-0 PGX references now run with
-  `Z2000_PART4_ROOT`: thirteen pass their class-0 references (`p0_01` to
-  `p0_04`, `p0_06`, and `p0_08` to `p0_16` except `p0_13`), and `p0_05`,
-  `p0_07`, and `p0_13` pin the current fail-closed boundary. QCD-before-COD moved `p0_01`
+  `Z2000_PART4_ROOT`: fourteen pass their class-0 references (all but
+  `p0_05` and `p0_13`), and those two pin the current fail-closed boundary. QCD-before-COD moved `p0_01`
   to an exact pass;
   uniform full COC, LRCP layers, SOP/EPH, T1 termination styles, and reserved
   segment-less marker handling move `p0_02` to an exact pass;
@@ -425,8 +424,9 @@ The active G0/G4 corpus expansion is:
 6. Map the remaining public profiles to manifested decode and malformed cases.
    `tools/release_local.ps1` runs the optional assets with
    `--require-optional` whenever `Z2000_PART4_ROOT` is set. `p0_15` (exact) and
-   `p0_08` (bit-exact against Kakadu, within its T.803 bounds) now pass; the
-   remaining fail-closed T.803 streams are `p0_05`, `p0_07`, and `p0_13`.
+   `p0_08` (bit-exact against Kakadu, within its T.803 bounds) now pass, and
+   so does `p0_07` (RLCP multipart POC); the remaining fail-closed T.803
+   streams are `p0_05` and `p0_13`.
 
 Exit when every existing public profile maps to the new matrix and the runner
 can evaluate the relevant T.803 references and tolerances without inflating

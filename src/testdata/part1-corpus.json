@@ -1644,15 +1644,17 @@
         "redistribution": "optional local asset; not redistributed by z2000"
       },
       "oracle": "T.803 class-0 c0p0_07.pgx at reduction 0, signed 8-bit formatted output, peak error <= 10, MSE <= 0.34",
-      "features": ["siz-bounded-unsigned-components", "progression-poc", "tiles-and-tile-parts", "reversible-53"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload",
+      "features": ["siz-native-signed-components", "progression-poc", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "decode_pass",
+      "decoder": "native",
       "references": [{
         "path": "reference_class0_profile0/c0p0_07.pgx",
         "sha256": "55ee08494d259e5879aa4695d8c9d1afca4f4bb0be65bde61b55c7120d425d38",
         "format": "pgx",
         "component": 0,
         "resolution_reduction": 0,
+        "crop": { "x": 0, "y": 0 },
+        "sample_shift": 4,
         "max_peak_error": 10,
         "max_mse": 0.34
       }]
@@ -3946,6 +3948,36 @@
           "sha256": "b1b108d2963ab62fca506395f087fd425ad8c154bc7204500a22a2a1348ceb0b",
           "format": "pgx",
           "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0.0
+        }
+      ]
+    },
+    {
+      "id": "kakadu-rlcp-poc-tileparts",
+      "path": "src/testdata/kakadu-rlcp-poc-tileparts.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "f204bddae5797f21f2a26b239cc01dffd6fd6e0ebe181d647759b7057a963541",
+      "source": {
+        "producer": "Kakadu 8.4.1 kdu_compress",
+        "version": "8.4.1",
+        "origin": "64x48 8-bit gray, reversible, 2x2 tiles of 32x32, main progression RLCP with a two-record main-header POC (LRCP over the lower resolutions, then RLCP), split into 28 resolution tile-parts. The multipart POC gate admitted every main progression except RLCP",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "codestream and source PGX committed; producer application not redistributed",
+        "command": "magick -seed 9 -size 64x48 plasma:fractal -depth 8 -colorspace gray gray.pgm; kdu_compress -i gray.pgm -o src/testdata/kakadu-rlcp-poc-tileparts.j2c Creversible=yes Corder=RLCP Clayers=3 Clevels=2 Porder={0,0,2,2,1,LRCP},{0,0,3,3,1,RLCP} ORGtparts=R Stiles={32,32} -num_threads 0"
+      },
+      "oracle": "lossless: the native plane equals the encoder input exactly",
+      "features": ["progression-poc", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "src/testdata/kakadu-rlcp-poc-tileparts-source.pgx",
+          "sha256": "8ee1422b4c112f4e921125e995265950be6b5be27417bc935c6d0c5332f2cedc",
+          "format": "pgx",
+          "component": 0,
           "resolution_reduction": 0,
           "max_peak_error": 0,
           "max_mse": 0.0

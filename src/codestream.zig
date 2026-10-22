@@ -7168,12 +7168,6 @@ fn readStrictCodestreamMetadataForProfile(
             }
         }
         if (poc_records.items.len != 0 or has_tile_poc) {
-            if (has_multiple_tile_parts) {
-                switch (parsed_progression) {
-                    .rpcl, .lrcp, .pcrl, .cprl => {},
-                    else => return CodestreamError.UnsupportedPayload,
-                }
-            }
             var tile_index: u32 = 0;
             while (tile_index < grid.tileCount()) : (tile_index += 1) {
                 const tile = grid.tile(tile_index) catch return CodestreamError.InvalidCodestream;

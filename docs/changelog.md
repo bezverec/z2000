@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multipart POC Under RLCP
+
+- A POC schedule over multiple tile-parts was accepted under every main
+  progression except RLCP. The composed sequence does not depend on which
+  order the POC overrides, and the coverage check that the tile-parts
+  together hold that sequence is the same for all five, so the exclusion is
+  gone.
+- T.803 `p0_07` (256 tiles of three signed 12-bit components, main order
+  RLCP, a POC in both tile-parts of tile 0) now decodes bit-exactly against
+  Kakadu 8.4.1 and OpenJPEG 2.5.4 in all three components, and exactly
+  against its class-0 reference. `kakadu-rlcp-poc-tileparts`, a Kakadu
+  stream with main order RLCP, a two-record POC, and 28 resolution
+  tile-parts, pins the case losslessly in the default corpus and fails on
+  the previous code. 14 of the 16 T.803 profile-0 streams pass.
+
 ### T.803 p0_08 And p0_15
 
 - Main-header QCD is now sized by the components it actually serves, those
