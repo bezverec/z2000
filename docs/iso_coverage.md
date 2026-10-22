@@ -22,7 +22,7 @@ arbitrary-profile support, or completion of the roadmap's G0-G7 program.
 Remaining work includes generic component and encode breadth, ROI/registration encode and marker
 semantics, selective/streaming decode, broader JP2 mappings, producer diversity,
 and performance outside those scored bounds. The separate roadmap estimate is
-about 57% and is intentionally not folded into either 100/100 score.
+about 61% (2026-10-22) and is intentionally not folded into either 100/100 score.
 
 ## Broad Part 1 Readiness Matrix
 
