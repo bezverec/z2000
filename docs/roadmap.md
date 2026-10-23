@@ -145,7 +145,7 @@ decoded, encoded, malformed-tested, and independently reproduced.
 ### Current Completion Estimate
 
 As of 2026-10-23, the general-purpose G0-G7 program is estimated at **about
-64% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
+65% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
 This is a planning estimate, not a conformance score. It gives every phase
 equal weight because the remaining effort is too uncertain for a more precise
 cost model; the headline is the rounded mean of the phase estimates below.
