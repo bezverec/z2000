@@ -585,7 +585,11 @@ Other commands:
   the reference grid for component C or every component: its coefficients
   are scaled above the background and signalled by RGN, and with several
   layers the first layer carries exactly the region, which then decodes
-  losslessly from that layer alone. Tile-parts follow `--tile-parts R|L|C`
+  losslessly from that layer alone. `--rates R1,R2,...` forms one layer per
+  compression ratio (layer k holds about 1/Rk of the lossless size, the last
+  layer is lossless) by global PCRD over every block of every tile and
+  component; with a ROI, PCRD orders the layers instead and the upshifted
+  region still comes first. Tile-parts follow `--tile-parts R|L|C`
   for any layout, and `P` too for one to four full-resolution components of
   one precision at the origin. It
   is the only encoder for signed, more than 16-bit, or more than four

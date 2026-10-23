@@ -56,6 +56,30 @@ entries are grouped by development milestone rather than semantic version.
   byte-identical to before (their layers end at terminated segments) and
   decode identically in all four decoders.
 
+### Wide Encoder: Rate-Targeted Layers
+
+- `LosslessOptions.rates` / `zraw-to-j2k --rates R1,R2,...` now work on the
+  wide encoder, for 1 to 38 bits and every component layout: layer k
+  carries about 1/Rk of the lossless size and the last layer is lossless.
+  The wide tile builder keeps each block's per-pass distortion reductions
+  weighted by the squared 5/3 band norm (`ebcot.passDistortions` is now
+  generic over i32 and i64), and the tile pipeline's global PCRD
+  (`applyGridPcrdTargets`) sets every block's layers with one slope
+  threshold over all blocks of all tiles and, on the componentwise path,
+  all components, before the packets are merged. With a ROI, PCRD orders
+  the layers; the upshifted region's large distortion reductions still put
+  it first.
+- Evidence: at 8 and 16 bits, with two rate targets and three layers, the
+  wide encoder writes the gray and planar RGBA encoders' bytes on one tile,
+  on a tile grid on four threads, and on LRCP with L parts and BYPASS, and
+  the RGB encoder's bytes on the grids (its one-tile writer also charges
+  measured packet-header bytes); 34-bit RCT and tiled streams, a general
+  layout with 12-, 20-, 31-, and 5-bit components, and that layout with a
+  ROI decode closer with every layer and exactly at the last, with the same
+  bytes on one and four threads. Kakadu 8.4.1 decodes layers 1 to 3 of
+  16- and 24-bit rate-targeted streams exactly as z2000 does, and every
+  decoder that supports the precision decodes the full streams exactly.
+
 ### Wide Encoder: Maxshift ROI And Tile-Parts On Any Layout
 
 - `LosslessOptions.roi_regions` and `zraw-to-j2k --roi [C:]X,Y,W,H` encode

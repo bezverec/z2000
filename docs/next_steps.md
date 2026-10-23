@@ -913,7 +913,10 @@ Promote decoder-proven capabilities to the writer in this order:
    layout (P on the uniform layout). Open: `P` parts and tile-header
    COD/COC/QCC/RGN schedules on the componentwise path;
 4. deterministic layer formation with practical exact-byte and quality-target
-   modes, with overshoot and distortion reported explicitly;
+   modes, with overshoot and distortion reported explicitly (the wide encoder
+   now shares the global PCRD of the main encoders, for 1 to 38 bits and any
+   component layout; header-overhead charging, quality targets, and reporting
+   remain);
 5. streaming/memory-bounded tile encode and public resource limits.
 
 Every writer option needs z2000 exact decode plus OpenJPEG, Grok, and Kakadu

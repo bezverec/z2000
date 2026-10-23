@@ -431,7 +431,16 @@ Primary public functions:
 - `encodeNativeLosslessWithOptions(allocator, source, options)` — reversible
   encode of `NativeSamplePlanes` in any Part 1 layout, each component signed
   or unsigned with up to `max_wide_encode_precision` (38) bits, without MCT
-  or with RCT over the first three components, with no rate targets. One to
+  or with RCT over the first three components. `rates`/`rate_count` form the
+  layers by the global PCRD of the tile pipeline (`applyGridPcrdTargets`):
+  each block keeps its 5/3-norm-weighted per-pass distortion reductions
+  (`ebcot.passDistortions`, generic over i32 and i64), and one slope
+  threshold over every block of every tile and component meets the byte
+  targets (lossless size / rate; the last layer is lossless). At 8 and 16
+  bits this is the planar and gray encoders' allocation byte for byte, and
+  the RGB encoder's on tile grids (on one tile that encoder also charges the
+  measured packet-header bytes). With rates, a ROI's first-layer rule gives
+  way to PCRD. One to
   four full-resolution components of one precision at the origin without CRG
   registration (`nativeLayoutIsUniform`) take the uniform path below. Every
   other layout — up to 16384 components, mixed precision and signedness, SIZ
