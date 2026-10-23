@@ -903,7 +903,11 @@ Promote decoder-proven capabilities to the writer in this order:
    signedness, precision (1 to 38 bits), subsampling, reference-grid origins,
    CRG registration, and direct raw-codestream output (`zraw-to-j2k`). Open:
    tile-part divisions and empty tile-components on that componentwise path;
-2. per-component coding style and quantization controls;
+2. **Coding style complete on the wide encoder:** per-component levels,
+   code-block size, precincts, and code-block style written as COC, with QCC
+   following each component's precision and band count. Reversible
+   quantization has no further per-component choice; a per-component guard
+   bit count and 9/7 quantization remain;
 3. `RGN` Maxshift ROI, component registration, and general tile-part/header
    schedules;
 4. deterministic layer formation with practical exact-byte and quality-target

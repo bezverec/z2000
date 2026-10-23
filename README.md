@@ -435,7 +435,7 @@ z2000 input.j2k output.pgx [--component N] [--tile-index N|--region X,Y,W,H] [--
 z2000 j2k-to-pgx input.j2c output.pgx [options]
 z2000 input.j2k output.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND]
 z2000 j2k-to-zraw input.j2c output.zraw [options]
-z2000 zraw-to-j2k input.zraw output.j2k [--tile W,H] [--mct none|rct] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--levels N] [--layers N] [--block N] [framing and code-block style flags]
+z2000 zraw-to-j2k input.zraw output.j2k [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--levels N] [--layers N] [--block N] [framing and code-block style flags]
 ```
 
 The DNG adapter accepts exactly one uncompressed, chunky, unsigned 8/16-bit
@@ -577,7 +577,11 @@ Other commands:
   workers), without MCT or with RCT over the first three components
   (`--mct rct`, which needs them on one grid with one precision), in every
   progression order with POC, TLM, PPM/PPT, SOP/EPH, layers, and the
-  code-block style flags of `tiff-to-jp2`; one to four full-resolution
+  code-block style flags of `tiff-to-jp2`. `--component C:...` (repeatable)
+  gives component C its own decomposition levels, code-block size,
+  precincts, and code-block style, written as a COC marker with a QCC for
+  its band count, e.g. `--component 2:levels=3/block=32x16/bypass`. One to
+  four full-resolution
   components of one precision at the origin also take R/L/C/P tile-parts. It
   is the only encoder for signed, more than 16-bit, or more than four
   components and works through i64 coefficients; at 8 and 16 bits its output

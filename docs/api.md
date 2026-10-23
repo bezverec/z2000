@@ -51,7 +51,7 @@ zig build run -- j2k-to-pgx input.j2k component.pgx [--component N] [--tile-inde
 zig build run -- *.j2c .pgx [j2k-to-pgx options]
 zig build run -- j2k-to-zraw input.j2k components.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq]
 zig build run -- *.j2c .zraw [j2k-to-zraw options]
-zig build run -- zraw-to-j2k components.zraw output.j2k [--tile W,H] [--mct none|rct] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
+zig build run -- zraw-to-j2k components.zraw output.j2k [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../bypass/reset-context/terminate-all/vertical-causal/predictable-termination/segmentation-symbols/style=none] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
 ```
 
 `--version` (or `-V`) prints the generated SemVer application version including
@@ -447,7 +447,17 @@ Primary public functions:
   tiles are written by the sampled encoder's writers, one tile-part each. POC
   needs at most 256 components there, a tile without any sample of a
   subsampled component is refused, and at 8 and 16 bits the output equals
-  `encodeLosslessSampledPlanarWithOptions` byte for byte. On the uniform path
+  `encodeLosslessSampledPlanarWithOptions` byte for byte.
+  `LosslessOptions.component_coding` lists `ComponentCodingOverride`s that
+  give single components their own decomposition levels, code-block size,
+  precincts, and code-block style (`ComponentBlockStyle`); unset fields keep
+  COD's value. Such a request takes the componentwise path, which writes a
+  main-header COC for each component whose effective coding differs from COD
+  and a QCC for each component whose precision or band count differs from
+  QCD's, both with two-byte selectors above 256 components; the progression
+  and POC resolution ranges reach the deepest component. An override for a
+  missing component or a component named twice is `InvalidCodestream`; every
+  other encoder refuses a non-empty list. On the uniform path
   samples go through i64 throughout: the DC
   level shift, the RCT (`forwardRctWide`), the origin-aware
   `wavelet_int.forward53WideOrigin`, and

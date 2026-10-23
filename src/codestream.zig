@@ -287,6 +287,31 @@ pub const T1Backend = enum {
 /// the signalled value when a codestream carries legal guard bits in 0..7.
 const strict_guard_bits: u8 = 2;
 
+/// Code-block style flags of one component (A.6.1 Table A.19).
+pub const ComponentBlockStyle = struct {
+    bypass: bool = false,
+    reset_context: bool = false,
+    terminate_all: bool = false,
+    vertical_causal: bool = false,
+    predictable_termination: bool = false,
+    segmentation_symbols: bool = false,
+};
+
+/// One component's coding where it departs from COD (A.6.2 COC): its
+/// decomposition levels, code-block size, precincts, and code-block style.
+/// Unset fields keep the COD value.
+pub const ComponentCodingOverride = struct {
+    component: u16,
+    levels: ?u8 = null,
+    block_width: ?u16 = null,
+    block_height: ?u16 = null,
+    /// When set, `precincts[0..precinct_count]` replaces COD's precincts,
+    /// in the order of `LosslessOptions.precincts`.
+    precinct_count: ?u8 = null,
+    precincts: [33]PrecinctSize = defaultPrecincts(),
+    style: ?ComponentBlockStyle = null,
+};
+
 pub const LosslessOptions = struct {
     levels: u8 = 5,
     layers: u16 = 1,
@@ -329,6 +354,10 @@ pub const LosslessOptions = struct {
     threads: u8 = 1,
     emit_temporary_payload_sidecar: bool = false,
     t1_backend: T1Backend = .iso_mq,
+    /// Per-component coding written as main-header COC markers. Only the
+    /// wide native encoder (`encodeNativeLosslessWithOptions`) carries it;
+    /// every other encoder refuses a non-empty list.
+    component_coding: []const ComponentCodingOverride = &.{},
 
     pub fn precinctForResolution(self: LosslessOptions, resolution: usize) PrecinctSize {
         const count = @as(usize, self.precinct_count);
@@ -817,7 +846,9 @@ pub fn encodeNativeLosslessWithOptions(
     source: NativeSamplePlanes,
     options: LosslessOptions,
 ) ![]u8 {
-    if (!nativeLayoutIsUniform(source)) return encodeNativeWideComponentwise(allocator, source, options);
+    if (!nativeLayoutIsUniform(source) or options.component_coding.len != 0) {
+        return encodeNativeWideComponentwise(allocator, source, options);
+    }
     const component_count = source.planes.len;
     if (component_count == 0 or component_count > color.max_components) return CodestreamError.UnsupportedPayload;
     if (source.reference_x0 != 0 or source.reference_y0 != 0) return CodestreamError.UnsupportedPayload;
@@ -1027,13 +1058,7 @@ fn encodeNativeWideComponentwise(
     try validatePrecincts(options);
     // The shared style and progression rules; origins and PLT are this
     // writer's own business.
-    var style_check = options;
-    style_check.image_origin_x = 0;
-    style_check.image_origin_y = 0;
-    style_check.tile_origin_x = 0;
-    style_check.tile_origin_y = 0;
-    style_check.plt = true;
-    try validateCodingPath(style_check);
+    try validateWideCodingStyle(options);
     options.image_origin_x = source.reference_x0;
     options.image_origin_y = source.reference_y0;
 
@@ -1049,8 +1074,34 @@ fn encodeNativeWideComponentwise(
     }) catch return CodestreamError.InvalidCodestream;
     const tile_count = std.math.cast(usize, grid.tileCount()) orelse return CodestreamError.ImageTooLarge;
     if (tile_count == 0 or tile_count > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
-    const levels = actualDwtLevels(source.reference_x1 - source.reference_x0, source.reference_y1 - source.reference_y0, options.levels);
+    const reference_width: usize = source.reference_x1 - source.reference_x0;
+    const reference_height: usize = source.reference_y1 - source.reference_y0;
+    const levels = actualDwtLevels(reference_width, reference_height, options.levels);
     const encode_options = normalizedEncodePrecinctOptions(options, levels);
+
+    // Each component's effective coding: COD's, with its override applied.
+    const component_options = try allocator.alloc(LosslessOptions, component_count);
+    defer allocator.free(component_options);
+    @memset(component_options, options);
+    const overridden = try allocator.alloc(bool, component_count);
+    defer allocator.free(overridden);
+    @memset(overridden, false);
+    for (options.component_coding) |override| {
+        if (override.component >= component_count or overridden[override.component]) return CodestreamError.InvalidCodestream;
+        overridden[override.component] = true;
+        applyComponentCodingOverride(&component_options[override.component], override);
+    }
+    var max_levels = levels;
+    for (component_options) |*coding| {
+        if (coding.levels > 32) return CodestreamError.TooManyLevels;
+        try validateBlockSize(coding.block_width, coding.block_height);
+        try validatePrecincts(coding.*);
+        try validateWideCodingStyle(coding.*);
+        const component_levels = actualDwtLevels(reference_width, reference_height, coding.levels);
+        coding.* = normalizedEncodePrecinctOptions(coding.*, component_levels);
+        coding.levels = component_levels;
+        max_levels = @max(max_levels, component_levels);
+    }
 
     const quantizations = try allocator.alloc(WideReversibleQuantization, component_count);
     defer allocator.free(quantizations);
@@ -1097,8 +1148,7 @@ fn encodeNativeWideComponentwise(
             .planes = planes,
             .quantizations = quantizations,
             .grid = grid,
-            .levels = levels,
-            .encode_options = encode_options,
+            .component_options = component_options,
             .artifacts = artifacts,
             .initialized = initialized,
             .next_job = &next_job,
@@ -1126,7 +1176,7 @@ fn encodeNativeWideComponentwise(
         .resolution_start = 0,
         .component_start = 0,
         .layer_end = encode_options.layers,
-        .resolution_end = levels + 1,
+        .resolution_end = max_levels + 1,
         .component_end = @intCast(component_count),
         .progression = @fromBackingInt(@intCast(@backingInt(encode_options.progression))),
     }};
@@ -1158,12 +1208,94 @@ fn encodeNativeWideComponentwise(
         );
     }
 
-    const main_header = try wideComponentwiseMainHeaderBytes(allocator, source, quantizations, levels, encode_options);
+    const main_header = try wideComponentwiseMainHeaderBytes(allocator, source, quantizations, levels, encode_options, component_options);
     defer allocator.free(main_header);
+    // POC resolution indices reach the deepest component.
     if (grid.isSingleTile()) {
-        return writeSampledSingleTileCodestream(allocator, main_header, @intCast(component_count), levels, streams[0], encode_options);
+        return writeSampledSingleTileCodestream(allocator, main_header, @intCast(component_count), max_levels, streams[0], encode_options);
     }
-    return writeSampledMultiTileCodestream(allocator, streams, main_header, @intCast(component_count), levels, encode_options);
+    return writeSampledMultiTileCodestream(allocator, streams, main_header, @intCast(component_count), max_levels, encode_options);
+}
+
+fn applyComponentCodingOverride(coding: *LosslessOptions, override: ComponentCodingOverride) void {
+    if (override.levels) |levels| coding.levels = levels;
+    if (override.block_width) |width| coding.block_width = width;
+    if (override.block_height) |height| coding.block_height = height;
+    if (override.precinct_count) |count| {
+        coding.precinct_count = count;
+        coding.precincts = override.precincts;
+    }
+    if (override.style) |style| {
+        coding.bypass = style.bypass;
+        coding.reset_context = style.reset_context;
+        coding.terminate_all = style.terminate_all;
+        coding.vertical_causal = style.vertical_causal;
+        coding.predictable_termination = style.predictable_termination;
+        coding.segmentation_symbols = style.segmentation_symbols;
+    }
+}
+
+/// The shared style and progression rules of `validateCodingPath`; origins,
+/// PLT, and per-component coding are the componentwise writer's own business.
+fn validateWideCodingStyle(options: LosslessOptions) !void {
+    var check = options;
+    check.image_origin_x = 0;
+    check.image_origin_y = 0;
+    check.tile_origin_x = 0;
+    check.tile_origin_y = 0;
+    check.plt = true;
+    check.component_coding = &.{};
+    try validateCodingPath(check);
+}
+
+/// Whether a component's effective coding is COD's, so it needs no COC.
+fn wideCodingMatchesCod(coding: LosslessOptions, cod: LosslessOptions, cod_levels: u8) bool {
+    if (coding.levels != cod_levels or coding.block_width != cod.block_width or
+        coding.block_height != cod.block_height or codeBlockStyle(coding) != codeBlockStyle(cod) or
+        (coding.precinct_count > 0) != (cod.precinct_count > 0))
+    {
+        return false;
+    }
+    if (cod.precinct_count == 0) return true;
+    for (0..@as(usize, cod_levels) + 1) |resolution| {
+        if (precinctByte(coding.precinctForResolution(resolution)) != precinctByte(cod.precinctForResolution(resolution))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// COC (A.6.2) with one component's decomposition levels, code-block size
+/// and style, transform, and precincts; the selector takes two bytes when
+/// the codestream has more than 256 components.
+fn appendCocForComponent(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    component: u16,
+    two_byte_selector: bool,
+    coding: LosslessOptions,
+) !void {
+    const uses_precincts = coding.precinct_count > 0;
+    const selector_bytes: u16 = if (two_byte_selector) 2 else 1;
+    const precinct_bytes: u16 = if (uses_precincts) @as(u16, coding.levels) + 1 else 0;
+    try appendMarker(allocator, out, .coc);
+    try appendU16Be(allocator, out, 2 + selector_bytes + 1 + 5 + precinct_bytes);
+    if (two_byte_selector) {
+        try appendU16Be(allocator, out, component);
+    } else {
+        try out.append(allocator, @intCast(component));
+    }
+    try out.append(allocator, if (uses_precincts) 0x01 else 0x00);
+    try out.append(allocator, coding.levels);
+    try out.append(allocator, codeBlockExponent(coding.block_width));
+    try out.append(allocator, codeBlockExponent(coding.block_height));
+    try out.append(allocator, codeBlockStyle(coding));
+    try out.append(allocator, @backingInt(coding.transform));
+    if (uses_precincts) {
+        for (0..@as(usize, coding.levels) + 1) |resolution| {
+            try out.append(allocator, precinctByte(coding.precinctForResolution(resolution)));
+        }
+    }
 }
 
 const WideComponentTileJob = struct {
@@ -1172,8 +1304,8 @@ const WideComponentTileJob = struct {
     planes: []const []const i64,
     quantizations: []const WideReversibleQuantization,
     grid: tile_grid.Grid,
-    levels: u8,
-    encode_options: LosslessOptions,
+    /// Each component's effective coding, with its own decomposition levels.
+    component_options: []const LosslessOptions,
     artifacts: []tile_pipeline.TileRpclEncodeArtifacts,
     initialized: []bool,
     next_job: *std.atomic.Value(usize),
@@ -1217,16 +1349,17 @@ const WideComponentTileJob = struct {
             const start = (@as(usize, rect.y0 - layout.y0) + row) * layout.width + (rect.x0 - layout.x0);
             @memcpy(region[row * width ..][0..width], plane[start..][0..width]);
         }
-        const achieved = try wavelet_int.forward53WideOrigin(allocator, region, width, height, self.levels, rect.x0, rect.y0);
-        if (achieved != self.levels) return CodestreamError.InvalidCodestream;
+        const coding = self.component_options[component];
+        const achieved = try wavelet_int.forward53WideOrigin(allocator, region, width, height, coding.levels, rect.x0, rect.y0);
+        if (achieved != coding.levels) return CodestreamError.InvalidCodestream;
         const component_tile = tile_grid.Tile{ .index = tile.index, .column = tile.column, .row = tile.row, .rect = rect };
         return buildWideTileArtifacts(
             allocator,
             component_tile,
             &.{region},
-            self.levels,
-            wideScaffoldOptions(self.encode_options, &self.precincts, 1, layout.precision, self.quantizations[component], .rpcl),
-            wideBlockStyle(self.encode_options),
+            coding.levels,
+            wideScaffoldOptions(coding, &self.precincts, 1, layout.precision, self.quantizations[component], .rpcl),
+            wideBlockStyle(coding),
         );
     }
 };
@@ -1238,6 +1371,7 @@ fn wideComponentwiseMainHeaderBytes(
     quantizations: []const WideReversibleQuantization,
     levels: u8,
     encode_options: LosslessOptions,
+    component_options: []const LosslessOptions,
 ) ![]u8 {
     const component_count = source.planes.len;
     var out: std.ArrayList(u8) = .empty;
@@ -1267,11 +1401,18 @@ fn wideComponentwiseMainHeaderBytes(
         try out.append(allocator, layout.y_step);
     }
 
+    const two_byte_selector = component_count > 256;
     try appendCod(allocator, &out, levels, encode_options);
+    for (component_options, 0..) |coding, component| {
+        if (wideCodingMatchesCod(coding, encode_options, levels)) continue;
+        try appendCocForComponent(allocator, &out, @intCast(component), two_byte_selector, coding);
+    }
+    // QCD serves every component with component 0's precision and COD's
+    // levels; any other component gets a QCC with its own band count.
     try appendQcdWideReversible(allocator, &out, levels, quantizations[0]);
-    for (quantizations[1..], 1..) |quantization, component| {
-        if (std.meta.eql(quantization, quantizations[0])) continue;
-        try appendQccWideReversible(allocator, &out, levels, @intCast(component), component_count > 256, quantization);
+    for (quantizations, component_options, 0..) |quantization, coding, component| {
+        if (std.meta.eql(quantization, quantizations[0]) and coding.levels == levels) continue;
+        try appendQccWideReversible(allocator, &out, coding.levels, @intCast(component), two_byte_selector, quantization);
     }
 
     // CRG (A.9.1) when any component carries a registration offset.
@@ -1773,7 +1914,7 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         options.mct != .none or options.progression != .rpcl or
         options.layers == 0 or options.layers > max_quality_layers or
         options.rate_count != 0 or
-        options.emit_temporary_payload_sidecar or
+        options.emit_temporary_payload_sidecar or options.component_coding.len != 0 or
         options.t1_backend != .iso_mq or options.bypass or options.terminate_all or
         options.reset_context or options.vertical_causal or
         options.predictable_termination or options.segmentation_symbols)
@@ -22724,6 +22865,8 @@ fn validateCodingPath(options: LosslessOptions) !void {
     {
         return CodestreamError.UnsupportedPayload;
     }
+    // Per-component coding (COC) is written by the wide encoder only.
+    if (options.component_coding.len != 0) return CodestreamError.UnsupportedPayload;
     // The common RGB/planar and multi-tile assemblers still depend on their
     // PLT-backed packet-part accounting. The sampled single-tile entry point
     // owns the first PLT-less writer slice and does not call this validator.

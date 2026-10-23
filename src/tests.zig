@@ -40064,3 +40064,140 @@ test "wide componentwise encoder round-trips general component layouts" {
         codestream.encodeNativeLosslessWithOptions(allocator, sparse, .{ .mct = .none, .tile_width = 4, .tile_height = 8 }),
     );
 }
+
+/// Component indices of the COC (0xff53) or QCC (0xff5d) markers in a main
+/// header, in order.
+fn mainHeaderComponentMarkers(allocator: std.mem.Allocator, bytes: []const u8, marker: u16, two_byte_selector: bool) ![]u16 {
+    var found: std.ArrayList(u16) = .empty;
+    errdefer found.deinit(allocator);
+    var index: usize = 2;
+    while (index + 4 <= bytes.len) {
+        const code = readU16BeTest(bytes, index);
+        if (code == codestream.markerValue("sot")) break;
+        const length = readU16BeTest(bytes, index + 2);
+        if (code == marker) {
+            try found.append(allocator, if (two_byte_selector) readU16BeTest(bytes, index + 4) else bytes[index + 4]);
+        }
+        index += 2 + length;
+    }
+    return found.toOwnedSlice(allocator);
+}
+
+test "wide encoder writes per-component coding as COC and QCC" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_c0c);
+    const random = prng.random();
+
+    const specs = [_]GenericComponent{
+        .{ .precision = 12 },
+        .{ .precision = 12, .signed = true },
+        .{ .precision = 30 },
+        .{ .precision = 12, .x_step = 2, .y_step = 2 },
+        .{ .precision = 12 },
+    };
+    var precincts: [33]codestream.PrecinctSize = undefined;
+    precincts[0] = .{ .width = 32, .height = 32 };
+    precincts[1] = .{ .width = 16, .height = 16 };
+    const overrides = [_]codestream.ComponentCodingOverride{
+        .{ .component = 1, .levels = 2 },
+        .{ .component = 2, .block_width = 16, .block_height = 32, .style = .{ .bypass = true, .vertical_causal = true } },
+        .{ .component = 3, .levels = 1, .precinct_count = 2, .precincts = precincts, .style = .{ .terminate_all = true } },
+        // COD's own coding: no COC.
+        .{ .component = 4, .levels = 5, .block_width = 64, .block_height = 64 },
+    };
+    const variants = [_]codestream.LosslessOptions{
+        .{ .mct = .none, .component_coding = &overrides },
+        .{ .mct = .none, .component_coding = &overrides, .tile_width = 24, .tile_height = 16, .progression = .lrcp, .threads = 4 },
+        .{ .mct = .none, .component_coding = &overrides, .progression = .cprl, .ppm = true },
+        .{ .mct = .none, .component_coding = &overrides, .tile_width = 32, .tile_height = 32, .progression = .pcrl, .sop = true, .eph = true },
+    };
+    var source = try genericNativeSource(allocator, random, .{ 0, 0, 45, 37 }, &specs);
+    defer source.deinit();
+    for (variants) |options| {
+        const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, options);
+        defer allocator.free(encoded);
+        var serial_options = options;
+        serial_options.threads = 1;
+        const serial = try codestream.encodeNativeLosslessWithOptions(allocator, source, serial_options);
+        defer allocator.free(serial);
+        try std.testing.expectEqualSlices(u8, serial, encoded);
+
+        const cocs = try mainHeaderComponentMarkers(allocator, encoded, codestream.markerValue("coc"), false);
+        defer allocator.free(cocs);
+        try std.testing.expectEqualSlices(u16, &.{ 1, 2, 3 }, cocs);
+        // Other levels or another precision need their own QCC.
+        const qccs = try mainHeaderComponentMarkers(allocator, encoded, codestream.markerValue("qcc"), false);
+        defer allocator.free(qccs);
+        try std.testing.expectEqualSlices(u16, &.{ 1, 2, 3 }, qccs);
+
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .threads = 4 }, .{});
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+        }
+        // A reduced decode respects each component's own levels.
+        var reduced = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .resolution_reduction = 1 }, .{});
+        defer reduced.deinit();
+        try reduced.validateSamples();
+    }
+
+    // Above 256 components COC and QCC carry two-byte selectors.
+    var many: [260]GenericComponent = @splat(.{ .precision = 8 });
+    many[259].precision = 9;
+    var crowd = try genericNativeSource(allocator, random, .{ 0, 0, 9, 7 }, &many);
+    defer crowd.deinit();
+    const crowd_overrides = [_]codestream.ComponentCodingOverride{
+        .{ .component = 258, .levels = 1, .style = .{ .reset_context = true } },
+        .{ .component = 7, .block_width = 4, .block_height = 4 },
+        // No decomposition at all.
+        .{ .component = 3, .levels = 0 },
+    };
+    const crowd_stream = try codestream.encodeNativeLosslessWithOptions(allocator, crowd, .{ .mct = .none, .component_coding = &crowd_overrides });
+    defer allocator.free(crowd_stream);
+    const crowd_cocs = try mainHeaderComponentMarkers(allocator, crowd_stream, codestream.markerValue("coc"), true);
+    defer allocator.free(crowd_cocs);
+    try std.testing.expectEqualSlices(u16, &.{ 3, 7, 258 }, crowd_cocs);
+    const crowd_qccs = try mainHeaderComponentMarkers(allocator, crowd_stream, codestream.markerValue("qcc"), true);
+    defer allocator.free(crowd_qccs);
+    try std.testing.expectEqualSlices(u16, &.{ 3, 258, 259 }, crowd_qccs);
+    var crowd_decoded = try codestream.decodeLosslessNative(allocator, crowd_stream, .{});
+    defer crowd_decoded.deinit();
+    for (crowd.planes, crowd_decoded.planes) |expected, actual| {
+        try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+    }
+
+    // Fail closed: an override for a missing component, a component named
+    // twice, a block too large, TERMALL across layers, and every encoder
+    // that does not write COC.
+    const missing = [_]codestream.ComponentCodingOverride{.{ .component = 5, .levels = 1 }};
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .component_coding = &missing }));
+    const twice = [_]codestream.ComponentCodingOverride{ .{ .component = 1, .levels = 1 }, .{ .component = 1, .levels = 2 } };
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .component_coding = &twice }));
+    const oversized = [_]codestream.ComponentCodingOverride{.{ .component = 0, .block_width = 128, .block_height = 64 }};
+    if (codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .component_coding = &oversized })) |bytes| {
+        allocator.free(bytes);
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    const layered = [_]codestream.ComponentCodingOverride{.{ .component = 2, .style = .{ .terminate_all = true } }};
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .layers = 2, .component_coding = &layered }));
+
+    const plain = [_]codestream.ComponentCodingOverride{.{ .component = 0, .levels = 2 }};
+    var gray: [16 * 16]u16 = undefined;
+    for (&gray, 0..) |*sample, index| sample.* = @intCast(index);
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessGrayWithOptions(allocator, .{
+        .allocator = allocator,
+        .width = 16,
+        .height = 16,
+        .bit_depth = 8,
+        .samples = &gray,
+    }, .{ .mct = .none, .component_coding = &plain }));
+    var planar = try color.SamplePlanes.initWithComponentLayouts(allocator, 16, 16, &.{ 8, 8 }, &.{ 16, 8 }, &.{ 16, 8 });
+    defer planar.deinit();
+    for (planar.planes) |plane| @memset(plane, 3);
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessSampledPlanarWithOptions(
+        allocator,
+        planar,
+        &.{ .{ .xrsiz = 1, .yrsiz = 1 }, .{ .xrsiz = 2, .yrsiz = 2 } },
+        .{ .mct = .none, .tile_part_divisions = null, .component_coding = &plain },
+    ));
+}

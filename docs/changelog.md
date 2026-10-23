@@ -5,6 +5,31 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Wide Encoder: Per-Component Coding (COC)
+
+- `LosslessOptions.component_coding` and `zraw-to-j2k --component
+  C:levels=N/block=WxH/precincts=[w,h].../STYLE` give single components
+  their own decomposition levels (0 to 32), code-block size, precincts, and
+  code-block style (BYPASS, RESET, TERMALL, causal, ERTERM, segmentation
+  symbols). The wide encoder's componentwise path codes each component with
+  its own coding and writes a main-header COC for every component whose
+  coding differs from COD, plus a QCC wherever the precision or the band
+  count differs from QCD's; above 256 components both take two-byte
+  selectors. Progression and POC resolution ranges reach the deepest
+  component. Every other encoder refuses a non-empty list.
+- Evidence: a test checks the exact COC and QCC component lists (an
+  override equal to COD writes none), exact round trips through one-tile,
+  tiled LRCP on four threads, CPRL with PPM, and PCRL with SOP/EPH, the
+  same bytes on one and four threads, a reduced decode, two-byte selectors
+  on 260 components including a component with no decomposition, and the
+  refusals (missing or repeated component, oversized block, TERMALL across
+  layers, the gray and sampled encoders). Kakadu 8.4.1 decodes exactly
+  every tried combination: levels from 0 to 6, mixed block sizes, per-
+  component precincts and styles, RCT with overridden extra components,
+  20 and 300 components (z2000 and OpenJPEG for 300), tiles, LRCP, CPRL,
+  PPM, and POC. OpenJPEG matches every full-resolution component, as
+  before.
+
 ### Wide Encoder: Any Part 1 Component Layout
 
 - `zraw-to-j2k` / `encodeNativeLosslessWithOptions` encode any component

@@ -1145,11 +1145,20 @@ fn zrawToJ2kCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []co
     options.mct = .none;
     options.threads = defaultThreadCount();
     var poc_storage: [64]codestream.PocRecord = undefined;
+    var component_storage: [256]codestream.ComponentCodingOverride = undefined;
+    var component_count: usize = 0;
     var tile_parts_explicit = false;
     var index: usize = 2;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--tile") or std.mem.eql(u8, arg, "--progression") or
+        if (std.mem.eql(u8, arg, "--component")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            if (component_count >= component_storage.len) return error.InvalidValue;
+            component_storage[component_count] = try parseComponentCoding(args[index]);
+            component_count += 1;
+            options.component_coding = component_storage[0..component_count];
+        } else if (std.mem.eql(u8, arg, "--tile") or std.mem.eql(u8, arg, "--progression") or
             std.mem.eql(u8, arg, "--mct") or std.mem.eql(u8, arg, "--tile-parts") or
             std.mem.eql(u8, arg, "--poc") or std.mem.eql(u8, arg, "--poc-location") or
             std.mem.eql(u8, arg, "--threads"))
@@ -1996,6 +2005,66 @@ fn parseU16Pair(value: []const u8) !U16Pair {
     };
 }
 
+/// One `--component` override: `C:setting/setting...`, where a setting is
+/// `levels=N`, `block=WxH` (or `block=N`), `precincts=[w,h][w,h]...`,
+/// `style=none`, or a code-block style flag (`bypass`, `reset-context`,
+/// `terminate-all`, `vertical-causal`, `predictable-termination`,
+/// `segmentation-symbols`). Any style setting replaces COD's style for the
+/// component with exactly the flags given.
+fn parseComponentCoding(value: []const u8) !codestream.ComponentCodingOverride {
+    const colon = std.mem.indexOfScalar(u8, value, ':') orelse return error.InvalidValue;
+    var override = codestream.ComponentCodingOverride{
+        .component = try std.fmt.parseInt(u16, value[0..colon], 10),
+    };
+    var settings = std.mem.splitScalar(u8, value[colon + 1 ..], '/');
+    while (settings.next()) |setting| {
+        if (setting.len == 0) return error.InvalidValue;
+        const equals = std.mem.indexOfScalar(u8, setting, '=');
+        const key = if (equals) |position| setting[0..position] else setting;
+        const argument = if (equals) |position| setting[position + 1 ..] else "";
+        if (std.mem.eql(u8, key, "levels")) {
+            override.levels = try std.fmt.parseInt(u8, argument, 10);
+        } else if (std.mem.eql(u8, key, "block")) {
+            if (std.mem.indexOfScalar(u8, argument, 'x')) |x| {
+                override.block_width = try std.fmt.parseInt(u16, argument[0..x], 10);
+                override.block_height = try std.fmt.parseInt(u16, argument[x + 1 ..], 10);
+            } else {
+                const edge = try std.fmt.parseInt(u16, argument, 10);
+                override.block_width = edge;
+                override.block_height = edge;
+            }
+        } else if (std.mem.eql(u8, key, "precincts")) {
+            var precincts = codestream.LosslessOptions{};
+            try parsePrecincts(argument, &precincts);
+            override.precincts = precincts.precincts;
+            override.precinct_count = precincts.precinct_count;
+        } else {
+            var style = override.style orelse codestream.ComponentBlockStyle{};
+            if (std.mem.eql(u8, key, "style") and std.mem.eql(u8, argument, "none")) {
+                style = .{};
+            } else if (equals != null) {
+                return error.InvalidValue;
+            } else if (std.mem.eql(u8, key, "bypass")) {
+                style.bypass = true;
+            } else if (std.mem.eql(u8, key, "reset-context")) {
+                style.reset_context = true;
+            } else if (std.mem.eql(u8, key, "terminate-all")) {
+                style.terminate_all = true;
+            } else if (std.mem.eql(u8, key, "vertical-causal")) {
+                style.vertical_causal = true;
+            } else if (std.mem.eql(u8, key, "predictable-termination")) {
+                style.predictable_termination = true;
+            } else if (std.mem.eql(u8, key, "segmentation-symbols")) {
+                style.segmentation_symbols = true;
+            } else {
+                return error.InvalidValue;
+            }
+            override.style = style;
+        }
+    }
+    return override;
+}
+
 fn parsePrecincts(value: []const u8, options: *codestream.LosslessOptions) !void {
     var index: usize = 0;
     var count: usize = 0;
@@ -2087,7 +2156,7 @@ fn usage() void {
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--tile-index N|--region X,Y,W,H] [--layers N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
         \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
         \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
-        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--tile W,H] [--mct none|rct] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
+        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE...] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.
