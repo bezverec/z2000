@@ -101,7 +101,27 @@ Recorded rather than worked around, so the behaviour stays pinned.
   packet for packet (checked against the SOP boundaries). Removing PLT and
   TLM from the z2000 file without touching a packet makes `kdu_expand`
   exact. Kakadu cannot be used as an oracle for multi-layer tile-header POC
-  with PLT; strip PLT or move the POC to the main header.
+  with PLT; strip PLT or move the POC to the main header. z2000's
+  run-divided POC streams (`R`/`L`/`C` parts under a tile-header POC, two
+  layers) hit it as "Unexpectedly ran out of packet length information while
+  processing tile-parts". All 18 RGB and gray layouts tried decode exactly
+  once PLT and TLM are stripped, and with one layer they decode exactly with
+  PLT.
+- **POC precedence and placement differ between the decoders.** ISO A.6.6
+  and B.12.3 rank `Tile-part POC > Main POC > Tile-part COD > Main COD`.
+  When a z2000 stream with a tile-header LRCP POC also gets an injected
+  main-header RLCP POC covering every packet (37x23 16-bit RGB, two layers,
+  untiled and on 16x10 tiles, PLT stripped), `kdu_expand` 8.4.1 and
+  `grk_decompress` 20.4.12 follow the tile POC and are exact, as z2000 is now.
+  `opj_decompress` 2.5.4 follows the main POC: 851 of 851 pixels are wrong
+  untiled, and it fails on the tiled file. All three references tolerate two
+  things A.6.6 forbids, and z2000 rejects both: a second POC segment in one
+  header, and a tile POC that first appears after the tile's first tile-part
+  (96x80 RGB, RPCL `R` parts). On the encoding side, `kdu_compress` with both
+  `Porder={...}` and `Porder:T0={...}` writes only the main-header POC but
+  orders the tile's packets by the tile record, so every decoder (Kakadu
+  included) misdecodes its output; no independent producer of
+  main-plus-tile POC was found.
 - **`opj_compress` drops packets from an overlapping POC schedule.** Given
   `-POC T1=0,0,1,3,3,LRCP/T1=0,0,3,3,3,RPCL` (layer 0 of everything, then
   everything), OpenJPEG 2.5.4 writes 25 packets per tile instead of 27:

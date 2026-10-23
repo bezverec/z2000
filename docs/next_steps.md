@@ -781,10 +781,20 @@ Implement in small marker-to-raster slices:
    resolution tile-parts, 28 layer tile-parts, and a POC in a `TPsot=1` header —
    reconstruct the schedule-free fixture's raster byte for byte, corroborated by
    Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.3.6. Subsampled components are
-   covered by the same model, pinned against their committed source planes. The semantics were derived
-   empirically from those decoders, not from ISO/IEC 15444-1 A.6.6; confirming
-   them against the standard text remains open, as does POC emission for these
-   divisions. A reproduced
+   covered by the same model, pinned against their committed source planes.
+   **Checked against the standard text (ITU-T T.800 08/2002, A.6.6, B.11,
+   B.12.2/B.12.3).** The consecutive-run and later-part append semantics,
+   skipping of sent packets, and complete coverage match the text. Three
+   rules did not and are corrected: a tile's own POC replaces the main-header
+   POC rather than appending to it (`Tile-part POC > Main POC > Tile-part COD >
+   Main COD`), at most one POC marker segment may appear in a header, and a
+   tile that uses POC must carry one in its first tile-part header. Still open:
+   enforcing that each progression volume is declared in a tile-part header
+   before its first packet. **POC emission for `R`, `L`, and `C` divisions is
+   complete:** under any schedule the writer cuts each tile's composed
+   sequence into runs of constant resolution, layer, or component (Kakadu's
+   `ORGtparts` behaviour) and keeps every record in the main header or
+   `TPsot=0`. `P` parts still require the canonical PCRL position sequence. A reproduced
    `kdu_makeppm` defect is pinned fail-closed: with a PLT-carrying source it
    strips the PLT segments without shrinking each tile-part `Psot`.
 6. **Single normalized packet index — bounded foundation landed.** Strict
