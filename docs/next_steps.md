@@ -790,7 +790,11 @@ Implement in small marker-to-raster slices:
    Main COD`), at most one POC marker segment may appear in a header, and a
    tile that uses POC must carry one in its first tile-part header. Still open:
    enforcing that each progression volume is declared in a tile-part header
-   before its first packet, and POC emission for these divisions. A reproduced
+   before its first packet. **POC emission for `R`, `L`, and `C` divisions is
+   complete:** under any schedule the writer cuts each tile's composed
+   sequence into runs of constant resolution, layer, or component (Kakadu's
+   `ORGtparts` behaviour) and keeps every record in the main header or
+   `TPsot=0`. `P` parts still require the canonical PCRL position sequence. A reproduced
    `kdu_makeppm` defect is pinned fail-closed: with a PLT-carrying source it
    strips the PLT segments without shrinking each tile-part `Psot`.
 6. **Single normalized packet index — bounded foundation landed.** Strict

@@ -3544,6 +3544,17 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
             try std.testing.expectEqualSlices(u16, rgb_.samples, decoded_.samples);
         }
     }.run;
+    // `R`/`L`/`C` under a POC whose sequence is not grouped by that index
+    // are cut into key runs (see the next test); they must round-trip.
+    const expectRunPartRoundtrip = struct {
+        fn run(allocator_: std.mem.Allocator, rgb_: image.RgbImage, options_: codestream.LosslessOptions) !void {
+            const bytes = try codestream.encodeLosslessWithOptions(allocator_, rgb_, options_);
+            defer allocator_.free(bytes);
+            var decoded_ = try codestream.decodeLosslessTemporary(allocator_, bytes);
+            defer decoded_.deinit();
+            try std.testing.expectEqualSlices(u16, rgb_.samples, decoded_.samples);
+        }
+    }.run;
     const records = [_]codestream.PocRecord{
         .{
             .resolution_start = 0,
@@ -3599,10 +3610,7 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     );
     bad_options = options;
     bad_options.tile_part_divisions = 'R';
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, bad_options),
-    );
+    try expectRunPartRoundtrip(allocator, rgb, bad_options);
     bad_options = options;
     bad_options.tile_width = 16;
     bad_options.tile_height = 12;
@@ -3669,10 +3677,7 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     try expectTileHeaderRoundtrip(allocator, rgb, component_part_options);
 
     component_part_options.poc_records = &records;
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, component_part_options),
-    );
+    try expectRunPartRoundtrip(allocator, rgb, component_part_options);
 
     const position_records = [_]codestream.PocRecord{.{
         .resolution_start = 0,
@@ -3749,16 +3754,10 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     _ = try jp2.parseInfo(std.testing.allocator, resolution_part_wrapped);
 
     resolution_part_options.poc_records = &records;
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, resolution_part_options),
-    );
+    try expectRunPartRoundtrip(allocator, rgb, resolution_part_options);
 
     layer_part_options.tile_part_divisions = 'R';
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, layer_part_options),
-    );
+    try expectRunPartRoundtrip(allocator, rgb, layer_part_options);
 
     const interleaved_records = [_]codestream.PocRecord{.{
         .resolution_start = 0,
@@ -3770,10 +3769,112 @@ test "POC writer emits scheduled single- and multi-tile packet streams" {
     }};
     layer_part_options.tile_part_divisions = 'L';
     layer_part_options.poc_records = &interleaved_records;
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.encodeLosslessWithOptions(allocator, rgb, layer_part_options),
-    );
+    try expectRunPartRoundtrip(allocator, rgb, layer_part_options);
+}
+
+test "POC tile-part divisions cut the composed sequence into key runs" {
+    // ISO B.11: tile-parts are consecutive runs of a tile's packet sequence.
+    // Under a POC whose sequence is not grouped by resolution, layer, or
+    // component, `R`, `L`, and `C` start a new tile-part wherever that index
+    // changes, as Kakadu's ORGtparts does; every record stays in TPsot=0, which
+    // B.12.3 permits (Figure B.15a).
+    const allocator = std.testing.allocator;
+    const width = 32;
+    const height = 24;
+    const samples = try makeMultiTileTestImage(allocator, width, height);
+    defer allocator.free(samples);
+    const rgb = image.RgbImage{
+        .allocator = allocator,
+        .width = width,
+        .height = height,
+        .bit_depth = 8,
+        .samples = samples,
+    };
+    const lrcp_all = [_]codestream.PocRecord{
+        .{ .resolution_start = 0, .component_start = 0, .layer_end = 2, .resolution_end = 3, .component_end = 3, .progression = .lrcp },
+    };
+    const rpcl_all = [_]codestream.PocRecord{
+        .{ .resolution_start = 0, .component_start = 0, .layer_end = 2, .resolution_end = 3, .component_end = 3, .progression = .rpcl },
+    };
+    const Case = struct { division: u8, records: []const codestream.PocRecord };
+    const cases = [_]Case{
+        // LRCP over two layers revisits every resolution: R0 R1 R2 R0 R1 R2.
+        .{ .division = 'R', .records = &lrcp_all },
+        // LRCP cycles the components inside every (layer, resolution).
+        .{ .division = 'C', .records = &lrcp_all },
+        // RPCL alternates the layer on every packet.
+        .{ .division = 'L', .records = &rpcl_all },
+    };
+    for (cases) |case| {
+        for ([_]u32{ 0, 16 }) |tile_width| {
+            for ([_]bool{ false, true }) |in_tile_header| {
+                var options = codestream.LosslessOptions{
+                    .levels = 2,
+                    .layers = 2,
+                    .progression = .rpcl,
+                    .poc_records = case.records,
+                    .poc_in_tile_header = in_tile_header,
+                    .tile_part_divisions = case.division,
+                    .block_width = 4,
+                    .block_height = 4,
+                    .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
+                    .precinct_count = 3,
+                };
+                if (tile_width != 0) {
+                    options.tile_width = tile_width;
+                    options.tile_height = 12;
+                }
+                const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+                defer allocator.free(encoded);
+                var decoded = try codestream.decodeLosslessTemporary(allocator, encoded);
+                defer decoded.deinit();
+                try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
+                const audit = try codestream.auditStrictPacketHeaders(allocator, encoded);
+                const tile_count: usize = if (tile_width == 0) 1 else 4;
+                const parts = countMarker(encoded, codestream.markerValue("sot"));
+                switch (case.division) {
+                    'R' => try std.testing.expectEqual(tile_count * 6, parts),
+                    'C' => try std.testing.expectEqual(tile_count * 18, parts),
+                    // Every packet is its own run.
+                    'L' => try std.testing.expectEqual(@as(usize, audit.packets), parts),
+                    else => unreachable,
+                }
+                try std.testing.expectEqual(
+                    if (in_tile_header) tile_count else 1,
+                    countMarker(encoded, codestream.markerValue("poc")),
+                );
+                const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, encoded);
+                defer allocator.free(wrapped);
+                _ = try jp2.parseInfo(std.testing.allocator, wrapped);
+            }
+        }
+    }
+
+    // TPsot is one byte: 64x64 with 8x8 precincts has 85 precincts per
+    // component, so per-packet layer runs need 510 tile-parts.
+    const large_samples = try makeMultiTileTestImage(allocator, 64, 64);
+    defer allocator.free(large_samples);
+    const large = image.RgbImage{
+        .allocator = allocator,
+        .width = 64,
+        .height = 64,
+        .bit_depth = 8,
+        .samples = large_samples,
+    };
+    const rpcl_large = [_]codestream.PocRecord{
+        .{ .resolution_start = 0, .component_start = 0, .layer_end = 2, .resolution_end = 4, .component_end = 3, .progression = .rpcl },
+    };
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessWithOptions(allocator, large, .{
+        .levels = 3,
+        .layers = 2,
+        .progression = .rpcl,
+        .poc_records = &rpcl_large,
+        .tile_part_divisions = 'L',
+        .block_width = 4,
+        .block_height = 4,
+        .precincts = @as([33]codestream.PrecinctSize, @splat(.{ .width = 8, .height = 8 })),
+        .precinct_count = 4,
+    }));
 }
 
 test "5/3 wavelet roundtrips integer-like samples" {

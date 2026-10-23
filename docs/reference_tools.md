@@ -101,7 +101,12 @@ Recorded rather than worked around, so the behaviour stays pinned.
   packet for packet (checked against the SOP boundaries). Removing PLT and
   TLM from the z2000 file without touching a packet makes `kdu_expand`
   exact. Kakadu cannot be used as an oracle for multi-layer tile-header POC
-  with PLT; strip PLT or move the POC to the main header.
+  with PLT; strip PLT or move the POC to the main header. z2000's
+  run-divided POC streams (`R`/`L`/`C` parts under a tile-header POC, two
+  layers) hit it as "Unexpectedly ran out of packet length information while
+  processing tile-parts". All 18 RGB and gray layouts tried decode exactly
+  once PLT and TLM are stripped, and with one layer they decode exactly with
+  PLT.
 - **POC precedence and placement differ between the decoders.** ISO A.6.6
   and B.12.3 rank `Tile-part POC > Main POC > Tile-part COD > Main COD`.
   When a z2000 stream with a tile-header LRCP POC also gets an injected

@@ -5,6 +5,40 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### POC Tile-Part Divisions As Key Runs
+
+- `R`, `L`, and `C` tile-parts now work under any POC schedule. Each part is
+  a run of the tile's composed sequence over which the resolution, layer,
+  or component stays the same (ISO B.11: tile-parts are consecutive packet
+  runs). `kdu_compress ORGtparts=R` cuts the same way: its committed
+  `kakadu-poc-resolution-tileparts` has 9 runs per tile. Before, the writer
+  refused any schedule that was not grouped by the division's index, and it
+  also required a COD order matching the division (RPCL for `R`, LRCP for
+  `L`, CPRL for `C`) although a POC overrides COD. Every record stays in the
+  main header or `TPsot=0`, which B.12.3 allows (Figure B.15a).
+- Single-tile POC requests with a division now go through the multi-tile
+  writer (a one-tile grid) instead of being refused. A single-tile planar or
+  wide POC request no longer silently drops `R` parts when the COD order is
+  not RPCL. `P` parts are unchanged: they still need the canonical PCRL
+  position sequence. A tile with more than 255 runs is refused
+  (`UnsupportedPayload`), since `TPsot` is one byte.
+- Evidence:
+  - A new test covers `R` and `C` under an all-LRCP POC and `L` under an
+    all-RPCL POC, on one tile and on four tiles, with main- and tile-header
+    POC. It pins the part counts (6, 18, and one per packet per tile) and
+    exact decode, and it failed on the previous commit.
+  - The earlier refusal cases in the POC writer test now round-trip.
+  - The 32 previously supported contiguous cases (RGB, gray, RGBA; 32x32 and
+    40x24 tiles; `R`/`L`/`C`; main and tile POC) give byte-identical
+    streams.
+  - Live 96x80 RGB, gray, and RGBA output on 1, 9, and 12 tiles with two
+    layers decodes exactly through z2000, OpenJPEG 2.5.4, and Grok 20.4.12
+    (54 streams). Kakadu 8.4.1 is exact on every main-header-POC stream, and
+    exact on the tile-header ones once their PLT is removed; with PLT it
+    refuses them. That is the known `kdu_expand` PLT-path defect.
+  - The wide encoder writes the same divisions, and its output round-trips
+    to byte-equal ZRAW.
+
 ### POC Semantics Checked Against ISO/IEC 15444-1 A.6.6
 
 - The multipart POC model had been derived from what Kakadu, OpenJPEG, and

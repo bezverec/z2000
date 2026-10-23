@@ -258,9 +258,12 @@ Supported public JP2 profiles are still narrow:
   multi-layer LRCP and position-major PCRL/CPRL use one tile-part because their
   streams cannot be divided per resolution
 - checked main- or first-tile-part-header POC schedules on single- and multi-tile grids with one
-  tile-part per tile, plus `R` parts when each resolution is contiguous, `L`
-  parts when every quality layer is contiguous, and `C` parts when each RGB
-  component is contiguous; `P` parts require the canonical PCRL position
+  tile-part per tile, or with `R`, `L`, or `C` parts for any schedule: each
+  part is a run of the tile's composed sequence over which the resolution,
+  layer, or component stays the same (ISO B.11), so a contiguous schedule
+  gets one part per value and an interleaved one a part per run, at most 255
+  per tile (more is `UnsupportedPayload`). Under a POC the COD order no longer
+  has to match the division. `P` parts require the canonical PCRL position
   sequence while allowing packet reordering inside each position. The writer
   emits the requested order independently for each tile and strict decode
   follows ISO A.6.6 precedence (a tile's own POC replaces the main-header

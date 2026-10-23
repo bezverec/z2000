@@ -726,8 +726,11 @@ pub fn encodeLosslessPlanarWithOptions(
     if (!grid.isSingleTile() or !single_tile_profile) {
         var routed = options;
         // One tile in another progression order is written as one part, as
-        // the single-tile RGB path does; `R` parts need RPCL.
-        if (grid.isSingleTile() and routed.tile_part_divisions == 'R' and routed.progression != .rpcl) {
+        // the single-tile RGB path does; `R` parts need RPCL. A POC replaces
+        // the COD order, and its `R` parts follow the composed sequence.
+        if (grid.isSingleTile() and routed.tile_part_divisions == 'R' and routed.progression != .rpcl and
+            routed.poc_records.len == 0)
+        {
             routed.tile_part_divisions = null;
         }
         return encodeLosslessPlanarMultiTile(allocator, planar, grid, routed, mixed_component_precision);
@@ -884,8 +887,11 @@ pub fn encodeNativeLosslessWithOptions(
     if (!single_tile_profile) {
         var routed = options;
         // One tile in another progression order is written as one part, as
-        // the main planar encoder does; `R` parts need RPCL.
-        if (grid.isSingleTile() and routed.tile_part_divisions == 'R' and routed.progression != .rpcl) {
+        // the main planar encoder does; `R` parts need RPCL. A POC replaces
+        // the COD order, and its `R` parts follow the composed sequence.
+        if (grid.isSingleTile() and routed.tile_part_divisions == 'R' and routed.progression != .rpcl and
+            routed.poc_records.len == 0)
+        {
             routed.tile_part_divisions = null;
         }
         return encodeNativeWideMultiTile(allocator, planes, grid, levels, quantization, .{
@@ -3989,7 +3995,7 @@ fn encodeLosslessWithOptionsMeasured(
     };
     try validateLosslessRequest(grid, options);
 
-    if (!grid.isSingleTile()) {
+    if (!grid.isSingleTile() or (options.poc_records.len != 0 and options.tile_part_divisions != null)) {
         return encodeLosslessMultiTileMeasured(allocator, rgb, grid, options, 3, null, timings, total_start);
     }
 
@@ -21175,9 +21181,9 @@ fn validateLosslessRequest(grid: tile_grid.Grid, options: LosslessOptions) !void
         if (options.ppm or options.ppt or options.emit_temporary_payload_sidecar) {
             return CodestreamError.UnsupportedPayload;
         }
-        if (grid.isSingleTile()) {
-            if (options.tile_part_divisions != null) return CodestreamError.UnsupportedPayload;
-        } else if (options.tile_part_divisions != null and
+        // Divisions under a POC are written by the multi-tile writer, which
+        // takes a one-tile grid as well.
+        if (options.tile_part_divisions != null and
             options.tile_part_divisions != 'R' and options.tile_part_divisions != 'L' and
             options.tile_part_divisions != 'C' and options.tile_part_divisions != 'P')
         {
@@ -21215,17 +21221,20 @@ fn validateLosslessRequest(grid: tile_grid.Grid, options: LosslessOptions) !void
 fn validateMultiTileCodingPath(options: LosslessOptions, components: u16) !void {
     try validateMultiTileProgression(options.progression, options.layers);
     try validateTilePartDivisions(options.tile_part_divisions);
-    if (options.tile_part_divisions == 'R' and options.progression != .rpcl) {
+    // Under a POC the COD order is overridden (ISO A.6.6) and `R`/`L`/`C`
+    // parts follow the runs of the composed sequence instead.
+    const fixed_division = options.poc_records.len == 0;
+    if (fixed_division and options.tile_part_divisions == 'R' and options.progression != .rpcl) {
         return CodestreamError.UnsupportedPayload;
     }
     // Per-layer divisions need layer-contiguous packet ranges inside each
     // tile, which only LRCP provides (layer is the outermost loop).
-    if (options.tile_part_divisions == 'L' and options.progression != .lrcp) {
+    if (fixed_division and options.tile_part_divisions == 'L' and options.progression != .lrcp) {
         return CodestreamError.UnsupportedPayload;
     }
     // Per-component divisions need component-contiguous packet ranges; CPRL
     // is the Part 1 order with component as the outermost loop.
-    if (options.tile_part_divisions == 'C' and options.progression != .cprl) {
+    if (fixed_division and options.tile_part_divisions == 'C' and options.progression != .cprl) {
         return CodestreamError.UnsupportedPayload;
     }
     // Precinct-position divisions need position-contiguous packet ranges;
@@ -21355,53 +21364,81 @@ fn validatePocTilePartCoverage(
     if (counts_known and total != sequence_len) return CodestreamError.UnsupportedPayload;
 }
 
-fn validatePocLayerTilePartSequence(sequence: []const packet_plan.Packet, layers: u16) !void {
-    const layer_count = @as(usize, layers);
-    if (layer_count == 0 or layer_count > std.math.maxInt(u8) or sequence.len == 0 or
-        sequence.len % layer_count != 0)
-    {
-        return CodestreamError.UnsupportedPayload;
-    }
-    const packets_per_layer = sequence.len / layer_count;
-    for (0..layer_count) |layer| {
-        const start = layer * packets_per_layer;
-        for (sequence[start..][0..packets_per_layer]) |packet| {
-            if (packet.layer != @as(u16, @intCast(layer))) return CodestreamError.UnsupportedPayload;
-        }
-    }
+fn pocRunDivision(division: ?u8) bool {
+    const value = division orelse return false;
+    return value == 'R' or value == 'L' or value == 'C';
 }
 
-fn validatePocResolutionTilePartSequence(
+/// Appends the lengths of the runs of `sequence` over which the division's
+/// index (resolution, layer, or component) stays constant.
+fn appendPocKeyRuns(
+    allocator: std.mem.Allocator,
+    runs: *std.ArrayList(usize),
     sequence: []const packet_plan.Packet,
-    plan: packet_plan.Plan,
+    division: u8,
 ) !void {
-    if (plan.resolution_count == 0 or sequence.len == 0) return CodestreamError.UnsupportedPayload;
-    var packet_index: usize = 0;
-    for (plan.resolutions[0..plan.resolution_count], 0..) |resolution, resolution_index| {
-        const packet_count = std.math.cast(usize, resolution.packets) orelse
-            return CodestreamError.UnsupportedPayload;
-        const end = std.math.add(usize, packet_index, packet_count) catch
-            return CodestreamError.UnsupportedPayload;
-        if (packet_count == 0 or end > sequence.len) return CodestreamError.UnsupportedPayload;
-        for (sequence[packet_index..end]) |packet| {
-            if (packet.resolution != @as(u8, @intCast(resolution_index))) {
-                return CodestreamError.UnsupportedPayload;
-            }
+    var previous: ?u32 = null;
+    for (sequence) |packet| {
+        const key: u32 = switch (division) {
+            'R' => packet.resolution,
+            'L' => packet.layer,
+            'C' => packet.component,
+            else => return CodestreamError.InvalidCodestream,
+        };
+        if (previous != null and previous.? == key) {
+            runs.items[runs.items.len - 1] += 1;
+        } else {
+            try runs.append(allocator, 1);
         }
-        packet_index = end;
+        previous = key;
     }
-    if (packet_index != sequence.len) return CodestreamError.UnsupportedPayload;
 }
 
-fn validatePocComponentTilePartSequence(sequence: []const packet_plan.Packet, components: u16) !void {
-    if (components == 0 or sequence.len == 0 or sequence.len % components != 0) return CodestreamError.UnsupportedPayload;
-    const packets_per_component = sequence.len / components;
-    for (0..components) |component| {
-        const start = component * packets_per_component;
-        for (sequence[start..][0..packets_per_component]) |packet| {
-            if (packet.component != @as(u16, @intCast(component))) return CodestreamError.UnsupportedPayload;
-        }
+/// One tile-part per run from `appendPocKeyRuns`. TPsot is one byte, so a
+/// tile whose schedule changes its key more than 255 times cannot be divided.
+fn buildMultiTileRunParts(
+    allocator: std.mem.Allocator,
+    artifacts: tile_pipeline.TileRpclEncodeGridArtifacts,
+    runs: []const std.ArrayList(usize),
+    options: LosslessOptions,
+) ![]MultiTilePacketPart {
+    if (runs.len != artifacts.tiles.len) return CodestreamError.InvalidCodestream;
+    var total_parts: usize = 0;
+    for (runs) |tile_runs| {
+        if (tile_runs.items.len == 0) return CodestreamError.InvalidCodestream;
+        if (tile_runs.items.len > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
+        total_parts = try std.math.add(usize, total_parts, tile_runs.items.len);
     }
+    const parts = try allocator.alloc(MultiTilePacketPart, total_parts);
+    errdefer allocator.free(parts);
+
+    var out_index: usize = 0;
+    for (artifacts.tiles, runs) |tile_artifacts, tile_runs| {
+        if (tile_artifacts.tile.index > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+        var first_packet: usize = 0;
+        for (tile_runs.items, 0..) |packet_count, part_index| {
+            const packet_end = try std.math.add(usize, first_packet, packet_count);
+            if (packet_end > tile_artifacts.stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
+            const psot = try packetPartPsot(
+                options,
+                tile_artifacts.stream.packet_lengths[first_packet..packet_end],
+                tile_artifacts.stream.packet_header_lengths[first_packet..packet_end],
+            );
+            parts[out_index] = .{
+                .tile_index = @intCast(tile_artifacts.tile.index),
+                .tile_part_index = @intCast(part_index),
+                .tile_part_count = @intCast(tile_runs.items.len),
+                .first_packet = first_packet,
+                .packet_count = packet_count,
+                .psot = std.math.cast(u32, psot) orelse return CodestreamError.UnsupportedPayload,
+            };
+            out_index += 1;
+            first_packet = packet_end;
+        }
+        if (first_packet != tile_artifacts.stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
+    }
+    if (out_index != parts.len) return CodestreamError.InvalidCodestream;
+    return parts;
 }
 
 fn validatePocPositionTilePartSequence(
@@ -22051,8 +22088,24 @@ fn assembleMultiTileArtifactsCodestream(
     for (artifacts.tiles) |tile_artifacts| {
         if (tile_artifacts.levels != levels) return CodestreamError.InvalidCodestream;
     }
+    // Under a POC, `R`/`L`/`C` parts are the runs of the composed sequence
+    // over which that index stays constant (ISO B.11: tile-parts are
+    // consecutive packet runs). Contiguous schedules give one run per value,
+    // exactly the fixed divisions below.
+    const poc_key_runs: ?[]std.ArrayList(usize) = if (encode_options.poc_records.len != 0 and
+        pocRunDivision(encode_options.tile_part_divisions))
+        try allocator.alloc(std.ArrayList(usize), artifacts.tiles.len)
+    else
+        null;
+    if (poc_key_runs) |runs| for (runs) |*tile_runs| {
+        tile_runs.* = .empty;
+    };
+    defer if (poc_key_runs) |runs| {
+        for (runs) |*tile_runs| tile_runs.deinit(allocator);
+        allocator.free(runs);
+    };
     if (encode_options.poc_records.len != 0) {
-        for (artifacts.tiles) |*tile_artifacts| {
+        for (artifacts.tiles, 0..) |*tile_artifacts, tile_position| {
             const sequence = poc.buildSequence(
                 allocator,
                 tile_artifacts.scaffold.plan,
@@ -22065,9 +22118,12 @@ fn assembleMultiTileArtifactsCodestream(
             };
             defer allocator.free(sequence);
             switch (encode_options.tile_part_divisions orelse 0) {
-                'R' => try validatePocResolutionTilePartSequence(sequence, tile_artifacts.scaffold.plan),
-                'L' => try validatePocLayerTilePartSequence(sequence, encode_options.layers),
-                'C' => try validatePocComponentTilePartSequence(sequence, components),
+                'R', 'L', 'C' => try appendPocKeyRuns(
+                    allocator,
+                    &poc_key_runs.?[tile_position],
+                    sequence,
+                    encode_options.tile_part_divisions.?,
+                ),
                 'P' => try validatePocPositionTilePartSequence(
                     allocator,
                     sequence,
@@ -22095,6 +22151,8 @@ fn assembleMultiTileArtifactsCodestream(
     {
         const parts = if (division == null)
             try buildMultiTileSingleParts(allocator, artifacts, encode_options)
+        else if (poc_key_runs) |runs|
+            try buildMultiTileRunParts(allocator, artifacts, runs, encode_options)
         else switch (division.?) {
             'R' => try buildMultiTileResolutionParts(allocator, artifacts, levels, encode_options),
             'L' => try buildMultiTileLayerParts(allocator, artifacts, encode_options),
