@@ -17813,6 +17813,111 @@ test "EBCOT inferred continuous MQ decoders accept rate-truncated pass prefixes"
     }
 }
 
+test "EBCOT continuous pass boundaries are the shortest exactly decodable truncations" {
+    // A quality layer ending at a pass boundary of a continuous codeword
+    // holds the boundary's cumulative_bytes. That prefix must decode the
+    // passes before the boundary exactly as the whole codeword does, and the
+    // prefix one byte shorter must not (the ISO coders record the minimal
+    // length; the legacy coder a safe one). Seed 0x7a323030 reaches a
+    // boundary whose first byte left out is a 0xFF followed by a carry into
+    // its stuffed bit, where the one-padded prefix falls below the interval.
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7a32_3030);
+    const random = prng.random();
+    const sizes = [_][2]usize{ .{ 64, 64 }, .{ 32, 32 }, .{ 13, 7 }, .{ 4, 4 }, .{ 64, 16 } };
+    const scales = [_]f64{ 0.7, 3, 25, 400, 9000 };
+    const styles = [_]ebcot.CodeBlockStyle{
+        .{},
+        .{ .reset_context = true },
+        .{ .vertical_causal = true, .segmentation_symbols = true },
+        .{ .predictable_termination = true },
+    };
+    var plane: [64 * 64]i32 = undefined;
+    var direct_scratch = ebcot.DirectBlockScratch.init(allocator);
+    defer direct_scratch.deinit();
+    var boundaries: usize = 0;
+    for (0..45) |round| {
+        const size = sizes[round % sizes.len];
+        const width = size[0];
+        const height = size[1];
+        const scale = scales[(round / sizes.len) % scales.len];
+        const samples = plane[0 .. width * height];
+        for (samples) |*sample| {
+            const magnitude: i32 = @intFromFloat(@floor(-@log(1.0 - random.float(f64)) * scale));
+            sample.* = if (random.boolean()) -magnitude else magnitude;
+        }
+        const rect = subband.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+        for (styles) |style| {
+            var block = try ebcot.encodeBlockWithStyle(allocator, samples, width, rect, style);
+            defer block.deinit(allocator);
+            const view = ebcot.EncodedBlockView{
+                .bitplanes = block.bitplanes,
+                .non_zero_count = block.non_zero_count,
+                .passes = block.passes,
+                .symbols = block.symbols,
+            };
+            var direct = try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(&direct_scratch, samples, width, rect, style);
+            defer direct.deinit(allocator);
+            var symbols = try ebcot.encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(allocator, view, style);
+            defer symbols.deinit(allocator);
+            try std.testing.expectEqualSlices(u8, symbols.bytes, direct.bytes);
+            try std.testing.expectEqualSlices(ebcot.CodeBlockPassPayload, symbols.passes, direct.passes);
+
+            var legacy: ?ebcot.CodeBlockSegment = if (style.predictable_termination)
+                null
+            else
+                try ebcot.encodeBlockSymbolsSegmentContinuousWithStyle(allocator, view, style);
+            defer if (legacy) |*segment| segment.deinit(allocator);
+
+            for ([_]?ebcot.CodeBlockSegment{ direct, legacy }, [_]bool{ true, false }) |maybe_segment, iso| {
+                const segment = maybe_segment orelse continue;
+                var previous: u64 = 0;
+                for (segment.passes, 0..) |pass, index| {
+                    try std.testing.expectEqual(previous, @as(u64, pass.byte_offset));
+                    try std.testing.expectEqual(pass.cumulative_bytes, pass.byte_offset + pass.byte_length);
+                    try std.testing.expect(pass.cumulative_bytes >= previous);
+                    previous = pass.cumulative_bytes;
+                    const passes: u16 = @intCast(index + 1);
+                    if (passes == segment.pass_count) break;
+                    const length: usize = @intCast(pass.cumulative_bytes);
+                    if (length > 0) try std.testing.expect(segment.bytes[length - 1] != 0xff);
+                    boundaries += 1;
+
+                    const exact = try decodeContinuousPrefixForTest(allocator, iso, segment, passes, segment.bytes, width, height, style);
+                    defer allocator.free(exact);
+                    const truncated = try decodeContinuousPrefixForTest(allocator, iso, segment, passes, segment.bytes[0..length], width, height, style);
+                    defer allocator.free(truncated);
+                    try std.testing.expectEqualSlices(i32, exact, truncated);
+                    if (iso and length > 0) {
+                        if (decodeContinuousPrefixForTest(allocator, iso, segment, passes, segment.bytes[0 .. length - 1], width, height, style)) |shorter| {
+                            defer allocator.free(shorter);
+                            try std.testing.expect(!std.mem.eql(i32, exact, shorter));
+                        } else |_| {}
+                    }
+                }
+                try std.testing.expectEqual(segment.byte_length, previous);
+            }
+        }
+    }
+    try std.testing.expect(boundaries > 3000);
+}
+
+fn decodeContinuousPrefixForTest(
+    allocator: std.mem.Allocator,
+    iso: bool,
+    segment: ebcot.CodeBlockSegment,
+    passes: u16,
+    bytes: []const u8,
+    width: usize,
+    height: usize,
+    style: ebcot.CodeBlockStyle,
+) ![]i32 {
+    return if (iso)
+        ebcot.decodeCodeBlockPayloadContinuousInferredIsoMqWithStyle(allocator, segment.bitplanes, passes, bytes, width, height, style)
+    else
+        ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(allocator, segment.bitplanes, passes, bytes, width, height, style);
+}
+
 test "EBCOT styled continuous MQ partial decoder accepts pass prefixes" {
     const allocator = std.testing.allocator;
     const width = 4;
@@ -21318,9 +21423,11 @@ test "rate-targeted layer byte accounting stays pinned on the PCRD corpus" {
     // global PCRD allocator plus packet-header charging must land each
     // cumulative layer size on its byte target. The reference-relative
     // quality of these truncation points is measured out-of-process by the
-    // ladder tool. Gain-normalized 9/7 synthesis weights pin the first four
-    // prefixes below; matching OpenJPEG precincts measure deficits of
-    // 1.60/0.31/0.65/0.15 dB (2026-07-13).
+    // ladder tool. Gain-normalized 9/7 synthesis weights and pass boundaries
+    // at their decodable truncation lengths pin the first four prefixes
+    // below; at matching OpenJPEG precincts the prefixes measure 0.79/0.70/
+    // 0.46/0.42 dB above OpenJPEG at the same bytes (2026-10-23; before the
+    // truncation lengths, 1.60/0.31/0.65/0.15 dB below).
     const allocator = std.testing.allocator;
     const width = 256;
     const height = 256;
@@ -21407,7 +21514,7 @@ test "rate-targeted layer byte accounting stays pinned on the PCRD corpus" {
     // (total payload / ratio). The allocator charges measured packet-header
     // bytes against the targets, so actual sizes sit at or slightly under
     // them; 15% covers pass-boundary snapping on this corpus.
-    const expected_prefix_bytes = [_]u64{ 657, 1329, 2639, 5355 };
+    const expected_prefix_bytes = [_]u64{ 667, 1333, 2645, 5355 };
     var cumulative: u64 = 0;
     for (0..rates.len - 1) |layer| {
         var layer_sum: u64 = 0;

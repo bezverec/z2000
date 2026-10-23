@@ -95,8 +95,17 @@ pub const Encoder = struct {
         self.fake_previous = previous_byte;
     }
 
-    pub fn emittedByteCount(self: Encoder) usize {
-        return self.activeByteCount();
+    /// The coder state at a truncation point of a continuous codeword; see
+    /// truncationLength.
+    pub fn passEnd(self: *const Encoder) PassEnd {
+        const bytes = self.output orelse &self.bytes;
+        return .{
+            .emitted = bytes.items.len - self.output_start,
+            .previous_byte = self.previousByteFrom(bytes),
+            .c = self.c,
+            .a = self.a,
+            .ct = self.ct,
+        };
     }
 
     pub fn write(self: *Encoder, context_index: usize, bit: bool) !void {
@@ -278,16 +287,84 @@ pub const Encoder = struct {
     fn activeBytes(self: *Encoder) *std.ArrayList(u8) {
         return self.output orelse &self.bytes;
     }
-
-    fn activeBytesConst(self: Encoder) *const std.ArrayList(u8) {
-        return self.output orelse &self.bytes;
-    }
-
-    fn activeByteCount(self: Encoder) usize {
-        const bytes = self.activeBytesConst();
-        return bytes.items.len - self.output_start;
-    }
 };
+
+/// Encoder registers at a coding-pass boundary of a continuous codeword: the
+/// bytes emitted so far (a carry can still increment the last of them) and
+/// the interval [C, C + A) below them (C.2).
+pub const PassEnd = struct {
+    emitted: usize,
+    previous_byte: u8,
+    c: u32,
+    a: u32,
+    ct: u8,
+};
+
+/// The truncation length of the coding pass ending at `pass_end`: the
+/// shortest prefix of the finished codeword `codeword` (coded from a
+/// resetStream state) from which a decoder recovers every decision coded
+/// before that boundary. The emitted byte count is not one: the decisions
+/// still in the C register are missing from it, so a decoder reading only
+/// those bytes misdecodes the end of the pass.
+///
+/// A decoder reads past the end of a codeword as 0xFF bytes, i.e. one bits
+/// (C.3.4), so a prefix of length L stands for the value
+/// prefix(L) + ulp(L), and the decisions before the boundary decode
+/// correctly exactly when that value lies above the low end of the
+/// boundary's interval [low, low + A) and at most at its high end. The value
+/// usually exceeds the finished codeword's own, which is in the interval,
+/// but not when the first byte left out is a 0xFF whose successor carries
+/// into its stuffed msb (0xFF 0x85 adds up to more than one ulp), so both
+/// ends are checked. Values are compared relative to the bytes before index
+/// emitted - 1, which no later carry changes, and the search starts there:
+/// no shorter prefix stays below the high end. It ends within a few bytes
+/// of the emitted ones, once ulp(L) is below the weight of the C register's
+/// lsb and no carry follows. A prefix never ends on 0xFF: dropping a final
+/// 0xFF leaves the padded value unchanged, and such a contribution could
+/// form a marker with the bytes after it.
+pub fn truncationLength(pass_end: PassEnd, codeword: []const u8) usize {
+    std.debug.assert(pass_end.emitted <= codeword.len);
+    std.debug.assert(pass_end.ct >= 1 and pass_end.ct <= 12);
+    // Scales weights so the bytes searched past the emitted ones keep a
+    // positive exponent: weight 2^frame is the C register's lsb.
+    const frame: u8 = 64;
+    const one: u128 = 1;
+    const emitted = pass_end.emitted;
+    // Exponent of the lsb weight of byte emitted - 1 (the C register's carry
+    // bit lands on it after ct more shifts).
+    var lsb: u8 = 27 - pass_end.ct + frame;
+    const low = (@as(u128, pass_end.previous_byte) << @intCast(lsb)) + (@as(u128, pass_end.c) << frame);
+    const high = low + (@as(u128, pass_end.a) << frame);
+
+    if (emitted > 0) {
+        const before: u8 = if (emitted > 1) codeword[emitted - 2] else 0;
+        const padded = one << @intCast(lsb + @as(u8, if (before == 0xff) 7 else 8));
+        if (padded > low and padded <= high) return withoutFinalFf(codeword, emitted - 1);
+    }
+
+    var previous = if (emitted > 0) codeword[emitted - 1] else pass_end.previous_byte;
+    var value = @as(u128, previous) << @intCast(lsb);
+    var length = emitted;
+    while (true) {
+        const padded = value + (one << @intCast(lsb));
+        if (padded > low and padded <= high) return withoutFinalFf(codeword, length);
+        // The whole codeword always decodes; the lsb bound only guards the
+        // weights (the search ends far above it).
+        if (length == codeword.len or lsb < 16) return codeword.len;
+        // Bit stuffing: the byte after 0xFF carries seven bits, its msb
+        // overlapping the 0xFF's lsb.
+        lsb -= if (previous == 0xff) 7 else 8;
+        previous = codeword[length];
+        value += @as(u128, previous) << @intCast(lsb);
+        length += 1;
+    }
+}
+
+fn withoutFinalFf(codeword: []const u8, length: usize) usize {
+    var trimmed = length;
+    while (trimmed > 0 and codeword[trimmed - 1] == 0xff) trimmed -= 1;
+    return trimmed;
+}
 
 pub const Decoder = struct {
     allocator: std.mem.Allocator,

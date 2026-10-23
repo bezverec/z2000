@@ -5,6 +5,57 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Quality Layers End At Decodable Pass Truncation Lengths
+
+- Every quality layer that ended on a pass boundary of a continuous
+  codeword misdecoded the end of that pass. The encoders recorded each
+  pass's `cumulative_bytes` as the bytes the MQ coder had emitted so far,
+  which leaves out the decisions still in its C register; z2000, Kakadu
+  8.4.1, OpenJPEG 2.5.4, and Grok 20.4.12 all reconstructed the same wrong
+  samples, so it was a property of the streams. Only the final layer
+  (always the whole codeword) and segment ends of BYPASS/TERMALL blocks
+  were exact.
+- Each pass boundary now records its truncation length, computed exactly
+  when the codeword is finished (`mq_iso.truncationLength`, Taubman &
+  Marcellin 12.3.2): the shortest prefix whose one-padded value (a decoder
+  reads past the end as 0xFF) lies above the low end of the pass's final
+  interval and at most at its high end. The low end matters because a 0xFF
+  followed by a byte carrying into its stuffed bit (`0xFF 0x85`) is worth
+  more than the 0xFF's padding. No length ends on 0xFF. Across random code
+  blocks the length is 0 to 2 bytes past the emitted count (avg. ~1.3).
+  The legacy MQ backend gets a safe length (written, pending, and register
+  bits); raw BYPASS passes count their partial byte. The direct, symbol,
+  wide, and BYPASS encoders share `resolveSegmentPassEnds`, so rate
+  control, PCRD slopes, and layer byte budgets all use the same lengths.
+- The Maxshift ROI first layer drops its five-byte margin past the pass
+  boundary and uses the exact length.
+- Every layered stream with a continuous codeword changes bytes. The PCRD
+  corpus pin moves from 657/1329/2639/5355 to 667/1333/2645/5355 bytes, and
+  its layer prefixes measure 18.70/20.70/23.42/26.92 dB instead of
+  15.43/19.70/22.23/26.35 dB, 0.79/0.70/0.46/0.42 dB above OpenJPEG at the
+  same bytes (they trailed by 1.60/0.31/0.65/0.15 dB;
+  `tools/pcrd_psnr_ladder.ps1`).
+- Evidence: a test encodes 45 random blocks in four styles (plain, RESET,
+  causal+SEGMARK, ERTERM) through the direct, symbol, and legacy coders and
+  checks at every pass boundary (over 3000) that the prefix decodes the
+  passes before it exactly as the whole codeword does, that one byte less
+  does not (ISO coders), that the direct and symbol coders record the same
+  pass table, and that no prefix ends on 0xFF. Before the change 4792 of
+  4836 ISO boundaries in that sweep misdecoded. On 1024x768 photographs,
+  every intermediate layer of 5/3 streams (five even layers, rate targets,
+  causal+SEGMARK, 256x256 tiles in LRCP with L tile-parts) now decodes
+  identically in z2000, Kakadu, OpenJPEG, and Grok and matches an oracle
+  decode that takes each block's passes from the layer but its bytes from
+  the whole codeword; before, layer 1 of the five-layer RGB stream differed
+  in 649297 samples (up to 110 levels), and z2000 refused layers 1-3 of the
+  causal+SEGMARK stream outright (a misdecoded segmentation symbol). On 9/7
+  streams (even layers, rate targets, RESET+ERTERM) z2000 matches the
+  oracle exactly and each other decoder differs from it only by its own
+  rounding, at most 1 level as for the full stream, where layer 1 was off
+  by up to 88 levels in every decoder. BYPASS streams with even layers are
+  byte-identical to before (their layers end at terminated segments) and
+  decode identically in all four decoders.
+
 ### Wide Encoder: Maxshift ROI And Tile-Parts On Any Layout
 
 - `LosslessOptions.roi_regions` and `zraw-to-j2k --roi [C:]X,Y,W,H` encode
