@@ -60,6 +60,11 @@ pub const PacketScaffoldOptions = struct {
     /// 5/3 squared-norm weight. Used only when rate targets are requested.
     band_weights: ?[33][4]f64 = null,
     front_end: ?TileFrontEnd = null,
+    /// Maxshift ROI upshift of the wide encoder's blocks (Annex H). With
+    /// several layers, the first carries exactly the passes of the bitplanes
+    /// at or above it -- the region of interest -- and the rest are spread
+    /// evenly over the remaining layers.
+    roi_shift: u8 = 0,
 };
 
 pub const PacketScaffold = struct {
@@ -2166,7 +2171,10 @@ pub fn buildWideTileRpclEncodeArtifacts(
         var encoded = EncodedComponentBlock{ .job = job, .segment = segment, .bypass = actual_style.bypass };
         var moved = false;
         errdefer if (!moved) encoded.deinit(allocator);
-        encoded.layers = try computeLayerTruncations(allocator, encoded.segment, scaffold.layers);
+        encoded.layers = if (options.roi_shift != 0 and scaffold.layers > 1)
+            try computeRoiLayerTruncations(allocator, encoded.segment, scaffold.layers, options.roi_shift)
+        else
+            try computeLayerTruncations(allocator, encoded.segment, scaffold.layers);
         blocks[initialized] = encoded;
         moved = true;
         initialized += 1;
@@ -4162,6 +4170,79 @@ fn computeLayerTruncations(
     }
     return layers;
 }
+
+/// Layers for a Maxshift ROI block: the first ends after the passes of the
+/// bitplanes at or above `roi_shift` (3k - 2 passes for k such bitplanes,
+/// none for a background-only block), the others split the remaining passes
+/// evenly.
+fn computeRoiLayerTruncations(
+    allocator: std.mem.Allocator,
+    segment: ebcot.CodeBlockSegment,
+    layer_count: u16,
+    roi_shift: u8,
+) ![]t2.LayerTruncation {
+    if (layer_count < 2 or layer_count > rate_alloc.max_layers) return PacketScaffoldError.InvalidLayer;
+    const roi_bitplanes: u16 = if (segment.bitplanes > roi_shift) segment.bitplanes - roi_shift else 0;
+    const roi_passes: u16 = if (roi_bitplanes == 0) 0 else @min(segment.pass_count, 3 * roi_bitplanes - 2);
+    const later_layers: u32 = layer_count - 1;
+
+    const layers = try allocator.alloc(t2.LayerTruncation, layer_count);
+    errdefer allocator.free(layers);
+    // The first layer must hold every ROI pass, so its end rounds up to the
+    // next truncation point, and to the whole block when that is where it
+    // falls.
+    layers[0] = try roiFirstLayerTruncation(segment, roi_passes);
+    var previous = layers[0];
+    for (layers[1..], 1..) |*layer, index| {
+        const requested: u16 = previous.cumulative_passes + @as(u16, @intCast(std.math.divCeil(
+            u32,
+            @as(u32, segment.pass_count - layers[0].cumulative_passes) * @as(u32, @intCast(index)),
+            later_layers,
+        ) catch unreachable));
+        layer.* = if (previous.cumulative_passes == segment.pass_count)
+            previous
+        else
+            try normalizedLayerTruncation(segment, @max(requested, layers[0].cumulative_passes), previous, index + 1 == layers.len);
+        previous = layer.*;
+    }
+    return layers;
+}
+
+/// The shortest truncation of `segment` that holds its first `passes`
+/// passes: a pass boundary of a continuous codeword, the end of the
+/// terminated segment containing that pass, or the whole block.
+fn roiFirstLayerTruncation(segment: ebcot.CodeBlockSegment, passes: u16) !t2.LayerTruncation {
+    const whole = t2.LayerTruncation{ .cumulative_passes = segment.pass_count, .cumulative_bytes = segment.byte_length };
+    if (passes == 0) return .{ .cumulative_passes = 0, .cumulative_bytes = 0 };
+    if (passes >= segment.pass_count) return whole;
+    if (segment.segments) |spans| {
+        var cumulative_passes: u16 = 0;
+        var cumulative_bytes: u64 = 0;
+        for (spans) |span| {
+            cumulative_passes += span.pass_count;
+            cumulative_bytes += span.byte_length;
+            if (cumulative_passes >= passes) {
+                if (cumulative_bytes >= segment.byte_length) return whole;
+                return .{ .cumulative_passes = cumulative_passes, .cumulative_bytes = cumulative_bytes };
+            }
+        }
+        return whole;
+    }
+    // A continuous codeword's pass boundary records only the bytes the MQ
+    // coder has emitted; the decisions still in its registers need a few
+    // more. Bytes of the running codeword beyond the boundary never disturb
+    // the passes before it, so the layer takes more than any MQ flush writes.
+    const point = try segment.truncationPointForPasses(passes);
+    var decodable = point.cumulative_bytes + mq_register_bytes;
+    // A contribution ending in 0xFF would make a marker with whatever the
+    // packet holds next; the byte after it is below 0x80 (bit stuffing).
+    while (decodable < segment.byte_length and segment.bytes[decodable - 1] == 0xff) decodable += 1;
+    if (decodable >= segment.byte_length) return whole;
+    return .{ .cumulative_passes = point.cumulative_passes, .cumulative_bytes = decodable };
+}
+
+/// More bytes than an MQ flush (C.2.9) ever writes past the emitted ones.
+const mq_register_bytes = 5;
 
 fn normalizedLayerTruncation(
     segment: ebcot.CodeBlockSegment,

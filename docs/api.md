@@ -457,7 +457,21 @@ Primary public functions:
   QCD's, both with two-byte selectors above 256 components; the progression
   and POC resolution ranges reach the deepest component. An override for a
   missing component or a component named twice is `InvalidCodestream`; every
-  other encoder refuses a non-empty list. On the uniform path
+  other encoder refuses a non-empty list.
+  `LosslessOptions.roi_regions` lists `RoiRegion`s (half-open rectangles on
+  the reference grid, for one component or every component) coded as
+  Maxshift ROI (Annex H): the componentwise path transforms every
+  tile-component first, marks the coefficients whose band position falls
+  within the rectangle widened by three at every level
+  (`markWideRoiCoefficients`), takes s one bit above the largest background
+  magnitude of the component, shifts the marked coefficients up by s, and
+  writes a main-header RGN per ROI component; every band then needs
+  Mb + s <= 37 bitplanes, or the request is `UnsupportedPayload`. With
+  several layers the first ends, block by block, just past the passes of the
+  bitplanes at or above s (`computeRoiLayerTruncations`), so the region
+  decodes exactly from it. `tile_part_divisions` `R`, `L`, and `C` cut each
+  tile's merged packet sequence into runs of one resolution, layer, or
+  component (`writeSampledTilePartsCodestream`); `P` is refused there. On the uniform path
   samples go through i64 throughout: the DC
   level shift, the RCT (`forwardRctWide`), the origin-aware
   `wavelet_int.forward53WideOrigin`, and

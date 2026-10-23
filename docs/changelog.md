@@ -5,6 +5,44 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Wide Encoder: Maxshift ROI And Tile-Parts On Any Layout
+
+- `LosslessOptions.roi_regions` and `zraw-to-j2k --roi [C:]X,Y,W,H` encode
+  Maxshift regions of interest (Annex H): the componentwise path now runs in
+  two stages, transforming every tile-component first so that each ROI
+  component's upshift s can follow its largest background magnitude across
+  all tiles, then shifting the marked coefficients and coding. RGN marks
+  each ROI component in the main header. The mask is the rectangle's band
+  position at every level widened by three, which covers the 5/3 synthesis
+  support. s is one bit above the background, because OpenJPEG 2.5.4 and
+  Grok 20.4.12 misplace the Maxshift threshold by a bit (the smallest s
+  decodes exactly in Kakadu and z2000 only); bands needing more than 37
+  bitplanes with the shift are refused.
+- With several layers the first layer of every block ends just past the
+  passes of its bitplanes at or above s, rounded up to the next terminated
+  segment for BYPASS, and for a continuous codeword five bytes past the
+  pass boundary (an MQ coder's emitted count leaves its last decisions in
+  its registers) and never on 0xFF. The region then decodes exactly from
+  the first layer: z2000 and Kakadu agree on every sample, for three
+  regions and continuous, BYPASS, RESET, and causal/segmentation styles.
+- The componentwise path takes `--tile-parts R|L|C`: each tile's merged
+  packet sequence is cut into runs of one resolution, layer, or component,
+  written with per-part TLM entries, PPM groups, PPT, PLT, and a tile POC in
+  the first part (`writeSampledTilePartsCodestream`). Without divisions the
+  sampled writers' bytes are unchanged (checked against the hashes of the
+  sampled encoder before this work).
+- Evidence: a test checks the RGN component lists, exact round trips with
+  ROI on one or all components, tiles, LRCP with L parts and BYPASS, that
+  every sample inside the region decodes exactly from layer 1 while the
+  background does not, and the refusals (region outside the image, unknown
+  component, 30-bit background beyond 37 bitplanes, other encoders);
+  another walks the tile-parts (TPsot counting to TNsot, Psot chaining to
+  EOC) for R, L with PPM, C with PPT and SOP/EPH, and R on a grid, and
+  refuses P. Kakadu decodes every ROI and tile-part combination tried
+  exactly; Grok matches the full-resolution components; OpenJPEG does too
+  except for ROI with BYPASS, which it misdecodes even on Kakadu's own
+  stream (documented in `reference_tools.md`).
+
 ### Wide Encoder: Per-Component Coding (COC)
 
 - `LosslessOptions.component_coding` and `zraw-to-j2k --component

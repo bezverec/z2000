@@ -580,9 +580,14 @@ Other commands:
   code-block style flags of `tiff-to-jp2`. `--component C:...` (repeatable)
   gives component C its own decomposition levels, code-block size,
   precincts, and code-block style, written as a COC marker with a QCC for
-  its band count, e.g. `--component 2:levels=3/block=32x16/bypass`. One to
-  four full-resolution
-  components of one precision at the origin also take R/L/C/P tile-parts. It
+  its band count, e.g. `--component 2:levels=3/block=32x16/bypass`.
+  `--roi [C:]X,Y,W,H` (repeatable) marks a Maxshift region of interest on
+  the reference grid for component C or every component: its coefficients
+  are scaled above the background and signalled by RGN, and with several
+  layers the first layer carries exactly the region, which then decodes
+  losslessly from that layer alone. Tile-parts follow `--tile-parts R|L|C`
+  for any layout, and `P` too for one to four full-resolution components of
+  one precision at the origin. It
   is the only encoder for signed, more than 16-bit, or more than four
   components and works through i64 coefficients; at 8 and 16 bits its output
   is byte for byte that of the RGB, planar, gray, and sampled encoders. A

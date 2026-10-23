@@ -240,6 +240,16 @@ cleanly once an oracle confirmed the stream was sound.
 Measured gaps where z2000 is outside the reference-versus-reference spread, kept
 here so they are not rediscovered as new.
 
+- **Maxshift ROI in OpenJPEG 2.5.4 and Grok 20.4.12.** With the smallest
+  legal upshift (2^s just above the largest background magnitude, H.1) both
+  take background coefficients of magnitude at least 2^(s-1) for ROI and
+  misdecode the stream; Kakadu 8.4.1 and z2000 decode it exactly. z2000's
+  wide encoder therefore chooses s one bit larger, which all four decode
+  exactly. Independently, OpenJPEG 2.5.4 misdecodes every reversible ROI
+  stream that also uses BYPASS, including one written by `kdu_compress
+  Creversible=yes Rshift=11 Cmodes=BYPASS -roi ...` (1079 of 1107 samples
+  wrong), which Kakadu, Grok, and z2000 decode exactly.
+
 - *(Resolved; diagnosis below was wrong.)* The drift was the midpoint offset
   being added twice for coefficients whose code block stopped before the end
   of bitplane zero, not boundary precision. Kept for the record:

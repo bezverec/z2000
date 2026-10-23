@@ -908,8 +908,10 @@ Promote decoder-proven capabilities to the writer in this order:
    following each component's precision and band count. Reversible
    quantization has no further per-component choice; a per-component guard
    bit count and 9/7 quantization remain;
-3. `RGN` Maxshift ROI, component registration, and general tile-part/header
-   schedules;
+3. **Complete on the wide encoder:** `RGN` Maxshift ROI with a ROI-first
+   layer, CRG component registration, and R/L/C tile-parts on any component
+   layout (P on the uniform layout). Open: `P` parts and tile-header
+   COD/COC/QCC/RGN schedules on the componentwise path;
 4. deterministic layer formation with practical exact-byte and quality-target
    modes, with overshoot and distortion reported explicitly;
 5. streaming/memory-bounded tile encode and public resource limits.

@@ -297,6 +297,16 @@ pub const ComponentBlockStyle = struct {
     segmentation_symbols: bool = false,
 };
 
+/// A Maxshift region of interest (A.6.3 RGN, Annex H): a rectangle on the
+/// reference grid, half-open, for one component or (null) every component.
+pub const RoiRegion = struct {
+    component: ?u16 = null,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+};
+
 /// One component's coding where it departs from COD (A.6.2 COC): its
 /// decomposition levels, code-block size, precincts, and code-block style.
 /// Unset fields keep the COD value.
@@ -358,6 +368,9 @@ pub const LosslessOptions = struct {
     /// wide native encoder (`encodeNativeLosslessWithOptions`) carries it;
     /// every other encoder refuses a non-empty list.
     component_coding: []const ComponentCodingOverride = &.{},
+    /// Maxshift regions of interest, written as main-header RGN markers by
+    /// the wide native encoder only; every other encoder refuses them.
+    roi_regions: []const RoiRegion = &.{},
 
     pub fn precinctForResolution(self: LosslessOptions, resolution: usize) PrecinctSize {
         const count = @as(usize, self.precinct_count);
@@ -846,7 +859,7 @@ pub fn encodeNativeLosslessWithOptions(
     source: NativeSamplePlanes,
     options: LosslessOptions,
 ) ![]u8 {
-    if (!nativeLayoutIsUniform(source) or options.component_coding.len != 0) {
+    if (!nativeLayoutIsUniform(source) or options.component_coding.len != 0 or options.roi_regions.len != 0) {
         return encodeNativeWideComponentwise(allocator, source, options);
     }
     const component_count = source.planes.len;
@@ -1026,15 +1039,30 @@ fn encodeNativeWideComponentwise(
     }
 
     var options = requested;
-    // One tile-part per tile; the default resolution divisions collapse to it.
-    if (options.tile_part_divisions == 'R') options.tile_part_divisions = null;
+    // Tile-parts are runs of each tile's packet sequence over which the
+    // resolution, layer, or component stays the same (B.11).
+    const division_supported = if (options.tile_part_divisions) |division|
+        division == 'R' or division == 'L' or division == 'C'
+    else
+        true;
     if (options.transform != .reversible_5_3 or options.quantization != .none or
         options.emit_temporary_payload_sidecar or options.rate_count != 0 or options.t1_backend != .iso_mq or
-        options.tile_part_divisions != null or (options.ppm and options.ppt) or (options.ppt and !options.plt))
+        !division_supported or (options.ppm and options.ppt) or (options.ppt and !options.plt))
     {
         return CodestreamError.UnsupportedPayload;
     }
     if (options.poc_in_tile_header and options.poc_records.len == 0) return CodestreamError.InvalidCodestream;
+    for (options.roi_regions) |region| {
+        if (region.x1 <= region.x0 or region.y1 <= region.y0 or
+            region.x0 < source.reference_x0 or region.y0 < source.reference_y0 or
+            region.x1 > source.reference_x1 or region.y1 > source.reference_y1)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+        if (region.component) |component| {
+            if (component >= component_count) return CodestreamError.InvalidCodestream;
+        }
+    }
     // POC records carry one-byte component indices here.
     if (options.poc_records.len != 0 and component_count > 256) return CodestreamError.UnsupportedPayload;
     switch (options.mct) {
@@ -1137,6 +1165,25 @@ fn encodeNativeWideComponentwise(
     defer for (artifacts, initialized) |*artifact, is_initialized| {
         if (is_initialized) artifact.deinit();
     };
+    const regions = try allocator.alloc([]i64, job_count);
+    @memset(regions, &.{});
+    defer {
+        for (regions) |region| allocator.free(region);
+        allocator.free(regions);
+    }
+    const masks = try allocator.alloc([]bool, job_count);
+    @memset(masks, &.{});
+    defer {
+        for (masks) |mask| allocator.free(mask);
+        allocator.free(masks);
+    }
+    const background = try allocator.alloc(u64, job_count);
+    defer allocator.free(background);
+    @memset(background, 0);
+    const roi_shifts = try allocator.alloc(u8, component_count);
+    defer allocator.free(roi_shifts);
+    @memset(roi_shifts, 0);
+
     var next_job = std.atomic.Value(usize).init(0);
     const worker_count = @max(@as(usize, 1), @min(@as(usize, options.threads), job_count));
     const jobs = try allocator.alloc(WideComponentTileJob, worker_count);
@@ -1149,6 +1196,12 @@ fn encodeNativeWideComponentwise(
             .quantizations = quantizations,
             .grid = grid,
             .component_options = component_options,
+            .roi_regions = options.roi_regions,
+            .regions = regions,
+            .masks = masks,
+            .background = background,
+            .roi_shifts = roi_shifts,
+            .stage = .transform,
             .artifacts = artifacts,
             .initialized = initialized,
             .next_job = &next_job,
@@ -1156,17 +1209,27 @@ fn encodeNativeWideComponentwise(
     }
     const threads = try allocator.alloc(std.Thread, worker_count - 1);
     defer allocator.free(threads);
-    var spawned: usize = 0;
-    while (spawned < threads.len) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, WideComponentTileJob.run, .{&jobs[spawned]}) catch |err| {
-            next_job.store(job_count, .release);
-            for (threads[0..spawned]) |thread| thread.join();
-            return err;
-        };
+    try runWideComponentJobs(jobs, &next_job, job_count, threads);
+
+    // Maxshift (H.1): s with every background magnitude of the component
+    // below 2^s, so the decoder tells ROI from background by magnitude alone.
+    // The smallest such s decodes exactly in z2000 and Kakadu 8.4.1, but
+    // OpenJPEG 2.5.4 and Grok 20.4.12 take a background magnitude of at
+    // least 2^(s-1) for ROI, so s carries one more bit. Bands then carry
+    // Mb + s bitplanes, at most 37.
+    for (roi_shifts, 0..) |*shift, component| {
+        if (!componentHasRoi(options.roi_regions, component)) continue;
+        var largest: u64 = 0;
+        var tile: usize = 0;
+        while (tile < tile_count) : (tile += 1) largest = @max(largest, background[tile * component_count + component]);
+        const bits: u8 = @intCast(64 - @clz(largest));
+        shift.* = bits + 1;
+        var deepest: u8 = 0;
+        for (quantizations[component].bitplanes) |bitplanes| deepest = @max(deepest, bitplanes);
+        if (@as(u16, deepest) + shift.* > ebcot.max_wide_magnitude_bitplanes) return CodestreamError.UnsupportedPayload;
     }
-    jobs[worker_count - 1].run();
-    for (threads[0..spawned]) |thread| thread.join();
-    for (jobs) |job| try job.result;
+    for (jobs) |*job| job.stage = .code;
+    try runWideComponentJobs(jobs, &next_job, job_count, threads);
     for (initialized) |is_initialized| {
         if (!is_initialized) return CodestreamError.InvalidCodestream;
     }
@@ -1208,9 +1271,26 @@ fn encodeNativeWideComponentwise(
         );
     }
 
-    const main_header = try wideComponentwiseMainHeaderBytes(allocator, source, quantizations, levels, encode_options, component_options);
+    const main_header = try wideComponentwiseMainHeaderBytes(allocator, source, quantizations, levels, encode_options, component_options, roi_shifts);
     defer allocator.free(main_header);
     // POC resolution indices reach the deepest component.
+    if (encode_options.tile_part_divisions) |division| {
+        const runs = try allocator.alloc(std.ArrayList(usize), tile_count);
+        var runs_built: usize = 0;
+        defer {
+            for (runs[0..runs_built]) |*tile_runs| tile_runs.deinit(allocator);
+            allocator.free(runs);
+        }
+        const run_slices = try allocator.alloc([]const usize, tile_count);
+        defer allocator.free(run_slices);
+        for (streams, runs, run_slices) |stream, *tile_runs, *slice| {
+            tile_runs.* = .empty;
+            runs_built += 1;
+            try appendPocKeyRuns(allocator, tile_runs, stream.sequence, division);
+            slice.* = tile_runs.items;
+        }
+        return writeSampledTilePartsCodestream(allocator, streams, run_slices, main_header, @intCast(component_count), max_levels, encode_options);
+    }
     if (grid.isSingleTile()) {
         return writeSampledSingleTileCodestream(allocator, main_header, @intCast(component_count), max_levels, streams[0], encode_options);
     }
@@ -1245,6 +1325,7 @@ fn validateWideCodingStyle(options: LosslessOptions) !void {
     check.tile_origin_y = 0;
     check.plt = true;
     check.component_coding = &.{};
+    check.roi_regions = &.{};
     try validateCodingPath(check);
 }
 
@@ -1306,44 +1387,70 @@ const WideComponentTileJob = struct {
     grid: tile_grid.Grid,
     /// Each component's effective coding, with its own decomposition levels.
     component_options: []const LosslessOptions,
+    roi_regions: []const RoiRegion,
+    /// Per (tile, component) job: the transformed coefficients, its ROI mask
+    /// (empty without ROI), and the largest background magnitude, kept from
+    /// the transform stage for the coding stage when a ROI needs the
+    /// component-wide shift first.
+    regions: [][]i64,
+    masks: [][]bool,
+    background: []u64,
+    /// Per component Maxshift upshift, set between the stages.
+    roi_shifts: []const u8,
+    stage: Stage,
     artifacts: []tile_pipeline.TileRpclEncodeArtifacts,
     initialized: []bool,
     next_job: *std.atomic.Value(usize),
     precincts: [33]packet_plan.Precinct = undefined,
     result: anyerror!void = {},
 
+    const Stage = enum { transform, code };
+
     fn run(self: *WideComponentTileJob) void {
         while (true) {
             const index = self.next_job.fetchAdd(1, .monotonic);
             if (index >= self.artifacts.len) return;
-            self.artifacts[index] = self.build(index) catch |err| {
+            const outcome = switch (self.stage) {
+                .transform => self.transform(index),
+                .code => self.code(index),
+            };
+            outcome catch |err| {
                 self.result = err;
                 // Stop the other workers at their next job.
                 self.next_job.store(self.artifacts.len, .monotonic);
                 return;
             };
-            self.initialized[index] = true;
         }
     }
 
-    fn build(self: *WideComponentTileJob, index: usize) !tile_pipeline.TileRpclEncodeArtifacts {
-        const allocator = self.allocator;
+    fn componentRect(self: *const WideComponentTileJob, index: usize) !struct { tile: tile_grid.Tile, rect: tile_grid.Rect } {
         const component = index % self.planes.len;
         const tile = try self.grid.tile(@intCast(index / self.planes.len));
         const layout = self.source.planes[component].layout;
-        const rect = tile_grid.Rect{
+        return .{ .tile = tile, .rect = .{
             .x0 = ceilDivU32(tile.rect.x0, layout.x_step),
             .y0 = ceilDivU32(tile.rect.y0, layout.y_step),
             .x1 = ceilDivU32(tile.rect.x1, layout.x_step),
             .y1 = ceilDivU32(tile.rect.y1, layout.y_step),
-        };
+        } };
+    }
+
+    /// Cuts the tile-component out of its plane, runs the i64 5/3, and, for a
+    /// component with a ROI, marks the ROI coefficients and records the
+    /// largest background magnitude.
+    fn transform(self: *WideComponentTileJob, index: usize) !void {
+        const allocator = self.allocator;
+        const component = index % self.planes.len;
+        const layout = self.source.planes[component].layout;
+        const placed = try self.componentRect(index);
+        const rect = placed.rect;
         // A tile that holds no sample of a subsampled component would need an
         // empty component tile, which the scaffold does not build.
         if (rect.x1 <= rect.x0 or rect.y1 <= rect.y0) return CodestreamError.UnsupportedPayload;
         const width: usize = rect.width();
         const height: usize = rect.height();
         const region = try allocator.alloc(i64, try std.math.mul(usize, width, height));
-        defer allocator.free(region);
+        self.regions[index] = region;
         const plane = self.planes[component];
         for (0..height) |row| {
             const start = (@as(usize, rect.y0 - layout.y0) + row) * layout.width + (rect.x0 - layout.x0);
@@ -1352,17 +1459,123 @@ const WideComponentTileJob = struct {
         const coding = self.component_options[component];
         const achieved = try wavelet_int.forward53WideOrigin(allocator, region, width, height, coding.levels, rect.x0, rect.y0);
         if (achieved != coding.levels) return CodestreamError.InvalidCodestream;
-        const component_tile = tile_grid.Tile{ .index = tile.index, .column = tile.column, .row = tile.row, .rect = rect };
-        return buildWideTileArtifacts(
-            allocator,
+
+        if (!componentHasRoi(self.roi_regions, component)) return;
+        const mask = try allocator.alloc(bool, region.len);
+        self.masks[index] = mask;
+        try markWideRoiCoefficients(allocator, mask, rect, coding.levels, layout, self.roi_regions, component);
+        var background: u64 = 0;
+        for (region, mask) |coefficient, in_roi| {
+            if (!in_roi) background = @max(background, @abs(coefficient));
+        }
+        self.background[index] = background;
+    }
+
+    /// Applies the component's Maxshift upshift to its ROI coefficients and
+    /// codes the tile-component.
+    fn code(self: *WideComponentTileJob, index: usize) !void {
+        const component = index % self.planes.len;
+        const layout = self.source.planes[component].layout;
+        const placed = try self.componentRect(index);
+        const region = self.regions[index];
+        const shift = self.roi_shifts[component];
+        if (shift != 0) {
+            // Every shifted magnitude stays below 2^37, the Part 1 ceiling.
+            const limit = @as(u64, 1) << @intCast(ebcot.max_wide_magnitude_bitplanes - shift);
+            for (region, self.masks[index]) |*coefficient, in_roi| {
+                if (!in_roi) continue;
+                if (@abs(coefficient.*) >= limit) return CodestreamError.UnsupportedPayload;
+                coefficient.* <<= @intCast(shift);
+            }
+        }
+        const coding = self.component_options[component];
+        var scaffold_options = wideScaffoldOptions(coding, &self.precincts, 1, layout.precision, self.quantizations[component], .rpcl);
+        if (shift != 0) {
+            for (&scaffold_options.nominal_bitplanes.?) |*level| {
+                for (level) |*bitplanes| bitplanes.* += shift;
+            }
+            scaffold_options.roi_shift = shift;
+        }
+        const component_tile = tile_grid.Tile{ .index = placed.tile.index, .column = placed.tile.column, .row = placed.tile.row, .rect = placed.rect };
+        self.artifacts[index] = try buildWideTileArtifacts(
+            self.allocator,
             component_tile,
             &.{region},
             coding.levels,
-            wideScaffoldOptions(coding, &self.precincts, 1, layout.precision, self.quantizations[component], .rpcl),
+            scaffold_options,
             wideBlockStyle(coding),
         );
+        self.initialized[index] = true;
     }
 };
+
+fn componentHasRoi(regions: []const RoiRegion, component: usize) bool {
+    for (regions) |region| {
+        if (region.component == null or region.component.? == component) return true;
+    }
+    return false;
+}
+
+/// Marks the coefficients of one tile-component (Mallat layout over `rect`)
+/// that carry a ROI rectangle: in every band, the band coordinates of the
+/// rectangle at that level, widened by three on each side to cover the 5/3
+/// synthesis support (Annex H allows any mask; Maxshift needs none at the
+/// decoder).
+fn markWideRoiCoefficients(
+    allocator: std.mem.Allocator,
+    mask: []bool,
+    rect: tile_grid.Rect,
+    levels: u8,
+    layout: native_samples.ComponentLayout,
+    regions: []const RoiRegion,
+    component: usize,
+) !void {
+    @memset(mask, false);
+    const width: usize = rect.width();
+    const bands = try subband.makeBandsForRegion(allocator, rect.x0, rect.y0, rect.x1, rect.y1, levels);
+    defer allocator.free(bands);
+    for (regions) |region| {
+        if (region.component != null and region.component.? != component) continue;
+        // The rectangle on the component grid.
+        const x0: i64 = ceilDivU32(region.x0, layout.x_step);
+        const y0: i64 = ceilDivU32(region.y0, layout.y_step);
+        const x1: i64 = ceilDivU32(region.x1, layout.x_step);
+        const y1: i64 = ceilDivU32(region.y1, layout.y_step);
+        for (bands) |band| {
+            const scale: i64 = @as(i64, 1) << @intCast(band.level);
+            const low_x = @divFloor(x0, scale) - 3;
+            const high_x = std.math.divCeil(i64, x1, scale) catch unreachable;
+            const low_y = @divFloor(y0, scale) - 3;
+            const high_y = std.math.divCeil(i64, y1, scale) catch unreachable;
+            for (0..band.rect.height) |row| {
+                const v: i64 = @as(i64, band.origin_y) + @as(i64, @intCast(row));
+                if (v < low_y or v >= high_y + 3) continue;
+                for (0..band.rect.width) |column| {
+                    const u: i64 = @as(i64, band.origin_x) + @as(i64, @intCast(column));
+                    if (u < low_x or u >= high_x + 3) continue;
+                    mask[(band.rect.y + row) * width + band.rect.x + column] = true;
+                }
+            }
+        }
+    }
+}
+
+/// Runs `jobs` over `count` indices on their workers and returns the first
+/// error any of them met.
+fn runWideComponentJobs(jobs: []WideComponentTileJob, next_job: *std.atomic.Value(usize), count: usize, threads: []std.Thread) !void {
+    next_job.store(0, .monotonic);
+    var spawned: usize = 0;
+    while (spawned + 1 < jobs.len) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, WideComponentTileJob.run, .{&jobs[spawned]}) catch |err| {
+            next_job.store(count, .release);
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+    jobs[jobs.len - 1].run();
+    for (threads[0..spawned]) |thread| thread.join();
+    for (jobs) |job| try job.result;
+}
 
 /// SIZ, COD, QCD, QCC, and CRG of the componentwise path.
 fn wideComponentwiseMainHeaderBytes(
@@ -1372,6 +1585,7 @@ fn wideComponentwiseMainHeaderBytes(
     levels: u8,
     encode_options: LosslessOptions,
     component_options: []const LosslessOptions,
+    roi_shifts: []const u8,
 ) ![]u8 {
     const component_count = source.planes.len;
     var out: std.ArrayList(u8) = .empty;
@@ -1413,6 +1627,20 @@ fn wideComponentwiseMainHeaderBytes(
     for (quantizations, component_options, 0..) |quantization, coding, component| {
         if (std.meta.eql(quantization, quantizations[0]) and coding.levels == levels) continue;
         try appendQccWideReversible(allocator, &out, coding.levels, @intCast(component), two_byte_selector, quantization);
+    }
+    // RGN (A.6.3) with the Maxshift style and each ROI component's upshift.
+    for (roi_shifts, 0..) |shift, component| {
+        if (shift == 0) continue;
+        const selector_bytes: u16 = if (two_byte_selector) 2 else 1;
+        try appendMarker(allocator, &out, .rgn);
+        try appendU16Be(allocator, &out, 2 + selector_bytes + 2);
+        if (two_byte_selector) {
+            try appendU16Be(allocator, &out, @intCast(component));
+        } else {
+            try out.append(allocator, @intCast(component));
+        }
+        try out.append(allocator, 0);
+        try out.append(allocator, shift);
     }
 
     // CRG (A.9.1) when any component carries a registration offset.
@@ -1914,7 +2142,7 @@ pub fn encodeLosslessSampledPlanarWithOptions(
         options.mct != .none or options.progression != .rpcl or
         options.layers == 0 or options.layers > max_quality_layers or
         options.rate_count != 0 or
-        options.emit_temporary_payload_sidecar or options.component_coding.len != 0 or
+        options.emit_temporary_payload_sidecar or options.component_coding.len != 0 or options.roi_regions.len != 0 or
         options.t1_backend != .iso_mq or options.bypass or options.terminate_all or
         options.reset_context or options.vertical_causal or
         options.predictable_termination or options.segmentation_symbols)
@@ -2047,8 +2275,11 @@ const SampledTilePacketStream = struct {
     packet_lengths: []u32,
     packet_header_lengths: []u32,
     packet_bytes: []u8,
+    /// The tile's packet sequence in stream order, when the merge kept it.
+    sequence: []packet_plan.Packet = &.{},
 
     fn deinit(self: *SampledTilePacketStream) void {
+        self.allocator.free(self.sequence);
         self.allocator.free(self.packet_bytes);
         self.allocator.free(self.packet_header_lengths);
         self.allocator.free(self.packet_lengths);
@@ -2184,7 +2415,7 @@ fn mergeSampledComponentPacketStreams(
         reference_tile.rect.y0,
         poc_records,
     );
-    defer allocator.free(global);
+    errdefer allocator.free(global);
 
     const layers: u64 = layer_count;
     const resolution_offsets = try allocator.alloc([33]u64, component_count);
@@ -2241,6 +2472,7 @@ fn mergeSampledComponentPacketStreams(
         .packet_lengths = packet_lengths,
         .packet_header_lengths = packet_header_lengths,
         .packet_bytes = packet_bytes,
+        .sequence = global,
     };
 }
 
@@ -2345,50 +2577,89 @@ fn writeSampledMultiTileCodestream(
     levels: u8,
     encode_options: LosslessOptions,
 ) ![]u8 {
-    const tile_count = streams.len;
-    const parts = try allocator.alloc(MultiTilePacketPart, tile_count);
+    return writeSampledTilePartsCodestream(allocator, streams, null, main_header, components, levels, encode_options);
+}
+
+/// The sampled writers' tile-part layout: each tile split into consecutive
+/// runs of its packet sequence (`tile_runs[t]` holds the packet counts of
+/// tile t's parts), or one part per tile when `tile_runs` is null. Parts are
+/// written tile by tile; a tile's POC goes in its first part, and its SOP
+/// numbering and PPT `Zppt` indices run on across its parts. TLM and PPM
+/// carry one entry or group per tile-part.
+fn writeSampledTilePartsCodestream(
+    allocator: std.mem.Allocator,
+    streams: []const SampledTilePacketStream,
+    tile_runs: ?[]const []const usize,
+    main_header: []const u8,
+    components: u16,
+    levels: u8,
+    encode_options: LosslessOptions,
+) ![]u8 {
+    if (tile_runs) |runs| {
+        if (runs.len != streams.len) return CodestreamError.InvalidCodestream;
+    }
+    var part_count: usize = 0;
+    for (streams, 0..) |stream, tile| {
+        const count = if (tile_runs) |runs| runs[tile].len else 1;
+        if (count == 0 or count > std.math.maxInt(u8)) return CodestreamError.UnsupportedPayload;
+        if (stream.tile.index > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+        part_count += count;
+    }
+    const parts = try allocator.alloc(MultiTilePacketPart, part_count);
     defer allocator.free(parts);
     const uses_packed_headers = encode_options.ppm or encode_options.ppt;
     const tile_poc_bytes = if (encode_options.poc_in_tile_header)
         try pocMarkerByteCount(encode_options)
     else
         0;
-    for (streams, parts) |stream, *part| {
-        if (stream.tile.index > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
-        const framed_bytes = if (uses_packed_headers)
-            try packedPacketBodyByteCount(encode_options, stream.packet_lengths, stream.packet_header_lengths)
-        else
-            try rpclPacketPayloadByteCount(encode_options, stream.packet_lengths);
-        const plt_bytes = if (encode_options.ppm or !encode_options.plt)
-            0
-        else if (uses_packed_headers)
-            try pltBytesForPackedPacketLengths(encode_options, stream.packet_lengths, stream.packet_header_lengths)
-        else
-            try pltBytesForRpclPacketLengths(encode_options, stream.packet_lengths);
-        const ppt_bytes = if (encode_options.ppt)
-            try pptMarkerByteCount(encode_options, stream.packet_header_lengths)
-        else
-            0;
-        const psot = std.math.cast(
-            u32,
-            try std.math.add(
-                usize,
-                14,
+    var part_index: usize = 0;
+    for (streams, 0..) |stream, tile| {
+        const whole = [_]usize{stream.packet_lengths.len};
+        const runs: []const usize = if (tile_runs) |all| all[tile] else &whole;
+        var first: usize = 0;
+        for (runs, 0..) |count, run| {
+            if (first + count > stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
+            const lengths = stream.packet_lengths[first..][0..count];
+            const header_lengths = stream.packet_header_lengths[first..][0..count];
+            const framed_bytes = if (uses_packed_headers)
+                try packedPacketBodyByteCount(encode_options, lengths, header_lengths)
+            else
+                try rpclPacketPayloadByteCount(encode_options, lengths);
+            const plt_bytes = if (encode_options.ppm or !encode_options.plt)
+                0
+            else if (uses_packed_headers)
+                try pltBytesForPackedPacketLengths(encode_options, lengths, header_lengths)
+            else
+                try pltBytesForRpclPacketLengths(encode_options, lengths);
+            const ppt_bytes = if (encode_options.ppt)
+                try pptMarkerByteCount(encode_options, header_lengths)
+            else
+                0;
+            const poc_bytes = if (run == 0) tile_poc_bytes else 0;
+            const psot = std.math.cast(
+                u32,
                 try std.math.add(
                     usize,
-                    framed_bytes,
-                    try std.math.add(usize, plt_bytes, try std.math.add(usize, ppt_bytes, tile_poc_bytes)),
+                    14,
+                    try std.math.add(
+                        usize,
+                        framed_bytes,
+                        try std.math.add(usize, plt_bytes, try std.math.add(usize, ppt_bytes, poc_bytes)),
+                    ),
                 ),
-            ),
-        ) orelse return CodestreamError.ImageTooLarge;
-        part.* = .{
-            .tile_index = @intCast(stream.tile.index),
-            .tile_part_index = 0,
-            .tile_part_count = 1,
-            .first_packet = 0,
-            .packet_count = stream.packet_lengths.len,
-            .psot = psot,
-        };
+            ) orelse return CodestreamError.ImageTooLarge;
+            parts[part_index] = .{
+                .tile_index = @intCast(stream.tile.index),
+                .tile_part_index = @intCast(run),
+                .tile_part_count = @intCast(runs.len),
+                .first_packet = first,
+                .packet_count = count,
+                .psot = psot,
+            };
+            part_index += 1;
+            first += count;
+        }
+        if (first != stream.packet_lengths.len) return CodestreamError.InvalidCodestream;
     }
 
     var out: std.ArrayList(u8) = .empty;
@@ -2407,72 +2678,62 @@ fn writeSampledMultiTileCodestream(
         if (ppm_groups.len != 0) allocator.free(ppm_groups);
     }
     if (encode_options.ppm) {
-        ppm_groups = try allocator.alloc([]u8, streams.len);
-        for (streams) |stream| {
+        ppm_groups = try allocator.alloc([]u8, parts.len);
+        var tile_cursor: usize = 0;
+        for (parts) |part| {
+            while (streams[tile_cursor].tile.index != part.tile_index) tile_cursor += 1;
+            const stream = streams[tile_cursor];
+            const bytes = try sampledPartPacketBytes(stream, part);
             ppm_groups[ppm_group_count] = try collectPackedPacketHeaders(
                 allocator,
                 encode_options,
-                stream.packet_lengths,
-                stream.packet_header_lengths,
-                stream.packet_bytes,
+                stream.packet_lengths[part.first_packet..][0..part.packet_count],
+                stream.packet_header_lengths[part.first_packet..][0..part.packet_count],
+                bytes,
             );
             ppm_group_count += 1;
         }
         try appendPpmPacketHeaderGroups(allocator, &out, ppm_groups);
     }
 
-    for (streams, parts) |stream, part| {
-        try appendSot(allocator, &out, part.tile_index, part.psot, 0, 1);
-        if (encode_options.poc_in_tile_header) {
-            try appendPocForComponents(allocator, &out, levels, components, encode_options);
-        }
-        if (encode_options.ppt) {
-            try appendPltFromPackedPacketLengths(
-                allocator,
-                &out,
-                encode_options,
-                stream.packet_lengths,
-                stream.packet_header_lengths,
-            );
-            var ppt_marker_index: u16 = 0;
-            try appendPptPacketHeaders(
-                allocator,
-                &out,
-                encode_options,
-                stream.packet_lengths,
-                stream.packet_header_lengths,
-                stream.packet_bytes,
-                &ppt_marker_index,
-            );
-        } else if (encode_options.plt and !encode_options.ppm) {
-            try appendPltFromRpclPacketLengths(allocator, &out, encode_options, stream.packet_lengths);
-        }
-        try appendMarker(allocator, &out, .sod);
+    var cursor: usize = 0;
+    for (streams) |stream| {
         var packet_sequence: u16 = 0;
-        if (uses_packed_headers) {
-            try appendPackedPacketBodies(
-                allocator,
-                &out,
-                encode_options,
-                stream.packet_lengths,
-                stream.packet_header_lengths,
-                stream.packet_bytes,
-                &packet_sequence,
-            );
-        } else {
-            try appendRpclPackets(
-                allocator,
-                &out,
-                encode_options,
-                stream.packet_lengths,
-                stream.packet_header_lengths,
-                stream.packet_bytes,
-                &packet_sequence,
-            );
+        var ppt_marker_index: u16 = 0;
+        const tile_parts = parts[cursor..][0..parts[cursor].tile_part_count];
+        cursor += tile_parts.len;
+        for (tile_parts) |part| {
+            const lengths = stream.packet_lengths[part.first_packet..][0..part.packet_count];
+            const header_lengths = stream.packet_header_lengths[part.first_packet..][0..part.packet_count];
+            const bytes = try sampledPartPacketBytes(stream, part);
+            try appendSot(allocator, &out, part.tile_index, part.psot, part.tile_part_index, part.tile_part_count);
+            if (encode_options.poc_in_tile_header and part.tile_part_index == 0) {
+                try appendPocForComponents(allocator, &out, levels, components, encode_options);
+            }
+            if (encode_options.ppt) {
+                try appendPltFromPackedPacketLengths(allocator, &out, encode_options, lengths, header_lengths);
+                try appendPptPacketHeaders(allocator, &out, encode_options, lengths, header_lengths, bytes, &ppt_marker_index);
+            } else if (encode_options.plt and !encode_options.ppm) {
+                try appendPltFromRpclPacketLengths(allocator, &out, encode_options, lengths);
+            }
+            try appendMarker(allocator, &out, .sod);
+            if (uses_packed_headers) {
+                try appendPackedPacketBodies(allocator, &out, encode_options, lengths, header_lengths, bytes, &packet_sequence);
+            } else {
+                try appendRpclPackets(allocator, &out, encode_options, lengths, header_lengths, bytes, &packet_sequence);
+            }
         }
     }
     try appendMarker(allocator, &out, .eoc);
     return out.toOwnedSlice(allocator);
+}
+
+/// The packet bytes of one tile-part of a merged tile stream.
+fn sampledPartPacketBytes(stream: SampledTilePacketStream, part: MultiTilePacketPart) ![]const u8 {
+    const start = try rpclPacketByteOffset(stream.packet_lengths, part.first_packet);
+    const end = try rpclPacketByteOffset(stream.packet_lengths, part.first_packet + part.packet_count);
+    if (end > stream.packet_bytes.len) return CodestreamError.InvalidCodestream;
+    return stream.packet_bytes[start..end];
 }
 
 /// Single tile-part assembly for the sampled encoder. The packet count is
@@ -22865,8 +23126,9 @@ fn validateCodingPath(options: LosslessOptions) !void {
     {
         return CodestreamError.UnsupportedPayload;
     }
-    // Per-component coding (COC) is written by the wide encoder only.
-    if (options.component_coding.len != 0) return CodestreamError.UnsupportedPayload;
+    // Per-component coding (COC) and ROI (RGN) are written by the wide
+    // encoder only.
+    if (options.component_coding.len != 0 or options.roi_regions.len != 0) return CodestreamError.UnsupportedPayload;
     // The common RGB/planar and multi-tile assemblers still depend on their
     // PLT-backed packet-part accounting. The sampled single-tile entry point
     // owns the first PLT-less writer slice and does not call this validator.

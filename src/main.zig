@@ -1147,6 +1147,8 @@ fn zrawToJ2kCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []co
     var poc_storage: [64]codestream.PocRecord = undefined;
     var component_storage: [256]codestream.ComponentCodingOverride = undefined;
     var component_count: usize = 0;
+    var roi_storage: [64]codestream.RoiRegion = undefined;
+    var roi_count: usize = 0;
     var tile_parts_explicit = false;
     var index: usize = 2;
     while (index < args.len) : (index += 1) {
@@ -1158,6 +1160,27 @@ fn zrawToJ2kCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             component_storage[component_count] = try parseComponentCoding(args[index]);
             component_count += 1;
             options.component_coding = component_storage[0..component_count];
+        } else if (std.mem.eql(u8, arg, "--roi")) {
+            // [C:]X,Y,W,H on the reference grid; without C, every component.
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            if (roi_count >= roi_storage.len) return error.InvalidValue;
+            var text = args[index];
+            var roi_component: ?u16 = null;
+            if (std.mem.indexOfScalar(u8, text, ':')) |colon| {
+                roi_component = try std.fmt.parseInt(u16, text[0..colon], 10);
+                text = text[colon + 1 ..];
+            }
+            const region = try parseDecodeRegion(text);
+            roi_storage[roi_count] = .{
+                .component = roi_component,
+                .x0 = region.x0,
+                .y0 = region.y0,
+                .x1 = try std.math.add(u32, region.x0, region.width),
+                .y1 = try std.math.add(u32, region.y0, region.height),
+            };
+            roi_count += 1;
+            options.roi_regions = roi_storage[0..roi_count];
         } else if (std.mem.eql(u8, arg, "--tile") or std.mem.eql(u8, arg, "--progression") or
             std.mem.eql(u8, arg, "--mct") or std.mem.eql(u8, arg, "--tile-parts") or
             std.mem.eql(u8, arg, "--poc") or std.mem.eql(u8, arg, "--poc-location") or
@@ -2156,7 +2179,7 @@ fn usage() void {
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--tile-index N|--region X,Y,W,H] [--layers N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
         \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
         \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
-        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE...] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
+        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE...] [--roi [C:]X,Y,W,H] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.

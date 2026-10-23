@@ -40201,3 +40201,156 @@ test "wide encoder writes per-component coding as COC and QCC" {
         .{ .mct = .none, .tile_part_divisions = null, .component_coding = &plain },
     ));
 }
+
+test "wide encoder writes Maxshift ROI as RGN and puts the region in the first layer" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_401);
+    const random = prng.random();
+    const specs = [_]GenericComponent{
+        .{ .precision = 12 },
+        .{ .precision = 10, .signed = true },
+        .{ .precision = 12, .x_step = 2, .y_step = 2 },
+    };
+    var source = try genericNativeSource(allocator, random, .{ 0, 0, 48, 40 }, &specs);
+    defer source.deinit();
+
+    const rect = codestream.RoiRegion{ .x0 = 12, .y0 = 10, .x1 = 30, .y1 = 26 };
+    const on_one = [_]codestream.RoiRegion{.{ .component = 1, .x0 = rect.x0, .y0 = rect.y0, .x1 = rect.x1, .y1 = rect.y1 }};
+    const on_all = [_]codestream.RoiRegion{ rect, .{ .x0 = 40, .y0 = 0, .x1 = 48, .y1 = 6 } };
+    const Case = struct { regions: []const codestream.RoiRegion, options: codestream.LosslessOptions, roi_components: []const u16 };
+    const cases = [_]Case{
+        .{ .regions = &on_one, .options = .{ .mct = .none, .layers = 3 }, .roi_components = &.{1} },
+        .{ .regions = &on_all, .options = .{ .mct = .none, .layers = 2, .tile_width = 24, .tile_height = 20, .threads = 4 }, .roi_components = &.{ 0, 1, 2 } },
+        .{ .regions = &on_all, .options = .{ .mct = .none, .layers = 2, .progression = .lrcp, .tile_part_divisions = 'L', .bypass = true }, .roi_components = &.{ 0, 1, 2 } },
+    };
+    for (cases) |case| {
+        var options = case.options;
+        options.roi_regions = case.regions;
+        const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, options);
+        defer allocator.free(encoded);
+
+        const rgns = try mainHeaderComponentMarkers(allocator, encoded, codestream.markerValue("rgn"), false);
+        defer allocator.free(rgns);
+        try std.testing.expectEqualSlices(u16, case.roi_components, rgns);
+
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .threads = 4 }, .{});
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+        }
+
+        // The first layer carries every bitplane of the ROI coefficients, so
+        // the region decodes exactly from it while the background does not.
+        var first = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .quality_layer_limit = 1 }, .{});
+        defer first.deinit();
+        for (case.roi_components) |component| {
+            const expected = source.planes[component];
+            const actual = first.planes[component];
+            const layout = expected.layout;
+            const x0 = std.math.divCeil(u32, rect.x0, layout.x_step) catch unreachable;
+            const x1 = std.math.divCeil(u32, rect.x1, layout.x_step) catch unreachable;
+            const y0 = std.math.divCeil(u32, rect.y0, layout.y_step) catch unreachable;
+            const y1 = std.math.divCeil(u32, rect.y1, layout.y_step) catch unreachable;
+            var background_differs: usize = 0;
+            for (0..layout.height) |row| {
+                for (0..layout.width) |column| {
+                    const index = row * layout.width + column;
+                    const inside = column >= x0 and column < x1 and row >= y0 and row < y1;
+                    if (inside) {
+                        try std.testing.expectEqual(expected.samples[index], actual.samples[index]);
+                    } else if (expected.samples[index] != actual.samples[index]) {
+                        background_differs += 1;
+                    }
+                }
+            }
+            try std.testing.expect(background_differs > 0);
+        }
+    }
+
+    // Refusals: a region outside the image, an unknown component, a shift
+    // that would take the bands past 37 bitplanes, and the other encoders.
+    const outside = [_]codestream.RoiRegion{.{ .x0 = 40, .y0 = 0, .x1 = 49, .y1 = 6 }};
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .roi_regions = &outside }));
+    const unknown = [_]codestream.RoiRegion{.{ .component = 3, .x0 = 0, .y0 = 0, .x1 = 4, .y1 = 4 }};
+    try std.testing.expectError(codestream.CodestreamError.InvalidCodestream, codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .roi_regions = &unknown }));
+    // Large enough that the 30-bit background lies outside the widened mask.
+    var deep = try genericNativeSource(allocator, random, .{ 0, 0, 64, 64 }, &.{.{ .precision = 30 }});
+    defer deep.deinit();
+    const whole = [_]codestream.RoiRegion{.{ .x0 = 2, .y0 = 2, .x1 = 9, .y1 = 9 }};
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeNativeLosslessWithOptions(allocator, deep, .{ .mct = .none, .roi_regions = &whole }));
+    var gray: [16 * 16]u16 = undefined;
+    for (&gray, 0..) |*sample, index| sample.* = @intCast(index);
+    try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessGrayWithOptions(allocator, .{
+        .allocator = allocator,
+        .width = 16,
+        .height = 16,
+        .bit_depth = 8,
+        .samples = &gray,
+    }, .{ .mct = .none, .roi_regions = &whole }));
+}
+
+test "wide componentwise encoder divides tiles into R, L, and C tile-parts" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_7a7);
+    const random = prng.random();
+    const specs = [_]GenericComponent{
+        .{ .precision = 9 },
+        .{ .precision = 9, .x_step = 2, .y_step = 2 },
+        .{ .precision = 17, .signed = true },
+    };
+    var source = try genericNativeSource(allocator, random, .{ 3, 2, 51, 38 }, &specs);
+    defer source.deinit();
+    // `parts_per_tile` is the most parts a tile can have; a tile whose
+    // deepest resolution is empty (the 3,2 origin empties it in the first
+    // tile of the 32x24 grid) has one part fewer.
+    const Case = struct { options: codestream.LosslessOptions, parts_per_tile: usize };
+    const cases = [_]Case{
+        // Five levels: six resolutions, each its own part.
+        .{ .options = .{ .mct = .none, .tile_part_divisions = 'R' }, .parts_per_tile = 6 },
+        .{ .options = .{ .mct = .none, .tile_part_divisions = 'L', .progression = .lrcp, .layers = 3, .ppm = true }, .parts_per_tile = 3 },
+        .{ .options = .{ .mct = .none, .tile_part_divisions = 'C', .progression = .cprl, .tile_width = 32, .tile_height = 24, .ppt = true, .sop = true, .eph = true }, .parts_per_tile = 3 },
+        .{ .options = .{ .mct = .none, .tile_part_divisions = 'R', .tile_width = 32, .tile_height = 24, .threads = 4, .tlm = true }, .parts_per_tile = 6 },
+    };
+    for (cases) |case| {
+        const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, case.options);
+        defer allocator.free(encoded);
+        // Walk the main header to the first SOT, then tile-part by Psot.
+        var position: usize = 2;
+        while (readU16BeTest(encoded, position) != codestream.markerValue("sot")) {
+            position += 2 + readU16BeTest(encoded, position + 2);
+        }
+        var tiles: usize = 0;
+        var full_tiles: usize = 0;
+        var expected_part: u8 = 0;
+        var part_count: u8 = 0;
+        while (readU16BeTest(encoded, position) == codestream.markerValue("sot")) {
+            // Parts of a tile follow each other, TPsot counting up to TNsot.
+            const part = encoded[position + 10];
+            if (part == 0) {
+                try std.testing.expectEqual(expected_part, part_count);
+                part_count = encoded[position + 11];
+                try std.testing.expect(part_count >= 2 and part_count <= case.parts_per_tile);
+                if (part_count == case.parts_per_tile) full_tiles += 1;
+                tiles += 1;
+                expected_part = 0;
+            }
+            try std.testing.expectEqual(expected_part, part);
+            try std.testing.expectEqual(part_count, encoded[position + 11]);
+            expected_part += 1;
+            position += readU32BeTest(encoded, position + 6);
+        }
+        try std.testing.expectEqual(expected_part, part_count);
+        try std.testing.expectEqual(codestream.markerValue("eoc"), readU16BeTest(encoded, position));
+        try std.testing.expect(tiles >= 1 and full_tiles >= 1);
+
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .threads = 4 }, .{});
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+        }
+    }
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .tile_part_divisions = 'P', .progression = .pcrl }),
+    );
+}
