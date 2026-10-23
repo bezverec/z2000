@@ -5,6 +5,35 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Kakadu Tile-Header POC Refusal Diagnosed
+
+- The `kdu_expand` refusal of tile-header POC with two layers ("Illegal
+  inclusion tag tree") is a Kakadu 8.4.1 defect in its PLT path, not a z2000
+  packet-order error. `kdu_expand` misdecodes its own `kdu_compress` output
+  with a tile-specific `Porder`, `Clayers=2`, and `ORGgen_plt=yes` (exit 0,
+  every pixel wrong) whenever the COD order puts the layer innermost (RPCL,
+  PCRL, CPRL) and the tile POC does not (LRCP, RLCP); the same streams are
+  exact without PLT, with the POC in the main header, or with one layer, and
+  OpenJPEG 2.5.4, Grok 20.4.12, and z2000 decode all of them exactly.
+- z2000's 37x23 16-bit `--tile 16,10 --poc "0,0,2,2,3,rpcl;2,0,2,6,3,lrcp"
+  --layers 2 --poc-location tile` stream decodes exactly in Kakadu once its
+  PLT and TLM are removed, with no packet changed; its PLT lengths equal the
+  SOP-delimited packets in all nine tiles, and the packet counts per tile
+  equal Kakadu's for the same `Porder`. The earlier "tile-header POC with `R`
+  parts and PLT" refusal reproduces with the same dependence: z2000
+  `--tile-parts R --poc-location tile` on 96x80 with 32x32 tiles is exact in
+  Kakadu with one layer, and with two gets "Unexpected change in coding
+  parameters or packet sequencing" (exact without PLT); Kakadu's own two
+  `Porder:T0` instances (one POC per tile-part) with two layers and PLT get
+  the same error.
+  `docs/reference_tools.md` records the trigger grid and the ISO/IEC
+  15444-1 A.6.6, A.7.3, B.10.4, and B.12 reading.
+- Found along the way and still open: z2000 rejects a single-tile Kakadu
+  stream with two `Porder:T0` instances (one POC per tile-part, first part
+  `TNsot=0`) as `InvalidCodestream`, with one or two layers, while OpenJPEG,
+  Grok, and `kdu_expand` without PLT decode it exactly. The same two
+  instances on a tile grid decode exactly.
+
 ### Wide Encoder: Tile Grids, RCT, And Every Progression
 
 - `zraw-to-j2k` / `encodeNativeLosslessWithOptions` now take tile grids

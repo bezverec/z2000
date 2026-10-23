@@ -71,6 +71,37 @@ Recorded rather than worked around, so the behaviour stays pinned.
   "Unexpectedly ran out of packet length information while processing
   tile-parts". OpenJPEG, Grok, and z2000 all reconstruct the raster. Committed
   as the decode entry `kakadu-singletile-rlc-tileparts-plt`.
+- **`kdu_expand` mis-sequences tile-header POC when PLT is present.** With
+  two or more quality layers, a POC in a tile-part header, and PLT in that
+  tile, `kdu_expand` 8.4.1 does not follow the POC order, and it fails on
+  `kdu_compress`'s own output. On a 37x23 16-bit RGB source
+  (`Clevels=5 Clayers=2 Creversible=yes Cuse_sop=yes ORGgen_plt=yes`,
+  untiled with `Porder:T0={0,0,2,6,3,LRCP}`, or on `Stiles={10,16}` with
+  `Porder:T<n>={0,0,2,2,3,RPCL},{2,0,2,6,3,LRCP}` for every tile)
+  `kdu_expand` exits 0 with all 851 pixels wrong; OpenJPEG 2.5.4, Grok
+  20.4.12, and z2000 decode the same files exactly, and so does `kdu_expand`
+  once `ORGgen_plt=no`. A 5x5 grid of COD order against a single
+  full-volume tile POC record shows the trigger: COD in RPCL, PCRL, or CPRL
+  (layer innermost) with a tile POC in LRCP or RLCP misdecodes; every other
+  pair, including a tile POC equal to the COD order, is exact. The same
+  POC in the main header is exact, and with one layer every pair is exact.
+  z2000's `--poc ... --layers 2 --poc-location tile` streams hit the same
+  path and get "Illegal inclusion tag tree encountered while decoding a
+  packet header" instead of wrong pixels (RPCL or PCRL COD; LRCP and RLCP
+  COD decode). A separate POC per tile-part has the same dependence: two
+  `Porder:T0` instances with `Clayers=2` and PLT give "Unexpected change in
+  coding parameters or packet sequencing", as does z2000's
+  `--tile-parts R --poc-location tile --layers 2` (96x80 on 32x32 tiles);
+  both decode in Kakadu without PLT. The streams are legal: ISO/IEC 15444-1
+  A.6.6 makes a tile-part-header POC override COD and the main-header POC
+  for that tile, B.12 iterates every record over its own volume and skips
+  packets already sent (so each precinct still sees its layers in
+  increasing order, which B.10.4's inclusion tag tree needs), and A.7.3
+  defines PLT as lengths in codestream order, which z2000's PLT matches
+  packet for packet (checked against the SOP boundaries). Removing PLT and
+  TLM from the z2000 file without touching a packet makes `kdu_expand`
+  exact. Kakadu cannot be used as an oracle for multi-layer tile-header POC
+  with PLT; strip PLT or move the POC to the main header.
 - **`opj_compress` drops packets from an overlapping POC schedule.** Given
   `-POC T1=0,0,1,3,3,LRCP/T1=0,0,3,3,3,RPCL` (layer 0 of everything, then
   everything), OpenJPEG 2.5.4 writes 25 packets per tile instead of 27:
