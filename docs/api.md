@@ -263,8 +263,11 @@ Supported public JP2 profiles are still narrow:
   component is contiguous; `P` parts require the canonical PCRL position
   sequence while allowing packet reordering inside each position. The writer
   emits the requested order independently for each tile and strict decode
-  appends tile-local records after inherited main-header records before
-  normalizing each catalog to RPCL. `--poc-location tile` emits the marker in
+  follows ISO A.6.6 precedence (a tile's own POC replaces the main-header
+  POC; records from the tile's later tile-part headers append to its first
+  part's) before normalizing each catalog to RPCL. A second POC in one header,
+  or a tile POC that first appears after the tile's first tile-part, is
+  rejected. `--poc-location tile` emits the marker in
   `TPsot=0`, updates `Psot` and TLM, and is not combined with PPM/PPT
 - a bounded multi-tile lossless envelope: RCT/5-3, one or more quality layers
   for all five progression orders, deterministic row-major encode, reordered

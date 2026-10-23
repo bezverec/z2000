@@ -7477,6 +7477,9 @@ fn readStrictCodestreamMetadataForProfile(
             };
         } else if (marker == @backingInt(Marker.poc)) {
             if (!saw_qcd) return CodestreamError.InvalidCodestream;
+            // ISO A.6.6: at most one POC marker segment in any header; a
+            // segment always carries at least one record.
+            if (poc_records.items.len != 0) return CodestreamError.InvalidCodestream;
             poc.appendSegment(allocator, &poc_records, segment, component_count, levels + 1, layers) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
@@ -11575,9 +11578,10 @@ const StrictMultiTileContext = struct {
         records: *std.ArrayList(poc.Record),
     ) !?[]const poc.Record {
         if (tile_index >= self.tile_poc_records.len) return CodestreamError.InvalidCodestream;
-        if (self.main_header.poc_records) |main| try records.appendSlice(allocator, main);
-        try records.appendSlice(allocator, self.tile_poc_records[tile_index].items);
-        return if (records.items.len == 0) null else records.items;
+        const effective = effectivePocRecords(self.main_header.poc_records, self.tile_poc_records[tile_index].items) orelse
+            return null;
+        try records.appendSlice(allocator, effective);
+        return records.items;
     }
 
     /// The per-tile header view that lets the unchanged single-tile strict
@@ -15288,6 +15292,14 @@ fn readStrictPacketHeaderSpan(
     return .{ .header_length = header_length, .payload_length = payload_length };
 }
 
+/// ISO A.6.6 and B.12.3 precedence: Tile-part POC > Main POC > COD. A tile
+/// with its own POC ignores the main-header records entirely; the main records
+/// apply only to tiles without one.
+fn effectivePocRecords(main_records: ?[]const poc.Record, tile_records: []const poc.Record) ?[]const poc.Record {
+    if (tile_records.len != 0) return tile_records;
+    return main_records;
+}
+
 fn buildStrictPacketSequence(
     allocator: std.mem.Allocator,
     progression: ProgressionOrder,
@@ -15297,15 +15309,9 @@ fn buildStrictPacketSequence(
     main_records: ?[]const poc.Record,
     tile_records: []const poc.Record,
 ) ![]packet_plan.Packet {
-    if (main_records == null and tile_records.len == 0) {
+    const records = effectivePocRecords(main_records, tile_records) orelse
         return buildStreamPacketSequence(allocator, progression, plan, component_count, layers);
-    }
-
-    var records: std.ArrayList(poc.Record) = .empty;
-    defer records.deinit(allocator);
-    if (main_records) |main| try records.appendSlice(allocator, main);
-    try records.appendSlice(allocator, tile_records);
-    return poc.buildSequence(allocator, plan, component_count, layers, records.items) catch |err| switch (err) {
+    return poc.buildSequence(allocator, plan, component_count, layers, records) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return CodestreamError.InvalidCodestream,
     };
@@ -15440,11 +15446,8 @@ fn buildSampledStrictPacketSequence(
     );
     defer component_plans.deinit();
     const full = plan.resolutions[plan.resolution_count - 1];
-    var records: std.ArrayList(poc.Record) = .empty;
-    defer records.deinit(allocator);
-    if (main_records) |main| try records.appendSlice(allocator, main);
-    try records.appendSlice(allocator, tile_records);
-    if (records.items.len == 0) {
+    const records = effectivePocRecords(main_records, tile_records) orelse &.{};
+    if (records.len == 0) {
         return packet_plan.sampledOrderedPackets(
             allocator,
             component_plans.components[0..component_count],
@@ -15463,14 +15466,15 @@ fn buildSampledStrictPacketSequence(
         layers,
         full.x0,
         full.y0,
-        records.items,
+        records,
     );
 }
 
 /// Collects the POC records of a single-tile stream from every tile-part
 /// header in stream order. A POC in a later tile-part continues the tile's
 /// progression (ISO A.6.6; Kakadu writes one per `Porder:T0` instance), so
-/// the first part's records alone need not cover the tile.
+/// the first part's records alone need not cover the tile. A tile that uses
+/// POC must carry one in its first tile-part header (A.6.6, B.12.3).
 fn readStrictSingleTilePocRecords(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -15502,6 +15506,9 @@ fn readStrictSingleTilePocRecords(
             &plt_carry,
         );
         defer tile_part.deinit(allocator);
+        if (tile_part_index != 0 and tile_part.poc_records.items.len != 0 and records.items.len == 0) {
+            return CodestreamError.InvalidCodestream;
+        }
         try records.appendSlice(allocator, tile_part.poc_records.items);
         cursor = tile_part.end;
     }
@@ -16666,6 +16673,7 @@ fn readStrictMultiTileTilePartSpans(
             .transform = transform,
             .component_count = component_count,
         } else null;
+        const tile_records_before = tile_poc_records[tile_index].items.len;
         const sod = try readTilePartHeaderMarkers(
             allocator,
             bytes,
@@ -16688,6 +16696,13 @@ fn readStrictMultiTileTilePartSpans(
             },
             coding_target,
         );
+        // A tile that uses POC carries one in its first tile-part header
+        // (ISO A.6.6, B.12.3); a POC that first appears later is malformed.
+        if (sot.tile_part_index != 0 and tile_records_before == 0 and
+            tile_poc_records[tile_index].items.len != 0)
+        {
+            return CodestreamError.InvalidCodestream;
+        }
         const external_headers = if (ppm_headers) |headers|
             try strictPpmGroupAt(headers, tile_part_index)
         else
@@ -17150,6 +17165,8 @@ fn readStrictMainHeaderIndex(
         } else if (marker == @backingInt(Marker.poc)) {
             const levels = cod_levels orelse return CodestreamError.InvalidCodestream;
             const layers = cod_layers orelse return CodestreamError.InvalidCodestream;
+            // ISO A.6.6: at most one POC marker segment in any header.
+            if (poc_records.items.len != 0) return CodestreamError.InvalidCodestream;
             poc.appendSegment(allocator, &poc_records, segment, component_count, levels + 1, layers) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return CodestreamError.InvalidCodestream,
@@ -18295,6 +18312,7 @@ fn readTilePartHeaderMarkers(
     var cursor = start;
     var expected_plt_index: u8 = 0;
     var saw_ppt = false;
+    var saw_poc = false;
     while (cursor + 1 < end) {
         const marker = readU16Be(bytes, cursor);
         if (marker == @backingInt(Marker.sod)) {
@@ -18327,6 +18345,9 @@ fn readTilePartHeaderMarkers(
         } else if (marker == @backingInt(Marker.com)) {
             // Tile-part comments are metadata only and do not affect packet spans.
         } else if (marker == @backingInt(Marker.poc)) {
+            // ISO A.6.6: at most one POC marker segment in any header.
+            if (saw_poc) return CodestreamError.InvalidCodestream;
+            saw_poc = true;
             if (poc_target) |target| {
                 if (!target.allowed) return CodestreamError.InvalidCodestream;
                 const limits = target.limits;

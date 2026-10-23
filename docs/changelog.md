@@ -5,6 +5,40 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### POC Semantics Checked Against ISO/IEC 15444-1 A.6.6
+
+- The multipart POC model had been derived from what Kakadu, OpenJPEG, and
+  Grok produce and accept. It is now checked against the standard text
+  (ITU-T T.800 08/2002, A.6.6, B.11, B.12.2, B.12.3). Several parts match:
+  - tile-parts are consecutive runs of one sequence;
+  - records from later tile-part headers append;
+  - packets already sent are skipped;
+  - every packet must be covered.
+- Three rules did not match and are now enforced:
+  - A tile's own POC **replaces** the main-header POC (`Tile-part POC > Main
+    POC > Tile-part COD > Main COD`). z2000 had appended the tile records
+    after the main ones, so a main POC that covered the tile hid the tile's
+    order, and such streams failed as `InvalidCodestream`. One helper,
+    `effectivePocRecords`, now serves the common-grid, sampled, and
+    multi-tile sequences.
+  - At most one POC marker segment per header, in the strict readers and the
+    JP2 wrapper audit.
+  - A tile that uses POC carries one in its first tile-part header; a POC
+    that first appears in a later tile-part is rejected.
+- Evidence: two tests failed on the previous commit and pass now.
+  - Main plus tile POC on single- and multi-tile grids decodes exactly.
+  - Duplicate POC (main and tile-part header) and a late first POC on single-
+    and multi-tile `R` parts are rejected; the same POC moved to the first
+    tile-part decodes.
+  - Kakadu 8.4.1 and Grok 20.4.12 decode the main-plus-tile construction
+    exactly; OpenJPEG 2.5.4 follows the main POC and misdecodes it.
+  - All three references accept the duplicate and late-POC streams, which
+    z2000 now rejects as A.6.6 requires.
+  - The corpus still reports 104 decode passes and no mismatch.
+- Still open: A.6.6 also requires each progression volume to be declared in
+  a tile-part header before its first packet; that order is not yet
+  checked.
+
 ### Single-Tile POC In A Later Tile-Part Header
 
 - Single-tile strict decode built its packet schedule from the first

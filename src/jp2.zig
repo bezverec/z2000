@@ -1621,6 +1621,7 @@ fn validateMainHeaderMarkers(
     var expected_plm_index: u16 = 0;
     var override_state = ComponentOverrideState{};
     var saw_crg = false;
+    var saw_poc = false;
     var profile_state = profile_signaling.State.init(rsiz);
     while (cursor < payload.len - 2) {
         const marker = try readU16Be(payload, cursor);
@@ -1676,6 +1677,9 @@ fn validateMainHeaderMarkers(
             },
             marker_poc => {
                 if (!saw_qcd) return Jp2Error.InvalidCodestream;
+                // ISO A.6.6: at most one POC marker segment in any header.
+                if (saw_poc) return Jp2Error.InvalidCodestream;
+                saw_poc = true;
             },
             marker_crg => {},
             marker_cap, marker_prf => {},
@@ -1963,6 +1967,7 @@ fn validateFirstTilePartHeader(
     var cursor = start;
     var plt_state = PltState{};
     var part_has_ppt = false;
+    var part_has_poc = false;
     while (cursor < end) {
         const marker = try readU16Be(payload, cursor);
         if ((marker >> 8) != 0xff) return Jp2Error.InvalidCodestream;
@@ -2002,8 +2007,12 @@ fn validateFirstTilePartHeader(
                 return;
             },
             marker_plt, marker_com => {},
-            // Part 1 permits POC in any tile-part header, not only the first.
-            marker_poc => {},
+            // Part 1 permits POC in any tile-part header, not only the first,
+            // but at most one per header (ISO A.6.6).
+            marker_poc => {
+                if (part_has_poc) return Jp2Error.InvalidCodestream;
+                part_has_poc = true;
+            },
             marker_rgn => {},
             marker_ppt => part_has_ppt = true,
             marker_sot, marker_eoc => return Jp2Error.InvalidCodestream,
