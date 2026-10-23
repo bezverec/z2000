@@ -1650,6 +1650,7 @@ pub const DirectBlockScratch = struct {
     width: usize = 0,
     height: usize = 0,
     pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty,
+    pass_boundaries: std.ArrayList(PassBoundary) = .empty,
     bytes: std.ArrayList(u8) = .empty,
     segments: std.ArrayList(SegmentSpan) = .empty,
     nb_flags: std.ArrayList(u16) = .empty,
@@ -1672,6 +1673,7 @@ pub const DirectBlockScratch = struct {
         self.flags.deinit(self.allocator);
         self.significant_words.deinit(self.allocator);
         self.pass_payloads.deinit(self.allocator);
+        self.pass_boundaries.deinit(self.allocator);
         self.bytes.deinit(self.allocator);
         self.segments.deinit(self.allocator);
         self.nb_flags.deinit(self.allocator);
@@ -1681,6 +1683,7 @@ pub const DirectBlockScratch = struct {
 
     fn reset(self: *DirectBlockScratch) void {
         self.pass_payloads.clearRetainingCapacity();
+        self.pass_boundaries.clearRetainingCapacity();
         self.bytes.clearRetainingCapacity();
         self.segments.clearRetainingCapacity();
         self.current_pass_distortion = null;
@@ -2345,6 +2348,60 @@ pub fn encodeBlockSymbolsSegmentIsoMq(allocator: std.mem.Allocator, block: Encod
     };
 }
 
+/// Where a coding pass ends inside its codeword segment, recorded while the
+/// segment is coded and resolved by resolveSegmentPassEnds once it is
+/// finished.
+const PassBoundary = union(enum) {
+    mq: mq_iso.PassEnd,
+    /// The bytes holding every raw bit written so far.
+    raw: usize,
+};
+
+/// The truncation length of the pass ending at `boundary` within its
+/// finished segment `codeword`: the shortest prefix that decodes that pass
+/// and every earlier one of the segment exactly, never ending on 0xFF.
+fn passTruncationLength(boundary: PassBoundary, codeword: []const u8) usize {
+    return switch (boundary) {
+        .mq => |pass_end| mq_iso.truncationLength(pass_end, codeword),
+        .raw => |written| blk: {
+            var length = @min(written, codeword.len);
+            // The byte after a raw 0xFF is below 0x80 (bit stuffing).
+            if (length > 0 and length < codeword.len and codeword[length - 1] == 0xff) length += 1;
+            break :blk length;
+        },
+    };
+}
+
+/// Ends each pass of one finished codeword segment, which starts at byte
+/// `segment_start` of the block payload, at its truncation length rather
+/// than at the bytes the coder had emitted when the pass ended: those leave
+/// out the decisions still in the MQ registers (or the raw bits of a partial
+/// byte), so a quality layer ending there would misdecode the end of the
+/// pass. A pass never ends before the one ahead of it, and the segment's
+/// last pass ends with the segment. With `chain_offsets` each pass's
+/// byte_offset becomes the end of the pass ahead of it; otherwise the
+/// recorded offsets are kept.
+fn resolveSegmentPassEnds(
+    passes: []CodeBlockPassPayload,
+    boundaries: []const PassBoundary,
+    codeword: []const u8,
+    segment_start: u64,
+    chain_offsets: bool,
+) void {
+    std.debug.assert(passes.len == boundaries.len);
+    var previous = segment_start;
+    for (passes, boundaries, 0..) |*pass, boundary, index| {
+        const end: u64 = if (index + 1 == passes.len)
+            segment_start + codeword.len
+        else
+            @max(previous, segment_start + passTruncationLength(boundary, codeword));
+        if (chain_offsets) pass.byte_offset = @intCast(previous);
+        pass.byte_length = @intCast(end - pass.byte_offset);
+        pass.cumulative_bytes = end;
+        previous = end;
+    }
+}
+
 pub fn encodeBlockSymbolsSegmentIsoMqContinuous(allocator: std.mem.Allocator, block: EncodedBlockView) !CodeBlockSegment {
     return encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(allocator, block, .{});
 }
@@ -2370,12 +2427,13 @@ pub fn encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(
 
     var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
     errdefer pass_payloads.deinit(allocator);
+    var boundaries: std.ArrayList(PassBoundary) = .empty;
+    defer boundaries.deinit(allocator);
     var encoder = try mq_iso.Encoder.init(allocator, mq_context_count);
     defer encoder.deinit();
     try encoder.resetJpeg2000Contexts();
 
     var symbol_offset: usize = 0;
-    var previous_bytes: u64 = 0;
     for (block.passes, 0..) |pass, pass_ordinal| {
         if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
         if (style.reset_context and pass_ordinal != 0) try encoder.resetJpeg2000Contexts();
@@ -2383,16 +2441,15 @@ pub fn encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(
         for (pass_symbols) |symbol| {
             try encoder.write(mqContextIndex(symbol.context), symbol.bit);
         }
-        const cumulative_bytes: u64 = @intCast(encoder.emittedByteCount());
         try pass_payloads.append(allocator, .{
             .kind = pass.kind,
             .magnitude_bitplane = pass.magnitude_bitplane,
             .symbol_count = pass.symbol_count,
-            .byte_offset = @intCast(previous_bytes),
-            .byte_length = @intCast(cumulative_bytes - previous_bytes),
-            .cumulative_bytes = cumulative_bytes,
+            .byte_offset = 0,
+            .byte_length = 0,
+            .cumulative_bytes = 0,
         });
-        previous_bytes = cumulative_bytes;
+        try boundaries.append(allocator, .{ .mq = encoder.passEnd() });
         symbol_offset += pass.symbol_count;
     }
     if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
@@ -2405,14 +2462,7 @@ pub fn encodeBlockSymbolsSegmentIsoMqContinuousWithStyle(
     else
         try encoder.finish();
     errdefer allocator.free(encoded);
-    if (pass_payloads.items.len > 0) {
-        const last = &pass_payloads.items[pass_payloads.items.len - 1];
-        if (encoded.len < last.byte_offset) return EbcotError.InvalidBlock;
-        last.byte_length = encoded.len - last.byte_offset;
-        last.cumulative_bytes = @intCast(encoded.len);
-    } else if (encoded.len != 0) {
-        return EbcotError.InvalidBlock;
-    }
+    resolveSegmentPassEnds(pass_payloads.items, boundaries.items, encoded, 0, true);
 
     const pass_slice = try pass_payloads.toOwnedSlice(allocator);
     errdefer allocator.free(pass_slice);
@@ -2539,8 +2589,13 @@ const RawBitWriter = struct {
         }
     }
 
-    fn emittedByteCount(self: RawBitWriter) usize {
-        return self.activeByteCount();
+    /// The bytes that hold every bit written so far, the partial one
+    /// included.
+    fn writtenByteCount(self: *const RawBitWriter) usize {
+        const bytes = (self.output orelse &self.buffer).items;
+        const emitted = bytes.len - self.output_start;
+        const capacity: u8 = if (emitted == 0 or bytes[bytes.len - 1] != 0xff) 8 else 7;
+        return emitted + @intFromBool(self.remaining < capacity);
     }
 
     fn appendByte(self: *RawBitWriter, value: u8) !void {
@@ -2648,6 +2703,8 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypass(
     try encoder.resetJpeg2000Contexts();
     var raw = RawBitWriter.init(allocator);
     defer raw.deinit();
+    var boundaries: std.ArrayList(PassBoundary) = .empty;
+    defer boundaries.deinit(allocator);
 
     var symbol_offset: usize = 0;
     var segment_start_bytes: u64 = 0;
@@ -2676,16 +2733,18 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypass(
         symbol_offset += pass.symbol_count;
         segment_pass_count += 1;
 
-        const running: u64 = segment_start_bytes +
-            (if (is_raw) @as(u64, raw.buffer.items.len) else @as(u64, encoder.emittedByteCount()));
         try pass_payloads.append(allocator, .{
             .kind = pass.kind,
             .magnitude_bitplane = pass.magnitude_bitplane,
             .symbol_count = pass.symbol_count,
             .byte_offset = @intCast(segment_start_bytes),
-            .byte_length = @intCast(running - segment_start_bytes),
-            .cumulative_bytes = running,
+            .byte_length = 0,
+            .cumulative_bytes = segment_start_bytes,
         });
+        try boundaries.append(allocator, if (is_raw)
+            .{ .raw = raw.writtenByteCount() }
+        else
+            .{ .mq = encoder.passEnd() });
 
         const last_pass = ordinal + 1 == block.passes.len;
         if (last_pass or passEndsBypassSegment(style, block.bitplanes, pass.magnitude_bitplane, pass.kind)) {
@@ -2702,11 +2761,15 @@ pub fn encodeBlockSymbolsSegmentIsoMqBypass(
                 .pass_count = segment_pass_count,
                 .byte_length = @intCast(encoded.len),
             });
-            const cumulative: u64 = @intCast(bytes.items.len);
-            const fixup = &pass_payloads.items[pass_payloads.items.len - 1];
-            fixup.byte_length = cumulative - fixup.byte_offset;
-            fixup.cumulative_bytes = cumulative;
-            segment_start_bytes = cumulative;
+            const first_pass = pass_payloads.items.len - segment_pass_count;
+            resolveSegmentPassEnds(
+                pass_payloads.items[first_pass..],
+                boundaries.items[first_pass..],
+                encoded,
+                segment_start_bytes,
+                false,
+            );
+            segment_start_bytes = @intCast(bytes.items.len);
             segment_pass_count = 0;
             if (!last_pass) {
                 if (segment_is_raw) raw.reset() else encoder.resetStream();
@@ -2970,11 +3033,12 @@ pub fn encodeBlockSymbolsSegmentContinuousWithStyle(allocator: std.mem.Allocator
 
     var pass_payloads: std.ArrayList(CodeBlockPassPayload) = .empty;
     errdefer pass_payloads.deinit(allocator);
+    var pass_ends: std.ArrayList(mq.PassEnd) = .empty;
+    defer pass_ends.deinit(allocator);
     var encoder = try mq.Encoder.init(allocator, mq_context_count);
     defer encoder.deinit();
 
     var symbol_offset: usize = 0;
-    var previous_bytes: u64 = 0;
     for (block.passes, 0..) |pass, pass_ordinal| {
         if (symbol_offset + pass.symbol_count > block.symbols.len) return EbcotError.InvalidBlock;
         if (style.reset_context and pass_ordinal != 0) encoder.resetContexts();
@@ -2983,29 +3047,33 @@ pub fn encodeBlockSymbolsSegmentContinuousWithStyle(allocator: std.mem.Allocator
             try encoder.write(mqContextIndex(symbol.context), symbol.bit);
         }
 
-        const cumulative_bytes = encoderBufferedByteCount(&encoder);
         try pass_payloads.append(allocator, .{
             .kind = pass.kind,
             .magnitude_bitplane = pass.magnitude_bitplane,
             .symbol_count = pass.symbol_count,
-            .byte_offset = @intCast(previous_bytes),
-            .byte_length = @intCast(cumulative_bytes - previous_bytes),
-            .cumulative_bytes = cumulative_bytes,
+            .byte_offset = 0,
+            .byte_length = 0,
+            .cumulative_bytes = 0,
         });
-        previous_bytes = cumulative_bytes;
+        try pass_ends.append(allocator, encoder.passEnd());
         symbol_offset += pass.symbol_count;
     }
     if (symbol_offset != block.symbols.len) return EbcotError.InvalidBlock;
 
     const encoded = try encoder.finish();
     errdefer allocator.free(encoded.bytes);
-    if (pass_payloads.items.len > 0) {
-        const last = &pass_payloads.items[pass_payloads.items.len - 1];
-        if (encoded.bytes.len < last.byte_offset) return EbcotError.InvalidBlock;
-        last.byte_length = encoded.bytes.len - last.byte_offset;
-        last.cumulative_bytes = @intCast(encoded.bytes.len);
-    } else if (encoded.bytes.len != 0) {
-        return EbcotError.InvalidBlock;
+    // As resolveSegmentPassEnds does for the ISO coder: each pass ends where
+    // a decoder can recover it, not at the bytes written when it ended.
+    var previous_bytes: u64 = 0;
+    for (pass_payloads.items, pass_ends.items, 0..) |*payload, pass_end, index| {
+        const end: u64 = if (index + 1 == pass_payloads.items.len)
+            encoded.bytes.len
+        else
+            @max(previous_bytes, mq.truncationLength(pass_end, encoded.bytes));
+        payload.byte_offset = @intCast(previous_bytes);
+        payload.byte_length = @intCast(end - previous_bytes);
+        payload.cumulative_bytes = end;
+        previous_bytes = end;
     }
 
     const pass_slice = try pass_payloads.toOwnedSlice(allocator);
@@ -3076,10 +3144,6 @@ fn encodeBlockSymbolsSegmentTerminated(allocator: std.mem.Allocator, block: Enco
         .bytes = byte_slice,
         .segments = segment_slice,
     };
-}
-
-fn encoderBufferedByteCount(encoder: *const mq.Encoder) u64 {
-    return @as(u64, @intCast(encoder.writer.bytes.items.len)) + @intFromBool(encoder.writer.used != 0);
 }
 
 fn ownedSegmentFromDirectScratch(
@@ -5841,7 +5905,6 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
     raw.resetInto(&scratch.bytes);
 
     var segment_start_bytes: u64 = 0;
-    var previous_running: u64 = 0;
     var segment_pass_count: u16 = 0;
     var segment_is_raw = false;
     var pass_index: u16 = 0;
@@ -5887,17 +5950,18 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
 
             segment_pass_count += 1;
             pass_index += 1;
-            const running: u64 = segment_start_bytes +
-                (if (is_raw) @as(u64, raw.emittedByteCount()) else @as(u64, iso.emittedByteCount()));
             try scratch.pass_payloads.append(scratch.allocator, .{
                 .kind = kind,
                 .magnitude_bitplane = bitplane,
                 .symbol_count = symbol_count,
-                .byte_offset = @intCast(previous_running),
-                .byte_length = @intCast(running - previous_running),
-                .cumulative_bytes = running,
+                .byte_offset = 0,
+                .byte_length = 0,
+                .cumulative_bytes = 0,
             });
-            previous_running = running;
+            try scratch.pass_boundaries.append(scratch.allocator, if (is_raw)
+                .{ .raw = raw.writtenByteCount() }
+            else
+                .{ .mq = iso.passEnd() });
 
             const last_pass = pass_index == total_passes;
             if (last_pass or passEndsBypassSegment(style, bitplanes, bitplane, kind)) {
@@ -5918,12 +5982,15 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
                     .pass_count = segment_pass_count,
                     .byte_length = @intCast(encoded_len),
                 });
-                const cumulative: u64 = @intCast(scratch.bytes.items.len);
-                const fixup = &scratch.pass_payloads.items[scratch.pass_payloads.items.len - 1];
-                fixup.byte_length = cumulative - fixup.byte_offset;
-                fixup.cumulative_bytes = cumulative;
-                segment_start_bytes = cumulative;
-                previous_running = cumulative;
+                const first_pass = scratch.pass_payloads.items.len - segment_pass_count;
+                resolveSegmentPassEnds(
+                    scratch.pass_payloads.items[first_pass..],
+                    scratch.pass_boundaries.items[first_pass..],
+                    scratch.bytes.items[@intCast(segment_start_bytes)..],
+                    segment_start_bytes,
+                    true,
+                );
+                segment_start_bytes = @intCast(scratch.bytes.items.len);
                 segment_pass_count = 0;
                 if (!last_pass) {
                     raw.resetInto(&scratch.bytes);

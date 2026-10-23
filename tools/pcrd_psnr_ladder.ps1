@@ -29,6 +29,14 @@ param(
 #   layer 2: z2000 1329 B -> 19.70 dB | opj -> 20.00 dB | delta 0.31 dB
 #   layer 3: z2000 2639 B -> 22.23 dB | opj -> 22.87 dB | delta 0.65 dB
 #   layer 4: z2000 5355 B -> 26.35 dB | opj -> 26.50 dB | delta 0.15 dB
+# Ending each layer at its pass boundary's decodable truncation length
+# (2026-10-23; before, a layer ending on a continuous codeword's pass
+# boundary dropped the decisions still in the MQ registers, and every
+# decoder misdecoded the end of that pass) produces:
+#   layer 1: z2000  667 B -> 18.70 dB | opj -> 17.91 dB | delta -0.79 dB
+#   layer 2: z2000 1333 B -> 20.70 dB | opj -> 20.00 dB | delta -0.70 dB
+#   layer 3: z2000 2645 B -> 23.42 dB | opj -> 22.97 dB | delta -0.46 dB
+#   layer 4: z2000 5355 B -> 26.92 dB | opj -> 26.50 dB | delta -0.42 dB
 # Keep the historical values above as the before-change baseline.
 
 $ErrorActionPreference = 'Stop'
@@ -189,3 +197,4 @@ Write-Host ""
 Write-Host ("worst allocator deficit vs OpenJPEG at matched bytes: {0:F2} dB" -f $worst)
 Write-Host "(2026-07-11 baseline: 1.78 / 0.69 / 1.21 / 1.78 dB per layer; improvements should shrink these)"
 Write-Host "(2026-07-13 gain-normalized/profile-matched: 1.60 / 0.31 / 0.65 / 0.15 dB)"
+Write-Host "(2026-10-23 decodable pass truncation lengths: -0.79 / -0.70 / -0.46 / -0.42 dB, ahead of OpenJPEG)"

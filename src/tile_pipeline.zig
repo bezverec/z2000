@@ -4250,21 +4250,13 @@ fn roiFirstLayerTruncation(segment: ebcot.CodeBlockSegment, passes: u16) !t2.Lay
         }
         return whole;
     }
-    // A continuous codeword's pass boundary records only the bytes the MQ
-    // coder has emitted; the decisions still in its registers need a few
-    // more. Bytes of the running codeword beyond the boundary never disturb
-    // the passes before it, so the layer takes more than any MQ flush writes.
+    // A continuous codeword's pass boundary is its truncation length, the
+    // shortest prefix that decodes the passes before it (never ending on
+    // 0xFF).
     const point = try segment.truncationPointForPasses(passes);
-    var decodable = point.cumulative_bytes + mq_register_bytes;
-    // A contribution ending in 0xFF would make a marker with whatever the
-    // packet holds next; the byte after it is below 0x80 (bit stuffing).
-    while (decodable < segment.byte_length and segment.bytes[decodable - 1] == 0xff) decodable += 1;
-    if (decodable >= segment.byte_length) return whole;
-    return .{ .cumulative_passes = point.cumulative_passes, .cumulative_bytes = decodable };
+    if (point.cumulative_bytes >= segment.byte_length) return whole;
+    return .{ .cumulative_passes = point.cumulative_passes, .cumulative_bytes = point.cumulative_bytes };
 }
-
-/// More bytes than an MQ flush (C.2.9) ever writes past the emitted ones.
-const mq_register_bytes = 5;
 
 fn normalizedLayerTruncation(
     segment: ebcot.CodeBlockSegment,

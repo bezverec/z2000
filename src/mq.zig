@@ -164,6 +164,16 @@ pub const Encoder = struct {
         self.symbol_count += 1;
     }
 
+    /// The coder state at a truncation point of a continuous codeword; see
+    /// truncationLength.
+    pub fn passEnd(self: Encoder) PassEnd {
+        return .{
+            .emitted = self.writer.bytes.items.len,
+            .used = self.writer.used,
+            .pending = self.pending,
+        };
+    }
+
     pub fn finish(self: *Encoder) !Encoded {
         try self.finalize();
 
@@ -219,6 +229,35 @@ pub const Encoder = struct {
         }
     }
 };
+
+/// Encoder state at a coding-pass boundary of a continuous codeword: the
+/// complete bytes written, the bits of the partial one, and the pending
+/// underflow bits whose value later decisions settle.
+pub const PassEnd = struct {
+    emitted: usize,
+    used: u4,
+    pending: usize,
+};
+
+/// The truncation length of the coding pass ending at `pass_end`: a prefix
+/// of the finished codeword `codeword` from which the decoder recovers every
+/// symbol coded before that boundary. The decoder reads past a codeword as
+/// zero bits, so a prefix holding every bit up to the end of the interval's
+/// low register (the written bits, the pending bits and the code_bits
+/// register bits) reads as a value no lower than the low end, and no higher
+/// than the finished codeword, which lies in the interval. A prefix never
+/// ends on 0xFF; the byte after it is stuffed below 0x80.
+pub fn truncationLength(pass_end: PassEnd, codeword: []const u8) usize {
+    std.debug.assert(pass_end.emitted <= codeword.len);
+    var needed: usize = pass_end.used + pass_end.pending + code_bits;
+    var length = pass_end.emitted;
+    while (needed > 0 and length < codeword.len) : (length += 1) {
+        const capacity: usize = if (length > 0 and codeword[length - 1] == 0xff) 7 else 8;
+        needed -|= capacity;
+    }
+    if (length > 0 and length < codeword.len and codeword[length - 1] == 0xff) length += 1;
+    return length;
+}
 
 pub const Decoder = struct {
     allocator: std.mem.Allocator,
