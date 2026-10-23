@@ -873,9 +873,10 @@ override fixtures pin the fix against their PGX-exact native decode.
 
 What remains on this item:
 
-1. Commit or obtain a one-component multi-tile fixture. The grayscale banded
-   case currently rides on the shared per-tile path rather than on its own
-   evidence, because no z2000 encoder emits that layout.
+1. Commit or obtain an independently written one-component multi-tile
+   fixture. The grayscale banded case currently rides on the shared per-tile
+   path; z2000's gray and wide encoders now write that layout, but the
+   evidence should not come from the codec under test alone.
 2. Broaden independent evidence for multi-tile uniform-sampling encode. Kakadu
    8.4.1 reconstructs the one-component stream exactly; the two-component
    layout has z2000 round-trip evidence only, and OpenJPEG/Grok legs are not
@@ -898,8 +899,10 @@ correctness gate.
 
 Promote decoder-proven capabilities to the writer in this order:
 
-1. generic component counts, signedness, precision, subsampling, and direct
-   raw-codestream output;
+1. **Complete on the wide encoder:** generic component counts (up to 16384),
+   signedness, precision (1 to 38 bits), subsampling, reference-grid origins,
+   CRG registration, and direct raw-codestream output (`zraw-to-j2k`). Open:
+   tile-part divisions and empty tile-components on that componentwise path;
 2. per-component coding style and quantization controls;
 3. `RGN` Maxshift ROI, component registration, and general tile-part/header
    schedules;

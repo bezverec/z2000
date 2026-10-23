@@ -5,6 +5,43 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Wide Encoder: Any Part 1 Component Layout
+
+- `zraw-to-j2k` / `encodeNativeLosslessWithOptions` encode any component
+  layout a ZRAW can hold: up to 16384 components, each with its own
+  precision (1 to 38 bits), signedness, and XRsiz/YRsiz, on a reference grid
+  with an origin, with CRG registration written as a CRG marker. Until now
+  it took one to four full-resolution components of one precision at the
+  origin, which still take the unchanged uniform path.
+- The new componentwise path codes every (tile, component) pair on its own,
+  in parallel, and merges each tile's packets into the sampled B.12 order of
+  the sampled planar encoder, whose merge
+  (`mergeSampledComponentPacketStreams`) and writers now work over any
+  component count and take a prebuilt main header. Every progression order
+  is available without POC (as its one-record schedule), with POC up to 256
+  components, TLM, PPM, PPT, SOP/EPH, layers, styles, and RCT over three
+  components on one grid with one precision. QCC carries each other
+  precision, with two-byte selectors above 256 components.
+- The native decoder now accepts RCT when the other components differ in
+  precision or sampling (it transforms components 0..2 only), and the
+  header check enforces what G.1 asks of the transformed three: one grid and
+  one bit depth. A strict SIZ corruption test that changes the precision of
+  one RCT component keeps failing closed.
+- Evidence: at 8 and 16 bits the componentwise path writes the sampled
+  encoder's bytes for 4:2:0-style layouts on one tile, tile grids, a
+  shifted origin with PPM, PPT with SOP/EPH, and POC without TLM; the
+  sampled encoder's own bytes are unchanged on 14 option sets. Round trips
+  cover 1-, 12-, 23-, 31-, and 38-bit components with mixed sampling and
+  signedness at two origins, RCT plus subsampled 5- and 33-bit components,
+  CRG registration, and 300 components of every precision, with identical
+  bytes on one and four threads; RCT over unequal precisions, POC over 300
+  components, and a tile without samples of a subsampled component are
+  refused. Kakadu 8.4.1 decodes every layout up to 32 bits exactly
+  (including 20 components and CRG); OpenJPEG 2.5.4 matches every
+  full-resolution component (it upsamples subsampled ones and converts three
+  components with subsampled chroma from sYCC); Grok 20.4.12 matches the
+  layouts it writes as PGX.
+
 ### POC Tile-Part Divisions As Key Runs
 
 - `R`, `L`, and `C` tile-parts now work under any POC schedule. Each part is

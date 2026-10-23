@@ -144,8 +144,8 @@ decoded, encoded, malformed-tested, and independently reproduced.
 
 ### Current Completion Estimate
 
-As of 2026-10-22, the general-purpose G0-G7 program is estimated at **about
-62% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
+As of 2026-10-23, the general-purpose G0-G7 program is estimated at **about
+63% complete**, with an uncertainty of roughly **+/- 8 percentage points**.
 This is a planning estimate, not a conformance score. It gives every phase
 equal weight because the remaining effort is too uncertain for a more precise
 cost model; the headline is the rounded mean of the phase estimates below.
@@ -159,7 +159,7 @@ method. Neither number changes the bounded 100/100 scorecards.
 | G2 | 80% | Thirteen independent decode override slices through three-level main/tile/tile-component 5/3/9/7 precedence plus shared encoder/decoder B.7 geometry | Arbitrary PLT-less multipart PPM and broader packed combinations |
 | G3 | 53% | Broad T1/T2 styles, progression, complete TLM ST/SP parsing with SOT reconciliation, POC including bounded sampled PPM composition, multipart foundations, bounded main/tile `RGN` Maxshift reconstruction, main-header `CRG` registration metadata with exact T.803 evidence, checked `PLM` decode over foreign Kakadu packet/T1 payloads, a shared raw/JP2 `Rsiz`/`CAP`/`PRF` syntax-consistency gate, and decode of every Part 1 profile in Table A.10 (Profile 0/1, cinema, broadcast, IMF) with T.803, Kakadu, and OpenJPEG evidence | Independently emitted PLM marker evidence, actual externally specified CAP/PRF payload profiles where relevant, PLM/ROI/registration encode, POC emission for `P` divisions beyond the canonical PCRL sequence, and enforcing that each POC volume is declared before its first packet (the remaining A.6.6 rule; the rest is now checked against the T.800 text) |
 | G4 | 70% | Direct resolution reduction, quality-layer-prefix, bounded row-major tile selection, single-/multi-tile reference-region selection whose intra-tile pruning reaches packet assembly, selected and reduced reference-grid upsampling, selected sampled sYCC conversion, push-based tile and band output sinks on every bounded decode shape with streaming bounded-TIFF conversion, plus T1 skipping, catalog compaction, and borrowed packet spans | Incremental codestream input, tile-local synthesis planes, and the remaining conversion layouts |
-| G5 | 40% | Strong bounded multi-tile, progression, style, and rate-control encoder; a wide i64 encoder for signed 1- to 38-bit samples with tile grids, RCT, every progression, POC, and packed headers, byte-identical to the main encoders at 8/16 bits | Generic components and per-component controls, rate control on the wide encoder, ROI, and streaming encode |
+| G5 | 45% | Strong bounded multi-tile, progression, style, and rate-control encoder; a wide i64 encoder for any Part 1 component layout (16384 components, 1- to 38-bit mixed precision and signedness, subsampling, origins, CRG) with tile grids, RCT, every progression, POC, and packed headers, byte-identical to the main and sampled encoders at 8/16 bits | Per-component coding controls, rate control and tile-part divisions on the wide encoder, ROI, and streaming encode |
 | G6 | 50% | Raw PGX/ZRAW, core JP2, bounded palette/alpha/colour/metadata workflows | General legal mappings, preservation rules, and representability diagnostics |
 | G7 | 37% | Extensive corruption tests, deterministic builds, four-codec interop, cross-platform prerelease evidence assembled and tested locally, a defined clamping policy for lossy versus exact decode | Claimed Part 4 classes, wider fuzz/resource gates, API/CLI stability, clean 1.0 evidence |
 

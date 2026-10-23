@@ -817,6 +817,7 @@ pub fn encodeNativeLosslessWithOptions(
     source: NativeSamplePlanes,
     options: LosslessOptions,
 ) ![]u8 {
+    if (!nativeLayoutIsUniform(source)) return encodeNativeWideComponentwise(allocator, source, options);
     const component_count = source.planes.len;
     if (component_count == 0 or component_count > color.max_components) return CodestreamError.UnsupportedPayload;
     if (source.reference_x0 != 0 or source.reference_y0 != 0) return CodestreamError.UnsupportedPayload;
@@ -938,6 +939,383 @@ pub fn encodeNativeLosslessWithOptions(
         .component_signed = component_signed,
         .wide_quantization = quantization,
     }, encode_options);
+}
+
+/// Whether `source` fits the wide encoder's uniform path: one to four
+/// components of one precision, full resolution on the reference grid at the
+/// origin, without CRG registration.
+fn nativeLayoutIsUniform(source: NativeSamplePlanes) bool {
+    if (source.planes.len == 0 or source.planes.len > color.max_components) return false;
+    if (source.reference_x0 != 0 or source.reference_y0 != 0) return false;
+    const precision = source.planes[0].layout.precision;
+    for (source.planes) |plane| {
+        const layout = plane.layout;
+        if (layout.precision != precision or layout.x_step != 1 or layout.y_step != 1 or
+            layout.x0 != 0 or layout.y0 != 0 or layout.registration_x != 0 or layout.registration_y != 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The wide encoder's componentwise path, for any Part 1 component layout the
+/// uniform path does not carry: up to 16384 components, mixed precision and
+/// signedness, SIZ subsampling, a reference-grid origin, and CRG
+/// registration. Each component of each tile is transformed and coded on its
+/// own (i64 5/3 and T1, as a one-component scaffold on the component's tile
+/// rectangle), and the tile's packets are merged into the sampled progression
+/// order of B.12, the way `encodeLosslessSampledPlanarWithOptions` does for
+/// 8/16-bit planes. QCD carries component 0's wide signalling and QCC every
+/// component whose precision differs, with two-byte selectors above 256
+/// components. Tiles are written one tile-part each.
+fn encodeNativeWideComponentwise(
+    allocator: std.mem.Allocator,
+    source: NativeSamplePlanes,
+    requested: LosslessOptions,
+) ![]u8 {
+    const component_count = source.planes.len;
+    if (component_count == 0 or component_count > max_strict_metadata_components) return CodestreamError.UnsupportedPayload;
+    if (source.reference_x1 <= source.reference_x0 or source.reference_y1 <= source.reference_y0) {
+        return CodestreamError.InvalidCodestream;
+    }
+    for (source.planes) |plane| {
+        const layout = plane.layout;
+        if (layout.precision == 0 or layout.precision > max_wide_encode_precision) return CodestreamError.UnsupportedPayload;
+        if (layout.x_step == 0 or layout.y_step == 0) return CodestreamError.InvalidCodestream;
+        // The component grid must be the SIZ one (B.2).
+        if (layout.x0 != ceilDivU32(source.reference_x0, layout.x_step) or
+            layout.y0 != ceilDivU32(source.reference_y0, layout.y_step) or
+            layout.width != ceilDivU32(source.reference_x1, layout.x_step) - layout.x0 or
+            layout.height != ceilDivU32(source.reference_y1, layout.y_step) - layout.y0 or
+            plane.samples.len != try std.math.mul(usize, layout.width, layout.height))
+        {
+            return CodestreamError.InvalidCodestream;
+        }
+    }
+
+    var options = requested;
+    // One tile-part per tile; the default resolution divisions collapse to it.
+    if (options.tile_part_divisions == 'R') options.tile_part_divisions = null;
+    if (options.transform != .reversible_5_3 or options.quantization != .none or
+        options.emit_temporary_payload_sidecar or options.rate_count != 0 or options.t1_backend != .iso_mq or
+        options.tile_part_divisions != null or (options.ppm and options.ppt) or (options.ppt and !options.plt))
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    if (options.poc_in_tile_header and options.poc_records.len == 0) return CodestreamError.InvalidCodestream;
+    // POC records carry one-byte component indices here.
+    if (options.poc_records.len != 0 and component_count > 256) return CodestreamError.UnsupportedPayload;
+    switch (options.mct) {
+        .none => {},
+        // RCT needs three components on one grid with one precision (G.2).
+        .rct => {
+            if (component_count < 3) return CodestreamError.UnsupportedPayload;
+            const first = source.planes[0].layout;
+            for (source.planes[1..3]) |plane| {
+                const layout = plane.layout;
+                if (layout.precision != first.precision or layout.x_step != first.x_step or layout.y_step != first.y_step) {
+                    return CodestreamError.UnsupportedPayload;
+                }
+            }
+        },
+        .ict => return CodestreamError.UnsupportedPayload,
+    }
+    if (options.levels > 32) return CodestreamError.TooManyLevels;
+    if (options.layers == 0 or options.layers > max_quality_layers or options.threads == 0) return CodestreamError.InvalidCodestream;
+    try validateBlockSize(options.block_width, options.block_height);
+    try validatePrecincts(options);
+    // The shared style and progression rules; origins and PLT are this
+    // writer's own business.
+    var style_check = options;
+    style_check.image_origin_x = 0;
+    style_check.image_origin_y = 0;
+    style_check.tile_origin_x = 0;
+    style_check.tile_origin_y = 0;
+    style_check.plt = true;
+    try validateCodingPath(style_check);
+    options.image_origin_x = source.reference_x0;
+    options.image_origin_y = source.reference_y0;
+
+    const grid = tile_grid.Grid.init(.{
+        .xsiz = source.reference_x1,
+        .ysiz = source.reference_y1,
+        .xosiz = source.reference_x0,
+        .yosiz = source.reference_y0,
+        .xtsiz = options.tile_width,
+        .ytsiz = options.tile_height,
+        .xtosiz = options.tile_origin_x,
+        .ytosiz = options.tile_origin_y,
+    }) catch return CodestreamError.InvalidCodestream;
+    const tile_count = std.math.cast(usize, grid.tileCount()) orelse return CodestreamError.ImageTooLarge;
+    if (tile_count == 0 or tile_count > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+    const levels = actualDwtLevels(source.reference_x1 - source.reference_x0, source.reference_y1 - source.reference_y0, options.levels);
+    const encode_options = normalizedEncodePrecinctOptions(options, levels);
+
+    const quantizations = try allocator.alloc(WideReversibleQuantization, component_count);
+    defer allocator.free(quantizations);
+    for (source.planes, quantizations) |plane, *quantization| {
+        quantization.* = try WideReversibleQuantization.forPrecision(plane.layout.precision);
+    }
+
+    // ISO B.1.1 DC level shift for unsigned components, then the RCT.
+    const planes = try allocator.alloc([]i64, component_count);
+    var shifted: usize = 0;
+    defer {
+        for (planes[0..shifted]) |plane| allocator.free(plane);
+        allocator.free(planes);
+    }
+    for (source.planes) |plane| {
+        const coefficients = try allocator.dupe(i64, plane.samples);
+        planes[shifted] = coefficients;
+        shifted += 1;
+        if (!plane.layout.signed) {
+            const shift = @as(i64, 1) << @as(u6, @intCast(plane.layout.precision - 1));
+            for (coefficients) |*value| value.* -= shift;
+        }
+    }
+    if (options.mct == .rct) forwardRctWide(planes[0..3]);
+
+    // Every (tile, component) pair is an independent job.
+    const job_count = try std.math.mul(usize, tile_count, component_count);
+    const artifacts = try allocator.alloc(tile_pipeline.TileRpclEncodeArtifacts, job_count);
+    defer allocator.free(artifacts);
+    const initialized = try allocator.alloc(bool, job_count);
+    defer allocator.free(initialized);
+    @memset(initialized, false);
+    defer for (artifacts, initialized) |*artifact, is_initialized| {
+        if (is_initialized) artifact.deinit();
+    };
+    var next_job = std.atomic.Value(usize).init(0);
+    const worker_count = @max(@as(usize, 1), @min(@as(usize, options.threads), job_count));
+    const jobs = try allocator.alloc(WideComponentTileJob, worker_count);
+    defer allocator.free(jobs);
+    for (jobs) |*job| {
+        job.* = .{
+            .allocator = allocator,
+            .source = source,
+            .planes = planes,
+            .quantizations = quantizations,
+            .grid = grid,
+            .levels = levels,
+            .encode_options = encode_options,
+            .artifacts = artifacts,
+            .initialized = initialized,
+            .next_job = &next_job,
+        };
+    }
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < threads.len) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, WideComponentTileJob.run, .{&jobs[spawned]}) catch |err| {
+            next_job.store(job_count, .release);
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+    jobs[worker_count - 1].run();
+    for (threads[0..spawned]) |thread| thread.join();
+    for (jobs) |job| try job.result;
+    for (initialized) |is_initialized| {
+        if (!is_initialized) return CodestreamError.InvalidCodestream;
+    }
+
+    // A progression without POC is the one-record schedule over everything.
+    const progression_record = [_]poc.Record{.{
+        .resolution_start = 0,
+        .component_start = 0,
+        .layer_end = encode_options.layers,
+        .resolution_end = levels + 1,
+        .component_end = @intCast(component_count),
+        .progression = @fromBackingInt(@intCast(@backingInt(encode_options.progression))),
+    }};
+    const schedule: []const poc.Record = if (encode_options.poc_records.len != 0)
+        encode_options.poc_records
+    else if (encode_options.progression == .rpcl)
+        &.{}
+    else
+        &progression_record;
+
+    const sampled_plans = try allocator.alloc(packet_plan.SampledComponentPlan, component_count);
+    defer allocator.free(sampled_plans);
+    const streams = try allocator.alloc(SampledTilePacketStream, tile_count);
+    defer allocator.free(streams);
+    var merged: usize = 0;
+    defer for (streams[0..merged]) |*stream| stream.deinit();
+    while (merged < tile_count) : (merged += 1) {
+        const tile_artifacts = artifacts[merged * component_count ..][0..component_count];
+        for (tile_artifacts, sampled_plans, source.planes) |artifact, *plan, plane| {
+            plan.* = .{ .plan = artifact.scaffold.plan, .xrsiz = plane.layout.x_step, .yrsiz = plane.layout.y_step };
+        }
+        streams[merged] = try mergeSampledComponentPacketStreams(
+            allocator,
+            try grid.tile(@intCast(merged)),
+            tile_artifacts,
+            sampled_plans,
+            encode_options.layers,
+            schedule,
+        );
+    }
+
+    const main_header = try wideComponentwiseMainHeaderBytes(allocator, source, quantizations, levels, encode_options);
+    defer allocator.free(main_header);
+    if (grid.isSingleTile()) {
+        return writeSampledSingleTileCodestream(allocator, main_header, @intCast(component_count), levels, streams[0], encode_options);
+    }
+    return writeSampledMultiTileCodestream(allocator, streams, main_header, @intCast(component_count), levels, encode_options);
+}
+
+const WideComponentTileJob = struct {
+    allocator: std.mem.Allocator,
+    source: NativeSamplePlanes,
+    planes: []const []const i64,
+    quantizations: []const WideReversibleQuantization,
+    grid: tile_grid.Grid,
+    levels: u8,
+    encode_options: LosslessOptions,
+    artifacts: []tile_pipeline.TileRpclEncodeArtifacts,
+    initialized: []bool,
+    next_job: *std.atomic.Value(usize),
+    precincts: [33]packet_plan.Precinct = undefined,
+    result: anyerror!void = {},
+
+    fn run(self: *WideComponentTileJob) void {
+        while (true) {
+            const index = self.next_job.fetchAdd(1, .monotonic);
+            if (index >= self.artifacts.len) return;
+            self.artifacts[index] = self.build(index) catch |err| {
+                self.result = err;
+                // Stop the other workers at their next job.
+                self.next_job.store(self.artifacts.len, .monotonic);
+                return;
+            };
+            self.initialized[index] = true;
+        }
+    }
+
+    fn build(self: *WideComponentTileJob, index: usize) !tile_pipeline.TileRpclEncodeArtifacts {
+        const allocator = self.allocator;
+        const component = index % self.planes.len;
+        const tile = try self.grid.tile(@intCast(index / self.planes.len));
+        const layout = self.source.planes[component].layout;
+        const rect = tile_grid.Rect{
+            .x0 = ceilDivU32(tile.rect.x0, layout.x_step),
+            .y0 = ceilDivU32(tile.rect.y0, layout.y_step),
+            .x1 = ceilDivU32(tile.rect.x1, layout.x_step),
+            .y1 = ceilDivU32(tile.rect.y1, layout.y_step),
+        };
+        // A tile that holds no sample of a subsampled component would need an
+        // empty component tile, which the scaffold does not build.
+        if (rect.x1 <= rect.x0 or rect.y1 <= rect.y0) return CodestreamError.UnsupportedPayload;
+        const width: usize = rect.width();
+        const height: usize = rect.height();
+        const region = try allocator.alloc(i64, try std.math.mul(usize, width, height));
+        defer allocator.free(region);
+        const plane = self.planes[component];
+        for (0..height) |row| {
+            const start = (@as(usize, rect.y0 - layout.y0) + row) * layout.width + (rect.x0 - layout.x0);
+            @memcpy(region[row * width ..][0..width], plane[start..][0..width]);
+        }
+        const achieved = try wavelet_int.forward53WideOrigin(allocator, region, width, height, self.levels, rect.x0, rect.y0);
+        if (achieved != self.levels) return CodestreamError.InvalidCodestream;
+        const component_tile = tile_grid.Tile{ .index = tile.index, .column = tile.column, .row = tile.row, .rect = rect };
+        return buildWideTileArtifacts(
+            allocator,
+            component_tile,
+            &.{region},
+            self.levels,
+            wideScaffoldOptions(self.encode_options, &self.precincts, 1, layout.precision, self.quantizations[component], .rpcl),
+            wideBlockStyle(self.encode_options),
+        );
+    }
+};
+
+/// SIZ, COD, QCD, QCC, and CRG of the componentwise path.
+fn wideComponentwiseMainHeaderBytes(
+    allocator: std.mem.Allocator,
+    source: NativeSamplePlanes,
+    quantizations: []const WideReversibleQuantization,
+    levels: u8,
+    encode_options: LosslessOptions,
+) ![]u8 {
+    const component_count = source.planes.len;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    // SIZ (A.5.1) with every component's precision, signedness, and sampling.
+    const lsiz = std.math.add(usize, 38, try std.math.mul(usize, 3, component_count)) catch
+        return CodestreamError.UnsupportedPayload;
+    if (lsiz > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+    try appendMarker(allocator, &out, .siz);
+    try appendU16Be(allocator, &out, @intCast(lsiz));
+    try appendU16Be(allocator, &out, 0);
+    try appendU32Be(allocator, &out, source.reference_x1);
+    try appendU32Be(allocator, &out, source.reference_y1);
+    try appendU32Be(allocator, &out, source.reference_x0);
+    try appendU32Be(allocator, &out, source.reference_y0);
+    try appendU32Be(allocator, &out, encode_options.tile_width);
+    try appendU32Be(allocator, &out, encode_options.tile_height);
+    try appendU32Be(allocator, &out, encode_options.tile_origin_x);
+    try appendU32Be(allocator, &out, encode_options.tile_origin_y);
+    try appendU16Be(allocator, &out, @intCast(component_count));
+    for (source.planes) |plane| {
+        const layout = plane.layout;
+        const signed_flag: u8 = if (layout.signed) 0x80 else 0;
+        try out.append(allocator, (layout.precision - 1) | signed_flag);
+        try out.append(allocator, layout.x_step);
+        try out.append(allocator, layout.y_step);
+    }
+
+    try appendCod(allocator, &out, levels, encode_options);
+    try appendQcdWideReversible(allocator, &out, levels, quantizations[0]);
+    for (quantizations[1..], 1..) |quantization, component| {
+        if (std.meta.eql(quantization, quantizations[0])) continue;
+        try appendQccWideReversible(allocator, &out, levels, @intCast(component), component_count > 256, quantization);
+    }
+
+    // CRG (A.9.1) when any component carries a registration offset.
+    for (source.planes) |plane| {
+        if (plane.layout.registration_x == 0 and plane.layout.registration_y == 0) continue;
+        const lcrg = 2 + 4 * component_count;
+        if (lcrg > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
+        try appendMarker(allocator, &out, .crg);
+        try appendU16Be(allocator, &out, @intCast(lcrg));
+        for (source.planes) |registered| {
+            try appendU16Be(allocator, &out, registered.layout.registration_x);
+            try appendU16Be(allocator, &out, registered.layout.registration_y);
+        }
+        break;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// QCC (A.6.5) with the wide reversible signalling of one component; the
+/// selector takes two bytes when the codestream has more than 256 components.
+fn appendQccWideReversible(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    levels: u8,
+    component: u16,
+    two_byte_selector: bool,
+    quantization: WideReversibleQuantization,
+) !void {
+    const bands = 1 + 3 * @as(u16, levels);
+    const selector_bytes: u16 = if (two_byte_selector) 2 else 1;
+    try appendMarker(allocator, out, .qcc);
+    try appendU16Be(allocator, out, 3 + selector_bytes + bands);
+    if (two_byte_selector) {
+        try appendU16Be(allocator, out, component);
+    } else {
+        try out.append(allocator, @intCast(component));
+    }
+    try out.append(allocator, (quantization.guard_bits << 5) | @backingInt(QuantizationStyle.none));
+    try out.append(allocator, quantization.exponent(.ll) << 3);
+    for (0..levels) |_| {
+        inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
+            try out.append(allocator, quantization.exponent(kind) << 3);
+        }
+    }
 }
 
 /// Forward RCT (ISO/IEC 15444-1 G.2.1) over three level-shifted planes, in
@@ -1634,9 +2012,32 @@ fn buildSampledTilePacketStream(
         };
     }
 
+    return mergeSampledComponentPacketStreams(
+        allocator,
+        reference_tile,
+        per_component[0..component_count],
+        sampled_plans[0..component_count],
+        layer_count,
+        poc_records,
+    );
+}
+
+/// Merges one tile's single-component packet streams (each in its own RPCL
+/// order) into the tile's sampled progression: the canonical sampled RPCL
+/// sequence, or the sequence composed from `poc_records`.
+fn mergeSampledComponentPacketStreams(
+    allocator: std.mem.Allocator,
+    reference_tile: tile_grid.Tile,
+    per_component: []const tile_pipeline.TileRpclEncodeArtifacts,
+    sampled_plans: []const packet_plan.SampledComponentPlan,
+    layer_count: u16,
+    poc_records: []const poc.Record,
+) !SampledTilePacketStream {
+    const component_count = per_component.len;
+    if (sampled_plans.len != component_count) return CodestreamError.InvalidCodestream;
     const global = try buildSampledPocPacketSequence(
         allocator,
-        sampled_plans[0..component_count],
+        sampled_plans,
         layer_count,
         reference_tile.rect.x0,
         reference_tile.rect.y0,
@@ -1645,7 +2046,8 @@ fn buildSampledTilePacketStream(
     defer allocator.free(global);
 
     const layers: u64 = layer_count;
-    var resolution_offsets: [max_codestream_components][33]u64 = undefined;
+    const resolution_offsets = try allocator.alloc([33]u64, component_count);
+    defer allocator.free(resolution_offsets);
     for (0..component_count) |component| {
         const plan = per_component[component].scaffold.plan;
         var running: u64 = 0;
@@ -1756,6 +2158,53 @@ fn assembleSampledMultiTileCodestream(
     }
     if (initialized != streams.len) return CodestreamError.InvalidCodestream;
 
+    const main_header = try sampledMainHeaderBytes(allocator, .{
+        .width = @intCast(planar.width),
+        .height = @intCast(planar.height),
+        .bit_depth = planar.bit_depth,
+        .component_bit_depths = component_bit_depths,
+        .component_xrsiz = component_xrsiz,
+        .component_yrsiz = component_yrsiz,
+        .components = @intCast(planar.planes.len),
+        .image_origin_x = encode_options.image_origin_x,
+        .image_origin_y = encode_options.image_origin_y,
+        .tile_width = encode_options.tile_width,
+        .tile_height = encode_options.tile_height,
+        .tile_origin_x = encode_options.tile_origin_x,
+        .tile_origin_y = encode_options.tile_origin_y,
+    }, levels, planar.bit_depth, encode_options);
+    defer allocator.free(main_header);
+    return writeSampledMultiTileCodestream(allocator, streams, main_header, @intCast(planar.planes.len), levels, encode_options);
+}
+
+/// SIZ, COD, and QCD of the sampled planar encoder.
+fn sampledMainHeaderBytes(
+    allocator: std.mem.Allocator,
+    profile: SizProfile,
+    levels: u8,
+    bit_depth: u8,
+    encode_options: LosslessOptions,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendSizForComponents(allocator, &out, profile);
+    try appendCod(allocator, &out, levels, encode_options);
+    try appendQcd(allocator, &out, levels, bit_depth, encode_options);
+    return out.toOwnedSlice(allocator);
+}
+
+/// Writes one tile-part per tile from merged per-tile packet streams after a
+/// prebuilt main header (SIZ through QCD/QCC): POC, TLM, PPM, then each tile
+/// with its POC, PLT or PPT, and packets.
+fn writeSampledMultiTileCodestream(
+    allocator: std.mem.Allocator,
+    streams: []const SampledTilePacketStream,
+    main_header: []const u8,
+    components: u16,
+    levels: u8,
+    encode_options: LosslessOptions,
+) ![]u8 {
+    const tile_count = streams.len;
     const parts = try allocator.alloc(MultiTilePacketPart, tile_count);
     defer allocator.free(parts);
     const uses_packed_headers = encode_options.ppm or encode_options.ppt;
@@ -1804,25 +2253,9 @@ fn assembleSampledMultiTileCodestream(
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendMarker(allocator, &out, .soc);
-    try appendSizForComponents(allocator, &out, .{
-        .width = @intCast(planar.width),
-        .height = @intCast(planar.height),
-        .bit_depth = planar.bit_depth,
-        .component_bit_depths = component_bit_depths,
-        .component_xrsiz = component_xrsiz,
-        .component_yrsiz = component_yrsiz,
-        .components = @intCast(planar.planes.len),
-        .image_origin_x = encode_options.image_origin_x,
-        .image_origin_y = encode_options.image_origin_y,
-        .tile_width = encode_options.tile_width,
-        .tile_height = encode_options.tile_height,
-        .tile_origin_x = encode_options.tile_origin_x,
-        .tile_origin_y = encode_options.tile_origin_y,
-    });
-    try appendCod(allocator, &out, levels, encode_options);
-    try appendQcd(allocator, &out, levels, planar.bit_depth, encode_options);
+    try out.appendSlice(allocator, main_header);
     if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
-        try appendPocForComponents(allocator, &out, levels, @intCast(planar.planes.len), encode_options);
+        try appendPocForComponents(allocator, &out, levels, components, encode_options);
     }
     if (encode_options.tlm) try appendMultiTileTlm(allocator, &out, parts);
 
@@ -1850,7 +2283,7 @@ fn assembleSampledMultiTileCodestream(
     for (streams, parts) |stream, part| {
         try appendSot(allocator, &out, part.tile_index, part.psot, 0, 1);
         if (encode_options.poc_in_tile_header) {
-            try appendPocForComponents(allocator, &out, levels, @intCast(planar.planes.len), encode_options);
+            try appendPocForComponents(allocator, &out, levels, components, encode_options);
         }
         if (encode_options.ppt) {
             try appendPltFromPackedPacketLengths(
@@ -1909,7 +2342,46 @@ fn assembleSampledSingleTileCodestream(
     input: SampledAssemblyInput,
     encode_options: LosslessOptions,
 ) ![]u8 {
-    const levels = input.levels;
+    const main_header = try sampledMainHeaderBytes(allocator, .{
+        .width = @intCast(input.width),
+        .height = @intCast(input.height),
+        .bit_depth = input.bit_depth,
+        .component_bit_depths = input.component_bit_depths,
+        .component_xrsiz = input.component_xrsiz,
+        .component_yrsiz = input.component_yrsiz,
+        .components = input.components,
+        .image_origin_x = encode_options.image_origin_x,
+        .image_origin_y = encode_options.image_origin_y,
+        .tile_width = encode_options.tile_width,
+        .tile_height = encode_options.tile_height,
+        .tile_origin_x = encode_options.tile_origin_x,
+        .tile_origin_y = encode_options.tile_origin_y,
+    }, input.levels, input.bit_depth, encode_options);
+    defer allocator.free(main_header);
+    return writeSampledSingleTileCodestream(allocator, main_header, input.components, input.levels, .{
+        .allocator = allocator,
+        .tile = undefined,
+        .packet_lengths = @constCast(input.packet_lengths),
+        .packet_header_lengths = @constCast(input.packet_header_lengths),
+        .packet_bytes = @constCast(input.packet_bytes),
+    }, encode_options);
+}
+
+/// The single tile-part counterpart of `writeSampledMultiTileCodestream`.
+fn writeSampledSingleTileCodestream(
+    allocator: std.mem.Allocator,
+    main_header: []const u8,
+    components: u16,
+    levels: u8,
+    stream: SampledTilePacketStream,
+    encode_options: LosslessOptions,
+) ![]u8 {
+    const input = .{
+        .components = components,
+        .packet_lengths = stream.packet_lengths,
+        .packet_header_lengths = stream.packet_header_lengths,
+        .packet_bytes = stream.packet_bytes,
+    };
     if (input.packet_lengths.len != input.packet_header_lengths.len) {
         return CodestreamError.InvalidCodestream;
     }
@@ -1944,23 +2416,7 @@ fn assembleSampledSingleTileCodestream(
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendMarker(allocator, &out, .soc);
-    try appendSizForComponents(allocator, &out, .{
-        .width = @intCast(input.width),
-        .height = @intCast(input.height),
-        .bit_depth = input.bit_depth,
-        .component_bit_depths = input.component_bit_depths,
-        .component_xrsiz = input.component_xrsiz,
-        .component_yrsiz = input.component_yrsiz,
-        .components = input.components,
-        .image_origin_x = encode_options.image_origin_x,
-        .image_origin_y = encode_options.image_origin_y,
-        .tile_width = encode_options.tile_width,
-        .tile_height = encode_options.tile_height,
-        .tile_origin_x = encode_options.tile_origin_x,
-        .tile_origin_y = encode_options.tile_origin_y,
-    });
-    try appendCod(allocator, &out, levels, encode_options);
-    try appendQcd(allocator, &out, levels, input.bit_depth, encode_options);
+    try out.appendSlice(allocator, main_header);
     if (encode_options.poc_records.len != 0 and !encode_options.poc_in_tile_header) {
         try appendPocForComponents(allocator, &out, levels, input.components, encode_options);
     }
@@ -7667,13 +8123,22 @@ fn readStrictCodestreamMetadataForProfile(
     {
         return CodestreamError.UnsupportedPayload;
     }
-    const native_mixed_multitile = precision_profile == .native and
-        parsed_mct == .none and parsed_transform == .reversible_5_3 and
-        parsed_quantization == .none;
+    // The native decoder applies a component transform to components 0..2
+    // only (checking that they share one grid) and passes every other
+    // component through, so neither mixed precision nor the sampling of the
+    // other components stands in its way.
+    const native_reversible = precision_profile == .native and
+        parsed_transform == .reversible_5_3 and parsed_quantization == .none;
+    // G.1: the transformed components share one bit depth.
+    const transformed_share_precision = component_count >= 3 and
+        component_bit_depths[1] == component_bit_depths[0] and
+        component_bit_depths[2] == component_bit_depths[0];
     if (mixed_component_precision and
-        (parsed_mct != .none or parsed_transform != .reversible_5_3 or
+        ((parsed_mct != .none and !(native_reversible and transformed_share_precision)) or
+            parsed_transform != .reversible_5_3 or
             parsed_quantization != .none or
-            (!parsed_grid_value.isSingleTile() and !native_mixed_multitile)))
+            (!parsed_grid_value.isSingleTile() and !(native_reversible and parsed_mct == .none) and
+                !(native_reversible and parsed_mct == .rct))))
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -7685,7 +8150,11 @@ fn readStrictCodestreamMetadataForProfile(
                 component_yrsiz[component] == component_yrsiz[0];
         }
         const sampled_no_mct = parsed_mct == .none;
-        const sampled_rct = parsed_mct == .rct and uniform_sampling and !mixed_component_precision;
+        const transformed_share_grid = component_count >= 3 and
+            component_xrsiz[1] == component_xrsiz[0] and component_yrsiz[1] == component_yrsiz[0] and
+            component_xrsiz[2] == component_xrsiz[0] and component_yrsiz[2] == component_yrsiz[0];
+        const sampled_rct = parsed_mct == .rct and
+            ((uniform_sampling and !mixed_component_precision) or (native_reversible and transformed_share_grid));
         const sampled_reversible = parsed_transform == .reversible_5_3 and parsed_quantization == .none;
         const sampled_irreversible_no_mct = sampled_no_mct and !mixed_component_precision and
             parsed_transform == .irreversible_9_7 and parsed_quantization != .none;

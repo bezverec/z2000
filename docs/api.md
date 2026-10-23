@@ -429,10 +429,26 @@ Primary public functions:
   exact ZRAW diagnostic carrier with allocation limits and exact payload-
   boundary validation
 - `encodeNativeLosslessWithOptions(allocator, source, options)` — reversible
-  encode of `NativeSamplePlanes` (one to four components of one precision,
-  signed or unsigned, up to `max_wide_encode_precision`, 38 bits) on the
-  reference grid at the origin, without MCT or with RCT over the first three
-  components, with no rate targets. Samples go through i64 throughout: the DC
+  encode of `NativeSamplePlanes` in any Part 1 layout, each component signed
+  or unsigned with up to `max_wide_encode_precision` (38) bits, without MCT
+  or with RCT over the first three components, with no rate targets. One to
+  four full-resolution components of one precision at the origin without CRG
+  registration (`nativeLayoutIsUniform`) take the uniform path below. Every
+  other layout — up to 16384 components, mixed precision and signedness, SIZ
+  subsampling, a reference-grid origin, CRG — takes
+  `encodeNativeWideComponentwise`: each (tile, component) pair is shifted,
+  transformed, and coded on its own on the component's tile rectangle, in
+  parallel on `options.threads` workers, and each tile's packets are merged
+  into the sampled B.12 order by `mergeSampledComponentPacketStreams` (the
+  progression without POC is its one-record schedule). Its main header is
+  SIZ with every component's precision, signedness, and sampling, COD, QCD
+  for component 0, QCC for each component of another precision (two-byte
+  selectors above 256 components), and CRG when any component is registered;
+  tiles are written by the sampled encoder's writers, one tile-part each. POC
+  needs at most 256 components there, a tile without any sample of a
+  subsampled component is refused, and at 8 and 16 bits the output equals
+  `encodeLosslessSampledPlanarWithOptions` byte for byte. On the uniform path
+  samples go through i64 throughout: the DC
   level shift, the RCT (`forwardRctWide`), the origin-aware
   `wavelet_int.forward53WideOrigin`, and
   `ebcot.encodeCodeBlockSegmentIsoMqWideWithStyle`. Routing follows

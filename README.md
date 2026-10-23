@@ -569,15 +569,20 @@ Other commands:
   component-local dimensions, sampling steps, and origins are retained.
   `--tile-index`, `--region`, `--layers`, `--reduce`, `--threads`, and `--t1-backend` work in explicit, shorthand,
   and non-recursive batch forms.
-- **zraw-to-j2k INPUT OUTPUT**: Reversible encode of a canonical ZRAW (one to
-  four components of one precision, signed or unsigned, 1 to 38 bits) into a
-  raw codestream, on one tile or a tile grid (`--tile W,H`, tiles encoded on
-  `--threads` workers), without MCT or with RCT over the first three
-  components (`--mct rct`), in every progression order with POC, R/L/C/P
-  tile-parts, TLM, PPM/PPT, SOP/EPH, layers, and the code-block style flags of
-  `tiff-to-jp2`. It is the only encoder for signed or more than 16-bit samples
-  and works through i64 coefficients; at 8 and 16 bits its output is byte for
-  byte that of the RGB, planar, and gray encoders. Up to 34 bits (33 with RCT,
+- **zraw-to-j2k INPUT OUTPUT**: Reversible encode of a canonical ZRAW in any
+  Part 1 component layout: up to 16384 components, each with its own
+  precision (1 to 38 bits), signedness, and SIZ subsampling, on a reference
+  grid with any origin, with CRG registration carried over. It writes a raw
+  codestream on one tile or a tile grid (`--tile W,H`, encoded on `--threads`
+  workers), without MCT or with RCT over the first three components
+  (`--mct rct`, which needs them on one grid with one precision), in every
+  progression order with POC, TLM, PPM/PPT, SOP/EPH, layers, and the
+  code-block style flags of `tiff-to-jp2`; one to four full-resolution
+  components of one precision at the origin also take R/L/C/P tile-parts. It
+  is the only encoder for signed, more than 16-bit, or more than four
+  components and works through i64 coefficients; at 8 and 16 bits its output
+  is byte for byte that of the RGB, planar, gray, and sampled encoders. A
+  tile that would hold no sample of a subsampled component is refused. Up to 34 bits (33 with RCT,
   whose colour differences carry one more bit) every band keeps the main
   encoder's two guard bits; above that the guard shrinks toward the 37
   magnitude bitplanes QCD can signal, and an image whose coefficients outgrow

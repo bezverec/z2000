@@ -3419,7 +3419,7 @@ test "tile-header POC overrides the main-header POC" {
         const first_sot = findMarker(tile_poc, codestream.markerValue("sot")) orelse return error.MissingSot;
         const both = try spliceMarkerSegmentForTest(allocator, tile_poc, first_sot, codestream.markerValue("poc"), &main_rlcp);
         defer allocator.free(both);
-        try std.testing.expect(findMarker(both[0..first_sot + 11], codestream.markerValue("poc")) != null);
+        try std.testing.expect(findMarker(both[0 .. first_sot + 11], codestream.markerValue("poc")) != null);
         var decoded = try codestream.decodeLosslessTemporary(allocator, both);
         defer decoded.deinit();
         try std.testing.expectEqualSlices(u16, rgb.samples, decoded.samples);
@@ -39833,5 +39833,234 @@ test "wide encoder round-trips tile grids with RCT from 17 to 38 bits" {
     try std.testing.expectError(
         codestream.CodestreamError.UnsupportedPayload,
         codestream.encodeNativeLosslessWithOptions(allocator, two, .{ .mct = .rct, .tile_width = 16, .tile_height = 10 }),
+    );
+}
+
+const GenericComponent = struct {
+    precision: u8,
+    signed: bool = false,
+    x_step: u8 = 1,
+    y_step: u8 = 1,
+    registration_x: u16 = 0,
+    registration_y: u16 = 0,
+};
+
+/// Native planes on the SIZ component grids of a reference rectangle, filled
+/// with a gentle ramp plus noise around the middle of each range (so
+/// 35- to 38-bit components stay within 37 bitplanes).
+fn genericNativeSource(
+    allocator: std.mem.Allocator,
+    random: std.Random,
+    reference: [4]u32,
+    specs: []const GenericComponent,
+) !native_samples.SamplePlanes {
+    const layouts = try allocator.alloc(native_samples.ComponentLayout, specs.len);
+    defer allocator.free(layouts);
+    for (layouts, specs) |*layout, spec| {
+        const x0 = std.math.divCeil(u32, reference[0], spec.x_step) catch unreachable;
+        const y0 = std.math.divCeil(u32, reference[1], spec.y_step) catch unreachable;
+        const x1 = std.math.divCeil(u32, reference[2], spec.x_step) catch unreachable;
+        const y1 = std.math.divCeil(u32, reference[3], spec.y_step) catch unreachable;
+        layout.* = .{
+            .precision = spec.precision,
+            .signed = spec.signed,
+            .x0 = x0,
+            .y0 = y0,
+            .x_step = spec.x_step,
+            .y_step = spec.y_step,
+            .registration_x = spec.registration_x,
+            .registration_y = spec.registration_y,
+            .width = x1 - x0,
+            .height = y1 - y0,
+        };
+    }
+    var source = try native_samples.SamplePlanes.initFromLayout(allocator, .{
+        .allocator = allocator,
+        .capabilities = 0,
+        .reference_x0 = reference[0],
+        .reference_y0 = reference[1],
+        .reference_x1 = reference[2],
+        .reference_y1 = reference[3],
+        .tile_width = reference[2],
+        .tile_height = reference[3],
+        .tile_origin_x = 0,
+        .tile_origin_y = 0,
+        .components = layouts,
+    }, .{});
+    errdefer source.deinit();
+    for (source.planes) |plane| {
+        const layout = plane.layout;
+        const minimum = try layout.minimumSample();
+        const maximum = try layout.maximumSample();
+        const span: i128 = maximum - minimum;
+        // The ramp rises at most 2^31 across the component and the noise
+        // stays within 2^25: steeper content on a small tile of a 38-bit
+        // component would outgrow 37 bitplanes at the tile edge.
+        const rise: i128 = @min(@divFloor(span * 3, 4), @as(i128, 1) << 31);
+        const start: i128 = minimum + @divFloor(span - rise, 2);
+        const noise: i64 = @as(i64, 1) << @intCast(@min(layout.precision - 1, 28)) >> 3;
+        const extent: i128 = @as(i128, @intCast(layout.width)) * 5 + @as(i128, @intCast(layout.height)) * 3;
+        for (plane.samples, 0..) |*sample, index| {
+            const x: i128 = @intCast(index % layout.width);
+            const y: i128 = @intCast(index / layout.width);
+            const ramp: i64 = @intCast(start + @divFloor(rise * (x * 5 + y * 3), extent));
+            sample.* = std.math.clamp(ramp + random.intRangeAtMost(i64, -noise, noise), minimum, maximum);
+        }
+        if (layout.precision <= 34) {
+            plane.samples[0] = minimum;
+            plane.samples[plane.samples.len - 1] = maximum;
+        }
+    }
+    return source;
+}
+
+test "wide componentwise encoder writes the sampled encoder's bytes" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_5a3);
+    const random = prng.random();
+    const sampling = [_]codestream.ComponentSampling{
+        .{ .xrsiz = 1, .yrsiz = 1 },
+        .{ .xrsiz = 2, .yrsiz = 2 },
+        .{ .xrsiz = 2, .yrsiz = 1 },
+    };
+    const poc_records = [_]codestream.PocRecord{
+        .{ .resolution_start = 0, .component_start = 0, .layer_end = 2, .resolution_end = 2, .component_end = 3, .progression = .rpcl },
+        .{ .resolution_start = 2, .component_start = 0, .layer_end = 2, .resolution_end = 6, .component_end = 3, .progression = .cprl },
+    };
+    const variants = [_]codestream.LosslessOptions{
+        .{ .mct = .none, .tile_part_divisions = null },
+        .{ .mct = .none, .tile_part_divisions = null, .tile_width = 16, .tile_height = 12, .layers = 2 },
+        .{ .mct = .none, .tile_part_divisions = null, .image_origin_x = 5, .image_origin_y = 3, .tile_width = 16, .tile_height = 16, .ppm = true },
+        .{ .mct = .none, .tile_part_divisions = null, .tile_width = 32, .tile_height = 20, .ppt = true, .sop = true, .eph = true },
+        .{ .mct = .none, .tile_part_divisions = null, .layers = 2, .poc_records = &poc_records, .tlm = false },
+    };
+    for ([_]u8{ 8, 16 }) |depth| {
+        for (variants) |variant| {
+            const reference = [4]u32{ variant.image_origin_x, variant.image_origin_y, variant.image_origin_x + 41, variant.image_origin_y + 27 };
+            var specs: [3]GenericComponent = undefined;
+            for (&specs, sampling) |*spec, factor| spec.* = .{ .precision = depth, .x_step = factor.xrsiz, .y_step = factor.yrsiz };
+            var source = try genericNativeSource(allocator, random, reference, &specs);
+            defer source.deinit();
+
+            var depths: [3]u8 = undefined;
+            var widths: [3]usize = undefined;
+            var heights: [3]usize = undefined;
+            for (source.planes, &depths, &widths, &heights) |plane, *d, *w, *h| {
+                d.* = depth;
+                w.* = plane.layout.width;
+                h.* = plane.layout.height;
+            }
+            var planar = try color.SamplePlanes.initWithComponentLayouts(allocator, 41, 27, &depths, &widths, &heights);
+            defer planar.deinit();
+            for (planar.planes, source.planes) |destination, plane| {
+                for (destination, plane.samples) |*out, sample| out.* = @intCast(sample);
+            }
+            const sampled = try codestream.encodeLosslessSampledPlanarWithOptions(allocator, planar, &sampling, variant);
+            defer allocator.free(sampled);
+            var wide_options = variant;
+            wide_options.image_origin_x = 0;
+            wide_options.image_origin_y = 0;
+            const wide = try codestream.encodeNativeLosslessWithOptions(allocator, source, wide_options);
+            defer allocator.free(wide);
+            try std.testing.expectEqualSlices(u8, sampled, wide);
+        }
+    }
+}
+
+test "wide componentwise encoder round-trips general component layouts" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_6e6);
+    const random = prng.random();
+
+    const Case = struct {
+        reference: [4]u32,
+        specs: []const GenericComponent,
+        options: codestream.LosslessOptions = .{ .mct = .none },
+    };
+    const mixed = [_]GenericComponent{
+        .{ .precision = 1 },
+        .{ .precision = 12, .signed = true },
+        .{ .precision = 23, .x_step = 2, .y_step = 3 },
+        .{ .precision = 31, .signed = true },
+        .{ .precision = 38, .x_step = 3, .y_step = 1 },
+    };
+    const rct_plus = [_]GenericComponent{
+        .{ .precision = 20 },
+        .{ .precision = 20 },
+        .{ .precision = 20 },
+        .{ .precision = 5, .signed = true, .x_step = 2, .y_step = 2 },
+        .{ .precision = 33 },
+    };
+    const registered = [_]GenericComponent{
+        .{ .precision = 10 },
+        .{ .precision = 10, .x_step = 2, .y_step = 2, .registration_x = 32768, .registration_y = 32768 },
+        .{ .precision = 10, .x_step = 2, .y_step = 2, .registration_x = 32768 },
+    };
+    var many: [300]GenericComponent = undefined;
+    for (&many, 0..) |*spec, index| spec.* = .{
+        .precision = @intCast(1 + index % 38),
+        .signed = index % 3 == 0,
+        .x_step = @intCast(1 + index % 2),
+        .y_step = @intCast(1 + index % 3 / 2),
+    };
+    const cases = [_]Case{
+        .{ .reference = .{ 0, 0, 41, 27 }, .specs = &mixed },
+        // Tile rows [4,15), [15,30), [30,33) leave every component, including
+        // the vertically 3x subsampled one, at least one row per tile.
+        .{ .reference = .{ 7, 4, 52, 33 }, .specs = &mixed, .options = .{ .mct = .none, .tile_width = 24, .tile_height = 15, .progression = .lrcp, .layers = 3, .threads = 4 } },
+        .{ .reference = .{ 3, 0, 44, 25 }, .specs = &rct_plus, .options = .{ .mct = .rct, .tile_width = 20, .tile_height = 12, .ppm = true, .bypass = true } },
+        .{ .reference = .{ 0, 0, 41, 27 }, .specs = &rct_plus, .options = .{ .mct = .rct, .progression = .cprl, .terminate_all = true, .vertical_causal = true } },
+        .{ .reference = .{ 0, 0, 32, 20 }, .specs = &registered, .options = .{ .mct = .none, .progression = .pcrl, .ppt = true } },
+        .{ .reference = .{ 1, 1, 12, 9 }, .specs = &many, .options = .{ .mct = .none, .threads = 4, .progression = .rlcp } },
+    };
+    for (cases) |case| {
+        var source = try genericNativeSource(allocator, random, case.reference, case.specs);
+        defer source.deinit();
+        const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, case.options);
+        defer allocator.free(encoded);
+        // Threads change nothing in the bytes.
+        var serial_options = case.options;
+        serial_options.threads = 1;
+        const serial = try codestream.encodeNativeLosslessWithOptions(allocator, source, serial_options);
+        defer allocator.free(serial);
+        try std.testing.expectEqualSlices(u8, serial, encoded);
+
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .threads = 4 }, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqual(source.reference_x0, decoded.reference_x0);
+        try std.testing.expectEqual(source.reference_y1, decoded.reference_y1);
+        try std.testing.expectEqual(source.planes.len, decoded.planes.len);
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqual(expected.layout.precision, actual.layout.precision);
+            try std.testing.expectEqual(expected.layout.signed, actual.layout.signed);
+            try std.testing.expectEqual(expected.layout.x_step, actual.layout.x_step);
+            try std.testing.expectEqual(expected.layout.y0, actual.layout.y0);
+            try std.testing.expectEqual(expected.layout.registration_x, actual.layout.registration_x);
+            try std.testing.expectEqual(expected.layout.registration_y, actual.layout.registration_y);
+            try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+        }
+    }
+
+    // Fail closed: RCT over components of different precision, POC with
+    // more components than one-byte POC indices reach, and a tile holding
+    // no sample of a heavily subsampled component.
+    var unequal = try genericNativeSource(allocator, random, .{ 0, 0, 16, 16 }, &.{ .{ .precision = 8 }, .{ .precision = 9 }, .{ .precision = 8 }, .{ .precision = 8, .x_step = 2 } });
+    defer unequal.deinit();
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeNativeLosslessWithOptions(allocator, unequal, .{ .mct = .rct }),
+    );
+    var wide_set = try genericNativeSource(allocator, random, .{ 0, 0, 4, 4 }, &many);
+    defer wide_set.deinit();
+    const records = [_]codestream.PocRecord{.{ .resolution_start = 0, .component_start = 0, .layer_end = 1, .resolution_end = 3, .component_end = 300, .progression = .cprl }};
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeNativeLosslessWithOptions(allocator, wide_set, .{ .mct = .none, .poc_records = &records }),
+    );
+    var sparse = try genericNativeSource(allocator, random, .{ 0, 0, 40, 8 }, &.{ .{ .precision = 8 }, .{ .precision = 8, .x_step = 16 } });
+    defer sparse.deinit();
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.encodeNativeLosslessWithOptions(allocator, sparse, .{ .mct = .none, .tile_width = 4, .tile_height = 8 }),
     );
 }
