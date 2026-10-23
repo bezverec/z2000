@@ -1866,13 +1866,14 @@ fn midpointSquaredError(sample_magnitude: u64, p: u8) f64 {
 /// returns the pass count.
 pub fn passDistortions(
     scratch: *BlockScratch,
-    plane: []const i32,
+    /// i32 coefficients, or i64 on the wide path.
+    plane: anytype,
     stride: usize,
     rect: subband.Rect,
     style: CodeBlockStyle,
     out: []f64,
 ) !u16 {
-    const view = try encodeBlockScratchWithStyle(scratch, plane, stride, rect, style);
+    const view = try encodeBlockScratchGeneric(scratch, plane, stride, rect, style);
     const pass_count: u16 = @intCast(view.passes.len);
     if (out.len < pass_count) return EbcotError.InvalidBlock;
     @memset(out[0..pass_count], 0);

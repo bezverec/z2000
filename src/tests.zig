@@ -40354,3 +40354,141 @@ test "wide componentwise encoder divides tiles into R, L, and C tile-parts" {
         codestream.encodeNativeLosslessWithOptions(allocator, source, .{ .mct = .none, .tile_part_divisions = 'P', .progression = .pcrl }),
     );
 }
+
+test "wide encoder forms rate-targeted layers like the main encoders" {
+    const allocator = std.testing.allocator;
+    const width = 37;
+    const height = 23;
+    var prng = std.Random.DefaultPrng.init(0x2000_4a7e);
+    const random = prng.random();
+    var plane_storage: [4][width * height]u16 = undefined;
+    var rates: [@typeInfo(@FieldType(codestream.LosslessOptions, "rates")).array.len]f64 = @splat(0);
+    rates[0] = 24;
+    rates[1] = 6;
+    const variants = [_]codestream.LosslessOptions{
+        .{ .layers = 3, .rates = rates, .rate_count = 2 },
+        .{ .layers = 3, .rates = rates, .rate_count = 2, .tile_width = 16, .tile_height = 10, .threads = 4 },
+        .{ .layers = 3, .rates = rates, .rate_count = 2, .tile_width = 16, .tile_height = 10, .progression = .lrcp, .tile_part_divisions = 'L', .bypass = true },
+    };
+    for ([_]u8{ 8, 16 }) |depth| {
+        const maximum: u16 = @intCast((@as(u32, 1) << @intCast(depth)) - 1);
+        for (&plane_storage) |*plane| {
+            for (plane, 0..) |*sample, index| {
+                const ramp: u32 = @intCast((index % width) * 7 + (index / width) * 5);
+                sample.* = @intCast(@min(@as(u32, maximum), ramp * (@as(u32, maximum) / 300) + random.intRangeAtMost(u32, 0, maximum / 16)));
+            }
+        }
+        for (variants, 0..) |variant, variant_index| {
+            var with_rct = variant;
+            with_rct.mct = .rct;
+            var without_mct = variant;
+            without_mct.mct = .none;
+
+            const interleaved = try allocator.alloc(u16, width * height * 3);
+            defer allocator.free(interleaved);
+            for (0..width * height) |pixel| {
+                for (0..3) |component| interleaved[pixel * 3 + component] = plane_storage[component][pixel];
+            }
+            const rgb_stream = try codestream.encodeLosslessWithOptions(allocator, .{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = depth,
+                .samples = interleaved,
+            }, with_rct);
+            defer allocator.free(rgb_stream);
+            var rgb_source = try wideSourceFromU16Planes(allocator, &.{ &plane_storage[0], &plane_storage[1], &plane_storage[2] }, width, height, depth);
+            defer rgb_source.deinit();
+            const wide_rgb = try codestream.encodeNativeLosslessWithOptions(allocator, rgb_source, with_rct);
+            defer allocator.free(wide_rgb);
+            // On one tile the RGB encoder's own writer also charges the
+            // measured packet-header bytes against the layer targets; on a
+            // grid it runs the same global PCRD as the others.
+            if (variant_index != 0) try std.testing.expectEqualSlices(u8, rgb_stream, wide_rgb);
+
+            var rgba = try color.SamplePlanes.init(allocator, width, height, depth, 4);
+            defer rgba.deinit();
+            for (rgba.planes, 0..) |plane, component| @memcpy(plane, &plane_storage[component]);
+            const rgba_stream = try codestream.encodeLosslessPlanarWithOptions(allocator, rgba, with_rct);
+            defer allocator.free(rgba_stream);
+            var rgba_source = try wideSourceFromU16Planes(allocator, &.{ &plane_storage[0], &plane_storage[1], &plane_storage[2], &plane_storage[3] }, width, height, depth);
+            defer rgba_source.deinit();
+            const wide_rgba = try codestream.encodeNativeLosslessWithOptions(allocator, rgba_source, with_rct);
+            defer allocator.free(wide_rgba);
+            try std.testing.expectEqualSlices(u8, rgba_stream, wide_rgba);
+
+            const gray_stream = try codestream.encodeLosslessGrayWithOptions(allocator, .{
+                .allocator = allocator,
+                .width = width,
+                .height = height,
+                .bit_depth = depth,
+                .samples = &plane_storage[0],
+            }, without_mct);
+            defer allocator.free(gray_stream);
+            var gray_source = try wideSourceFromU16Planes(allocator, &.{&plane_storage[0]}, width, height, depth);
+            defer gray_source.deinit();
+            const wide_gray = try codestream.encodeNativeLosslessWithOptions(allocator, gray_source, without_mct);
+            defer allocator.free(wide_gray);
+            try std.testing.expectEqualSlices(u8, gray_stream, wide_gray);
+        }
+    }
+}
+
+test "wide encoder rate targets refine wide and general layouts layer by layer" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_4a7f);
+    const random = prng.random();
+    var rates: [@typeInfo(@FieldType(codestream.LosslessOptions, "rates")).array.len]f64 = @splat(0);
+    rates[0] = 40;
+    rates[1] = 10;
+    rates[2] = 3;
+    const wide_specs = [_]GenericComponent{ .{ .precision = 34 }, .{ .precision = 34 }, .{ .precision = 34 } };
+    const general_specs = [_]GenericComponent{
+        .{ .precision = 12 },
+        .{ .precision = 20, .signed = true, .x_step = 2, .y_step = 2 },
+        .{ .precision = 31 },
+        .{ .precision = 5, .signed = true },
+    };
+    const roi = [_]codestream.RoiRegion{.{ .component = 0, .x0 = 8, .y0 = 6, .x1 = 30, .y1 = 20 }};
+    const Case = struct { specs: []const GenericComponent, options: codestream.LosslessOptions };
+    const cases = [_]Case{
+        .{ .specs = &wide_specs, .options = .{ .mct = .rct, .layers = 4, .rates = rates, .rate_count = 3 } },
+        .{ .specs = &wide_specs, .options = .{ .mct = .none, .layers = 4, .rates = rates, .rate_count = 3, .tile_width = 24, .tile_height = 16 } },
+        .{ .specs = &general_specs, .options = .{ .mct = .none, .layers = 4, .rates = rates, .rate_count = 3, .tile_width = 24, .tile_height = 16, .progression = .rlcp } },
+        .{ .specs = &general_specs, .options = .{ .mct = .none, .layers = 4, .rates = rates, .rate_count = 3, .roi_regions = &roi } },
+    };
+    for (cases) |case| {
+        var source = try genericNativeSource(allocator, random, .{ 0, 0, 48, 32 }, case.specs);
+        defer source.deinit();
+        const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, case.options);
+        defer allocator.free(encoded);
+        var serial_options = case.options;
+        serial_options.threads = 4;
+        const threaded = try codestream.encodeNativeLosslessWithOptions(allocator, source, serial_options);
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, encoded, threaded);
+
+        // Each further layer brings the reconstruction closer, and the last
+        // is lossless.
+        var previous_error: f64 = std.math.inf(f64);
+        for ([_]u16{ 1, 2, 3, 0 }) |limit| {
+            var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{ .quality_layer_limit = limit }, .{});
+            defer decoded.deinit();
+            var squared: f64 = 0;
+            for (source.planes, decoded.planes) |expected, actual| {
+                const scale = std.math.pow(f64, 2, @floatFromInt(expected.layout.precision));
+                for (expected.samples, actual.samples) |a, b| {
+                    const difference = @as(f64, @floatFromInt(a - b)) / scale;
+                    squared += difference * difference;
+                }
+            }
+            if (limit == 0) {
+                try std.testing.expectEqual(@as(f64, 0), squared);
+            } else {
+                try std.testing.expect(squared < previous_error);
+                try std.testing.expect(squared > 0);
+            }
+            previous_error = squared;
+        }
+    }
+}

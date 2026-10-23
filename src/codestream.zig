@@ -884,7 +884,7 @@ pub fn encodeNativeLosslessWithOptions(
         component_signed[component] = layout.signed;
     }
     if (options.transform != .reversible_5_3 or options.quantization != .none or
-        options.emit_temporary_payload_sidecar or options.rate_count != 0 or options.t1_backend != .iso_mq)
+        options.emit_temporary_payload_sidecar or options.t1_backend != .iso_mq)
     {
         return CodestreamError.UnsupportedPayload;
     }
@@ -960,15 +960,18 @@ pub fn encodeNativeLosslessWithOptions(
         _ = try wavelet_int.forward53WideOrigin(allocator, plane, width, height, levels, 0, 0);
     }
     var scaffold_precincts: [33]packet_plan.Precinct = undefined;
+    const scaffold_options = wideScaffoldOptions(encode_options, &scaffold_precincts, component_count, precision, quantization, .rpcl);
     var artifacts = try buildWideTileArtifacts(
         allocator,
         try grid.tile(0),
         planes,
         levels,
-        wideScaffoldOptions(encode_options, &scaffold_precincts, component_count, precision, quantization, .rpcl),
+        scaffold_options,
         wideBlockStyle(encode_options),
     );
     defer artifacts.deinit();
+    // Rate targets: the global PCRD sets every block's layer truncations.
+    try tile_pipeline.applyGridPcrdTargets(allocator, (&artifacts)[0..1], scaffold_options);
 
     return assembleSingleTileCodestream(allocator, .{
         .width = width,
@@ -1046,7 +1049,7 @@ fn encodeNativeWideComponentwise(
     else
         true;
     if (options.transform != .reversible_5_3 or options.quantization != .none or
-        options.emit_temporary_payload_sidecar or options.rate_count != 0 or options.t1_backend != .iso_mq or
+        options.emit_temporary_payload_sidecar or options.t1_backend != .iso_mq or
         !division_supported or (options.ppm and options.ppt) or (options.ppt and !options.plt))
     {
         return CodestreamError.UnsupportedPayload;
@@ -1081,7 +1084,12 @@ fn encodeNativeWideComponentwise(
         .ict => return CodestreamError.UnsupportedPayload,
     }
     if (options.levels > 32) return CodestreamError.TooManyLevels;
-    if (options.layers == 0 or options.layers > max_quality_layers or options.threads == 0) return CodestreamError.InvalidCodestream;
+    if (options.layers == 0 or options.layers > max_quality_layers or options.threads == 0 or
+        options.rate_count > options.layers)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    try validateRates(options);
     try validateBlockSize(options.block_width, options.block_height);
     try validatePrecincts(options);
     // The shared style and progression rules; origins and PLT are this
@@ -1232,6 +1240,17 @@ fn encodeNativeWideComponentwise(
     try runWideComponentJobs(jobs, &next_job, job_count, threads);
     for (initialized) |is_initialized| {
         if (!is_initialized) return CodestreamError.InvalidCodestream;
+    }
+
+    // Rate targets: one slope threshold over every block of every
+    // tile-component, before the tiles' packets are merged.
+    if (encode_options.rate_count != 0) {
+        var pcrd_precincts: [33]packet_plan.Precinct = undefined;
+        try tile_pipeline.applyGridPcrdTargets(
+            allocator,
+            artifacts,
+            wideScaffoldOptions(encode_options, &pcrd_precincts, 1, source.planes[0].layout.precision, quantizations[0], .rpcl),
+        );
     }
 
     // A progression without POC is the one-record schedule over everything.
@@ -1733,6 +1752,8 @@ fn wideScaffoldOptions(
         .components = @intCast(component_count),
         .component_bit_depths = depths,
         .nominal_bitplanes = quantization.table(),
+        .rates = encode_options.rates,
+        .rate_count = encode_options.rate_count,
     };
 }
 
@@ -1837,6 +1858,8 @@ fn encodeNativeWideMultiTile(
     for (initialized) |is_initialized| {
         if (!is_initialized) return CodestreamError.InvalidCodestream;
     }
+    // Rate targets: one slope threshold over every block of every tile.
+    try tile_pipeline.applyGridPcrdTargets(allocator, tiles, jobs[0].scaffold_options);
 
     var artifacts = tile_pipeline.TileRpclEncodeGridArtifacts{
         .allocator = allocator,

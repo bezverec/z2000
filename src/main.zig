@@ -1184,7 +1184,7 @@ fn zrawToJ2kCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []co
         } else if (std.mem.eql(u8, arg, "--tile") or std.mem.eql(u8, arg, "--progression") or
             std.mem.eql(u8, arg, "--mct") or std.mem.eql(u8, arg, "--tile-parts") or
             std.mem.eql(u8, arg, "--poc") or std.mem.eql(u8, arg, "--poc-location") or
-            std.mem.eql(u8, arg, "--threads"))
+            std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "--rates"))
         {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -1205,6 +1205,9 @@ fn zrawToJ2kCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []co
                     if (value.len != 1) return error.InvalidValue;
                     options.tile_part_divisions = value[0];
                 }
+            } else if (std.mem.eql(u8, arg, "--rates")) {
+                // Compression ratios per layer; the last layer is lossless.
+                try parseRates(value, &options);
             } else if (std.mem.eql(u8, arg, "--poc")) {
                 if (options.poc_records.len != 0) return error.InvalidValue;
                 options.poc_records = try parsePocRecords(value, &poc_storage);
@@ -2179,7 +2182,7 @@ fn usage() void {
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--tile-index N|--region X,Y,W,H] [--layers N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
         \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
         \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
-        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE...] [--roi [C:]X,Y,W,H] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
+        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE...] [--roi [C:]X,Y,W,H] [--rates R1,R2,...] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.

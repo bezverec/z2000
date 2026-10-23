@@ -2133,8 +2133,15 @@ pub fn buildWideTileRpclEncodeArtifacts(
     options: PacketScaffoldOptions,
     style: ebcot.CodeBlockStyle,
 ) !TileRpclEncodeArtifacts {
-    if (options.nominal_bitplanes == null or options.rate_count != 0) return PacketScaffoldError.InvalidLayer;
+    if (options.nominal_bitplanes == null) return PacketScaffoldError.InvalidLayer;
     if (planes.len != options.components) return PacketScaffoldError.InvalidPlane;
+    // Rate targets keep each block's band-weighted per-pass distortion
+    // reductions for the global PCRD (`applyGridPcrdTargets`), which then
+    // replaces these provisional layers.
+    const capture_distortions = options.rate_count > 0 and options.layers > 1 and !style.terminate_all;
+    var distortion_scratch = ebcot.BlockScratch.init(allocator);
+    defer distortion_scratch.deinit();
+    var distortions: [164]f64 = undefined;
     for (planes) |plane| {
         if (plane.len != try std.math.mul(usize, width, height)) return PacketScaffoldError.InvalidPlane;
     }
@@ -2171,7 +2178,22 @@ pub fn buildWideTileRpclEncodeArtifacts(
         var encoded = EncodedComponentBlock{ .job = job, .segment = segment, .bypass = actual_style.bypass };
         var moved = false;
         errdefer if (!moved) encoded.deinit(allocator);
-        encoded.layers = if (options.roi_shift != 0 and scaffold.layers > 1)
+        if (capture_distortions and segment.pass_count > 0) {
+            const pass_count = ebcot.passDistortions(
+                &distortion_scratch,
+                planes[job.component],
+                width,
+                job.rect,
+                actual_style,
+                distortions[0..],
+            ) catch return PacketScaffoldError.InvalidLayer;
+            if (pass_count != segment.pass_count) return PacketScaffoldError.InvalidLayer;
+            const weight = pcrdBandWeight(job.band);
+            const stored = try allocator.alloc(f64, pass_count);
+            for (stored, distortions[0..pass_count]) |*out, value| out.* = value * weight;
+            encoded.pass_distortions = stored;
+        }
+        encoded.layers = if (options.roi_shift != 0 and scaffold.layers > 1 and options.rate_count == 0)
             try computeRoiLayerTruncations(allocator, encoded.segment, scaffold.layers, options.roi_shift)
         else
             try computeLayerTruncations(allocator, encoded.segment, scaffold.layers);
