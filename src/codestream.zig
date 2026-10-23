@@ -15467,31 +15467,44 @@ fn buildSampledStrictPacketSequence(
     );
 }
 
-fn readStrictFirstTilePartPocRecords(
+/// Collects the POC records of a single-tile stream from every tile-part
+/// header in stream order. A POC in a later tile-part continues the tile's
+/// progression (ISO A.6.6; Kakadu writes one per `Porder:T0` instance), so
+/// the first part's records alone need not cover the tile.
+fn readStrictSingleTilePocRecords(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     first_sot: usize,
     limits: TilePartPocLimits,
 ) !std.ArrayList(poc.Record) {
+    var records: std.ArrayList(poc.Record) = .empty;
+    errdefer records.deinit(allocator);
     var expected_tile_part_count: ?u8 = null;
     var expected_ppt_index: u16 = 0;
-    var tile_part = try readStrictTilePartHeader(
-        allocator,
-        bytes,
-        first_sot,
-        0,
-        &expected_tile_part_count,
-        null,
-        &expected_ppt_index,
-        null,
-        null,
-        limits,
-        null,
-        null,
-    );
-    defer tile_part.deinit(allocator);
-    const records = tile_part.poc_records;
-    tile_part.poc_records = .empty;
+    // Tile-level PLT carry: see applyTileLevelPltCarry.
+    var plt_carry: std.ArrayList(usize) = .empty;
+    defer plt_carry.deinit(allocator);
+    var cursor = first_sot;
+    var tile_part_index: usize = 0;
+    while (bytes.len - cursor >= 2 and readU16Be(bytes, cursor) == @backingInt(Marker.sot)) : (tile_part_index += 1) {
+        var tile_part = try readStrictTilePartHeader(
+            allocator,
+            bytes,
+            cursor,
+            tile_part_index,
+            &expected_tile_part_count,
+            null,
+            &expected_ppt_index,
+            null,
+            null,
+            limits,
+            null,
+            &plt_carry,
+        );
+        defer tile_part.deinit(allocator);
+        try records.appendSlice(allocator, tile_part.poc_records.items);
+        cursor = tile_part.end;
+    }
     return records;
 }
 
@@ -15553,7 +15566,7 @@ pub fn collectStrictInlinePacketSpans(
         .resolution_count = header.levels + 1,
         .layer_count = header.layers,
     };
-    var tile_poc_records = try readStrictFirstTilePartPocRecords(
+    var tile_poc_records = try readStrictSingleTilePocRecords(
         allocator,
         bytes,
         main_header.first_sot,
@@ -15927,7 +15940,7 @@ fn readStrictSodPacketCatalog(
         .resolution_count = header.levels + 1,
         .layer_count = layers,
     };
-    var tile_poc_records = try readStrictFirstTilePartPocRecords(
+    var tile_poc_records = try readStrictSingleTilePocRecords(
         allocator,
         bytes,
         main_header.first_sot,

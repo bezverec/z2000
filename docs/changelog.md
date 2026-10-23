@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Single-Tile POC In A Later Tile-Part Header
+
+- Single-tile strict decode built its packet schedule from the first
+  tile-part's POC only and dropped the records of later parts, so a stream
+  with one POC per tile-part (Kakadu's two `Porder:T0` instances, first part
+  `TNsot=0`) failed as an incomplete schedule (`InvalidCodestream`). Records
+  from every tile-part header now append in stream order
+  (`readStrictSingleTilePocRecords`), as ISO/IEC 15444-1 A.6.6 makes a later
+  part's POC continue the tile's progression and as the multi-tile path
+  already did.
+- Evidence: `kakadu-poc-later-tilepart-singletile` (resolution 0 in RPCL in
+  the first part, the rest in LRCP in the second) and its `ORGgen_plt=yes`
+  twin are the untiled form of `kakadu-poc-later-tilepart` and decode to its
+  raster, with one and eight threads; a test pinning that failed on the
+  previous commit. OpenJPEG 2.5.4 and Grok 20.4.12 decode both exactly;
+  `kdu_expand` decodes the PLT-less one and refuses its own PLT one, the
+  defect described below. The 37x23 two-layer streams from the diagnosis
+  (two `Porder:T0` instances, with and without PLT) now decode exactly too.
+  The corpus reports 104 decode passes and no mismatch.
+
 ### Kakadu Tile-Header POC Refusal Diagnosed
 
 - The `kdu_expand` refusal of tile-header POC with two layers ("Illegal
@@ -28,11 +48,9 @@ entries are grouped by development milestone rather than semantic version.
   the same error.
   `docs/reference_tools.md` records the trigger grid and the ISO/IEC
   15444-1 A.6.6, A.7.3, B.10.4, and B.12 reading.
-- Found along the way and still open: z2000 rejects a single-tile Kakadu
-  stream with two `Porder:T0` instances (one POC per tile-part, first part
-  `TNsot=0`) as `InvalidCodestream`, with one or two layers, while OpenJPEG,
-  Grok, and `kdu_expand` without PLT decode it exactly. The same two
-  instances on a tile grid decode exactly.
+- Found along the way: z2000 rejected a single-tile Kakadu stream with two
+  `Porder:T0` instances, which OpenJPEG, Grok, and `kdu_expand` without PLT
+  decode exactly (fixed above).
 
 ### Wide Encoder: Tile Grids, RCT, And Every Progression
 
