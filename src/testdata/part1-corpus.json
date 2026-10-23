@@ -2021,6 +2021,56 @@
       "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
     },
     {
+      "id": "kakadu-poc-later-tilepart-singletile",
+      "path": "src/testdata/kakadu-poc-later-tilepart-singletile.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "b2fac6ec1581951a6bc2aae46d4a5292e358ad1b6801b913066f5ba7157da386",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "untiled: the single tile carries two tile-parts (the first with TNsot=0), each with its own POC marker, so neither POC alone covers the tile",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-poc-later-tilepart-singletile.jp2 Creversible=yes Clevels=2 Clayers=3 Cblk={4,4} -quiet Corder=RPCL Porder:T0={0,0,1,3,3,RPCL} Porder:T0={0,0,3,3,3,LRCP}"
+      },
+      "oracle": "src/tests.zig pins equality with the kakadu-poc-later-tilepart raster; Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok 20.4.12 all decode it to the source exactly",
+      "features": [
+        "progression-poc",
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
+      "id": "kakadu-poc-later-tilepart-singletile-plt",
+      "path": "src/testdata/kakadu-poc-later-tilepart-singletile-plt.jp2",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "interleaved_rgb",
+      "sha256": "b05768da0d8bdb72f42e866100676e269a001ffa216d47e978cc7a79b52e90fb",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "kakadu-poc-later-tilepart-singletile with PLT in both tile-parts",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed",
+        "command": "kdu_compress -i src/testdata/openjpeg-sycc420-origin.tif -o src/testdata/kakadu-poc-later-tilepart-singletile-plt.jp2 Creversible=yes Clevels=2 Clayers=3 Cblk={4,4} -quiet Corder=RPCL Porder:T0={0,0,1,3,3,RPCL} Porder:T0={0,0,3,3,3,LRCP} ORGgen_plt=yes"
+      },
+      "oracle": "src/tests.zig pins equality with the kakadu-poc-later-tilepart raster; OpenJPEG 2.5.4 and Grok 20.4.12 decode it to the source exactly, while kdu_expand 8.4.1 refuses its own stream (\"Unexpected change in coding parameters or packet sequencing\"; see docs/reference_tools.md)",
+      "features": [
+        "progression-poc",
+        "tiles-and-tile-parts",
+        "packet-header-placement",
+        "reversible-53"
+      ],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2c18ab2cff7a44f196ffb401b56dfbf40c854daf1e016778af2525eaaaf2e508"
+    },
+    {
       "id": "kakadu-sampled-poc-one-part",
       "path": "src/testdata/kakadu-sampled-poc-one-part.j2c",
       "availability": "committed",
