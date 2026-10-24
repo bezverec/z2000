@@ -5,6 +5,8 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+## 0.2.0-rc.4 — 2026-10-24
+
 ### Quality Layers End At Decodable Pass Truncation Lengths
 
 - Every quality layer that ended on a pass boundary of a continuous
