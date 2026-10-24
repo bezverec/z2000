@@ -409,6 +409,32 @@ fn nbfMarkSignificant(flags: []u16, stride: usize, x: usize, y: usize, negative:
     }
 }
 
+/// Words past the padded neighborhood that nbfMarkSignificantRows may touch.
+const nbf_wide_mark_slack = 2;
+
+inline fn nbfOrLanes(flags: []u16, index: usize, lanes: u64) void {
+    std.debug.assert(index + 4 <= flags.len);
+    const words: *align(1) u64 = @ptrCast(flags.ptr + index);
+    words.* |= lanes;
+}
+
+/// nbfMarkSignificant with one unaligned four-lane OR per neighbor row
+/// (x - 1 .. x + 2; the fourth lane gets nothing). The flags need
+/// nbf_wide_mark_slack words past the padded block.
+inline fn nbfMarkSignificantRows(flags: []u16, stride: usize, x: usize, y: usize, negative: bool) void {
+    const p = nbfIndex(stride, x, y);
+    const sgn: u16 = if (negative) 0xffff else 0;
+    nbfOrLanes(flags, p - stride - 1, @as(u64, nbf_sig_se) |
+        (@as(u64, nbf_sig_s | (nbf_sgn_s & sgn)) << 16) |
+        (@as(u64, nbf_sig_sw) << 32));
+    nbfOrLanes(flags, p - 1, @as(u64, nbf_sig_e | (nbf_sgn_e & sgn)) |
+        (@as(u64, nbf_sig_self) << 16) |
+        (@as(u64, nbf_sig_w | (nbf_sgn_w & sgn)) << 32));
+    nbfOrLanes(flags, p + stride - 1, @as(u64, nbf_sig_ne) |
+        (@as(u64, nbf_sig_n | (nbf_sgn_n & sgn)) << 16) |
+        (@as(u64, nbf_sig_nw) << 32));
+}
+
 fn nbfClearVisit(flags: []u16) void {
     const mask_vec: NbfClearVector = @splat(~nbf_visit);
     var index: usize = 0;
@@ -1708,7 +1734,9 @@ pub const DirectBlockScratch = struct {
         self.width = width;
         self.height = height;
         self.nb_stride = nbfStride(width);
-        try self.nb_flags.resize(self.allocator, try std.math.mul(usize, self.nb_stride, height + 2));
+        // Slack for nbfMarkSignificantRows, as in the decode scratch.
+        const nb_words = try std.math.mul(usize, self.nb_stride, height + 2);
+        try self.nb_flags.resize(self.allocator, try std.math.add(usize, nb_words, nbf_wide_mark_slack));
         if (comptime maintain_packed_t1_context_flags) {
             try self.packed_t1_flags.resize(self.allocator, try std.math.mul(usize, width, pcfStripeCount(height)));
         }
@@ -1730,6 +1758,8 @@ pub fn DecodeBlockScratchFor(comptime CoefficientType: type) type {
         pub const Coefficient = CoefficientType;
         /// Deepest magnitude bitplane count the coefficient type holds.
         pub const max_bitplanes: u8 = if (CoefficientType == i32) 31 else max_wide_magnitude_bitplanes;
+        /// nb_flags carries nbf_wide_mark_slack words for nbfMarkSignificantRows.
+        pub const nb_flags_wide_mark_slack = true;
 
         allocator: std.mem.Allocator,
         flags: std.ArrayList(u8) = .empty,
@@ -1779,7 +1809,10 @@ pub fn DecodeBlockScratchFor(comptime CoefficientType: type) type {
             self.width = width;
             self.height = height;
             self.nb_stride = nbfStride(width);
-            try self.nb_flags.resize(self.allocator, try std.math.mul(usize, self.nb_stride, height + 2));
+            // nbfMarkSignificantRows writes four lanes from x - 1, so the
+            // last padded row needs nbf_wide_mark_slack more words.
+            const nb_words = try std.math.mul(usize, self.nb_stride, height + 2);
+            try self.nb_flags.resize(self.allocator, try std.math.add(usize, nb_words, nbf_wide_mark_slack));
             if (comptime maintain_packed_t1_context_flags) {
                 try self.packed_t1_flags.resize(self.allocator, try std.math.mul(usize, width, pcfStripeCount(height)));
             }
@@ -6262,7 +6295,7 @@ fn emitDirectIsoSignificancePass(
                             const negative = coeff < 0;
                             try encoder.writeBit(negative);
                             symbol_count += 1;
-                            nbfMarkSignificant(flags, nbs, x, y, negative);
+                            nbfMarkSignificantRows(flags, nbs, x, y, negative);
                             directMarkPackedT1Significant(scratch, x, y, negative);
                             setSignificantRow(scratch, x, y);
                         }
@@ -6281,7 +6314,7 @@ fn emitDirectIsoSignificancePass(
                             const sign = directT1SignCoding(scratch, x, y, sample_flags, style);
                             try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
                             symbol_count += 1;
-                            nbfMarkSignificant(flags, nbs, x, y, negative);
+                            nbfMarkSignificantRows(flags, nbs, x, y, negative);
                             directMarkPackedT1Significant(scratch, x, y, negative);
                             setSignificantRow(scratch, x, y);
                         }
@@ -6347,7 +6380,7 @@ fn emitDirectIsoSignificancePassPlain(
                             try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
                         }
                         symbol_count += 1;
-                        nbfMarkSignificant(flags, nbs, x, y, negative);
+                        nbfMarkSignificantRows(flags, nbs, x, y, negative);
                         setSignificantRow(scratch, x, y);
                     }
                 }
@@ -6505,7 +6538,7 @@ fn emitDirectIsoCleanupPass(
                     const negative = coeff < 0;
                     try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
                     symbol_count += 1;
-                    nbfMarkSignificant(flags, nbs, x, y, negative);
+                    nbfMarkSignificantRows(flags, nbs, x, y, negative);
                     directMarkPackedT1Significant(scratch, x, y, negative);
                     setSignificantRow(scratch, x, y);
                 }
@@ -6622,7 +6655,7 @@ fn nbfEmitCleanupSample(
         const sign = directT1SignCoding(scratch, x, y, sample_flags, style);
         try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
         symbol_count += 1;
-        nbfMarkSignificant(flags, nbs, x, y, negative);
+        nbfMarkSignificantRows(flags, nbs, x, y, negative);
         directMarkPackedT1Significant(scratch, x, y, negative);
         setSignificantRow(scratch, x, y);
     }
@@ -6735,7 +6768,7 @@ inline fn emitDirectCleanupSignPlain(
     const sign = nbf_sc_lut[nbfScIndex(sample_flags)];
     const negative = plane[(rect.y + y) * stride + rect.x + x] < 0;
     try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
-    nbfMarkSignificant(flags, nbs, x, y, negative);
+    nbfMarkSignificantRows(flags, nbs, x, y, negative);
     setSignificantRow(scratch, x, y);
 }
 
@@ -7284,7 +7317,14 @@ fn markDecodedSignificant(scratch: anytype, x: usize, y: usize, bitplane: u8, ne
     decodeMarkPackedT1Significant(scratch, x, y, negative);
 }
 
+/// Only the decode scratch allocates the slack nbfMarkSignificantRows needs.
+fn assertWideMarkScratch(comptime Scratch: type) void {
+    const Child = @typeInfo(Scratch).pointer.child;
+    if (!@hasDecl(Child, "nb_flags_wide_mark_slack")) @compileError("wide significance marks need the decode scratch's flag slack");
+}
+
 fn markDecodedSignificantNbf(scratch: anytype, x: usize, y: usize, bitplane: u8, negative: bool) void {
+    comptime assertWideMarkScratch(@TypeOf(scratch));
     const C = ScratchCoefficient(@TypeOf(scratch));
     const index = localIndex(scratch.width, x, y);
     // ISO-conventional midpoint reconstruction (matches OpenJPEG): a newly
@@ -7297,7 +7337,7 @@ fn markDecodedSignificantNbf(scratch: anytype, x: usize, y: usize, bitplane: u8,
     const magnitude_bit = one | half;
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
-    nbfMarkSignificant(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
+    nbfMarkSignificantRows(scratch.nb_flags.items, scratch.nb_stride, x, y, negative);
     decodeMarkPackedT1Significant(scratch, x, y, negative);
 }
 
@@ -7310,6 +7350,7 @@ inline fn markDecodedSignificantNbfKnown(
     bitplane: u8,
     negative: bool,
 ) void {
+    comptime assertWideMarkScratch(@TypeOf(scratch));
     const C = ScratchCoefficient(@TypeOf(scratch));
     const index = localIndex(scratch.width, x, y);
     // ISO-conventional midpoint reconstruction (matches OpenJPEG): a newly
@@ -7322,7 +7363,7 @@ inline fn markDecodedSignificantNbfKnown(
     const magnitude_bit = one | half;
     scratch.coeffs.items[index] = if (negative) -magnitude_bit else magnitude_bit;
     setSignificantRowDecode(scratch, x, y);
-    nbfMarkSignificant(flags, nbs, x, y, negative);
+    nbfMarkSignificantRows(flags, nbs, x, y, negative);
     decodeMarkPackedT1Significant(scratch, x, y, negative);
 }
 

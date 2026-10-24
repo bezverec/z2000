@@ -37,6 +37,10 @@ all-thread setting.
 
 ## Current Evidence
 
+- 2026-10-25 (`benchmarks.md`): folded MQ contexts and four-lane neighbor
+  updates cut common-stream t1 decode from 781.6 to 691.9 ms (Grok 20.4.19
+  621.0 ms, now 1.11x) and t20 to 111.1 ms (Grok 20.4.19 115.7 ms). Four
+  scan-side candidates were measured and rejected; see P2.
 - 2026-10-24 interleaved A/B on the same i5-14500 (`benchmarks.md`): Grok
   20.4.19 decodes the common lossless stream in 123.7/634.1 ms at t20/t1
   against z2000 127.2/814.9 ms, but Grok 20.4.14 and 20.4.12 decode it in
@@ -121,6 +125,19 @@ Candidates must reduce actual per-symbol work or improve its data layout while
 preserving MQ state order. Preserve byte/symbol oracles, corruption behavior,
 and scalar comparisons. Do not reopen the rejected wholesale packed-column or
 SWAR designs without a new measured hypothesis.
+
+`tools/win_sample_profile.zig` samples a t1 run without administrator rights
+and attributes it to inlined functions and source lines. Kept so far: folded
+MQ contexts and four-lane neighbor-row updates. Rejected on 2026-10-25: a
+per-pass local copy of the MQ registers (no change), branch-free sign
+handling in refinement (+1.2%), per-column candidate masks (+3.7%), and
+16-column vector screening of significance propagation (+7.1%): the
+per-sample branches predict well, so the remaining cost is the MQ decisions
+themselves and the flag and coefficient updates. Remaining ideas: a cheaper
+cleanup-pass sample loop (index strength reduction), contiguous per-block
+magnitudes for the encoder's passes (`isMagnitudeBitSet`/`magnitude` are 13%
+of t1 encode), and decoding straight into the coefficient plane instead of
+scattering each block.
 
 ### P3. Decode Pipeline Overlap
 

@@ -13,27 +13,54 @@ pub const DecodeBranchStats = struct {
     byte_in: u64 = 0,
 };
 
-const Context = struct {
-    state: u8 = 0,
-    mps: bool = false,
-    qe: u16 = mq.state_table[0].qe,
-    nmps: u8 = mq.state_table[0].nmps,
-    nlps: u8 = mq.state_table[0].nlps,
-    switch_mps: bool = mq.state_table[0].switch_mps,
+/// An adaptive context with its MPS folded into the state index
+/// (2 * state + mps). Every transition copies one precomputed context, the
+/// MPS switch of Table C.2 already applied, instead of updating its fields
+/// one by one.
+const Context = extern struct {
+    qe: u16,
+    mps: bool,
+    /// Folded index after an MPS decision that renormalizes.
+    nmps: u8,
+    /// Folded index after an LPS decision.
+    nlps: u8,
+    padding: [3]u8 = .{ 0, 0, 0 },
 
     inline fn reset(self: *Context) void {
-        self.* = .{};
+        self.* = folded_contexts[0];
     }
 
+    /// Initial state for a context whose MPS is 0.
     inline fn setState(self: *Context, state_index: u8) void {
-        const row = mq.state_table[state_index];
-        self.state = state_index;
-        self.qe = row.qe;
-        self.nmps = row.nmps;
-        self.nlps = row.nlps;
-        self.switch_mps = row.switch_mps;
+        self.* = folded_contexts[2 * @as(usize, state_index)];
+    }
+
+    inline fn takeMps(self: *Context) void {
+        self.* = folded_contexts[self.nmps];
+    }
+
+    inline fn takeLps(self: *Context) void {
+        self.* = folded_contexts[self.nlps];
     }
 };
+
+const folded_contexts = makeFoldedContexts();
+
+fn makeFoldedContexts() [2 * mq.state_table.len]Context {
+    var table: [2 * mq.state_table.len]Context = undefined;
+    for (mq.state_table, 0..) |row, state| {
+        for (0..2) |mps| {
+            const lps_mps = if (row.switch_mps) 1 - mps else mps;
+            table[2 * state + mps] = .{
+                .qe = row.qe,
+                .mps = mps == 1,
+                .nmps = @intCast(2 * @as(usize, row.nmps) + mps),
+                .nlps = @intCast(2 * @as(usize, row.nlps) + lps_mps),
+            };
+        }
+    }
+    return table;
+}
 
 pub const Encoder = struct {
     allocator: std.mem.Allocator,
@@ -128,7 +155,7 @@ pub const Encoder = struct {
                 } else {
                     self.c += qe;
                 }
-                context.setState(context.nmps);
+                context.takeMps();
                 try self.renormalize();
             } else {
                 self.c += qe;
@@ -139,8 +166,7 @@ pub const Encoder = struct {
             } else {
                 self.a = qe;
             }
-            if (context.switch_mps) context.mps = !context.mps;
-            context.setState(context.nlps);
+            context.takeLps();
             try self.renormalize();
         }
     }
@@ -515,25 +541,25 @@ pub const Decoder = struct {
         const lps_is_current_mps = self.a < qe;
         self.a = qe;
         if (lps_is_current_mps) {
-            context.setState(context.nmps);
-            return context.mps;
+            const bit = context.mps;
+            context.takeMps();
+            return bit;
         }
 
         const bit = !context.mps;
-        if (context.switch_mps) context.mps = !context.mps;
-        context.setState(context.nlps);
+        context.takeLps();
         return bit;
     }
 
     inline fn exchangeMps(self: *Decoder, context: *Context, qe: u16) bool {
         if (self.a < qe) {
             const bit = !context.mps;
-            if (context.switch_mps) context.mps = !context.mps;
-            context.setState(context.nlps);
+            context.takeLps();
             return bit;
         }
-        context.setState(context.nmps);
-        return context.mps;
+        const bit = context.mps;
+        context.takeMps();
+        return bit;
     }
 
     inline fn renormalize(self: *Decoder) void {

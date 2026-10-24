@@ -46,6 +46,44 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, single-thread T1 decode
+
+Same host, method, profile, and stream as the 2026-10-24 record below
+(interleaved A/B, medians; the common 6,636,048-byte z2000 lossless JP2).
+Base is `8764a89`. Every candidate decoded to the identical TIFF and wrote
+the identical stream; kept candidates also left the 34-bit wide stream's
+bytes and exact decode unchanged.
+
+Attribution came from `tools/win_sample_profile.zig` (instruction-pointer
+sampling, about 1 kHz, six t1 decodes): Tier-1 held 91% of the samples,
+with `readUnchecked` 15%, the context `setState` 7%, `refineMagnitude` 6%,
+and the per-word neighbor updates of a newly significant sample 3%.
+
+| Candidate | Comparison | Result |
+| --- | --- | --- |
+| Codeword registers in a local decoder copy per pass | 810.4 -> 813.3 ms (7 rounds) | +0.4%, rejected (LLVM already keeps them in registers) |
+| Folded MQ contexts (one 8-byte copy per transition) | 795.3 -> 747.5 ms (7 rounds) | -6.0%, kept |
+| Branch-free sign handling in `refineMagnitude` | 749.7 -> 759.0 ms (9 rounds) | +1.2%, rejected |
+| Branch-free candidate mask per stripe column, `ctz` walk | 748.5 -> 775.8 ms (7 rounds) | +3.7%, rejected |
+| Vector screening of 16 columns x 4 rows in significance propagation | 750.5 -> 803.8 ms (7 rounds) | +7.1%, rejected |
+| Four-lane neighbor-row ORs for a newly significant sample (decode) | 726.3 -> 690.5 ms (9 rounds, vs folded) | -4.9%, kept |
+| The same in the encoder | t1 encode 863.6 -> 849.2 ms (7 rounds) | -1.7%, kept |
+
+The rejected screening candidates show that the scalar per-sample branches
+of the significance and refinement passes are well predicted; their cost
+is the MQ decisions and the flag and coefficient updates, not the scan.
+
+Cumulative, 7 rounds each:
+
+| Run | `8764a89` | Candidate | Grok 20.4.19 |
+| --- | ---: | ---: | ---: |
+| Decode t1 | 781.6 ms | 691.9 ms (-11.5%) | 621.0 ms |
+| Decode t20 | 114.2 ms | 111.1 ms (-2.7%) | 115.7 ms |
+| Encode t1 | 886.4 ms | 849.2 ms (-4.2%) | — |
+
+The t1 decode gap to Grok 20.4.19 narrows from 1.26x to 1.11x on this
+day's medians.
+
 ## 2026-10-24: Intel Core i5-14500, wide-path threading; Grok 20.4.19
 
 ### Provenance And Method

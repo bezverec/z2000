@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster Single-Thread T1 Decode
+
+- MQ contexts fold their MPS into the state index (2 * state + MPS, 94
+  precomputed contexts with Table C.2's MPS switch applied), so every
+  coder transition, in the decoder and the encoder, copies one 8-byte
+  context instead of reading a state row and updating five fields behind a
+  switch branch.
+- A sample that becomes significant updates its neighbors' flag words with
+  one unaligned four-lane OR per neighbor row instead of nine to thirteen
+  single-word updates (`nbfMarkSignificantRows`). The decode and encode
+  scratches carry two words of slack after the padded block for it, and a
+  compile-time check keeps other callers on the per-word version.
+- Output is unchanged: decoded samples and written streams are
+  byte-identical on the maintained lossless profile and on the 34-bit wide
+  stream. Interleaved A/B on the i5-14500 (`benchmarks.md`): common-stream
+  lossless decode 781.6 -> 691.9 ms at t1 (-11.5%; Grok 20.4.19 621.0 ms)
+  and 114.2 -> 111.1 ms at t20 (Grok 20.4.19 115.7 ms); lossless encode
+  886.4 -> 849.2 ms at t1.
+- `tools/win_sample_profile.zig` is a sampling profiler for Windows that
+  needs no administrator rights; it attributes samples to inlined functions
+  and source lines through DbgHelp.
+
 ### Faster Wide (Above 29-Bit) Encode And Decode
 
 - The wide i64 encoder coded every code-block on one thread, built and freed
