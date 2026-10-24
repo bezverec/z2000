@@ -11,10 +11,10 @@ Current status is tracked in [docs/iso_coverage.md](docs/iso_coverage.md). As
 of 2026-08-05, both the narrow RGB lossless JP2 target and the broader bounded
 Part 1 engineering scorecard are estimated at **100/100 within their declared
 profiles**. This is separate from the general-purpose G0-G7 plan, estimated at
-about 61% (+/- 8 points) in [the roadmap](docs/roadmap.md) as of 2026-10-22.
-All 16 official T.803 profile-0 conformance streams decode against their
-references ([Part 1 corpus](docs/part1_corpus.md)). Neither figure nor that
-result is a formal ISO conformance certification.
+about 65% (+/- 8 points) in [the roadmap](docs/roadmap.md) as of 2026-10-24.
+All 16 official T.803 profile-0 conformance streams and all 7 profile-1
+streams decode against their references ([Part 1 corpus](docs/part1_corpus.md)).
+Neither figure nor that result is a formal ISO conformance certification.
 
 The current prerelease is [`v0.2.0-rc.4`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.4),
 with binaries for Windows x86-64, Linux x86-64, and Linux RISC-V 64. It has no
@@ -160,6 +160,14 @@ macOS archive; on macOS, build from source with Zig 0.17.
   precision across 1..16 bits. Checked PGX diagnostics cover one component up to 32-bit
   storage; canonical ZRAW preserves all components, signedness, 1..38-bit
   precision, sampling geometry, and origins without narrowing.
+- A native reversible encoder (`zraw-to-j2k`, `encodeNativeLosslessWithOptions`)
+  for any Part 1 component layout: up to 16384 components, each signed or
+  unsigned with its own precision from 1 to 38 bits and its own subsampling,
+  image origins, and CRG registration; tile grids encoded in parallel, RCT,
+  every progression order, POC, R/L/C/P tile-parts, PPM/PPT, per-component
+  COC coding, Maxshift ROI whose region decodes losslessly from the first
+  layer, and rate-targeted layers by global PCRD. At 8 and 16 bits it writes
+  the existing RGB, planar, gray, and sampled encoders' bytes.
 - Bounded component-subsampling decode with per-component SIZ `XRsiz/YRsiz`,
   reference-grid RPCL merging across unequal component precinct grids,
   component-local T1/DWT geometry, and variable-size planar output. Embedded
@@ -435,7 +443,7 @@ z2000 input.j2k output.pgx [--component N] [--tile-index N|--region X,Y,W,H] [--
 z2000 j2k-to-pgx input.j2c output.pgx [options]
 z2000 input.j2k output.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend BACKEND]
 z2000 j2k-to-zraw input.j2c output.zraw [options]
-z2000 zraw-to-j2k input.zraw output.j2k [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--levels N] [--layers N] [--block N] [framing and code-block style flags]
+z2000 zraw-to-j2k input.zraw output.j2k [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE] [--roi [C:]X,Y,W,H] [--rates R1,R2,...] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--levels N] [--layers N] [--block N] [framing and code-block style flags]
 ```
 
 The DNG adapter accepts exactly one uncompressed, chunky, unsigned 8/16-bit

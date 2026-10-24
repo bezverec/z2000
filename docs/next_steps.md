@@ -138,13 +138,21 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
-`v0.2.0-rc.4` was assembled on 2026-10-24 by `tools/release_local.ps1` in
-the same way as rc.3 and replaces it: rc.3 ended quality layers at
-undecodable pass lengths, so its layered streams misdecode their intermediate
-layers in every decoder. It also brings 1- to 38-bit decode, the seven T.803
-profile-1 streams, and the native encoder. It has no macOS archive either.
-The next release action is again to collect feedback and decide between a
-final `v0.2.0` and `v0.2.0-rc.5`.
+`v0.2.0-rc.4` was published on 2026-10-24 from commit `5854aee` (build 614)
+and replaces rc.3: rc.3 ended quality layers at undecodable pass lengths, so
+its layered streams misdecode their intermediate layers in every decoder. It
+also brings 1- to 38-bit decode, the seven T.803 profile-1 streams, and the
+native encoder. `tools/release_local.ps1` assembled it like rc.3 (a first run
+stopped on a transient Zig `Unexpected` file error after every gate had
+passed; the rerun was clean): native Windows Debug and ReleaseFast suites
+(632 tests each), the corpus with all optional T.803 streams (127 passes, 19
+expected rejections, no mismatch), and the Linux x86-64 and RISC-V 64
+ReleaseFast suites in an `alpine:3.22` container. Every binary reports
+`0.2.0-rc.4+build.614.g5854aeef` under both CLI names, one fixture converts
+to identical bytes on all three platforms, and `SHA256SUMS` covers the
+Windows, Linux x86-64, and Linux RISC-V archives. It has no macOS archive
+either. The next release action is again to collect feedback and decide
+between a final `v0.2.0` and `v0.2.0-rc.5`.
 `v0.2.0-rc.3` was published on 2026-10-22 from commit `14dfa4a` (build 586).
 It replaces rc.2, which rejected Part 1 profile streams and rate-truncated
 reversible files. `tools/release_local.ps1` assembled it end to end: native

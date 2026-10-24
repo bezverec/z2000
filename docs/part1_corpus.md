@@ -50,14 +50,17 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-10-22 gate contains 125 entries: 109 committed entries plus all 16
-optional T.803 profile-0 inputs, and **all 16 T.803 inputs pass**. Every input
+The 2026-10-24 gate (the `v0.2.0-rc.4` release run) contains 146 entries:
+123 committed entries plus all 23 optional T.803 inputs, the 16 profile-0
+and the 7 profile-1 streams, and **all 23 T.803 inputs pass**. Every input
 and every declared reference is independently checksummed. `p0_13` is checked
 against its class-1 references for components 0 to 3, because its class-0
 reference holds component 1's value in z2000, OpenJPEG, and Kakadu alike; the
-other fifteen use their class-0 references. With the optional root present the
-result is 106 decode passes, 19 expected fail-closed cases, zero mismatches,
-and zero skips. The paragraphs below record how each stream was promoted; the
+other fifteen profile-0 streams use their class-0 references, and the
+profile-1 streams their class-1 references for every component. With the
+optional root present the result is 127 decode passes, 19 expected
+fail-closed cases, zero mismatches, and zero skips; without it, 104 passes,
+19 expected fail-closed cases, and 23 skips. The paragraphs below record how each stream was promoted; the
 history up to 2026-07-26, when ten passed, comes first.
 
 `p0_01`, `p0_02`, `p0_03`, `p0_11`, `p0_12`, `p0_16`, `p0_04`, `p0_09`,
