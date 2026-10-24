@@ -1317,11 +1317,26 @@ pub fn forward53WideOrigin(
     x0: u32,
     y0: u32,
 ) !u8 {
+    return forward53WideOriginThreaded(allocator, data, width, height, requested_levels, x0, y0, 1);
+}
+
+/// `forward53WideOrigin` with every row and column pass split over up to
+/// `threads` workers; integer lifting, so the result never depends on them.
+pub fn forward53WideOriginThreaded(
+    allocator: std.mem.Allocator,
+    data: []i64,
+    width: usize,
+    height: usize,
+    requested_levels: u8,
+    x0: u32,
+    y0: u32,
+    threads: usize,
+) !u8 {
     if (width == 0 or height == 0 or data.len != width * height) {
         return TransformError.InvalidDimensions;
     }
-    const scratch = try allocator.alloc(i64, 2 * @max(width, height));
-    defer allocator.free(scratch);
+    var workers = try WidePassWorkers.init(allocator, data, width, height, threads);
+    defer workers.deinit();
 
     var cur_width = width;
     var cur_height = height;
@@ -1333,16 +1348,8 @@ pub fn forward53WideOrigin(
         if (cur_width == 1 and cur_height == 1 and cur_x0 == 0 and cur_y0 == 0) return requested_levels;
         const next_width = lowCountOrigin(cur_width, cur_x0);
         const next_height = lowCountOrigin(cur_height, cur_y0);
-        const line = scratch[0..cur_height];
-        const temp = scratch[cur_height .. 2 * cur_height];
-        for (0..cur_width) |col| {
-            for (0..cur_height) |row| line[row] = data[row * width + col];
-            forward53WideLine(line, temp, cur_y0);
-            for (0..cur_height) |row| data[row * width + col] = line[row];
-        }
-        for (0..cur_height) |row| {
-            forward53WideLine(data[row * width ..][0..cur_width], scratch[0..cur_width], cur_x0);
-        }
+        try workers.pass(data, width, cur_width, cur_height, cur_y0, .forward_columns);
+        try workers.pass(data, width, cur_width, cur_height, cur_x0, .forward_rows);
         cur_width = next_width;
         cur_height = next_height;
         cur_x0 = ceilDiv2(cur_x0);
@@ -1363,6 +1370,22 @@ pub fn inverse53WideReducedOrigin(
     reduction: u8,
     x0: u32,
     y0: u32,
+) !ResolutionShape {
+    return inverse53WideReducedOriginThreaded(allocator, data, width, height, levels, reduction, x0, y0, 1);
+}
+
+/// `inverse53WideReducedOrigin` with every row and column pass split over up
+/// to `threads` workers; each lifting result is still checked.
+pub fn inverse53WideReducedOriginThreaded(
+    allocator: std.mem.Allocator,
+    data: []i64,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+    x0: u32,
+    y0: u32,
+    threads: usize,
 ) !ResolutionShape {
     if (width == 0 or height == 0 or data.len != width * height) {
         return TransformError.InvalidDimensions;
@@ -1386,26 +1409,163 @@ pub fn inverse53WideReducedOrigin(
         resolutions[level + 1] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
     }
 
-    const scratch = try allocator.alloc(i64, 2 * @max(width, height));
-    defer allocator.free(scratch);
+    var workers = try WidePassWorkers.init(allocator, data, width, height, threads);
+    defer workers.deinit();
     var level = levels;
     while (level > reduction) {
         level -= 1;
         const shape = shapes[level];
         if (shape.width == 0 or shape.height == 0) continue;
-        for (0..shape.height) |row| {
-            try inverse53WideLine(data[row * width ..][0..shape.width], scratch[0..shape.width], shape.x0);
-        }
-        const line = scratch[0..shape.height];
-        const temp = scratch[shape.height .. 2 * shape.height];
-        for (0..shape.width) |col| {
-            for (0..shape.height) |row| line[row] = data[row * width + col];
-            try inverse53WideLine(line, temp, shape.y0);
-            for (0..shape.height) |row| data[row * width + col] = line[row];
-        }
+        try workers.pass(data, width, shape.width, shape.height, shape.x0, .inverse_rows);
+        try workers.pass(data, width, shape.width, shape.height, shape.y0, .inverse_columns);
     }
     return resolutions[reduction];
 }
+
+/// Columns lifted together per vertical batch: their samples of one row are
+/// contiguous, so a batch reads each row once instead of once per column.
+const wide_column_batch = 8;
+
+/// Below this many samples per pass the workers cost more than they save.
+const wide_parallel_min_samples = 1 << 16;
+
+const WidePassKind = enum { forward_rows, forward_columns, inverse_rows, inverse_columns };
+
+/// One worker's share of one horizontal or vertical 5/3 pass over a region of
+/// an i64 plane: rows or columns `start..end`, with its own scratch.
+const WidePassJob = struct {
+    data: []i64,
+    width: usize,
+    span_width: usize,
+    span_height: usize,
+    origin: u32,
+    kind: WidePassKind,
+    start: usize = 0,
+    end: usize = 0,
+    scratch: []i64,
+    result: anyerror!void = {},
+
+    fn run(job: *WidePassJob) void {
+        job.result = job.work();
+    }
+
+    fn work(job: *WidePassJob) !void {
+        switch (job.kind) {
+            .forward_rows, .inverse_rows => for (job.start..job.end) |row| {
+                const line = job.data[row * job.width ..][0..job.span_width];
+                if (job.kind == .forward_rows) {
+                    forward53WideLine(line, job.scratch[0..job.span_width], job.origin);
+                } else {
+                    try inverse53WideLine(line, job.scratch[0..job.span_width], job.origin);
+                }
+            },
+            .forward_columns, .inverse_columns => {
+                const height = job.span_height;
+                var col = job.start;
+                while (col < job.end) {
+                    const count = @min(wide_column_batch, job.end - col);
+                    // Gather `count` columns into separate lines, row by row.
+                    for (0..height) |row| {
+                        const source = job.data[row * job.width + col ..][0..count];
+                        for (source, 0..) |value, lane| job.scratch[lane * height + row] = value;
+                    }
+                    const temp = job.scratch[wide_column_batch * height ..][0..height];
+                    for (0..count) |lane| {
+                        const line = job.scratch[lane * height ..][0..height];
+                        if (job.kind == .forward_columns) {
+                            forward53WideLine(line, temp, job.origin);
+                        } else {
+                            try inverse53WideLine(line, temp, job.origin);
+                        }
+                    }
+                    for (0..height) |row| {
+                        const destination = job.data[row * job.width + col ..][0..count];
+                        for (destination, 0..) |*value, lane| value.* = job.scratch[lane * height + row];
+                    }
+                    col += count;
+                }
+            },
+        }
+    }
+};
+
+/// Runs one pass over `items` rows or columns on up to `jobs.len` workers.
+fn runWidePass(jobs: []WidePassJob, threads: []std.Thread, template: WidePassJob, items: usize) !void {
+    if (items == 0) return;
+    const samples = template.span_width * template.span_height;
+    const workers = if (samples < wide_parallel_min_samples) 1 else @max(1, @min(jobs.len, items));
+    const share = (items + workers - 1) / workers;
+    var used: usize = 0;
+    var start: usize = 0;
+    while (start < items) : (start += share) {
+        // Each worker keeps the scratch it was given once.
+        const scratch = jobs[used].scratch;
+        jobs[used] = template;
+        jobs[used].scratch = scratch;
+        jobs[used].start = start;
+        jobs[used].end = @min(items, start + share);
+        used += 1;
+    }
+    var spawned: usize = 0;
+    errdefer for (threads[0..spawned]) |thread| thread.join();
+    while (spawned + 1 < used) : (spawned += 1) {
+        threads[spawned] = try std.Thread.spawn(.{}, WidePassJob.run, .{&jobs[spawned]});
+    }
+    jobs[used - 1].run();
+    for (threads[0..spawned]) |thread| thread.join();
+    spawned = 0;
+    for (jobs[0..used]) |job| try job.result;
+}
+
+/// Per-worker scratch and job slots for the threaded wide 5/3.
+const WidePassWorkers = struct {
+    allocator: std.mem.Allocator,
+    scratch: []i64,
+    jobs: []WidePassJob,
+    threads: []std.Thread,
+
+    fn init(allocator: std.mem.Allocator, data: []i64, width: usize, height: usize, threads: usize) !WidePassWorkers {
+        const count = @max(1, threads);
+        const scratch_len = (wide_column_batch + 1) * @max(width, height);
+        const scratch = try allocator.alloc(i64, try std.math.mul(usize, count, scratch_len));
+        errdefer allocator.free(scratch);
+        const jobs = try allocator.alloc(WidePassJob, count);
+        errdefer allocator.free(jobs);
+        const thread_slots = try allocator.alloc(std.Thread, count);
+        for (jobs, 0..) |*job, index| job.* = .{
+            .data = data,
+            .width = width,
+            .span_width = 0,
+            .span_height = 0,
+            .origin = 0,
+            .kind = .forward_rows,
+            .scratch = scratch[index * scratch_len ..][0..scratch_len],
+        };
+        return .{ .allocator = allocator, .scratch = scratch, .jobs = jobs, .threads = thread_slots };
+    }
+
+    fn deinit(self: *WidePassWorkers) void {
+        self.allocator.free(self.threads);
+        self.allocator.free(self.jobs);
+        self.allocator.free(self.scratch);
+    }
+
+    fn pass(self: *WidePassWorkers, data: []i64, width: usize, span_width: usize, span_height: usize, origin: u32, kind: WidePassKind) !void {
+        const items = switch (kind) {
+            .forward_rows, .inverse_rows => span_height,
+            .forward_columns, .inverse_columns => span_width,
+        };
+        try runWidePass(self.jobs, self.threads, .{
+            .data = data,
+            .width = width,
+            .span_width = span_width,
+            .span_height = span_height,
+            .origin = origin,
+            .kind = kind,
+            .scratch = &.{},
+        }, items);
+    }
+};
 
 fn forward53WideLine(data: []i64, scratch: []i64, origin: u32) void {
     if ((origin & 1) == 0) {

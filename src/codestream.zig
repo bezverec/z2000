@@ -957,10 +957,11 @@ pub fn encodeNativeLosslessWithOptions(
 
     const encode_options = normalizedEncodePrecinctOptions(options, levels);
     for (planes) |plane| {
-        _ = try wavelet_int.forward53WideOrigin(allocator, plane, width, height, levels, 0, 0);
+        _ = try wavelet_int.forward53WideOriginThreaded(allocator, plane, width, height, levels, 0, 0, encode_options.threads);
     }
     var scaffold_precincts: [33]packet_plan.Precinct = undefined;
-    const scaffold_options = wideScaffoldOptions(encode_options, &scaffold_precincts, component_count, precision, quantization, .rpcl);
+    var scaffold_options = wideScaffoldOptions(encode_options, &scaffold_precincts, component_count, precision, quantization, .rpcl);
+    scaffold_options.threads = encode_options.threads;
     var artifacts = try buildWideTileArtifacts(
         allocator,
         try grid.tile(0),
@@ -1209,6 +1210,7 @@ fn encodeNativeWideComponentwise(
             .masks = masks,
             .background = background,
             .roi_shifts = roi_shifts,
+            .block_threads = @intCast(@max(1, @as(usize, options.threads) / worker_count)),
             .stage = .transform,
             .artifacts = artifacts,
             .initialized = initialized,
@@ -1416,6 +1418,9 @@ const WideComponentTileJob = struct {
     background: []u64,
     /// Per component Maxshift upshift, set between the stages.
     roi_shifts: []const u8,
+    /// Code-block workers per tile-component: the threads the job workers
+    /// leave over.
+    block_threads: u8 = 1,
     stage: Stage,
     artifacts: []tile_pipeline.TileRpclEncodeArtifacts,
     initialized: []bool,
@@ -1476,7 +1481,7 @@ const WideComponentTileJob = struct {
             @memcpy(region[row * width ..][0..width], plane[start..][0..width]);
         }
         const coding = self.component_options[component];
-        const achieved = try wavelet_int.forward53WideOrigin(allocator, region, width, height, coding.levels, rect.x0, rect.y0);
+        const achieved = try wavelet_int.forward53WideOriginThreaded(allocator, region, width, height, coding.levels, rect.x0, rect.y0, self.block_threads);
         if (achieved != coding.levels) return CodestreamError.InvalidCodestream;
 
         if (!componentHasRoi(self.roi_regions, component)) return;
@@ -1509,6 +1514,7 @@ const WideComponentTileJob = struct {
         }
         const coding = self.component_options[component];
         var scaffold_options = wideScaffoldOptions(coding, &self.precincts, 1, layout.precision, self.quantizations[component], .rpcl);
+        scaffold_options.threads = self.block_threads;
         if (shift != 0) {
             for (&scaffold_options.nominal_bitplanes.?) |*level| {
                 for (level) |*bitplanes| bitplanes.* += shift;
@@ -1835,7 +1841,12 @@ fn encodeNativeWideMultiTile(
             .image_width = grid.params.xsiz,
             .grid = grid,
             .levels = levels,
-            .scaffold_options = wideScaffoldOptions(encode_options, &scaffold_precincts, planes.len, main_header.bit_depth, quantization, packet_order),
+            .scaffold_options = blk: {
+                var scaffold = wideScaffoldOptions(encode_options, &scaffold_precincts, planes.len, main_header.bit_depth, quantization, packet_order);
+                // Threads the tile workers leave over code blocks inside a tile.
+                scaffold.threads = @intCast(@max(1, @as(usize, options.threads) / worker_count));
+                break :blk scaffold;
+            },
             .block_style = wideBlockStyle(encode_options),
             .tiles = tiles,
             .initialized = initialized,
@@ -1926,7 +1937,7 @@ const WideTileEncodeJob = struct {
                 const start = (@as(usize, tile.rect.y0) + row) * self.image_width + tile.rect.x0;
                 @memcpy(region[row * tile_width ..][0..tile_width], plane[start..][0..tile_width]);
             }
-            const achieved = try wavelet_int.forward53WideOrigin(allocator, region, tile_width, tile_height, self.levels, tile.rect.x0, tile.rect.y0);
+            const achieved = try wavelet_int.forward53WideOriginThreaded(allocator, region, tile_width, tile_height, self.levels, tile.rect.x0, tile.rect.y0, self.scaffold_options.threads);
             if (achieved != self.levels) return CodestreamError.InvalidCodestream;
         }
         return buildWideTileArtifacts(allocator, tile, tile_planes, self.levels, self.scaffold_options, self.block_style);
@@ -5684,6 +5695,7 @@ fn inverseNativeComponentPlane(
     levels: u8,
     reduction: u8,
     workspace: *wavelet_int.Workspace,
+    threads: u8,
 ) !NativeComponentInverse {
     const x0 = catalog.component_x0[component];
     const y0 = catalog.component_y0[component];
@@ -5703,7 +5715,7 @@ fn inverseNativeComponentPlane(
                 }
                 return .{ .shape = synthesized.shape, .lossy = true };
             }
-            const shape = wavelet_int.inverse53WideReducedOrigin(allocator, wide, width, height, levels, reduction, x0, y0) catch |err| switch (err) {
+            const shape = wavelet_int.inverse53WideReducedOriginThreaded(allocator, wide, width, height, levels, reduction, x0, y0, threads) catch |err| switch (err) {
                 wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
                 else => return err,
             };
@@ -6063,6 +6075,7 @@ fn reconstructNativeComponent(
         levels,
         options.resolution_reduction,
         workspace,
+        options.threads,
     );
     return .{ .plane = plane, .stride = width, .inverse = inverse };
 }

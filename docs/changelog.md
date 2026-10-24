@@ -5,6 +5,29 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster Wide (Above 29-Bit) Encode And Decode
+
+- The wide i64 encoder coded every code-block on one thread, built and freed
+  a symbol scratch per block, and with rates generated each block's symbols a
+  second time for the pass distortions. Blocks of a tile now run on the
+  encoder's threads (`PacketScaffoldOptions.threads`; tile and
+  tile-component workers share the budget), each worker reuses one
+  `BlockScratch`, and the distortions come from the symbols just coded
+  (`ebcot.passDistortionsFromView`, `ebcot.encodeBlockViewSegmentIsoMq`).
+- The wide 5/3 forward and inverse transforms split each row and column pass
+  over the threads (`forward53WideOriginThreaded`,
+  `inverse53WideReducedOriginThreaded`), with columns lifted in batches of
+  eight; integer lifting, so the coefficients never depend on the thread
+  count, and the inverse still checks every lifting result.
+- Output bytes are unchanged: the 34-bit three-component 2000x1500 stream
+  and its two-layer rate-controlled variant are byte-identical to the
+  previous build at t20, a new test pins identical bytes on one and eight
+  block workers (RCT, bypass, two layers with a rate), and decode is exact.
+- Interleaved A/B on the Intel Core i5-14500 (`benchmarks.md`): that
+  lossless encode drops from 8.81 s to 0.57 s at t20 and from 8.28 s to
+  4.52 s at t1, the two-layer `--rates 20,5` encode from 12.36 s to 0.64 s,
+  and its decode from 415 to 366 ms at t20.
+
 ### Irreversible 9/7 At Every Precision
 
 - The native decoder refused 9/7 components above 24 bits, because f32

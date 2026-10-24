@@ -60,6 +60,9 @@ pub const PacketScaffoldOptions = struct {
     /// 5/3 squared-norm weight. Used only when rate targets are requested.
     band_weights: ?[33][4]f64 = null,
     front_end: ?TileFrontEnd = null,
+    /// Code-block workers of the wide tile builder; the blocks are coded in
+    /// any order and stored by index, so the output never depends on it.
+    threads: u8 = 1,
     /// Maxshift ROI upshift of the wide encoder's blocks (Annex H). With
     /// several layers, the first carries exactly the passes of the bitplanes
     /// at or above it -- the region of interest -- and the rest are spread
@@ -2135,13 +2138,6 @@ pub fn buildWideTileRpclEncodeArtifacts(
 ) !TileRpclEncodeArtifacts {
     if (options.nominal_bitplanes == null) return PacketScaffoldError.InvalidLayer;
     if (planes.len != options.components) return PacketScaffoldError.InvalidPlane;
-    // Rate targets keep each block's band-weighted per-pass distortion
-    // reductions for the global PCRD (`applyGridPcrdTargets`), which then
-    // replaces these provisional layers.
-    const capture_distortions = options.rate_count > 0 and options.layers > 1 and !style.terminate_all;
-    var distortion_scratch = ebcot.BlockScratch.init(allocator);
-    defer distortion_scratch.deinit();
-    var distortions: [164]f64 = undefined;
     for (planes) |plane| {
         if (plane.len != try std.math.mul(usize, width, height)) return PacketScaffoldError.InvalidPlane;
     }
@@ -2152,56 +2148,61 @@ pub fn buildWideTileRpclEncodeArtifacts(
     errdefer if (!scaffold_moved) scaffold.deinit();
 
     const total_blocks = try scaffold.componentBlockCount();
-    const blocks = try allocator.alloc(EncodedComponentBlock, total_blocks);
-    var initialized: usize = 0;
-    var blocks_moved = false;
-    errdefer if (!blocks_moved) {
-        for (blocks[0..initialized]) |*block| block.deinit(allocator);
-        allocator.free(blocks);
-    };
+    const jobs = try allocator.alloc(ComponentBlock, total_blocks);
+    defer allocator.free(jobs);
+    var listed: usize = 0;
     var iterator = scaffold.componentBlockIterator();
     while (try iterator.next()) |job| {
+        if (listed >= jobs.len) return PacketScaffoldError.InvalidComponentBlock;
         try validateRectInPlane(job.rect, width, height);
-        var actual_style = style;
-        actual_style.band_kind = job.band.kind;
-        const segment = ebcot.encodeCodeBlockSegmentIsoMqWideWithStyle(
-            allocator,
-            planes[job.component],
-            width,
-            job.rect,
-            actual_style,
-        ) catch |err| switch (err) {
-            // More bitplanes than Part 1 can signal.
-            ebcot.EbcotError.InvalidBlock => return PacketScaffoldError.InvalidLayer,
-            else => return err,
-        };
-        var encoded = EncodedComponentBlock{ .job = job, .segment = segment, .bypass = actual_style.bypass };
-        var moved = false;
-        errdefer if (!moved) encoded.deinit(allocator);
-        if (capture_distortions and segment.pass_count > 0) {
-            const pass_count = ebcot.passDistortions(
-                &distortion_scratch,
-                planes[job.component],
-                width,
-                job.rect,
-                actual_style,
-                distortions[0..],
-            ) catch return PacketScaffoldError.InvalidLayer;
-            if (pass_count != segment.pass_count) return PacketScaffoldError.InvalidLayer;
-            const weight = pcrdBandWeight(job.band);
-            const stored = try allocator.alloc(f64, pass_count);
-            for (stored, distortions[0..pass_count]) |*out, value| out.* = value * weight;
-            encoded.pass_distortions = stored;
-        }
-        encoded.layers = if (options.roi_shift != 0 and scaffold.layers > 1 and options.rate_count == 0)
-            try computeRoiLayerTruncations(allocator, encoded.segment, scaffold.layers, options.roi_shift)
-        else
-            try computeLayerTruncations(allocator, encoded.segment, scaffold.layers);
-        blocks[initialized] = encoded;
-        moved = true;
-        initialized += 1;
+        jobs[listed] = job;
+        listed += 1;
     }
-    if (initialized != total_blocks) return PacketScaffoldError.InvalidComponentBlock;
+    if (listed != total_blocks) return PacketScaffoldError.InvalidComponentBlock;
+
+    const blocks = try allocator.alloc(EncodedComponentBlock, total_blocks);
+    const coded = try allocator.alloc(bool, total_blocks);
+    defer allocator.free(coded);
+    @memset(coded, false);
+    var blocks_moved = false;
+    errdefer if (!blocks_moved) {
+        for (blocks, coded) |*block, is_coded| {
+            if (is_coded) block.deinit(allocator);
+        }
+        allocator.free(blocks);
+    };
+    var next_block = std.atomic.Value(usize).init(0);
+    const worker_count = @max(@as(usize, 1), @min(@as(usize, options.threads), total_blocks));
+    const workers = try allocator.alloc(WideBlockWorker, worker_count);
+    defer allocator.free(workers);
+    for (workers) |*worker| worker.* = .{
+        .allocator = allocator,
+        .planes = planes,
+        .width = width,
+        .style = style,
+        .options = options,
+        .layers = scaffold.layers,
+        .jobs = jobs,
+        .blocks = blocks,
+        .coded = coded,
+        .next_block = &next_block,
+    };
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < threads.len) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, WideBlockWorker.run, .{&workers[spawned]}) catch |err| {
+            next_block.store(total_blocks, .release);
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+    }
+    workers[worker_count - 1].run();
+    for (threads[0..spawned]) |thread| thread.join();
+    for (workers) |worker| try worker.result;
+    for (coded) |is_coded| {
+        if (!is_coded) return PacketScaffoldError.InvalidComponentBlock;
+    }
     var catalog = EncodedBlockCatalog{
         .allocator = allocator,
         .tile = scaffold.tile,
@@ -4192,6 +4193,84 @@ fn computeLayerTruncations(
     }
     return layers;
 }
+
+/// One code-block worker of `buildWideTileRpclEncodeArtifacts`: codes blocks
+/// by index from a shared counter and keeps, when rate targets are set, each
+/// block's band-weighted per-pass distortion reductions for the global PCRD
+/// (`applyGridPcrdTargets`), which then replaces the provisional layers.
+const WideBlockWorker = struct {
+    allocator: std.mem.Allocator,
+    planes: []const []const i64,
+    width: usize,
+    style: ebcot.CodeBlockStyle,
+    options: PacketScaffoldOptions,
+    layers: u16,
+    jobs: []const ComponentBlock,
+    blocks: []EncodedComponentBlock,
+    coded: []bool,
+    next_block: *std.atomic.Value(usize),
+    result: anyerror!void = {},
+
+    fn run(self: *WideBlockWorker) void {
+        // One symbol scratch per worker, reused for every block it codes.
+        var scratch = ebcot.BlockScratch.init(self.allocator);
+        defer scratch.deinit();
+        while (true) {
+            const index = self.next_block.fetchAdd(1, .monotonic);
+            if (index >= self.jobs.len) return;
+            self.blocks[index] = self.code(self.jobs[index], &scratch) catch |err| {
+                self.result = err;
+                // Stop the other workers at their next block.
+                self.next_block.store(self.jobs.len, .monotonic);
+                return;
+            };
+            self.coded[index] = true;
+        }
+    }
+
+    fn code(self: *WideBlockWorker, job: ComponentBlock, scratch: *ebcot.BlockScratch) !EncodedComponentBlock {
+        const allocator = self.allocator;
+        const options = self.options;
+        var actual_style = self.style;
+        actual_style.band_kind = job.band.kind;
+        const view = ebcot.encodeBlockScratchWideWithStyle(
+            scratch,
+            self.planes[job.component],
+            self.width,
+            job.rect,
+            actual_style,
+        ) catch |err| switch (err) {
+            // More bitplanes than Part 1 can signal.
+            ebcot.EbcotError.InvalidBlock => return PacketScaffoldError.InvalidLayer,
+            else => return err,
+        };
+        const segment = try ebcot.encodeBlockViewSegmentIsoMq(allocator, view, actual_style);
+        var encoded = EncodedComponentBlock{ .job = job, .segment = segment, .bypass = actual_style.bypass };
+        errdefer encoded.deinit(allocator);
+        const capture_distortions = options.rate_count > 0 and options.layers > 1 and !self.style.terminate_all;
+        if (capture_distortions and segment.pass_count > 0) {
+            // From the symbols just coded, not a second generation.
+            var distortions: [164]f64 = undefined;
+            const pass_count = ebcot.passDistortionsFromView(
+                view,
+                self.planes[job.component],
+                self.width,
+                job.rect,
+                distortions[0..],
+            ) catch return PacketScaffoldError.InvalidLayer;
+            if (pass_count != segment.pass_count) return PacketScaffoldError.InvalidLayer;
+            const weight = pcrdBandWeight(job.band);
+            const stored = try allocator.alloc(f64, pass_count);
+            for (stored, distortions[0..pass_count]) |*out, value| out.* = value * weight;
+            encoded.pass_distortions = stored;
+        }
+        encoded.layers = if (options.roi_shift != 0 and self.layers > 1 and options.rate_count == 0)
+            try computeRoiLayerTruncations(allocator, encoded.segment, self.layers, options.roi_shift)
+        else
+            try computeLayerTruncations(allocator, encoded.segment, self.layers);
+        return encoded;
+    }
+};
 
 /// Layers for a Maxshift ROI block: the first ends after the passes of the
 /// bitplanes at or above `roi_shift` (3k - 2 passes for k such bitplanes,

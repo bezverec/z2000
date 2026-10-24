@@ -1877,6 +1877,18 @@ pub fn passDistortions(
     out: []f64,
 ) !u16 {
     const view = try encodeBlockScratchGeneric(scratch, plane, stride, rect, style);
+    return passDistortionsFromView(view, plane, stride, rect, out);
+}
+
+/// `passDistortions` over symbols already generated for the block, so a
+/// caller that codes the block from the same view generates them once.
+pub fn passDistortionsFromView(
+    view: EncodedBlockView,
+    plane: anytype,
+    stride: usize,
+    rect: subband.Rect,
+    out: []f64,
+) !u16 {
     const pass_count: u16 = @intCast(view.passes.len);
     if (out.len < pass_count) return EbcotError.InvalidBlock;
     @memset(out[0..pass_count], 0);
@@ -1934,6 +1946,17 @@ pub fn encodeCodeBlockSegmentIsoMqWideWithStyle(
     var scratch = BlockScratch.init(allocator);
     defer scratch.deinit();
     const block = try encodeBlockScratchWideWithStyle(&scratch, plane, stride, rect, style);
+    return encodeBlockViewSegmentIsoMq(allocator, block, style);
+}
+
+/// One generated block through the ISO MQ writer matching `style`
+/// (continuous, bypass, or terminated). The view may live in a reused
+/// scratch; the segment owns its bytes.
+pub fn encodeBlockViewSegmentIsoMq(
+    allocator: std.mem.Allocator,
+    block: EncodedBlockView,
+    style: CodeBlockStyle,
+) !CodeBlockSegment {
     if (style.terminate_all) {
         return if (style.bypass)
             encodeBlockSymbolsSegmentIsoMqBypassTerminated(allocator, block, style)

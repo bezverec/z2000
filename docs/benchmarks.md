@@ -46,6 +46,67 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-24: Intel Core i5-14500, wide-path threading; Grok 20.4.19
+
+### Provenance And Method
+
+| Item | Value |
+| --- | --- |
+| Host | Intel Core i5-14500, 14 cores / 20 logical processors, Windows 11 Pro 10.0.26300 |
+| z2000 | base `e0c24b2`; candidate = the commit recording this entry; Zig 0.17.0, ReleaseFast native |
+| Grok | 20.4.19 (official `grok-windows-latest.zip` of the v20.4.19 release), with 20.4.14 and 20.4.12 beside it |
+| Measurement | interleaved A/B: one warm-up per command, then rounds that run every command in turn; median and minimum wall time |
+
+The host had other work running, which moved sequential `hyperfine` runs by
+up to 20% between otherwise identical binaries. Interleaving spreads that
+load over every candidate alike, so only same-table comparisons are made
+below; absolute numbers move with the host's load on the day.
+
+### Wide Path (34-Bit, i64 T1 And 5/3)
+
+Input: a 72,000,124-byte ZRAW, three signed 34-bit 2000x1500 components;
+`zraw-to-j2k` defaults (five levels, 64x64 blocks, one layer), 17,990,803 B
+lossless stream. The candidate's output is byte-identical to the base for
+that stream and for `--rates 20,5` (two layers), and the decode is exact.
+
+| Run | Base `e0c24b2` median | Candidate median | Change |
+| --- | ---: | ---: | ---: |
+| Lossless encode t20 (5 rounds) | 8814.6 ms | 566.3 ms | -93.6% |
+| Lossless encode t1 (3 rounds) | 8280.3 ms | 4521.3 ms | -45.4% |
+| `--rates 20,5` encode t20 (5 rounds) | 12360.0 ms | 638.1 ms | -94.8% |
+| Decode t20 (5 rounds) | 414.7 ms | 365.9 ms | -11.8% |
+| Decode t1 (3 rounds) | 2108.3 ms | 2096.4 ms | -0.6% |
+
+Steps on the way (t20 lossless encode): block-parallel T1 took the base from
+8.36 s to 1.75 s; the threaded wide 5/3 moved decode from 520 to 453 ms;
+one reused `BlockScratch` per worker then halved the encode again, and with
+rates removed the second symbol generation. The t1 encode gain is the
+allocation removal alone. Grok accepts only precisions 1..16, so it has no
+leg on this profile.
+
+### Main Lossless Profile Against Grok 20.4.19
+
+Established archival profile (`bench_compare.ps1` commands: one 8192x8192
+tile, RPCL, six resolutions, 256/128 precincts, 64x64 blocks, BYPASS,
+SOP/EPH, R tile-parts, TLM) on `bench-rgb-2048.tif`; 7 rounds, z2000 at the
+candidate. Every decode named here was pixel-exact against the TIFF; z2000
+wrote 6,636,048 B and both Grok versions 6,635,216 B.
+
+| Run | z2000 | Grok 20.4.19 | Grok 20.4.12 |
+| --- | ---: | ---: | ---: |
+| Encode t20 | 140.9 ms | 143.6 ms | 145.8 ms |
+| Encode t1 | 931.0 ms | 836.0 ms | 796.3 ms |
+| Decode t20, common z2000 stream | 127.2 ms | 123.7 ms | 95.0 ms |
+| Decode t1, common z2000 stream | 814.9 ms | 634.1 ms | 620.7 ms |
+
+Grok 20.4.19 decoded its own stream in 120.8/632.8 ms at t20/t1. A separate
+11-round t20 decode of the common stream confirmed the version gap: z2000
+124.2 ms, Grok 20.4.19 120.7 ms, 20.4.14 97.0 ms, 20.4.12 93.9 ms. Grok
+20.4.19 is thus about 25% slower at t20 than 20.4.14 on this host and
+profile while its t1 decode is unchanged; z2000 encodes faster than either
+Grok at t20 and is within 3% of 20.4.19's t20 decode, but still 1.29x
+slower at t1 decode. The main-path code did not change in this candidate.
+
 ## 2026-07-17: Apple M4, first native four-codec run (Kakadu on macOS)
 
 ### Provenance

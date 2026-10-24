@@ -40690,3 +40690,35 @@ test "f64 synthesis of relabelled irreversible streams scales the f32 decode exa
         }
     }
 }
+
+test "wide single-tile encode writes the same bytes on any number of block workers" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_b10c);
+    const random = prng.random();
+    const specs = [_]GenericComponent{ .{ .precision = 30 }, .{ .precision = 30 }, .{ .precision = 30 } };
+    var source = try genericNativeSource(allocator, random, .{ 0, 0, 160, 96 }, &specs);
+    defer source.deinit();
+    var rates: [@typeInfo(@FieldType(codestream.LosslessOptions, "rates")).array.len]f64 = @splat(0);
+    rates[0] = 20;
+    // One tile in RPCL: the uniform single-tile path, whose code blocks run
+    // on `threads` workers.
+    for ([_]codestream.LosslessOptions{
+        .{ .mct = .rct, .block_width = 16, .block_height = 16 },
+        .{ .mct = .none, .block_width = 32, .block_height = 16, .layers = 2, .rates = rates, .rate_count = 1, .bypass = true },
+    }) |options| {
+        var serial_options = options;
+        serial_options.threads = 1;
+        const serial = try codestream.encodeNativeLosslessWithOptions(allocator, source, serial_options);
+        defer allocator.free(serial);
+        var parallel_options = options;
+        parallel_options.threads = 8;
+        const parallel = try codestream.encodeNativeLosslessWithOptions(allocator, source, parallel_options);
+        defer allocator.free(parallel);
+        try std.testing.expectEqualSlices(u8, serial, parallel);
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, parallel, .{ .threads = 4 }, .{});
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+        }
+    }
+}

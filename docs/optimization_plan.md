@@ -23,7 +23,10 @@ Every candidate follows the same cycle:
 2. record the baseline command, commit, CPU, thread count, and output hash;
 3. implement one narrow change;
 4. run correctness and interop gates;
-5. measure enough warm runs with `hyperfine` to separate signal from noise;
+5. measure enough warm runs to separate signal from noise: `hyperfine` on a
+   quiet host, or interleaved A/B rounds (every candidate in turn, median and
+   minimum) when other work shares the machine, because sequential runs then
+   differ by more than the effect under test;
 6. keep only a repeatable improvement on the target profile without a material
    regression on the other maintained profiles; otherwise revert the candidate
    and record the result in `benchmarks.md`.
@@ -34,6 +37,14 @@ all-thread setting.
 
 ## Current Evidence
 
+- 2026-10-24 interleaved A/B on the same i5-14500 (`benchmarks.md`): Grok
+  20.4.19 decodes the common lossless stream in 123.7/634.1 ms at t20/t1
+  against z2000 127.2/814.9 ms, but Grok 20.4.14 and 20.4.12 decode it in
+  about 95 ms at t20, so the t20 gate below stays at the faster Grok, not
+  the newest one. z2000 encodes faster than both Grok versions at t20 and
+  remains about 1.1x slower at t1. The wide (above 29-bit) path is now
+  block-parallel with threaded 5/3; Grok cannot be compared there
+  (it stops at 16 bits).
 - The 2026-07-16 Intel Core i5-14500 checkpoint is the active Windows/x86
   optimization baseline. On the common z2000 lossless stream, z2000 decoded in
   831.5/135.3 ms at t1/t20 versus Grok 636.8/99.1 ms, OpenJPEG
