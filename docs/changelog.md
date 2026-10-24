@@ -5,6 +5,29 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Irreversible 9/7 At Every Precision
+
+- The native decoder refused 9/7 components above 24 bits, because f32
+  synthesis no longer lands such samples on their nearest integer. They now
+  decode in f64: the T1 coefficients go through i64 (any band may exceed 31
+  bitplanes), dequantization uses the same steps and midpoint rule, the
+  inverse 9/7 runs in f64 (`wavelet.inverse97ReducedOriginF64`, scalar, with
+  the f32 kernels' lifting order, boundary rules, and origins), and three
+  components under ICT are transformed in f64 as well. Up to 24 bits the f32
+  path is unchanged.
+- Scalar QCD steps accept Mb up to the Part 1 ceiling of 37 and an exponent
+  of zero (E.1 allows 0..31); the i32 decode paths still refuse blocks
+  deeper than 31 bitplanes.
+- Evidence: the f64 transform inverts its forward transform to below one
+  LSB at 38 bits and tracks the f32 synthesis; Kakadu 8.4.1 28- and 30-bit
+  irreversible streams decode within 115 and 423 of kdu_expand's own output
+  (Kakadu synthesizes in single precision; OpenJPEG 2.5.4 differs from it
+  by up to 3136 and 12800); a signed 12-bit Kakadu 9/7 stream and an 8-bit
+  five-component ICT tile grid relabelled by 16 and 20 bits decode, at full
+  and reduced resolution, to 2^k times their f32 decode within its
+  rounding. OpenJPEG 2.5.4 writes invalid QCD exponents for such
+  precisions, which z2000 refuses (`reference_tools.md`).
+
 ## 0.2.0-rc.4 — 2026-10-24
 
 ### Quality Layers End At Decodable Pass Truncation Lengths

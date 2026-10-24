@@ -40599,3 +40599,94 @@ test "wide encoder rate targets refine wide and general layouts layer by layer" 
         }
     }
 }
+
+/// Samples of a little-endian `PG LM <depth> <w> <h>` PGX with 4-byte
+/// unsigned samples, as kdu_expand writes them above 16 bits.
+fn readUnsignedPgxLm32(allocator: std.mem.Allocator, bytes: []const u8) ![]i64 {
+    const newline = std.mem.indexOfScalar(u8, bytes, '\n') orelse return error.InvalidPgx;
+    var fields = std.mem.tokenizeScalar(u8, bytes[0..newline], ' ');
+    _ = fields.next();
+    if (!std.mem.eql(u8, fields.next() orelse return error.InvalidPgx, "LM")) return error.InvalidPgx;
+    _ = fields.next();
+    const width = try std.fmt.parseInt(usize, fields.next() orelse return error.InvalidPgx, 10);
+    const height = try std.fmt.parseInt(usize, fields.next() orelse return error.InvalidPgx, 10);
+    const body = bytes[newline + 1 ..];
+    if (body.len != width * height * 4) return error.InvalidPgx;
+    const samples = try allocator.alloc(i64, width * height);
+    for (samples, 0..) |*sample, index| sample.* = std.mem.readInt(u32, body[index * 4 ..][0..4], .little);
+    return samples;
+}
+
+test "irreversible components above 24 bits decode in f64 within Kakadu's own rounding" {
+    const allocator = std.testing.allocator;
+    // kdu_compress 8.4.1 Creversible=no -rate 4 on 64x48 unsigned 28- and
+    // 30-bit samples; references are kdu_expand's own output. Kakadu
+    // synthesizes in single precision, so the gap grows with the precision:
+    // OpenJPEG 2.5.4 differs from Kakadu by up to 3136 and 12800 here.
+    const Case = struct { stream: []const u8, reference: []const u8, precision: u8, max: i64, mean: f64 };
+    const cases = [_]Case{
+        .{ .stream = @embedFile("testdata/kakadu-97-unsigned28.j2c"), .reference = @embedFile("testdata/kakadu-97-unsigned28-kakadu.pgx"), .precision = 28, .max = 256, .mean = 32 },
+        .{ .stream = @embedFile("testdata/kakadu-97-unsigned30.j2c"), .reference = @embedFile("testdata/kakadu-97-unsigned30-kakadu.pgx"), .precision = 30, .max = 1024, .mean = 128 },
+    };
+    for (cases) |case| {
+        const reference = try readUnsignedPgxLm32(allocator, case.reference);
+        defer allocator.free(reference);
+        var decoded = try codestream.decodeLosslessNative(allocator, case.stream, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqual(case.precision, decoded.planes[0].layout.precision);
+        var largest: i64 = 0;
+        var total: f64 = 0;
+        for (decoded.planes[0].samples, reference) |actual, expected| {
+            const gap: i64 = @intCast(@abs(actual - expected));
+            largest = @max(largest, gap);
+            total += @floatFromInt(gap);
+        }
+        try std.testing.expect(largest <= case.max);
+        try std.testing.expect(total / @as(f64, @floatFromInt(reference.len)) <= case.mean);
+    }
+}
+
+test "f64 synthesis of relabelled irreversible streams scales the f32 decode exactly" {
+    const allocator = std.testing.allocator;
+    // Raising a component's SIZ precision by k multiplies every 9/7 step
+    // (E-3, R_b = precision + gain) by 2^k and leaves the coded coefficients
+    // alone, so the f64 decode of the relabelled stream must be 2^k times the
+    // f32 decode of the original, up to the original's rounding (2^(k-1)).
+    // The second stream carries ICT over its first three components on a
+    // tile grid, so the f64 inverse ICT is covered too.
+    const Case = struct { stream: []const u8, extra: u5 };
+    const cases = [_]Case{
+        .{ .stream = @embedFile("testdata/kakadu-97-native-signed12.j2c"), .extra = 16 },
+        .{ .stream = @embedFile("testdata/kakadu-five-component-ict-tiles.j2c"), .extra = 20 },
+    };
+    for (cases) |case| {
+        const relabelled = try allocator.dupe(u8, case.stream);
+        defer allocator.free(relabelled);
+        const siz = findMarker(relabelled, codestream.markerValue("siz")) orelse return error.MissingMarker;
+        const components = readU16BeTest(relabelled, siz + 38);
+        for (0..components) |component| relabelled[siz + 40 + 3 * component] += case.extra;
+
+        for ([_]u8{ 0, 1 }) |reduction| {
+            var narrow = try codestream.decodeLosslessNativeWithOptions(allocator, case.stream, .{ .resolution_reduction = reduction }, .{});
+            defer narrow.deinit();
+            var wide = try codestream.decodeLosslessNativeWithOptions(allocator, relabelled, .{ .resolution_reduction = reduction, .threads = 4 }, .{});
+            defer wide.deinit();
+            for (narrow.planes, wide.planes) |small, large| {
+                const layout = small.layout;
+                try std.testing.expectEqual(layout.precision + case.extra, large.layout.precision);
+                const small_shift: i64 = if (layout.signed) 0 else @as(i64, 1) << @intCast(layout.precision - 1);
+                const large_shift: i64 = if (layout.signed) 0 else @as(i64, 1) << @intCast(large.layout.precision - 1);
+                const minimum = try layout.minimumSample();
+                const maximum = try layout.maximumSample();
+                const scale = @as(i64, 1) << case.extra;
+                for (small.samples, large.samples) |s, l| {
+                    // A sample clamped at either end of the narrow range says
+                    // nothing about the unclamped value.
+                    if (s == minimum or s == maximum) continue;
+                    const expected = (s - small_shift) * scale + large_shift;
+                    try std.testing.expect(@abs(l - expected) <= @divExact(scale, 2) + @divExact(scale, 64));
+                }
+            }
+        }
+    }
+}

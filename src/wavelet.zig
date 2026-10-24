@@ -1077,3 +1077,219 @@ pub fn inverse97Parallel(
         runDwt97Phase(&pool, planes, width, shape.width, shape.height, shape.x0, shape.y0, scratches, pack_len, max_dim, .inverse_columns);
     }
 }
+
+// Irreversible 9/7 in f64 for components above 24 bits, where f32 synthesis
+// no longer carries a sample to the nearest integer. Scalar, with the same
+// lifting order, boundary rules, and origin handling as the f32 kernels.
+const dwt97_alpha_f64: f64 = -1.586134342059924;
+const dwt97_beta_f64: f64 = -0.052980118572961;
+const dwt97_gamma_f64: f64 = 0.882911075530934;
+const dwt97_delta_f64: f64 = 0.443506852043971;
+const dwt97_k_f64: f64 = 1.230174104914001;
+const dwt97_inv_k_f64: f64 = 1.0 / dwt97_k_f64;
+
+fn liftOddF64(even: []f64, odd: []f64, coefficient: f64) void {
+    for (odd, 0..) |*value, j| {
+        const right = if (j + 1 < even.len) even[j + 1] else even[j];
+        value.* += coefficient * (even[j] + right);
+    }
+}
+
+fn liftEvenF64(even: []f64, odd: []f64, coefficient: f64) void {
+    for (even, 0..) |*value, j| {
+        const left = if (j > 0) odd[j - 1] else odd[0];
+        const right = if (j < odd.len) odd[j] else odd[j - 1];
+        value.* += coefficient * (left + right);
+    }
+}
+
+fn scaleF64(half: []f64, scale: f64) void {
+    for (half) |*value| value.* *= scale;
+}
+
+fn forward97LineF64(data: []f64, scratch: []f64, origin: u32) void {
+    if (data.len == 0) return;
+    if (data.len == 1) {
+        if ((origin & 1) == 1) data[0] *= 2.0;
+        return;
+    }
+    const even_count = (data.len + 1) / 2;
+    const odd_count = data.len / 2;
+    const even = scratch[0..even_count];
+    const odd = scratch[even_count..data.len];
+    for (odd, 0..) |*value, j| {
+        even[j] = data[2 * j];
+        value.* = data[2 * j + 1];
+    }
+    if (even_count > odd_count) even[odd_count] = data[2 * odd_count];
+    if ((origin & 1) == 0) {
+        liftOddF64(even, odd, dwt97_alpha_f64);
+        liftEvenF64(even, odd, dwt97_beta_f64);
+        liftOddF64(even, odd, dwt97_gamma_f64);
+        liftEvenF64(even, odd, dwt97_delta_f64);
+        scaleF64(even, dwt97_inv_k_f64);
+        scaleF64(odd, dwt97_k_f64);
+        @memcpy(data[0..even_count], even);
+        @memcpy(data[even_count..], odd);
+    } else {
+        liftEvenF64(even, odd, dwt97_alpha_f64);
+        liftOddF64(even, odd, dwt97_beta_f64);
+        liftEvenF64(even, odd, dwt97_gamma_f64);
+        liftOddF64(even, odd, dwt97_delta_f64);
+        scaleF64(even, dwt97_k_f64);
+        scaleF64(odd, dwt97_inv_k_f64);
+        @memcpy(data[0..odd_count], odd);
+        @memcpy(data[odd_count..], even);
+    }
+}
+
+fn inverse97LineF64(data: []f64, scratch: []f64, origin: u32) void {
+    if (data.len == 0) return;
+    if (data.len == 1) {
+        if ((origin & 1) == 1) data[0] = data[0] / 2.0;
+        return;
+    }
+    const even_count = (data.len + 1) / 2;
+    const odd_count = data.len / 2;
+    const even = scratch[0..even_count];
+    const odd = scratch[even_count..data.len];
+    if ((origin & 1) == 0) {
+        @memcpy(even, data[0..even_count]);
+        @memcpy(odd, data[even_count..]);
+        scaleF64(even, dwt97_k_f64);
+        scaleF64(odd, dwt97_inv_k_f64);
+        liftEvenF64(even, odd, -dwt97_delta_f64);
+        liftOddF64(even, odd, -dwt97_gamma_f64);
+        liftEvenF64(even, odd, -dwt97_beta_f64);
+        liftOddF64(even, odd, -dwt97_alpha_f64);
+    } else {
+        @memcpy(odd, data[0..odd_count]);
+        @memcpy(even, data[odd_count..]);
+        scaleF64(even, dwt97_inv_k_f64);
+        scaleF64(odd, dwt97_k_f64);
+        liftOddF64(even, odd, -dwt97_delta_f64);
+        liftEvenF64(even, odd, -dwt97_gamma_f64);
+        liftOddF64(even, odd, -dwt97_beta_f64);
+        liftEvenF64(even, odd, -dwt97_alpha_f64);
+    }
+    for (odd, 0..) |value, j| {
+        data[2 * j] = even[j];
+        data[2 * j + 1] = value;
+    }
+    if (even_count > odd_count) data[2 * odd_count] = even[odd_count];
+}
+
+/// Forward 9/7 in f64 over an origin-aware region, `levels` decompositions in
+/// the ISO order (vertical, then horizontal per level).
+pub fn forward97OriginF64(allocator: std.mem.Allocator, data: []f64, width: usize, height: usize, levels: u8, x0: u32, y0: u32) !void {
+    if (width == 0 or height == 0 or data.len != width * height) return TransformError.InvalidDimensions;
+    const line = try allocator.alloc(f64, @max(width, height));
+    defer allocator.free(line);
+    const scratch = try allocator.alloc(f64, @max(width, height));
+    defer allocator.free(scratch);
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    for (0..levels) |_| {
+        if (cur_width != 0 and cur_height != 0) {
+            for (0..cur_width) |col| {
+                for (0..cur_height) |row| line[row] = data[row * width + col];
+                forward97LineF64(line[0..cur_height], scratch, cur_y0);
+                for (0..cur_height) |row| data[row * width + col] = line[row];
+            }
+            for (0..cur_height) |row| forward97LineF64(data[row * width ..][0..cur_width], scratch, cur_x0);
+        }
+        cur_width = lowCountOrigin(cur_width, cur_x0);
+        cur_height = lowCountOrigin(cur_height, cur_y0);
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+    }
+}
+
+/// Inverse 9/7 in f64 down to `reduction` levels below full resolution;
+/// returns the reconstructed top-left shape. The f64 counterpart of
+/// `inverse2DReducedOrigin` for irreversible components above 24 bits.
+pub fn inverse97ReducedOriginF64(
+    allocator: std.mem.Allocator,
+    data: []f64,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+    x0: u32,
+    y0: u32,
+) !ResolutionShape {
+    if (width == 0 or height == 0 or data.len != width * height) return TransformError.InvalidDimensions;
+    if (reduction > levels) return TransformError.InvalidDimensions;
+    if (levels > 32) return TransformError.TooManyLevels;
+    var shapes: [32]LevelShape = undefined;
+    var resolutions: [33]ResolutionShape = undefined;
+    var cur_width = width;
+    var cur_height = height;
+    var cur_x0 = x0;
+    var cur_y0 = y0;
+    resolutions[0] = .{ .width = width, .height = height, .x0 = x0, .y0 = y0 };
+    for (0..levels) |level| {
+        shapes[level] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+        cur_width = lowCountOrigin(cur_width, cur_x0);
+        cur_height = lowCountOrigin(cur_height, cur_y0);
+        cur_x0 = ceilDiv2(cur_x0);
+        cur_y0 = ceilDiv2(cur_y0);
+        resolutions[level + 1] = .{ .width = cur_width, .height = cur_height, .x0 = cur_x0, .y0 = cur_y0 };
+    }
+    const line = try allocator.alloc(f64, @max(width, height));
+    defer allocator.free(line);
+    const scratch = try allocator.alloc(f64, @max(width, height));
+    defer allocator.free(scratch);
+    var level = levels;
+    while (level > reduction) {
+        level -= 1;
+        const shape = shapes[level];
+        // An empty region synthesizes to itself (ISO F.3.8).
+        if (shape.width == 0 or shape.height == 0) continue;
+        for (0..shape.height) |row| inverse97LineF64(data[row * width ..][0..shape.width], scratch, shape.x0);
+        for (0..shape.width) |col| {
+            for (0..shape.height) |row| line[row] = data[row * width + col];
+            inverse97LineF64(line[0..shape.height], scratch, shape.y0);
+            for (0..shape.height) |row| data[row * width + col] = line[row];
+        }
+    }
+    return resolutions[reduction];
+}
+
+test "f64 9/7 inverts its forward transform and tracks the f32 synthesis" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x97f64);
+    const random = prng.random();
+    const Case = struct { width: usize, height: usize, levels: u8, x0: u32, y0: u32 };
+    for ([_]Case{
+        .{ .width = 37, .height = 23, .levels = 5, .x0 = 0, .y0 = 0 },
+        .{ .width = 16, .height = 9, .levels = 3, .x0 = 3, .y0 = 5 },
+        .{ .width = 1, .height = 7, .levels = 2, .x0 = 1, .y0 = 0 },
+    }) |case| {
+        const count = case.width * case.height;
+        const original = try allocator.alloc(f64, count);
+        defer allocator.free(original);
+        for (original) |*value| value.* = @floatFromInt(random.intRangeAtMost(i64, -(1 << 37), (1 << 37) - 1));
+        const data = try allocator.dupe(f64, original);
+        defer allocator.free(data);
+        try forward97OriginF64(allocator, data, case.width, case.height, case.levels, case.x0, case.y0);
+
+        // The f32 synthesis of the same (scaled) coefficients agrees to f32
+        // precision, so both run the same lifting.
+        const scale: f64 = 1.0 / @as(f64, 1 << 26);
+        const narrow = try allocator.alloc(f32, count);
+        defer allocator.free(narrow);
+        for (narrow, data) |*out, value| out.* = @floatCast(value * scale);
+        _ = try inverse2DReducedOrigin(allocator, narrow, case.width, case.height, case.levels, 0, .irreversible_9_7, case.x0, case.y0);
+
+        const shape = try inverse97ReducedOriginF64(allocator, data, case.width, case.height, case.levels, 0, case.x0, case.y0);
+        try std.testing.expectEqual(case.width, shape.width);
+        for (original, data, narrow) |expected, actual, single| {
+            // A 38-bit integer comes back to well under one LSB.
+            try std.testing.expectApproxEqAbs(expected, actual, 1e-3);
+            try std.testing.expectApproxEqAbs(expected * scale, @as(f64, single), 0.05);
+        }
+    }
+}

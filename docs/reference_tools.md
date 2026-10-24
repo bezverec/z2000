@@ -240,6 +240,16 @@ cleanly once an oracle confirmed the stream was sound.
 Measured gaps where z2000 is outside the reference-versus-reference spread, kept
 here so they are not rediscovered as new.
 
+- **High-precision 9/7 from OpenJPEG 2.5.4 and Kakadu 8.4.1.** Above about
+  24 bits `opj_compress -I` writes QCD exponents that underflow and wrap
+  (for 28 bits: 2, 2, 2, 2, 1, 1, 1, 0, 0, 0, then 30 for the finest bands),
+  so its bands declare one magnitude bitplane while carrying more; z2000
+  refuses those streams in packet header parsing, and Kakadu and OpenJPEG
+  decode them to output far from the source. Kakadu's own 28- and 30-bit
+  irreversible streams are valid; its decode differs from z2000's f64
+  synthesis by at most 115 and 423 (single precision), from OpenJPEG's by
+  up to 3136 and 12800. Its 32-bit output saturates. A zero exponent is
+  legal (E.1) and is accepted for scalar steps.
 - **Maxshift ROI in OpenJPEG 2.5.4 and Grok 20.4.12.** With the smallest
   legal upshift (2^s just above the largest background magnitude, H.1) both
   take background coefficients of magnitude at least 2^(s-1) for ROI and

@@ -5650,14 +5650,9 @@ fn checkStrictNativeProfile(header: TemporaryHeader, options: DecodeOptions) !vo
         const quantization = componentQuantizationForHeader(header, component);
         switch (componentTransformForHeader(header, component)) {
             .reversible_5_3 => if (quantization != .none) return CodestreamError.UnsupportedPayload,
-            // Irreversible samples are rounded from f32 synthesis, which
-            // carries them exactly only up to 24 significant bits; wider
-            // components stay unsupported rather than silently losing
-            // precision.
-            .irreversible_9_7 => {
-                if (quantization == .none) return CodestreamError.UnsupportedPayload;
-                if (componentBitDepthForHeader(header, component) > 24) return CodestreamError.UnsupportedPayload;
-            },
+            // Up to 24 bits irreversible samples are synthesized in f32, above
+            // that in f64 (`max_f32_irreversible_precision`).
+            .irreversible_9_7 => if (quantization == .none) return CodestreamError.UnsupportedPayload,
         }
     }
 }
@@ -5697,7 +5692,17 @@ fn inverseNativeComponentPlane(
         // Only reversible components take the wide path, through the checked
         // scalar i64 5/3.
         .wide => |wide| {
-            if (componentTransformForHeader(header, component) != .reversible_5_3) return CodestreamError.UnsupportedPayload;
+            if (componentTransformForHeader(header, component) == .irreversible_9_7) {
+                const synthesized = try inverseNativeIrreversiblePlaneF64(allocator, header, catalog, component, wide, width, height, levels, reduction);
+                defer allocator.free(synthesized.plane);
+                for (0..synthesized.shape.height) |row| {
+                    const base = row * width;
+                    for (wide[base..][0..synthesized.shape.width], synthesized.plane[base..][0..synthesized.shape.width]) |*coefficient, value| {
+                        coefficient.* = roundNativeIrreversibleSampleF64(value, 0);
+                    }
+                }
+                return .{ .shape = synthesized.shape, .lossy = true };
+            }
             const shape = wavelet_int.inverse53WideReducedOrigin(allocator, wide, width, height, levels, reduction, x0, y0) catch |err| switch (err) {
                 wavelet_int.TransformError.CoefficientOverflow => return CodestreamError.InvalidCodestream,
                 else => return err,
@@ -5810,6 +5815,163 @@ fn inverseNativeIrreversiblePlane(
     };
 }
 
+/// Highest irreversible precision synthesized in f32, whose 24-bit
+/// significand still lands every sample on its nearest integer; wider
+/// components are dequantized and synthesized in f64.
+const max_f32_irreversible_precision: u8 = 24;
+
+/// One irreversible component dequantized and synthesized in f64 from i64
+/// coefficients, with the same step sizes and midpoint rule as
+/// `inverseNativeIrreversiblePlane`. The caller owns `plane`.
+const NativeIrreversiblePlaneF64 = struct {
+    plane: []f64,
+    shape: wavelet_int.ResolutionShape,
+};
+
+fn inverseNativeIrreversiblePlaneF64(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    component: usize,
+    coefficients: []const i64,
+    width: usize,
+    height: usize,
+    levels: u8,
+    reduction: u8,
+) !NativeIrreversiblePlaneF64 {
+    const x0 = catalog.component_x0[component];
+    const y0 = catalog.component_y0[component];
+    const width_u32 = std.math.cast(u32, width) orelse return CodestreamError.InvalidCodestream;
+    const height_u32 = std.math.cast(u32, height) orelse return CodestreamError.InvalidCodestream;
+    const x1 = std.math.add(u32, x0, width_u32) catch return CodestreamError.InvalidCodestream;
+    const y1 = std.math.add(u32, y0, height_u32) catch return CodestreamError.InvalidCodestream;
+    const bands = try subband.makeBandsForRegion(allocator, x0, y0, x1, y1, levels);
+    defer allocator.free(bands);
+    const deltas = try allocator.alloc(f64, bands.len);
+    defer allocator.free(deltas);
+    const depth = componentBitDepthForHeader(header, component);
+    if (component >= header.component_qcd.len) return CodestreamError.InvalidCodestream;
+    const component_qcd = &header.component_qcd[component];
+    for (bands, deltas) |band, *delta| {
+        const step = signalledQcdBandStep(component_qcd, levels, band.kind, band.level) orelse
+            signalledHeaderBandStep(header, band.kind, band.level) orelse
+            try irreversibleBandStepSizeFor(header.quantization, depth, band.kind, band.level, levels);
+        delta.* = irreversibleBandDelta(depth, band.kind, step);
+    }
+    const pixels = try std.math.mul(usize, width, height);
+    if (coefficients.len != pixels) return CodestreamError.InvalidCodestream;
+    const plane = try allocator.alloc(f64, pixels);
+    errdefer allocator.free(plane);
+    @memset(plane, 0);
+    for (bands, deltas) |band, delta| {
+        if (!strictBandRequiredForReduction(band, reduction)) continue;
+        for (0..band.rect.height) |row| {
+            const base = (band.rect.y + row) * width + band.rect.x;
+            for (coefficients[base..][0..band.rect.width], plane[base..][0..band.rect.width]) |q, *value| {
+                if (q == 0) continue;
+                const magnitude = (@as(f64, @floatFromInt(@abs(q))) + 0.5) * delta;
+                value.* = if (q < 0) -magnitude else magnitude;
+            }
+        }
+    }
+    // The ISO midpoint offset only for coefficients whose last decoded
+    // bitplane is zero (`strictIrreversibleMidpointRule`).
+    for (catalog.components[component]) |block| {
+        const rule = strictIrreversibleMidpointRule(block);
+        if (rule == .all) continue;
+        if (block.band_index >= bands.len) return CodestreamError.InvalidCodestream;
+        if (!strictBandRequiredForReduction(bands[block.band_index], reduction)) continue;
+        const half_step = deltas[block.band_index] * 0.5;
+        const end_x = try std.math.add(usize, block.rect.x, block.rect.width);
+        const end_y = try std.math.add(usize, block.rect.y, block.rect.height);
+        if (end_x > width or end_y > height) return CodestreamError.InvalidCodestream;
+        for (block.rect.y..end_y) |y| {
+            for (block.rect.x..end_x) |x| {
+                const q = coefficients[y * width + x];
+                if (q == 0) continue;
+                if (rule == .unit_magnitudes and @abs(q) == 1) continue;
+                plane[y * width + x] -= if (q < 0) -half_step else half_step;
+            }
+        }
+    }
+    const shape = try wavelet.inverse97ReducedOriginF64(allocator, plane, width, height, levels, reduction, x0, y0);
+    return .{ .plane = plane, .shape = .{ .width = shape.width, .height = shape.height, .x0 = shape.x0, .y0 = shape.y0 } };
+}
+
+/// The f64 counterpart of `roundNativeIrreversibleSample`, into i64.
+fn roundNativeIrreversibleSampleF64(value: f64, level_shift: f64) i64 {
+    if (std.math.isNan(value)) return 0;
+    const limit: f64 = @floatFromInt(@as(i64, 1) << 62);
+    return @intFromFloat(std.math.clamp(@round(value + level_shift) - level_shift, -limit, limit));
+}
+
+/// `reconstructNativeIctComponents` above 24 bits: i64 coefficients, f64
+/// synthesis, and the inverse ICT in f64 with the same constants.
+fn reconstructNativeIctComponentsF64(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+    depth: u8,
+) ![3]NativeReconstructedComponent {
+    var planes: [3]NativeReconstructedComponent = undefined;
+    var floats: [3][]f64 = undefined;
+    var built: usize = 0;
+    defer for (floats[0..built]) |plane| allocator.free(plane);
+    errdefer for (planes[0..built]) |plane| plane.plane.deinit(allocator);
+    while (built < planes.len) : (built += 1) {
+        const component = built;
+        const levels = componentLevelsForHeader(header, component);
+        const width = catalog.component_widths[component];
+        const height = catalog.component_heights[component];
+        const coefficients = try reconstructStrictComponentCoefficientsAs(
+            i64,
+            allocator,
+            width,
+            height,
+            levels,
+            catalog,
+            component,
+            componentRoiShiftForHeader(header, component),
+            options,
+            null,
+        );
+        const synthesized = inverseNativeIrreversiblePlaneF64(allocator, header, catalog, component, coefficients, width, height, levels, options.resolution_reduction) catch |err| {
+            allocator.free(coefficients);
+            return err;
+        };
+        planes[component] = .{
+            .plane = .{ .wide = coefficients },
+            .stride = width,
+            .inverse = .{ .shape = synthesized.shape, .lossy = true },
+        };
+        floats[component] = synthesized.plane;
+    }
+    const shape = planes[0].inverse.shape;
+    for (planes[1..]) |plane| {
+        if (plane.inverse.shape.width != shape.width or plane.inverse.shape.height != shape.height or
+            plane.inverse.shape.x0 != shape.x0 or plane.inverse.shape.y0 != shape.y0)
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+    const level_shift: f64 = if (header.component_signed[0])
+        0
+    else
+        @floatFromInt(@as(i64, 1) << @as(u6, @intCast(depth - 1)));
+    for (0..shape.height) |row| {
+        for (0..shape.width) |column| {
+            const y = floats[0][row * planes[0].stride + column];
+            const cb = floats[1][row * planes[1].stride + column];
+            const cr = floats[2][row * planes[2].stride + column];
+            planes[0].plane.wide[row * planes[0].stride + column] = roundNativeIrreversibleSampleF64(y + 1.402 * cr, level_shift);
+            planes[1].plane.wide[row * planes[1].stride + column] = roundNativeIrreversibleSampleF64(y - 0.34413 * cb - 0.71414 * cr, level_shift);
+            planes[2].plane.wide[row * planes[2].stride + column] = roundNativeIrreversibleSampleF64(y + 1.772 * cb, level_shift);
+        }
+    }
+    return planes;
+}
+
 /// Rounds a reconstructed irreversible sample to the integer plane, before
 /// the component's DC level shift. `level_shift` makes ties round as they do
 /// on the shifted sample, which is where the interleaved RGB path rounds.
@@ -5845,12 +6007,19 @@ const NativeCoefficientPlane = union(enum) {
     }
 };
 
-/// Whether a reversible component needs i64 coefficients: a precision above
-/// `max_native_payload_precision`, or a code block whose Mb (with any ROI
-/// shift) exceeds the 31 magnitude bitplanes of the i32 T1.
+/// Whether a component needs i64 coefficients: a reversible one above
+/// `max_native_payload_precision` bits, an irreversible one above
+/// `max_f32_irreversible_precision` bits (synthesized in f64), or any whose
+/// code blocks have an Mb (with any ROI shift) beyond the 31 magnitude
+/// bitplanes of the i32 T1.
 fn nativeComponentNeedsWidePlane(header: TemporaryHeader, catalog: StrictPacketBlockCatalog, component: usize) bool {
-    if (componentTransformForHeader(header, component) != .reversible_5_3) return false;
-    if (componentBitDepthForHeader(header, component) > max_native_payload_precision) return true;
+    const depth = componentBitDepthForHeader(header, component);
+    switch (componentTransformForHeader(header, component)) {
+        .reversible_5_3 => if (depth > max_native_payload_precision) return true,
+        // f64 synthesis, whose rounded samples need i64 (above 31 bits) and
+        // whose coefficients may need more than 31 bitplanes.
+        .irreversible_9_7 => if (depth > max_f32_irreversible_precision) return true,
+    }
     for (catalog.components[component]) |block| {
         if (block.nominal_bitplanes > ebcot.DecodeBlockScratch.max_bitplanes) return true;
     }
@@ -5995,6 +6164,7 @@ fn reconstructNativeIctComponents(
             return CodestreamError.UnsupportedPayload;
         }
     }
+    if (depth > max_f32_irreversible_precision) return reconstructNativeIctComponentsF64(allocator, header, catalog, options, depth);
     var planes: [3]NativeReconstructedComponent = undefined;
     var floats: [3][]f32 = undefined;
     var built: usize = 0;
@@ -9907,9 +10077,11 @@ fn readStrictQcdScalarStep(
     cursor.* += 2;
     const exponent: u8 = @intCast(actual >> 11);
     const mantissa = actual & 0x07ff;
-    if (exponent == 0) return CodestreamError.InvalidCodestream;
-    const nominal = @as(u16, exponent) + guard_bits - 1;
-    if (nominal == 0 or nominal > 31) return CodestreamError.InvalidCodestream;
+    // epsilon_b spans 0..31 (E.1); only an empty band (Mb = 0) is invalid.
+    // Mb up to the Part 1 ceiling of 37: bands deeper than 31 decode on the
+    // wide native path, and the i32 T1 refuses them.
+    const nominal = @as(u16, exponent) + guard_bits -| 1;
+    if (nominal == 0 or nominal > ebcot.max_wide_magnitude_bitplanes) return CodestreamError.InvalidCodestream;
     return .{ .exponent = exponent, .mantissa = mantissa };
 }
 

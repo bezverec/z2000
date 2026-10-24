@@ -122,8 +122,9 @@ all logical CPUs, the ISO MQ backend, and big-endian `ML` PGX are defaults.
 `--pgx-order ML|LM` are available in explicit, shorthand, and batch forms.
 Invalid component indexes and profiles outside the native contract fail before
 an output file is written. That contract covers reversible 5/3 and, since the
-native decoder gained an irreversible path, 9/7 without MCT for components of
-up to 24 bits, including single-tile streams that mix 5/3 and 9/7 components;
+native decoder gained an irreversible path, 9/7 without MCT at every
+precision (in f64 above 24 bits), including single-tile streams that mix 5/3
+and 9/7 components;
 irreversible samples are rounded and clamped to the component range.
 
 `j2k-to-zraw` uses the same raw-codestream decode boundary but writes every
@@ -502,7 +503,10 @@ Primary public functions:
 - `decodeLosslessNative(allocator, bytes, limits)` /
   `decodeLosslessNativeWithOptions(allocator, bytes, options, limits)` — first
   native payload profile: strict single- and multi-tile reversible 5/3 or
-  irreversible 9/7 (components up to 24 bits), chosen per component where COC
+  irreversible 9/7 (dequantized and synthesized in f32 up to
+  `max_f32_irreversible_precision`, 24 bits, and above it in f64 from i64
+  T1 coefficients through `wavelet.inverse97ReducedOriginF64`, with the
+  inverse ICT in f64 too), chosen per component where COC
   overrides the transform, no MCT or a component transform over the first
   three components (RCT when they are 5/3, ICT when they are 9/7 with equal
   precision), and caller-limited signed or unsigned

@@ -19,8 +19,7 @@ Both bounded scorecards are complete. The narrow target measures one practical
 archival profile; the second target measures only the broader profiled Part 1
 features listed below. Neither score claims formal certification,
 arbitrary-profile support, or completion of the roadmap's G0-G7 program.
-Remaining work includes irreversible components above 24 bits, encoder
-quality targets, PLM encode, and tile-header schedules, the remaining marker
+Remaining work includes encoder quality targets, PLM encode, and tile-header schedules, the remaining marker
 semantics, selective/streaming decode, broader JP2 mappings, producer
 diversity, and performance outside those scored bounds; generic components,
 1- to 38-bit precision, ROI, and registration encode have landed on the
