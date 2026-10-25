@@ -4093,6 +4093,10 @@ const StrictPacketAuditBandGroup = struct {
 
 const StrictRpclBlockAssembly = struct {
     payload: std.ArrayList(u8) = .empty,
+    /// A chunked multi-layer walk records each contribution where it lies in
+    /// the packet bytes instead of copying it into `payload`; the catalog
+    /// fill gathers them.
+    payload_segments: std.ArrayList([]const u8) = .empty,
     payload_offset: usize = 0,
     payload_length: usize = 0,
     payload_retained: bool = true,
@@ -4186,6 +4190,8 @@ const StrictComponentAssembly = struct {
     /// Set by a chunked walk: the packet bytes every block's `payload_offset`
     /// indexes, borrowed instead of `payloads`.
     borrowed_payloads: ?[]u8 = null,
+    /// Payload arenas of a chunked multi-layer walk, one per run.
+    chunk_arenas: std.ArrayList(std.heap.ArenaAllocator) = .empty,
     /// Backs every block's `payload` list: a multi-layer stream grows each
     /// list once per contribution, and an arena turns those thousands of
     /// small allocations into bumps, all released with the assembly.
@@ -4214,8 +4220,10 @@ const StrictComponentAssembly = struct {
     }
 
     fn deinit(self: *StrictComponentAssembly) void {
-        // Block payloads live in the arena.
+        // Block payloads live in the arenas.
         self.payload_arena.deinit();
+        for (self.chunk_arenas.items) |*arena| arena.deinit();
+        self.chunk_arenas.deinit(self.allocator);
         self.payloads.deinit(self.allocator);
         self.allocator.free(self.blocks);
         self.* = undefined;
@@ -11160,9 +11168,9 @@ fn assembleStrictPacketCatalogHeadersThreaded(
 
     const persistent_precinct_state = packetCatalogRevisitsPrecincts(catalog.entries);
     const by_component = threads > 1 and header.component_count > 1;
-    const chunked = by_component and threads > header.component_count and header.layers == 1 and
+    const chunked = by_component and threads > header.component_count and
         !persistent_precinct_state and retain_payloads and resolution_reduction == 0 and region == null and
-        strictCatalogChunkable(catalog, assemblies.assemblies);
+        strictCatalogChunkable(catalog);
     if (retain_payloads and header.layers == 1 and !chunked) {
         // Component payloads arrive packet by packet; reserving their upper
         // bound (the packets' own lengths) keeps the buffers from regrowing.
@@ -11241,10 +11249,8 @@ const StrictCatalogEntryState = struct {
     stateful_groups: ?*StrictStatefulPrecinctGroups,
     active_group_storage: [max_rpcl_packet_band_groups]StrictPacketAuditBandGroup = undefined,
     active_group_count: usize = 0,
-    /// With a chunked walk (`StrictCatalogChunkJob`), the packet bytes the
-    /// payloads are borrowed from: a block records its offset there instead
-    /// of having its bytes copied.
-    borrowed_packet_bytes: ?[]const u8 = null,
+    /// Where a chunked walk puts the payloads instead.
+    payload_target: StrictPayloadTarget = .{},
 
     fn deinit(self: *StrictCatalogEntryState) void {
         if (!self.persistent_precinct_state and !self.use_packet_group_arena) {
@@ -11296,7 +11302,7 @@ fn assembleStrictCatalogEntry(
     } else state.active_group_storage[0..state.active_group_count];
 
     if (selected.len == 0) {
-        const read = try readStrictPacketHeaderForAudit(packet_view, entry.packet, &.{}, null, &.{}, null);
+        const read = try readStrictPacketHeaderForAudit(packet_view, entry.packet, &.{}, null, &.{}, .{});
         if (read.included_blocks != 0 or read.payload_length != 0) {
             return CodestreamError.InvalidCodestream;
         }
@@ -11318,7 +11324,7 @@ fn assembleStrictCatalogEntry(
         active_groups,
         if (retain_payload) &assemblies[entry.packet.component] else null,
         geometry.blocks,
-        state.borrowed_packet_bytes,
+        state.payload_target,
     );
     audit.header_decoded_packets += 1;
     audit.header_bytes += read.header_length;
@@ -11426,24 +11432,34 @@ fn assembleStrictCatalogEntriesByComponent(
 
 const max_catalog_component_workers = 16;
 
-/// Whether a single-layer full decode can walk each component's packets in
-/// independent chunks with the payloads borrowed from the input: every
-/// packet's body is a contiguous span of the borrowed packet bytes (split
-/// off by EPH), holding its blocks' payloads whole, and no precinct is
-/// visited twice.
-fn strictCatalogChunkable(catalog: StrictPacketCatalog, assemblies: []const StrictComponentAssembly) bool {
+/// Where a chunked walk (`StrictCatalogChunkJob`) puts block payloads
+/// instead of the assembly's own buffers.
+const StrictPayloadTarget = struct {
+    /// Single layer: the packet bytes a payload stays in; the block records
+    /// its offset there.
+    borrowed: ?[]const u8 = null,
+    /// Several layers: the chunk's own allocator for the per-block lists of
+    /// payload segments, which stay in the packet bytes until the catalog
+    /// fill gathers them.
+    segment_allocator: ?std.mem.Allocator = null,
+};
+
+/// Whether a full decode can walk each component's packets in independent
+/// runs: no precinct is visited twice (its layers follow each other, so a
+/// run that starts at a layer-0 packet holds whole precincts), and every
+/// packet lies in the borrowed input, where a single-layer packet's
+/// payloads stay contiguous.
+fn strictCatalogChunkable(catalog: StrictPacketCatalog) bool {
     if (catalog.owns_packet_bytes or catalog.auxiliary_packet_headers.len != 0) return false;
-    for (assemblies) |assembly| {
-        if (!assembly.use_component_payloads) return false;
-    }
     for (catalog.entries) |entry| {
-        if (!entry.split_header_body or entry.header_from_aux or entry.packet.layer != 0) return false;
+        if (entry.header_from_aux) return false;
     }
     return true;
 }
 
-/// One run of a component's consecutive packets in catalog order, walked
-/// with its own precinct groups and its payloads written from `payload_base`.
+/// One run of a component's consecutive packets in catalog order, starting
+/// at a layer-0 packet, walked with its own precinct groups. Several layers'
+/// payloads go to the run's own arena, which the component keeps afterwards.
 const StrictCatalogChunkJob = struct {
     header: TemporaryHeader,
     catalog: StrictPacketCatalog,
@@ -11451,6 +11467,9 @@ const StrictCatalogChunkJob = struct {
     assemblies: []StrictComponentAssembly,
     retained_layer_count: u16,
     entries: []const u32,
+    component: usize,
+    single_layer: bool,
+    payload_arena: std.heap.ArenaAllocator = undefined,
     audit: StrictPacketHeaderAudit = .{},
     failed_entry: usize = std.math.maxInt(usize),
     failure: anyerror = error.Unexpected,
@@ -11458,13 +11477,17 @@ const StrictCatalogChunkJob = struct {
     fn run(self: *StrictCatalogChunkJob) void {
         var packet_group_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer packet_group_arena.deinit();
+        self.payload_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         var state = StrictCatalogEntryState{
             .group_allocator = packet_group_arena.allocator(),
             .packet_group_arena = &packet_group_arena,
             .use_packet_group_arena = true,
             .persistent_precinct_state = false,
             .stateful_groups = null,
-            .borrowed_packet_bytes = self.catalog.packet_bytes,
+            .payload_target = if (self.single_layer)
+                .{ .borrowed = self.catalog.packet_bytes }
+            else
+                .{ .segment_allocator = self.payload_arena.allocator() },
         };
         defer state.deinit();
         for (self.entries) |entry_index| {
@@ -11479,10 +11502,11 @@ const StrictCatalogChunkJob = struct {
 
 /// `assembleStrictCatalogEntriesByComponent` for `strictCatalogChunkable`
 /// catalogs, with each component's packets cut into runs of about equal
-/// body bytes so that more workers than components share the walk. The
-/// payloads are not copied: every component borrows the packet bytes
-/// (`StrictComponentAssembly.borrowed_payloads`). The first failing entry in
-/// catalog order decides the error, as in the serial walk.
+/// bytes, each starting at a layer-0 packet, so that more workers than
+/// components share the walk. Single-layer payloads are not copied: every
+/// component borrows the packet bytes (`StrictComponentAssembly.borrowed_payloads`).
+/// The first failing entry in catalog order decides the error, as in the
+/// serial walk.
 fn assembleStrictCatalogEntriesInChunks(
     allocator: std.mem.Allocator,
     header: TemporaryHeader,
@@ -11498,7 +11522,7 @@ fn assembleStrictCatalogEntriesInChunks(
     var total_bytes: usize = 0;
     for (catalog.entries) |entry| {
         if (entry.packet.component >= component_count) return CodestreamError.InvalidCodestream;
-        total_bytes = try std.math.add(usize, total_bytes, entry.body_length);
+        total_bytes = try std.math.add(usize, total_bytes, entry.byte_length);
     }
     if (catalog.entries.len > std.math.maxInt(u32)) return CodestreamError.InvalidCodestream;
 
@@ -11518,7 +11542,7 @@ fn assembleStrictCatalogEntriesInChunks(
         fill[entry.packet.component] += 1;
     }
 
-    // Runs of about `target` body bytes; never more runs than packets.
+    // Runs of about `target` bytes, cut only before a layer-0 packet.
     const target = @max(1, total_bytes / @as(usize, threads));
     var jobs: std.ArrayList(StrictCatalogChunkJob) = .empty;
     defer jobs.deinit(allocator);
@@ -11526,9 +11550,11 @@ fn assembleStrictCatalogEntriesInChunks(
         const entries = order[component_starts[component]..component_starts[component + 1]];
         var run_start: usize = 0;
         var run_bytes: usize = 0;
+        if (entries.len != 0 and catalog.entries[entries[0]].packet.layer != 0) return CodestreamError.InvalidCodestream;
         for (entries, 0..) |entry_index, position| {
-            run_bytes += catalog.entries[entry_index].body_length;
-            if (run_bytes >= target or position + 1 == entries.len) {
+            run_bytes += catalog.entries[entry_index].byte_length;
+            const last = position + 1 == entries.len;
+            if (last or (run_bytes >= target and catalog.entries[entries[position + 1]].packet.layer == 0)) {
                 try jobs.append(allocator, .{
                     .header = header,
                     .catalog = catalog,
@@ -11536,16 +11562,28 @@ fn assembleStrictCatalogEntriesInChunks(
                     .assemblies = assemblies,
                     .retained_layer_count = retained_layer_count,
                     .entries = entries[run_start .. position + 1],
+                    .component = component,
+                    .single_layer = header.layers == 1,
                 });
                 run_start = position + 1;
                 run_bytes = 0;
             }
         }
-        assemblies[component].borrowed_payloads = @constCast(catalog.packet_bytes);
+        if (header.layers == 1) {
+            if (!assemblies[component].use_component_payloads) return CodestreamError.InvalidCodestream;
+            assemblies[component].borrowed_payloads = @constCast(catalog.packet_bytes);
+        }
     }
 
     if (!worker_pool.runJobsOn(threads, StrictCatalogChunkJob, jobs.items, StrictCatalogChunkJob.run)) {
         for (jobs.items) |*job| job.run();
+    }
+    // Each run's payload arena now backs blocks of its component.
+    var kept: usize = 0;
+    errdefer for (jobs.items[kept..]) |*job| job.payload_arena.deinit();
+    while (kept < jobs.items.len) : (kept += 1) {
+        const job = &jobs.items[kept];
+        try assemblies[job.component].chunk_arenas.append(assemblies[job.component].allocator, job.payload_arena);
     }
     var first_failure: ?*const StrictCatalogChunkJob = null;
     for (jobs.items) |*job| {
@@ -11585,7 +11623,7 @@ fn readStrictPacketHeaderForAudit(
     groups: []StrictPacketAuditBandGroup,
     assembly: ?*StrictComponentAssembly,
     source_blocks: []const subband.CodeBlock,
-    borrowed_packet_bytes: ?[]const u8,
+    payload_target: StrictPayloadTarget,
 ) !StrictPacketHeaderRead {
     const header_bytes = if (view.split_header_body) view.header else view.header_and_body;
     const payload_bytes = if (view.split_header_body) view.body else view.header_and_body;
@@ -11638,7 +11676,7 @@ fn readStrictPacketHeaderForAudit(
             if (end > payload_bytes.len) return CodestreamError.TruncatedData;
             const payload = payload_bytes[cursor..end];
             if (assembly) |target| {
-                try appendStrictPacketAuditBlock(target, source_blocks, block_index, decoded, payload, borrowed_packet_bytes);
+                try appendStrictPacketAuditBlock(target, source_blocks, block_index, decoded, payload, payload_target);
             }
             cursor = end;
             payload_length = try std.math.add(u64, payload_length, decoded.byte_length);
@@ -11661,7 +11699,7 @@ fn appendStrictPacketAuditBlock(
     block_index: usize,
     decoded: t2.DecodedPacketBlock,
     payload: []const u8,
-    borrowed_packet_bytes: ?[]const u8,
+    payload_target: StrictPayloadTarget,
 ) !void {
     if (block_index >= assembly.blocks.len or block_index >= source_blocks.len) {
         return CodestreamError.InvalidCodestream;
@@ -11695,7 +11733,7 @@ fn appendStrictPacketAuditBlock(
     if (block.payload_retained) {
         if (assembly.use_component_payloads) {
             if (previous_payload_length != 0) return CodestreamError.InvalidCodestream;
-            if (borrowed_packet_bytes) |packet_bytes| {
+            if (payload_target.borrowed) |packet_bytes| {
                 // The payload stays where it is in the packet bytes.
                 const base = @intFromPtr(packet_bytes.ptr);
                 const start = @intFromPtr(payload.ptr);
@@ -11706,12 +11744,20 @@ fn appendStrictPacketAuditBlock(
                 try assembly.payloads.appendSlice(assembly.allocator, payload);
             }
         } else {
-            try block.payload.appendSlice(assembly.payloadAllocator(), payload);
-            if (block.payload.items.len != block.payload_length) return CodestreamError.InvalidCodestream;
+            if (payload_target.segment_allocator) |segment_allocator| {
+                // Only this walk adds to the block, so its segments add up to
+                // `payload_length`.
+                if (block.payload.items.len != 0) return CodestreamError.InvalidCodestream;
+                try block.payload_segments.append(segment_allocator, payload);
+            } else {
+                if (block.payload_segments.items.len != 0) return CodestreamError.InvalidCodestream;
+                try block.payload.appendSlice(assembly.payloadAllocator(), payload);
+                if (block.payload.items.len != block.payload_length) return CodestreamError.InvalidCodestream;
+            }
         }
     } else {
         block.payload_offset = 0;
-        if (block.payload.items.len != 0) return CodestreamError.InvalidCodestream;
+        if (block.payload.items.len != 0 or block.payload_segments.items.len != 0) return CodestreamError.InvalidCodestream;
     }
 }
 
@@ -11922,7 +11968,13 @@ fn strictAssemblyBlockRetainedPayloadLength(
     block: StrictRpclBlockAssembly,
 ) usize {
     if (!block.payload_retained) return 0;
-    return if (assembly.use_component_payloads) block.payload_length else block.payload.items.len;
+    if (assembly.use_component_payloads) return block.payload_length;
+    if (block.payload_segments.items.len != 0) {
+        var total: usize = 0;
+        for (block.payload_segments.items) |segment| total += segment.len;
+        return total;
+    }
+    return block.payload.items.len;
 }
 
 fn inferredBitplanesForCodingPassPrefix(pass_count: u16) u8 {
@@ -11986,7 +12038,17 @@ const StrictCatalogFillJob = struct {
                 if (source_payload_end > payloads.len) return CodestreamError.InvalidCodestream;
             }
             if (!assembly.use_component_payloads and source.payload_retained and payload_length > 0) {
-                @memcpy(payloads[payload_offset..][0..payload_length], source.payload.items);
+                if (source.payload_segments.items.len != 0) {
+                    var gathered: usize = 0;
+                    for (source.payload_segments.items) |segment| {
+                        if (gathered + segment.len > payload_length) return CodestreamError.InvalidCodestream;
+                        @memcpy(payloads[payload_offset + gathered ..][0..segment.len], segment);
+                        gathered += segment.len;
+                    }
+                    if (gathered != payload_length) return CodestreamError.InvalidCodestream;
+                } else {
+                    @memcpy(payloads[payload_offset..][0..payload_length], source.payload.items);
+                }
             }
             dest.* = .{
                 .metadata_ready = source.metadata_ready,

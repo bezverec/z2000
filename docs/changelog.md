@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Multi-Layer Packet Headers Walked In Runs
+
+- The chunked packet-header walk now covers multi-layer streams whose
+  precincts are never revisited (RPCL and the like): runs start only at a
+  layer-0 packet, so a precinct's layers stay in one run, and EPH is no
+  longer required (a single-layer payload is contiguous in the input either
+  way). A multi-layer block records its contributions as segments of the
+  packet bytes, and the catalog fill gathers them into place once; the walk
+  used to copy them into per-block lists first and the fill copied them
+  again.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream); the one- against
+  eight-thread mutation test now also runs a two-layer stream without EPH.
+  Against `f548d81` on the lossy profile at t20: header walk 1.90 -> 0.93
+  ms, packet catalog 3.76 -> 2.42 ms (11 `--timings` runs); wall 82.7 ->
+  81.9 ms (21 rounds).
+
 ### Packet Catalog Before Tier-1 On All Workers
 
 - The shared pool no longer refuses tasks while it is still starting its

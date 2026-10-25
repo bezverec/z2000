@@ -46,6 +46,27 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, multi-layer header walk in runs
+
+Base `f548d81`, lossy profile (`lossy.jp2`: RPCL, two layers, SOP and PLT,
+no EPH), t20. Its header walk was 1.4-1.6 ms on three workers (one per
+component) after 0.2 ms of geometry and 0.35-0.47 ms of block-table setup.
+A first version cut each component into runs but kept copying every
+contribution into per-block lists, now in 20 per-run arenas: the walk got
+slower (1.91 -> 2.41 ms). Recording the contributions as segments of the
+packet bytes and gathering them only in the catalog fill:
+
+| Stage (11 runs, t20, lossy) | Base | New |
+| --- | ---: | ---: |
+| header walk | 1.90 ms | 0.93 ms |
+| finalize | 0.69 ms | 0.66 ms |
+| packet catalog | 3.76 ms | 2.42 ms |
+| total | 70.80 ms | 67.51 ms |
+
+Wall time, 21 interleaved rounds: lossy t20 82.7 -> 81.9 ms, lossy t6 134.9
+-> 133.0 ms, lossless t20 78.8 -> 79.0 ms (unchanged path). Output
+byte-identical as before.
+
 ## 2026-10-25: Intel Core i5-14500, packet catalog on all workers
 
 Base `58e16ac`, same host and method. A timeline of the stages before the

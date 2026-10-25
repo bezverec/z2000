@@ -7949,9 +7949,20 @@ test "threaded packet scan and chunked header walk decode exactly as one thread"
     const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .samples = samples };
 
     // Small precincts give every tile-part enough packets for the threaded
-    // scan, and EPH lets the header walk run in chunks.
-    var options = codestream.LosslessOptions{ .eph = true, .block_width = 16, .block_height = 16 };
-    for (&options.precincts) |*precinct| precinct.* = .{ .width = 32, .height = 32 };
+    // scan and the chunked header walk: one layer with EPH (payloads
+    // borrowed), and two layers without (payload segments gathered).
+    for ([_]codestream.LosslessOptions{
+        .{ .eph = true, .block_width = 16, .block_height = 16 },
+        .{ .layers = 2, .block_width = 16, .block_height = 16 },
+    }) |base_options| {
+        var options = base_options;
+        for (&options.precincts) |*precinct| precinct.* = .{ .width = 32, .height = 32 };
+        try expectThreadedCatalogMatchesSerial(allocator, rgb, options);
+    }
+}
+
+fn expectThreadedCatalogMatchesSerial(allocator: std.mem.Allocator, rgb: image.RgbImage, options: codestream.LosslessOptions) !void {
+    const samples = rgb.samples;
     const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
     defer allocator.free(encoded);
 

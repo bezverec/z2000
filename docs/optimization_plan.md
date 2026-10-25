@@ -207,11 +207,13 @@ workers (2026-10-25: scan in byte-balanced chunks, single-layer header walk
 in runs with borrowed payloads, pool tasks no longer refused during its
 start-up), 3.05 -> 1.70 ms at t20. Between the catalog and the first block
 there remain the catalog fill (0.3 ms, copying the per-block segment
-tables), the coverage checks (0.4-0.6 ms), and the pool setup; the
-multi-layer profile's walk (2.2 ms, one worker per component because the
-precinct state persists across layers) is the larger head on lossy
-streams. Starting Tier-1 on finished blocks during the walk would now
-overlap at most about 1 ms at t20.
+tables), the coverage checks (0.4-0.6 ms), and the pool setup. The
+multi-layer walk runs in runs as well since 2026-10-25 (lossy header walk
+1.90 -> 0.93 ms); its catalog fill (0.66 ms, gathering the payload
+segments, one worker per component) and, before the irreversible pool,
+the reconstruction setup (about 0.7 ms) are the lossy head now. Starting
+Tier-1 on finished blocks during the walk would overlap at most about
+1 ms at t20.
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse

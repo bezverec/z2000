@@ -576,11 +576,14 @@ written, meanwhile.
 Before Tier-1, the packet catalog is built on the pool as well. With PLT
 lengths, packet spans are prefix sums and SOP numbers follow from position,
 so each tile-part's packet frames are checked in chunks of about equal bytes;
-the first failing packet in order decides the error. A single-layer full
-decode with EPH walks its packet headers in runs of consecutive packets per
-component (no precinct is visited twice) and leaves every block's payload in
-the borrowed input, recording its offset there instead of copying it. Other
-streams walk one component per worker with shared precinct state.
+the first failing packet in order decides the error. A full decode whose
+precincts are never revisited (each precinct's layers follow each other)
+walks its packet headers in runs of consecutive packets per component, each
+run starting at a layer-0 packet. A single-layer block's payload stays in
+the borrowed input (the block records its offset); a multi-layer block
+records its contributions as segments of the packet bytes, which the
+catalog fill gathers once. Other streams walk one component per worker with
+shared precinct state.
 
 The decode overlaps stages where data dependencies allow it: the block pool
 runs plane by plane, and a `StrictComponentFinisher` runs a plane's inverse
