@@ -11016,6 +11016,21 @@ fn assembleStrictPacketCatalogHeaders(
         );
     }
 
+    if (retain_payloads and header.layers == 1) {
+        // Component payloads arrive packet by packet; reserving their upper
+        // bound (the packets' own lengths) keeps the buffers from regrowing.
+        const reserve = try allocator.alloc(usize, header.component_count);
+        defer allocator.free(reserve);
+        @memset(reserve, 0);
+        for (catalog.entries) |entry| {
+            if (entry.packet.component >= reserve.len) return CodestreamError.InvalidCodestream;
+            reserve[entry.packet.component] += entry.byte_length;
+        }
+        for (assemblies.assemblies, reserve) |*assembly, bytes| {
+            if (assembly.use_component_payloads) try assembly.payloads.ensureTotalCapacity(assembly.allocator, bytes);
+        }
+    }
+
     const persistent_precinct_state = packetCatalogRevisitsPrecincts(catalog.entries);
     var stateful_groups: ?StrictStatefulPrecinctGroups = if (persistent_precinct_state)
         try StrictStatefulPrecinctGroups.init(allocator, header)
@@ -15084,11 +15099,8 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     const required_height = try reducedGridLength(catalog.component_y0[component], height, options.resolution_reduction);
 
     const blocks = catalog.components[component];
-    if (options.resolution_reduction != 0 or strictBlocksRequireZeroInitializedPlane(blocks) or
-        strictBlocksHaveRegionPruning(blocks))
-    {
-        @memset(plane, 0);
-    }
+    const partial_plane = options.resolution_reduction != 0 or strictBlocksHaveRegionPruning(blocks);
+    if (partial_plane) @memset(plane, 0);
     // Coverage is checked once from the block rectangles, on a bit per
     // sample, for the serial and the parallel decode alike: every retained
     // sample in exactly one block, none outside the plane.
@@ -15102,6 +15114,15 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         bands,
         options.resolution_reduction,
     );
+    if (!partial_plane and strictBlocksRequireZeroInitializedPlane(blocks)) {
+        // Every sample then lies in exactly one block, and only zero-length
+        // blocks are never written: zero those instead of the whole plane.
+        for (blocks) |block| {
+            if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) {
+                try zeroStrictBlockRect(plane, width, height, block.rect);
+            }
+        }
+    }
     const worker_count = strictDecodeBlockThreadCount(options, blocks.len);
     if (worker_count > 1) {
         try reconstructStrictComponentBlocksParallel(
@@ -15954,6 +15975,16 @@ fn scatterStrictDecodedBlock(
         source = source_end;
     }
     if (source != decoded.len) return CodestreamError.InvalidCodestream;
+}
+
+fn zeroStrictBlockRect(plane: anytype, plane_width: usize, plane_height: usize, rect: subband.Rect) !void {
+    const end_x = try std.math.add(usize, rect.x, rect.width);
+    const end_y = try std.math.add(usize, rect.y, rect.height);
+    if (end_x > plane_width or end_y > plane_height) return CodestreamError.InvalidCodestream;
+    for (rect.y..end_y) |y| {
+        const row_start = try std.math.add(usize, try std.math.mul(usize, y, plane_width), rect.x);
+        @memset(plane[row_start..][0..rect.width], 0);
+    }
 }
 
 fn scatterStrictDecodedBlockUnchecked(

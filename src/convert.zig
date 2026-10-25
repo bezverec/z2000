@@ -47,7 +47,7 @@ pub fn jp2ToTiff(
     var command_timings = Timings{};
     const extract_start = clock.monotonicNs();
     const info = try jp2.parseInfo(allocator, bytes);
-    const j2k = try jp2.extractCodestream(allocator, bytes);
+    const j2k = try jp2.extractParsedCodestream(bytes);
     command_timings.codestream_extract_ns = clock.elapsedNs(extract_start);
     if (convert_to_srgb) {
         if (info.color_space != .restricted_icc or info.components != 3 or info.has_palette) {
@@ -78,7 +78,7 @@ pub fn jp2ToTiff(
         !jp2InfoHasSubsampling(info))
     {
         const icc_start = clock.monotonicNs();
-        const icc_profile = try jp2.extractIccProfile(allocator, bytes);
+        const icc_profile = try jp2.extractParsedIccProfile(allocator, bytes, info);
         defer if (icc_profile) |profile| allocator.free(profile);
         command_timings.icc_extract_ns = clock.elapsedNs(icc_start);
 
@@ -123,7 +123,7 @@ pub fn jp2ToTiff(
     // for palette input above, so no colour conversion can be pending here.
     if (info.has_palette and !jp2InfoHasSubsampling(info)) {
         const icc_start = clock.monotonicNs();
-        const icc_profile = try jp2.extractIccProfile(allocator, bytes);
+        const icc_profile = try jp2.extractParsedIccProfile(allocator, bytes, info);
         defer if (icc_profile) |profile| allocator.free(profile);
         command_timings.icc_extract_ns = clock.elapsedNs(icc_start);
 
@@ -173,7 +173,7 @@ pub fn jp2ToTiff(
     {
         const alpha_mode = info.alpha_mode orelse return error.UnsupportedComponentCount;
         const icc_start = clock.monotonicNs();
-        const icc_profile = try jp2.extractIccProfile(allocator, bytes);
+        const icc_profile = try jp2.extractParsedIccProfile(allocator, bytes, info);
         defer if (icc_profile) |profile| allocator.free(profile);
         command_timings.icc_extract_ns = clock.elapsedNs(icc_start);
 
@@ -223,7 +223,7 @@ pub fn jp2ToTiff(
         info.color_space != .sycc and jp2InfoHasSubsampling(info))
     {
         const icc_start = clock.monotonicNs();
-        const icc_profile = try jp2.extractIccProfile(allocator, bytes);
+        const icc_profile = try jp2.extractParsedIccProfile(allocator, bytes, info);
         defer if (icc_profile) |profile| allocator.free(profile);
         command_timings.icc_extract_ns = clock.elapsedNs(icc_start);
 
@@ -380,7 +380,7 @@ pub fn jp2ToTiff(
     command_timings.codestream_decode_ns = clock.elapsedNs(decode_start);
 
     const icc_start = clock.monotonicNs();
-    if (try jp2.extractIccProfile(allocator, bytes)) |profile| {
+    if (try jp2.extractParsedIccProfile(allocator, bytes, info)) |profile| {
         if (convert_to_srgb) {
             defer allocator.free(profile);
             switch (decoded) {

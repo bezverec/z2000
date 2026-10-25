@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Shorter Serial Stages In JP2 Decode
+
+- Single-layer component payloads were appended packet by packet into
+  buffers that regrew as they filled; the buffers now reserve their upper
+  bound (the component's packet lengths) first. The packet-header stage
+  falls from 8.0 to 4.2 ms on the common stream.
+- JP2-to-TIFF validated the whole file three times: once for its info,
+  again inside `extractCodestream`, and again inside `extractIccProfile`.
+  `jp2.extractParsedCodestream` and `jp2.extractParsedIccProfile` take the
+  already accepted file and its `Info` (codestream box 1.66 -> 0.88 ms, ICC
+  0.95 -> 0.01 ms).
+- A plane with zero-length blocks was cleared whole before the workers
+  started; once coverage has been checked, only those blocks' rectangles
+  are cleared. Reduced-resolution and region-pruned decodes still clear the
+  whole plane.
+- Output is byte-identical (lossless profile at t1 and t20, region decodes
+  at t1 and t20, 34-bit wide stream). Interleaved A/B on the i5-14500
+  against `d2f9fa8`: common-stream decode 101.6 -> 97.6 ms at t20 (Kakadu
+  8.4.1 67.5 ms, Grok 20.4.19 114.4 ms); t1 unchanged within noise.
+
 ### Bit-Per-Sample Coverage Check In Serial Block Decode
 
 - The single-thread block decode tracked coverage in a byte per sample:

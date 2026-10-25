@@ -758,6 +758,12 @@ pub fn parseInfo(allocator: std.mem.Allocator, bytes: []const u8) !Info {
 
 pub fn extractCodestream(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     _ = try parseInfo(allocator, bytes);
+    return extractParsedCodestream(bytes);
+}
+
+/// `extractCodestream` for bytes that `parseInfo` already accepted: only the
+/// box walk, without validating the file (and its codestream) again.
+pub fn extractParsedCodestream(bytes: []const u8) ![]const u8 {
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, true);
@@ -924,7 +930,12 @@ fn validateIptc(bytes: []const u8) !void {
 }
 
 pub fn extractIccProfile(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
-    const info = try parseInfo(allocator, bytes);
+    return extractParsedIccProfile(allocator, bytes, try parseInfo(allocator, bytes));
+}
+
+/// `extractIccProfile` for bytes that `parseInfo` already accepted, with the
+/// `Info` it returned.
+pub fn extractParsedIccProfile(allocator: std.mem.Allocator, bytes: []const u8, info: Info) !?[]u8 {
     if (!info.has_icc_profile) return null;
 
     var cursor: usize = 0;

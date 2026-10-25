@@ -91,7 +91,11 @@ all-thread setting.
   handling 3.9, setup 3.3, ICC 0.9), while the T1 phase scales. P1/P3 work
   should now shrink those serial stages, in that order, before more T1
   tuning. The serial block decode's per-sample coverage bytes were the
-  first casualty (t1 decode 621.8 -> 599.0 ms).
+  first casualty (t1 decode 621.8 -> 599.0 ms); reserved payload buffers,
+  a single JP2 parse, and clearing only empty blocks then took t20 decode
+  to 97.6 ms (Kakadu 67.5 ms). Still serial: TIFF write (7 ms, half of it
+  the file write), JP2 read (2.2 ms), packet headers (4.2 ms), and the
+  packet scan (0.8 ms).
 - 2026-10-25: the integer 5/3 column passes lift 32-column strips (then 8,
   then scalar), using whole cache lines per row; the inverse DWT stage went
   from 32.1 to 23.3 ms at t1, decode t20 to 104.2 ms.

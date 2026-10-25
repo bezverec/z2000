@@ -67,6 +67,20 @@ bitmap checked from block rectangles.
 | --- | --- | --- |
 | Serial decode checks coverage on the parallel path's bitmap | t1 decode 621.8 -> 599.0 ms (9 rounds) | -3.7%, kept |
 
+Then, against `d2f9fa8` (stage medians of 11 interleaved `--timings` runs
+at t20):
+
+| Candidate | Comparison | Result |
+| --- | --- | --- |
+| Reserve single-layer component payload buffers up front | headers 8.03 -> 4.20 ms | kept |
+| Parse the JP2 once (codestream and ICC from the accepted `Info`) | codestream box 1.66 -> 0.88 ms, ICC 0.95 -> 0.01 ms | kept |
+| Clear only zero-length blocks' rectangles, not the whole plane | block payload 57.12 -> 56.36 ms, total 85.26 -> 83.41 ms | kept (the page faults move into the workers) |
+| Write the TIFF in 256 KiB bands instead of one buffer | TIFF write 7.07 -> 5.56 ms | rejected: `writeRgb` would leave a partial file on a sample-range error, and checking first costs the gain |
+
+End to end, 9 rounds: t20 decode 101.6 -> 97.6 ms (Kakadu 8.4.1 67.5 ms,
+Grok 20.4.19 114.4 ms); t1 597.2 -> 603.4 ms, inside noise (Kakadu 579.7,
+Grok 623.2 ms).
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is
