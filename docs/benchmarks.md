@@ -127,6 +127,12 @@ z2000 104.8 ms at t20 and 536.7 against 581.0 ms at t1.
 | In-pool 9/7 on 4 / 8 threads | 103.7 -> 105.0 / 105.6 ms | rejected |
 | Finish only plane 0 in the pool | 104.4 -> 106.6 ms | rejected |
 
+Inverse colour worker cap (was four), `--timings` at t20 against
+`9062bc0`, 11 runs: lossless RCT 2.06 / 1.68 / 1.92 ms and lossy ICT
+5.28 / 4.16 / 3.19 ms with caps 4 / 8 / 16. Kept eight for the RCT paths
+and sixteen for the float paths; end to end (11 rounds) 90.3 -> 88.5 ms
+lossless and 103.3 -> 100.1 ms lossy.
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

@@ -5,6 +5,17 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Inverse Colour Worker Caps Per Transform
+
+- Inverse colour conversion was capped at four workers, tuned on an 8C/16T
+  host. The integer RCT paths now use up to eight and the float ICT and
+  level-shift paths up to sixteen: the RCT is memory-bound and peaks at
+  eight on the i5-14500, while the float paths keep gaining.
+- Output is byte-identical (lossless and lossy profiles at t2, t8, t20).
+  `--timings` against `9062bc0`: inverse MCT 2.06 -> 1.68 ms (lossless),
+  5.28 -> 3.19 ms (lossy) at t20; interleaved A/B: decode 90.3 -> 88.5 ms
+  lossless and 103.3 -> 100.1 ms lossy at t20.
+
 ### Inverse 9/7 Overlapped With Tier-1
 
 - The irreversible three-component path at full resolution on two or more

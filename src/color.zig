@@ -724,9 +724,12 @@ fn inverseRctRange(samples: []u16, planes: RctPlanes, begin: usize, end: usize, 
 // ---------------------------------------------------------------------------
 
 const max_rct_workers = 32;
-// Inverse color is a short memory-heavy tail after T1. Four workers beat eight
-// on the maintained 8C/16T host; smaller images stay serial to avoid spawn cost.
-const max_inverse_color_workers = 4;
+// Inverse color is a short tail after T1. The integer RCT is memory-bound and
+// peaks at eight workers on the i5-14500 (four on the earlier 8C/16T host);
+// the float ICT and level shift do enough arithmetic per sample to keep
+// gaining up to sixteen. Smaller images stay serial to avoid spawn cost.
+const max_inverse_color_workers = 16;
+const max_inverse_rct_workers = 8;
 const min_inverse_color_pixels_per_worker = 64 * 1024;
 
 const RctForwardJob = struct {
@@ -768,12 +771,12 @@ fn colorBands(pixels: usize, lanes: usize, thread_count: usize, out: *[max_rct_w
     return bands;
 }
 
-fn inverseColorThreadCount(pixels: usize, requested_threads: usize) usize {
+fn inverseColorThreadCount(pixels: usize, requested_threads: usize, max_workers: usize) usize {
     const workers_for_size = if (pixels == 0)
         1
     else
         1 + (pixels - 1) / min_inverse_color_pixels_per_worker;
-    return @max(1, @min(@min(requested_threads, max_inverse_color_workers), workers_for_size));
+    return @max(1, @min(@min(requested_threads, max_workers), workers_for_size));
 }
 
 fn runColorJobs(
@@ -823,7 +826,7 @@ pub fn inverseRctThreaded(
     errdefer allocator.free(samples);
 
     var ranges: [max_rct_workers][2]usize = undefined;
-    const band_count = colorBands(pixels, rct_lanes, inverseColorThreadCount(pixels, requested_threads), &ranges);
+    const band_count = colorBands(pixels, rct_lanes, inverseColorThreadCount(pixels, requested_threads, max_inverse_rct_workers), &ranges);
     var jobs: [max_inverse_color_workers]RctInverseJob = undefined;
     for (0..band_count) |band| {
         jobs[band] = .{
@@ -890,7 +893,7 @@ pub fn inverseRctSaturatedThreaded(
     errdefer allocator.free(samples);
 
     var ranges: [max_rct_workers][2]usize = undefined;
-    const band_count = colorBands(pixels, 1, inverseColorThreadCount(pixels, requested_threads), &ranges);
+    const band_count = colorBands(pixels, 1, inverseColorThreadCount(pixels, requested_threads, max_inverse_rct_workers), &ranges);
     var jobs: [max_inverse_color_workers]SaturatedRctInverseJob = undefined;
     for (0..band_count) |band| {
         jobs[band] = .{
@@ -1161,7 +1164,7 @@ pub fn inverseIctThreaded(
     errdefer allocator.free(samples);
 
     var ranges: [max_rct_workers][2]usize = undefined;
-    const band_count = colorBands(pixels, ict_lanes, inverseColorThreadCount(pixels, requested_threads), &ranges);
+    const band_count = colorBands(pixels, ict_lanes, inverseColorThreadCount(pixels, requested_threads, max_inverse_color_workers), &ranges);
     var jobs: [max_inverse_color_workers]IctInverseJob = undefined;
     for (0..band_count) |band| {
         jobs[band] = .{
@@ -1220,7 +1223,7 @@ pub fn inverseNoTransformFloatThreaded(
     errdefer allocator.free(samples);
 
     var ranges: [max_rct_workers][2]usize = undefined;
-    const band_count = colorBands(pixels, 1, inverseColorThreadCount(pixels, requested_threads), &ranges);
+    const band_count = colorBands(pixels, 1, inverseColorThreadCount(pixels, requested_threads, max_inverse_color_workers), &ranges);
     var jobs: [max_inverse_color_workers]NoTransformFloatInverseJob = undefined;
     for (0..band_count) |band| {
         jobs[band] = .{
