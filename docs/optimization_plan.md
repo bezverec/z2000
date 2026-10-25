@@ -160,6 +160,17 @@ samples are the data-dependent branch on the coded bit, not memory.
 Remaining idea: decoding straight into the coefficient plane instead of
 scattering each block (a few percent at most).
 
+### P2b. Tier-1 Throughput On Shared And Efficiency Cores
+
+On 2026-10-25 z2000 decoded within 13% of Kakadu on one thread per P-core
+but gained only 1.12x from hyper-threading (Kakadu 1.36x) and ran 1.46x
+behind it on the E-cores (`benchmarks.md`). Ruled out: the block
+coefficient buffer (i16 variant neutral), instruction-cache size (hot pass
+code shrunk from 42 to 16 KB, neutral), and out-of-line MQ renormalization
+(slower). Next steps need hardware counters (cache misses, branch
+mispredictions, front-end stalls) from an elevated session or a Linux
+`perf` run on the same CPU.
+
 ### P3. Decode Pipeline Overlap
 
 First slice done 2026-10-25: the reversible full-resolution inverse 5/3 of

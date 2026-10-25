@@ -46,6 +46,38 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, where Tier-1 loses past six threads
+
+Base is `fe7c8e5`, common lossless stream unless noted. A small launcher
+that creates the process suspended and sets its affinity mask before
+resuming it compared z2000 and Kakadu 8.4.1 per core type (5 rounds, both
+codecs carrying the launcher's overhead):
+
+| Cores (mask) | Threads | z2000 | Kakadu | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| 6 P-cores, one thread each (`555`) | 6 | 162.6 ms | 143.9 ms | 1.13 |
+| 6 P-cores with hyper-threading (`FFF`) | 12 | 145.5 ms | 106.1 ms | 1.37 |
+| 8 E-cores (`FF000`) | 8 | 194.3 ms | 133.1 ms | 1.46 |
+| all (`FFFFF`) | 20 | 108.2 ms | 88.3 ms | 1.23 |
+
+z2000 gains 1.12x from the second hyper-thread of each P-core where Kakadu
+gains 1.36x, and runs relatively slower on the E-cores; on one thread per
+P-core it is within 13%. Three hypotheses were tested and none moved this:
+
+| Candidate | Result |
+| --- | --- |
+| i16 coefficients for blocks of at most 14 bitplanes (half the 16 KB block buffer) | t1 600.4 -> 604.4 ms, t20 87.4 -> 89.6 ms lossless and 93.8 -> 93.4 ms lossy (15 rounds): neutral, dropped |
+| MQ exchange and renormalization out of line (call sites shrink; hot pass functions 20% smaller) | t1 +12.3%, P12-HT +5.8%, E8 +5.2%: rejected |
+| Profiled and vertical-causal pass variants out of line (hot pass code from about 42 KB to 16 KB) | t1 -0.3%, P6 +1.1%, P12-HT +1.6%, E8 -1.0%, t20 +0.2% (11 rounds): neutral, dropped |
+
+Instruction-cache size and the coefficient buffer are therefore not the
+limit. A 32x32-block encoding of the same image decodes 18% faster at t1
+(MQ about 6.9 against 9.3 ns per symbol with similar symbol counts and
+more LPS decisions), but slower at t6 and t12; the per-symbol difference
+shows in `readUnchecked` itself, so it is a property of the stream rather
+than of a decoder path. Pinning the remaining SMT/E-core gap down needs
+hardware counters, which this unelevated host cannot read.
+
 ## 2026-10-25: Intel Core i5-14500, t20 serial budget; serial coverage bits
 
 Same host, method, profile, and stream as the record below; base is
