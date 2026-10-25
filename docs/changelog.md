@@ -21,7 +21,8 @@ entries are grouped by development milestone rather than semantic version.
 - Output is byte-identical (lossless and lossy at t1, t2, t20; region and
   layer-limited decodes). Interleaved A/B on the i5-14500 against
   `34abe84`: decode 89.2 -> 85.2 ms lossless and 96.6 -> 90.9 ms lossy at
-  t20.
+  t20. The irreversible path without overlap (one thread) takes the
+  raster as well (lossy t1 581.3 -> 576.5 ms).
 
 ### Threaded Dequantization In The 9/7 Tail
 

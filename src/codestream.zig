@@ -12231,6 +12231,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
             options.resolution_reduction,
             timings,
             catalog,
+            rgb8,
         );
     }
 
@@ -14561,7 +14562,7 @@ fn decodeIrreversibleImageFromQuantizedPlanes(
     header: TemporaryHeader,
     quantized: color.RctPlanes,
 ) !image.RgbImage {
-    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, 1, 0, null, null);
+    return decodeIrreversibleImageFromQuantizedPlanesMeasured(allocator, header, quantized, 1, 0, null, null, null);
 }
 
 const IrreversibleInversePlaneJob = struct {
@@ -14682,6 +14683,7 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     resolution_reduction: u8,
     timings: ?*DecodeTimings,
     catalog: ?StrictPacketBlockCatalog,
+    rgb8: ?*Rgb8Raster,
 ) !image.RgbImage {
     if (resolution_reduction > header.levels) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, header.width, header.height);
@@ -14700,7 +14702,7 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     // intra-plane inverse was bit-exact but regressed the maintained t16 gate.
     try runComponentJobs(IrreversibleInversePlaneJob, allocator, reconstruction.jobs[0..], componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
-    return reconstruction.finish(allocator, header, thread_count, resolution_reduction, timings, null);
+    return reconstruction.finish(allocator, header, thread_count, resolution_reduction, timings, rgb8);
 }
 
 /// The irreversible back end's state besides the quantized planes: band
