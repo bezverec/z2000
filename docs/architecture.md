@@ -553,6 +553,20 @@ code-block jobs where profiling justifies the overhead. Work completion order
 never determines packet order; final assembly is deterministic by tile and
 packet index. Per-worker scratch buffers and wavelet workspaces are reused.
 
+`worker_pool.zig` is the process-wide pool for jobs whose indices never wait
+on one another (the decode block pool, inverse colour conversion,
+dequantization, raster serialization): its threads start once, can start in
+the background while a decode still parses (`prepare`), and sleep on a futex
+between tasks; a task submitted while it is busy is refused and runs on the
+caller's own threads. The DWT drivers, whose workers meet at barriers between
+lifting phases, keep their own per-transform pools.
+
+The decode overlaps stages where data dependencies allow it: the block pool
+runs plane by plane, and a `StrictComponentFinisher` runs a plane's inverse
+DWT (and, for 9/7, its dequantization) on the worker that writes its last
+block while the pool decodes later planes. Results never depend on that
+timing: a plane's transform starts only after all its blocks are written.
+
 Portable Zig `@Vector` code is the SIMD baseline. Lane widths and generated code
 are audited for x86 AVX2/AVX-512, ARM NEON, and RISC-V/RVV behavior, with scalar
 oracles and cross-target tests. Architecture-specific paths must retain scalar
