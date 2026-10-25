@@ -142,7 +142,9 @@ dequantize 2.0 ms, midpoint fix-up under 0.1 ms, parallel inverse 9/7
 4.0 ms. A 9/7 worker cap of 12 / 16 left the stage at 8.46 / 8.53 ms
 (8.59 at 8). Splitting the clear and dequantization by rows over eight
 workers: stage 8.51 -> 5.52 ms (11 `--timings` runs), decode 99.1 ->
-94.2 ms (11 rounds).
+94.2 ms (11 rounds). Skipping the clear when the bands provably tile the
+plane (so the page faults fall in band order instead of one sweep) was
+slower, 93.7 -> 99.4 ms at t20 (11 rounds), and was dropped.
 
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
