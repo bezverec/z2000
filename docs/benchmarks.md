@@ -137,6 +137,13 @@ Arena-backed block payload lists (multi-layer streams), against `599a4ee`
 on the lossy profile: headers 5.12 -> 3.54 ms, finalize 1.46 -> 1.33 ms
 (11 `--timings` runs); decode 100.9 -> 97.5 ms at t20 (11 rounds).
 
+The lossy tail (plane 2 after the pool) measured at t20: clear 2.5 ms,
+dequantize 2.0 ms, midpoint fix-up under 0.1 ms, parallel inverse 9/7
+4.0 ms. A 9/7 worker cap of 12 / 16 left the stage at 8.46 / 8.53 ms
+(8.59 at 8). Splitting the clear and dequantization by rows over eight
+workers: stage 8.51 -> 5.52 ms (11 `--timings` runs), decode 99.1 ->
+94.2 ms (11 rounds).
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

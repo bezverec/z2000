@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Threaded Dequantization In The 9/7 Tail
+
+- The plane the irreversible pool leaves to the end was cleared (a fresh
+  16 MB plane, so mostly page faults) and dequantized on one thread before
+  its parallel inverse 9/7: 2.5 + 2.0 ms of a 8.5 ms tail at t20. Both now
+  run split by rows over up to eight workers; each clears its rows and
+  dequantizes every band's part of them, and bands are disjoint, so every
+  sample ends as before.
+- Output is byte-identical (lossy 9/7 at t2, t3, t8, t20, layer-limited
+  and region decodes; lossless; 34-bit wide). `--timings` against
+  `9eca3df`: inverse DWT stage 8.51 -> 5.52 ms on the lossy profile at
+  t20; interleaved A/B: decode 99.1 -> 94.2 ms. A 9/7 worker cap of 12 or
+  16 instead of 8 changed the tail by under 2%.
+
 ### Arena-Backed Block Payloads For Multi-Layer Streams
 
 - A multi-layer stream assembles each block's payload in its own list,

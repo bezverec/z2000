@@ -14544,10 +14544,60 @@ fn irreversibleDequantizePlane(job: *IrreversibleInversePlaneJob) !void {
 /// DWT workers (byte-identical to the serial transform).
 fn irreversibleInversePlaneParallel(job: *IrreversibleInversePlaneJob, thread_count: u8) !void {
     if (job.reduction != 0) return CodestreamError.InvalidCodestream;
-    try irreversibleDequantizePlane(job);
+    try irreversibleDequantizePlaneThreaded(job, thread_count);
     try wavelet.inverse97ParallelPlane(std.heap.smp_allocator, job.plane, job.width, job.height, job.levels, job.x0, job.y0, thread_count);
     job.shape = .{ .width = job.width, .height = job.height, .x0 = job.x0, .y0 = job.y0 };
 }
+
+const DequantizeRowsJob = struct {
+    job: *const IrreversibleInversePlaneJob,
+    first_row: usize,
+    end_row: usize,
+
+    /// Clears rows `first_row..end_row` and dequantizes every band's part of
+    /// them; bands are disjoint, so each sample ends as in the serial pass.
+    fn run(self: *const DequantizeRowsJob) void {
+        const job = self.job;
+        @memset(job.plane[self.first_row * job.width .. self.end_row * job.width], 0);
+        for (job.bands, job.deltas) |band, delta| {
+            if (!strictBandRequiredForReduction(band, job.reduction)) continue;
+            const top = @max(band.rect.y, self.first_row);
+            const bottom = @min(band.rect.y + band.rect.height, self.end_row);
+            if (top >= bottom) continue;
+            var part = band.rect;
+            part.y = top;
+            part.height = bottom - top;
+            dequantizeBandRegion(job.quantized, job.plane, job.width, part, delta);
+        }
+    }
+};
+
+/// The memory-bound start of the dequantization (clearing a fresh plane and
+/// writing every band) split by rows over up to eight workers.
+fn irreversibleDequantizePlaneThreaded(job: *IrreversibleInversePlaneJob, thread_count: u8) !void {
+    const workers = @min(@as(usize, @max(thread_count, 1)), max_dequantize_workers, job.height);
+    if (workers < 2) return irreversibleDequantizePlane(job);
+    var parts: [max_dequantize_workers]DequantizeRowsJob = undefined;
+    const rows_per_worker = (job.height + workers - 1) / workers;
+    var used: usize = 0;
+    var row: usize = 0;
+    while (row < job.height) : (row += rows_per_worker) {
+        parts[used] = .{ .job = job, .first_row = row, .end_row = @min(job.height, row + rows_per_worker) };
+        used += 1;
+    }
+    var threads: [max_dequantize_workers]std.Thread = undefined;
+    var spawned: usize = 0;
+    defer for (threads[0..spawned]) |thread| thread.join();
+    while (spawned + 1 < used) : (spawned += 1) {
+        threads[spawned] = try std.Thread.spawn(.{}, DequantizeRowsJob.run, .{&parts[spawned]});
+    }
+    parts[used - 1].run();
+    for (threads[0..spawned]) |thread| thread.join();
+    spawned = 0;
+    if (job.blocks) |blocks| try removeUnearnedMidpointOffsets(job, blocks);
+}
+
+const max_dequantize_workers = 8;
 
 fn irreversibleInversePlane(job: *IrreversibleInversePlaneJob) anyerror!void {
     try irreversibleDequantizePlane(job);
