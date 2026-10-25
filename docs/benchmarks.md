@@ -150,6 +150,20 @@ slower, 93.7 -> 99.4 ms at t20 (11 rounds), and was dropped.
 intermediate, no separate serialization), against `34abe84`, 11 rounds at
 t20: lossless 89.2 -> 85.2 ms, lossy 96.6 -> 90.9 ms.
 
+Thread scaling on the common lossless stream against Kakadu 8.4.1 (5
+rounds): z2000 591.3 / 139.9 / 104.3 ms at t1 / t6 / t12, Kakadu 577.9 /
+130.9 / 83.3 ms. The gap opens past six threads, where hyper-threaded and
+efficiency cores join (z2000 1.34x from t6 to t12, Kakadu 1.57x); t14 /
+t16 / t20 z2000 99.7 / 92.1 / 87.1 ms, Kakadu 76.6 ms at t14 and 72.6 ms
+at t20 (7 rounds). Parallel positional writes of a 12.6 MB file from 4 or
+8 threads were slower than one WriteFile (about 2.7 ms) in a standalone
+probe.
+
+Plane 1 of the lossy profile, placed adaptively (in the pool only while
+its job fits the estimated remaining Tier-1 time), against `53117f3`, 7
+rounds: t4 184.8 -> 182.0, t8 123.4 -> 124.6, t20 92.7 -> 90.7 ms;
+always deferring it to the tail: t4 +3.0%, t8 +3.2%, t20 -3.1%.
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

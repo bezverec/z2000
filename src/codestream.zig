@@ -3367,6 +3367,13 @@ fn dequantizeBandRegion(src: []const i32, dst: []f32, stride: usize, rect: subba
     }
 }
 
+fn acceptsAll(context: *anyopaque, target: usize, progress: f64) bool {
+    _ = context;
+    _ = target;
+    _ = progress;
+    return true;
+}
+
 /// `StrictComponentFinisher` running the serial inverse 5/3 on a decoded
 /// plane (equal to the parallel transform byte for byte).
 const StrictInverse53Finisher = struct {
@@ -3377,6 +3384,7 @@ const StrictInverse53Finisher = struct {
     fn finisher(self: *StrictInverse53Finisher, finished: []std.atomic.Value(bool)) StrictComponentFinisher {
         return .{
             .context = self,
+            .accepts = acceptsAll,
             .finish = finish,
             // The last plane completes when the pool drains; it is cheaper
             // on all DWT workers afterwards than on one worker at the end.
@@ -12213,12 +12221,20 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
 
     if (irreversible) |*reconstruction| {
         const wavelet_start = monotonicNs();
+        // Every plane the pool left over is dequantized, then all of them go
+        // through one parallel inverse 9/7.
+        const none: []f32 = &.{};
+        var tail_planes = [3][]f32{ none, none, none };
         for (strict_planes.planes, 0..) |plane, component| {
             if (finished[component].load(.acquire)) continue;
             const job = &reconstruction.jobs[component];
             job.quantized = plane;
-            try irreversibleInversePlaneParallel(job, options.threads);
+            try irreversibleDequantizePlaneThreaded(job, options.threads);
+            tail_planes[component] = job.plane;
+            job.shape = .{ .width = job.width, .height = job.height, .x0 = job.x0, .y0 = job.y0 };
         }
+        const first = reconstruction.jobs[0];
+        try wavelet.inverse97Parallel(std.heap.smp_allocator, tail_planes, first.width, first.height, first.levels, first.x0, first.y0, options.threads);
         if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
         return reconstruction.finish(allocator, header, options.threads, 0, timings, rgb8);
     }
@@ -14601,15 +14617,6 @@ fn irreversibleDequantizePlane(job: *IrreversibleInversePlaneJob) !void {
     }
 }
 
-/// `irreversibleInversePlane` at full resolution with the inverse 9/7 on all
-/// DWT workers (byte-identical to the serial transform).
-fn irreversibleInversePlaneParallel(job: *IrreversibleInversePlaneJob, thread_count: u8) !void {
-    if (job.reduction != 0) return CodestreamError.InvalidCodestream;
-    try irreversibleDequantizePlaneThreaded(job, thread_count);
-    try wavelet.inverse97ParallelPlane(std.heap.smp_allocator, job.plane, job.width, job.height, job.levels, job.x0, job.y0, thread_count);
-    job.shape = .{ .width = job.width, .height = job.height, .x0 = job.x0, .y0 = job.y0 };
-}
-
 const DequantizeRowsJob = struct {
     job: *const IrreversibleInversePlaneJob,
     first_row: usize,
@@ -14855,21 +14862,42 @@ const IrreversibleReconstruction = struct {
 /// serial inverse 9/7.
 const StrictInverse97Finisher = struct {
     reconstruction: *IrreversibleReconstruction,
+    pool_start_ns: u64 = 0,
+    /// How long plane 0's serial job took, once it ran.
+    first_job_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     fn finisher(self: *StrictInverse97Finisher, finished: []std.atomic.Value(bool)) StrictComponentFinisher {
+        self.pool_start_ns = monotonicNs();
         return .{
             .context = self,
+            .accepts = accepts,
             .finish = finish,
             .target_limit = finished.len - 1,
             .finished = finished,
         };
     }
 
+    /// Plane 0 always runs in the pool. A later plane runs there only while
+    /// its serial job (timed on plane 0) still fits in the pool's estimated
+    /// remaining Tier-1 time; otherwise it joins the parallel tail instead
+    /// of keeping one worker busy after the others have drained the pool.
+    fn accepts(context: *anyopaque, target: usize, progress: f64) bool {
+        const self: *StrictInverse97Finisher = @ptrCast(@alignCast(context));
+        if (target == 0) return true;
+        const job_ns = self.first_job_ns.load(.acquire);
+        if (job_ns == 0 or progress <= 0) return false;
+        const elapsed: f64 = @floatFromInt(monotonicNs() -| self.pool_start_ns);
+        const remaining = elapsed * (1.0 - progress) / progress;
+        return remaining >= @as(f64, @floatFromInt(job_ns));
+    }
+
     fn finish(context: *anyopaque, target: usize, plane: []i32) anyerror!void {
         const self: *StrictInverse97Finisher = @ptrCast(@alignCast(context));
         const job = &self.reconstruction.jobs[target];
         job.quantized = plane;
+        const start = monotonicNs();
         try irreversibleInversePlane(job);
+        if (target == 0) self.first_job_ns.store(@max(monotonicNs() -| start, 1), .release);
     }
 };
 
@@ -15124,6 +15152,10 @@ fn StrictBlockDecodeTargetFor(comptime Coefficient: type) type {
 /// caller; `finished` records which ones it ran.
 const StrictComponentFinisher = struct {
     context: *anyopaque,
+    /// Whether to finish `target` in the pool now; `progress` is the share
+    /// of blocks the pool has handed out. A plane declined here is left to
+    /// the caller.
+    accepts: *const fn (context: *anyopaque, target: usize, progress: f64) bool,
     finish: *const fn (context: *anyopaque, target: usize, plane: []i32) anyerror!void,
     target_limit: usize,
     finished: []std.atomic.Value(bool),
@@ -15166,6 +15198,9 @@ fn completeStrictDecodeBlock(job: anytype, target: u32) void {
     if (target >= finisher.target_limit) return;
     // Finishers take i32 planes only; wider planes are left to the caller.
     if (std.meta.Elem(@TypeOf(job.targets[0].plane)) != i32) return;
+    const handed_out = @min(job.next_block.load(.monotonic), job.block_order.len);
+    const progress = @as(f64, @floatFromInt(handed_out)) / @as(f64, @floatFromInt(@max(job.block_order.len, 1)));
+    if (!finisher.accepts(finisher.context, target, progress)) return;
     const plane_target = job.targets[target];
     undoMaxshiftRoi(plane_target.plane, plane_target.roi_shift);
     finisher.finish(finisher.context, target, plane_target.plane) catch |err| {

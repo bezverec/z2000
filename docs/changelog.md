@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Adaptive Placement Of The In-Pool 9/7 Job
+
+- At high thread counts plane 1's serial dequantize-plus-9/7 job (about
+  19 ms) outlasted the pool, keeping one worker busy after the rest had
+  drained it. Finishers now first decide whether to take a plane
+  (`StrictComponentFinisher.accepts`): plane 0 always runs in the pool and
+  is timed, and plane 1 runs there only while that time fits the pool's
+  estimated remaining Tier-1 time (elapsed time scaled by the share of
+  blocks still to hand out); otherwise it joins plane 2 in the tail,
+  where both are dequantized on several threads and go through one
+  parallel inverse 9/7. The reversible finisher takes every plane as
+  before. Only scheduling depends on the timing, never the samples.
+- Output is byte-identical (lossy at t1, t2, t3, t4, t8, t20 and
+  layer-limited; lossless at t2 to t20; 34-bit wide stream). Interleaved
+  A/B on the lossy profile against `53117f3`: t20 92.7 -> 90.7 ms, t4
+  184.8 -> 182.0 ms, t8 123.4 -> 124.6 ms (noise). Always deferring plane 1
+  helped t20 by 3.1% but cost t4 and t8 3%.
+
 ### 8-Bit RGB Decoded Straight Into The TIFF Buffer
 
 - JP2-to-TIFF of an 8-bit RGB image built 16-bit interleaved samples
