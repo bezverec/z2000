@@ -7895,6 +7895,28 @@ test "worker pool refuses a task submitted while it is busy" {
     try std.testing.expectEqual(@as(u32, hits.len), nested.inner_refused.load(.monotonic));
 }
 
+const PoolBackgroundRelease = struct {
+    buffer: []u8,
+    released: *std.atomic.Value(u32),
+
+    pub fn deinit(self: *PoolBackgroundRelease) void {
+        std.heap.smp_allocator.free(self.buffer);
+        _ = self.released.fetchAdd(1, .release);
+    }
+};
+
+test "worker pool releases a value in the background exactly once" {
+    var released = std.atomic.Value(u32).init(0);
+    const buffer = try std.heap.smp_allocator.alloc(u8, 1 << 20);
+    @memset(buffer, 0xa5);
+    worker_pool.deinitInBackground(PoolBackgroundRelease{ .buffer = buffer, .released = &released });
+    var spins: usize = 0;
+    while (released.load(.acquire) == 0 and spins < 100_000_000) : (spins += 1) {
+        std.atomic.spinLoopHint();
+    }
+    try std.testing.expectEqual(@as(u32, 1), released.load(.acquire));
+}
+
 test "in-place 8-bit RGB TIFF raster writes the same file as writeRgb" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

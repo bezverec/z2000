@@ -12381,14 +12381,14 @@ fn inverseAndCompactStrictCommonPlanes53(
             return CodestreamError.InvalidCodestream;
         }
         const compact = try compactTopLeftCoefficientPlane(
-            allocator,
+            planes.allocator,
             planes.planes[component],
             source_width,
             source_height,
             reduced.width,
             reduced.height,
         );
-        allocator.free(planes.planes[component]);
+        planes.allocator.free(planes.planes[component]);
         planes.planes[component] = compact;
         planes.component_widths[component] = reduced.width;
         planes.component_heights[component] = reduced.height;
@@ -12421,11 +12421,15 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     // same way, at any origin.
     const overlap_97 = header.transform == .irreversible_9_7 and options.resolution_reduction == 0 and
         componentThreadCountFor(options.threads) >= 2;
+    // The overlapped reconstruction and, on several threads, the coefficient
+    // planes come from the thread-safe page-level allocator, and their tens of
+    // megabytes are released in the background while the caller goes on
+    // (writing the output, typically).
     var irreversible: ?IrreversibleReconstruction = if (overlap_97)
-        try IrreversibleReconstruction.init(allocator, header, 0, catalog)
+        try IrreversibleReconstruction.init(std.heap.smp_allocator, header, 0, catalog)
     else
         null;
-    defer if (irreversible) |*reconstruction| reconstruction.deinit();
+    defer if (irreversible) |reconstruction| worker_pool.deinitInBackground(reconstruction);
     var dwt97_finisher: StrictInverse97Finisher = undefined;
     const finisher: ?StrictComponentFinisher = if (overlap_dwt)
         dwt_finisher.finisher(&finished)
@@ -12442,7 +12446,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
         timings,
         finisher,
     );
-    defer strict_planes.deinit();
+    defer if (options.threads >= 2) worker_pool.deinitInBackground(strict_planes) else strict_planes.deinit();
     if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
 
     if (irreversible) |*reconstruction| {
@@ -15030,7 +15034,7 @@ const IrreversibleReconstruction = struct {
         return self;
     }
 
-    fn deinit(self: *IrreversibleReconstruction) void {
+    pub fn deinit(self: *IrreversibleReconstruction) void {
         self.reconstructed.deinit();
         self.allocator.free(self.deltas);
         self.allocator.free(self.bands);
@@ -15633,15 +15637,19 @@ fn reconstructStrictComponentCoefficientPlanesFinishing(
     // path (one thread per component) was only load-balanced at exactly 3
     // threads; a scheduler per component then ended three times on its
     // slowest worker.
-    const plane_slices = try allocator.alloc([]i32, 3);
+    //
+    // On several threads the planes come from the thread-safe page-level
+    // allocator, so the caller can release them in the background.
+    const plane_allocator = if (options.threads >= 2) std.heap.smp_allocator else allocator;
+    const plane_slices = try plane_allocator.alloc([]i32, 3);
     var allocated: usize = 0;
     errdefer {
-        for (plane_slices[0..allocated]) |plane_slice| allocator.free(plane_slice);
-        allocator.free(plane_slices);
+        for (plane_slices[0..allocated]) |plane_slice| plane_allocator.free(plane_slice);
+        plane_allocator.free(plane_slices);
     }
     const pixels = try std.math.mul(usize, header.width, header.height);
     while (allocated < 3) : (allocated += 1) {
-        plane_slices[allocated] = try allocator.alloc(i32, pixels);
+        plane_slices[allocated] = try plane_allocator.alloc(i32, pixels);
     }
     var fills: [3]StrictComponentFill(i32) = undefined;
     for (&fills, 0..) |*fill, component| {
@@ -15666,7 +15674,7 @@ fn reconstructStrictComponentCoefficientPlanesFinishing(
     );
 
     return .{
-        .allocator = allocator,
+        .allocator = plane_allocator,
         .width = header.width,
         .height = header.height,
         .bit_depth = header.bit_depth,

@@ -188,7 +188,12 @@ fusing inverse MCT/ICT with TIFF serialization (no 16-bit interleaved
 intermediate; ICT is 5.4 ms at t20 on the lossy profile); a persistent
 worker pool shared by Tier-1, DWT, MCT, and output (done 2026-10-25 for
 everything but the barrier-synchronized DWT pools: `worker_pool.zig`,
-lossy t20 91.7 -> 88.8 ms).
+lossy t20 91.7 -> 88.8 ms). Releasing the coefficient planes and the 9/7
+reconstruction on a background thread (2026-10-25) took 3-4 ms off the
+serial tail at t20 (lossless 84.5 -> 81.1 ms). What stays serial at t20
+outside the Tier-1 pool, about 16 ms: input read 2.2-2.6 ms, packet catalog
+3.0-3.6 ms, inverse DWT tail 3.0-3.8 ms, inverse RCT 1.1-1.3 ms, TIFF write
+4.3-4.9 ms, JP2 parse 1.0 ms (`benchmarks.md`).
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse

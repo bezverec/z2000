@@ -135,6 +135,28 @@ pub fn run(threads: usize, count: usize, context: *anyopaque, task: *const fn (*
     return true;
 }
 
+/// Calls `value.deinit()` on a short-lived detached thread, so releasing a
+/// large buffer overlaps whatever the caller does next: unmapping pages that
+/// many threads have touched costs milliseconds on Windows. `value` must own
+/// its memory through a thread-safe allocator, and nothing may refer to that
+/// memory any more. Falls back to releasing it on the calling thread.
+pub fn deinitInBackground(value: anytype) void {
+    const T = @TypeOf(value);
+    const Release = struct {
+        fn run(owned: T) void {
+            var released = owned;
+            released.deinit();
+        }
+    };
+    if (!builtin.single_threaded) {
+        if (std.Thread.spawn(.{ .stack_size = 64 * 1024 }, Release.run, .{value})) |thread| {
+            thread.detach();
+            return;
+        } else |_| {}
+    }
+    Release.run(value);
+}
+
 /// `run` over a slice of jobs, one index per job, each handed to `work`.
 pub fn runJobs(comptime Job: type, jobs: []Job, comptime work: fn (*Job) void) bool {
     const Adapter = struct {

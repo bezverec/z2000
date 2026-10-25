@@ -46,6 +46,33 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, decode intermediates released in the background
+
+Base `b9a0c2a`, same host, ReleaseFast, interleaved A/B, 15 rounds, wall
+time of `decode-temp-jp2` (process start included). A timeline of one t20
+lossless decode (temporary marks, 6 runs) had placed 3.0-3.8 ms between the
+end of the colour transform and the return from the decode: the free of the
+three 2048x2048 i32 coefficient planes. Leaking them instead saved 0.8% of
+wall time only, since the process exit then paid for the unmapping; handing
+them to a detached thread overlaps it with the TIFF write.
+
+| Stream | Threads | Base | Candidate | Change |
+| --- | ---: | ---: | ---: | ---: |
+| common lossless | 20 | 84.5 ms | 81.1 ms | -4.1% |
+| common lossless | 6 (mask `555`) | 147.1 ms | 145.3 ms | -1.2% |
+| lossy | 20 | 88.3 ms | 85.3 ms | -3.4% |
+| lossy | 6 (mask `555`) | 141.1 ms | 141.1 ms | 0.0% |
+
+The cost scales with the number of threads that touched the pages, hence
+the smaller effect at six. Decoded TIFFs are byte-identical to the base for
+both streams at t1/t2/t3/t20, region (`100,200,700,500`) and `--layers 1`
+decodes, and the 34-bit wide stream (also at `--reduce 1` and `2`).
+
+Same timeline, remaining serial time at t20 outside the Tier-1 pool (ms):
+input read 2.2-2.6, JP2 parse and codestream extraction 1.0, packet catalog
+3.0-3.6, inverse DWT tail 3.0-3.8, inverse RCT 1.1-1.3, catalog free 0.3,
+TIFF write 4.3-4.9, input and raster free 0.6.
+
 ## 2026-10-25: Intel Core i5-14500, hardware counters; per-core-type study corrected
 
 Source `fc00b6e` (ReleaseFast), Kakadu 8.4.1 `kdu_expand -num_threads N

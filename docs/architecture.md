@@ -559,7 +559,12 @@ dequantization, raster serialization): its threads start once, can start in
 the background while a decode still parses (`prepare`), and sleep on a futex
 between tasks; a task submitted while it is busy is refused and runs on the
 caller's own threads. The DWT drivers, whose workers meet at barriers between
-lifting phases, keep their own per-transform pools.
+lifting phases, keep their own per-transform pools. `deinitInBackground`
+releases a decode's large intermediates (coefficient planes and the 9/7
+reconstruction, allocated from the thread-safe page-level allocator on
+several threads) on a detached thread, because unmapping pages that many
+workers touched costs milliseconds; the decode returns, and its output is
+written, meanwhile.
 
 The decode overlaps stages where data dependencies allow it: the block pool
 runs plane by plane, and a `StrictComponentFinisher` runs a plane's inverse

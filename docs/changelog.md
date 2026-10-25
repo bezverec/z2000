@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Decode Intermediates Released In The Background
+
+- A t20 decode spent 3-4 ms on one thread freeing its 48 MB of coefficient
+  planes after the colour transform (unmapping pages that twenty workers
+  had touched), and the 9/7 path about 1.5 ms more for its reconstruction
+  planes. On several threads both now come from the thread-safe page-level
+  allocator and are released on a short-lived detached thread
+  (`worker_pool.deinitInBackground`) while the output is written; one
+  thread keeps the caller's allocator and frees in place.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream). Against `b9a0c2a`, 15
+  rounds: lossless 84.5 -> 81.1 ms at t20 and 147.1 -> 145.3 ms at t6
+  (six P-cores); lossy 88.3 -> 85.3 ms at t20, unchanged at t6.
+
 ### Per-Core-Type Measurement Tools
 
 - `tools/win_affinity_run.zig` runs a command confined to a processor mask
