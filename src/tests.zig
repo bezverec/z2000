@@ -7841,6 +7841,48 @@ test "TIFF writer rejects out-of-range 8-bit samples before narrowing" {
     try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.writeRgb(io, allocator, rgb, path));
 }
 
+test "in-place 8-bit RGB TIFF raster writes the same file as writeRgb" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [2][96]u8 = undefined;
+    const reference_path = try std.fmt.bufPrint(&path_buffer[0], ".zig-cache/tmp/{s}/reference.tif", .{tmp.sub_path});
+    const raster_path = try std.fmt.bufPrint(&path_buffer[1], ".zig-cache/tmp/{s}/raster.tif", .{tmp.sub_path});
+
+    const width = 37;
+    const height = 11;
+    const profile = [_]u8{ 0, 0, 0, 24, 'a', 'c', 's', 'p', 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    for ([_]?[]const u8{ null, &profile }) |icc| {
+        const samples = try allocator.alloc(u16, width * height * 3);
+        defer allocator.free(samples);
+        for (samples, 0..) |*sample, index| sample.* = @intCast((index * 37 + 11) % 256);
+        const rgb = image.RgbImage{
+            .allocator = allocator,
+            .width = width,
+            .height = height,
+            .bit_depth = 8,
+            .samples = samples,
+            .icc_profile = if (icc) |bytes| @constCast(bytes) else null,
+        };
+        try tiff.writeRgb(io, allocator, rgb, reference_path);
+
+        const icc_len = if (icc) |bytes| bytes.len else 0;
+        const offset = try tiff.rgbRasterOffset(width, height, 8, icc_len);
+        const buffer = try allocator.alloc(u8, offset + samples.len + icc_len);
+        defer allocator.free(buffer);
+        for (samples, buffer[offset..][0..samples.len]) |sample, *byte| byte.* = @intCast(sample);
+        try tiff.writeRgb8Raster(io, allocator, buffer, width, height, icc, raster_path);
+
+        const reference = try std.Io.Dir.cwd().readFileAlloc(io, reference_path, allocator, .limited(1 << 20));
+        defer allocator.free(reference);
+        const written = try std.Io.Dir.cwd().readFileAlloc(io, raster_path, allocator, .limited(1 << 20));
+        defer allocator.free(written);
+        try std.testing.expectEqualSlices(u8, reference, written);
+    }
+}
+
 test "threaded RGB TIFF writer matches the serial writer and still rejects before writing" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### 8-Bit RGB Decoded Straight Into The TIFF Buffer
+
+- JP2-to-TIFF of an 8-bit RGB image built 16-bit interleaved samples
+  (25 MB for the benchmark image) and then serialized them into a second,
+  8-bit file buffer. A decode may now be handed a `codestream.Rgb8Raster`:
+  where it applies (single tile, full resolution, uncropped, RCT or ICT)
+  the inverse colour transform writes 8-bit samples straight into one
+  buffer with room for the TIFF header before them and the ICC profile
+  after (`color.inverse{Rct,RctSaturated,Ict}ThreadedInto8`, generic over
+  the output sample type), and `tiff.writeRgb8Raster` fills in the header
+  and profile and writes it. Everywhere else the decode returns 16-bit
+  samples as before. A new test pins `writeRgb8Raster` against `writeRgb`
+  with and without an ICC profile.
+- Output is byte-identical (lossless and lossy at t1, t2, t20; region and
+  layer-limited decodes). Interleaved A/B on the i5-14500 against
+  `34abe84`: decode 89.2 -> 85.2 ms lossless and 96.6 -> 90.9 ms lossy at
+  t20.
+
 ### Threaded Dequantization In The 9/7 Tail
 
 - The plane the irreversible pool leaves to the end was cleared (a fresh

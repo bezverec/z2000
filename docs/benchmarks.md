@@ -146,6 +146,10 @@ workers: stage 8.51 -> 5.52 ms (11 `--timings` runs), decode 99.1 ->
 plane (so the page faults fall in band order instead of one sweep) was
 slower, 93.7 -> 99.4 ms at t20 (11 rounds), and was dropped.
 
+8-bit RGB decoded straight into the TIFF file buffer (no 16-bit
+intermediate, no separate serialization), against `34abe84`, 11 rounds at
+t20: lossless 89.2 -> 85.2 ms, lossy 96.6 -> 90.9 ms.
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

@@ -266,6 +266,8 @@ pub fn jp2ToTiff(
     }
 
     const decode_start = clock.monotonicNs();
+    var rgb8_raster = codestream.Rgb8Raster{};
+    defer allocator.free(rgb8_raster.bytes);
     var decoded: tiff.DecodedImage = if (info.has_palette) palette: {
         var indexed = if (collect_decode_timings)
             try codestream.decodeLosslessGrayWithOptionsProfiled(allocator, j2k, options, &decode_timings)
@@ -359,10 +361,22 @@ pub fn jp2ToTiff(
                 defer planes.deinit();
                 break :rgb .{ .rgb = try color.interleaveRgb(allocator, planes) };
             }
+            // An 8-bit decode without colour conversion can write its samples
+            // straight into the TIFF file buffer (header and ICC room around
+            // them); where the decoder cannot, it returns samples as usual.
+            var rgb_options = options;
+            if (!convert_to_srgb and info.bits_per_component == 8) {
+                const icc_len = if (info.has_icc_profile) info.icc_profile_bytes else 0;
+                rgb8_raster = .{
+                    .prefix_len = try tiff.rgbRasterOffset(info.width, info.height, 8, icc_len),
+                    .suffix_len = icc_len,
+                };
+                rgb_options.rgb8_raster = &rgb8_raster;
+            }
             break :rgb .{ .rgb = if (collect_decode_timings)
-                try codestream.decodeLosslessTemporaryWithOptionsProfiled(allocator, j2k, options, &decode_timings)
+                try codestream.decodeLosslessTemporaryWithOptionsProfiled(allocator, j2k, rgb_options, &decode_timings)
             else
-                try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, options) };
+                try codestream.decodeLosslessTemporaryWithOptions(allocator, j2k, rgb_options) };
         },
         2, 4 => alpha: {
             const alpha_mode = info.alpha_mode orelse return error.UnsupportedComponentCount;
@@ -412,7 +426,10 @@ pub fn jp2ToTiff(
 
     const write_start = clock.monotonicNs();
     switch (decoded) {
-        .rgb => |rgb| try tiff.writeRgbThreaded(io, allocator, rgb, output_path, options.threads),
+        .rgb => |rgb| if (rgb8_raster.bytes.len != 0)
+            try tiff.writeRgb8Raster(io, allocator, rgb8_raster.bytes, rgb.width, rgb.height, rgb.icc_profile, output_path)
+        else
+            try tiff.writeRgbThreaded(io, allocator, rgb, output_path, options.threads),
         .grayscale => |gray| try tiff.writeGray(io, allocator, gray, output_path),
         .alpha => |alpha| try tiff.writeAlpha(io, allocator, alpha, output_path),
     }

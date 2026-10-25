@@ -307,6 +307,44 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
     return writeRgbThreaded(io, allocator, rgb, path, 1);
 }
 
+/// Bytes before the raster in the file `writeRgb` writes for this geometry.
+pub fn rgbRasterOffset(width: usize, height: usize, bit_depth: u8, icc_len: usize) !usize {
+    const layout = try RgbLayout.init(width, height, bit_depth, icc_len);
+    return layout.raster_offset;
+}
+
+/// Writes the same file as `writeRgb` for an 8-bit image whose raster is
+/// already in place: `bytes` holds `rgbRasterOffset` free bytes, the
+/// interleaved samples, and room for the ICC profile; the header and the
+/// profile are filled in and `bytes` is written as the file.
+pub fn writeRgb8Raster(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    bytes: []u8,
+    width: usize,
+    height: usize,
+    icc_profile: ?[]const u8,
+    path: []const u8,
+) !void {
+    const icc_len = if (icc_profile) |profile| profile.len else 0;
+    if (icc_profile) |profile| {
+        if (profile.len == 0) return TiffError.InvalidTagValue;
+    }
+    const layout = try RgbLayout.init(width, height, 8, icc_len);
+    const raster_len = try std.math.mul(usize, try std.math.mul(usize, width, height), 3);
+    if (bytes.len != @as(usize, layout.raster_offset) + raster_len + icc_len) return TiffError.InvalidTagValue;
+
+    var prefix: std.ArrayList(u8) = .empty;
+    defer prefix.deinit(allocator);
+    try prefix.ensureTotalCapacity(allocator, layout.raster_offset);
+    try layout.appendPrefix(allocator, &prefix);
+    if (prefix.items.len != layout.raster_offset) return TiffError.InvalidTagValue;
+    @memcpy(bytes[0..prefix.items.len], prefix.items);
+    if (icc_profile) |profile| @memcpy(bytes[layout.raster_offset + raster_len ..], profile);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+}
+
 /// `writeRgb` with the raster serialized by up to `threads` workers, each
 /// over whole rows. The file is still written only once every row passed.
 pub fn writeRgbThreaded(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, path: []const u8, threads: usize) !void {

@@ -431,6 +431,21 @@ pub const DecodeOptions = struct {
     /// Discard this many finest DWT resolution levels during synthesis.
     /// Zero reconstructs the full image; the value must not exceed COD/NL.
     resolution_reduction: u8 = 0,
+    /// See `Rgb8Raster`. Null returns 16-bit samples as usual.
+    rgb8_raster: ?*Rgb8Raster = null,
+};
+
+/// Optional output for an interleaved 8-bit RGB decode: where it applies (a
+/// single-tile, full-resolution, uncropped decode with RCT or ICT), the
+/// colour transform writes its samples straight into `bytes`, allocated with
+/// `prefix_len` free bytes before them and `suffix_len` after (room for a
+/// file header and trailer), and the returned image carries no samples.
+/// Elsewhere `bytes` stays empty and the image carries its 16-bit samples.
+/// The caller frees `bytes` with the decode allocator.
+pub const Rgb8Raster = struct {
+    prefix_len: usize = 0,
+    suffix_len: usize = 0,
+    bytes: []u8 = &.{},
 };
 
 /// One component window inside a `TileSinkRegion`. Coordinates are absolute
@@ -7862,7 +7877,14 @@ fn decodeStrictSingleTileImageMeasured(
     try compactStrictPacketBlockCatalogForReduction(&strict_catalog, header.levels, options.resolution_reduction, timings);
     if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
 
-    var decoded = try decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, strict_catalog, options, timings);
+    var decoded = try decodeStrictRpclImageFromBlockCatalogMeasured(
+        allocator,
+        header,
+        strict_catalog,
+        options,
+        timings,
+        if (requested_region == null) options.rgb8_raster else null,
+    );
     if (requested_region) |requested| {
         defer decoded.deinit();
         recordStrictSingleTileDecodeWindow(timings);
@@ -12082,7 +12104,7 @@ fn decodeStrictRpclImageFromBlockCatalog(
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
 ) !image.RgbImage {
-    return decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, catalog, options, null);
+    return decodeStrictRpclImageFromBlockCatalogMeasured(allocator, header, catalog, options, null, null);
 }
 
 fn inverseAndCompactStrictCommonPlanes53(
@@ -12147,6 +12169,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     catalog: StrictPacketBlockCatalog,
     options: DecodeOptions,
     timings: ?*DecodeTimings,
+    rgb8: ?*Rgb8Raster,
 ) !image.RgbImage {
     if (headerHasMixedComponentTransforms(header)) return CodestreamError.UnsupportedPayload;
     const plan = temporaryPacketPlan(header);
@@ -12197,7 +12220,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
             try irreversibleInversePlaneParallel(job, options.threads);
         }
         if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
-        return reconstruction.finish(allocator, header, options.threads, 0, timings);
+        return reconstruction.finish(allocator, header, options.threads, 0, timings, rgb8);
     }
     if (header.transform == .irreversible_9_7) {
         return decodeIrreversibleImageFromQuantizedPlanesMeasured(
@@ -12254,12 +12277,49 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
             }
         }
     }
+    if (rgb8) |raster| {
+        if (header.mct != .none and header.bit_depth == 8 and options.resolution_reduction == 0) {
+            const out = try allocateRgb8Raster(allocator, raster, header.width, header.height);
+            errdefer freeRgb8Raster(allocator, raster);
+            if (strictDecodeSaturates(options, catalog)) {
+                try color.inverseRctSaturatedThreadedInto8(strict_planes, out, options.threads);
+            } else {
+                try color.inverseRctThreadedInto8(strict_planes, out, options.threads);
+            }
+            return rgb8ImageShell(allocator, header);
+        }
+    }
     return if (header.mct == .none)
         color.inverseNoTransform(allocator, strict_planes)
     else if (strictDecodeSaturates(options, catalog))
         color.inverseRctSaturatedThreaded(allocator, strict_planes, options.threads)
     else
         color.inverseRctThreaded(allocator, strict_planes, options.threads);
+}
+
+/// Allocates `raster.bytes` (prefix, three bytes per pixel, suffix) and
+/// returns the pixel part.
+fn allocateRgb8Raster(allocator: std.mem.Allocator, raster: *Rgb8Raster, width: usize, height: usize) ![]u8 {
+    const pixel_bytes = try std.math.mul(usize, try std.math.mul(usize, width, height), 3);
+    const total = try std.math.add(usize, try std.math.add(usize, raster.prefix_len, pixel_bytes), raster.suffix_len);
+    raster.bytes = try allocator.alloc(u8, total);
+    return raster.bytes[raster.prefix_len..][0..pixel_bytes];
+}
+
+fn freeRgb8Raster(allocator: std.mem.Allocator, raster: *Rgb8Raster) void {
+    allocator.free(raster.bytes);
+    raster.bytes = &.{};
+}
+
+/// The image returned when the samples went to an `Rgb8Raster`.
+fn rgb8ImageShell(allocator: std.mem.Allocator, header: TemporaryHeader) image.RgbImage {
+    return .{
+        .allocator = allocator,
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .samples = &.{},
+    };
 }
 
 /// Builds a per-tile packet catalog from one Stage B tile-part span: the
@@ -14357,7 +14417,7 @@ fn decodeStrictMultiTileImageToSink(
         );
         if (timings) |t| t.packet_catalog_ns += elapsedNs(catalog_start);
 
-        var tile_image = try decodeStrictRpclImageFromBlockCatalogMeasured(allocator, tile_header, block_catalog, options, timings);
+        var tile_image = try decodeStrictRpclImageFromBlockCatalogMeasured(allocator, tile_header, block_catalog, options, timings, null);
         defer tile_image.deinit();
         if (tile.rect.x0 < header.reference_x0 or tile.rect.y0 < header.reference_y0) {
             return CodestreamError.InvalidCodestream;
@@ -14640,7 +14700,7 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
     // intra-plane inverse was bit-exact but regressed the maintained t16 gate.
     try runComponentJobs(IrreversibleInversePlaneJob, allocator, reconstruction.jobs[0..], componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
-    return reconstruction.finish(allocator, header, thread_count, resolution_reduction, timings);
+    return reconstruction.finish(allocator, header, thread_count, resolution_reduction, timings, null);
 }
 
 /// The irreversible back end's state besides the quantized planes: band
@@ -14743,6 +14803,7 @@ const IrreversibleReconstruction = struct {
         thread_count: u8,
         resolution_reduction: u8,
         timings: ?*DecodeTimings,
+        rgb8: ?*Rgb8Raster,
     ) !image.RgbImage {
         const decoded_width = try reducedGridLength(header.reference_x0, header.width, resolution_reduction);
         const decoded_height = try reducedGridLength(header.reference_y0, header.height, resolution_reduction);
@@ -14757,6 +14818,14 @@ const IrreversibleReconstruction = struct {
             if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
         }
         if (resolution_reduction == 0) {
+            if (rgb8) |raster| {
+                if (header.mct != .none and header.bit_depth == 8) {
+                    const out = try allocateRgb8Raster(allocator, raster, header.width, header.height);
+                    errdefer freeRgb8Raster(allocator, raster);
+                    try color.inverseIctThreadedInto8(self.reconstructed, out, thread_count);
+                    return rgb8ImageShell(allocator, header);
+                }
+            }
             return if (header.mct == .none)
                 color.inverseNoTransformFloatThreaded(allocator, self.reconstructed, thread_count)
             else
