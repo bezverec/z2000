@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Wider Column Strips In The 5/3 Transform
+
+- The integer 5/3 column passes (forward and inverse, serial and banded
+  parallel) lifted eight columns at a time down the full height, so each
+  row's 64-byte cache line was half used and fetched again for the next
+  strip. They now lift strips four vectors (32 columns) wide, then
+  one-vector strips, then scalar columns for the remainder. Each column is
+  transformed exactly as before.
+- Output is byte-identical (lossless profile both ways at t1 and t20,
+  34-bit wide stream), and the i64-versus-i32 transform test now covers
+  shapes that cross all three strip widths in both directions.
+- Interleaved A/B on the i5-14500 against `4575cb6` (`benchmarks.md`):
+  inverse DWT stage 32.1 -> 23.3 ms at t1; decode 630.9 -> 612.7 ms at t1
+  and 111.6 -> 104.2 ms at t20; encode 802.9 -> 790.0 ms at t1 and
+  120.0 -> 115.8 ms at t20.
+
 ### Cheaper Cleanup Pass And MQ Renormalization
 
 - The cleanup pass reads each stripe column's four flag words once: they

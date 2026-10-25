@@ -46,6 +46,29 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
+
+Same host, method, profile, and stream as the record below; base is
+`4575cb6`. Stage times come from interleaved `--timings` runs (median of
+nine). Every candidate decoded to the identical TIFF and wrote the
+identical stream.
+
+| Candidate | Comparison | Result |
+| --- | --- | --- |
+| Encoder: block copied contiguously before its coding passes | t1 encode 820.8 -> 822.9 ms (9 rounds) | +0.3%, rejected (locality was not the cost of `isMagnitudeBitSet`) |
+| Encoder: RENORME shifting several bits up to the BYTEOUT point | t1 encode 829.7 -> 840.4 ms (9 rounds) | +1.3%, rejected (most renormalizations are one bit) |
+| 5/3 column strips 16 columns wide | inverse DWT 32.79 -> 26.45 ms | -19.3% |
+| 5/3 column strips 32 columns wide, then 8, then scalar | inverse DWT 32.13 -> 23.30 ms | -27.5%, kept |
+
+End to end, 9 rounds each:
+
+| Run | `4575cb6` | Candidate |
+| --- | ---: | ---: |
+| Decode t1 | 630.9 ms | 612.7 ms (-2.9%) |
+| Decode t20 | 111.6 ms | 104.2 ms (-6.7%) |
+| Encode t1 | 802.9 ms | 790.0 ms (-1.6%) |
+| Encode t20 | 120.0 ms | 115.8 ms (-3.5%) |
+
 ## 2026-10-25: Intel Core i5-14500, cleanup pass and MQ renormalization
 
 Same host, method, profile, and stream as the record below; base is

@@ -16,9 +16,11 @@ pub const ResolutionShape = struct {
 
 const LevelShape = ResolutionShape;
 
-const vertical_lanes = simd.i32_lanes;
-const VerticalVector = @Vector(vertical_lanes, i32);
-const ShiftVector = @Vector(vertical_lanes, u5);
+/// Columns per vertical strip. A strip four vectors wide streams whole cache
+/// lines of each row (8 lanes left half of every line for the next strip
+/// to fetch again); narrower strips then cover the remainder.
+const vertical_lanes = 4 * simd.i32_lanes;
+const narrow_vertical_lanes = simd.i32_lanes;
 const horizontal_lanes = simd.i32_lanes;
 const horizontal_pair_lanes = horizontal_lanes * 2;
 const HorizontalVector = @Vector(horizontal_lanes, i32);
@@ -395,9 +397,12 @@ fn forward53ColumnBand(data: []i32, stride: usize, col_begin: usize, col_end: us
     if (height < 2) return;
     var col = col_begin;
     while (col + vertical_lanes <= col_end) : (col += vertical_lanes) {
-        forward53ColumnVector(data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+        forward53ColumnVector(vertical_lanes, data, stride, col, height, scratch[0 .. height * vertical_lanes]);
     }
     if (col_end == width) {
+        while (col + narrow_vertical_lanes <= width) : (col += narrow_vertical_lanes) {
+            forward53ColumnVector(narrow_vertical_lanes, data, stride, col, height, scratch[0 .. height * narrow_vertical_lanes]);
+        }
         while (col < width) : (col += 1) {
             forward53ColumnScalar(data, stride, col, height, scratch[0..height]);
         }
@@ -408,9 +413,12 @@ fn inverse53ColumnBand(data: []i32, stride: usize, col_begin: usize, col_end: us
     if (height < 2) return;
     var col = col_begin;
     while (col + vertical_lanes <= col_end) : (col += vertical_lanes) {
-        inverse53ColumnVector(data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+        inverse53ColumnVector(vertical_lanes, data, stride, col, height, scratch[0 .. height * vertical_lanes]);
     }
     if (col_end == width) {
+        while (col + narrow_vertical_lanes <= width) : (col += narrow_vertical_lanes) {
+            inverse53ColumnVector(narrow_vertical_lanes, data, stride, col, height, scratch[0 .. height * narrow_vertical_lanes]);
+        }
         while (col < width) : (col += 1) {
             inverse53ColumnScalar(data, stride, col, height, scratch[0..height]);
         }
@@ -735,55 +743,58 @@ fn forward53Columns(data: []i32, stride: usize, width: usize, height: usize, scr
 
     var col: usize = 0;
     while (col + vertical_lanes <= width) : (col += vertical_lanes) {
-        forward53ColumnVector(data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+        forward53ColumnVector(vertical_lanes, data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+    }
+    while (col + narrow_vertical_lanes <= width) : (col += narrow_vertical_lanes) {
+        forward53ColumnVector(narrow_vertical_lanes, data, stride, col, height, scratch[0 .. height * narrow_vertical_lanes]);
     }
     while (col < width) : (col += 1) {
         forward53ColumnScalar(data, stride, col, height, scratch[0..height]);
     }
 }
 
-fn forward53ColumnVector(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
+fn forward53ColumnVector(comptime lanes: usize, data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
     var row: usize = 1;
     while (row < height) : (row += 2) {
         const right = if (row + 1 < height)
-            loadVector(data, stride, row + 1, col)
+            loadVector(lanes, data, stride, row + 1, col)
         else
-            loadVector(data, stride, row - 1, col);
-        const updated = loadVector(data, stride, row, col) -
-            floorHalfVector(loadVector(data, stride, row - 1, col) + right);
+            loadVector(lanes, data, stride, row - 1, col);
+        const updated = loadVector(lanes, data, stride, row, col) -
+            floorHalfVector(loadVector(lanes, data, stride, row - 1, col) + right);
         storeVector(data, stride, row, col, updated);
     }
 
     row = 0;
     while (row < height) : (row += 2) {
         const left = if (row > 0)
-            loadVector(data, stride, row - 1, col)
+            loadVector(lanes, data, stride, row - 1, col)
         else
-            loadVector(data, stride, 1, col);
+            loadVector(lanes, data, stride, 1, col);
         const right = if (row + 1 < height)
-            loadVector(data, stride, row + 1, col)
+            loadVector(lanes, data, stride, row + 1, col)
         else
-            loadVector(data, stride, row - 1, col);
-        const updated = loadVector(data, stride, row, col) + floorQuarterBiasedVector(left + right);
+            loadVector(lanes, data, stride, row - 1, col);
+        const updated = loadVector(lanes, data, stride, row, col) + floorQuarterBiasedVector(left + right);
         storeVector(data, stride, row, col, updated);
     }
 
     var out: usize = 0;
     row = 0;
     while (row < height) : (row += 2) {
-        storeScratchVector(scratch, out, loadVector(data, stride, row, col));
+        storeScratchVector(scratch, out, loadVector(lanes, data, stride, row, col));
         out += 1;
     }
 
     row = 1;
     while (row < height) : (row += 2) {
-        storeScratchVector(scratch, out, loadVector(data, stride, row, col));
+        storeScratchVector(scratch, out, loadVector(lanes, data, stride, row, col));
         out += 1;
     }
 
     row = 0;
     while (row < height) : (row += 1) {
-        storeVector(data, stride, row, col, loadScratchVector(scratch, row));
+        storeVector(data, stride, row, col, loadScratchVector(lanes, scratch, row));
     }
 }
 
@@ -825,57 +836,60 @@ fn inverse53Columns(data: []i32, stride: usize, width: usize, height: usize, scr
 
     var col: usize = 0;
     while (col + vertical_lanes <= width) : (col += vertical_lanes) {
-        inverse53ColumnVector(data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+        inverse53ColumnVector(vertical_lanes, data, stride, col, height, scratch[0 .. height * vertical_lanes]);
+    }
+    while (col + narrow_vertical_lanes <= width) : (col += narrow_vertical_lanes) {
+        inverse53ColumnVector(narrow_vertical_lanes, data, stride, col, height, scratch[0 .. height * narrow_vertical_lanes]);
     }
     while (col < width) : (col += 1) {
         inverse53ColumnScalar(data, stride, col, height, scratch[0..height]);
     }
 }
 
-fn inverse53ColumnVector(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
+fn inverse53ColumnVector(comptime lanes: usize, data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
     const lows = lowCount(height);
     var row: usize = 0;
     var packed_row: usize = 0;
     while (row < height) : (row += 2) {
-        storeScratchVector(scratch, row, loadVector(data, stride, packed_row, col));
+        storeScratchVector(scratch, row, loadVector(lanes, data, stride, packed_row, col));
         packed_row += 1;
     }
 
     row = 1;
     packed_row = lows;
     while (row < height) : (row += 2) {
-        storeScratchVector(scratch, row, loadVector(data, stride, packed_row, col));
+        storeScratchVector(scratch, row, loadVector(lanes, data, stride, packed_row, col));
         packed_row += 1;
     }
 
     row = 0;
     while (row < height) : (row += 2) {
         const left = if (row > 0)
-            loadScratchVector(scratch, row - 1)
+            loadScratchVector(lanes, scratch, row - 1)
         else
-            loadScratchVector(scratch, 1);
+            loadScratchVector(lanes, scratch, 1);
         const right = if (row + 1 < height)
-            loadScratchVector(scratch, row + 1)
+            loadScratchVector(lanes, scratch, row + 1)
         else
-            loadScratchVector(scratch, row - 1);
-        const updated = loadScratchVector(scratch, row) - floorQuarterBiasedVector(left + right);
+            loadScratchVector(lanes, scratch, row - 1);
+        const updated = loadScratchVector(lanes, scratch, row) - floorQuarterBiasedVector(left + right);
         storeScratchVector(scratch, row, updated);
     }
 
     row = 1;
     while (row < height) : (row += 2) {
         const right = if (row + 1 < height)
-            loadScratchVector(scratch, row + 1)
+            loadScratchVector(lanes, scratch, row + 1)
         else
-            loadScratchVector(scratch, row - 1);
-        const updated = loadScratchVector(scratch, row) +
-            floorHalfVector(loadScratchVector(scratch, row - 1) + right);
+            loadScratchVector(lanes, scratch, row - 1);
+        const updated = loadScratchVector(lanes, scratch, row) +
+            floorHalfVector(loadScratchVector(lanes, scratch, row - 1) + right);
         storeScratchVector(scratch, row, updated);
     }
 
     row = 0;
     while (row < height) : (row += 1) {
-        storeVector(data, stride, row, col, loadScratchVector(scratch, row));
+        storeVector(data, stride, row, col, loadScratchVector(lanes, scratch, row));
     }
 }
 
@@ -1093,12 +1107,17 @@ fn floorQuarterBiased(value: i32) i32 {
     return (value + 2) >> 2;
 }
 
-fn floorHalfVector(value: VerticalVector) VerticalVector {
-    return value >> @as(ShiftVector, @splat(1));
+fn VerticalShift(comptime Vector: type) type {
+    return @Vector(@typeInfo(Vector).vector.len, u5);
 }
 
-fn floorQuarterBiasedVector(value: VerticalVector) VerticalVector {
-    return (value + @as(VerticalVector, @splat(2))) >> @as(ShiftVector, @splat(2));
+fn floorHalfVector(value: anytype) @TypeOf(value) {
+    return value >> @as(VerticalShift(@TypeOf(value)), @splat(1));
+}
+
+fn floorQuarterBiasedVector(value: anytype) @TypeOf(value) {
+    const Vector = @TypeOf(value);
+    return (value + @as(Vector, @splat(2))) >> @as(VerticalShift(Vector), @splat(2));
 }
 
 fn floorHalfHorizontal(value: HorizontalVector) HorizontalVector {
@@ -1109,20 +1128,22 @@ fn floorQuarterBiasedHorizontal(value: HorizontalVector) HorizontalVector {
     return (value + @as(HorizontalVector, @splat(2))) >> @as(HorizontalShiftVector, @splat(2));
 }
 
-fn loadVector(data: []const i32, stride: usize, row: usize, col: usize) VerticalVector {
-    return data[row * stride + col ..][0..vertical_lanes].*;
+fn loadVector(comptime lanes: usize, data: []const i32, stride: usize, row: usize, col: usize) @Vector(lanes, i32) {
+    return data[row * stride + col ..][0..lanes].*;
 }
 
-fn storeVector(data: []i32, stride: usize, row: usize, col: usize, value: VerticalVector) void {
-    data[row * stride + col ..][0..vertical_lanes].* = value;
+fn storeVector(data: []i32, stride: usize, row: usize, col: usize, value: anytype) void {
+    const lanes = @typeInfo(@TypeOf(value)).vector.len;
+    data[row * stride + col ..][0..lanes].* = value;
 }
 
-fn loadScratchVector(scratch: []const i32, row: usize) VerticalVector {
-    return scratch[row * vertical_lanes ..][0..vertical_lanes].*;
+fn loadScratchVector(comptime lanes: usize, scratch: []const i32, row: usize) @Vector(lanes, i32) {
+    return scratch[row * lanes ..][0..lanes].*;
 }
 
-fn storeScratchVector(scratch: []i32, row: usize, value: VerticalVector) void {
-    scratch[row * vertical_lanes ..][0..vertical_lanes].* = value;
+fn storeScratchVector(scratch: []i32, row: usize, value: anytype) void {
+    const lanes = @typeInfo(@TypeOf(value)).vector.len;
+    scratch[row * lanes ..][0..lanes].* = value;
 }
 
 fn packEvenOdd(data: []i32, scratch: []i32) void {
@@ -1686,7 +1707,12 @@ test "wide 5/3 matches the i32 transform and round-trips 38-bit samples" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x5eed_0053);
     const random = prng.random();
-    const shapes = [_][4]u32{ .{ 17, 13, 0, 0 }, .{ 9, 11, 3, 5 }, .{ 1, 7, 1, 0 }, .{ 32, 1, 0, 3 }, .{ 2, 2, 1, 1 } };
+    // The wider shapes cross every column-strip width of the i32 path
+    // (four vectors, one vector, scalar tail).
+    const shapes = [_][4]u32{
+        .{ 17, 13, 0, 0 }, .{ 9, 11, 3, 5 },  .{ 1, 7, 1, 0 },   .{ 32, 1, 0, 3 },
+        .{ 2, 2, 1, 1 },   .{ 77, 45, 0, 0 }, .{ 45, 70, 2, 0 }, .{ 103, 38, 1, 2 },
+    };
     for (shapes) |shape| {
         const width: usize = shape[0];
         const height: usize = shape[1];
@@ -1702,6 +1728,9 @@ test "wide 5/3 matches the i32 transform and round-trips 38-bit samples" {
         defer workspace.deinit();
         const levels = try forward53WithWorkspaceOrigin(&workspace, narrow, width, height, 4, shape[2], shape[3]);
         try std.testing.expectEqual(levels, try forward53WideOrigin(allocator, wide, width, height, 4, shape[2], shape[3]));
+        for (narrow, wide) |n, w| try std.testing.expectEqual(@as(i64, n), w);
+        _ = try inverse53ReducedWithWorkspaceOrigin(&workspace, narrow, width, height, levels, 0, shape[2], shape[3]);
+        _ = try inverse53WideReducedOrigin(allocator, wide, width, height, levels, 0, shape[2], shape[3]);
         for (narrow, wide) |n, w| try std.testing.expectEqual(@as(i64, n), w);
 
         // 38-bit signed samples round-trip exactly.

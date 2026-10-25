@@ -85,6 +85,9 @@ all-thread setting.
   (17.3 ms vs 12.8 ms at t8). Capping restored t16 to t8 and improved lossless
   decode t16 by 7.8% and encode t16 by 6.1% with byte-identical output
   (2026-07-15 record in `benchmarks.md`).
+- 2026-10-25: the integer 5/3 column passes lift 32-column strips (then 8,
+  then scalar), using whole cache lines per row; the inverse DWT stage went
+  from 32.1 to 23.3 ms at t1, decode t20 to 104.2 ms.
 - Both DWT drivers now share the 9/7 driver's persistent barrier pool: the 5/3
   driver stopped re-spawning threads for each of its ten phases per transform.
   Kept for a clean 2.8% lossless encode t16 improvement (inverse DWT stage
@@ -138,10 +141,11 @@ per-sample branches predict well, so the remaining cost is the MQ decisions
 themselves and the flag and coefficient updates. Also kept: the cleanup
 column screen (run mode and all-known columns from one look at four flag
 words) and a 64-bit MQ C register with buffered bytes (one-shift RENORMD);
-a buffered raw bit reader was neutral. Remaining ideas: contiguous
-per-block magnitudes for the encoder's passes (`isMagnitudeBitSet` and
-`magnitude` are 13% of t1 encode), and decoding straight into the
-coefficient plane instead of scattering each block.
+a buffered raw bit reader was neutral. On the encoder, a contiguous block
+copy and multi-bit RENORME were both slower: the `isMagnitudeBitSet`
+samples are the data-dependent branch on the coded bit, not memory.
+Remaining idea: decoding straight into the coefficient plane instead of
+scattering each block (a few percent at most).
 
 ### P3. Decode Pipeline Overlap
 
