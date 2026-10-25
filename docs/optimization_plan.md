@@ -85,6 +85,13 @@ all-thread setting.
   (17.3 ms vs 12.8 ms at t8). Capping restored t16 to t8 and improved lossless
   decode t16 by 7.8% and encode t16 by 6.1% with byte-identical output
   (2026-07-15 record in `benchmarks.md`).
+- 2026-10-25 t20 budget against Kakadu 8.4.1 (64.3 ms vs z2000 100.1 ms on
+  the common stream; t1 583.9 vs 607.0 ms): about 25 ms of z2000's t20
+  decode is serial (packet catalog 9.9, TIFF write 7.1, file and box
+  handling 3.9, setup 3.3, ICC 0.9), while the T1 phase scales. P1/P3 work
+  should now shrink those serial stages, in that order, before more T1
+  tuning. The serial block decode's per-sample coverage bytes were the
+  first casualty (t1 decode 621.8 -> 599.0 ms).
 - 2026-10-25: the integer 5/3 column passes lift 32-column strips (then 8,
   then scalar), using whole cache lines per row; the inverse DWT stage went
   from 32.1 to 23.3 ms at t1, decode t20 to 104.2 ms.

@@ -15089,18 +15089,21 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     {
         @memset(plane, 0);
     }
+    // Coverage is checked once from the block rectangles, on a bit per
+    // sample, for the serial and the parallel decode alike: every retained
+    // sample in exactly one block, none outside the plane.
+    try validateStrictBlockCatalogCoverageBits(
+        allocator,
+        width,
+        height,
+        required_width,
+        required_height,
+        blocks,
+        bands,
+        options.resolution_reduction,
+    );
     const worker_count = strictDecodeBlockThreadCount(options, blocks.len);
     if (worker_count > 1) {
-        try validateStrictBlockCatalogCoverageBits(
-            allocator,
-            width,
-            height,
-            required_width,
-            required_height,
-            blocks,
-            bands,
-            options.resolution_reduction,
-        );
         try reconstructStrictComponentBlocksParallel(
             allocator,
             width,
@@ -15119,10 +15122,6 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         return;
     }
 
-    const covered = try allocator.alloc(bool, pixels);
-    defer allocator.free(covered);
-    @memset(covered, false);
-
     // One reusable T1 scratch per component keeps the hot decode loop free
     // of per-block allocations.
     var scratch = ebcot.DecodeBlockScratchFor(Coefficient).init(allocator);
@@ -15136,9 +15135,6 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         const in_resolution = try strictBlockRequiredForReduction(block, bands, options.resolution_reduction);
         const required = in_resolution and block.region_required;
         if (block.cumulative_passes == 0 and block.cumulative_bytes == 0) {
-            if (in_resolution) {
-                try markStrictZeroBlockCovered(covered, width, height, block.rect);
-            }
             if (!required) {
                 if (timings) |t| t.t1_skipped_blocks += 1;
             }
@@ -15148,9 +15144,6 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         if (block.encoded_bitplanes > block.nominal_bitplanes) return CodestreamError.InvalidCodestream;
         if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
         if (!required) {
-            if (in_resolution) {
-                try markStrictZeroBlockCovered(covered, width, height, block.rect);
-            }
             if (timings) |t| {
                 t.t1_skipped_blocks += 1;
                 t.t1_skipped_payload_bytes += @intCast(block.payload_length);
@@ -15173,7 +15166,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
                 block.code_block_style,
                 t1_stats,
             );
-            try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+            try scatterStrictDecodedBlockUnchecked(plane, width, height, block.rect, decoded);
             continue;
         }
         if (block.code_block_style.terminate_all) {
@@ -15191,7 +15184,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
                 block.code_block_style,
                 t1_stats,
             );
-            try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+            try scatterStrictDecodedBlockUnchecked(plane, width, height, block.rect, decoded);
             continue;
         }
 
@@ -15208,7 +15201,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
                     block.code_block_style,
                 );
                 errdefer allocator.free(decoded);
-                try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+                try scatterStrictDecodedBlockUnchecked(plane, width, height, block.rect, decoded);
                 allocator.free(decoded);
             },
             .iso_mq => {
@@ -15222,13 +15215,8 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
                     block.code_block_style,
                     t1_stats,
                 );
-                try scatterStrictDecodedBlock(plane, covered, width, height, block.rect, decoded);
+                try scatterStrictDecodedBlockUnchecked(plane, width, height, block.rect, decoded);
             },
-        }
-    }
-    for (0..required_height) |row| {
-        for (covered[row * width ..][0..required_width]) |is_covered| {
-            if (!is_covered) return CodestreamError.InvalidCodestream;
         }
     }
     undoMaxshiftRoi(plane, roi_shift);

@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Bit-Per-Sample Coverage Check In Serial Block Decode
+
+- The single-thread block decode tracked coverage in a byte per sample:
+  every block's rows were checked and marked, and the whole plane was
+  scanned at the end. It now runs the parallel path's check: one bit per
+  sample, set from the block rectangles before decoding (every retained
+  sample in exactly one block, none outside the plane), after which
+  decoded blocks are copied without per-sample bookkeeping. Zero-length
+  and region-pruned blocks count toward coverage exactly as before.
+- Output is byte-identical (lossless profile, region decode, 34-bit wide
+  stream at t1). Interleaved A/B on the i5-14500 against `86cb099`:
+  common-stream decode 621.8 -> 599.0 ms at t1.
+
 ### Wider Column Strips In The 5/3 Transform
 
 - The integer 5/3 column passes (forward and inverse, serial and banded

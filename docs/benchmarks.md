@@ -46,6 +46,27 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, t20 serial budget; serial coverage bits
+
+Same host, method, profile, and stream as the record below; base is
+`86cb099`. Kakadu 8.4.1 (`kdu_expand -num_threads N -quiet`) on the
+common stream, 7 rounds: 583.9 ms at t1 against z2000 607.0 ms, but
+64.3 ms at t20 against 100.1 ms. z2000's t20 `--timings` budget (90.7 ms
+on that run) is about 25 ms of serial work: JP2 read 2.2, codestream box
+1.7, packet catalog 9.9 (headers 8.3, of which about 5 ms only when
+payloads are retained), unattributed codestream setup 3.3, ICC 0.9, and
+TIFF write 7.1 (serialization 2.9, file write 4.5); T1 is 56.8 ms for 60
+jobs that each take about 17 ms, so the block phase itself scales.
+
+Sampling 40 t1 decodes showed the serial path's byte-per-sample coverage
+bookkeeping at about 10 ms per decode (row checks and marks, the 12.6 MB
+memset, the final scan), which the parallel path already replaced with a
+bitmap checked from block rectangles.
+
+| Candidate | Comparison | Result |
+| --- | --- | --- |
+| Serial decode checks coverage on the parallel path's bitmap | t1 decode 621.8 -> 599.0 ms (9 rounds) | -3.7%, kept |
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is
