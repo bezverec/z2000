@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Cheaper Cleanup Pass And MQ Renormalization
+
+- The cleanup pass reads each stripe column's four flag words once: they
+  decide run mode and skip a column whose samples are all significant or
+  already visited, and the per-sample loop indexes from the column base.
+  The encoder's cleanup pass skips such columns the same way.
+- The MQ decoder keeps C.3's C register in the top half of a 64-bit
+  register with the following code bytes buffered below it: RENORMD is one
+  shift instead of a bit-count loop with a CT test per step, and BYTEIN
+  runs in batches once fewer bits are left than a shift needs. The byte
+  sequence and every decision are unchanged.
+- Output is byte-identical (lossless profile both ways, `--timings`
+  profiled decode, 34-bit wide stream). Interleaved A/B on the i5-14500
+  against `44e754f` (`benchmarks.md`): common-stream decode 694.9 ->
+  636.5 ms at t1 (Grok 20.4.19 617.4 ms) and 112.6 -> 109.4 ms at t20
+  (Grok 117.2 ms); encode 847.7 -> 821.6 ms at t1 (Grok 790.9 ms) and
+  121.7 -> 119.8 ms at t20 (Grok 137.4 ms).
+
 ### Faster Single-Thread T1 Decode
 
 - MQ contexts fold their MPS into the state index (2 * state + MPS, 94

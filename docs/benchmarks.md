@@ -46,6 +46,31 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, cleanup pass and MQ renormalization
+
+Same host, method, profile, and stream as the record below; base is
+`44e754f`. Every candidate decoded to the identical TIFF and wrote the
+identical stream.
+
+| Candidate | Comparison | Result |
+| --- | --- | --- |
+| Cleanup: four column flag words read once, all-known columns skipped, indexes from the column base | t1 decode 718.8 -> 692.5 ms (9 rounds) | -3.7%, kept |
+| MQ decoder: 64-bit C register with buffered bytes, one-shift RENORMD | t1 decode 673.8 -> 637.9 ms (9 rounds, vs the cleanup build) | -5.3%, kept |
+| Raw (BYPASS) bit reader with a 64-bit buffer | t1 decode -1.3% (9 rounds), then +1.8% (11 rounds) | neutral, rejected |
+| Encoder cleanup: all-known columns skipped | t1 encode 863.1 -> 814.7 ms (9 rounds) | -5.6%, kept |
+
+Cumulative (decode 9 rounds, encode 7 rounds):
+
+| Run | `44e754f` | Candidate | Grok 20.4.19 |
+| --- | ---: | ---: | ---: |
+| Decode t1 | 694.9 ms | 636.5 ms (-8.4%) | 617.4 ms |
+| Decode t20 | 112.6 ms | 109.4 ms (-2.9%) | 117.2 ms |
+| Encode t1 | 847.7 ms | 821.6 ms (-3.1%) | 790.9 ms |
+| Encode t20 | 121.7 ms | 119.8 ms (-1.6%) | 137.4 ms |
+
+The t1 decode gap to Grok 20.4.19 is 1.03x on this day's medians (1.26x
+at `8764a89`); z2000 is faster at t20 in both directions.
+
 ## 2026-10-25: Intel Core i5-14500, single-thread T1 decode
 
 Same host, method, profile, and stream as the 2026-10-24 record below

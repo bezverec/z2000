@@ -38,9 +38,11 @@ all-thread setting.
 ## Current Evidence
 
 - 2026-10-25 (`benchmarks.md`): folded MQ contexts and four-lane neighbor
-  updates cut common-stream t1 decode from 781.6 to 691.9 ms (Grok 20.4.19
-  621.0 ms, now 1.11x) and t20 to 111.1 ms (Grok 20.4.19 115.7 ms). Four
-  scan-side candidates were measured and rejected; see P2.
+  updates cut common-stream t1 decode from 781.6 to 691.9 ms; the cleanup
+  column screen and a 64-bit MQ register then took it to 636.5 ms (Grok
+  20.4.19 617.4 ms, 1.03x). At t20 z2000 decodes in 109.4 ms and encodes in
+  119.8 ms, both ahead of Grok 20.4.19 (117.2 and 137.4 ms); t1 encode
+  remains 1.04x behind it. Five scan-side candidates were rejected; see P2.
 - 2026-10-24 interleaved A/B on the same i5-14500 (`benchmarks.md`): Grok
   20.4.19 decodes the common lossless stream in 123.7/634.1 ms at t20/t1
   against z2000 127.2/814.9 ms, but Grok 20.4.14 and 20.4.12 decode it in
@@ -133,11 +135,13 @@ per-pass local copy of the MQ registers (no change), branch-free sign
 handling in refinement (+1.2%), per-column candidate masks (+3.7%), and
 16-column vector screening of significance propagation (+7.1%): the
 per-sample branches predict well, so the remaining cost is the MQ decisions
-themselves and the flag and coefficient updates. Remaining ideas: a cheaper
-cleanup-pass sample loop (index strength reduction), contiguous per-block
-magnitudes for the encoder's passes (`isMagnitudeBitSet`/`magnitude` are 13%
-of t1 encode), and decoding straight into the coefficient plane instead of
-scattering each block.
+themselves and the flag and coefficient updates. Also kept: the cleanup
+column screen (run mode and all-known columns from one look at four flag
+words) and a 64-bit MQ C register with buffered bytes (one-shift RENORMD);
+a buffered raw bit reader was neutral. Remaining ideas: contiguous
+per-block magnitudes for the encoder's passes (`isMagnitudeBitSet` and
+`magnitude` are 13% of t1 encode), and decoding straight into the
+coefficient plane instead of scattering each block.
 
 ### P3. Decode Pipeline Overlap
 

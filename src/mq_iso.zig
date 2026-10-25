@@ -399,7 +399,11 @@ pub const Decoder = struct {
     pos: usize = 0,
     current_byte: u8 = 0xff,
     a: u32 = 0x8000,
-    c: u32 = 0,
+    /// The C register of C.3.1 in bits 32..63; the bits below buffer the
+    /// following code bytes, so renormalization is one shift and BYTEIN
+    /// runs in batches. `ct` counts the buffered bits (C.3's CT plus every
+    /// byte read ahead).
+    c: u64 = 0,
     ct: u8 = 0,
 
     pub fn init(allocator: std.mem.Allocator, context_count: usize, bytes: []const u8) !Decoder {
@@ -422,7 +426,7 @@ pub const Decoder = struct {
             .contexts = contexts,
             .bytes = bytes,
             .current_byte = first,
-            .c = @as(u32, first) << first_byte_shift,
+            .c = @as(u64, first) << (@as(u6, first_byte_shift) + 32),
         };
         decoder.byteIn();
         decoder.c <<= 7;
@@ -441,13 +445,13 @@ pub const Decoder = struct {
             .contexts = contexts,
             .bytes = bytes,
             .current_byte = first,
-            .c = @as(u32, 0xff) << 16,
+            .c = @as(u64, 0xff) << 48,
         };
         if (first > 0x8f) {
-            decoder.c += 0xff00;
+            decoder.c += @as(u64, 0xff00) << 32;
             decoder.ct = 8;
         } else {
-            decoder.c += @as(u32, first) << 9;
+            decoder.c += @as(u64, first) << 41;
             decoder.ct = 7;
         }
         decoder.c <<= 7;
@@ -468,7 +472,7 @@ pub const Decoder = struct {
         self.current_byte = firstByte(bytes);
         self.a = 0x8000;
         self.ct = 0;
-        self.c = @as(u32, self.current_byte) << 16;
+        self.c = @as(u64, self.current_byte) << 48;
         self.byteIn();
         self.c <<= 7;
         self.ct -= 7;
@@ -494,10 +498,10 @@ pub const Decoder = struct {
         const qe = context.qe;
 
         const next_a = self.a - qe;
-        const c_high = self.c >> 16;
+        const c_high = self.c >> 48;
         self.a = next_a;
         if (c_high >= qe) {
-            self.c -= @as(u32, qe) << 16;
+            self.c -= @as(u64, qe) << 48;
             if ((next_a & 0x8000) != 0) return context.mps;
             const bit = self.exchangeMps(context, qe);
             self.renormalize();
@@ -517,10 +521,10 @@ pub const Decoder = struct {
         const qe = context.qe;
 
         const next_a = self.a - qe;
-        const c_high = self.c >> 16;
+        const c_high = self.c >> 48;
         self.a = next_a;
         if (c_high >= qe) {
-            self.c -= @as(u32, qe) << 16;
+            self.c -= @as(u64, qe) << 48;
             if ((next_a & 0x8000) != 0) {
                 stats.fast_mps += 1;
                 return context.mps;
@@ -562,57 +566,62 @@ pub const Decoder = struct {
         return bit;
     }
 
+    /// RENORMD as one shift: A doubles until it reaches 0x8000, and C takes
+    /// as many buffered bits, refilled first when too few are left.
     inline fn renormalize(self: *Decoder) void {
-        while (self.a < 0x8000) {
-            if (self.ct == 0) self.byteIn();
-            const shift = self.renormalizeShift();
-            self.a <<= shift;
-            self.c <<= shift;
-            self.ct -= shift;
-        }
+        const shift = renormalizeShift(self.a);
+        if (self.ct < shift) _ = self.fill();
+        self.a <<= shift;
+        self.c <<= shift;
+        self.ct -= shift;
     }
 
     inline fn renormalizeProfiled(self: *Decoder, stats: *DecodeBranchStats) void {
-        while (self.a < 0x8000) {
-            if (self.ct == 0) {
-                stats.byte_in += 1;
-                self.byteIn();
-            }
-            const shift = self.renormalizeShift();
-            stats.renorm_shifts += shift;
-            self.a <<= shift;
-            self.c <<= shift;
-            self.ct -= shift;
-        }
+        const shift = renormalizeShift(self.a);
+        if (self.ct < shift) stats.byte_in += self.fill();
+        stats.renorm_shifts += shift;
+        self.a <<= shift;
+        self.c <<= shift;
+        self.ct -= shift;
     }
 
-    inline fn renormalizeShift(self: Decoder) u5 {
-        std.debug.assert(self.a != 0);
-        const needed: u8 = @intCast(@clz(self.a) - 16);
-        return @intCast(@min(needed, self.ct));
+    inline fn renormalizeShift(a: u32) u5 {
+        std.debug.assert(a != 0 and a < 0x8000);
+        return @intCast(@clz(a) - 16);
     }
 
+    /// Buffers code bytes until more than 32 bits wait below C, which covers
+    /// any single renormalization (at most 15 bits); returns the BYTEIN count.
+    fn fill(self: *Decoder) u64 {
+        var count: u64 = 0;
+        while (self.ct <= 32) : (count += 1) self.byteIn();
+        return count;
+    }
+
+    /// BYTEIN of C.3.4, appending the next byte below the buffered bits
+    /// (bit 40 - ct is where C.3's `C + (B << 8)` lands when CT is 0).
     inline fn byteIn(self: *Decoder) void {
         const current = self.current_byte;
         const next_index = self.pos + 1;
         const next = if (next_index < self.bytes.len) self.bytes[next_index] else 0xff;
+        const position: u6 = @intCast(40 - @as(u8, self.ct));
         if (current == 0xff) {
             if (next > 0x8f) {
-                self.c += 0xff00;
-                self.ct = 8;
+                self.c += @as(u64, 0xff) << position;
+                self.ct += 8;
             } else {
                 self.pos += 1;
                 self.current_byte = next;
-                self.c += @as(u32, next) << 9;
-                self.ct = 7;
+                self.c += @as(u64, next) << (position + 1);
+                self.ct += 7;
             }
             return;
         }
 
         self.pos += 1;
         self.current_byte = next;
-        self.c += @as(u32, next) << 8;
-        self.ct = 8;
+        self.c += @as(u64, next) << position;
+        self.ct += 8;
     }
 };
 

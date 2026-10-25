@@ -5161,8 +5161,22 @@ fn decodeCleanupPassInferredPlain(
     while (stripe_y < scratch.height) : (stripe_y += 4) {
         const stripe_height = @min(@as(usize, 4), scratch.height - stripe_y);
         var x: usize = 0;
-        while (x < scratch.width) : (x += 1) {
-            if (stripe_height == 4 and nbfCanUseRunStripePlain(flags, nbs, x, stripe_y)) {
+        var column = nbfIndex(nbs, 0, stripe_y);
+        while (x < scratch.width) : ({
+            x += 1;
+            column += 1;
+        }) {
+            if (stripe_height != 4) {
+                symbol_count += try decodeCleanupSampleRangePlainKnown(scratch, decoder, flags, nbs, x, stripe_y, column, 0, stripe_height, bitplane, band_index);
+                continue;
+            }
+            // The four flag words decide both run mode and whether the
+            // column has anything left to code.
+            const f0 = flags[column];
+            const f1 = flags[column + nbs];
+            const f2 = flags[column + 2 * nbs];
+            const f3 = flags[column + 3 * nbs];
+            if (((f0 | f1 | f2 | f3) & nbf_cleanup_run_blockers) == 0) {
                 const agg = try mqRead(decoder, mqContextIndex(.cleanup_aggregation));
                 symbol_count += 1;
                 if (!agg) continue;
@@ -5173,14 +5187,19 @@ fn decodeCleanupPassInferredPlain(
 
                 {
                     const y = stripe_y + runlen;
-                    const sample_flags = flags[nbfIndex(nbs, x, y)];
+                    const sample_flags = flags[column + runlen * nbs];
                     try decodeCleanupSignPlainKnown(scratch, decoder, flags, nbs, x, y, bitplane, sample_flags);
                     symbol_count += 1;
                 }
 
-                symbol_count += try decodeCleanupSampleRangePlainKnown(scratch, decoder, flags, nbs, x, stripe_y, runlen + 1, 4, bitplane, band_index);
+                symbol_count += try decodeCleanupSampleRangePlainKnown(scratch, decoder, flags, nbs, x, stripe_y, column, runlen + 1, 4, bitplane, band_index);
             } else {
-                symbol_count += try decodeCleanupSampleRangePlainKnown(scratch, decoder, flags, nbs, x, stripe_y, 0, stripe_height, bitplane, band_index);
+                // Every sample already significant or visited: nothing to code.
+                const known = nbf_sig_self | nbf_visit;
+                const all_known = @intFromBool((f0 & known) != 0) & @intFromBool((f1 & known) != 0) &
+                    @intFromBool((f2 & known) != 0) & @intFromBool((f3 & known) != 0);
+                if (all_known != 0) continue;
+                symbol_count += try decodeCleanupSampleRangePlainKnown(scratch, decoder, flags, nbs, x, stripe_y, column, 0, 4, bitplane, band_index);
             }
         }
     }
@@ -5499,19 +5518,6 @@ inline fn nbfDecodeCleanupSampleRange(
     return symbol_count;
 }
 
-fn nbfDecodeCleanupSamplePlain(
-    scratch: anytype,
-    decoder: anytype,
-    x: usize,
-    y: usize,
-    bitplane: u8,
-    band_kind: subband.Kind,
-) !usize {
-    const flags = scratch.nb_flags.items;
-    const nbs = scratch.nb_stride;
-    return nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, y, bitplane, @backingInt(band_kind));
-}
-
 inline fn nbfDecodeCleanupSamplePlainKnown(
     scratch: anytype,
     decoder: anytype,
@@ -5519,10 +5525,11 @@ inline fn nbfDecodeCleanupSamplePlainKnown(
     nbs: usize,
     x: usize,
     y: usize,
+    index: usize,
     bitplane: u8,
     band_index: usize,
 ) !usize {
-    const sample = flags[nbfIndex(nbs, x, y)];
+    const sample = flags[index];
     if ((sample & (nbf_sig_self | nbf_visit)) != 0) return 0;
     const zero_context = nbf_zc_lut[band_index][sample & nbf_sig8];
     const bit = try mqRead(decoder, mqContextIndex(zero_context));
@@ -5541,6 +5548,7 @@ inline fn decodeCleanupSampleRangePlainKnown(
     nbs: usize,
     x: usize,
     stripe_y: usize,
+    column: usize,
     first_dy: usize,
     end_dy: usize,
     bitplane: u8,
@@ -5548,8 +5556,12 @@ inline fn decodeCleanupSampleRangePlainKnown(
 ) !usize {
     var symbol_count: usize = 0;
     var dy = first_dy;
-    while (dy < end_dy) : (dy += 1) {
-        symbol_count += try nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, stripe_y + dy, bitplane, band_index);
+    var index = column + first_dy * nbs;
+    while (dy < end_dy) : ({
+        dy += 1;
+        index += nbs;
+    }) {
+        symbol_count += try nbfDecodeCleanupSamplePlainKnown(scratch, decoder, flags, nbs, x, stripe_y + dy, index, bitplane, band_index);
     }
     return symbol_count;
 }
@@ -6577,6 +6589,15 @@ fn emitDirectIsoCleanupPassPlain(
         const stripe_height = @min(@as(usize, 4), rect.height - stripe_y);
         var x: usize = 0;
         while (x < rect.width) : (x += 1) {
+            if (stripe_height == 4) {
+                // As in the decoder: one look at the column's four flag
+                // words skips a column with nothing left to code.
+                const column = nbfIndex(nbs, x, stripe_y);
+                const known = nbf_sig_self | nbf_visit;
+                const all_known = @intFromBool((flags[column] & known) != 0) & @intFromBool((flags[column + nbs] & known) != 0) &
+                    @intFromBool((flags[column + 2 * nbs] & known) != 0) & @intFromBool((flags[column + 3 * nbs] & known) != 0);
+                if (all_known != 0) continue;
+            }
             if (stripe_height == 4 and nbfCanUseRunStripePlain(flags, nbs, x, stripe_y)) {
                 const runlen = cleanupRunLength(plane, stride, rect, x, stripe_y, bitplane);
                 try encoder.write(mqContextIndex(.cleanup_aggregation), runlen != 4);
