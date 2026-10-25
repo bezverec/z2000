@@ -46,6 +46,37 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, packet catalog on all workers
+
+Base `58e16ac`, same host and method. A timeline of the stages before the
+Tier-1 pool (temporary marks, t20, common lossless stream) showed 3.6-4.0
+ms: scan 1.0, header walk 1.6-1.9 (one worker per component), finalize
+0.3, coverage checks 0.4-0.6, pool setup 0.15 ms. The scan was almost all
+the per-packet frame check (a search for 0xFF bytes through every packet
+body); split into chunks it did not get faster at first because the shared
+pool refused the task while its background start-up still held it. With
+that fixed and the pool started before the input is read:
+
+| Stage (11 runs, t20) | Base | New |
+| --- | ---: | ---: |
+| scan | 0.98 ms | 0.44 ms |
+| header walk | 1.67 ms | 0.87 ms |
+| finalize | 0.32 ms | 0.28 ms |
+| packet catalog | 3.05 ms | 1.70 ms |
+| total (lossless) | 66.43 ms | 63.81 ms |
+
+Inside the header walk, runs of packets on 20 workers cost about 7 ms of
+CPU while they copied the payloads into fresh per-component buffers (page
+faults on 6.6 MB); borrowing the payloads from the input took the walk from
+1.20 to 0.87 ms. Initializing the block tables (about 4 MB, one 112-entry
+segment table per block) in parallel ranges took it from 1.41 to 1.20 ms.
+
+Wall time, 21 interleaved rounds: lossless t20 80.7 -> 77.9 ms (-3.5%), t6
+141.4 -> 141.6 ms, t1 604.3 -> 602.8 ms; lossy (multi-layer, no chunked
+walk) t20 101.9 -> 100.7 ms. Decoded TIFFs byte-identical to the base for
+both streams at t1/t2/t3/t20, region and `--layers 1` decodes, and the
+34-bit wide stream.
+
 ## 2026-10-25: Intel Core i5-14500, streamed RGB tail with a replaced output file (rejected)
 
 Base `9525104`, common lossless stream at t20 unless noted. Prototype: after

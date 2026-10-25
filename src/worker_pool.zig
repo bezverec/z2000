@@ -12,7 +12,10 @@
 //! can carry into the next one. Indices must not wait for one another:
 //! a thread may run several of them in turn, so a barrier between indices
 //! could deadlock. One task runs at a time; a concurrent `run` returns
-//! false and the caller falls back to its own threads.
+//! false and the caller falls back to its own threads. Starting threads
+//! (`prepare`, or `run` asking for more) does not hold the pool: a task
+//! published meanwhile runs on the threads already started, and a thread
+//! takes part only in tasks that counted it.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -21,15 +24,21 @@ pub const max_threads = 63;
 
 const Pool = struct {
     threads: [max_threads]std.Thread = undefined,
-    /// Started threads; only grows, under `busy` or the starter.
+    /// Started threads, which are also their indices; only grows, under
+    /// `growing`.
     started: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    /// Set while a task (or a background start) owns the pool.
+    /// Set while a task owns the pool.
     busy: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Set while threads are being started.
+    growing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Futex word the threads sleep on; bumped once per task.
     generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     /// Futex word the caller sleeps on: threads that finished the task.
     acknowledged: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    participants: u32 = 0,
+    /// The current task's generation (high half) and participant count
+    /// (threads `0..participants`, low half), published before the
+    /// generation itself.
+    announced: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     next_index: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     count: usize = 0,
     context: *anyopaque = undefined,
@@ -42,9 +51,11 @@ fn futexIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-/// `seen` is the generation when the thread was started: it joins only
-/// tasks published after that, never one already being acknowledged.
-fn worker(start_generation: u32) void {
+/// `seen` starts as the generation when the thread was started: it looks
+/// only at tasks published after that, and takes part in one only when the
+/// task counted it (its `index` below the participants), so the caller's
+/// acknowledgement count is exact even while threads are still starting.
+fn worker(index: u32, start_generation: u32) void {
     var seen = start_generation;
     while (true) {
         var current = pool.generation.load(.acquire);
@@ -53,8 +64,14 @@ fn worker(start_generation: u32) void {
             current = pool.generation.load(.acquire);
         }
         seen = current;
+        // A newer announcement means this task ended without counting this
+        // thread (the next one is being set up); skip it.
+        const announced = pool.announced.load(.acquire);
+        if (@as(u32, @truncate(announced >> 32)) != current) continue;
+        const participants: u32 = @truncate(announced);
+        if (index >= participants) continue;
         drain();
-        if (pool.acknowledged.fetchAdd(1, .acq_rel) + 1 == pool.participants) {
+        if (pool.acknowledged.fetchAdd(1, .acq_rel) + 1 == participants) {
             futexIo().futexWake(u32, &pool.acknowledged.raw, 1);
         }
     }
@@ -69,30 +86,30 @@ fn drain() void {
 }
 
 /// Starts pool threads up to `threads - 1` (the caller is the last one).
-/// Must hold `busy`. A failed spawn leaves the pool smaller.
+/// Must hold `growing`. A failed spawn leaves the pool smaller.
 fn grow(threads: usize) void {
     const wanted: u32 = @intCast(@min(threads -| 1, max_threads));
     var started = pool.started.load(.monotonic);
     while (started < wanted) : (started += 1) {
-        pool.threads[started] = std.Thread.spawn(.{}, worker, .{pool.generation.load(.acquire)}) catch break;
+        pool.threads[started] = std.Thread.spawn(.{}, worker, .{ started, pool.generation.load(.acquire) }) catch break;
         pool.started.store(started + 1, .release);
     }
 }
 
 fn growInBackground(threads: usize) void {
     grow(threads);
-    pool.busy.store(false, .release);
+    pool.growing.store(false, .release);
 }
 
 /// Starts the pool's threads for a later `run` with up to `threads` workers
 /// on a helper thread, so the caller can keep parsing. Does nothing when
-/// they are already there or the pool is busy.
+/// they are already there or are being started.
 pub fn prepare(threads: usize) void {
     if (builtin.single_threaded or threads < 2) return;
     if (pool.started.load(.acquire) + 1 >= @min(threads, max_threads + 1)) return;
-    if (pool.busy.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return;
+    if (pool.growing.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return;
     const helper = std.Thread.spawn(.{}, growInBackground, .{threads}) catch {
-        pool.busy.store(false, .release);
+        pool.growing.store(false, .release);
         return;
     };
     helper.detach();
@@ -110,7 +127,12 @@ pub fn run(threads: usize, count: usize, context: *anyopaque, task: *const fn (*
     }
     if (pool.busy.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return false;
     defer pool.busy.store(false, .release);
-    grow(threads);
+    // Start missing threads unless someone else is starting them; then use
+    // the ones already there.
+    if (pool.growing.cmpxchgStrong(false, true, .acquire, .monotonic) == null) {
+        grow(threads);
+        pool.growing.store(false, .release);
+    }
     const participants = pool.started.load(.acquire);
     if (participants == 0) {
         for (0..count) |index| task(context, index);
@@ -120,10 +142,12 @@ pub fn run(threads: usize, count: usize, context: *anyopaque, task: *const fn (*
     pool.count = count;
     pool.context = context;
     pool.task = task;
-    pool.participants = participants;
     pool.next_index.store(0, .monotonic);
     pool.acknowledged.store(0, .monotonic);
-    _ = pool.generation.fetchAdd(1, .release);
+    // Only the task owner moves the generation.
+    const generation = pool.generation.load(.monotonic) +% 1;
+    pool.announced.store((@as(u64, generation) << 32) | participants, .release);
+    pool.generation.store(generation, .release);
     futexIo().futexWake(u32, &pool.generation.raw, std.math.maxInt(u32));
 
     drain();
@@ -159,11 +183,16 @@ pub fn deinitInBackground(value: anytype) void {
 
 /// `run` over a slice of jobs, one index per job, each handed to `work`.
 pub fn runJobs(comptime Job: type, jobs: []Job, comptime work: fn (*Job) void) bool {
+    return runJobsOn(jobs.len, Job, jobs, work);
+}
+
+/// `runJobs` with up to `threads` threads, for more jobs than threads.
+pub fn runJobsOn(threads: usize, comptime Job: type, jobs: []Job, comptime work: fn (*Job) void) bool {
     const Adapter = struct {
         fn call(context: *anyopaque, index: usize) void {
             const all: [*]Job = @ptrCast(@alignCast(context));
             work(&all[index]);
         }
     };
-    return run(jobs.len, jobs.len, @ptrCast(jobs.ptr), Adapter.call);
+    return run(@min(threads, jobs.len), jobs.len, @ptrCast(jobs.ptr), Adapter.call);
 }

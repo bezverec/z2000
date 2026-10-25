@@ -202,9 +202,16 @@ and the write band by band into a temporary file moved over the output
 was tried and rejected (2026-10-25, `benchmarks.md`): the tail shrank by
 1.4 ms, but the move over an existing file and the time outside the decode
 grew by as much, and wall time rose 1-2% at t20. The write itself (about
-3.3 ms for 12.6 MB) is the floor there. What is left: starting Tier-1 on
-blocks while later packet headers are still being walked, and the packet
-catalog (3.0-3.6 ms, its scan serial).
+3.3 ms for 12.6 MB) is the floor there. The packet catalog now runs on all
+workers (2026-10-25: scan in byte-balanced chunks, single-layer header walk
+in runs with borrowed payloads, pool tasks no longer refused during its
+start-up), 3.05 -> 1.70 ms at t20. Between the catalog and the first block
+there remain the catalog fill (0.3 ms, copying the per-block segment
+tables), the coverage checks (0.4-0.6 ms), and the pool setup; the
+multi-layer profile's walk (2.2 ms, one worker per component because the
+precinct state persists across layers) is the larger head on lossy
+streams. Starting Tier-1 on finished blocks during the walk would now
+overlap at most about 1 ms at t20.
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse

@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Packet Catalog Before Tier-1 On All Workers
+
+- The shared pool no longer refuses tasks while it is still starting its
+  threads: a task runs on the threads already started, and each thread
+  joins only tasks that counted it. Before, the packet scan and header
+  walk of a large decode found the pool busy with its own start-up and ran
+  on one thread or on freshly spawned ones. JP2-to-TIFF now starts the pool
+  before reading the input file.
+- The packet scan checks the PLT-delimited packets of each tile-part
+  (frames, SOP numbers, EPH position) in byte-balanced chunks on the pool;
+  the first failing packet in order still decides the error.
+- A single-layer full decode with EPH walks its packet headers in runs of
+  consecutive packets per component instead of one component per worker,
+  and its block payloads stay in the input (offsets into the borrowed
+  packet bytes) rather than being copied into per-component buffers. The
+  per-component block tables are initialized in parallel ranges.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream); a mutation test compares
+  one-thread and eight-thread decodes byte by byte and error by error.
+  Against `58e16ac` at t20 on the common lossless stream: scan 0.98 -> 0.44
+  ms, header walk 1.67 -> 0.87 ms, packet catalog 3.05 -> 1.70 ms (11
+  `--timings` runs); wall 80.7 -> 77.9 ms (21 rounds). t6, t1, and the
+  multi-layer lossy profile are unchanged.
+
 ### JP2 Tile-Part Audit Beside The Decode
 
 - The JP2 wrapper's validation ends with a walk of every tile-part's

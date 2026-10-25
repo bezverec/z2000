@@ -562,13 +562,25 @@ on one another (the decode block pool, inverse colour conversion,
 dequantization, raster serialization): its threads start once, can start in
 the background while a decode still parses (`prepare`), and sleep on a futex
 between tasks; a task submitted while it is busy is refused and runs on the
-caller's own threads. The DWT drivers, whose workers meet at barriers between
+caller's own threads. Starting threads does not hold the pool: a task
+published meanwhile runs on the threads already started, and each thread
+joins only tasks whose announced participant count includes its index. The
+DWT drivers, whose workers meet at barriers between
 lifting phases, keep their own per-transform pools. `deinitInBackground`
 releases a decode's large intermediates (coefficient planes and the 9/7
 reconstruction, allocated from the thread-safe page-level allocator on
 several threads) on a detached thread, because unmapping pages that many
 workers touched costs milliseconds; the decode returns, and its output is
 written, meanwhile.
+
+Before Tier-1, the packet catalog is built on the pool as well. With PLT
+lengths, packet spans are prefix sums and SOP numbers follow from position,
+so each tile-part's packet frames are checked in chunks of about equal bytes;
+the first failing packet in order decides the error. A single-layer full
+decode with EPH walks its packet headers in runs of consecutive packets per
+component (no precinct is visited twice) and leaves every block's payload in
+the borrowed input, recording its offset there instead of copying it. Other
+streams walk one component per worker with shared precinct state.
 
 The decode overlaps stages where data dependencies allow it: the block pool
 runs plane by plane, and a `StrictComponentFinisher` runs a plane's inverse

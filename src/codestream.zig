@@ -3813,6 +3813,9 @@ pub const StrictPacketBlockCatalog = struct {
     component_y0: []u32 = &.{},
     components: [][]StrictPacketBlock = &.{},
     payloads: [][]u8 = &.{},
+    /// The payloads are the decode input's packet bytes, not owned (see
+    /// `assembleStrictCatalogEntriesInChunks`); block offsets index them.
+    payloads_borrowed: bool = false,
 
     fn init(allocator: std.mem.Allocator, component_count: u16) !StrictPacketBlockCatalog {
         if (component_count == 0) return CodestreamError.UnsupportedPayload;
@@ -3851,8 +3854,10 @@ pub const StrictPacketBlockCatalog = struct {
         for (self.components) |blocks| {
             if (blocks.len > 0) self.allocator.free(blocks);
         }
-        for (self.payloads) |payload| {
-            if (payload.len > 0) self.allocator.free(payload);
+        if (!self.payloads_borrowed) {
+            for (self.payloads) |payload| {
+                if (payload.len > 0) self.allocator.free(payload);
+            }
         }
         if (self.component_widths.len > 0) self.allocator.free(self.component_widths);
         if (self.component_heights.len > 0) self.allocator.free(self.component_heights);
@@ -4178,14 +4183,24 @@ const StrictComponentAssembly = struct {
     y0: u32 = 0,
     payloads: std.ArrayList(u8) = .empty,
     use_component_payloads: bool = false,
+    /// Set by a chunked walk: the packet bytes every block's `payload_offset`
+    /// indexes, borrowed instead of `payloads`.
+    borrowed_payloads: ?[]u8 = null,
     /// Backs every block's `payload` list: a multi-layer stream grows each
     /// list once per contribution, and an arena turns those thousands of
     /// small allocations into bumps, all released with the assembly.
     payload_arena: std.heap.ArenaAllocator,
 
     fn init(allocator: std.mem.Allocator, block_count: usize, use_component_payloads: bool) !StrictComponentAssembly {
+        const assembly = try initBlocksUnset(allocator, block_count, use_component_payloads);
+        for (assembly.blocks) |*block| block.* = .{};
+        return assembly;
+    }
+
+    /// `init` leaving the blocks for the caller to set (`initializeStrictAssemblyGeometry`
+    /// does), so that large block arrays can be filled on several threads.
+    fn initBlocksUnset(allocator: std.mem.Allocator, block_count: usize, use_component_payloads: bool) !StrictComponentAssembly {
         const blocks = try allocator.alloc(StrictRpclBlockAssembly, block_count);
-        for (blocks) |*block| block.* = .{};
         return .{
             .allocator = allocator,
             .blocks = blocks,
@@ -4218,6 +4233,17 @@ const StrictComponentAssemblySet = struct {
         block_counts: []const usize,
         use_component_payloads: bool,
     ) !StrictComponentAssemblySet {
+        return initBlocks(allocator, component_count, block_counts, use_component_payloads, true);
+    }
+
+    /// `init`, or with `set_blocks` false `StrictComponentAssembly.initBlocksUnset`.
+    fn initBlocks(
+        allocator: std.mem.Allocator,
+        component_count: u16,
+        block_counts: []const usize,
+        use_component_payloads: bool,
+        set_blocks: bool,
+    ) !StrictComponentAssemblySet {
         if (component_count < 1 or block_counts.len != component_count) {
             return CodestreamError.UnsupportedPayload;
         }
@@ -4228,7 +4254,10 @@ const StrictComponentAssemblySet = struct {
         };
         errdefer set.deinit();
         for (0..component_count) |component| {
-            set.assemblies[component] = try StrictComponentAssembly.init(allocator, block_counts[component], use_component_payloads);
+            set.assemblies[component] = if (set_blocks)
+                try StrictComponentAssembly.init(allocator, block_counts[component], use_component_payloads)
+            else
+                try StrictComponentAssembly.initBlocksUnset(allocator, block_counts[component], use_component_payloads);
             set.initialized += 1;
         }
         return set;
@@ -8166,7 +8195,7 @@ fn readStrictPacketCatalogWithHeader(
     bytes: []const u8,
     header: TemporaryHeader,
 ) !StrictPacketCatalog {
-    return readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, false);
+    return readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, false, 1);
 }
 
 fn readStrictPacketCatalogWithHeaderStorage(
@@ -8174,6 +8203,7 @@ fn readStrictPacketCatalogWithHeaderStorage(
     bytes: []const u8,
     header: TemporaryHeader,
     prefer_borrowed_packet_bytes: bool,
+    threads: u8,
 ) !StrictPacketCatalog {
     const plan = temporaryPacketPlan(header);
     return readStrictSodPacketCatalog(
@@ -8184,6 +8214,7 @@ fn readStrictPacketCatalogWithHeaderStorage(
         header.layers,
         header.progression,
         prefer_borrowed_packet_bytes,
+        threads,
     );
 }
 
@@ -8196,7 +8227,7 @@ pub fn auditStrictPacketHeaders(allocator: std.mem.Allocator, bytes: []const u8)
     if (header.tile_width != 0 or header.tile_height != 0) {
         return auditStrictMultiTilePacketHeaders(allocator, bytes, header, null, null);
     }
-    var catalog = try readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, true);
+    var catalog = try readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, true, 1);
     defer catalog.deinit();
     return auditStrictPacketCatalogHeaders(allocator, header, catalog);
 }
@@ -8226,7 +8257,7 @@ fn readStrictPacketBlockCatalogWithHeaderProfiled(
     threads: u8,
 ) !StrictPacketBlockCatalog {
     const scan_start = monotonicNs();
-    var catalog = try readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, true);
+    var catalog = try readStrictPacketCatalogWithHeaderStorage(allocator, bytes, header, true, threads);
     defer catalog.deinit();
     if (timings) |t| {
         if (catalog.owns_packet_bytes) {
@@ -11115,31 +11146,24 @@ fn assembleStrictPacketCatalogHeadersThreaded(
         block_counts[component] = geometry.blocks.len;
     }
 
-    var assemblies = try StrictComponentAssemblySet.init(
+    // Every block is set by `initializeStrictAssemblyGeometry`, on several
+    // threads when there are any.
+    var assemblies = try StrictComponentAssemblySet.initBlocks(
         allocator,
         header.component_count,
         block_counts,
         header.layers == 1,
+        false,
     );
     errdefer assemblies.deinit();
-    for (0..header.component_count) |component| {
-        const geometry = try geometries.geometryFor(component);
-        try initializeStrictAssemblyGeometry(
-            &assemblies.assemblies[component],
-            geometry.bands,
-            geometry.blocks,
-            geometry.width,
-            geometry.height,
-            geometry.x0,
-            geometry.y0,
-            header,
-            component,
-            resolution_reduction,
-            region,
-        );
-    }
+    try initializeStrictAssembliesGeometry(allocator, &geometries, assemblies.assemblies, header, resolution_reduction, region, threads);
 
-    if (retain_payloads and header.layers == 1) {
+    const persistent_precinct_state = packetCatalogRevisitsPrecincts(catalog.entries);
+    const by_component = threads > 1 and header.component_count > 1;
+    const chunked = by_component and threads > header.component_count and header.layers == 1 and
+        !persistent_precinct_state and retain_payloads and resolution_reduction == 0 and region == null and
+        strictCatalogChunkable(catalog, assemblies.assemblies);
+    if (retain_payloads and header.layers == 1 and !chunked) {
         // Component payloads arrive packet by packet; reserving their upper
         // bound (the packets' own lengths) keeps the buffers from regrowing.
         const reserve = try allocator.alloc(usize, header.component_count);
@@ -11154,8 +11178,6 @@ fn assembleStrictPacketCatalogHeadersThreaded(
         }
     }
 
-    const persistent_precinct_state = packetCatalogRevisitsPrecincts(catalog.entries);
-    const by_component = threads > 1 and header.component_count > 1;
     // Walked by component, the precinct state is shared by the workers (each
     // touches only its component's slots), so its groups come from the
     // thread-safe page allocator.
@@ -11166,7 +11188,18 @@ fn assembleStrictPacketCatalogHeadersThreaded(
     defer if (stateful_groups) |*groups| groups.deinit();
 
     const use_packet_group_arena = header.layers == 1 and !persistent_precinct_state;
-    if (by_component) {
+    if (chunked) {
+        try assembleStrictCatalogEntriesInChunks(
+            allocator,
+            header,
+            catalog,
+            &geometries,
+            assemblies.assemblies,
+            retained_layer_count,
+            audit,
+            threads,
+        );
+    } else if (by_component) {
         try assembleStrictCatalogEntriesByComponent(
             header,
             catalog,
@@ -11208,6 +11241,10 @@ const StrictCatalogEntryState = struct {
     stateful_groups: ?*StrictStatefulPrecinctGroups,
     active_group_storage: [max_rpcl_packet_band_groups]StrictPacketAuditBandGroup = undefined,
     active_group_count: usize = 0,
+    /// With a chunked walk (`StrictCatalogChunkJob`), the packet bytes the
+    /// payloads are borrowed from: a block records its offset there instead
+    /// of having its bytes copied.
+    borrowed_packet_bytes: ?[]const u8 = null,
 
     fn deinit(self: *StrictCatalogEntryState) void {
         if (!self.persistent_precinct_state and !self.use_packet_group_arena) {
@@ -11259,7 +11296,7 @@ fn assembleStrictCatalogEntry(
     } else state.active_group_storage[0..state.active_group_count];
 
     if (selected.len == 0) {
-        const read = try readStrictPacketHeaderForAudit(packet_view, entry.packet, &.{}, null, &.{});
+        const read = try readStrictPacketHeaderForAudit(packet_view, entry.packet, &.{}, null, &.{}, null);
         if (read.included_blocks != 0 or read.payload_length != 0) {
             return CodestreamError.InvalidCodestream;
         }
@@ -11281,6 +11318,7 @@ fn assembleStrictCatalogEntry(
         active_groups,
         if (retain_payload) &assemblies[entry.packet.component] else null,
         geometry.blocks,
+        state.borrowed_packet_bytes,
     );
     audit.header_decoded_packets += 1;
     audit.header_bytes += read.header_length;
@@ -11388,6 +11426,136 @@ fn assembleStrictCatalogEntriesByComponent(
 
 const max_catalog_component_workers = 16;
 
+/// Whether a single-layer full decode can walk each component's packets in
+/// independent chunks with the payloads borrowed from the input: every
+/// packet's body is a contiguous span of the borrowed packet bytes (split
+/// off by EPH), holding its blocks' payloads whole, and no precinct is
+/// visited twice.
+fn strictCatalogChunkable(catalog: StrictPacketCatalog, assemblies: []const StrictComponentAssembly) bool {
+    if (catalog.owns_packet_bytes or catalog.auxiliary_packet_headers.len != 0) return false;
+    for (assemblies) |assembly| {
+        if (!assembly.use_component_payloads) return false;
+    }
+    for (catalog.entries) |entry| {
+        if (!entry.split_header_body or entry.header_from_aux or entry.packet.layer != 0) return false;
+    }
+    return true;
+}
+
+/// One run of a component's consecutive packets in catalog order, walked
+/// with its own precinct groups and its payloads written from `payload_base`.
+const StrictCatalogChunkJob = struct {
+    header: TemporaryHeader,
+    catalog: StrictPacketCatalog,
+    geometries: *StrictComponentGeometrySet,
+    assemblies: []StrictComponentAssembly,
+    retained_layer_count: u16,
+    entries: []const u32,
+    audit: StrictPacketHeaderAudit = .{},
+    failed_entry: usize = std.math.maxInt(usize),
+    failure: anyerror = error.Unexpected,
+
+    fn run(self: *StrictCatalogChunkJob) void {
+        var packet_group_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer packet_group_arena.deinit();
+        var state = StrictCatalogEntryState{
+            .group_allocator = packet_group_arena.allocator(),
+            .packet_group_arena = &packet_group_arena,
+            .use_packet_group_arena = true,
+            .persistent_precinct_state = false,
+            .stateful_groups = null,
+            .borrowed_packet_bytes = self.catalog.packet_bytes,
+        };
+        defer state.deinit();
+        for (self.entries) |entry_index| {
+            assembleStrictCatalogEntry(self.header, self.catalog, self.geometries, self.assemblies, true, self.retained_layer_count, &self.audit, &state, self.catalog.entries[entry_index]) catch |err| {
+                self.failed_entry = entry_index;
+                self.failure = err;
+                return;
+            };
+        }
+    }
+};
+
+/// `assembleStrictCatalogEntriesByComponent` for `strictCatalogChunkable`
+/// catalogs, with each component's packets cut into runs of about equal
+/// body bytes so that more workers than components share the walk. The
+/// payloads are not copied: every component borrows the packet bytes
+/// (`StrictComponentAssembly.borrowed_payloads`). The first failing entry in
+/// catalog order decides the error, as in the serial walk.
+fn assembleStrictCatalogEntriesInChunks(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketCatalog,
+    geometries: *StrictComponentGeometrySet,
+    assemblies: []StrictComponentAssembly,
+    retained_layer_count: u16,
+    audit: *StrictPacketHeaderAudit,
+    threads: u8,
+) !void {
+    const component_count: usize = header.component_count;
+    if (assemblies.len != component_count) return CodestreamError.InvalidCodestream;
+    var total_bytes: usize = 0;
+    for (catalog.entries) |entry| {
+        if (entry.packet.component >= component_count) return CodestreamError.InvalidCodestream;
+        total_bytes = try std.math.add(usize, total_bytes, entry.body_length);
+    }
+    if (catalog.entries.len > std.math.maxInt(u32)) return CodestreamError.InvalidCodestream;
+
+    // Each component's entries in catalog order, components one after the
+    // other.
+    const order = try allocator.alloc(u32, catalog.entries.len);
+    defer allocator.free(order);
+    const component_starts = try allocator.alloc(usize, component_count + 1);
+    defer allocator.free(component_starts);
+    @memset(component_starts, 0);
+    for (catalog.entries) |entry| component_starts[@as(usize, entry.packet.component) + 1] += 1;
+    for (1..component_count + 1) |component| component_starts[component] += component_starts[component - 1];
+    const fill = try allocator.dupe(usize, component_starts[0..component_count]);
+    defer allocator.free(fill);
+    for (catalog.entries, 0..) |entry, index| {
+        order[fill[entry.packet.component]] = @intCast(index);
+        fill[entry.packet.component] += 1;
+    }
+
+    // Runs of about `target` body bytes; never more runs than packets.
+    const target = @max(1, total_bytes / @as(usize, threads));
+    var jobs: std.ArrayList(StrictCatalogChunkJob) = .empty;
+    defer jobs.deinit(allocator);
+    for (0..component_count) |component| {
+        const entries = order[component_starts[component]..component_starts[component + 1]];
+        var run_start: usize = 0;
+        var run_bytes: usize = 0;
+        for (entries, 0..) |entry_index, position| {
+            run_bytes += catalog.entries[entry_index].body_length;
+            if (run_bytes >= target or position + 1 == entries.len) {
+                try jobs.append(allocator, .{
+                    .header = header,
+                    .catalog = catalog,
+                    .geometries = geometries,
+                    .assemblies = assemblies,
+                    .retained_layer_count = retained_layer_count,
+                    .entries = entries[run_start .. position + 1],
+                });
+                run_start = position + 1;
+                run_bytes = 0;
+            }
+        }
+        assemblies[component].borrowed_payloads = @constCast(catalog.packet_bytes);
+    }
+
+    if (!worker_pool.runJobsOn(threads, StrictCatalogChunkJob, jobs.items, StrictCatalogChunkJob.run)) {
+        for (jobs.items) |*job| job.run();
+    }
+    var first_failure: ?*const StrictCatalogChunkJob = null;
+    for (jobs.items) |*job| {
+        if (job.failed_entry == std.math.maxInt(usize)) continue;
+        if (first_failure == null or job.failed_entry < first_failure.?.failed_entry) first_failure = job;
+    }
+    if (first_failure) |job| return job.failure;
+    for (jobs.items) |job| audit.add(job.audit);
+}
+
 fn packetCatalogRevisitsPrecincts(entries: []const StrictPacketEntry) bool {
     for (entries, 0..) |entry, index| {
         if (entry.packet.layer == 0) continue;
@@ -11417,6 +11585,7 @@ fn readStrictPacketHeaderForAudit(
     groups: []StrictPacketAuditBandGroup,
     assembly: ?*StrictComponentAssembly,
     source_blocks: []const subband.CodeBlock,
+    borrowed_packet_bytes: ?[]const u8,
 ) !StrictPacketHeaderRead {
     const header_bytes = if (view.split_header_body) view.header else view.header_and_body;
     const payload_bytes = if (view.split_header_body) view.body else view.header_and_body;
@@ -11469,7 +11638,7 @@ fn readStrictPacketHeaderForAudit(
             if (end > payload_bytes.len) return CodestreamError.TruncatedData;
             const payload = payload_bytes[cursor..end];
             if (assembly) |target| {
-                try appendStrictPacketAuditBlock(target, source_blocks, block_index, decoded, payload);
+                try appendStrictPacketAuditBlock(target, source_blocks, block_index, decoded, payload, borrowed_packet_bytes);
             }
             cursor = end;
             payload_length = try std.math.add(u64, payload_length, decoded.byte_length);
@@ -11492,6 +11661,7 @@ fn appendStrictPacketAuditBlock(
     block_index: usize,
     decoded: t2.DecodedPacketBlock,
     payload: []const u8,
+    borrowed_packet_bytes: ?[]const u8,
 ) !void {
     if (block_index >= assembly.blocks.len or block_index >= source_blocks.len) {
         return CodestreamError.InvalidCodestream;
@@ -11525,8 +11695,16 @@ fn appendStrictPacketAuditBlock(
     if (block.payload_retained) {
         if (assembly.use_component_payloads) {
             if (previous_payload_length != 0) return CodestreamError.InvalidCodestream;
-            block.payload_offset = assembly.payloads.items.len;
-            try assembly.payloads.appendSlice(assembly.allocator, payload);
+            if (borrowed_packet_bytes) |packet_bytes| {
+                // The payload stays where it is in the packet bytes.
+                const base = @intFromPtr(packet_bytes.ptr);
+                const start = @intFromPtr(payload.ptr);
+                if (start < base or start - base + payload.len > packet_bytes.len) return CodestreamError.InvalidCodestream;
+                block.payload_offset = start - base;
+            } else {
+                block.payload_offset = assembly.payloads.items.len;
+                try assembly.payloads.appendSlice(assembly.allocator, payload);
+            }
         } else {
             try block.payload.appendSlice(assembly.payloadAllocator(), payload);
             if (block.payload.items.len != block.payload_length) return CodestreamError.InvalidCodestream;
@@ -11535,6 +11713,79 @@ fn appendStrictPacketAuditBlock(
         block.payload_offset = 0;
         if (block.payload.items.len != 0) return CodestreamError.InvalidCodestream;
     }
+}
+
+/// `initializeStrictAssemblyGeometry` for every component, the blocks cut
+/// into ranges for the shared pool (each block is set exactly once, so the
+/// order does not matter); errors in component order.
+fn initializeStrictAssembliesGeometry(
+    allocator: std.mem.Allocator,
+    geometries: *StrictComponentGeometrySet,
+    assemblies: []StrictComponentAssembly,
+    header: TemporaryHeader,
+    resolution_reduction: u8,
+    region: ?tile_grid.Rect,
+    threads: u8,
+) !void {
+    const Job = struct {
+        assembly: *StrictComponentAssembly,
+        geometry: *const StrictComponentGeometry,
+        header: TemporaryHeader,
+        component: usize,
+        resolution_reduction: u8,
+        region: ?tile_grid.Rect,
+        begin: usize,
+        end: usize,
+        result: anyerror!void = {},
+
+        fn run(job: *@This()) void {
+            job.result = initializeStrictAssemblyGeometryRange(
+                job.assembly,
+                job.geometry.bands,
+                job.geometry.blocks,
+                job.geometry.width,
+                job.geometry.height,
+                job.geometry.x0,
+                job.geometry.y0,
+                job.header,
+                job.component,
+                job.resolution_reduction,
+                job.region,
+                job.begin,
+                job.end,
+            );
+        }
+    };
+    var total_blocks: usize = 0;
+    for (assemblies) |assembly| total_blocks += assembly.blocks.len;
+    const per_job = @max(256, total_blocks / @max(1, @as(usize, threads)));
+    var jobs: std.ArrayList(Job) = .empty;
+    defer jobs.deinit(allocator);
+    for (assemblies, 0..) |*assembly, component| {
+        const geometry = try geometries.geometryFor(component);
+        if (assembly.blocks.len != geometry.blocks.len) return CodestreamError.InvalidCodestream;
+        try setStrictAssemblyExtent(assembly, geometry.width, geometry.height, geometry.x0, geometry.y0);
+        var begin: usize = 0;
+        while (true) {
+            const end = @min(assembly.blocks.len, begin + per_job);
+            try jobs.append(allocator, .{
+                .assembly = assembly,
+                .geometry = geometry,
+                .header = header,
+                .component = component,
+                .resolution_reduction = resolution_reduction,
+                .region = region,
+                .begin = begin,
+                .end = end,
+            });
+            if (end == assembly.blocks.len) break;
+            begin = end;
+        }
+    }
+    if (threads < 2 or jobs.items.len < 2 or !worker_pool.runJobsOn(threads, Job, jobs.items, Job.run)) {
+        for (jobs.items) |*job| job.run();
+    }
+    for (jobs.items) |job| try job.result;
 }
 
 fn initializeStrictAssemblyGeometry(
@@ -11550,12 +11801,37 @@ fn initializeStrictAssemblyGeometry(
     resolution_reduction: u8,
     region: ?tile_grid.Rect,
 ) !void {
-    if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
+    try setStrictAssemblyExtent(assembly, width, height, x0, y0);
+    return initializeStrictAssemblyGeometryRange(assembly, bands, source_blocks, width, height, x0, y0, header, component, resolution_reduction, region, 0, assembly.blocks.len);
+}
+
+fn setStrictAssemblyExtent(assembly: *StrictComponentAssembly, width: usize, height: usize, x0: u32, y0: u32) !void {
     if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
     assembly.width = width;
     assembly.height = height;
     assembly.x0 = x0;
     assembly.y0 = y0;
+}
+
+/// Sets blocks `begin..end` of `assembly` from the component geometry, from
+/// their defaults up; `setStrictAssemblyExtent` comes first.
+fn initializeStrictAssemblyGeometryRange(
+    assembly: *StrictComponentAssembly,
+    bands: []const subband.Band,
+    source_blocks: []const subband.CodeBlock,
+    width: usize,
+    height: usize,
+    x0: u32,
+    y0: u32,
+    header: TemporaryHeader,
+    component: usize,
+    resolution_reduction: u8,
+    region: ?tile_grid.Rect,
+    begin: usize,
+    end: usize,
+) !void {
+    if (assembly.blocks.len != source_blocks.len) return CodestreamError.InvalidCodestream;
+    if (width == 0 or height == 0) return CodestreamError.InvalidCodestream;
     // A selected region derives the same per-resolution windows the block
     // catalog uses later, so payload for blocks it cannot reach is never
     // appended to this component's owned buffer.
@@ -11574,7 +11850,8 @@ fn initializeStrictAssemblyGeometry(
             header.component_yrsiz[component],
         );
     } else StrictRegionBandWindows.inactive;
-    for (assembly.blocks, source_blocks) |*block, source| {
+    for (assembly.blocks[begin..end], source_blocks[begin..end]) |*block, source| {
+        block.* = .{};
         if (source.band_index >= bands.len) return CodestreamError.InvalidCodestream;
         block.band_index = source.band_index;
         block.rect = source.rect;
@@ -11693,7 +11970,7 @@ const StrictCatalogFillJob = struct {
         const payloads = self.payloads;
         const payload_total = self.payload_total;
         var payload_offset: usize = 0;
-        if (assembly.use_component_payloads) {
+        if (assembly.use_component_payloads and assembly.borrowed_payloads == null) {
             if (payloads.len != payload_total) return CodestreamError.InvalidCodestream;
         }
         for (assembly.blocks, dest_blocks) |source, *dest| {
@@ -11777,7 +12054,11 @@ fn strictPacketBlockCatalogFromAssembliesCheckedThreaded(
         }
 
         catalog.components[component] = try allocator.alloc(StrictPacketBlock, assembly.blocks.len);
-        catalog.payloads[component] = if (assembly.use_component_payloads)
+        if (assembly.borrowed_payloads != null) catalog.payloads_borrowed = true;
+        if (catalog.payloads_borrowed != (assembly.borrowed_payloads != null)) return CodestreamError.InvalidCodestream;
+        catalog.payloads[component] = if (assembly.borrowed_payloads) |borrowed|
+            borrowed
+        else if (assembly.use_component_payloads)
             try assembly.payloads.toOwnedSlice(allocator)
         else if (payload_total > 0)
             try allocator.alloc(u8, payload_total)
@@ -16099,8 +16380,10 @@ fn compactStrictPacketBlockCatalogForReductionWithComponentCoding(
                 payload_total = std.math.add(usize, payload_total, block.payload_length) catch
                     return CodestreamError.InvalidCodestream;
             }
-            if (payload_total != payload.len) return CodestreamError.InvalidCodestream;
-            retained_total = std.math.add(u64, retained_total, @intCast(payload.len)) catch
+            // Borrowed packet bytes hold more than the payloads; each block's
+            // range was checked above.
+            if (!catalog.payloads_borrowed and payload_total != payload.len) return CodestreamError.InvalidCodestream;
+            retained_total = std.math.add(u64, retained_total, @intCast(payload_total)) catch
                 return CodestreamError.InvalidCodestream;
             continue;
         }
@@ -17838,6 +18121,7 @@ fn readStrictSodPacketCatalog(
     layers: u16,
     progression: ProgressionOrder,
     prefer_borrowed_packet_bytes: bool,
+    threads: u8,
 ) !StrictPacketCatalog {
     if (bytes.len < 4 or readU16Be(bytes, 0) != @backingInt(Marker.soc)) {
         return CodestreamError.InvalidCodestream;
@@ -18099,7 +18383,25 @@ fn readStrictSodPacketCatalog(
                 if (active_packed_headers.len != 0) {
                     if (stateful == null) stateful = try StrictStatefulPrecinctGroups.init(allocator, header);
                 }
-                for (tile_part.packet_lengths.items) |packet_length| {
+                if (active_packed_headers.len == 0 and borrowing_packet_bytes and threads >= 2 and
+                    tile_part.packet_lengths.items.len >= strict_threaded_frame_min_packets)
+                {
+                    try appendStrictSodPacketEntriesThreaded(
+                        allocator,
+                        &entries,
+                        bytes,
+                        &cursor,
+                        tile_part.end,
+                        tile_part.packet_lengths.items,
+                        sequence,
+                        &sequence_index,
+                        main_header.packet_markers,
+                        &packet_sequence,
+                        tile_part.sot.tile_index,
+                        tile_part_index,
+                        threads,
+                    );
+                } else for (tile_part.packet_lengths.items) |packet_length| {
                     if (sequence_index >= sequence.len) return CodestreamError.InvalidCodestream;
                     const packet = sequence[sequence_index];
                     sequence_index += 1;
@@ -19155,6 +19457,140 @@ fn appendStrictSodPackets(
         try lengths.append(allocator, payload_span.byte_length);
     }
     if (cursor != end) return CodestreamError.InvalidCodestream;
+}
+
+/// A tile-part needs at least this many PLT-delimited packets before their
+/// frames are checked on several threads.
+const strict_threaded_frame_min_packets = 16;
+
+/// The PLT-delimited packets of one tile-part, framed (lengths, SOP, EPH)
+/// on up to `threads` threads into catalog entries that borrow `bytes`. Each
+/// packet's span follows from the lengths alone and its SOP sequence number
+/// from its position, so the packets are checked independently; chunks of
+/// about equal bytes go to the shared pool. The entries, `cursor`, the
+/// sequence state, and the error (the first failing packet's, in packet
+/// order) are those of the serial walk.
+fn appendStrictSodPacketEntriesThreaded(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(StrictPacketEntry),
+    bytes: []const u8,
+    cursor: *usize,
+    end: usize,
+    packet_lengths: []const usize,
+    sequence: []const packet_plan.Packet,
+    sequence_index: *usize,
+    marker_policy: MainHeaderPacketMarkers,
+    packet_sequence: *u16,
+    tile_index: u16,
+    tile_part_index: usize,
+    threads: u8,
+) !void {
+    // The serial walk fails on the first packet past the progression, after
+    // framing the ones before it.
+    const count = @min(packet_lengths.len, sequence.len - sequence_index.*);
+    const offsets = try allocator.alloc(usize, count + 1);
+    defer allocator.free(offsets);
+    var offset = cursor.*;
+    for (packet_lengths[0..count], offsets[0..count]) |length, *start| {
+        start.* = offset;
+        // An overflowing span fails its packet (or an earlier one) as
+        // truncated, as in the serial walk.
+        offset = std.math.add(usize, offset, length) catch std.math.maxInt(usize);
+    }
+    offsets[count] = offset;
+    const spans = try allocator.alloc(StrictSodPacketPayloadSpan, count);
+    defer allocator.free(spans);
+
+    const FrameError = @typeInfo(@typeInfo(@TypeOf(appendStrictSodPacketPayload)).@"fn".return_type.?).error_union.error_set;
+    const Job = struct {
+        bytes: []const u8,
+        end: usize,
+        lengths: []const usize,
+        offsets: []const usize,
+        spans: []StrictSodPacketPayloadSpan,
+        marker_policy: MainHeaderPacketMarkers,
+        first_sequence: u16,
+        begin: usize,
+        finish: usize,
+        failed_at: usize = std.math.maxInt(usize),
+        failure: FrameError = undefined,
+
+        fn run(job: *@This()) void {
+            var unused: std.ArrayList(u8) = .empty;
+            for (job.begin..job.finish) |index| {
+                var frame_cursor = job.offsets[index];
+                var expected_sequence = job.first_sequence +% (if (job.marker_policy.sop) @as(u16, @truncate(index)) else 0);
+                job.spans[index] = appendStrictSodPacketPayload(
+                    std.heap.smp_allocator,
+                    &unused,
+                    job.bytes,
+                    &frame_cursor,
+                    job.end,
+                    job.lengths[index],
+                    job.marker_policy,
+                    &expected_sequence,
+                    false,
+                ) catch |err| {
+                    job.failed_at = index;
+                    job.failure = err;
+                    return;
+                };
+            }
+        }
+    };
+    var jobs: [worker_pool.max_threads + 1]Job = undefined;
+    const job_count = @max(1, @min(@min(@as(usize, threads), jobs.len), count));
+    // Chunks of about equal bytes: the scan's cost is the bytes it reads.
+    const total = offsets[count] -| offsets[0];
+    var begin: usize = 0;
+    for (0..job_count) |job_index| {
+        var finish = begin;
+        const target = offsets[0] +| total / job_count * (job_index + 1);
+        if (job_index + 1 == job_count) {
+            finish = count;
+        } else {
+            while (finish < count and offsets[finish] < target) finish += 1;
+        }
+        jobs[job_index] = .{
+            .bytes = bytes,
+            .end = end,
+            .lengths = packet_lengths,
+            .offsets = offsets,
+            .spans = spans,
+            .marker_policy = marker_policy,
+            .first_sequence = packet_sequence.*,
+            .begin = begin,
+            .finish = finish,
+        };
+        begin = finish;
+    }
+    if (!worker_pool.runJobs(Job, jobs[0..job_count], Job.run)) {
+        for (jobs[0..job_count]) |*job| job.run();
+    }
+    for (jobs[0..job_count]) |job| {
+        if (job.failed_at != std.math.maxInt(usize)) return job.failure;
+    }
+    if (count < packet_lengths.len) return CodestreamError.InvalidCodestream;
+
+    try entries.ensureUnusedCapacity(allocator, count);
+    for (spans, 0..) |span, index| {
+        entries.appendAssumeCapacity(.{
+            .packet = sequence[sequence_index.* + index],
+            .tile_index = tile_index,
+            .tile_part_index = @intCast(tile_part_index),
+            .byte_offset = span.packet_offset,
+            .byte_length = span.byte_length,
+            .split_header_body = span.split_header_body,
+            .header_from_aux = false,
+            .eph_header_length = null,
+            .header_length = span.header_length,
+            .body_offset = span.body_offset,
+            .body_length = span.body_length,
+        });
+    }
+    sequence_index.* += count;
+    if (marker_policy.sop) packet_sequence.* +%= @truncate(count);
+    cursor.* = offsets[count];
 }
 
 const StrictSodPacketPayloadSpan = struct {

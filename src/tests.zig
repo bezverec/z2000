@@ -7864,6 +7864,20 @@ test "worker pool runs every index exactly once across repeated tasks" {
     }
 }
 
+test "worker pool tasks published while threads are still starting run exactly once" {
+    // The background start overlaps the tasks; each must still see every
+    // index once and return only after its own participants.
+    worker_pool.prepare(40);
+    var hits: [61]std.atomic.Value(u32) = undefined;
+    var task = PoolCountTask{ .hits = &hits };
+    for (0..200) |round| {
+        const count = 1 + round % hits.len;
+        for (hits[0..count]) |*hit| hit.* = std.atomic.Value(u32).init(0);
+        try std.testing.expect(worker_pool.run(40, count, &task, PoolCountTask.call));
+        for (hits[0..count]) |hit| try std.testing.expectEqual(@as(u32, 1), hit.load(.monotonic));
+    }
+}
+
 const PoolNestedRun = struct {
     hits: []std.atomic.Value(u32),
     inner_ran: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -7915,6 +7929,55 @@ test "worker pool releases a value in the background exactly once" {
         std.atomic.spinLoopHint();
     }
     try std.testing.expectEqual(@as(u32, 1), released.load(.acquire));
+}
+
+/// Error name of a decode, or "" with the samples in `samples_out`.
+fn decodeOutcome(allocator: std.mem.Allocator, bytes: []const u8, threads: u8, samples_out: *?[]u16) []const u8 {
+    var decoded = codestream.decodeLosslessTemporaryWithOptions(allocator, bytes, .{ .threads = threads }) catch |err| return @errorName(err);
+    defer decoded.deinit();
+    samples_out.* = allocator.dupe(u16, decoded.samples) catch return "OutOfMemory";
+    return "";
+}
+
+test "threaded packet scan and chunked header walk decode exactly as one thread" {
+    const allocator = std.testing.allocator;
+    const width = 160;
+    const height = 144;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (samples, 0..) |*sample, index| sample.* = @intCast((index * 7 + (index / 480) * 13) % 256);
+    const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .samples = samples };
+
+    // Small precincts give every tile-part enough packets for the threaded
+    // scan, and EPH lets the header walk run in chunks.
+    var options = codestream.LosslessOptions{ .eph = true, .block_width = 16, .block_height = 16 };
+    for (&options.precincts) |*precinct| precinct.* = .{ .width = 32, .height = 32 };
+    const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+    defer allocator.free(encoded);
+
+    var reference: ?[]u16 = null;
+    defer if (reference) |values| allocator.free(values);
+    try std.testing.expectEqualStrings("", decodeOutcome(allocator, encoded, 1, &reference));
+    try std.testing.expectEqualSlices(u16, samples, reference.?);
+
+    const mutated = try allocator.dupe(u8, encoded);
+    defer allocator.free(mutated);
+    const step = @max(1, encoded.len / 240);
+    var position: usize = 0;
+    while (position < encoded.len) : (position += step) {
+        for ([_]u8{ 0xff, 0x10 }) |flip| {
+            @memcpy(mutated, encoded);
+            mutated[position] ^= flip;
+            var serial: ?[]u16 = null;
+            defer if (serial) |values| allocator.free(values);
+            var threaded: ?[]u16 = null;
+            defer if (threaded) |values| allocator.free(values);
+            const serial_outcome = decodeOutcome(allocator, mutated, 1, &serial);
+            const threaded_outcome = decodeOutcome(allocator, mutated, 8, &threaded);
+            try std.testing.expectEqualStrings(serial_outcome, threaded_outcome);
+            if (serial) |values| try std.testing.expectEqualSlices(u16, values, threaded.?);
+        }
+    }
 }
 
 /// Outcome of `parseInfo`, or of the deferred parse followed by its audit, as
