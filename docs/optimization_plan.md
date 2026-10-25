@@ -162,14 +162,19 @@ scattering each block (a few percent at most).
 
 ### P2b. Tier-1 Throughput On Shared And Efficiency Cores
 
-On 2026-10-25 z2000 decoded within 13% of Kakadu on one thread per P-core
-but gained only 1.12x from hyper-threading (Kakadu 1.36x) and ran 1.46x
-behind it on the E-cores (`benchmarks.md`). Ruled out: the block
-coefficient buffer (i16 variant neutral), instruction-cache size (hot pass
-code shrunk from 42 to 16 KB, neutral), and out-of-line MQ renormalization
-(slower). Next steps need hardware counters (cache misses, branch
-mispredictions, front-end stalls) from an elevated session or a Linux
-`perf` run on the same CPU.
+Closed 2026-10-25. The apparent hyper-threading and E-core deficit (1.37x
+and 1.46x behind Kakadu) came from Kakadu escaping a plain process
+affinity mask; confined by a job object (`tools/win_affinity_run.zig`),
+z2000 is 1.01x Kakadu on one P-core, 1.06x on one E-core, 1.13x on six
+P-cores, 1.18x with their hyper-threads, and 1.14x on the eight E-cores.
+Hardware counters (`tools/win_pmc_record.ps1`) give z2000 45% more
+instructions at a higher IPC (2.28 against 1.63 on a P-core), half the
+mispredictions per instruction, and rare LLC misses, with the same growth
+in cycles as Kakadu from one to six cores. What remains is the serial and
+overlap budget around Tier-1 (P3): at six threads the pool is balanced but
+15-20 ms of the decode runs outside it. Earlier probes that found nothing
+(i16 block coefficients, a 16 KB hot pass, out-of-line MQ renormalization)
+stay recorded in `benchmarks.md`.
 
 ### P3. Decode Pipeline Overlap
 

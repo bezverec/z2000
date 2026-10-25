@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Per-Core-Type Measurement Tools
+
+- `tools/win_affinity_run.zig` runs a command confined to a processor mask
+  through a job object; a plain process affinity mask lets a program that
+  sets its own thread affinities, such as Kakadu's multi-threaded decode,
+  run outside it (86% of its cycles on P-cores in an "E-core only" run).
+- `tools/win_pmc_record.ps1` (elevated) records per-thread hardware
+  counters for z2000 and Kakadu under several masks, and
+  `tools/win_pmc_summary.py` summarizes them without elevation.
+- The corrected comparison (`benchmarks.md`) withdraws the earlier
+  hyper-threading and E-core deficit: z2000 is 1.01x Kakadu on one P-core,
+  1.06x on one E-core, and 1.13-1.18x on six or more threads, where the
+  difference is the work around Tier-1 rather than Tier-1 throughput.
+
 ### Pre-Tier-1 Stages Split By Component
 
 - What runs between reading the packets and starting Tier-1 now uses the

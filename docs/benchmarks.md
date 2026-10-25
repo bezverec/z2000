@@ -46,6 +46,59 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, hardware counters; per-core-type study corrected
+
+Source `fc00b6e` (ReleaseFast), Kakadu 8.4.1 `kdu_expand -num_threads N
+-quiet`, common lossless stream (`z-t20.jp2`, 2048x2048 RGB). Counters came
+from `tools/win_pmc_record.ps1` (xperf, read at every context switch, so
+per-thread totals are exact; elevated session) and
+`tools/win_pmc_summary.py`; 3 runs per trace, figures per decode. With
+Hyper-V running the fixed counters are refused (0x54F), so instructions and
+cycles come from the general-purpose `InstructionRetired` and
+`UnhaltedCoreCycles`.
+
+The counters show that the record below ("where Tier-1 loses past six
+threads") measured Kakadu outside its mask: the launcher there only set the
+process affinity, and Kakadu's multi-threaded decode sets its own thread
+affinities. Share of Kakadu's cycles on processors outside the mask: 34% at
+`555`, 30% at `FFF`, 86% at `FF000` (its "8 E-core" decode ran mostly on
+P-cores). z2000 stayed inside every mask, and single-threaded Kakadu did
+too. `tools/win_affinity_run.zig` now runs the child in a job object whose
+affinity limit no thread can leave. Repeated with it (7 rounds, both codecs
+carrying the launcher):
+
+| Cores (mask) | Threads | z2000 | Kakadu | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| 1 P-core (`1`) | 1 | 645.6 ms | 638.5 ms | 1.01 |
+| 1 E-core (`10000`) | 1 | 959.2 ms | 903.7 ms | 1.06 |
+| 6 P-cores, one thread each (`555`) | 6 | 165.1 ms | 146.7 ms | 1.13 |
+| 6 P-cores with hyper-threading (`FFF`) | 12 | 135.9 ms | 115.1 ms | 1.18 |
+| 8 E-cores (`FF000`) | 8 | 183.5 ms | 161.2 ms | 1.14 |
+| all (`FFFFF`) | 20 | 104.1 ms | 89.7 ms | 1.16 |
+
+Hyper-threading gains z2000 1.21x and Kakadu 1.27x; there is no separate
+E-core deficit. Counters per decode on one core:
+
+| Core | Decoder | Instructions | Cycles | IPC | Mispredicts / 1k instr | LLC misses / 1k instr |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| P | z2000 | 6.39 G | 2.80 G | 2.28 | 6.3 | 0.81 |
+| P | Kakadu | 4.41 G | 2.71 G | 1.63 | 12.2 | 0.51 |
+| E | z2000 | 6.37 G | 3.35 G | 1.90 | 6.7 | 0.88 |
+| E | Kakadu | 4.40 G | 3.11 G | 1.41 | 13.8 | 0.59 |
+
+z2000 retires 45% more instructions at a higher IPC and has fewer branch
+mispredictions in absolute terms (40 M against 54 M per decode on a
+P-core); LLC misses are rare for both. On six P-cores both codecs spend
+13-15% more cycles than on one (3.16 G z2000, 3.11 G Kakadu, the latter
+measured unconfined), so the 1.13x at `555` is not extra work: z2000 keeps
+the cores busy for less of the decode. Its `--timings` at `555` (3 runs)
+put the Tier-1 pool at 112-127 ms with balanced workers (max/avg wall
+within 1%), leaving 15-20 ms in stages around it (JP2 read 2.2 ms, packet
+catalog 3.0-3.8 ms, inverse DWT 2.2-10.1 ms, TIFF write 3.9-4.3 ms) plus
+about 10 ms of process start and exit outside the timed span. The gap
+beyond one thread is therefore the serial and overlap budget around
+Tier-1, not per-core Tier-1 throughput.
+
 ## 2026-10-25: Intel Core i5-14500, pre-Tier-1 stages by component
 
 Header walk at t20 (lossless, current code): geometry 0.2, assemblies 0.6,
