@@ -46,6 +46,17 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, pre-Tier-1 stages by component
+
+Header walk at t20 (lossless, current code): geometry 0.2, assemblies 0.6,
+packet walk 1.8-2.4 ms; lossy (two layers, stateful precincts, walked
+serially) 3.0 ms; catalog finalize 0.6 / 1.4 ms (it copies each block's
+872-byte segment table). Splitting the single-layer walk, the finalize
+fill, and the per-plane coverage checks by component, against `db938ca`:
+header walk 2.58 -> 1.62 ms lossless, finalize 1.34 -> 0.74 ms lossy (9-11
+`--timings` runs); decode 87.5 -> 85.0 ms lossless, 89.9 -> 89.4 ms lossy
+(15 rounds).
+
 ## 2026-10-25: Intel Core i5-14500, shared worker pool
 
 Against `fd783db`, 11 rounds at t20: lossless 86.5 -> 84.9 ms, lossy 91.7

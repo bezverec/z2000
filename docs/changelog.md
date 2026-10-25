@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Pre-Tier-1 Stages Split By Component
+
+- What runs between reading the packets and starting Tier-1 now uses the
+  idle workers, one component per job: the packet-header walk of a
+  single-layer stream (each component keeps its own precinct state, blocks,
+  and payload buffer, and its packets in catalog order; the first failing
+  packet in catalog order still decides the error), the catalog build's
+  block fill and multi-layer payload copy, and each plane's coverage check
+  and clearing (temporary bitmaps from the thread-safe page allocator, the
+  caller's allocator used only on its own thread; errors in plane order).
+  Interleaving packet parsing with Tier-1 itself was set aside: the stream's
+  RPCL order delivers the finest resolution's blocks, three quarters of the
+  work, last.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  decodes; 34-bit wide stream). Against `db938ca` at t20: header walk 2.58
+  -> 1.62 ms lossless, catalog finalize 1.34 -> 0.74 ms lossy; decode 87.5
+  -> 85.0 ms lossless and 89.9 -> 89.4 ms lossy (15 rounds).
+
 ### Shared Worker Pool
 
 - Every parallel decode stage spawned its own threads (about 50 us each on
