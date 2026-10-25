@@ -1,4 +1,5 @@
 const std = @import("std");
+const worker_pool = @import("worker_pool.zig");
 const builtin = @import("builtin");
 const color = @import("color.zig");
 const image = @import("image.zig");
@@ -1202,15 +1203,17 @@ fn appendRasterLeThreaded(out: *std.ArrayList(u8), samples: []const u16, row_sam
         };
         used += 1;
     }
-    var spawned: [max_raster_workers]std.Thread = undefined;
-    var spawn_count: usize = 0;
-    defer for (spawned[0..spawn_count]) |thread| thread.join();
-    while (spawn_count + 1 < used) : (spawn_count += 1) {
-        spawned[spawn_count] = try std.Thread.spawn(.{}, RasterSlice.run, .{&slices[spawn_count]});
+    if (!worker_pool.runJobs(RasterSlice, slices[0..used], RasterSlice.run)) {
+        var spawned: [max_raster_workers]std.Thread = undefined;
+        var spawn_count: usize = 0;
+        defer for (spawned[0..spawn_count]) |thread| thread.join();
+        while (spawn_count + 1 < used) : (spawn_count += 1) {
+            spawned[spawn_count] = try std.Thread.spawn(.{}, RasterSlice.run, .{&slices[spawn_count]});
+        }
+        slices[used - 1].run();
+        for (spawned[0..spawn_count]) |thread| thread.join();
+        spawn_count = 0;
     }
-    slices[used - 1].run();
-    for (spawned[0..spawn_count]) |thread| thread.join();
-    spawn_count = 0;
     for (slices[0..used]) |slice| try slice.result;
 }
 

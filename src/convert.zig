@@ -1,6 +1,7 @@
 const std = @import("std");
 const clock = @import("clock.zig");
 const codestream = @import("codestream.zig");
+const worker_pool = @import("worker_pool.zig");
 const color = @import("color.zig");
 const icc_color = @import("icc.zig");
 const image = @import("image.zig");
@@ -45,6 +46,8 @@ pub fn jp2ToTiff(
     collect_decode_timings: bool,
 ) !Result {
     var command_timings = Timings{};
+    // Start the shared decode workers while the file is still being parsed.
+    worker_pool.prepare(options.threads);
     const extract_start = clock.monotonicNs();
     const info = try jp2.parseInfo(allocator, bytes);
     const j2k = try jp2.extractParsedCodestream(bytes);

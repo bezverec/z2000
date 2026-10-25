@@ -31,6 +31,7 @@ const tile_grid = @import("tile_grid.zig");
 const tile_pipeline = @import("tile_pipeline.zig");
 const tlm_parser = @import("tlm.zig");
 const tiff = @import("tiff.zig");
+const worker_pool = @import("worker_pool.zig");
 const tiff_compression = @import("tiff_compression.zig");
 const version = @import("version.zig");
 const wavelet = @import("wavelet.zig");
@@ -7839,6 +7840,59 @@ test "TIFF writer rejects out-of-range 8-bit samples before narrowing" {
     };
 
     try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.writeRgb(io, allocator, rgb, path));
+}
+
+const PoolCountTask = struct {
+    hits: []std.atomic.Value(u32),
+
+    fn call(context: *anyopaque, index: usize) void {
+        const self: *PoolCountTask = @ptrCast(@alignCast(context));
+        _ = self.hits[index].fetchAdd(1, .monotonic);
+    }
+};
+
+test "worker pool runs every index exactly once across repeated tasks" {
+    worker_pool.prepare(6);
+    var hits: [97]std.atomic.Value(u32) = undefined;
+    var task = PoolCountTask{ .hits = &hits };
+    for ([_]usize{ 1, 2, 3, 8, 20, 4, 64, 2 }) |threads| {
+        for ([_]usize{ 1, 2, 7, 97 }) |count| {
+            for (hits[0..count]) |*hit| hit.* = std.atomic.Value(u32).init(0);
+            try std.testing.expect(worker_pool.run(threads, count, &task, PoolCountTask.call));
+            for (hits[0..count]) |hit| try std.testing.expectEqual(@as(u32, 1), hit.load(.monotonic));
+        }
+    }
+}
+
+const PoolNestedRun = struct {
+    hits: []std.atomic.Value(u32),
+    inner_ran: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    inner_refused: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+    fn call(context: *anyopaque, index: usize) void {
+        const self: *PoolNestedRun = @ptrCast(@alignCast(context));
+        // A task that itself asks for the pool must be refused (the pool is
+        // busy), never deadlock, and leave the caller to do the work.
+        var inner_hits: [5]std.atomic.Value(u32) = undefined;
+        for (&inner_hits) |*hit| hit.* = std.atomic.Value(u32).init(0);
+        var inner = PoolCountTask{ .hits = &inner_hits };
+        if (worker_pool.run(4, inner_hits.len, &inner, PoolCountTask.call)) {
+            _ = self.inner_ran.fetchAdd(1, .monotonic);
+        } else {
+            _ = self.inner_refused.fetchAdd(1, .monotonic);
+        }
+        _ = self.hits[index].fetchAdd(1, .monotonic);
+    }
+};
+
+test "worker pool refuses a task submitted while it is busy" {
+    var hits: [12]std.atomic.Value(u32) = undefined;
+    for (&hits) |*hit| hit.* = std.atomic.Value(u32).init(0);
+    var nested = PoolNestedRun{ .hits = &hits };
+    try std.testing.expect(worker_pool.run(4, hits.len, &nested, PoolNestedRun.call));
+    for (hits) |hit| try std.testing.expectEqual(@as(u32, 1), hit.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), nested.inner_ran.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, hits.len), nested.inner_refused.load(.monotonic));
 }
 
 test "in-place 8-bit RGB TIFF raster writes the same file as writeRgb" {

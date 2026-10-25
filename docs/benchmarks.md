@@ -46,6 +46,13 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, shared worker pool
+
+Against `fd783db`, 11 rounds at t20: lossless 86.5 -> 84.9 ms, lossy 91.7
+-> 88.8 ms. The pool's threads start on a helper thread when JP2-to-TIFF
+begins and are reused by the Tier-1 pool, inverse colour conversion,
+dequantization, and TIFF serialization.
+
 ## 2026-10-25: Intel Core i5-14500, where Tier-1 loses past six threads
 
 Base is `fe7c8e5`, common lossless stream unless noted. A small launcher

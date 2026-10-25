@@ -1,4 +1,5 @@
 const std = @import("std");
+const worker_pool = @import("worker_pool.zig");
 const image = @import("image.zig");
 const simd = @import("simd.zig");
 
@@ -788,6 +789,7 @@ fn runColorJobs(
         worker(&jobs[0]);
         return;
     }
+    if (worker_pool.runJobs(Job, jobs, worker)) return;
 
     var threads: [max_inverse_color_workers - 1]std.Thread = undefined;
     var spawned: usize = 0;

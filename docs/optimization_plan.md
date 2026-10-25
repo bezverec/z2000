@@ -181,7 +181,9 @@ candidates in the same direction: splitting a finished plane's 9/7 into
 level or band tasks the idle workers can pick up at the end of the pool;
 fusing inverse MCT/ICT with TIFF serialization (no 16-bit interleaved
 intermediate; ICT is 5.4 ms at t20 on the lossy profile); a persistent
-worker pool shared by Tier-1, DWT, MCT, and output.
+worker pool shared by Tier-1, DWT, MCT, and output (done 2026-10-25 for
+everything but the barrier-synchronized DWT pools: `worker_pool.zig`,
+lossy t20 91.7 -> 88.8 ms).
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse

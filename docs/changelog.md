@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Shared Worker Pool
+
+- Every parallel decode stage spawned its own threads (about 50 us each on
+  Windows): the Tier-1 pool, inverse colour conversion, threaded
+  dequantization, and TIFF serialization. `worker_pool.zig` keeps one set
+  of threads for the process: `prepare` starts them on a helper thread,
+  so JP2-to-TIFF has them ready while it is still parsing the file, and
+  `run` hands a task's indices to them and the caller, with idle threads
+  asleep on a futex. A task returns only after every pool thread has
+  acknowledged it, so none carries into the next; a task submitted while
+  the pool is busy (a nested or concurrent call) is refused and the
+  caller falls back to its own threads, as do the barrier-synchronized DWT
+  pools, which keep their own threads. New tests check that every index
+  runs exactly once across repeated tasks and thread counts and that a
+  nested submission is refused without deadlock; the test binary passes
+  on Windows and on Linux (WSL).
+- Output is byte-identical (lossless and lossy at t2, t3, t8, t20; 34-bit
+  wide stream). Interleaved A/B on the i5-14500 against `fd783db`: decode
+  86.5 -> 84.9 ms lossless and 91.7 -> 88.8 ms lossy at t20.
+
 ### Adaptive Placement Of The In-Pool 9/7 Job
 
 - At high thread counts plane 1's serial dequantize-plus-9/7 job (about

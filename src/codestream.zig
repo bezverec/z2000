@@ -1,4 +1,5 @@
 const std = @import("std");
+const worker_pool = @import("worker_pool.zig");
 const builtin = @import("builtin");
 const bitplane = @import("bitplane.zig");
 const color = @import("color.zig");
@@ -14622,6 +14623,10 @@ const DequantizeRowsJob = struct {
     first_row: usize,
     end_row: usize,
 
+    fn runMutable(self: *DequantizeRowsJob) void {
+        self.run();
+    }
+
     /// Clears rows `first_row..end_row` and dequantizes every band's part of
     /// them; bands are disjoint, so each sample ends as in the serial pass.
     fn run(self: *const DequantizeRowsJob) void {
@@ -14653,15 +14658,17 @@ fn irreversibleDequantizePlaneThreaded(job: *IrreversibleInversePlaneJob, thread
         parts[used] = .{ .job = job, .first_row = row, .end_row = @min(job.height, row + rows_per_worker) };
         used += 1;
     }
-    var threads: [max_dequantize_workers]std.Thread = undefined;
-    var spawned: usize = 0;
-    defer for (threads[0..spawned]) |thread| thread.join();
-    while (spawned + 1 < used) : (spawned += 1) {
-        threads[spawned] = try std.Thread.spawn(.{}, DequantizeRowsJob.run, .{&parts[spawned]});
+    if (!worker_pool.runJobs(DequantizeRowsJob, parts[0..used], DequantizeRowsJob.runMutable)) {
+        var threads: [max_dequantize_workers]std.Thread = undefined;
+        var spawned: usize = 0;
+        defer for (threads[0..spawned]) |thread| thread.join();
+        while (spawned + 1 < used) : (spawned += 1) {
+            threads[spawned] = try std.Thread.spawn(.{}, DequantizeRowsJob.run, .{&parts[spawned]});
+        }
+        parts[used - 1].run();
+        for (threads[0..spawned]) |thread| thread.join();
+        spawned = 0;
     }
-    parts[used - 1].run();
-    for (threads[0..spawned]) |thread| thread.join();
-    spawned = 0;
     if (job.blocks) |blocks| try removeUnearnedMidpointOffsets(job, blocks);
 }
 
@@ -16329,19 +16336,21 @@ fn reconstructStrictComponentBlocksParallel(
         };
     }
 
-    const spawn_count = worker_count - 1;
-    var threads = try allocator.alloc(std.Thread, spawn_count);
-    defer allocator.free(threads);
-    var spawned: usize = 0;
-    while (spawned < spawn_count) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, Job.run, .{&jobs[spawned]}) catch |err| {
-            for (threads[0..spawned]) |thread| thread.join();
-            return err;
-        };
-    }
+    if (!worker_pool.runJobs(Job, jobs, Job.run)) {
+        const spawn_count = worker_count - 1;
+        var threads = try allocator.alloc(std.Thread, spawn_count);
+        defer allocator.free(threads);
+        var spawned: usize = 0;
+        while (spawned < spawn_count) : (spawned += 1) {
+            threads[spawned] = std.Thread.spawn(.{}, Job.run, .{&jobs[spawned]}) catch |err| {
+                for (threads[0..spawned]) |thread| thread.join();
+                return err;
+            };
+        }
 
-    Job.run(&jobs[spawn_count]);
-    for (threads[0..spawned]) |thread| thread.join();
+        Job.run(&jobs[spawn_count]);
+        for (threads[0..spawned]) |thread| thread.join();
+    }
 
     for (jobs) |job| try job.result;
     if (t1_stats) |stats| {
