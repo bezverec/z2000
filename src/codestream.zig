@@ -20446,9 +20446,45 @@ fn buildRpclBlockIndex(
     var index = try RpclBlockIndex.init(allocator, plan, component_count);
     errdefer index.deinit();
 
+    // The selection of `t2.collectRpclCodeBlockIndexes` for every precinct,
+    // without re-deriving each block's resolution and rectangle and each
+    // band's precinct rectangle once per block and precinct: blocks are
+    // grouped by resolution once (ascending index), and a precinct's
+    // rectangle is computed once per band.
+    const block_rects = try allocator.alloc(packet_plan.Rect, blocks.len);
+    defer allocator.free(block_rects);
+    const resolution_starts = try allocator.alloc(usize, @as(usize, plan.resolution_count) + 1);
+    defer allocator.free(resolution_starts);
+    const resolution_blocks = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(resolution_blocks);
+    const block_resolutions = try allocator.alloc(u8, blocks.len);
+    defer allocator.free(block_resolutions);
+    @memset(resolution_starts, 0);
+    for (blocks, 0..) |block, block_index| {
+        if (block.band_index >= bands.len) return t2.PacketHeaderError.InvalidPacketHeader;
+        const band = bands[block.band_index];
+        const resolution = try t2.bandResolutionIndex(levels, band);
+        block_resolutions[block_index] = resolution;
+        block_rects[block_index] = try t2.codeBlockSubbandPacketRect(band, block);
+        if (resolution < plan.resolution_count) resolution_starts[@as(usize, resolution) + 1] += 1;
+    }
+    for (1..resolution_starts.len) |slot| resolution_starts[slot] += resolution_starts[slot - 1];
+    const fill = try allocator.dupe(usize, resolution_starts);
+    defer allocator.free(fill);
+    for (block_resolutions, 0..) |resolution, block_index| {
+        if (resolution >= plan.resolution_count) continue;
+        resolution_blocks[fill[resolution]] = block_index;
+        fill[resolution] += 1;
+    }
+    const band_precincts = try allocator.alloc(packet_plan.Rect, bands.len);
+    defer allocator.free(band_precincts);
+    var selected: std.ArrayList(usize) = .empty;
+    defer selected.deinit(allocator);
+
     var resolution_index: u8 = 0;
     while (resolution_index < plan.resolution_count) : (resolution_index += 1) {
         const resolution = plan.resolutions[resolution_index];
+        const members = resolution_blocks[resolution_starts[resolution_index]..resolution_starts[@as(usize, resolution_index) + 1]];
         var precinct_index: u64 = 0;
         while (precinct_index < resolution.precincts) : (precinct_index += 1) {
             const packet = packet_plan.Packet{
@@ -20460,18 +20496,73 @@ fn buildRpclBlockIndex(
                 .component = 0,
                 .layer = 0,
             };
-            const selected = try t2.collectRpclCodeBlockIndexes(allocator, plan, packet, levels, bands, blocks);
-            defer allocator.free(selected);
+            for (bands, 0..) |band, band_index| {
+                if (try t2.bandResolutionIndex(levels, band) != resolution_index) continue;
+                band_precincts[band_index] = try t2.bandPrecinctRect(plan, packet, band);
+            }
+            selected.clearRetainingCapacity();
+            for (members) |block_index| {
+                const precinct = band_precincts[blocks[block_index].band_index];
+                if (precinct.width == 0 or precinct.height == 0) continue;
+                if (packet_plan.rectsIntersect(precinct, block_rects[block_index])) {
+                    try selected.append(allocator, block_index);
+                }
+            }
 
             var component: u16 = 0;
             while (component < component_count) : (component += 1) {
                 const cell = try index.cell(resolution_index, precinct_index, component);
-                try cell.indexes.appendSlice(allocator, selected);
+                try cell.indexes.appendSlice(allocator, selected.items);
             }
         }
     }
 
     return index;
+}
+
+test "RPCL block index selects what the per-precinct block scan selects" {
+    const allocator = std.testing.allocator;
+    const Case = struct { x0: u32, y0: u32, x1: u32, y1: u32, levels: u8, block: usize, precinct: u32 };
+    const cases = [_]Case{
+        .{ .x0 = 0, .y0 = 0, .x1 = 256, .y1 = 256, .levels = 5, .block = 64, .precinct = 128 },
+        .{ .x0 = 3, .y0 = 7, .x1 = 301, .y1 = 177, .levels = 4, .block = 32, .precinct = 64 },
+        .{ .x0 = 1, .y0 = 0, .x1 = 130, .y1 = 97, .levels = 3, .block = 16, .precinct = 32 },
+        .{ .x0 = 0, .y0 = 5, .x1 = 77, .y1 = 200, .levels = 6, .block = 64, .precinct = 32768 },
+    };
+    for (cases) |case| {
+        var precincts: [7]packet_plan.Precinct = undefined;
+        for (&precincts) |*precinct| precinct.* = .{ .width = case.precinct, .height = case.precinct };
+        const plan = try packet_plan.rpclTileRegion(case.x0, case.y0, case.x1, case.y1, case.levels, 2, 1, precincts[0 .. @as(usize, case.levels) + 1]);
+        const bands = try makeBandsForPacketPlan(allocator, plan, case.levels);
+        defer allocator.free(bands);
+        const blocks = try makeCodeBlocksForPacketPlan(allocator, bands, case.block, case.block, plan);
+        defer allocator.free(blocks);
+        var index = try buildRpclBlockIndex(allocator, plan, 2, case.levels, bands, blocks);
+        defer index.deinit();
+
+        var resolution_index: u8 = 0;
+        while (resolution_index < plan.resolution_count) : (resolution_index += 1) {
+            const resolution = plan.resolutions[resolution_index];
+            var precinct_index: u64 = 0;
+            while (precinct_index < resolution.precincts) : (precinct_index += 1) {
+                const packet = packet_plan.Packet{
+                    .sequence = 0,
+                    .resolution = resolution_index,
+                    .precinct_x = @intCast(precinct_index % resolution.precincts_x),
+                    .precinct_y = @intCast(precinct_index / resolution.precincts_x),
+                    .precinct_index = precinct_index,
+                    .component = 0,
+                    .layer = 0,
+                };
+                const expected = try t2.collectRpclCodeBlockIndexes(allocator, plan, packet, case.levels, bands, blocks);
+                defer allocator.free(expected);
+                for (0..2) |component| {
+                    const cell = try index.cell(resolution_index, precinct_index, @intCast(component));
+                    try std.testing.expectEqualSlices(usize, expected, cell.indexes.items);
+                }
+            }
+        }
+    }
 }
 
 /// Rate-distortion data for global PCRD (ISO 15444-1 J.14): per-block

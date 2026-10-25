@@ -97,6 +97,17 @@ pool preparation 3.3, JP2 read 2.2, inverse MCT 2.2, codestream box 0.9.
 Threaded raster serialization then took TIFF write from 7.33 to 5.86 ms
 (11 runs); the file write itself is about 4.5 ms.
 
+Further t20 probes against `61a6fef`:
+
+| Candidate | Comparison | Result |
+| --- | --- | --- |
+| 5/3 DWT worker cap 12 / 16 instead of 8 | inverse DWT 6.78 -> 6.14 / 5.86 ms; decode 93.4 -> 94.1 ms, encode 115.4 -> 116.1 ms (11 rounds, cap 16) | neutral end to end, cap kept at 8 |
+| Packet headers read per component on separate threads | headers 4.34 -> 3.64 ms; decode 93.1 -> 93.0 ms | rejected: the header stage is mostly geometry setup (2.0 ms), assemblies (0.6 ms), and the packet walk (1.9 ms) |
+| Linear RPCL block index (blocks grouped by resolution, rectangles computed once) | headers 4.30 -> 2.51 ms; decode 93.6 -> 91.4 ms, encode 113.5 -> 114.4 ms (11 rounds) | kept |
+
+Thread start costs about 48 us per thread on this host (19 spawns 0.9 ms,
+joins 0.1 ms), so a persistent pool would save roughly 1 ms per decode.
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

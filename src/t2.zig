@@ -1151,7 +1151,7 @@ pub fn codeBlockPacketRect(block: subband.CodeBlock) !packet_plan.Rect {
     };
 }
 
-fn codeBlockSubbandPacketRect(band: subband.Band, block: subband.CodeBlock) !packet_plan.Rect {
+pub fn codeBlockSubbandPacketRect(band: subband.Band, block: subband.CodeBlock) !packet_plan.Rect {
     if (block.rect.x < band.rect.x or block.rect.y < band.rect.y) return PacketHeaderError.InvalidPacketHeader;
     const local_x = block.rect.x - band.rect.x;
     const local_y = block.rect.y - band.rect.y;
@@ -1166,7 +1166,7 @@ fn codeBlockSubbandPacketRect(band: subband.Band, block: subband.CodeBlock) !pac
     };
 }
 
-fn bandPrecinctRect(plan: packet_plan.Plan, packet: packet_plan.Packet, band: subband.Band) !packet_plan.Rect {
+pub fn bandPrecinctRect(plan: packet_plan.Plan, packet: packet_plan.Packet, band: subband.Band) !packet_plan.Rect {
     const precinct = try packet_plan.precinctRect(plan, packet.resolution, packet.precinct_index);
     if (band.kind == .ll) return precinct;
     if (packet.resolution >= plan.resolution_count) return PacketHeaderError.InvalidPacketHeader;

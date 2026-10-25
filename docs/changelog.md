@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Linear RPCL Block Index
+
+- `buildRpclBlockIndex` asked `t2.collectRpclCodeBlockIndexes` for every
+  precinct, which scanned every code-block and re-derived its band's
+  resolution and precinct rectangle each time: about 465k intersection
+  tests for the 2048x2048 profile, the bulk of the 2 ms geometry setup in
+  every decode. Blocks are now grouped by resolution and their rectangles
+  computed once, each band's precinct rectangle once per precinct, and a
+  precinct tests only its own resolution's blocks. A new test checks the
+  index against the per-precinct scan for even, offset, odd-sized, and
+  single-precinct geometries.
+- Output is byte-identical (lossless profile both ways, lossy 9/7, 34-bit
+  wide stream both ways). `--timings` on the i5-14500 against `61a6fef`:
+  packet-header stage 4.30 -> 2.51 ms; interleaved A/B: t20 decode 93.6 ->
+  91.4 ms, encode unchanged within noise.
+
 ### Threaded TIFF Raster Serialization
 
 - `tiff.writeRgbThreaded` serializes the raster on up to eight workers
