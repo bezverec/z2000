@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### JP2 Tile-Part Audit Beside The Decode
+
+- The JP2 wrapper's validation ends with a walk of every tile-part's
+  markers and packet frames, 0.9 ms on the 6.6 MB common stream, done on
+  one thread before the decode started although the strict decoder checks
+  the same tile-parts itself. JP2-to-TIFF now runs that walk on a helper
+  thread beside the decode (`jp2.parseInfoDeferringTilePartAudit`) and
+  takes its verdict before any output is written and before a decode error
+  is reported, so every malformed file fails exactly as before (a mutation
+  test compares both orders byte by byte); one thread keeps it inline.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream). Against `a425ecd` at t20:
+  JP2 parse 0.93 -> 0.04 ms, decode total 68.1 -> 66.2 ms (11 `--timings`
+  runs); wall 82.5 -> 80.9 ms (21 rounds).
+
 ### Decode Intermediates Released In The Background
 
 - A t20 decode spent 3-4 ms on one thread freeing its 48 MB of coefficient

@@ -46,6 +46,24 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, JP2 tile-part audit beside the decode; DWT and read probes
+
+Base `a425ecd`, same host and method. The whole 0.9 ms "codestream box"
+stage was the JP2 wrapper's tile-part walk (stubbing it out left 0.01 ms).
+Running it on a helper thread beside the decode, 11 `--timings` runs at
+t20: JP2 parse 0.93 -> 0.04 ms, total 68.05 -> 66.22 ms. Wall time, 21
+interleaved rounds (a noisy session): lossless t20 82.5 -> 80.9 ms, t6
+145.8 -> 144.4 ms; lossy t20 103.7 -> 101.4 ms, t6 160.0 -> 162.6 ms. Output
+byte-identical as in the record below.
+
+Probes dropped on the way:
+
+| Candidate | Result |
+| --- | --- |
+| Inverse 5/3 phases on the shared `worker_pool` instead of a per-transform pool (its spawn and join cost 0.2-0.4 ms each at t20) | tail DWT 3.03 -> 2.70 ms, with 4096 spin polls before the futex sleep 2.59 ms; wall within noise (t20 -1.1%, t12 +0.4%, lossy t4 +3.7%, 25 and 21 rounds): dropped |
+| Same, 12 or 16 DWT workers | 2.42 / 2.31 / 2.41 ms at 8 / 12 / 16: the tail plane's transform is memory-bound |
+| Input read with 2, 4, or 8 parallel positional reads (standalone, 40 rounds) | 1.67 ms single, 1.50 / 1.48 / 1.47 ms: about 0.2 ms, dropped |
+
 ## 2026-10-25: Intel Core i5-14500, decode intermediates released in the background
 
 Base `b9a0c2a`, same host, ReleaseFast, interleaved A/B, 15 rounds, wall

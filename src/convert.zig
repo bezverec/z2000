@@ -49,9 +49,71 @@ pub fn jp2ToTiff(
     // Start the shared decode workers while the file is still being parsed.
     worker_pool.prepare(options.threads);
     const extract_start = clock.monotonicNs();
-    const info = try jp2.parseInfo(allocator, bytes);
-    const j2k = try jp2.extractParsedCodestream(bytes);
+    var parsed = try jp2.parseInfoDeferringTilePartAudit(allocator, bytes);
+    defer parsed.audit.deinit();
+    var audit = TilePartAuditTask{ .audit = &parsed.audit };
+    try audit.start(options.threads);
+    defer audit.join();
     command_timings.codestream_extract_ns = clock.elapsedNs(extract_start);
+    return jp2ToTiffParsed(io, allocator, bytes, parsed.info, &audit, output_path, options, convert_to_srgb, collect_decode_timings, command_timings) catch |err| {
+        // The wrapper's verdict on the tile-parts comes first, as when it ran
+        // before the decode.
+        try audit.finish();
+        return err;
+    };
+}
+
+/// Runs the JP2 wrapper's tile-part walk (`jp2.TilePartAudit`) on a helper
+/// thread while the codestream decodes; the strict decoder validates the same
+/// tile-parts independently, so nothing waits on it until `finish`, which
+/// comes before any output is written and before any decode error is
+/// reported.
+const TilePartAuditTask = struct {
+    audit: *const jp2.TilePartAudit,
+    thread: ?std.Thread = null,
+    result: jp2.TilePartAuditError!void = {},
+
+    /// Runs the audit on a helper thread, or here (returning its verdict)
+    /// with one thread or when no thread can be started.
+    fn start(self: *TilePartAuditTask, threads: u8) jp2.TilePartAuditError!void {
+        if (threads >= 2 and self.audit.pending) {
+            if (std.Thread.spawn(.{}, run, .{self})) |thread| {
+                self.thread = thread;
+                return;
+            } else |_| {}
+        }
+        try self.audit.run();
+    }
+
+    fn run(self: *TilePartAuditTask) void {
+        self.result = self.audit.run();
+    }
+
+    fn join(self: *TilePartAuditTask) void {
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+    }
+
+    fn finish(self: *TilePartAuditTask) jp2.TilePartAuditError!void {
+        self.join();
+        return self.result;
+    }
+};
+
+fn jp2ToTiffParsed(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    info: jp2.Info,
+    audit: *TilePartAuditTask,
+    output_path: []const u8,
+    options: codestream.DecodeOptions,
+    convert_to_srgb: bool,
+    collect_decode_timings: bool,
+    initial_timings: Timings,
+) !Result {
+    var command_timings = initial_timings;
+    const j2k = try jp2.extractParsedCodestream(bytes);
     if (convert_to_srgb) {
         if (info.color_space != .restricted_icc or info.components != 3 or info.has_palette) {
             return icc_color.IccError.UnsupportedProfile;
@@ -85,6 +147,7 @@ pub fn jp2ToTiff(
         defer if (icc_profile) |profile| allocator.free(profile);
         command_timings.icc_extract_ns = clock.elapsedNs(icc_start);
 
+        try audit.finish();
         const stream_start = clock.monotonicNs();
         var sink = tiff.GrayBandSink{
             .io = io,
@@ -130,6 +193,7 @@ pub fn jp2ToTiff(
         defer if (icc_profile) |profile| allocator.free(profile);
         command_timings.icc_extract_ns = clock.elapsedNs(icc_start);
 
+        try audit.finish();
         const stream_start = clock.monotonicNs();
         var table = (try jp2.extractPalette(allocator, bytes)) orelse
             return jp2.Jp2Error.MissingRequiredBox;
@@ -180,6 +244,7 @@ pub fn jp2ToTiff(
         defer if (icc_profile) |profile| allocator.free(profile);
         command_timings.icc_extract_ns = clock.elapsedNs(icc_start);
 
+        try audit.finish();
         const stream_start = clock.monotonicNs();
         var sink = tiff.AlphaBandSink{
             .io = io,
@@ -230,6 +295,7 @@ pub fn jp2ToTiff(
         defer if (icc_profile) |profile| allocator.free(profile);
         command_timings.icc_extract_ns = clock.elapsedNs(icc_start);
 
+        try audit.finish();
         const stream_start = clock.monotonicNs();
         var sink = tiff.RgbBandSink{
             .io = io,
@@ -395,6 +461,7 @@ pub fn jp2ToTiff(
     };
     defer decoded.deinit();
     command_timings.codestream_decode_ns = clock.elapsedNs(decode_start);
+    try audit.finish();
 
     const icc_start = clock.monotonicNs();
     if (try jp2.extractParsedIccProfile(allocator, bytes, info)) |profile| {

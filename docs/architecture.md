@@ -507,7 +507,11 @@ mislabeling the structural framing as independent encoder interoperability.
 `src/jp2.zig` validates the JP2 signature, `ftyp`, `jp2h`, `ihdr`, optional
 `BPCC`, supported `colr`, bounded `pclr`/`cmap`/`cdef`, resolution boxes, and
 exactly one contiguous codestream. Required ordering, duplicate boxes, lengths,
-component precision, sampling, and SIZ agreement are checked.
+component precision, sampling, and SIZ agreement are checked. The audit
+closes with a walk of every tile-part's markers and packet frames; JP2-to-TIFF
+runs that walk (`parseInfoDeferringTilePartAudit`) on a helper thread beside
+the decode, whose strict reader checks the same tile-parts on its own, and
+takes its verdict before writing anything or reporting a decode error.
 
 Restricted ICC profiles are preserved byte-for-byte by default. Preservation is
 not colour conversion. Enumerated sYCC (18) is recognized for three unsigned

@@ -7917,6 +7917,72 @@ test "worker pool releases a value in the background exactly once" {
     try std.testing.expectEqual(@as(u32, 1), released.load(.acquire));
 }
 
+/// Outcome of `parseInfo`, or of the deferred parse followed by its audit, as
+/// an error name ("" on success) for comparison.
+fn jp2ParseOutcome(allocator: std.mem.Allocator, bytes: []const u8, deferred: bool) ![]const u8 {
+    if (!deferred) {
+        _ = jp2.parseInfo(allocator, bytes) catch |err| return @errorName(err);
+        return "";
+    }
+    var parsed = jp2.parseInfoDeferringTilePartAudit(allocator, bytes) catch |err| return @errorName(err);
+    defer parsed.audit.deinit();
+    parsed.audit.run() catch |err| return @errorName(err);
+    const reference = try jp2.parseInfo(allocator, bytes);
+    try std.testing.expect(std.meta.eql(reference, parsed.info));
+    return "";
+}
+
+test "deferred JP2 tile-part audit reports exactly what parseInfo reports" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const width = 24;
+    const height = 20;
+    const samples = try allocator.alloc(u16, width * height * 3);
+    defer allocator.free(samples);
+    for (samples, 0..) |*sample, index| sample.* = @intCast((index * 37 + index / 7) % 256);
+    const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .samples = samples };
+
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/audit.tif", .{tmp.sub_path});
+    var audit_failures: usize = 0;
+    // Single tile with SOP and TLM, and a multi-tile grid with EPH.
+    for ([_]codestream.LosslessOptions{
+        .{},
+        .{ .tile_width = 16, .tile_height = 12, .eph = true },
+    }) |options| {
+        const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(encoded);
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, encoded);
+        defer allocator.free(wrapped);
+        try std.testing.expectEqualStrings("", try jp2ParseOutcome(allocator, wrapped, true));
+
+        const mutated = try allocator.dupe(u8, wrapped);
+        defer allocator.free(mutated);
+        for (0..wrapped.len) |position| {
+            for ([_]u8{ 0xff, 0x01 }) |flip| {
+                @memcpy(mutated, wrapped);
+                mutated[position] ^= flip;
+                const expected = try jp2ParseOutcome(allocator, mutated, false);
+                try std.testing.expectEqualStrings(expected, try jp2ParseOutcome(allocator, mutated, true));
+
+                // Where only the tile-part walk objects, the threaded
+                // conversion reports its verdict and writes nothing.
+                if (expected.len == 0 or audit_failures >= 24) continue;
+                var parsed = jp2.parseInfoDeferringTilePartAudit(allocator, mutated) catch continue;
+                parsed.audit.deinit();
+                audit_failures += 1;
+                const result = convert.jp2ToTiff(io, allocator, mutated, path, .{ .threads = 4 }, false, false);
+                if (result) |_| return error.TestUnexpectedResult else |err| try std.testing.expectEqualStrings(expected, @errorName(err));
+                try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(io, path, .{}));
+            }
+        }
+    }
+    try std.testing.expect(audit_failures > 0);
+}
+
 test "in-place 8-bit RGB TIFF raster writes the same file as writeRgb" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

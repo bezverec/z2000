@@ -657,6 +657,63 @@ fn wrapCodestream(
 }
 
 pub fn parseInfo(allocator: std.mem.Allocator, bytes: []const u8) !Info {
+    return parseInfoCapturing(allocator, bytes, null);
+}
+
+/// The tile-part walk that closes `parseInfo`'s codestream validation (every
+/// tile-part's markers and packet frames against the main header), captured
+/// so a caller can run it beside other work. `run` reports exactly what
+/// `parseInfo` would have reported at that point.
+pub const TilePartAudit = struct {
+    allocator: std.mem.Allocator,
+    pending: bool = false,
+    payload: []const u8 = &.{},
+    first_sot: usize = 0,
+    cod: CodSegmentInfo = undefined,
+    components: u16 = 0,
+    tile_count: u32 = 0,
+    has_ppm: bool = false,
+    tlm: TlmState = .{},
+
+    /// Safe on any thread: reads only the codestream bytes and its own
+    /// state, and allocates (multi-tile audits) from the thread-safe
+    /// page-level allocator.
+    pub fn run(self: *const TilePartAudit) TilePartAuditError!void {
+        if (!self.pending) return;
+        const tlm_markers: ?*const TlmState = if (self.tlm.saw) &self.tlm else null;
+        if (self.tile_count == 1) {
+            return validateTilePartSequence(self.payload, self.first_sot, self.cod, self.components, tlm_markers, self.has_ppm);
+        }
+        return validateMultiTileTilePartSequence(std.heap.smp_allocator, self.payload, self.first_sot, self.cod, self.components, tlm_markers, self.tile_count, self.has_ppm);
+    }
+
+    pub fn deinit(self: *TilePartAudit) void {
+        self.tlm.deinit(self.allocator);
+    }
+};
+
+pub const TilePartAuditError = Jp2Error || std.mem.Allocator.Error;
+
+pub const DeferredInfo = struct {
+    info: Info,
+    audit: TilePartAudit,
+};
+
+/// `parseInfo` with its tile-part walk left to the caller (`audit.run`),
+/// which must run it before relying on the codestream's tile-parts. An error
+/// found after the codestream box still comes after the audit's own, as in
+/// `parseInfo`.
+pub fn parseInfoDeferringTilePartAudit(allocator: std.mem.Allocator, bytes: []const u8) !DeferredInfo {
+    var audit = TilePartAudit{ .allocator = allocator };
+    errdefer audit.deinit();
+    const info = parseInfoCapturing(allocator, bytes, &audit) catch |err| {
+        try audit.run();
+        return err;
+    };
+    return .{ .info = info, .audit = audit };
+}
+
+fn parseInfoCapturing(allocator: std.mem.Allocator, bytes: []const u8, audit: ?*TilePartAudit) !Info {
     var cursor: usize = 0;
     var saw_signature = false;
     var saw_ftyp = false;
@@ -713,14 +770,14 @@ pub fn parseInfo(allocator: std.mem.Allocator, bytes: []const u8) !Info {
             @backingInt(BoxType.contiguous_codestream) => {
                 if (!saw_jp2h or saw_jp2c) return Jp2Error.InvalidBox;
                 var geometry = CodestreamGeometry{};
-                try validateCodestreamPayload(allocator, box.payload, .{
+                try validateCodestreamPayloadCapturing(allocator, box.payload, .{
                     .width = info.width,
                     .height = info.height,
                     .components = info.components,
                     .bits_per_component = info.bits_per_component,
                     .component_bit_depths = info.component_bit_depths,
                     .require_unit_sampling = false,
-                }, &geometry);
+                }, &geometry, audit);
                 info.component_xrsiz = geometry.xrsiz;
                 info.component_yrsiz = geometry.yrsiz;
                 info.image_origin_x = geometry.image_origin_x;
@@ -1524,6 +1581,16 @@ fn validateCodestreamPayload(
     expected: CodestreamShape,
     geometry_out: ?*CodestreamGeometry,
 ) !void {
+    return validateCodestreamPayloadCapturing(allocator, payload, expected, geometry_out, null);
+}
+
+fn validateCodestreamPayloadCapturing(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    expected: CodestreamShape,
+    geometry_out: ?*CodestreamGeometry,
+    audit: ?*TilePartAudit,
+) !void {
     if (payload.len < 4) return Jp2Error.InvalidCodestream;
     if (try readU16Be(payload, 0) != marker_soc) return Jp2Error.InvalidCodestream;
     if (try readU16Be(payload, payload.len - 2) != marker_eoc) return Jp2Error.InvalidCodestream;
@@ -1610,7 +1677,7 @@ fn validateCodestreamPayload(
             geometry.yrsiz[component_index] = yrsiz;
         }
     }
-    try validateMainHeaderMarkers(allocator, payload, segment_end, tile_count, components, rsiz);
+    try validateMainHeaderMarkers(allocator, payload, segment_end, tile_count, components, rsiz, audit);
 }
 
 fn validateMainHeaderMarkers(
@@ -1620,6 +1687,7 @@ fn validateMainHeaderMarkers(
     tile_count: u32,
     components: u16,
     rsiz: u16,
+    audit: ?*TilePartAudit,
 ) !void {
     var cursor = cursor_after_siz;
     var cod_info: ?CodSegmentInfo = null;
@@ -1653,6 +1721,23 @@ fn validateMainHeaderMarkers(
                     cod_info.?,
                 );
                 try validateQcdPayloadBytes(qcd_payload, effective_cod);
+                if (audit) |captured| {
+                    // The walk is left to the caller; the TLM state moves
+                    // into the audit, which frees it.
+                    captured.* = .{
+                        .allocator = allocator,
+                        .pending = true,
+                        .payload = payload,
+                        .first_sot = cursor,
+                        .cod = effective_cod,
+                        .components = components,
+                        .tile_count = tile_count,
+                        .has_ppm = ppm_state.saw,
+                        .tlm = tlm_state,
+                    };
+                    tlm_state = .{};
+                    return;
+                }
                 if (tile_count == 1) {
                     try validateTilePartSequence(payload, cursor, effective_cod, components, if (tlm_state.saw) &tlm_state else null, ppm_state.saw);
                 } else {
