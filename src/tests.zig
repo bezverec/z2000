@@ -7841,6 +7841,46 @@ test "TIFF writer rejects out-of-range 8-bit samples before narrowing" {
     try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.writeRgb(io, allocator, rgb, path));
 }
 
+test "threaded RGB TIFF writer matches the serial writer and still rejects before writing" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [3][96]u8 = undefined;
+    const serial_path = try std.fmt.bufPrint(&path_buffer[0], ".zig-cache/tmp/{s}/serial.tif", .{tmp.sub_path});
+    const threaded_path = try std.fmt.bufPrint(&path_buffer[1], ".zig-cache/tmp/{s}/threaded.tif", .{tmp.sub_path});
+    const rejected_path = try std.fmt.bufPrint(&path_buffer[2], ".zig-cache/tmp/{s}/rejected.tif", .{tmp.sub_path});
+
+    // Large enough for the threaded split, with a row count no worker count
+    // divides evenly.
+    const width = 1031;
+    const height = 347;
+    for ([_]u8{ 8, 16 }) |bit_depth| {
+        const samples = try allocator.alloc(u16, width * height * 3);
+        defer allocator.free(samples);
+        const max: u32 = if (bit_depth == 8) 255 else 65535;
+        for (samples, 0..) |*sample, index| sample.* = @intCast((index * 2654435761) % (max + 1));
+        const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = bit_depth, .samples = samples };
+
+        try tiff.writeRgb(io, allocator, rgb, serial_path);
+        try tiff.writeRgbThreaded(io, allocator, rgb, threaded_path, 8);
+        const serial = try std.Io.Dir.cwd().readFileAlloc(io, serial_path, allocator, .limited(1 << 24));
+        defer allocator.free(serial);
+        const threaded = try std.Io.Dir.cwd().readFileAlloc(io, threaded_path, allocator, .limited(1 << 24));
+        defer allocator.free(threaded);
+        try std.testing.expectEqualSlices(u8, serial, threaded);
+
+        if (bit_depth == 8) {
+            // An out-of-range sample in the last worker's rows fails the
+            // whole write before any file is created.
+            samples[samples.len - 1] = 256;
+            try std.testing.expectError(tiff.TiffError.InvalidTagValue, tiff.writeRgbThreaded(io, allocator, rgb, rejected_path, 8));
+            try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(io, rejected_path, .{}));
+        }
+    }
+}
+
 test "TIFF parser preserves embedded ICC profile tag" {
     const allocator = std.testing.allocator;
 

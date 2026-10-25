@@ -5,6 +5,17 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Threaded TIFF Raster Serialization
+
+- `tiff.writeRgbThreaded` serializes the raster on up to eight workers
+  over whole rows (below about a million samples it stays serial), and
+  JP2-to-TIFF passes its thread count. As with `writeRgb`, the file is
+  written only after every row has passed its range check; a new test pins
+  identical files for one and eight workers at 8 and 16 bits, and that an
+  out-of-range sample in the last worker's rows writes nothing.
+- Interleaved `--timings` on the i5-14500 against `a0f8a86`: TIFF write
+  7.33 -> 5.86 ms at t20; the rest of it is the file write itself.
+
 ### One Block Pool For All Components
 
 - Multi-thread block decode ran one pool per component, three after one

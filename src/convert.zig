@@ -412,7 +412,7 @@ pub fn jp2ToTiff(
 
     const write_start = clock.monotonicNs();
     switch (decoded) {
-        .rgb => |rgb| try tiff.writeRgb(io, allocator, rgb, output_path),
+        .rgb => |rgb| try tiff.writeRgbThreaded(io, allocator, rgb, output_path, options.threads),
         .grayscale => |gray| try tiff.writeGray(io, allocator, gray, output_path),
         .alpha => |alpha| try tiff.writeAlpha(io, allocator, alpha, output_path),
     }

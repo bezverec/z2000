@@ -304,6 +304,12 @@ const RgbLayout = struct {
 };
 
 pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, path: []const u8) !void {
+    return writeRgbThreaded(io, allocator, rgb, path, 1);
+}
+
+/// `writeRgb` with the raster serialized by up to `threads` workers, each
+/// over whole rows. The file is still written only once every row passed.
+pub fn writeRgbThreaded(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, path: []const u8, threads: usize) !void {
     const icc_profile = rgb.icc_profile;
     const layout = try RgbLayout.init(
         rgb.width,
@@ -322,8 +328,9 @@ pub fn writeRgb(io: std.Io, allocator: std.mem.Allocator, rgb: image.RgbImage, p
     try out.ensureTotalCapacity(allocator, try layout.totalBytes());
     try layout.appendPrefix(allocator, &out);
 
-    appendRasterLe(&out, rgb.samples, rgb.width * 3, rgb.bit_depth) catch |err| switch (err) {
+    appendRasterLeThreaded(&out, rgb.samples, rgb.width * 3, rgb.bit_depth, threads) catch |err| switch (err) {
         error.InvalidTagValue => return TiffError.InvalidTagValue,
+        else => |other| return other,
     };
     if (icc_profile) |profile| try out.appendSlice(allocator, profile);
 
@@ -1111,6 +1118,66 @@ fn appendRasterLe(out: *std.ArrayList(u8), samples: []const u16, row_samples: us
     out.items.len = start + raster_len;
     try serializeRasterLe(out.items[start..][0..raster_len], samples, row_samples, bit_depth);
 }
+
+/// Rows below which splitting the serialization costs more than it saves.
+const parallel_raster_min_samples = 1 << 20;
+
+const RasterSlice = struct {
+    raster: []u8,
+    samples: []const u16,
+    row_samples: usize,
+    bit_depth: u8,
+    result: error{InvalidTagValue}!void = {},
+
+    fn run(self: *RasterSlice) void {
+        self.result = serializeRasterLe(self.raster, self.samples, self.row_samples, self.bit_depth);
+    }
+};
+
+/// `appendRasterLe` with the rows split over up to `threads` workers; every
+/// row is byte-aligned, so each worker serializes its rows independently.
+fn appendRasterLeThreaded(out: *std.ArrayList(u8), samples: []const u16, row_samples: usize, bit_depth: u8, threads: usize) !void {
+    if (threads < 2 or samples.len < parallel_raster_min_samples) return appendRasterLe(out, samples, row_samples, bit_depth);
+    const start = out.items.len;
+    errdefer out.items.len = start;
+
+    if (row_samples == 0 or samples.len % row_samples != 0) return error.InvalidTagValue;
+    const row_bytes = rasterRowBytes(row_samples, bit_depth) catch return error.InvalidTagValue;
+    const rows = samples.len / row_samples;
+    const raster_len = rows * row_bytes;
+    std.debug.assert(out.capacity >= start + raster_len);
+    out.items.len = start + raster_len;
+    const raster = out.items[start..][0..raster_len];
+
+    var slices: [max_raster_workers]RasterSlice = undefined;
+    const workers = @min(@min(threads, max_raster_workers), rows);
+    const rows_per_worker = (rows + workers - 1) / workers;
+    var used: usize = 0;
+    var row: usize = 0;
+    while (row < rows) : (row += rows_per_worker) {
+        const count = @min(rows_per_worker, rows - row);
+        slices[used] = .{
+            .raster = raster[row * row_bytes ..][0 .. count * row_bytes],
+            .samples = samples[row * row_samples ..][0 .. count * row_samples],
+            .row_samples = row_samples,
+            .bit_depth = bit_depth,
+        };
+        used += 1;
+    }
+    var spawned: [max_raster_workers]std.Thread = undefined;
+    var spawn_count: usize = 0;
+    defer for (spawned[0..spawn_count]) |thread| thread.join();
+    while (spawn_count + 1 < used) : (spawn_count += 1) {
+        spawned[spawn_count] = try std.Thread.spawn(.{}, RasterSlice.run, .{&slices[spawn_count]});
+    }
+    slices[used - 1].run();
+    for (spawned[0..spawn_count]) |thread| thread.join();
+    spawn_count = 0;
+    for (slices[0..used]) |slice| try slice.result;
+}
+
+/// The raster is memory-bound; more workers than this only contend.
+const max_raster_workers = 8;
 
 /// Bytes one raster row occupies. Eight- and sixteen-bit samples are whole
 /// bytes; any other depth is packed MSB-first and each row is padded to a byte

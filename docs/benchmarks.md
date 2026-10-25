@@ -89,6 +89,14 @@ runs), decode 97.9 -> 93.0 ms at t20 (15 rounds). A bare process start
 creation and teardown for both codecs; z2000's own `--timings` total is
 80.9 ms.
 
+After the single pool (t20 `--timings`, 80.0 ms): block phase 51.0 ms with
+workers at 47.7 ms average (about 11.7x the t1 Tier-1 time, comparable to
+Kakadu's overall 10.6x), so the remaining gap is outside Tier-1: TIFF write
+7.3, inverse DWT 7.3 (eight workers, memory-bound), packet catalog 5.8,
+pool preparation 3.3, JP2 read 2.2, inverse MCT 2.2, codestream box 0.9.
+Threaded raster serialization then took TIFF write from 7.33 to 5.86 ms
+(11 runs); the file write itself is about 4.5 ms.
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is
