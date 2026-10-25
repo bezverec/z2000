@@ -4138,6 +4138,10 @@ const StrictComponentAssembly = struct {
     y0: u32 = 0,
     payloads: std.ArrayList(u8) = .empty,
     use_component_payloads: bool = false,
+    /// Backs every block's `payload` list: a multi-layer stream grows each
+    /// list once per contribution, and an arena turns those thousands of
+    /// small allocations into bumps, all released with the assembly.
+    payload_arena: std.heap.ArenaAllocator,
 
     fn init(allocator: std.mem.Allocator, block_count: usize, use_component_payloads: bool) !StrictComponentAssembly {
         const blocks = try allocator.alloc(StrictRpclBlockAssembly, block_count);
@@ -4146,11 +4150,17 @@ const StrictComponentAssembly = struct {
             .allocator = allocator,
             .blocks = blocks,
             .use_component_payloads = use_component_payloads,
+            .payload_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
 
+    fn payloadAllocator(self: *StrictComponentAssembly) std.mem.Allocator {
+        return self.payload_arena.allocator();
+    }
+
     fn deinit(self: *StrictComponentAssembly) void {
-        for (self.blocks) |*block| block.deinit(self.allocator);
+        // Block payloads live in the arena.
+        self.payload_arena.deinit();
         self.payloads.deinit(self.allocator);
         self.allocator.free(self.blocks);
         self.* = undefined;
@@ -11305,7 +11315,7 @@ fn appendStrictPacketAuditBlock(
             block.payload_offset = assembly.payloads.items.len;
             try assembly.payloads.appendSlice(assembly.allocator, payload);
         } else {
-            try block.payload.appendSlice(assembly.allocator, payload);
+            try block.payload.appendSlice(assembly.payloadAllocator(), payload);
             if (block.payload.items.len != block.payload_length) return CodestreamError.InvalidCodestream;
         }
     } else {
@@ -11944,7 +11954,7 @@ fn collectStrictRpclPacketBlocks(
             block.payload_length = std.math.add(usize, block.payload_length, payload.len) catch
                 return CodestreamError.InvalidCodestream;
             try block.appendSegmentLengths(decoded);
-            if (block.payload_retained) try block.payload.appendSlice(assembly.allocator, payload);
+            if (block.payload_retained) try block.payload.appendSlice(assembly.payloadAllocator(), payload);
             if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
             if (block.payload_retained and block.payload.items.len != block.payload_length) {
                 return CodestreamError.InvalidCodestream;

@@ -133,6 +133,10 @@ Inverse colour worker cap (was four), `--timings` at t20 against
 and sixteen for the float paths; end to end (11 rounds) 90.3 -> 88.5 ms
 lossless and 103.3 -> 100.1 ms lossy.
 
+Arena-backed block payload lists (multi-layer streams), against `599a4ee`
+on the lossy profile: headers 5.12 -> 3.54 ms, finalize 1.46 -> 1.33 ms
+(11 `--timings` runs); decode 100.9 -> 97.5 ms at t20 (11 rounds).
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

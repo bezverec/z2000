@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Arena-Backed Block Payloads For Multi-Layer Streams
+
+- A multi-layer stream assembles each block's payload in its own list,
+  grown once per contribution through the general allocator. Those lists
+  now come from an arena owned by the component assembly and released with
+  it; single-layer streams keep their reserved component buffer.
+- Output is byte-identical (lossy 9/7 at t1 and t20 and layer-limited,
+  lossless profile, 34-bit wide stream); the Debug test allocator reports
+  no leaks. `--timings` against `599a4ee` on the two-layer lossy profile:
+  packet-header stage 5.12 -> 3.54 ms; interleaved A/B: decode 100.9 ->
+  97.5 ms at t20.
+
 ### Inverse Colour Worker Caps Per Transform
 
 - Inverse colour conversion was capped at four workers, tuned on an 8C/16T
