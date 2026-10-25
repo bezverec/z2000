@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Inverse 9/7 Overlapped With Tier-1
+
+- The irreversible three-component path at full resolution on two or more
+  threads overlaps dequantization and the inverse 9/7 the same way as the
+  reversible path: `IrreversibleReconstruction` holds the band steps,
+  float planes, and per-component jobs before the block pool starts, the
+  worker completing plane 0 or 1 runs that plane's job
+  (`StrictInverse97Finisher`), and plane 2 is dequantized and transformed
+  on all DWT workers afterwards (`wavelet.inverse97ParallelPlane`, which
+  the existing parallel-versus-serial test already pins byte for byte).
+  Finishers now receive the plane index.
+- Band dequantization runs eight lanes at a time with the scalar rule's
+  f64 arithmetic in every lane, so its output is bit-identical.
+- Output is byte-identical (lossy 9/7 at t1, t2, t3, t4, t8, t20; region
+  and layer-limited lossy decodes; the lossless profile; 34-bit wide
+  stream). Interleaved A/B on the i5-14500 against `8288bd7` (a 4.8 MB
+  two-layer ICT stream of the benchmark image): decode 108.9 -> 104.4 ms
+  at t20, 145.1 -> 139.3 ms at t8, 594.2 -> 582.4 ms at t1. Running the
+  in-pool 9/7 on 4 or 8 threads, or finishing only plane 0 in the pool,
+  were slower.
+
 ### Inverse 5/3 Overlapped With Tier-1
 
 - Reversible three-component decode at full resolution on two or more

@@ -3320,10 +3320,25 @@ fn removeUnearnedMidpointOffsets(job: *IrreversibleInversePlaneJob, blocks: []co
 }
 
 fn dequantizeBandRegion(src: []const i32, dst: []f32, stride: usize, rect: subband.Rect, delta: f64) void {
+    const lanes = 8;
+    const QuantVector = @Vector(lanes, i32);
+    const WideVector = @Vector(lanes, f64);
+    const SampleVector = @Vector(lanes, f32);
+    const zero: QuantVector = @splat(0);
+    const half: WideVector = @splat(0.5);
+    const step: WideVector = @splat(delta);
     var row: usize = 0;
     while (row < rect.height) : (row += 1) {
         const base = (rect.y + row) * stride + rect.x;
         var col: usize = 0;
+        // The scalar rule below, lane by lane in the same f64 arithmetic.
+        while (col + lanes <= rect.width) : (col += lanes) {
+            const q: QuantVector = src[base + col ..][0..lanes].*;
+            const magnitude: WideVector = @floatFromInt(@abs(q));
+            const value = (magnitude + half) * step;
+            const signed: SampleVector = @floatCast(@select(f64, q < zero, -value, value));
+            dst[base + col ..][0..lanes].* = @select(f32, q == zero, @as(SampleVector, @splat(0)), signed);
+        }
         while (col < rect.width) : (col += 1) {
             const q = src[base + col];
             if (q == 0) {
@@ -3355,7 +3370,8 @@ const StrictInverse53Finisher = struct {
         };
     }
 
-    fn finish(context: *anyopaque, plane: []i32) anyerror!void {
+    fn finish(context: *anyopaque, target: usize, plane: []i32) anyerror!void {
+        _ = target;
         const self: *StrictInverse53Finisher = @ptrCast(@alignCast(context));
         var workspace = try wavelet_int.Workspace.init(std.heap.smp_allocator, @max(self.width, self.height));
         defer workspace.deinit();
@@ -12134,6 +12150,22 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     var finished: [3]std.atomic.Value(bool) = @splat(std.atomic.Value(bool).init(false));
     const overlap_dwt = header.transform != .irreversible_9_7 and options.resolution_reduction == 0 and
         componentThreadCountFor(options.threads) >= 2 and full_resolution.x0 == 0 and full_resolution.y0 == 0;
+    // The irreversible path overlaps dequantization and the inverse 9/7 the
+    // same way, at any origin.
+    const overlap_97 = header.transform == .irreversible_9_7 and options.resolution_reduction == 0 and
+        componentThreadCountFor(options.threads) >= 2;
+    var irreversible: ?IrreversibleReconstruction = if (overlap_97)
+        try IrreversibleReconstruction.init(allocator, header, 0, catalog)
+    else
+        null;
+    defer if (irreversible) |*reconstruction| reconstruction.deinit();
+    var dwt97_finisher: StrictInverse97Finisher = undefined;
+    const finisher: ?StrictComponentFinisher = if (overlap_dwt)
+        dwt_finisher.finisher(&finished)
+    else if (irreversible) |*reconstruction| blk: {
+        dwt97_finisher = .{ .reconstruction = reconstruction };
+        break :blk dwt97_finisher.finisher(&finished);
+    } else null;
     const payload_start = monotonicNs();
     var strict_planes = try reconstructStrictComponentCoefficientPlanesFinishing(
         allocator,
@@ -12141,11 +12173,22 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
         catalog,
         options,
         timings,
-        if (overlap_dwt) dwt_finisher.finisher(&finished) else null,
+        finisher,
     );
     defer strict_planes.deinit();
     if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
 
+    if (irreversible) |*reconstruction| {
+        const wavelet_start = monotonicNs();
+        for (strict_planes.planes, 0..) |plane, component| {
+            if (finished[component].load(.acquire)) continue;
+            const job = &reconstruction.jobs[component];
+            job.quantized = plane;
+            try irreversibleInversePlaneParallel(job, options.threads);
+        }
+        if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
+        return reconstruction.finish(allocator, header, options.threads, 0, timings);
+    }
     if (header.transform == .irreversible_9_7) {
         return decodeIrreversibleImageFromQuantizedPlanesMeasured(
             allocator,
@@ -14476,7 +14519,7 @@ fn irreversibleInversePlaneWorker(job: *IrreversibleInversePlaneJob) void {
     job.result = irreversibleInversePlane(job);
 }
 
-fn irreversibleInversePlane(job: *IrreversibleInversePlaneJob) anyerror!void {
+fn irreversibleDequantizePlane(job: *IrreversibleInversePlaneJob) !void {
     @memset(job.plane, 0);
     for (job.bands, job.deltas) |band, delta| {
         if (!strictBandRequiredForReduction(band, job.reduction)) continue;
@@ -14485,6 +14528,19 @@ fn irreversibleInversePlane(job: *IrreversibleInversePlaneJob) anyerror!void {
     if (job.blocks) |blocks| {
         try removeUnearnedMidpointOffsets(job, blocks);
     }
+}
+
+/// `irreversibleInversePlane` at full resolution with the inverse 9/7 on all
+/// DWT workers (byte-identical to the serial transform).
+fn irreversibleInversePlaneParallel(job: *IrreversibleInversePlaneJob, thread_count: u8) !void {
+    if (job.reduction != 0) return CodestreamError.InvalidCodestream;
+    try irreversibleDequantizePlane(job);
+    try wavelet.inverse97ParallelPlane(std.heap.smp_allocator, job.plane, job.width, job.height, job.levels, job.x0, job.y0, thread_count);
+    job.shape = .{ .width = job.width, .height = job.height, .x0 = job.x0, .y0 = job.y0 };
+}
+
+fn irreversibleInversePlane(job: *IrreversibleInversePlaneJob) anyerror!void {
+    try irreversibleDequantizePlane(job);
     job.shape = try wavelet.inverse2DReducedOrigin(
         std.heap.smp_allocator,
         job.plane,
@@ -14514,97 +14570,177 @@ fn decodeIrreversibleImageFromQuantizedPlanesMeasured(
         if (plane_slice.len != pixels) return CodestreamError.InvalidCodestream;
     }
 
-    const plan = temporaryPacketPlan(header);
-    if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
-    const full_resolution = plan.resolutions[plan.resolution_count - 1];
-    const x1 = std.math.add(u32, full_resolution.x0, std.math.cast(u32, header.width) orelse return CodestreamError.InvalidCodestream) catch
-        return CodestreamError.InvalidCodestream;
-    const y1 = std.math.add(u32, full_resolution.y0, std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream) catch
-        return CodestreamError.InvalidCodestream;
-    const bands = try subband.makeBandsForRegion(
-        allocator,
-        full_resolution.x0,
-        full_resolution.y0,
-        x1,
-        y1,
-        header.levels,
-    );
-    defer allocator.free(bands);
-
-    var reconstructed = try color.IctPlanes.init(allocator, header.width, header.height, header.bit_depth, 3);
-    defer reconstructed.deinit();
-
-    const delta_count = try std.math.mul(usize, bands.len, 3);
-    const deltas = try allocator.alloc(f64, delta_count);
-    defer allocator.free(deltas);
-    for (0..3) |component| {
-        const component_deltas = deltas[component * bands.len ..][0..bands.len];
-        const component_qcd = &header.component_qcd[component];
-        const component_depth = componentBitDepthForHeader(header, component);
-        for (bands, component_deltas) |band, *delta| {
-            const step = signalledQcdBandStep(
-                component_qcd,
-                header.levels,
-                band.kind,
-                band.level,
-            ) orelse signalledHeaderBandStep(header, band.kind, band.level) orelse
-                try irreversibleBandStepSizeFor(
-                    header.quantization,
-                    component_depth,
-                    band.kind,
-                    band.level,
-                    header.levels,
-                );
-            delta.* = irreversibleBandDelta(component_depth, band.kind, step);
-        }
-    }
+    var reconstruction = try IrreversibleReconstruction.init(allocator, header, resolution_reduction, catalog);
+    defer reconstruction.deinit();
+    for (&reconstruction.jobs, quantized.planes) |*job, plane| job.quantized = plane;
 
     const wavelet_start = monotonicNs();
     // Dequantization and the inverse 9/7 DWT are independent per component,
     // so three fused plane jobs avoid extra full-plane traffic. A wider
     // intra-plane inverse was bit-exact but regressed the maintained t16 gate.
-    var jobs = [3]IrreversibleInversePlaneJob{
-        .{ .quantized = quantized.planes[0], .plane = reconstructed.planes[0], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[0..bands.len], .reduction = resolution_reduction, .blocks = irreversibleMidpointBlocks(header, catalog, 0) },
-        .{ .quantized = quantized.planes[1], .plane = reconstructed.planes[1], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[bands.len .. 2 * bands.len], .reduction = resolution_reduction, .blocks = irreversibleMidpointBlocks(header, catalog, 1) },
-        .{ .quantized = quantized.planes[2], .plane = reconstructed.planes[2], .width = header.width, .height = header.height, .levels = header.levels, .x0 = full_resolution.x0, .y0 = full_resolution.y0, .bands = bands, .deltas = deltas[2 * bands.len .. 3 * bands.len], .reduction = resolution_reduction, .blocks = irreversibleMidpointBlocks(header, catalog, 2) },
-    };
-    try runComponentJobs(IrreversibleInversePlaneJob, allocator, jobs[0..], componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
+    try runComponentJobs(IrreversibleInversePlaneJob, allocator, reconstruction.jobs[0..], componentThreadCountFor(thread_count), irreversibleInversePlaneWorker);
     if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
-
-    const decoded_width = try reducedGridLength(header.reference_x0, header.width, resolution_reduction);
-    const decoded_height = try reducedGridLength(header.reference_y0, header.height, resolution_reduction);
-    for (jobs) |job| {
-        if (job.shape.width != decoded_width or job.shape.height != decoded_height) {
-            return CodestreamError.InvalidCodestream;
-        }
-    }
-
-    const color_start = monotonicNs();
-    defer {
-        if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
-    }
-    if (resolution_reduction == 0) {
-        return if (header.mct == .none)
-            color.inverseNoTransformFloatThreaded(allocator, reconstructed, thread_count)
-        else
-            color.inverseIctThreaded(allocator, reconstructed, thread_count);
-    }
-
-    var compact = try color.IctPlanes.init(allocator, decoded_width, decoded_height, header.bit_depth, 3);
-    defer compact.deinit();
-    for (0..3) |component| {
-        for (0..decoded_height) |row| {
-            @memcpy(
-                compact.planes[component][row * decoded_width ..][0..decoded_width],
-                reconstructed.planes[component][row * header.width ..][0..decoded_width],
-            );
-        }
-    }
-    return if (header.mct == .none)
-        color.inverseNoTransformFloatThreaded(allocator, compact, thread_count)
-    else
-        color.inverseIctThreaded(allocator, compact, thread_count);
+    return reconstruction.finish(allocator, header, thread_count, resolution_reduction, timings);
 }
+
+/// The irreversible back end's state besides the quantized planes: band
+/// steps, the float output planes, and one dequantize-plus-inverse job per
+/// component, each run once its quantized plane is complete.
+const IrreversibleReconstruction = struct {
+    allocator: std.mem.Allocator,
+    bands: []subband.Band,
+    deltas: []f64,
+    reconstructed: color.IctPlanes,
+    jobs: [3]IrreversibleInversePlaneJob,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        header: TemporaryHeader,
+        resolution_reduction: u8,
+        catalog: ?StrictPacketBlockCatalog,
+    ) !IrreversibleReconstruction {
+        const plan = temporaryPacketPlan(header);
+        if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
+        const full_resolution = plan.resolutions[plan.resolution_count - 1];
+        const x1 = std.math.add(u32, full_resolution.x0, std.math.cast(u32, header.width) orelse return CodestreamError.InvalidCodestream) catch
+            return CodestreamError.InvalidCodestream;
+        const y1 = std.math.add(u32, full_resolution.y0, std.math.cast(u32, header.height) orelse return CodestreamError.InvalidCodestream) catch
+            return CodestreamError.InvalidCodestream;
+        const bands = try subband.makeBandsForRegion(
+            allocator,
+            full_resolution.x0,
+            full_resolution.y0,
+            x1,
+            y1,
+            header.levels,
+        );
+        errdefer allocator.free(bands);
+
+        var reconstructed = try color.IctPlanes.init(allocator, header.width, header.height, header.bit_depth, 3);
+        errdefer reconstructed.deinit();
+
+        const delta_count = try std.math.mul(usize, bands.len, 3);
+        const deltas = try allocator.alloc(f64, delta_count);
+        errdefer allocator.free(deltas);
+        for (0..3) |component| {
+            const component_deltas = deltas[component * bands.len ..][0..bands.len];
+            const component_qcd = &header.component_qcd[component];
+            const component_depth = componentBitDepthForHeader(header, component);
+            for (bands, component_deltas) |band, *delta| {
+                const step = signalledQcdBandStep(
+                    component_qcd,
+                    header.levels,
+                    band.kind,
+                    band.level,
+                ) orelse signalledHeaderBandStep(header, band.kind, band.level) orelse
+                    try irreversibleBandStepSizeFor(
+                        header.quantization,
+                        component_depth,
+                        band.kind,
+                        band.level,
+                        header.levels,
+                    );
+                delta.* = irreversibleBandDelta(component_depth, band.kind, step);
+            }
+        }
+
+        var self = IrreversibleReconstruction{
+            .allocator = allocator,
+            .bands = bands,
+            .deltas = deltas,
+            .reconstructed = reconstructed,
+            .jobs = undefined,
+        };
+        for (&self.jobs, 0..) |*job, component| {
+            job.* = .{
+                .quantized = &.{},
+                .plane = reconstructed.planes[component],
+                .width = header.width,
+                .height = header.height,
+                .levels = header.levels,
+                .x0 = full_resolution.x0,
+                .y0 = full_resolution.y0,
+                .bands = bands,
+                .deltas = deltas[component * bands.len ..][0..bands.len],
+                .reduction = resolution_reduction,
+                .blocks = irreversibleMidpointBlocks(header, catalog, component),
+            };
+        }
+        return self;
+    }
+
+    fn deinit(self: *IrreversibleReconstruction) void {
+        self.reconstructed.deinit();
+        self.allocator.free(self.deltas);
+        self.allocator.free(self.bands);
+    }
+
+    /// Checks every job's output shape and undoes ICT or the level shift.
+    fn finish(
+        self: *IrreversibleReconstruction,
+        allocator: std.mem.Allocator,
+        header: TemporaryHeader,
+        thread_count: u8,
+        resolution_reduction: u8,
+        timings: ?*DecodeTimings,
+    ) !image.RgbImage {
+        const decoded_width = try reducedGridLength(header.reference_x0, header.width, resolution_reduction);
+        const decoded_height = try reducedGridLength(header.reference_y0, header.height, resolution_reduction);
+        for (self.jobs) |job| {
+            if (job.shape.width != decoded_width or job.shape.height != decoded_height) {
+                return CodestreamError.InvalidCodestream;
+            }
+        }
+
+        const color_start = monotonicNs();
+        defer {
+            if (timings) |t| t.color_transform_ns += elapsedNs(color_start);
+        }
+        if (resolution_reduction == 0) {
+            return if (header.mct == .none)
+                color.inverseNoTransformFloatThreaded(allocator, self.reconstructed, thread_count)
+            else
+                color.inverseIctThreaded(allocator, self.reconstructed, thread_count);
+        }
+
+        var compact = try color.IctPlanes.init(allocator, decoded_width, decoded_height, header.bit_depth, 3);
+        defer compact.deinit();
+        for (0..3) |component| {
+            for (0..decoded_height) |row| {
+                @memcpy(
+                    compact.planes[component][row * decoded_width ..][0..decoded_width],
+                    self.reconstructed.planes[component][row * header.width ..][0..decoded_width],
+                );
+            }
+        }
+        return if (header.mct == .none)
+            color.inverseNoTransformFloatThreaded(allocator, compact, thread_count)
+        else
+            color.inverseIctThreaded(allocator, compact, thread_count);
+    }
+};
+
+/// `StrictComponentFinisher` dequantizing a decoded plane and running its
+/// serial inverse 9/7.
+const StrictInverse97Finisher = struct {
+    reconstruction: *IrreversibleReconstruction,
+
+    fn finisher(self: *StrictInverse97Finisher, finished: []std.atomic.Value(bool)) StrictComponentFinisher {
+        return .{
+            .context = self,
+            .finish = finish,
+            .target_limit = finished.len - 1,
+            .finished = finished,
+        };
+    }
+
+    fn finish(context: *anyopaque, target: usize, plane: []i32) anyerror!void {
+        const self: *StrictInverse97Finisher = @ptrCast(@alignCast(context));
+        const job = &self.reconstruction.jobs[target];
+        job.quantized = plane;
+        try irreversibleInversePlane(job);
+    }
+};
 
 /// `apply_ict` inverts the ICT over components 0..2 into output samples; the
 /// four-component RGBA layout is the only caller, and its alpha plane receives
@@ -14857,7 +14993,7 @@ fn StrictBlockDecodeTargetFor(comptime Coefficient: type) type {
 /// caller; `finished` records which ones it ran.
 const StrictComponentFinisher = struct {
     context: *anyopaque,
-    finish: *const fn (context: *anyopaque, plane: []i32) anyerror!void,
+    finish: *const fn (context: *anyopaque, target: usize, plane: []i32) anyerror!void,
     target_limit: usize,
     finished: []std.atomic.Value(bool),
 };
@@ -14901,7 +15037,7 @@ fn completeStrictDecodeBlock(job: anytype, target: u32) void {
     if (std.meta.Elem(@TypeOf(job.targets[0].plane)) != i32) return;
     const plane_target = job.targets[target];
     undoMaxshiftRoi(plane_target.plane, plane_target.roi_shift);
-    finisher.finish(finisher.context, plane_target.plane) catch |err| {
+    finisher.finish(finisher.context, target, plane_target.plane) catch |err| {
         job.result = err;
         return;
     };

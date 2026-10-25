@@ -113,6 +113,20 @@ worker that completes them, plane 2 on all DWT workers afterwards), against
 `821fcbf`: t20 decode 91.3 -> 86.9 ms (15 rounds); t2 335.4 -> 334.9,
 t4 187.9 -> 191.9 (minimum 185.5 -> 183.0), t8 133.3 -> 123.7 ms (7 rounds).
 
+Lossy profile (4,800,644-byte two-layer 9/7 ICT stream of the benchmark
+image, written by z2000 with `--transform 9-7 --mct ict --qstyle
+scalar-expounded --layers 2`), t20 `--timings` at `8288bd7`: block phase
+50.5, inverse DWT 19.0 (one plane per thread), inverse MCT 5.4, packet
+catalog 7.7, TIFF 5.9 ms; Kakadu 8.4.1 decodes it in 68.3 ms against
+z2000 104.8 ms at t20 and 536.7 against 581.0 ms at t1.
+
+| Candidate (lossy, t20 unless noted) | Comparison | Result |
+| --- | --- | --- |
+| 9/7 overlap: planes 0 and 1 finished in the pool, plane 2 on all DWT workers | 107.8 -> 103.7 ms (11 rounds); t8 145.1 -> 139.3, t4 196.7 -> 197.9, t2 334.9 -> 328.4 ms | kept; plane 1's 19 ms serial job still overruns the pool by a few ms |
+| Vector dequantization | t20 102.7 -> 103.1 ms, t1 594.2 -> 582.4 ms (9 rounds) | kept (bit-identical) |
+| In-pool 9/7 on 4 / 8 threads | 103.7 -> 105.0 / 105.6 ms | rejected |
+| Finish only plane 0 in the pool | 104.4 -> 106.6 ms | rejected |
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

@@ -164,10 +164,13 @@ scattering each block (a few percent at most).
 
 First slice done 2026-10-25: the reversible full-resolution inverse 5/3 of
 planes 0 and 1 runs inside the block pool as each plane completes (t20
-decode 91.3 -> 86.9 ms). Next candidates in the same direction: the same
-finisher for the irreversible 9/7 path; fusing inverse MCT with TIFF
-serialization (no 16-bit interleaved intermediate); a persistent worker
-pool shared by Tier-1, DWT, MCT, and output.
+decode 91.3 -> 86.9 ms); the irreversible path followed (lossy t20 108.9
+-> 104.4 ms), where plane 1's serial 9/7 still overruns the pool. Next
+candidates in the same direction: splitting a finished plane's 9/7 into
+level or band tasks the idle workers can pick up at the end of the pool;
+fusing inverse MCT/ICT with TIFF serialization (no 16-bit interleaved
+intermediate; ICT is 5.4 ms at t20 on the lossy profile); a persistent
+worker pool shared by Tier-1, DWT, MCT, and output.
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse

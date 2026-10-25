@@ -746,6 +746,7 @@ const Dwt97BandJob = struct {
     fn run(job: *const Dwt97BandJob) void {
         switch (job.phase) {
             .forward_columns => for (job.planes) |plane| {
+                if (plane.len == 0) continue;
                 var col = job.begin;
                 if (job.cur_height >= 2) {
                     while (col + f32_block_lanes <= job.end) : (col += f32_block_lanes) {
@@ -761,6 +762,7 @@ const Dwt97BandJob = struct {
                 }
             },
             .inverse_columns => for (job.planes) |plane| {
+                if (plane.len == 0) continue;
                 var col = job.begin;
                 if (job.cur_height >= 2) {
                     while (col + f32_block_lanes <= job.end) : (col += f32_block_lanes) {
@@ -776,12 +778,14 @@ const Dwt97BandJob = struct {
                 }
             },
             .forward_rows => for (job.planes) |plane| {
+                if (plane.len == 0) continue;
                 var row = job.begin;
                 while (row < job.end) : (row += 1) {
                     forward1DOrigin(plane[row * job.stride ..][0..job.cur_width], job.scratch[0..job.cur_width], .irreversible_9_7, job.x0);
                 }
             },
             .inverse_rows => for (job.planes) |plane| {
+                if (plane.len == 0) continue;
                 var row = job.begin;
                 while (row < job.end) : (row += 1) {
                     inverse1DOrigin(plane[row * job.stride ..][0..job.cur_width], job.scratch[0..job.cur_width], .irreversible_9_7, job.x0);
@@ -1027,6 +1031,23 @@ pub fn forward97Parallel(
     return done;
 }
 
+/// `inverse97Parallel` over one plane.
+pub fn inverse97ParallelPlane(
+    allocator: std.mem.Allocator,
+    plane: []f32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    x0: u32,
+    y0: u32,
+    thread_count: usize,
+) !void {
+    if (plane.len == 0) return TransformError.InvalidDimensions;
+    const none: []f32 = &.{};
+    return inverse97Parallel(allocator, .{ plane, none, none }, width, height, levels, x0, y0, thread_count);
+}
+
+/// Inverse 9/7 of up to three planes; an empty plane is skipped.
 pub fn inverse97Parallel(
     allocator: std.mem.Allocator,
     planes: [3][]f32,
@@ -1038,6 +1059,7 @@ pub fn inverse97Parallel(
     thread_count: usize,
 ) !void {
     for (planes) |plane| {
+        if (plane.len == 0) continue;
         if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
     }
     var shapes: [32]LevelShape = undefined;
