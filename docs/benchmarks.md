@@ -55,7 +55,9 @@ serially) 3.0 ms; catalog finalize 0.6 / 1.4 ms (it copies each block's
 fill, and the per-plane coverage checks by component, against `db938ca`:
 header walk 2.58 -> 1.62 ms lossless, finalize 1.34 -> 0.74 ms lossy (9-11
 `--timings` runs); decode 87.5 -> 85.0 ms lossless, 89.9 -> 89.4 ms lossy
-(15 rounds).
+(15 rounds). The multi-layer walk by component (shared precinct state,
+per-component slots) then took the lossy header walk from 3.62 to 2.21 ms
+and decode from 87.6 to 86.3 ms (15 rounds).
 
 ## 2026-10-25: Intel Core i5-14500, shared worker pool
 

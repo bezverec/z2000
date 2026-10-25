@@ -22,6 +22,12 @@ entries are grouped by development milestone rather than semantic version.
   decodes; 34-bit wide stream). Against `db938ca` at t20: header walk 2.58
   -> 1.62 ms lossless, catalog finalize 1.34 -> 0.74 ms lossy; decode 87.5
   -> 85.0 ms lossless and 89.9 -> 89.4 ms lossy (15 rounds).
+- Multi-layer streams walk their headers by component too: the precinct
+  state that persists across layers is shared by the workers, each
+  touching only its component's slots, with its groups allocated from the
+  thread-safe page allocator. Lossy profile against `67e833a`: header walk
+  3.62 -> 2.21 ms, decode 87.6 -> 86.3 ms at t20; output byte-identical
+  (lossy t1, t2, t3, t20, layer-limited; lossless; 34-bit wide).
 
 ### Shared Worker Pool
 

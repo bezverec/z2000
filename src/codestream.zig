@@ -11155,14 +11155,18 @@ fn assembleStrictPacketCatalogHeadersThreaded(
     }
 
     const persistent_precinct_state = packetCatalogRevisitsPrecincts(catalog.entries);
+    const by_component = threads > 1 and header.component_count > 1;
+    // Walked by component, the precinct state is shared by the workers (each
+    // touches only its component's slots), so its groups come from the
+    // thread-safe page allocator.
     var stateful_groups: ?StrictStatefulPrecinctGroups = if (persistent_precinct_state)
-        try StrictStatefulPrecinctGroups.init(allocator, header)
+        try StrictStatefulPrecinctGroups.init(if (by_component) std.heap.smp_allocator else allocator, header)
     else
         null;
     defer if (stateful_groups) |*groups| groups.deinit();
 
     const use_packet_group_arena = header.layers == 1 and !persistent_precinct_state;
-    if (threads > 1 and use_packet_group_arena and header.component_count > 1) {
+    if (by_component) {
         try assembleStrictCatalogEntriesByComponent(
             header,
             catalog,
@@ -11172,6 +11176,7 @@ fn assembleStrictPacketCatalogHeadersThreaded(
             retained_layer_count,
             audit,
             @min(threads, header.component_count),
+            if (stateful_groups) |*groups| groups else null,
         );
     } else {
         var packet_group_arena = std.heap.ArenaAllocator.init(allocator);
@@ -11298,6 +11303,9 @@ const StrictCatalogComponentJob = struct {
     retained_layer_count: u16,
     first_component: usize,
     component_stride: usize,
+    /// Shared precinct state of a multi-layer walk; null walks with
+    /// per-packet groups from the worker's own arena.
+    stateful: ?*StrictStatefulPrecinctGroups,
     audit: StrictPacketHeaderAudit = .{},
     failed_entry: usize = std.math.maxInt(usize),
     failure: anyerror = error.Unexpected,
@@ -11308,9 +11316,9 @@ const StrictCatalogComponentJob = struct {
         var state = StrictCatalogEntryState{
             .group_allocator = packet_group_arena.allocator(),
             .packet_group_arena = &packet_group_arena,
-            .use_packet_group_arena = true,
-            .persistent_precinct_state = false,
-            .stateful_groups = null,
+            .use_packet_group_arena = self.stateful == null,
+            .persistent_precinct_state = self.stateful != null,
+            .stateful_groups = self.stateful,
         };
         defer state.deinit();
         for (self.catalog.entries, 0..) |entry, entry_index| {
@@ -11337,6 +11345,7 @@ fn assembleStrictCatalogEntriesByComponent(
     retained_layer_count: u16,
     audit: *StrictPacketHeaderAudit,
     workers: usize,
+    stateful: ?*StrictStatefulPrecinctGroups,
 ) !void {
     for (catalog.entries) |entry| {
         if (entry.packet.component >= header.component_count) return CodestreamError.InvalidCodestream;
@@ -11353,6 +11362,7 @@ fn assembleStrictCatalogEntriesByComponent(
             .retained_layer_count = retained_layer_count,
             .first_component = index,
             .component_stride = count,
+            .stateful = stateful,
         };
     }
     if (!worker_pool.runJobs(StrictCatalogComponentJob, jobs[0..count], StrictCatalogComponentJob.run)) {
