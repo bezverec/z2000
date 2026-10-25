@@ -46,6 +46,39 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-25: Intel Core i5-14500, streamed RGB tail with a replaced output file (rejected)
+
+Base `9525104`, common lossless stream at t20 unless noted. Prototype: after
+the Tier-1 pool, the unfinished plane's coarser 5/3 levels ran at once;
+then 32-row bands, claimed in order on the shared pool, each repeated the
+horizontal pass of its edge rows, applied the finest vertical lifting into
+a private buffer, and ran the inverse RCT into the 8-bit raster. Whichever
+thread finished the next band in row order wrote every finished band in
+one call to a temporary file beside the output (`std.Io.Dir.createFileAtomic`,
+preallocated to the final length), moved over the output path only after
+the ICC trailer, with the replaced file held open across the move so that
+freeing its data did not delay it. Output was byte-identical, and nothing
+changed at the output path on failure.
+
+| Stage (13 runs) | Base | Streamed |
+| --- | ---: | ---: |
+| inverse DWT | 3.08-3.41 ms | 1.54-1.59 ms (coarser levels only) |
+| inverse RCT | 1.15-1.29 ms | in the stream |
+| streamed output | - | 4.62 ms (first band ready after about 0.6 ms) |
+| TIFF write | 4.31-4.49 ms | 0.96-1.13 ms (trailer, close, move) |
+
+The tail went from about 8.6 to 7.2 ms, but the run outside the timed span
+grew by 1.6 ms (21 interleaved rounds: 15.9 -> 17.5 ms), and wall time was
+81.5 -> 83.1 ms at t20 (+1.9%) and 141.8 -> 140.4 ms at t6 (25 rounds);
+with the output deleted before every run, 83.9 -> 85.5 ms. Writing is the
+floor of the tail (one 12.6 MB write takes about 3.3 ms, in 32-row pieces
+about 4.5 ms before coalescing), and a move over an existing file costs
+about 1.1 ms more than overwriting it in place (standalone: 2.95 + 1.14 ms
+against 3.43 ms). Two details on the way: a separate delivering thread
+(one more than the cores) waited about 1 ms for a time slice after each
+wake-up, hence delivery by the computing threads; and per-band writes cost
+0.5 ms more than coalesced ones. Not merged.
+
 ## 2026-10-25: Intel Core i5-14500, JP2 tile-part audit beside the decode; DWT and read probes
 
 Base `a425ecd`, same host and method. The whole 0.9 ms "codestream box"

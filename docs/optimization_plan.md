@@ -197,12 +197,14 @@ catalog 3.0-3.6 ms, inverse DWT tail 3.0-3.8 ms, inverse RCT 1.1-1.3 ms,
 TIFF write 4.3-4.9 ms (`benchmarks.md`). The read and write are copy-bound
 (parallel reads saved 0.2 ms, parallel writes were slower), and the tail
 DWT is memory-bound (moving its phases to the shared pool or adding workers
-was within noise). What is left needs real overlap: streaming the last
-plane's final DWT level, the colour transform, and the write row band by
-row band behind Tier-1 (which needs a failure policy for the output file:
-the strict checks in the DWT and RCT can still reject the stream after
-writing has begun), or starting Tier-1 on blocks while later packet
-headers are still being walked.
+was within noise). Streaming the last plane's finest DWT level, the RCT,
+and the write band by band into a temporary file moved over the output
+was tried and rejected (2026-10-25, `benchmarks.md`): the tail shrank by
+1.4 ms, but the move over an existing file and the time outside the decode
+grew by as much, and wall time rose 1-2% at t20. The write itself (about
+3.3 ms for 12.6 MB) is the floor there. What is left: starting Tier-1 on
+blocks while later packet headers are still being walked, and the packet
+catalog (3.0-3.6 ms, its scan serial).
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse
