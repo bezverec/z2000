@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### One Block Pool For All Components
+
+- Multi-thread block decode ran one pool per component, three after one
+  another for RGB, each spawning its workers and ending on its slowest
+  one. The three-component reversible path and the irreversible path now
+  prepare every plane first (bands, coverage, clearing) and run one pool
+  over all components' blocks, heaviest first
+  (`fillStrictComponentsCoefficientsFromBlockCatalog`). Other decode paths
+  keep a pool per component.
+- Output is byte-identical (lossless profile at t1, t2, and t20; a lossy
+  9/7 stream at t1 and t20; region decodes; 34-bit wide stream).
+  Interleaved A/B on the i5-14500 against `61c690d`: block phase 58.7 ->
+  52.4 ms and common-stream decode 97.9 -> 93.0 ms at t20.
+
 ### Shorter Serial Stages In JP2 Decode
 
 - Single-layer component payloads were appended packet by packet into

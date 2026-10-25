@@ -81,6 +81,14 @@ End to end, 9 rounds: t20 decode 101.6 -> 97.6 ms (Kakadu 8.4.1 67.5 ms,
 Grok 20.4.19 114.4 ms); t1 597.2 -> 603.4 ms, inside noise (Kakadu 579.7,
 Grok 623.2 ms).
 
+One pool over all three components' blocks instead of a pool per
+component, against `61c690d`: block phase 58.71 -> 52.44 ms (11 `--timings`
+runs), decode 97.9 -> 93.0 ms at t20 (15 rounds). A bare process start
+(`--version`) takes 13.2 ms for z2000 and 12.4 ms for `kdu_expand
+-version`, so about 12 ms of every end-to-end figure here is process
+creation and teardown for both codecs; z2000's own `--timings` total is
+80.9 ms.
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

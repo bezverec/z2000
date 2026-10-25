@@ -78,7 +78,9 @@ all-thread setting.
   near-term value than another unbounded SIMD rewrite.
 - Persistent parallel forward 9/7 DWT and parallel inverse RCT/ICT were kept.
   The symmetric inverse-DWT pool and cross-component T1 pool were rejected by
-  measurement.
+  measurement in July; on 2026-10-25, with heaviest-first atomic block
+  scheduling inside it, one pool over all components' blocks was kept
+  (block phase 58.7 -> 52.4 ms at t20 on the i5-14500).
 - The 5/3 DWT phase is now capped at eight workers to match the 9/7 driver: the
   memory-bound bands stop scaling past the eight physical cores on the x86 host,
   so the uncapped 32-worker setting let lossless inverse DWT regress at t16

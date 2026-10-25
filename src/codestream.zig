@@ -14598,21 +14598,27 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
     );
     defer quantized.deinit();
     const payload_start = monotonicNs();
-    for (0..header.component_count) |component| {
-        try fillStrictComponentCoefficientsFromBlockCatalog(
-            allocator,
-            catalog.component_widths[component],
-            catalog.component_heights[component],
-            header.levels,
-            catalog,
-            component,
-            componentRoiShiftForHeader(header, component),
-            options,
-            quantized.planes[component],
-            if (timings) |t| &t.t1_pass_stats else null,
-            timings,
-        );
+    const fills = try allocator.alloc(StrictComponentFill(i32), header.component_count);
+    defer allocator.free(fills);
+    for (fills, 0..) |*fill, component| {
+        fill.* = .{
+            .component = component,
+            .width = catalog.component_widths[component],
+            .height = catalog.component_heights[component],
+            .roi_shift = componentRoiShiftForHeader(header, component),
+            .plane = quantized.planes[component],
+        };
     }
+    try fillStrictComponentsCoefficientsFromBlockCatalog(
+        i32,
+        allocator,
+        header.levels,
+        catalog,
+        options,
+        fills,
+        if (timings) |t| &t.t1_pass_stats else null,
+        timings,
+    );
     if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
 
     var reconstructed = try color.IctPlanes.initWithComponentLayouts(
@@ -14783,20 +14789,32 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
 
 /// One worker of the block-parallel T1 scheduler over i32 coefficients or, on
 /// the wide native path, i64.
+/// One component plane whose blocks a decode pool fills.
+fn StrictBlockDecodeTargetFor(comptime Coefficient: type) type {
+    return struct {
+        width: usize,
+        height: usize,
+        component: usize,
+        blocks: []const StrictPacketBlock,
+        bands: []const subband.Band,
+        plane: []Coefficient,
+    };
+}
+
+const StrictBlockRef = struct {
+    target: u32,
+    block: u32,
+};
+
 fn StrictBlockDecodeJobFor(comptime Coefficient: type) type {
     return struct {
         const Self = @This();
 
-        width: usize,
-        height: usize,
         catalog: *const StrictPacketBlockCatalog,
-        component: usize,
+        targets: []const StrictBlockDecodeTargetFor(Coefficient),
         next_block: *std.atomic.Value(usize),
-        blocks: []const StrictPacketBlock,
-        bands: []const subband.Band,
-        block_order: []const usize,
+        block_order: []const StrictBlockRef,
         options: DecodeOptions,
-        plane: []Coefficient,
         profile_worker: bool = false,
         collect_t1_stats: bool = false,
         t1_stats: ebcot.DecodePassStats = .{},
@@ -14810,7 +14828,7 @@ fn StrictBlockDecodeJobFor(comptime Coefficient: type) type {
 }
 
 fn strictBlockDecodeWorker(job: anytype) void {
-    const Coefficient = std.meta.Elem(@TypeOf(job.plane));
+    const Coefficient = std.meta.Elem(@TypeOf(job.targets[0].plane));
     const worker_start = if (job.profile_worker) monotonicNs() else 0;
     var scratch = ebcot.DecodeBlockScratchFor(Coefficient).init(std.heap.smp_allocator);
     defer scratch.deinit();
@@ -14821,15 +14839,17 @@ fn strictBlockDecodeWorker(job: anytype) void {
     while (true) {
         const order_index = job.next_block.fetchAdd(1, .monotonic);
         if (order_index >= job.block_order.len) break;
-        const block_index = job.block_order[order_index];
-        const block = job.blocks[block_index];
+        const ref = job.block_order[order_index];
+        const target = job.targets[ref.target];
+        const block_index: usize = ref.block;
+        const block = target.blocks[block_index];
         if (block.rect.width == 0 or block.rect.height == 0) {
             job.result = CodestreamError.InvalidCodestream;
             return;
         }
         const in_resolution = strictBlockRequiredForReduction(
             block,
-            job.bands,
+            target.bands,
             job.options.resolution_reduction,
         ) catch |err| {
             job.result = err;
@@ -14863,7 +14883,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
             job.result = CodestreamError.InvalidCodestream;
             return;
         }
-        const payload = job.catalog.blockPayload(job.component, block_index);
+        const payload = job.catalog.blockPayload(target.component, block_index);
         if (payload.len != block.payload_length) {
             job.result = CodestreamError.InvalidCodestream;
             return;
@@ -14891,7 +14911,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
                 job.result = err;
                 return;
             };
-            scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
+            scatterStrictDecodedBlockUnchecked(target.plane, target.width, target.height, block.rect, decoded) catch |err| {
                 job.result = err;
                 return;
             };
@@ -14916,7 +14936,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
                 job.result = err;
                 return;
             };
-            scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
+            scatterStrictDecodedBlockUnchecked(target.plane, target.width, target.height, block.rect, decoded) catch |err| {
                 job.result = err;
                 return;
             };
@@ -14941,7 +14961,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
                     job.result = err;
                     return;
                 };
-                scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
+                scatterStrictDecodedBlockUnchecked(target.plane, target.width, target.height, block.rect, decoded) catch |err| {
                     std.heap.smp_allocator.free(decoded);
                     job.result = err;
                     return;
@@ -14962,7 +14982,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
                     job.result = err;
                     return;
                 };
-                scatterStrictDecodedBlockUnchecked(job.plane, job.width, job.height, block.rect, decoded) catch |err| {
+                scatterStrictDecodedBlockUnchecked(target.plane, target.width, target.height, block.rect, decoded) catch |err| {
                     job.result = err;
                     return;
                 };
@@ -14979,31 +14999,41 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !color.RctPlanes {
-    // All multi-thread decode goes through the per-component block-level
-    // atomic scheduler (sequential components, balanced within each). The
-    // former component-parallel path (one thread per component) was only
-    // load-balanced at exactly 3 threads and left a 2:1 imbalance at 2
-    // threads (~1.31x); block-level balancing raises 2 threads to ~1.66x and
-    // keeps scaling monotone across thread counts.
+    // Multi-thread decode runs one block-level atomic scheduler over all
+    // three components' blocks, heaviest first. The former component-parallel
+    // path (one thread per component) was only load-balanced at exactly 3
+    // threads; a scheduler per component then ended three times on its
+    // slowest worker.
     const plane_slices = try allocator.alloc([]i32, 3);
-    var reconstructed: usize = 0;
+    var allocated: usize = 0;
     errdefer {
-        for (plane_slices[0..reconstructed]) |plane_slice| allocator.free(plane_slice);
+        for (plane_slices[0..allocated]) |plane_slice| allocator.free(plane_slice);
         allocator.free(plane_slices);
     }
-    while (reconstructed < 3) : (reconstructed += 1) {
-        plane_slices[reconstructed] = try reconstructStrictComponentCoefficientsFromBlockCatalog(
-            allocator,
-            header.width,
-            header.height,
-            header.levels,
-            catalog,
-            reconstructed,
-            componentRoiShiftForHeader(header, reconstructed),
-            options,
-            timings,
-        );
+    const pixels = try std.math.mul(usize, header.width, header.height);
+    while (allocated < 3) : (allocated += 1) {
+        plane_slices[allocated] = try allocator.alloc(i32, pixels);
     }
+    var fills: [3]StrictComponentFill(i32) = undefined;
+    for (&fills, 0..) |*fill, component| {
+        fill.* = .{
+            .component = component,
+            .width = header.width,
+            .height = header.height,
+            .roi_shift = componentRoiShiftForHeader(header, component),
+            .plane = plane_slices[component],
+        };
+    }
+    try fillStrictComponentsCoefficientsFromBlockCatalog(
+        i32,
+        allocator,
+        header.levels,
+        catalog,
+        options,
+        &fills,
+        if (timings) |t| &t.t1_pass_stats else null,
+        timings,
+    );
 
     return .{
         .allocator = allocator,
@@ -15076,6 +15106,77 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
     timings: ?*DecodeTimings,
 ) !void {
     const Coefficient = std.meta.Elem(@TypeOf(plane));
+    const fills = [_]StrictComponentFill(Coefficient){.{
+        .component = component,
+        .width = width,
+        .height = height,
+        .roi_shift = roi_shift,
+        .plane = plane,
+    }};
+    try fillStrictComponentsCoefficientsFromBlockCatalog(Coefficient, allocator, levels, catalog, options, &fills, t1_stats, timings);
+}
+
+/// One component plane for `fillStrictComponentsCoefficientsFromBlockCatalog`.
+fn StrictComponentFill(comptime Coefficient: type) type {
+    return struct {
+        component: usize,
+        width: usize,
+        height: usize,
+        roi_shift: u8,
+        plane: []Coefficient,
+    };
+}
+
+/// Decodes the blocks of several component planes. With more than one
+/// thread, one pool works through every component's blocks, heaviest first,
+/// instead of one pool per component that each end on their slowest worker.
+fn fillStrictComponentsCoefficientsFromBlockCatalog(
+    comptime Coefficient: type,
+    allocator: std.mem.Allocator,
+    levels: u8,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+    fills: []const StrictComponentFill(Coefficient),
+    t1_stats: ?*ebcot.DecodePassStats,
+    timings: ?*DecodeTimings,
+) !void {
+    const Target = StrictBlockDecodeTargetFor(Coefficient);
+    const targets = try allocator.alloc(Target, fills.len);
+    defer allocator.free(targets);
+    var prepared: usize = 0;
+    defer for (targets[0..prepared]) |target| allocator.free(target.bands);
+    var block_count: usize = 0;
+    for (fills) |fill| {
+        targets[prepared] = try prepareStrictComponentFill(Coefficient, allocator, levels, catalog, options, fill);
+        block_count += targets[prepared].blocks.len;
+        prepared += 1;
+    }
+
+    const worker_count = strictDecodeBlockThreadCount(options, block_count);
+    if (worker_count > 1) {
+        try reconstructStrictComponentBlocksParallel(Coefficient, allocator, catalog, targets, options, worker_count, t1_stats, timings);
+    } else {
+        for (targets) |target| {
+            try decodeStrictComponentBlocksSerial(Coefficient, allocator, catalog, target, options, t1_stats, timings);
+        }
+    }
+    for (fills) |fill| undoMaxshiftRoi(fill.plane, fill.roi_shift);
+}
+
+/// Checks one plane's block layout and clears what its blocks will not
+/// write; the returned target owns its bands.
+fn prepareStrictComponentFill(
+    comptime Coefficient: type,
+    allocator: std.mem.Allocator,
+    levels: u8,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+    fill: StrictComponentFill(Coefficient),
+) !StrictBlockDecodeTargetFor(Coefficient) {
+    const component = fill.component;
+    const width = fill.width;
+    const height = fill.height;
+    const plane = fill.plane;
     if (component >= catalog.component_count) return CodestreamError.InvalidCodestream;
     const pixels = try std.math.mul(usize, width, height);
     if (plane.len != pixels) return CodestreamError.InvalidCodestream;
@@ -15094,7 +15195,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         component_y1,
         levels,
     );
-    defer allocator.free(bands);
+    errdefer allocator.free(bands);
     const required_width = try reducedGridLength(catalog.component_x0[component], width, options.resolution_reduction);
     const required_height = try reducedGridLength(catalog.component_y0[component], height, options.resolution_reduction);
 
@@ -15123,26 +15224,31 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
             }
         }
     }
-    const worker_count = strictDecodeBlockThreadCount(options, blocks.len);
-    if (worker_count > 1) {
-        try reconstructStrictComponentBlocksParallel(
-            allocator,
-            width,
-            height,
-            catalog,
-            component,
-            blocks,
-            bands,
-            options,
-            plane,
-            worker_count,
-            t1_stats,
-            timings,
-        );
-        undoMaxshiftRoi(plane, roi_shift);
-        return;
-    }
+    return .{
+        .width = width,
+        .height = height,
+        .component = component,
+        .blocks = blocks,
+        .bands = bands,
+        .plane = plane,
+    };
+}
 
+fn decodeStrictComponentBlocksSerial(
+    comptime Coefficient: type,
+    allocator: std.mem.Allocator,
+    catalog: StrictPacketBlockCatalog,
+    target: StrictBlockDecodeTargetFor(Coefficient),
+    options: DecodeOptions,
+    t1_stats: ?*ebcot.DecodePassStats,
+    timings: ?*DecodeTimings,
+) !void {
+    const width = target.width;
+    const height = target.height;
+    const component = target.component;
+    const blocks = target.blocks;
+    const bands = target.bands;
+    const plane = target.plane;
     // One reusable T1 scratch per component keeps the hot decode loop free
     // of per-block allocations.
     var scratch = ebcot.DecodeBlockScratchFor(Coefficient).init(allocator);
@@ -15240,7 +15346,6 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
             },
         }
     }
-    undoMaxshiftRoi(plane, roi_shift);
 }
 
 /// ISO/IEC 15444-1 E.3.3 Maxshift reconstruction. Coefficients whose
@@ -15762,40 +15867,39 @@ fn strictCoverageBitRangeMask(lo: usize, hi: usize) u64 {
 }
 
 fn reconstructStrictComponentBlocksParallel(
+    comptime Coefficient: type,
     allocator: std.mem.Allocator,
-    width: usize,
-    height: usize,
     catalog: StrictPacketBlockCatalog,
-    component: usize,
-    blocks: []const StrictPacketBlock,
-    bands: []const subband.Band,
+    targets: []const StrictBlockDecodeTargetFor(Coefficient),
     options: DecodeOptions,
-    plane: anytype,
     worker_count: usize,
     t1_stats: ?*ebcot.DecodePassStats,
     timings: ?*DecodeTimings,
 ) !void {
-    const Job = StrictBlockDecodeJobFor(std.meta.Elem(@TypeOf(plane)));
-    const block_order = try allocator.alloc(usize, blocks.len);
+    const Job = StrictBlockDecodeJobFor(Coefficient);
+    var block_count: usize = 0;
+    for (targets) |target| block_count += target.blocks.len;
+    const block_order = try allocator.alloc(StrictBlockRef, block_count);
     defer allocator.free(block_order);
-    for (block_order, 0..) |*entry, index| entry.* = index;
-    std.mem.sort(usize, block_order, blocks, strictDecodeBlockHeavierThan);
+    var next_ref: usize = 0;
+    for (targets, 0..) |target, target_index| {
+        for (0..target.blocks.len) |block_index| {
+            block_order[next_ref] = .{ .target = @intCast(target_index), .block = @intCast(block_index) };
+            next_ref += 1;
+        }
+    }
+    std.mem.sort(StrictBlockRef, block_order, targets, strictDecodeBlockHeavierThan(Coefficient));
 
     var jobs = try allocator.alloc(Job, worker_count);
     defer allocator.free(jobs);
     var next_block = std.atomic.Value(usize).init(0);
     for (jobs) |*job| {
         job.* = .{
-            .width = width,
-            .height = height,
             .catalog = &catalog,
-            .component = component,
+            .targets = targets,
             .next_block = &next_block,
-            .blocks = blocks,
-            .bands = bands,
             .block_order = block_order,
             .options = options,
-            .plane = plane,
             .profile_worker = timings != null,
             .collect_t1_stats = t1_stats != null,
         };
@@ -15824,15 +15928,21 @@ fn reconstructStrictComponentBlocksParallel(
     }
 }
 
-fn strictDecodeBlockHeavierThan(blocks: []const StrictPacketBlock, lhs: usize, rhs: usize) bool {
-    const a = blocks[lhs];
-    const b = blocks[rhs];
-    if (a.payload_length != b.payload_length) return a.payload_length > b.payload_length;
-    if (a.cumulative_passes != b.cumulative_passes) return a.cumulative_passes > b.cumulative_passes;
-    const a_area = a.rect.width * a.rect.height;
-    const b_area = b.rect.width * b.rect.height;
-    if (a_area != b_area) return a_area > b_area;
-    return lhs < rhs;
+/// Heaviest blocks first across every target, so the pool ends on light ones.
+fn strictDecodeBlockHeavierThan(comptime Coefficient: type) fn ([]const StrictBlockDecodeTargetFor(Coefficient), StrictBlockRef, StrictBlockRef) bool {
+    return struct {
+        fn lessThan(targets: []const StrictBlockDecodeTargetFor(Coefficient), lhs: StrictBlockRef, rhs: StrictBlockRef) bool {
+            const a = targets[lhs.target].blocks[lhs.block];
+            const b = targets[rhs.target].blocks[rhs.block];
+            if (a.payload_length != b.payload_length) return a.payload_length > b.payload_length;
+            if (a.cumulative_passes != b.cumulative_passes) return a.cumulative_passes > b.cumulative_passes;
+            const a_area = a.rect.width * a.rect.height;
+            const b_area = b.rect.width * b.rect.height;
+            if (a_area != b_area) return a_area > b_area;
+            if (lhs.target != rhs.target) return lhs.target < rhs.target;
+            return lhs.block < rhs.block;
+        }
+    }.lessThan;
 }
 
 fn reconstructStrictComponentCoefficients(
