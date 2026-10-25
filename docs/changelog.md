@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Inverse 5/3 Overlapped With Tier-1
+
+- Reversible three-component decode at full resolution on two or more
+  threads no longer waits for every block before the inverse DWT. The
+  block pool now runs plane by plane (heaviest blocks first within each),
+  counts each plane's blocks down, and the worker that writes a plane's
+  last block undoes its ROI shift and runs that plane's serial inverse 5/3
+  while the others decode the next plane (`StrictComponentFinisher`,
+  `StrictInverse53Finisher`). The last plane, which completes when the pool
+  drains, runs on all DWT workers afterwards
+  (`wavelet_int.inverse53ParallelPlane`; the parallel driver skips empty
+  planes). Each plane's transform starts only after all its blocks are
+  written and is the same function as before, so the output does not
+  depend on timing.
+- Output is byte-identical (lossless profile at t1, t2, t3, t4, t8, t20;
+  region and layer-limited decodes; lossy 9/7; 34-bit wide stream).
+  Interleaved A/B on the i5-14500 against `821fcbf`: decode 91.3 -> 86.9 ms
+  at t20 and 133.3 -> 123.7 ms at t8; t2 and t4 unchanged within noise.
+
 ### Linear RPCL Block Index
 
 - `buildRpclBlockIndex` asked `t2.collectRpclCodeBlockIndexes` for every

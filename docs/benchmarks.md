@@ -108,6 +108,11 @@ Further t20 probes against `61a6fef`:
 Thread start costs about 48 us per thread on this host (19 spawns 0.9 ms,
 joins 0.1 ms), so a persistent pool would save roughly 1 ms per decode.
 
+Inverse 5/3 overlapped with Tier-1 (planes 0 and 1 transformed by the
+worker that completes them, plane 2 on all DWT workers afterwards), against
+`821fcbf`: t20 decode 91.3 -> 86.9 ms (15 rounds); t2 335.4 -> 334.9,
+t4 187.9 -> 191.9 (minimum 185.5 -> 183.0), t8 133.3 -> 123.7 ms (7 rounds).
+
 ## 2026-10-25: Intel Core i5-14500, 5/3 column strips; encoder probes
 
 Same host, method, profile, and stream as the record below; base is

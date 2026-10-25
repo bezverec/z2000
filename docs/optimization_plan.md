@@ -162,6 +162,13 @@ scattering each block (a few percent at most).
 
 ### P3. Decode Pipeline Overlap
 
+First slice done 2026-10-25: the reversible full-resolution inverse 5/3 of
+planes 0 and 1 runs inside the block pool as each plane completes (t20
+decode 91.3 -> 86.9 ms). Next candidates in the same direction: the same
+finisher for the irreversible 9/7 path; fusing inverse MCT with TIFF
+serialization (no 16-bit interleaved intermediate); a persistent worker
+pool shared by Tier-1, DWT, MCT, and output.
+
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse
 DWT beginning for complete tile/component/resolution dependencies, or

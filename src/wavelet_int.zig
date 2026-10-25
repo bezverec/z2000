@@ -461,18 +461,22 @@ const DwtBandJob = struct {
     fn run(job: *const DwtBandJob) void {
         switch (job.phase) {
             .forward_columns => for (job.planes) |plane| {
+                if (plane.len == 0) continue;
                 forward53ColumnBand(plane, job.stride, job.begin, job.end, job.cur_width, job.cur_height, job.scratch);
             },
             .inverse_columns => for (job.planes) |plane| {
+                if (plane.len == 0) continue;
                 inverse53ColumnBand(plane, job.stride, job.begin, job.end, job.cur_width, job.cur_height, job.scratch);
             },
             .forward_rows => for (job.planes) |plane| {
+                if (plane.len == 0) continue;
                 var row = job.begin;
                 while (row < job.end) : (row += 1) {
                     forward53Line(rowSlice(plane, job.stride, row, job.cur_width), job.scratch[0..job.cur_width]);
                 }
             },
             .inverse_rows => for (job.planes) |plane| {
+                if (plane.len == 0) continue;
                 var row = job.begin;
                 while (row < job.end) : (row += 1) {
                     inverse53Line(rowSlice(plane, job.stride, row, job.cur_width), job.scratch[0..job.cur_width]);
@@ -667,6 +671,21 @@ pub fn forward53Parallel(
     return done;
 }
 
+/// `inverse53Parallel` over one plane.
+pub fn inverse53ParallelPlane(
+    allocator: std.mem.Allocator,
+    plane: []i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    thread_count: usize,
+) !void {
+    if (plane.len == 0) return TransformError.InvalidDimensions;
+    const none: []i32 = &.{};
+    return inverse53Parallel(allocator, .{ plane, none, none }, width, height, levels, thread_count);
+}
+
+/// Inverse 5/3 of up to three planes; an empty plane is skipped.
 pub fn inverse53Parallel(
     allocator: std.mem.Allocator,
     planes: [3][]i32,
@@ -676,6 +695,7 @@ pub fn inverse53Parallel(
     thread_count: usize,
 ) !void {
     for (planes) |plane| {
+        if (plane.len == 0) continue;
         if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
     }
     if (levels > 32) return TransformError.TooManyLevels;

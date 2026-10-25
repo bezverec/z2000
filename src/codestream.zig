@@ -3337,6 +3337,32 @@ fn dequantizeBandRegion(src: []const i32, dst: []f32, stride: usize, rect: subba
     }
 }
 
+/// `StrictComponentFinisher` running the serial inverse 5/3 on a decoded
+/// plane (equal to the parallel transform byte for byte).
+const StrictInverse53Finisher = struct {
+    width: usize,
+    height: usize,
+    levels: u8,
+
+    fn finisher(self: *StrictInverse53Finisher, finished: []std.atomic.Value(bool)) StrictComponentFinisher {
+        return .{
+            .context = self,
+            .finish = finish,
+            // The last plane completes when the pool drains; it is cheaper
+            // on all DWT workers afterwards than on one worker at the end.
+            .target_limit = finished.len - 1,
+            .finished = finished,
+        };
+    }
+
+    fn finish(context: *anyopaque, plane: []i32) anyerror!void {
+        const self: *StrictInverse53Finisher = @ptrCast(@alignCast(context));
+        var workspace = try wavelet_int.Workspace.init(std.heap.smp_allocator, @max(self.width, self.height));
+        defer workspace.deinit();
+        try wavelet_int.inverse53WithWorkspace(&workspace, plane, self.width, self.height, self.levels);
+    }
+};
+
 fn inverseComponents53(
     allocator: std.mem.Allocator,
     slices: ComponentSlices,
@@ -12097,8 +12123,26 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     timings: ?*DecodeTimings,
 ) !image.RgbImage {
     if (headerHasMixedComponentTransforms(header)) return CodestreamError.UnsupportedPayload;
+    const plan = temporaryPacketPlan(header);
+    if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
+    const full_resolution = plan.resolutions[plan.resolution_count - 1];
+
+    // Reversible full-resolution decode on several threads overlaps the
+    // inverse DWT with Tier-1: planes 0 and 1 are transformed by the worker
+    // that writes their last block, while the pool decodes the next plane.
+    var dwt_finisher = StrictInverse53Finisher{ .width = header.width, .height = header.height, .levels = header.levels };
+    var finished: [3]std.atomic.Value(bool) = @splat(std.atomic.Value(bool).init(false));
+    const overlap_dwt = header.transform != .irreversible_9_7 and options.resolution_reduction == 0 and
+        componentThreadCountFor(options.threads) >= 2 and full_resolution.x0 == 0 and full_resolution.y0 == 0;
     const payload_start = monotonicNs();
-    var strict_planes = try reconstructStrictComponentCoefficientPlanesFromBlockCatalog(allocator, header, catalog, options, timings);
+    var strict_planes = try reconstructStrictComponentCoefficientPlanesFinishing(
+        allocator,
+        header,
+        catalog,
+        options,
+        timings,
+        if (overlap_dwt) dwt_finisher.finisher(&finished) else null,
+    );
     defer strict_planes.deinit();
     if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
 
@@ -12115,10 +12159,14 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     }
 
     const wavelet_start = monotonicNs();
-    if (options.resolution_reduction == 0) {
-        const plan = temporaryPacketPlan(header);
-        if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
-        const full_resolution = plan.resolutions[plan.resolution_count - 1];
+    if (overlap_dwt) {
+        // Whatever the pool did not finish (the last plane) runs on all
+        // DWT workers now.
+        for (strict_planes.planes, 0..) |plane, component| {
+            if (finished[component].load(.acquire)) continue;
+            try wavelet_int.inverse53ParallelPlane(allocator, plane, header.width, header.height, header.levels, options.threads);
+        }
+    } else if (options.resolution_reduction == 0) {
         try inverseComponents53(
             allocator,
             .{ .slices = .{ strict_planes.planes[0], strict_planes.planes[1], strict_planes.planes[2] } },
@@ -14618,6 +14666,7 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
         fills,
         if (timings) |t| &t.t1_pass_stats else null,
         timings,
+        null,
     );
     if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
 
@@ -14795,11 +14844,23 @@ fn StrictBlockDecodeTargetFor(comptime Coefficient: type) type {
         width: usize,
         height: usize,
         component: usize,
+        roi_shift: u8 = 0,
         blocks: []const StrictPacketBlock,
         bands: []const subband.Band,
         plane: []Coefficient,
     };
 }
+
+/// Work a decode pool runs on a plane as soon as its last block is written,
+/// while the pool goes on with later planes' blocks (ROI undo comes first).
+/// Planes from `target_limit` on, and any never completed, are left to the
+/// caller; `finished` records which ones it ran.
+const StrictComponentFinisher = struct {
+    context: *anyopaque,
+    finish: *const fn (context: *anyopaque, plane: []i32) anyerror!void,
+    target_limit: usize,
+    finished: []std.atomic.Value(bool),
+};
 
 const StrictBlockRef = struct {
     target: u32,
@@ -14815,6 +14876,8 @@ fn StrictBlockDecodeJobFor(comptime Coefficient: type) type {
         next_block: *std.atomic.Value(usize),
         block_order: []const StrictBlockRef,
         options: DecodeOptions,
+        remaining: []std.atomic.Value(usize) = &.{},
+        finisher: ?StrictComponentFinisher = null,
         profile_worker: bool = false,
         collect_t1_stats: bool = false,
         t1_stats: ebcot.DecodePassStats = .{},
@@ -14825,6 +14888,24 @@ fn StrictBlockDecodeJobFor(comptime Coefficient: type) type {
             strictBlockDecodeWorker(self);
         }
     };
+}
+
+/// Counts one block of `target` done; the worker that completes a plane runs
+/// the pool's finisher on it.
+fn completeStrictDecodeBlock(job: anytype, target: u32) void {
+    if (job.remaining.len == 0) return;
+    if (job.remaining[target].fetchSub(1, .acq_rel) != 1) return;
+    const finisher = job.finisher orelse return;
+    if (target >= finisher.target_limit) return;
+    // Finishers take i32 planes only; wider planes are left to the caller.
+    if (std.meta.Elem(@TypeOf(job.targets[0].plane)) != i32) return;
+    const plane_target = job.targets[target];
+    undoMaxshiftRoi(plane_target.plane, plane_target.roi_shift);
+    finisher.finish(finisher.context, plane_target.plane) catch |err| {
+        job.result = err;
+        return;
+    };
+    finisher.finished[target].store(true, .release);
 }
 
 fn strictBlockDecodeWorker(job: anytype) void {
@@ -14840,6 +14921,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
         const order_index = job.next_block.fetchAdd(1, .monotonic);
         if (order_index >= job.block_order.len) break;
         const ref = job.block_order[order_index];
+        defer completeStrictDecodeBlock(job, ref.target);
         const target = job.targets[ref.target];
         const block_index: usize = ref.block;
         const block = target.blocks[block_index];
@@ -14999,6 +15081,19 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !color.RctPlanes {
+    return reconstructStrictComponentCoefficientPlanesFinishing(allocator, header, catalog, options, timings, null);
+}
+
+/// The three planes, each given to `finisher` (when set) as soon as its
+/// blocks are decoded; see `StrictComponentFinisher`.
+fn reconstructStrictComponentCoefficientPlanesFinishing(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    catalog: StrictPacketBlockCatalog,
+    options: DecodeOptions,
+    timings: ?*DecodeTimings,
+    finisher: ?StrictComponentFinisher,
+) !color.RctPlanes {
     // Multi-thread decode runs one block-level atomic scheduler over all
     // three components' blocks, heaviest first. The former component-parallel
     // path (one thread per component) was only load-balanced at exactly 3
@@ -15033,6 +15128,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
         &fills,
         if (timings) |t| &t.t1_pass_stats else null,
         timings,
+        finisher,
     );
 
     return .{
@@ -15113,7 +15209,7 @@ fn fillStrictComponentCoefficientsFromBlockCatalog(
         .roi_shift = roi_shift,
         .plane = plane,
     }};
-    try fillStrictComponentsCoefficientsFromBlockCatalog(Coefficient, allocator, levels, catalog, options, &fills, t1_stats, timings);
+    try fillStrictComponentsCoefficientsFromBlockCatalog(Coefficient, allocator, levels, catalog, options, &fills, t1_stats, timings, null);
 }
 
 /// One component plane for `fillStrictComponentsCoefficientsFromBlockCatalog`.
@@ -15139,6 +15235,7 @@ fn fillStrictComponentsCoefficientsFromBlockCatalog(
     fills: []const StrictComponentFill(Coefficient),
     t1_stats: ?*ebcot.DecodePassStats,
     timings: ?*DecodeTimings,
+    finisher: ?StrictComponentFinisher,
 ) !void {
     const Target = StrictBlockDecodeTargetFor(Coefficient);
     const targets = try allocator.alloc(Target, fills.len);
@@ -15154,13 +15251,19 @@ fn fillStrictComponentsCoefficientsFromBlockCatalog(
 
     const worker_count = strictDecodeBlockThreadCount(options, block_count);
     if (worker_count > 1) {
-        try reconstructStrictComponentBlocksParallel(Coefficient, allocator, catalog, targets, options, worker_count, t1_stats, timings);
+        try reconstructStrictComponentBlocksParallel(Coefficient, allocator, catalog, targets, options, worker_count, t1_stats, timings, finisher);
     } else {
         for (targets) |target| {
             try decodeStrictComponentBlocksSerial(Coefficient, allocator, catalog, target, options, t1_stats, timings);
         }
     }
-    for (fills) |fill| undoMaxshiftRoi(fill.plane, fill.roi_shift);
+    for (fills, 0..) |fill, index| {
+        // A finished plane had its ROI undone before the finisher ran.
+        if (finisher) |f| {
+            if (f.finished[index].load(.acquire)) continue;
+        }
+        undoMaxshiftRoi(fill.plane, fill.roi_shift);
+    }
 }
 
 /// Checks one plane's block layout and clears what its blocks will not
@@ -15228,6 +15331,7 @@ fn prepareStrictComponentFill(
         .width = width,
         .height = height,
         .component = component,
+        .roi_shift = fill.roi_shift,
         .blocks = blocks,
         .bands = bands,
         .plane = plane,
@@ -15875,6 +15979,7 @@ fn reconstructStrictComponentBlocksParallel(
     worker_count: usize,
     t1_stats: ?*ebcot.DecodePassStats,
     timings: ?*DecodeTimings,
+    finisher: ?StrictComponentFinisher,
 ) !void {
     const Job = StrictBlockDecodeJobFor(Coefficient);
     var block_count: usize = 0;
@@ -15888,7 +15993,22 @@ fn reconstructStrictComponentBlocksParallel(
             next_ref += 1;
         }
     }
-    std.mem.sort(StrictBlockRef, block_order, targets, strictDecodeBlockHeavierThan(Coefficient));
+    if (finisher != null) {
+        // Plane by plane, heaviest first within each, so earlier planes
+        // complete (and get finished) while later ones still decode.
+        var start: usize = 0;
+        for (targets) |target| {
+            std.mem.sort(StrictBlockRef, block_order[start..][0..target.blocks.len], targets, strictDecodeBlockHeavierThan(Coefficient));
+            start += target.blocks.len;
+        }
+    } else {
+        std.mem.sort(StrictBlockRef, block_order, targets, strictDecodeBlockHeavierThan(Coefficient));
+    }
+    const remaining = try allocator.alloc(std.atomic.Value(usize), if (finisher != null) targets.len else 0);
+    defer allocator.free(remaining);
+    if (finisher != null) {
+        for (remaining, targets) |*count, target| count.* = std.atomic.Value(usize).init(target.blocks.len);
+    }
 
     var jobs = try allocator.alloc(Job, worker_count);
     defer allocator.free(jobs);
@@ -15900,6 +16020,8 @@ fn reconstructStrictComponentBlocksParallel(
             .next_block = &next_block,
             .block_order = block_order,
             .options = options,
+            .remaining = remaining,
+            .finisher = finisher,
             .profile_worker = timings != null,
             .collect_t1_stats = t1_stats != null,
         };
