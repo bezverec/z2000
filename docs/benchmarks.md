@@ -46,6 +46,24 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, decoder significance pass by bitmap
+
+Base `ed95eb6`, quiet host. The decoder's significance passes visit only
+the stripe columns and rows not yet significant:
+
+| Stream | Threads | Base | Bitmap visit |
+| --- | ---: | ---: | ---: |
+| lossless `z-t20.jp2` (wall, 9 rounds) | 1 | 578.9 ms | 535.1 ms (-7.6%) |
+| lossy `lossy.jp2` (wall, 9 rounds) | 1 | 563.1 ms | 546.9 ms (-2.9%) |
+| lossless (`--timings`, 21 runs) | 20 | 61.3 ms | 57.9 ms |
+| lossy (`--timings`, 21 runs) | 20 | 64.8 ms | 60.4 ms |
+
+Decoded TIFFs byte-identical. The same visit for the encoder's refinement
+pass, from a snapshot of the significance words per bitplane, was slower
+(lossless t1 encode 623.6 -> 639.2 ms with `--bypass`, 672.7 -> 688.9 ms
+without): 73% of the examined samples are refined, so the bit iteration
+outweighs the tests it saves.
+
 ## 2026-10-26: Intel Core i5-14500, significance pass by bitmap
 
 Base `5c20253`. A count over the lossless t1 encode (`--bypass`): the

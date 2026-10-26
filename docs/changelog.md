@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Decoder Significance Pass Skips Significant Samples By Bitmap
+
+- The decoder's significance propagation passes (MQ, non-causal; and
+  BYPASS raw, any style) visit only the columns and rows of a stripe
+  range that hold samples not yet significant, as the encoder's do since
+  `ed95eb6`; the encoder and decoder share the mask helpers
+  (`openStripeRows`, `openStripeColumns`, `openColumnRows`). Earlier
+  per-column candidate masks in the decoder, which computed neighbourhood
+  candidates, were slower; skipping by the significance words alone is
+  not.
+- Decoded samples identical (lossless and lossy at t1, t2, t3, t20;
+  region and layer-limited decodes; 34-bit wide stream); codestreams
+  unchanged. Against `ed95eb6` on a quiet host: lossless t1 decode
+  578.9 -> 535.1 ms (-7.6%), lossy t1 563.1 -> 546.9 ms (-2.9%), 9
+  interleaved rounds; t20 (21 `--timings` runs) lossless 61.3 -> 57.9 ms,
+  lossy 64.8 -> 60.4 ms.
+- Tried and dropped for the encoder's refinement pass: visiting only the
+  samples significant before the bitplane, from a snapshot of the
+  significance words. With most samples refined, the bit iteration cost
+  more than the skipped tests (lossless t1 +2.4%).
+
 ### Significance Pass Skips Significant Samples By Bitmap
 
 - The encoder's significance propagation pass (the common, non-causal

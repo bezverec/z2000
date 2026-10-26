@@ -4199,27 +4199,59 @@ fn decodeSignificancePassRaw(
                 x = x_end;
                 continue;
             }
-            while (x < x_end) : (x += 1) {
-                var p = nbfIndex(nbs, x, stripe_y);
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    const y = stripe_y + dy;
-                    const sample_flags_index = p;
-                    p += nbs;
-                    if (!decodeT1SignificanceCandidate(scratch, x, y, flags[sample_flags_index], style)) continue;
+            // As in the encoder: only samples not yet significant can be
+            // candidates; visit those columns and rows (see
+            // `openStripeColumns`).
+            const open_rows = openStripeRows(scratch, stripe_y, stripe_height, x);
+            var columns = openStripeColumns(&open_rows, x_end - x);
+            while (columns != 0) : (columns &= columns - 1) {
+                const column_bit: u6 = @intCast(@ctz(columns));
+                const column = x + column_bit;
+                var rows = openColumnRows(&open_rows, column_bit);
+                while (rows != 0) : (rows &= rows - 1) {
+                    const y = stripe_y + @ctz(rows);
+                    const sample_flags_index = nbfIndex(nbs, column, y);
+                    if (!decodeT1SignificanceCandidate(scratch, column, y, flags[sample_flags_index], style)) continue;
                     flags[sample_flags_index] |= nbf_visit;
-                    decodeMarkPackedT1Visited(scratch, x, y);
+                    decodeMarkPackedT1Visited(scratch, column, y);
                     symbol_count += 1;
                     if (reader.readBit()) {
                         symbol_count += 1;
                         const negative = reader.readBit();
-                        markDecodedSignificantNbf(scratch, x, y, bitplane, negative);
+                        markDecodedSignificantNbf(scratch, column, y, bitplane, negative);
                     }
                 }
             }
+            x = x_end;
         }
     }
     return symbol_count;
+}
+
+/// The stripe rows' insignificant samples in the 64-column range from `x`
+/// (a multiple of 64); rows past the stripe are empty.
+inline fn openStripeRows(scratch: anytype, stripe_y: usize, stripe_height: usize, x: usize) [4]u64 {
+    const word = x / significant_word_bits;
+    var open_rows: [4]u64 = @splat(0);
+    for (open_rows[0..stripe_height], 0..) |*open, dy| {
+        open.* = ~scratch.significant_words.items[(stripe_y + dy) * scratch.row_words + word];
+    }
+    return open_rows;
+}
+
+/// The columns, of the first `count`, that hold an insignificant sample. A
+/// significance pass codes only such samples, and a column's significance
+/// bits change only when its own samples are coded, so masks taken before
+/// the range are still exact when a column is reached.
+inline fn openStripeColumns(open_rows: *const [4]u64, count: usize) u64 {
+    return (open_rows[0] | open_rows[1] | open_rows[2] | open_rows[3]) & lowBitsMask(count);
+}
+
+/// Bit `dy` set when row `dy` of the column is insignificant.
+inline fn openColumnRows(open_rows: *const [4]u64, column_bit: u6) u4 {
+    var rows: u4 = 0;
+    inline for (0..4) |dy| rows |= @as(u4, @intCast((open_rows[dy] >> column_bit) & 1)) << dy;
+    return rows;
 }
 
 fn decodeRefinementPassRaw(
@@ -4712,14 +4744,15 @@ fn decodeSignificancePassInferredPlain(
                 continue;
             }
             const band_index = @backingInt(band_kind);
-            while (x < x_end) : (x += 1) {
-                // Strength-reduce the per-sample nbf index down the stripe
-                // column (mirrors decodeRefinementPassRaw): p advances by nbs.
-                var p = nbfIndex(nbs, x, stripe_y);
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    const sample_flags_index = p;
-                    p += nbs;
+            const open_rows = openStripeRows(scratch, stripe_y, stripe_height, x);
+            var columns = openStripeColumns(&open_rows, x_end - x);
+            while (columns != 0) : (columns &= columns - 1) {
+                const column_bit: u6 = @intCast(@ctz(columns));
+                const column = x + column_bit;
+                var rows = openColumnRows(&open_rows, column_bit);
+                while (rows != 0) : (rows &= rows - 1) {
+                    const y = stripe_y + @ctz(rows);
+                    const sample_flags_index = nbfIndex(nbs, column, y);
                     const sample_flags = flags[sample_flags_index];
                     if ((sample_flags & (nbf_sig_self | nbf_visit)) != 0) continue;
                     const pattern = sample_flags & nbf_sig8;
@@ -4733,10 +4766,11 @@ fn decodeSignificancePassInferredPlain(
                         const sign_bit = try mqRead(decoder, mqContextIndex(sign.context));
                         symbol_count += 1;
                         const negative = sign_bit != sign.predicted_negative;
-                        markDecodedSignificantNbf(scratch, x, stripe_y + dy, bitplane, negative);
+                        markDecodedSignificantNbf(scratch, column, y, bitplane, negative);
                     }
                 }
             }
+            x = x_end;
         }
     }
 
@@ -6365,20 +6399,13 @@ fn emitDirectIsoSignificancePassPlain(
             }
             // Only samples not yet significant can be candidates (most are,
             // in the lower bitplanes): visit the range's columns with such a
-            // sample and, in each, those rows. A column's significance bits
-            // change only when its own samples are coded, so masks taken for
-            // the whole range are still exact when a column is reached.
-            const word = x / significant_word_bits;
-            var open_rows: [4]u64 = @splat(0);
-            for (open_rows[0..stripe_height], 0..) |*open, dy| {
-                open.* = ~scratch.significant_words.items[(stripe_y + dy) * scratch.row_words + word];
-            }
-            var columns = (open_rows[0] | open_rows[1] | open_rows[2] | open_rows[3]) & lowBitsMask(x_end - x);
+            // sample and, in each, those rows (see `openStripeColumns`).
+            const open_rows = openStripeRows(scratch, stripe_y, stripe_height, x);
+            var columns = openStripeColumns(&open_rows, x_end - x);
             while (columns != 0) : (columns &= columns - 1) {
                 const column_bit: u6 = @intCast(@ctz(columns));
                 const column = x + column_bit;
-                var rows: u4 = 0;
-                inline for (0..4) |dy| rows |= @as(u4, @intCast((open_rows[dy] >> column_bit) & 1)) << dy;
+                var rows = openColumnRows(&open_rows, column_bit);
                 while (rows != 0) : (rows &= rows - 1) {
                     const y = stripe_y + @ctz(rows);
                     const p = nbfIndex(nbs, column, y);
