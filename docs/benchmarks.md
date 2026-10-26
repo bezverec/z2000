@@ -46,6 +46,24 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, MQ context store only on renormalization
+
+Base `cdb611e`. Storing the context on every decision (a select between
+the old and the next state) chained consecutive decisions of a context
+through a store-to-load forward once the passes kept the coder's
+registers in machine registers; storing it only on renormalization (one
+branch, predictable for the near-even refinement contexts) is faster
+again:
+
+| Profile | Threads | Rounds | Base | Store on renormalization |
+| --- | ---: | ---: | ---: | ---: |
+| lossless | 1 | 9 | 804.7 ms | 773.0 ms (-3.9%) |
+| lossy | 1 | 9 | 697.3 ms | 678.5 ms (-2.7%) |
+| lossless (`--timings`) | 20 | 15 | 94.0 ms | 90.4 ms |
+| lossy (`--timings`) | 20 | 15 | 95.4 ms | 92.5 ms |
+
+Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, lossy encode front end on all threads
 
 Base `6af8264`, encode `--timings` medians (15 runs at t20, 9 at t8):

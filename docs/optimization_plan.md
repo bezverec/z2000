@@ -284,7 +284,10 @@ lossy encode's front end then moved onto all threads (ICT bands on the
 shared pool, quantization in row ranges in place: lossy t20 114.0 ->
 97.9 ms). At t20 both encodes now spend about 68 ms of their 96-98 ms in
 block coding, so the Tier-1 encoder's per-symbol cost is again the target;
-the TIFF read (7.3 ms) is the next largest stage.
+the TIFF read (7.3 ms) is the next largest stage. The MQ encoder stores a
+context only when the decision renormalizes again (an unconditional store
+chained a context's decisions through memory once the registers stayed in
+machine registers): lossless t20 encode 90.4 ms.
 
 Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode
 gap, unless profiling finds a shared T1/MQ change. Then revisit bitplane

@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### MQ Encoder Context Store Only On Renormalization
+
+- With the encoder's registers held in machine registers (`noalias`
+  passes), storing a context on every decision became the bottleneck: each
+  decision of a context waited for the previous one's store. `write` now
+  stores the context, as before `6af8264`, only when the decision
+  renormalizes; the interval selection stays branch-free.
+- Codestreams byte-identical. Against `cdb611e`: lossless t1 encode
+  804.7 -> 773.0 ms (-3.9%), lossy t1 697.3 -> 678.5 ms (-2.7%), 9 rounds;
+  at t20 (15 `--timings` runs) lossless 94.0 -> 90.4 ms, lossy 95.4 ->
+  92.5 ms.
+
 ### Lossy Encode Front End On All Threads
 
 - On several threads the irreversible encoder's forward ICT runs in pixel

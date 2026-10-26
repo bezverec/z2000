@@ -42,11 +42,6 @@ const Context = extern struct {
     inline fn takeLps(self: *Context) void {
         self.* = folded_contexts[self.nlps];
     }
-
-    comptime {
-        // `Encoder.write` copies a context as one 64-bit word.
-        std.debug.assert(@sizeOf(Context) == 8);
-    }
 };
 
 const folded_contexts = makeFoldedContexts();
@@ -156,14 +151,12 @@ pub const Encoder = struct {
         self.c += if (upper) qe else 0;
         self.a = if (upper) next_a else qe;
         // An LPS always renormalizes, an MPS when A - Qe drops below 0x8000:
-        // exactly when the new A is below 0x8000. The context moves on and A
-        // doubles up to 0x8000 without a branch either (a shift of zero
-        // otherwise); only a byte boundary inside the shift branches.
-        const renormalizes = self.a < 0x8000;
-        // Contexts are copied as one word so that the choice is a select.
-        const word: *align(@alignOf(Context)) u64 = @ptrCast(context);
-        const moved: *align(@alignOf(Context)) const u64 = @ptrCast(&folded_contexts[if (is_mps) context.nmps else context.nlps]);
-        word.* = if (renormalizes) moved.* else word.*;
+        // exactly when the new A is below 0x8000. Only then does the context
+        // move on (a store on every decision would chain each decision of a
+        // context to the one before through memory), and A doubles up to
+        // 0x8000 in one shift unless a byte boundary falls inside it.
+        if (self.a >= 0x8000) return;
+        context.* = folded_contexts[if (is_mps) context.nmps else context.nlps];
         const shift: u5 = @clz(@as(u16, @intCast(self.a)));
         if (shift < self.ct) {
             self.a <<= shift;
