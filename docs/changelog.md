@@ -5,6 +5,16 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Encoder Coefficient Planes Released In The Background
+
+- On several threads the single-tile encoder takes its coefficient planes
+  from the thread-safe page-level allocator and releases them on a
+  background thread (`worker_pool.deinitInBackground`), as the decoder
+  does: unmapping the 48 MB of a 2048x2048 RGB encode that many workers
+  touched took about 1.8 ms at the end of the encode.
+- Codestreams byte-identical. Against `aea5067`, lossless (`--bypass`)
+  t20, 15 `--timings` runs: total 75.0 -> 74.1 ms.
+
 ### Encoder Packet Stream Built Into A Reserved Buffer
 
 - After Tier-1 the encoder builds every packet (header and the blocks'

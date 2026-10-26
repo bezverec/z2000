@@ -296,7 +296,11 @@ assembly (`markers/write SOD`) reserves its exact size now, 3.7 -> 1.0 ms,
 and so does the packet stream after Tier-1 (lossless t20 84.7 -> 78.7 ms).
 Still serial after the Tier-1 pool: the packet stream (about 2.5 ms; its
 packets are independent per precinct and component) and, for rate
-targets, the PCRD allocation with its probe stream (several ms).
+targets, the PCRD allocation with its probe stream (several ms). Building
+the packet stream on the pool in per-precinct runs was slower than the
+reserved serial build (2026-10-26: the joined copy and the runs' fresh
+pages cost what the threads saved). The coefficient planes are released
+in the background (1.8 ms off the encode's end).
 
 Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode
 gap, unless profiling finds a shared T1/MQ change. Then revisit bitplane

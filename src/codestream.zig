@@ -5085,16 +5085,21 @@ fn encodeLosslessWithOptionsMeasured(
 
     const levels = actualDwtLevels(rgb.width, rgb.height, options.levels);
     const color_start = monotonicNs();
+    // On several threads the coefficient planes come from the thread-safe
+    // page-level allocator and are released in the background: unmapping
+    // the 48 MB of a 2048x2048 RGB image that many workers touched takes
+    // about 2 ms.
+    const plane_allocator = if (options.threads >= 2) std.heap.smp_allocator else allocator;
     var planes = switch (options.transform) {
         .reversible_5_3 => if (options.mct == .none)
-            try color.forwardNoTransform(allocator, rgb)
+            try color.forwardNoTransform(plane_allocator, rgb)
         else
-            try color.forwardRctThreaded(allocator, rgb, options.threads),
+            try color.forwardRctThreaded(plane_allocator, rgb, options.threads),
         // The irreversible front end accounts its own ICT (color) and fused
         // 9/7 DWT + quantization (wavelet) phases.
-        .irreversible_9_7 => try forwardIrreversibleQuantizedPlanes(allocator, rgb, levels, options, timings),
+        .irreversible_9_7 => try forwardIrreversibleQuantizedPlanes(plane_allocator, rgb, levels, options, timings),
     };
-    defer planes.deinit();
+    defer if (options.threads >= 2) worker_pool.deinitInBackground(planes) else planes.deinit();
     if (options.transform == .reversible_5_3) {
         if (timings) |t| t.color_transform_ns = elapsedNs(color_start);
     }

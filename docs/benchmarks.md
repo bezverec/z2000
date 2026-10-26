@@ -46,6 +46,14 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, encoder planes released in the background
+
+Base `aea5067`, the benchmark lossless profile (with `--bypass`), t20. A
+probe timed the release of the encoder's coefficient planes at 1.7-1.9 ms
+and of the block catalog at 0.2 ms. Releasing the planes on a background
+thread: total 75.0 -> 74.1 ms (15 `--timings` runs). Codestreams
+byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, encoder packet stream into a reserved buffer
 
 Base `40039a0`, t20. A probe inside the block-coding stage put its serial
