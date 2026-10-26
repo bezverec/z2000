@@ -46,6 +46,22 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, 9/7 driver on the shared pool
+
+Base `14cb5dd`, lossy profile, 15 interleaved `--timings` runs (decode):
+
+| Threads | inverse DWT | Tail (DWT + banded ICT) | Decode total |
+| ---: | ---: | ---: | ---: |
+| 20 | 3.45 -> 3.02 ms | 7.52 -> 7.07 ms | 65.6 -> 64.4 ms |
+| 8 | 2.21 -> 1.52 ms | 6.69 -> 5.90 ms | 105.7 -> 103.5 ms |
+| 4 | 1.74 -> 1.61 ms | 8.41 -> 8.36 ms | 174.5 -> 172.4 ms |
+
+The host carried about 16% background load, so wall time is noisy: lossy
+decode t20 83.4 -> 80.3 ms (41 rounds), t8 140.8 -> 136.6 ms (31 rounds);
+lossy encode t20 141.5 -> 139.1 and 162.6 -> 163.5 ms in two 25- and
+31-round runs, that is within noise. Decoded TIFFs and the encoded
+codestream are byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, irreversible RGB tail in row bands
 
 Base `fe6fa96`, lossy profile (`lossy.jp2`), t20, 15 interleaved

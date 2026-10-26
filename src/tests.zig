@@ -7909,6 +7909,55 @@ test "worker pool refuses a task submitted while it is busy" {
     try std.testing.expectEqual(@as(u32, hits.len), nested.inner_refused.load(.monotonic));
 }
 
+const PoolNested97 = struct {
+    /// Per task, three planes in one buffer.
+    planes: [2][]f32,
+    results: [2]anyerror!void = .{ {}, {} },
+
+    fn call(context: *anyopaque, index: usize) void {
+        const self: *PoolNested97 = @ptrCast(@alignCast(context));
+        self.results[index] = roundtrip(self.planes[index]);
+    }
+
+    /// Three 129x64 planes, one after another.
+    fn roundtrip(samples: []f32) !void {
+        const n = 129 * 64;
+        const planes = [3][]f32{ samples[0..n], samples[n .. 2 * n], samples[2 * n ..] };
+        const levels = try wavelet.forward97Parallel(std.testing.allocator, planes, 129, 64, 4, 1, 1, 4);
+        try wavelet.inverse97Parallel(std.testing.allocator, planes, 129, 64, levels, 1, 1, 4);
+    }
+};
+
+test "parallel 9/7 started inside a pool task runs on its own threads" {
+    const allocator = std.testing.allocator;
+    var serial: [2][]f32 = undefined;
+    var nested = PoolNested97{ .planes = undefined };
+    for (0..2) |index| {
+        serial[index] = try allocator.alloc(f32, 3 * 129 * 64);
+        nested.planes[index] = try allocator.alloc(f32, 3 * 129 * 64);
+        for (serial[index], 0..) |*sample, offset| {
+            sample.* = @floatFromInt(@as(i32, @intCast((offset * 37 + index * 11) % 255)) - 128);
+        }
+        @memcpy(nested.planes[index], serial[index]);
+    }
+    defer for (0..2) |index| {
+        allocator.free(serial[index]);
+        allocator.free(nested.planes[index]);
+    };
+    // The pool is busy while its task runs, so the drivers inside fall back
+    // to threads of their own; the result must match the serial transform.
+    try std.testing.expect(worker_pool.run(2, 2, &nested, PoolNested97.call));
+    for (0..2) |index| {
+        try nested.results[index];
+        for (0..3) |component| {
+            const plane = serial[index][component * 129 * 64 ..][0 .. 129 * 64];
+            const levels = try wavelet.forward2DOrigin(allocator, plane, 129, 64, 4, .irreversible_9_7, 1, 1);
+            try wavelet.inverse2DOrigin(allocator, plane, 129, 64, levels, .irreversible_9_7, 1, 1);
+        }
+        try std.testing.expectEqualSlices(f32, serial[index], nested.planes[index]);
+    }
+}
+
 const PoolBackgroundRelease = struct {
     buffer: []u8,
     released: *std.atomic.Value(u32),

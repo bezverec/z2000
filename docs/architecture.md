@@ -571,8 +571,8 @@ published meanwhile runs on the threads already started, and each thread
 joins only tasks whose announced participant count includes its index, so a
 task with `threads` wakes at most `threads - 1` of them. The 5/3 driver runs
 each lifting phase as one such task (the barrier between phases is the task
-boundary) and spawns its own threads only when the pool is busy; the 9/7
-driver keeps its own per-transform pool. A reversible 8-bit RGB decode
+boundary) and spawns its own threads only when the pool is busy; so does
+the 9/7 driver. A reversible 8-bit RGB decode
 finishes in row bands: the coarser inverse 5/3 levels of the planes the
 block pool left, then each band's finest level (`inverse53FinestRows`, which
 repeats the horizontal pass of its edge rows) and inverse RCT straight into

@@ -1,5 +1,6 @@
 const std = @import("std");
 const simd = @import("simd.zig");
+const worker_pool = @import("worker_pool.zig");
 
 pub const Wavelet = enum(u8) {
     reversible_5_3 = 0,
@@ -719,7 +720,10 @@ fn unpackOddEven(data: []f32, scratch: []f32) void {
 // driver distributes the three planes' column bands and row bands across
 // `thread_count` workers with private scratch. The per-column and per-row
 // arithmetic is exactly the serial `forward2DOrigin` / `inverse2DOrigin`
-// kernels, so output stays bit-identical (covered by a unit test).
+// kernels, so output stays bit-identical (covered by a unit test). Each
+// phase runs on the process-wide `worker_pool` when it is free; only when it
+// is busy (a transform started from inside a pool task) does `Dwt97Pool`
+// spawn workers of its own, once per transform.
 // ---------------------------------------------------------------------------
 
 // Wide 9/7 bands are memory-heavy and short-lived. More than eight workers
@@ -742,6 +746,10 @@ const Dwt97BandJob = struct {
     begin: usize,
     end: usize,
     phase: Dwt97Phase,
+
+    fn runMutable(job: *Dwt97BandJob) void {
+        job.run();
+    }
 
     fn run(job: *const Dwt97BandJob) void {
         switch (job.phase) {
@@ -812,11 +820,17 @@ const Dwt97Pool = struct {
     generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     completed: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    spawn_failed: bool = false,
 
     fn start(pool: *Dwt97Pool, requested_workers: usize) void {
         pool.worker_count = @max(1, @min(requested_workers, max_dwt_workers));
-        if (pool.worker_count == 1) return;
+    }
 
+    /// Spawns this pool's own workers; false when that failed (the caller
+    /// thread then runs every band).
+    fn spawnOwnWorkers(pool: *Dwt97Pool) bool {
+        if (pool.spawn_failed) return false;
+        if (pool.spawned == pool.worker_count - 1) return true;
         while (pool.spawned < pool.worker_count - 1) : (pool.spawned += 1) {
             pool.worker_args[pool.spawned] = .{ .pool = pool, .index = pool.spawned };
             pool.threads[pool.spawned] = std.Thread.spawn(.{}, dwt97PoolWorker, .{&pool.worker_args[pool.spawned]}) catch {
@@ -825,16 +839,22 @@ const Dwt97Pool = struct {
                 pool.stopping.store(true, .release);
                 _ = pool.generation.fetchAdd(1, .release);
                 for (pool.threads[0..pool.spawned]) |thread| thread.join();
-                pool.worker_count = 1;
                 pool.spawned = 0;
-                return;
+                pool.spawn_failed = true;
+                return false;
             };
         }
+        return true;
     }
 
     fn dispatch(pool: *Dwt97Pool, active_jobs: usize) void {
         if (pool.worker_count == 1) {
             pool.jobs[0].run();
+            return;
+        }
+        if (pool.spawned == 0 and worker_pool.runJobs(Dwt97BandJob, pool.jobs[0..active_jobs], Dwt97BandJob.runMutable)) return;
+        if (!pool.spawnOwnWorkers()) {
+            for (pool.jobs[0..active_jobs]) |*job| job.run();
             return;
         }
 

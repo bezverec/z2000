@@ -233,9 +233,8 @@ moving it into the Tier-1 pool per block was slower (the pool workers
 grew by more than the tail shrank). After rc.5 the reversible path's
 answer carried over: the finest 9/7 level and the ICT run in row bands
 (lossy tail 10.8 -> 7.6 ms at t20). What is left there is the coarser 9/7
-levels (3.4 ms) on the 9/7 driver's own per-transform threads, which the
-5/3 driver no longer uses (its phases run on the shared pool), and the
-banded pass itself (4.2 ms, against 1.8 ms for the reversible one; a 9/7
+levels (3.0 ms since the 9/7 driver's phases run on the shared pool, as
+the 5/3 driver's do) and the banded pass itself (4.2 ms, against 1.8 ms for the reversible one; a 9/7
 band repeats eight context rows of horizontal lifting).
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is

@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### 9/7 Driver On The Shared Pool
+
+- `forward97Parallel` and `inverse97Parallel` run each lifting phase on the
+  shared worker pool when it is free, as the 5/3 driver does since rc.5,
+  and spawn threads of their own (once per transform) only when it is busy;
+  that takes the per-transform thread start and join off the encoder's
+  forward transform and the lossy decode's coarser levels. A unit test runs
+  both drivers from inside a pool task (so on their own threads) against
+  the serial transform.
+- Output is byte-identical (lossless and lossy decode at t1, t2, t3, t20;
+  region and layer-limited decodes; 34-bit wide stream; the lossy encode at
+  t20). Against `14cb5dd`, lossy stream, 15 interleaved `--timings` runs:
+  inverse DWT 3.45 -> 3.02 ms at t20, 2.21 -> 1.52 ms at t8, 1.74 ->
+  1.61 ms at t4; decode total 105.7 -> 103.5 ms at t8. Wall time on a
+  loaded host (41 rounds): lossy decode t20 83.4 -> 80.3 ms; lossy encode
+  t20 within noise.
+
 ### Irreversible RGB Tail In Row Bands
 
 - An irreversible 8-bit RGB decode on several threads now finishes like
