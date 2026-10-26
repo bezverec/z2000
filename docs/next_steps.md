@@ -138,8 +138,18 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
-`v0.2.0-rc.5` is prepared on 2026-10-26 for `tools/release_local.ps1` in
-the same way as rc.4. It changes no format or CLI behaviour: decode is
+`v0.2.0-rc.5` was published on 2026-10-26 from commit `bc3c02e` (build 653).
+`tools/release_local.ps1` assembled it like rc.4 (a first run stopped on a
+transient Zig `Unexpected` file error in the RISC-V test build after every
+earlier gate had passed; the rerun was clean): native Windows Debug and
+ReleaseFast suites (646 tests each), the corpus with all optional T.803
+streams (127 passes, 19 expected rejections, no mismatch), and the Linux
+x86-64 and RISC-V 64 ReleaseFast suites in an `alpine:3.22` container. Every
+binary reports `0.2.0-rc.5+build.653.gbc3c02e8` under both CLI names, one
+fixture converts to identical bytes on all three platforms, and `SHA256SUMS`
+covers the Windows, Linux x86-64, and Linux RISC-V archives. It has no macOS
+archive: hosted Actions minutes, which the native macOS build needs, were
+exhausted. It changes no format or CLI behaviour: decode is
 35-37% faster at 20 threads and 24-25% at one than rc.4's (level with
 Kakadu 8.4.1 at one thread on the i5-14500), encode 13-15% faster, and all
 output stays identical; irreversible 9/7 now decodes above 24 bits in f64
