@@ -50,7 +50,7 @@ $env:Z2000_PART4_ROOT = (Resolve-Path .zig-cache\part4\htj2k-codestreams).Path
 zig build part1-corpus -- --require-optional
 ```
 
-The 2026-10-26 gate (the `v0.2.0-rc.5` release run, as for rc.4) contains 146 entries:
+The 2026-10-26 gate (the `v0.2.0-rc.6` release run, as for rc.4 and rc.5) contains 146 entries:
 123 committed entries plus all 23 optional T.803 inputs, the 16 profile-0
 and the 7 profile-1 streams, and **all 23 T.803 inputs pass**. Every input
 and every declared reference is independently checksummed. `p0_13` is checked

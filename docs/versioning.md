@@ -129,7 +129,7 @@ release, advance it to the next planned pre-1.0 line in a normal commit.
 
 `tools/release_local.ps1` runs steps 3 to 7 on Windows with Zig 0.17, Git,
 Docker Desktop, and the GitHub CLI; `v0.2.0-rc.2` was assembled this way by
-hand, and `v0.2.0-rc.3` to `v0.2.0-rc.5` by the script itself. From a clean, pushed checkout whose `VERSION` and committed
+hand, and `v0.2.0-rc.3` to `v0.2.0-rc.6` by the script itself. From a clean, pushed checkout whose `VERSION` and committed
 `docs/releases/TAG.md` match the tag, it runs the native Debug and
 ReleaseFast tests and the Part 1 corpus, with `--require-optional` when
 `Z2000_PART4_ROOT` points at the T.803 checkout (it warns otherwise); runs the ReleaseFast suite for
@@ -155,7 +155,7 @@ fallback, not the default publication path. Its RISC-V job failed with
 SIGSEGV under the hosted runner's `qemu-riscv64` for `v0.2.0-rc.2` while the
 same suite passes locally, so it currently cannot assemble a release; its
 native macOS job still provides the macOS archive. When hosted minutes are
-unavailable, as for `v0.2.0-rc.3` to `v0.2.0-rc.5`, the release ships without a macOS archive
+unavailable, as for `v0.2.0-rc.3` to `v0.2.0-rc.6`, the release ships without a macOS archive
 (`-SkipMacos`) rather than with an untested cross-built one. A separate `macOS Release Artifact`
 workflow builds only the native macOS arm64 archive when no trusted local Mac
 is available. Ordinary commits and tag pushes do not publish a release. The

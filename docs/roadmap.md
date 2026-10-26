@@ -111,7 +111,7 @@ Keep prereleases intentional rather than commit-triggered. Prefer locally
 assembled and verified release archives so the RISC-V functional gate does not
 consume hosted Actions minutes. A release candidate still requires Windows,
 Linux, and RISC-V evidence, and macOS evidence for any macOS archive it ships
-(`v0.2.0-rc.3` to `v0.2.0-rc.5` shipped none because no macOS build could be tested), the full corruption suite, deterministic
+(`v0.2.0-rc.3` to `v0.2.0-rc.6` shipped none because no macOS build could be tested), the full corruption suite, deterministic
 threaded output, current four-codec interop, documented CLI/API boundaries, and
 reproducible benchmark provenance. The detailed policy is in
 [`versioning.md`](versioning.md).

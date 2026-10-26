@@ -138,8 +138,18 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
-`v0.2.0-rc.6` is prepared on 2026-10-26 for `tools/release_local.ps1` in
-the same way as rc.5. It changes no format or CLI behaviour: encode is
+`v0.2.0-rc.6` was published on 2026-10-26 from commit `ea92249` (build 679).
+`tools/release_local.ps1` assembled it like rc.5 (a first run stopped on a
+transient Zig `Unexpected` file error in the Windows release build after
+every test gate had passed; the rerun was clean): native Windows Debug and
+ReleaseFast suites (653 tests each), the corpus with all optional T.803
+streams (127 passes, 19 expected rejections, no mismatch), and the Linux
+x86-64 and RISC-V 64 ReleaseFast suites in an `alpine:3.22` container. Every
+binary reports `0.2.0-rc.6+build.679.gea92249b` under both CLI names, one
+fixture converts to identical bytes on all three platforms, and `SHA256SUMS`
+covers the Windows, Linux x86-64, and Linux RISC-V archives. It has no macOS
+archive: hosted Actions minutes are still exhausted. It changes no format
+or CLI behaviour: encode is
 32-38% faster than rc.5's and decode 9-22% faster (on one thread z2000 now
 encodes as fast as Kakadu 8.4.1 and decodes 20% faster on the i5-14500),
 all codestreams and decoded samples stay identical, and the threaded 9/7
