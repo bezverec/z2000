@@ -46,6 +46,46 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, 0.2.0-rc.6 release checkpoint
+
+`c207d4c` (the rc.6 code). `tools/bench_compare.ps1 -Runs 8 -Warmup 2
+-IncludeLossy`, `-Threads 20` and `-Threads 1`, Kakadu 8.4.1, OpenJPEG
+2.5.4, Grok 20.4.19, each codec with its own file of the same image (mean
+times; t1 rows give the range of the three t1 runs the two invocations
+made):
+
+| Operation | Threads | z2000 | Kakadu | OpenJPEG | Grok |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lossless encode | 20 | 82.1 | 70.2 | 124.6 | 136.6 |
+| lossless encode | 1 | 468.8-483.1 | 506.2-507.2 | 745.2-752.0 | 761.0-786.5 |
+| lossless decode | 20 | 74.4 | 68.4 | 106.3 | 117.0 |
+| lossless decode | 1 | 454.0-485.7 | 580.6-594.9 | 639.8-649.1 | 597.9-616.6 |
+| lossy encode | 20 | 81.2 | 67.9 | 128.2 | 159.3 |
+| lossy encode | 1 | 497.8-510.8 | 506.8-525.5 | 692.3-727.1 | 795.0-800.5 |
+| lossy decode | 20 | 83.6 | 76.0 | 110.3 | 154.2 |
+| lossy decode | 1 | 464.0-502.4 | 578.9-582.2 | 604.8-615.8 | 611.7-632.6 |
+
+Every codec's lossless output verified lossless; Grok, OpenJPEG, and Kakadu
+decode z2000's output losslessly; z2000's lossy codestream is identical at
+t1 and t20 (lossy files 4.80-4.83 MB).
+
+Against `v0.2.0-rc.5` (`bc3c02e`), interleaved medians (15 rounds at t20,
+7 at t1; lossy encode t20 25 rounds):
+
+| Operation | Threads | rc.5 | rc.6 | Change |
+| --- | ---: | ---: | ---: | ---: |
+| lossless encode (`--bypass`) | 20 | 120.8 ms | 82.6 ms | -31.7% |
+| lossless encode | 1 | 787.5 ms | 485.1 ms | -38.4% |
+| lossy encode (two layers) | 20 | 137.2 ms | 85.1 ms | -38.0% |
+| lossy encode | 1 | 777.7 ms | 515.2 ms | -33.7% |
+| lossless decode (`z-t20.jp2`) | 20 | 79.7 ms | 72.7 ms | -8.8% |
+| lossless decode | 1 | 599.2 ms | 468.0 ms | -21.9% |
+| lossy decode (`lossy.jp2`) | 20 | 80.9 ms | 71.8 ms | -11.3% |
+| lossy decode | 1 | 580.6 ms | 490.8 ms | -15.5% |
+
+The rc.6 encode is byte-identical to rc.5's, and its decoded TIFFs are
+identical to rc.5's for both streams.
+
 ## 2026-10-26: Intel Core i5-14500, BYPASS bits without a branch
 
 Base `7c0ac10`, lossless `--bypass` encode: t1 508.1 -> 483.0 ms (-4.9%,

@@ -5,6 +5,8 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+## 0.2.0-rc.6 — 2026-10-26
+
 ### BYPASS Bits Written Without A Branch
 
 - The encoder's raw (BYPASS) bit writer sets each bit with a shift of the

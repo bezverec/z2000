@@ -138,6 +138,21 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
+`v0.2.0-rc.6` is prepared on 2026-10-26 for `tools/release_local.ps1` in
+the same way as rc.5. It changes no format or CLI behaviour: encode is
+32-38% faster than rc.5's and decode 9-22% faster (on one thread z2000 now
+encodes as fast as Kakadu 8.4.1 and decodes 20% faster on the i5-14500),
+all codestreams and decoded samples stay identical, and the threaded 9/7
+transform of a one-row level at an odd vertical origin is fixed. Before
+it, on 2026-10-26, the interop scripts passed against Kakadu 8.4.1,
+OpenJPEG 2.5.4, and Grok 20.4.19 (`interop_kakadu_styles`,
+`interop_erterm`, `interop_pltless_multitile`, `interop_rate_multitile`,
+the BMP, PNG, JPEG, DNG, and OpenEXR adapter gates, and
+`wide_encode_interop.py` at 1 to 34 bits, every reference exact within its
+own precision limit). The next release action after publication is again
+to collect feedback and decide between a final `v0.2.0` and
+`v0.2.0-rc.7`.
+
 `v0.2.0-rc.5` was published on 2026-10-26 from commit `bc3c02e` (build 653).
 `tools/release_local.ps1` assembled it like rc.4 (a first run stopped on a
 transient Zig `Unexpected` file error in the RISC-V test build after every
