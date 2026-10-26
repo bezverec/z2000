@@ -345,6 +345,7 @@ Primary public types:
 - `EncodeTimings`
 - `DecodeTimings`
 - `DecodeOptions`
+- `Rgb8Raster`
 - `TileSinkInfo`
 - `TileSinkComponentLayout`
 - `TileSinkRegion`
@@ -632,6 +633,14 @@ Primary public functions:
   them, so `--tile-index` and `--region` return exactly the corresponding crop
   of a full conversion. Reduced conversion is not reachable from the current
   front ends and stays fail-closed.
+  `DecodeOptions.rgb8_raster` points at an `Rgb8Raster` with room requested
+  before (`prefix_len`) and after (`suffix_len`) the pixels. Where it applies
+  (a single-tile, full-resolution, uncropped interleaved RGB decode of 8-bit
+  samples with RCT or ICT), the colour transform writes the 8-bit samples
+  straight into `bytes`, which the decode allocates with the decode allocator
+  and the caller frees, and the returned image carries no samples; elsewhere
+  `bytes` stays empty and the image carries its 16-bit samples as usual. The
+  JP2-to-TIFF command uses it to decode into the TIFF file buffer.
   `DecodeOptions.quality_layer_limit` selects the first N quality layers on the
   shared strict packet catalog; zero keeps all layers. Values above COD/Layers
   fail closed. Every later packet header and payload span is still parsed and

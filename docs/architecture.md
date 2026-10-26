@@ -318,8 +318,12 @@ serialization, and the interleave shares `color.interleaveRgbSamples` with the
 whole-image path, so the streamed file is byte-identical. One-, two-, and four-component conversions stream the
 same way through `tiff.GrayBandWriter` and `tiff.AlphaBandWriter`, and a palette
 stream is expanded per band into `tiff.RgbBandWriter` by an adapter above the
-TIFF layer, since the palette table is a container concern. Every bounded
-JP2-to-TIFF conversion therefore streams.
+TIFF layer, since the palette table is a container concern. Those conversions
+therefore stream. A full-resolution three-component RGB conversion does not:
+an 8-bit one decodes through `DecodeOptions.rgb8_raster` straight into the
+TIFF file buffer (the colour transform writes the interleaved samples between
+room for the header and the ICC trailer) and writes it once, and a 16-bit one
+serializes its whole raster on several threads.
 
 Codestream input is still read whole and a selected tile still runs a full
 inverse DWT into a full-tile plane, so those are the remaining memory

@@ -155,7 +155,7 @@ macOS archive; on macOS, build from source with Zig 0.17.
   component of more than 29 bits, or with any band deeper than 31 bitplanes,
   decodes through `i64` T1 and 5/3 up to the QCD ceiling of 37 bitplanes. No
   other codec we test decodes above 30 bits (OpenJPEG 2.5.4 stops there,
-  Kakadu 8.4.1 stops at 28 and is not lossless there, Grok 20.4.12 at 16). The
+  Kakadu 8.4.1 stops at 28 and is not lossless there, Grok 20.4.19 at 16). The
   legacy `u16` planar API remains unsigned-only and now accepts component
   precision across 1..16 bits. Checked PGX diagnostics cover one component up to 32-bit
   storage; canonical ZRAW preserves all components, signedness, 1..38-bit
@@ -563,9 +563,12 @@ Other commands:
   --region,
   --layers, --threads, --t1-backend, --convert-to-srgb, and --timings. ICC conversion is opt-in;
   without the flag, profile bytes and samples are preserved unchanged.
-  Every bounded conversion is written band by band through a streaming TIFF
-  writer, so peak memory is one tile-row band rather than the whole raster plus
-  the whole file; the bytes are identical either way.
+  Grayscale, gray+alpha, RGBA, palette, and subsampled RGB conversions are
+  written band by band through a streaming TIFF writer, so peak memory is one
+  tile-row band rather than the whole raster plus the whole file. A
+  full-resolution 8-bit RGB decode instead writes its samples straight into
+  the TIFF file buffer (header and ICC room around them) and writes that
+  buffer once; the bytes are identical either way.
 - **j2k-to-pgx INPUT OUTPUT**: Decode one selected component from a raw `.j2k`
   or `.j2c` codestream through the native reversible path. `--component`
   defaults to 0, `--tile-index`/`--region` default to the complete image, and `--layers`

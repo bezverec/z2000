@@ -37,6 +37,13 @@ all-thread setting.
 
 ## Current Evidence
 
+- 2026-10-26, rc.5 checkpoint (`benchmarks.md`): z2000 decodes the
+  2048x2048 RGB benchmark in 80.4 ms lossless and 86.6 ms lossy at t20
+  (Kakadu 78.1 and 76.9 ms, OpenJPEG 114.8 and 119.7 ms, Grok 20.4.19 120.9
+  and 161.9 ms) and level with Kakadu at t1 (about 610 and 600 ms). Against
+  rc.4, decode is 35-37% faster at t20 and 24-25% at t1, encode 13-15%
+  faster. Encode remains the larger gap to Kakadu: 117.4 against 69.8 ms at
+  t20 and 812 against 543 ms at t1. Performance work is frozen for rc.5.
 - 2026-10-25 (`benchmarks.md`): folded MQ contexts and four-lane neighbor
   updates cut common-stream t1 decode from 781.6 to 691.9 ms; the cleanup
   column screen and a 64-bit MQ register then took it to 636.5 ms (Grok

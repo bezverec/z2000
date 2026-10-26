@@ -97,9 +97,11 @@ checked semantics.
 
 ### 4. Performance And Scale
 
-Continue separate 5/3 lossless and 9/7 lossy campaigns. Near-term value is in
-decode parallel efficiency, catalog/T1 overlap, I/O locality, and carefully
-measured T1 work. Portable Zig vectors remain the default SIMD abstraction;
+Continue separate 5/3 lossless and 9/7 lossy campaigns. Decode reached Kakadu
+at one thread and came within 1.03x (lossless) and 1.13x (lossy) of it on all
+threads for `v0.2.0-rc.5`, ahead of OpenJPEG and Grok; near-term value is now
+in encode throughput (1.5-1.7x behind Kakadu), the lossy decode tail, and
+carefully measured T1 work. Portable Zig vectors remain the default SIMD abstraction;
 AVX2, AVX-512, NEON, and RVV must share scalar-oracle tests. The long-term goal
 is to exceed Grok and then Kakadu without relaxing correctness or safety.
 

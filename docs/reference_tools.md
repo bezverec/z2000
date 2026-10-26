@@ -12,7 +12,25 @@ to find when a new sweep hits the same wall. The
 lookup table.
 
 Versions measured: **Kakadu 8.4.1**, **OpenJPEG 2.5.4**, **Grok 20.3.6**, and
-where stated **Grok 20.4.12** (re-measured on the same files).
+where stated **Grok 20.4.12** or **Grok 20.4.19** (re-measured on the same
+files).
+
+## Running The References For Measurement
+
+- **Kakadu's multi-threaded decode leaves a process affinity mask.**
+  `kdu_expand -num_threads N` with N above one sets its worker threads' own
+  affinities, so a mask set on the process (`SetProcessAffinityMask`, or
+  `start /affinity`) does not confine it: per-thread hardware counters
+  (2026-10-25, i5-14500) put 34% of its cycles outside a six-P-core mask, 30%
+  outside a twelve-hyper-thread mask, and 86% outside an eight-E-core mask.
+  Single-threaded Kakadu, z2000, and the other references stay inside. A job
+  object's affinity limit holds every thread; `tools/win_affinity_run.zig`
+  runs a command that way.
+- **Grok 20.4.19 decodes precisions 1 to 16 only**, as 20.4.12 does: the
+  wide-encoder sweep (`tools/wide_encode_interop.py`, 2026-10-26) decodes its
+  1- to 16-bit streams exactly and fails at 24 bits. On the i5-14500 its t20
+  decode of the common 2048x2048 stream is about 25% slower than 20.4.14 and
+  20.4.12 at an unchanged t1, so benchmark records name the Grok version.
 
 ## What The Producers Cannot Emit
 

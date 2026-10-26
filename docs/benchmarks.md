@@ -46,6 +46,46 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, 0.2.0-rc.5 release checkpoint
+
+Source `5e1c379` (performance frozen for rc.5), ReleaseFast native build,
+input `zig-out/bench-rgb-2048.tif` (2048x2048 RGB, 8 bits). Kakadu 8.4.1,
+OpenJPEG 2.5.4, Grok 20.4.19. A noisy host, so the four-codec table comes
+from `tools/bench_compare.ps1 -Runs 8 -Warmup 2 -IncludeLossy` (hyperfine,
+sequential; mean of 8) and the rc.4 comparison from interleaved rounds.
+
+Four codecs, each decoding its own file (lossless 5/3 RCT; lossy 9/7 ICT,
+two layers, final layer complete, files of 4.80-4.83 MB), ms:
+
+| Operation | Threads | z2000 | Kakadu | OpenJPEG | Grok |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lossless decode | 20 | 80.4 | 78.1 | 114.8 | 120.9 |
+| lossless decode | 1 | 609.4-626.6 | 609.6-680.6 | 678.3-913.8 | 647.9-659.5 |
+| lossy decode | 20 | 86.6 | 76.9 | 119.7 | 161.9 |
+| lossy decode | 1 | 593.8-603.7 | 601.1-618.1 | 624.0-631.1 | 646.1-651.6 |
+| lossless encode | 20 | 117.4 | 69.8 | 126.9 | 141.5 |
+| lossless encode | 1 | 811.6-818.6 | 538.7-547.0 | 779.2-796.2 | 813.0-825.7 |
+| lossy encode | 20 | 141.9 | 67.7 | 141.6 | 155.6 |
+| lossy encode | 1 | 787.3-794.1 | 529.0-662.3 | 736.1-751.7 | 835.3-842.7 |
+
+(t1 rows: the three t1 runs the two invocations made.) Every codec's
+lossless output verified lossless; Grok, OpenJPEG, and Kakadu decode z2000's
+output losslessly; z2000's lossy codestream is identical at t1 and t20.
+
+Against `v0.2.0-rc.4` (`5854aee`), interleaved, medians:
+
+| Operation | Threads | Rounds | rc.4 | rc.5 | Change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lossless decode (`z-t20.jp2`) | 20 | 15 | 123.7 ms | 80.5 ms | -34.9% |
+| lossless decode | 1 | 9 | 812.4 ms | 611.6 ms | -24.7% |
+| lossy decode (`lossy.jp2`) | 20 | 15 | 126.8 ms | 80.3 ms | -36.7% |
+| lossy decode | 1 | 9 | 788.6 ms | 596.7 ms | -24.3% |
+| lossless encode (defaults) | 20 | 9 | 138.4 ms | 118.0 ms | -14.8% |
+| lossless encode | 1 | 9 | 1037.3 ms | 899.7 ms | -13.3% |
+
+The rc.5 encode is byte-identical to rc.4's, and its decoded TIFFs are
+identical to rc.4's for both streams at t1 and t20.
+
 ## 2026-10-26: Intel Core i5-14500, reversible RGB tail in row bands
 
 Base `1528bab`, common lossless stream, t20, 13 `--timings` runs:

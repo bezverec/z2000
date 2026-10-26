@@ -994,14 +994,16 @@ programs rather than silently broadening the Part 1 claim.
 Performance work may run between correctness slices under
 [`optimization_plan.md`](optimization_plan.md).
 
-The 5/3 worker-cap and persistent-pool experiments are complete. The 2026-07-16
-i5-14500 checkpoint measured 5/3 lossless and 9/7 lossy at t1/t20 across
-z2000, Grok, OpenJPEG, and Kakadu. z2000 t20 lossless encode now beats Grok and
-nearly matches OpenJPEG, while common-stream decode remains 1.37x behind Grok
-and 1.43x behind Kakadu. The next measurement should therefore isolate decode
-packet/block readiness overlap, output/TIFF serialization, and allocation
-locality. Reopen broad T1 SWAR/packed-column work only with a new layout
-hypothesis and the normal keep rule.
+The decode campaign of 2026-10-24 to 2026-10-26 (single-thread Tier-1, one
+shared worker pool, Tier-1 overlapped with the inverse DWT, the packet
+catalog and the decode tail on all workers) is complete and frozen for
+`v0.2.0-rc.5`: on the i5-14500 z2000 now decodes the 2048x2048 RGB benchmark
+level with Kakadu 8.4.1 at t1 and within 1.03x (lossless) and 1.13x (lossy)
+of it at t20, ahead of OpenJPEG and Grok in both. The open performance
+candidates are a banded 9/7 finest level with the ICT for the lossy tail,
+and encode, now the larger gap to Kakadu (1.7x at t20, 1.5x at t1); see
+`optimization_plan.md`. Reopen broad T1 SWAR/packed-column work only with a
+new layout hypothesis and the normal keep rule.
 
 ## Gate For Every Slice
 
