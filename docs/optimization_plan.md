@@ -285,7 +285,9 @@ million examined samples were already significant; lossless t1 -7.5 to
 slower (most samples there are coded). The MQ encoder stores a context's
 next state into a discarded slot when the context stays, which removes the
 renormalization branch without chaining a context's decisions through
-memory (lossless t1 encode -15%, lossy -18%).
+memory (lossless t1 encode -15%, lossy -18%). The MQ decoder decodes
+without branches on the decision the same way (lossless t1 decode -16%,
+t8 -9%; neutral at t20, where hyper-threads share the cores).
 
 Active since 2026-10-26, after the decode campaign. The MQ encoder now
 codes without branching on the decision and the Tier-1 passes hold its

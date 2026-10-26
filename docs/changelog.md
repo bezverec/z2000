@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### MQ Decoder Without Branches On The Decision
+
+- The ISO MQ decoder's `readUnchecked`, which every Tier-1 decode pass
+  uses, decodes without branching on the decision: the MPS or LPS side
+  comes from one compare, C and A from selects, the decision from the
+  side and the conditional exchange, the context's next state is stored
+  into a discarded slot when the context stays (as the encoder does since
+  `f882c74`), and A doubles in one shift; only a refill of the buffered
+  code bits branches. `readProfiled` keeps the branchy form for its
+  per-transition counters and decodes the same decisions.
+- Decoded samples identical (lossless and lossy at t1, t2, t3, t20;
+  region and layer-limited decodes; 34-bit wide stream); codestreams
+  unchanged. Against `f882c74` on a quiet host, 9 interleaved rounds:
+  lossless decode t1 544.1 -> 455.3 ms (-16.3%), t8 108.4 -> 98.7 ms
+  (-8.9%); lossy t1 542.5 -> 472.1 ms (-13.0%), t8 107.6 -> 94.4 ms
+  (-12.3%). At t20 (21 `--timings` runs) the decode is unchanged within
+  noise (lossless 58.4 -> 58.8 ms, lossy 63.7 -> 62.5 ms): with
+  hyper-threads sharing cores, the branch-free decode's extra work offsets
+  the saved mispredictions there.
+
 ### MQ Encoder Without The Renormalization Branch
 
 - The MQ encoder's `write` no longer branches on whether a decision

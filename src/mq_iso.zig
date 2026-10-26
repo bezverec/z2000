@@ -415,6 +415,9 @@ pub const Decoder = struct {
     /// byte read ahead).
     c: u64 = 0,
     ct: u8 = 0,
+    /// Where `readUnchecked` stores a context's next state when it does not
+    /// move.
+    discarded_context: Context = undefined,
 
     pub fn init(allocator: std.mem.Allocator, context_count: usize, bytes: []const u8) !Decoder {
         return initWithFirstByteShift(allocator, context_count, bytes, 16);
@@ -500,31 +503,37 @@ pub const Decoder = struct {
         return self.readUnchecked(context_index);
     }
 
-    // Keep this branch layout in sync with readProfiled. The profiled variant
-    // only adds counters around the same ISO MQ decode transitions.
+    /// DECODE (C.3.2) without a branch on the decision, which is close to
+    /// random in refinement and often unpredictable elsewhere. The MPS
+    /// sub-interval keeps C - Qe and A - Qe, the LPS one C and A = Qe; after
+    /// the conditional exchange the decision is the MPS exactly when that
+    /// side's interval is not the smaller one (C.3.2, C.3.3). As in
+    /// `Encoder.write`, the context's next state is stored into a discarded
+    /// slot when the context does not move, and A doubles in one shift (of
+    /// zero when it stays); only a refill of the buffered bits branches.
     pub inline fn readUnchecked(self: *Decoder, context_index: usize) bool {
         std.debug.assert(context_index < self.contexts.len);
         const context = &self.contexts.ptr[context_index];
-        const qe = context.qe;
-
+        const qe: u32 = context.qe;
         const next_a = self.a - qe;
-        const c_high = self.c >> 48;
-        self.a = next_a;
-        if (c_high >= qe) {
-            self.c -= @as(u64, qe) << 48;
-            if ((next_a & 0x8000) != 0) return context.mps;
-            const bit = self.exchangeMps(context, qe);
-            self.renormalize();
-            return bit;
-        }
-
-        const bit = self.exchangeLps(context, qe);
-        self.renormalize();
+        const mps_side = (self.c >> 48) >= qe;
+        self.c -= if (mps_side) @as(u64, qe) << 48 else 0;
+        self.a = if (mps_side) next_a else qe;
+        const decided_mps = mps_side != (next_a < qe);
+        const bit = context.mps == decided_mps;
+        const target = if (self.a < 0x8000) context else &self.discarded_context;
+        target.* = folded_contexts[if (decided_mps) context.nmps else context.nlps];
+        const shift: u5 = @clz(@as(u16, @intCast(self.a)));
+        if (self.ct < shift) _ = self.fill();
+        self.a <<= shift;
+        self.c <<= shift;
+        self.ct -= shift;
         return bit;
     }
 
-    // Keep this branch layout in sync with readUnchecked. Once the MPS side
-    // misses its high-A fast return, that transition necessarily renormalizes.
+    // The branchy DECODE, with counters on its transitions; it decodes what
+    // readUnchecked does. Once the MPS side misses its high-A fast return,
+    // that transition necessarily renormalizes.
     pub inline fn readProfiled(self: *Decoder, context_index: usize, stats: *DecodeBranchStats) bool {
         std.debug.assert(context_index < self.contexts.len);
         const context = &self.contexts.ptr[context_index];

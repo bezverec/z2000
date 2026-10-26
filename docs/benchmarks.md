@@ -46,6 +46,22 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, MQ decoder without branches on the decision
+
+Base `f882c74`, quiet host, wall time, 9 interleaved rounds:
+
+| Stream | Threads | Base | Branch-free DECODE |
+| --- | ---: | ---: | ---: |
+| lossless `z-t20.jp2` | 1 | 544.1 ms | 455.3 ms (-16.3%) |
+| lossless | 8 | 108.4 ms | 98.7 ms (-8.9%) |
+| lossy `lossy.jp2` | 1 | 542.5 ms | 472.1 ms (-13.0%) |
+| lossy | 8 | 107.6 ms | 94.4 ms (-12.3%) |
+
+At t20 (21 `--timings` runs) within noise: lossless 58.4 -> 58.8 ms,
+lossy 63.7 -> 62.5 ms. Applied first to the refinement pass alone
+(lossless t1 -6.1%, lossy -11.7%), then to every pass (a further -9.3% and
+-4.2%). Decoded TIFFs byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, MQ encoder without the renormalization branch
 
 Base `471d743`, quiet host:
