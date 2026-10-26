@@ -5,6 +5,16 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Single-Tile Codestream Assembled Into A Reserved Buffer
+
+- The single-tile codestream assembler reserves the exact size of its
+  tile-parts (the sum of their Psot values and EOC) once the main header,
+  TLM, and PPM are written, so appending the packets no longer regrows the
+  buffer, and its final `toOwnedSlice` no longer shrinks it, each copying
+  the packets again.
+- Codestreams byte-identical. Against `a790391`, lossless t20, 15
+  `--timings` runs: markers/write SOD 3.7 -> 1.0 ms, total 88.6 -> 84.7 ms.
+
 ### JP2 Written Without A Copy Of The Codestream
 
 - An RGB `tiff-to-jp2` (and the other raster inputs that reach the same

@@ -5284,6 +5284,12 @@ fn assembleSingleTileCodestream(
         }
         try appendPpmPacketHeaderGroups(allocator, &out, ppm_groups[0..tile_parts]);
     }
+    // The tile-parts take exactly their Psot bytes, then EOC: reserving them
+    // spares the buffer's regrowth (and its final shrink) copying the
+    // packets again.
+    var remaining: usize = 2;
+    for (psots[0..tile_parts]) |psot| remaining += psot;
+    try out.ensureTotalCapacityPrecise(allocator, out.items.len + remaining);
     var packet_sequence: u16 = 0;
     var ppt_marker_index: u16 = 0;
     tile_part_index = 0;

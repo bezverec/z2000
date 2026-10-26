@@ -292,9 +292,7 @@ widening to 16-bit samples now runs on the pool as well (TIFF read 7.3 ->
 5.0 ms at t20); the file read itself (about 3.8 ms) is what remains there.
 An RGB JP2 without metadata is written as its boxes and then the
 codestream, without a copy (JP2 wrap 1.7 -> 0.6 ms). The codestream
-assembly (`markers/write SOD`, about 3.7 ms: markers and a copy of every
-packet into a fresh buffer) is the largest serial stage after block
-coding.
+assembly (`markers/write SOD`) reserves its exact size now, 3.7 -> 1.0 ms.
 
 Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode
 gap, unless profiling finds a shared T1/MQ change. Then revisit bitplane

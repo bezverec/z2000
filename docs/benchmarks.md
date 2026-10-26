@@ -46,6 +46,14 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, single-tile codestream into a reserved buffer
+
+Base `a790391`, lossless encode t20, 15 `--timings` runs: reserving the
+tile-parts' exact size before the packets are appended takes the
+`markers/write SOD` stage from 3.7 to 1.0 ms (the 6.2 MB of packets were
+copied on every regrowth of the buffer and once more by its final shrink);
+total 88.6 -> 84.7 ms. Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, JP2 written without a codestream copy
 
 Base `9ceeb56`, lossless encode t20, 15 `--timings` runs: writing the JP2
