@@ -13863,7 +13863,8 @@ test "parallel 9/7 DWT matches the serial origin transform bit-for-bit" {
     // worker counts from the inline fallback to more workers than vector groups.
     const dims = [_][2]usize{
         .{ 1, 1 },     .{ 1, 33 },   .{ 33, 1 },   .{ 64, 64 },   .{ 65, 63 },
-        .{ 129, 128 }, .{ 100, 40 }, .{ 17, 200 }, .{ 512, 512 },
+        .{ 129, 128 }, .{ 100, 40 }, .{ 17, 200 }, .{ 512, 512 }, .{ 130, 1 },
+        .{ 130, 2 },
     };
     const origins = [_][2]u32{ .{ 0, 0 }, .{ 1, 1 }, .{ 3, 2 } };
     const thread_counts = [_]usize{ 1, 2, 4, 8, 16 };

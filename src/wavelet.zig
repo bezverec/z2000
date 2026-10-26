@@ -753,12 +753,13 @@ const Dwt97BandJob = struct {
                         forward97VerticalBand(plane, job.stride, col, job.cur_height, (job.y0 & 1) == 1, job.pack_scratch);
                     }
                 }
-                if (job.end == job.cur_width) {
-                    while (col < job.cur_width) : (col += 1) {
-                        for (0..job.cur_height) |row| job.line[row] = plane[row * job.stride + col];
-                        forward1DOrigin(job.line[0..job.cur_height], job.scratch[0..job.cur_height], .irreversible_9_7, job.y0);
-                        for (0..job.cur_height) |row| plane[row * job.stride + col] = job.line[row];
-                    }
+                // The last band also runs the columns past the vector groups; on
+                // a single-row level (no vector pass) every band runs its own.
+                const line_end = if (job.cur_height < 2) job.end else if (job.end == job.cur_width) job.cur_width else col;
+                while (col < line_end) : (col += 1) {
+                    for (0..job.cur_height) |row| job.line[row] = plane[row * job.stride + col];
+                    forward1DOrigin(job.line[0..job.cur_height], job.scratch[0..job.cur_height], .irreversible_9_7, job.y0);
+                    for (0..job.cur_height) |row| plane[row * job.stride + col] = job.line[row];
                 }
             },
             .inverse_columns => for (job.planes) |plane| {
@@ -769,12 +770,13 @@ const Dwt97BandJob = struct {
                         inverse97VerticalBand(plane, job.stride, col, job.cur_height, (job.y0 & 1) == 1, job.pack_scratch);
                     }
                 }
-                if (job.end == job.cur_width) {
-                    while (col < job.cur_width) : (col += 1) {
-                        for (0..job.cur_height) |row| job.line[row] = plane[row * job.stride + col];
-                        inverse1DOrigin(job.line[0..job.cur_height], job.scratch[0..job.cur_height], .irreversible_9_7, job.y0);
-                        for (0..job.cur_height) |row| plane[row * job.stride + col] = job.line[row];
-                    }
+                // The last band also runs the columns past the vector groups; on
+                // a single-row level (no vector pass) every band runs its own.
+                const line_end = if (job.cur_height < 2) job.end else if (job.end == job.cur_width) job.cur_width else col;
+                while (col < line_end) : (col += 1) {
+                    for (0..job.cur_height) |row| job.line[row] = plane[row * job.stride + col];
+                    inverse1DOrigin(job.line[0..job.cur_height], job.scratch[0..job.cur_height], .irreversible_9_7, job.y0);
+                    for (0..job.cur_height) |row| plane[row * job.stride + col] = job.line[row];
                 }
             },
             .forward_rows => for (job.planes) |plane| {

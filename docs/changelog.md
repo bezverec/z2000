@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Single-Row 9/7 Levels On Several Threads
+
+- The threaded 9/7 driver (`forward97Parallel`, `inverse97Parallel`) now
+  runs every column band of a level that is one row high. Such a level has
+  no vector pass, and only the last band ran its columns, so with an odd
+  vertical origin (where the one-sample rule doubles or halves the sample)
+  the columns of the other bands were left unscaled and the threaded
+  transform differed from the serial one. It takes a level at least 64
+  samples wide and one row high at an odd origin, which none of the test
+  streams has; the parallel-versus-serial 9/7 test now covers it
+  (130x1 and 130x2 at the odd origins).
+
 ## 0.2.0-rc.5 — 2026-10-26
 
 ### Reversible RGB Tail In Row Bands
