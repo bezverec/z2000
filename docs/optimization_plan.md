@@ -282,7 +282,10 @@ columns and rows its stripe's significance words leave open (40.4 of 55.5
 million examined samples were already significant; lossless t1 -7.5 to
 -9%). The decoder's significance passes do the same (lossless t1 decode
 -7.6%). The refinement pass from a snapshot of the significance words was
-slower (most samples there are coded).
+slower (most samples there are coded). The MQ encoder stores a context's
+next state into a discarded slot when the context stays, which removes the
+renormalization branch without chaining a context's decisions through
+memory (lossless t1 encode -15%, lossy -18%).
 
 Active since 2026-10-26, after the decode campaign. The MQ encoder now
 codes without branching on the decision and the Tier-1 passes hold its

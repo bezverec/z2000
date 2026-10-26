@@ -46,6 +46,27 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, MQ encoder without the renormalization branch
+
+Base `471d743`, quiet host:
+
+| Profile | Threads | Base | Discarded-slot store |
+| --- | ---: | ---: | ---: |
+| lossless (wall, 9 rounds) | 1 | 679.6 ms | 577.8 ms (-15.0%) |
+| lossless `--bypass` (wall, 9 rounds) | 1 | 619.3 ms | 520.2 ms (-16.0%) |
+| lossy two-layer (`--timings`, 5 runs) | 1 | 615.3 ms | 503.0 ms |
+| lossless `--bypass` (`--timings`, 21 runs) | 20 | 68.3 ms | 63.0 ms |
+| lossy two-layer (`--timings`, 21 runs) | 20 | 72.1 ms | 65.5 ms |
+
+The three MQ store variants so far: always storing into the context (a
+select between old and next state; chains a context's decisions through
+memory), storing only on renormalization (a branch near even for
+refinement contexts), and now always storing, into the context or a
+discarded slot. Codestreams byte-identical. Rejected the same day: a local
+copy of the `refinement_later` context in the refinement pass (lossless t1
++6.5%) and the cleanup pass skipping all-significant columns by bitmap
+(-0.2 to -0.8%, within noise).
+
 ## 2026-10-26: Intel Core i5-14500, decoder significance pass by bitmap
 
 Base `ed95eb6`, quiet host. The decoder's significance passes visit only

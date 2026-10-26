@@ -72,6 +72,8 @@ pub const Encoder = struct {
     c: u32 = 0,
     ct: u8 = 12,
     fake_previous: u8 = 0,
+    /// Where `write` stores a context's next state when it does not move.
+    discarded_context: Context = undefined,
 
     pub fn init(allocator: std.mem.Allocator, context_count: usize) !Encoder {
         if (context_count == 0) return IsoMqError.InvalidContext;
@@ -152,11 +154,16 @@ pub const Encoder = struct {
         self.a = if (upper) next_a else qe;
         // An LPS always renormalizes, an MPS when A - Qe drops below 0x8000:
         // exactly when the new A is below 0x8000. Only then does the context
-        // move on (a store on every decision would chain each decision of a
-        // context to the one before through memory), and A doubles up to
-        // 0x8000 in one shift unless a byte boundary falls inside it.
-        if (self.a >= 0x8000) return;
-        context.* = folded_contexts[if (is_mps) context.nmps else context.nlps];
+        // move on. Without a branch on that (it is near even for refinement
+        // contexts): the next state is always stored, into a discarded slot
+        // when the context stays, so the context itself is not rewritten (a
+        // rewrite on every decision would chain each decision of a context
+        // to the one before through memory). A then doubles up to 0x8000 in
+        // one shift (of zero when it stays) unless a byte boundary falls
+        // inside it.
+        const renormalizes = self.a < 0x8000;
+        const target = if (renormalizes) context else &self.discarded_context;
+        target.* = folded_contexts[if (is_mps) context.nmps else context.nlps];
         const shift: u5 = @clz(@as(u16, @intCast(self.a)));
         if (shift < self.ct) {
             self.a <<= shift;

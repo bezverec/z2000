@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### MQ Encoder Without The Renormalization Branch
+
+- The MQ encoder's `write` no longer branches on whether a decision
+  renormalizes. The context's next state is stored on every decision,
+  into a discarded slot when the context stays, and A shifts by its
+  leading-zero count (zero when it stays); only a byte boundary inside the
+  shift branches. The renormalization branch was close to random for the
+  refinement contexts, and unlike the earlier always-store variant the
+  context itself is still rewritten only when it moves, so consecutive
+  decisions of a context do not wait on each other's stores.
+- Codestreams byte-identical. Against `471d743` on a quiet host: lossless
+  t1 encode 679.6 -> 577.8 ms (-15.0%), with `--bypass` 619.3 -> 520.2 ms
+  (-16.0%), 9 interleaved rounds; lossy two-layer t1 615.3 -> 503.0 ms
+  (5 `--timings` runs); t20 (21 runs) lossless `--bypass` 68.3 -> 63.0 ms,
+  lossy 72.1 -> 65.5 ms.
+- Tried and dropped the same day: the refinement pass keeping its
+  `refinement_later` context in a local (+6.5% at t1) and the cleanup pass
+  skipping all-significant columns by bitmap (within 1%, its four-flag
+  column screen already covers them).
+
 ### Decoder Significance Pass Skips Significant Samples By Bitmap
 
 - The decoder's significance propagation passes (MQ, non-causal; and
