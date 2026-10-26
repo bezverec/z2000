@@ -138,6 +138,15 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
+The final `v0.2.0` is prepared: its notes are drafted in
+`docs/releases/v0.2.0.md`, and it will be published from `main` (rc.6's code
+plus the coarser 5/3 levels inside Tier-1, byte-identical output) with
+`tools/release_local.ps1 -Tag v0.2.0 -SkipMacos -CreateDraft` once rc.6 has
+been out for a short test period without reported problems. At publication
+the changelog's unreleased entries move under `0.2.0`, README and
+`versioning.md` point at the release, and `VERSION` then advances to the
+next planned line (`0.3.0`).
+
 `v0.2.0-rc.6` was published on 2026-10-26 from commit `ea92249` (build 679).
 `tools/release_local.ps1` assembled it like rc.5 (a first run stopped on a
 transient Zig `Unexpected` file error in the Windows release build after
