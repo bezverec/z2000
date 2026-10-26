@@ -279,9 +279,12 @@ this path separately from the ordinary unsigned 8/16-bit display decoder.
 
 Active since 2026-10-26, after the decode campaign. The MQ encoder now
 codes without branching on the decision and the Tier-1 passes hold its
-registers in machine registers (lossless t1 -10.9%, lossy t1 -13.7%). At
-t20 the lossy encode's forward transform (ICT and 9/7, about 20 ms against
-7 ms for the lossless 5/3) is the next stage to examine.
+registers in machine registers (lossless t1 -10.9%, lossy t1 -13.7%). The
+lossy encode's front end then moved onto all threads (ICT bands on the
+shared pool, quantization in row ranges in place: lossy t20 114.0 ->
+97.9 ms). At t20 both encodes now spend about 68 ms of their 96-98 ms in
+block coding, so the Tier-1 encoder's per-symbol cost is again the target;
+the TIFF read (7.3 ms) is the next largest stage.
 
 Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode
 gap, unless profiling finds a shared T1/MQ change. Then revisit bitplane

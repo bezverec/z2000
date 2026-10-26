@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Lossy Encode Front End On All Threads
+
+- On several threads the irreversible encoder's forward ICT runs in pixel
+  bands on the shared pool (`color.forwardIctThreaded`; it was one
+  thread), and after the joint forward 9/7 the deadzone quantization runs
+  in row ranges of every plane on up to `--threads` threads (it ran one
+  job per plane, three threads) and writes each integer over the float it
+  comes from, so the 48 MB of integer planes of a 2048x2048 RGB encode are
+  no longer allocated and faulted in. The forward RCT's bands run on the
+  shared pool as well when it is free. A unit test compares the threaded
+  ICT with the single-thread one over odd sizes and thread counts.
+- Encoded codestreams are byte-identical (the encode profile matrix at t1
+  and t20) and decodes unchanged. Against `6af8264`, 15 `--timings` runs:
+  lossy t20 114.0 -> 97.9 ms (ICT 7.7 -> 2.6 ms, transform and
+  quantization 19.4 -> 10.5 ms), lossy t8 153.8 -> 138.1 ms (9 runs),
+  lossless t20 96.5 -> 95.6 ms (RCT 2.8 -> 2.6 ms). One thread takes the
+  per-plane path and is unchanged.
+
 ### MQ Encoder Without Symbol Branches
 
 - The ISO MQ encoder's `write` codes a decision without branching on it:

@@ -3041,20 +3041,56 @@ fn irreversibleForwardPlane(job: *IrreversibleForwardPlaneJob) anyerror!void {
     }
 }
 
-/// Quantize-only plane job for the intra-plane parallel DWT path, where the
-/// 9/7 transform already ran jointly across all planes.
-const IrreversibleQuantizePlaneJob = struct {
-    plane: []const f32,
-    quantized: []i32,
+/// Quantization of one plane's rows `row_begin..row_end` for the intra-plane
+/// parallel DWT path, where the 9/7 transform already ran jointly across all
+/// planes; the integers overwrite the floats they come from.
+const IrreversibleQuantizeRowsJob = struct {
+    plane: []f32,
     width: usize,
+    row_begin: usize,
+    row_end: usize,
     bands: []const subband.Band,
     deltas: []const f64,
-    result: anyerror!void = {},
+
+    fn work(job: *IrreversibleQuantizeRowsJob) void {
+        for (job.bands, job.deltas) |band, delta| {
+            const top = @max(band.rect.y, job.row_begin);
+            const bottom = @min(band.rect.y + band.rect.height, job.row_end);
+            if (top >= bottom or band.rect.width == 0) continue;
+            const rows = subband.Rect{ .x = band.rect.x, .y = top, .width = band.rect.width, .height = bottom - top };
+            quantizeBandRegion(job.plane, @as([*]i32, @ptrCast(job.plane.ptr))[0..job.plane.len], job.width, rows, delta);
+        }
+    }
 };
 
-fn irreversibleQuantizePlaneWorker(job: *IrreversibleQuantizePlaneJob) void {
-    for (job.bands, job.deltas) |band, delta| {
-        quantizeBandRegion(job.plane, job.quantized, job.width, band.rect, delta);
+/// Quantizes the transformed planes in place, in row ranges spread over up
+/// to `thread_count` threads of the shared pool (inline when it is busy).
+fn quantizeIrreversiblePlanesInPlace(
+    allocator: std.mem.Allocator,
+    planes: []const []f32,
+    width: usize,
+    height: usize,
+    bands: []const subband.Band,
+    deltas: []const f64,
+    thread_count: u8,
+) !void {
+    const ranges_per_plane = @max(1, @min(@as(usize, thread_count), height));
+    const jobs = try allocator.alloc(IrreversibleQuantizeRowsJob, planes.len * ranges_per_plane);
+    defer allocator.free(jobs);
+    for (planes, 0..) |plane, plane_index| {
+        for (0..ranges_per_plane) |range| {
+            jobs[plane_index * ranges_per_plane + range] = .{
+                .plane = plane,
+                .width = width,
+                .row_begin = height * range / ranges_per_plane,
+                .row_end = height * (range + 1) / ranges_per_plane,
+                .bands = bands,
+                .deltas = deltas,
+            };
+        }
+    }
+    if (!worker_pool.runJobsOn(thread_count, IrreversibleQuantizeRowsJob, jobs, IrreversibleQuantizeRowsJob.work)) {
+        for (jobs) |*job| job.work();
     }
 }
 
@@ -3089,6 +3125,8 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
     const color_start = monotonicNs();
     var ict = if (mct == .none)
         try color.forwardNoTransformFloat(allocator, rgb)
+    else if (thread_count > 1)
+        try color.forwardIctThreaded(allocator, rgb, thread_count)
     else
         try color.forwardIct(allocator, rgb);
     defer ict.deinit();
@@ -3110,20 +3148,14 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
         );
     }
 
-    var out = try color.RctPlanes.init(allocator, ict.width, ict.height, rgb.bit_depth, 3);
-    errdefer out.deinit();
-    const y = out.planes[0];
-    const cb = out.planes[1];
-    const cr = out.planes[2];
-
     const wavelet_start = monotonicNs();
     if (thread_count > 1) {
         // Intra-plane parallel DWT: one joint 9/7 transform over the three
         // planes with row/column bands spread across all `thread_count`
-        // workers, then 3-way quantize jobs. The per-plane job path below
-        // caps the DWT at three threads and starves wider machines. The
-        // per-column/per-row arithmetic is unchanged, so streams stay
-        // bit-identical.
+        // workers, then quantization in row ranges on all of them. The
+        // per-plane job path below caps the DWT at three threads and starves
+        // wider machines. The per-column/per-row arithmetic is unchanged, so
+        // streams stay bit-identical.
         const done = try wavelet.forward97Parallel(
             std.heap.smp_allocator,
             .{ ict.planes[0], ict.planes[1], ict.planes[2] },
@@ -3135,13 +3167,34 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
             thread_count,
         );
         if (done != levels) return CodestreamError.InvalidCodestream;
-        var jobs = [3]IrreversibleQuantizePlaneJob{
-            .{ .plane = ict.planes[0], .quantized = y, .width = ict.width, .bands = bands, .deltas = deltas },
-            .{ .plane = ict.planes[1], .quantized = cb, .width = ict.width, .bands = bands, .deltas = deltas },
-            .{ .plane = ict.planes[2], .quantized = cr, .width = ict.width, .bands = bands, .deltas = deltas },
+        // Each sample is quantized into its own slot, so the integer planes
+        // reuse the floating-point ones instead of 4 bytes per sample more.
+        try quantizeIrreversiblePlanesInPlace(allocator, ict.planes[0..3], ict.width, ict.height, bands, deltas, thread_count);
+        const planes = try allocator.alloc([]i32, 3);
+        for (planes, ict.planes[0..3]) |*plane, source| plane.* = @as([*]i32, @ptrCast(source.ptr))[0..source.len];
+        var out = color.RctPlanes{
+            .allocator = allocator,
+            .width = ict.width,
+            .height = ict.height,
+            .bit_depth = rgb.bit_depth,
+            .planes = planes,
         };
-        try runComponentJobs(IrreversibleQuantizePlaneJob, allocator, jobs[0..], componentThreadCountFor(thread_count), irreversibleQuantizePlaneWorker);
-    } else {
+        @memset(out.component_bit_depths[0..3], rgb.bit_depth);
+        @memset(out.component_widths[0..3], ict.width);
+        @memset(out.component_heights[0..3], ict.height);
+        // The planes now belong to `out`; `ict` frees only its plane list.
+        allocator.free(ict.planes);
+        ict.planes = &.{};
+        if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
+        return out;
+    }
+
+    var out = try color.RctPlanes.init(allocator, ict.width, ict.height, rgb.bit_depth, 3);
+    errdefer out.deinit();
+    const y = out.planes[0];
+    const cb = out.planes[1];
+    const cr = out.planes[2];
+    {
         // Serial/tile-worker path: each component's 9/7 DWT and deadzone
         // quantization is independent, so the three planes run as fused
         // component jobs (same pattern as the 5/3 path).

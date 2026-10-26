@@ -13078,6 +13078,24 @@ test "ICT transform roundtrips vector block and tail within tolerance" {
     try std.testing.expect(max_diff <= 2);
 }
 
+test "threaded forward ICT matches the single-thread transform" {
+    const allocator = std.testing.allocator;
+    for ([_][2]usize{ .{ 1, 1 }, .{ 7, 3 }, .{ 33, 17 }, .{ 130, 61 } }) |dim| {
+        const pixels = dim[0] * dim[1];
+        const samples = try allocator.alloc(u16, pixels * 3);
+        defer allocator.free(samples);
+        for (samples, 0..) |*sample, index| sample.* = @intCast((index * 2654435761 >> 7) % 4096);
+        const rgb = image.RgbImage{ .allocator = allocator, .width = dim[0], .height = dim[1], .bit_depth = 12, .samples = samples };
+        var expected = try color.forwardIct(allocator, rgb);
+        defer expected.deinit();
+        for ([_]usize{ 1, 2, 3, 8, 20 }) |threads| {
+            var actual = try color.forwardIctThreaded(allocator, rgb, threads);
+            defer actual.deinit();
+            for (expected.planes, actual.planes) |want, got| try std.testing.expectEqualSlices(f32, want, got);
+        }
+    }
+}
+
 test "integer 5/3 DWT roundtrips signed component plane" {
     const allocator = std.testing.allocator;
     const width = 5;

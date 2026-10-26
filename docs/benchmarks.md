@@ -46,6 +46,20 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, lossy encode front end on all threads
+
+Base `6af8264`, encode `--timings` medians (15 runs at t20, 9 at t8):
+
+| Profile | Threads | Total | MCT | DWT + quantization | Block coding |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lossy | 20 | 114.0 -> 97.9 ms | 7.7 -> 2.6 ms | 19.4 -> 10.5 ms | 67.1 -> 68.4 ms |
+| lossy | 8 | 153.8 -> 138.1 ms | 7.5 -> 2.5 ms | 18.5 -> 10.3 ms | 108.8 -> 109.5 ms |
+| lossless | 20 | 96.5 -> 95.6 ms | 2.8 -> 2.6 ms | 7.4 -> 6.9 ms | 67.2 -> 68.0 ms |
+
+The forward ICT ran on one thread, the quantization as one job per plane
+on three, into 48 MB of freshly allocated integer planes. Codestreams
+byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, MQ encoder without symbol branches
 
 Base `c558dc5`, the benchmark encode profiles. A sampling profile of the

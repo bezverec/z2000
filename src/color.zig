@@ -993,6 +993,8 @@ pub fn forwardRctThreaded(allocator: std.mem.Allocator, rgb: image.RgbImage, thr
     } else {
         var jobs: [max_rct_workers]RctForwardJob = undefined;
         for (0..band_count) |b| jobs[b] = .{ .samples = rgb.samples, .y = y, .cb = cb, .cr = cr, .begin = ranges[b][0], .end = ranges[b][1], .level_shift = level_shift };
+        // The shared pool when it is free, threads of its own otherwise.
+        if (worker_pool.runJobs(RctForwardJob, jobs[0..band_count], rctForwardWorker)) return out;
         var threads: [max_rct_workers]std.Thread = undefined;
         var spawned: usize = 0;
         while (spawned < band_count - 1) : (spawned += 1) {
@@ -1046,6 +1048,51 @@ pub fn forwardIct(allocator: std.mem.Allocator, rgb: image.RgbImage) !IctPlanes 
     var out = try IctPlanes.init(allocator, rgb.width, rgb.height, rgb.bit_depth, 3);
     errdefer out.deinit();
     forwardIctVector(rgb.samples, out.planes[0], out.planes[1], out.planes[2], pixels, shift);
+    return out;
+}
+
+const IctForwardJob = struct {
+    samples: []const u16,
+    y: []f32,
+    cb: []f32,
+    cr: []f32,
+    begin: usize,
+    end: usize,
+    shift: f32,
+
+    fn work(job: *IctForwardJob) void {
+        const begin = job.begin;
+        const end = job.end;
+        forwardIctVector(job.samples[begin * 3 .. end * 3], job.y[begin..end], job.cb[begin..end], job.cr[begin..end], end - begin, job.shift);
+    }
+};
+
+/// `forwardIct` over pixel bands on up to `thread_count` threads (the shared
+/// pool when it is free). Each pixel's arithmetic is unchanged.
+pub fn forwardIctThreaded(allocator: std.mem.Allocator, rgb: image.RgbImage, thread_count: usize) !IctPlanes {
+    if (rgb.width == 0 or rgb.height == 0) return ColorError.InvalidImage;
+    const pixels = try std.math.mul(usize, rgb.width, rgb.height);
+    const sample_count = try std.math.mul(usize, pixels, 3);
+    if (rgb.samples.len != sample_count) return ColorError.InvalidImage;
+    const shift: f32 = @floatFromInt(try dcLevelShift(rgb.bit_depth));
+
+    var out = try IctPlanes.init(allocator, rgb.width, rgb.height, rgb.bit_depth, 3);
+    errdefer out.deinit();
+    var ranges: [max_rct_workers][2]usize = undefined;
+    const band_count = colorBands(pixels, ict_lanes, @min(thread_count, max_inverse_color_workers), &ranges);
+    var jobs: [max_inverse_color_workers]IctForwardJob = undefined;
+    for (0..band_count) |band| {
+        jobs[band] = .{
+            .samples = rgb.samples,
+            .y = out.planes[0],
+            .cb = out.planes[1],
+            .cr = out.planes[2],
+            .begin = ranges[band][0],
+            .end = ranges[band][1],
+            .shift = shift,
+        };
+    }
+    runColorJobs(IctForwardJob, jobs[0..band_count], IctForwardJob.work);
     return out;
 }
 
