@@ -31,6 +31,7 @@ const tile_grid = @import("tile_grid.zig");
 const tile_pipeline = @import("tile_pipeline.zig");
 const tlm_parser = @import("tlm.zig");
 const tiff = @import("tiff.zig");
+const file_read = @import("file_read.zig");
 const worker_pool = @import("worker_pool.zig");
 const tiff_compression = @import("tiff_compression.zig");
 const version = @import("version.zig");
@@ -6513,6 +6514,28 @@ test "TIFF parser fails closed for unsupported narrow RGB variants" {
     var tiled_rgb = try tiff.parseRgb(allocator, tile_only);
     defer tiled_rgb.deinit();
     try std.testing.expectEqualSlices(u16, &.{ 10, 20, 30, 40, 50, 60 }, tiled_rgb.samples);
+}
+
+test "whole-file read returns large and small files intact" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/whole.bin", .{tmp.sub_path});
+
+    // Above the parallel threshold with a length that does not split evenly,
+    // then a small file read in one range.
+    for ([_]usize{ (5 << 20) + 13, 777 }) |len| {
+        const data = try allocator.alloc(u8, len);
+        defer allocator.free(data);
+        for (data, 0..) |*byte, index| byte.* = @truncate(index *% 2654435761 >> 13);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
+        const contents = try file_read.readWholeFile(io, allocator, path, 1 << 30);
+        defer allocator.free(contents);
+        try std.testing.expectEqualSlices(u8, data, contents);
+        try std.testing.expectError(error.StreamTooLong, file_read.readWholeFile(io, allocator, path, len));
+    }
 }
 
 test "TIFF writer roundtrips optimized 8-bit and 16-bit raster paths" {

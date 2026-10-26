@@ -1,5 +1,6 @@
 const std = @import("std");
 const worker_pool = @import("worker_pool.zig");
+const file_read = @import("file_read.zig");
 const builtin = @import("builtin");
 const color = @import("color.zig");
 const image = @import("image.zig");
@@ -173,7 +174,7 @@ pub const DecodedImage = union(enum) {
 /// The whole file, under the same size limit `read` applies; pair it with
 /// `pageOffsets` and `parsePage` for multi-page input.
 pub fn readBytes(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_size));
+    return file_read.readWholeFile(io, allocator, path, max_file_size);
 }
 
 pub fn read(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !DecodedImage {

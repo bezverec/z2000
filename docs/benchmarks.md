@@ -46,6 +46,14 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, input files read in ranges
+
+Base `909a58e`, t20. Reading the input into one buffer of the file's size
+in a single read did not change the read stages; reading it in eight
+positional ranges on the shared pool did: lossless decode JP2 read 2.32 ->
+1.92 ms (21 `--timings` runs, total 64.0 -> 63.4 ms), lossless encode
+TIFF read 4.8 -> 4.0 ms (15 runs). Output byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, rate probe with packet headers only
 
 Base `2dec45e`, lossy two-layer encode, t20, 21 `--timings` runs: building

@@ -583,7 +583,8 @@ releases a decode's large intermediates (coefficient planes and the 9/7
 reconstruction, allocated from the thread-safe page-level allocator on
 several threads) on a detached thread, because unmapping pages that many
 workers touched costs milliseconds; the decode returns, and its output is
-written, meanwhile.
+written, meanwhile. Both conversion commands read their input file in
+positional ranges on the pool (`file_read.readWholeFile`).
 
 Before Tier-1, the packet catalog is built on the pool as well. With PLT
 lengths, packet spans are prefix sums and SOP numbers follow from position,

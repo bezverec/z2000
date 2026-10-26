@@ -6,6 +6,7 @@ const codec = @import("codec.zig");
 const color = @import("color.zig");
 const clock = @import("clock.zig");
 const worker_pool = @import("worker_pool.zig");
+const file_read = @import("file_read.zig");
 const codestream = @import("codestream.zig");
 const native_samples = @import("native_samples.zig");
 const convert = @import("convert.zig");
@@ -1447,12 +1448,7 @@ fn decodeTempJp2Command(io: std.Io, allocator: std.mem.Allocator, args: []const 
     worker_pool.prepare(options.threads);
     const max_file_size = 1024 * 1024 * 1024;
     const read_start = monotonicNs();
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(
-        io,
-        args[0],
-        allocator,
-        .limited(max_file_size),
-    );
+    const bytes = try file_read.readWholeFile(io, allocator, args[0], max_file_size);
     defer allocator.free(bytes);
     command_timings.jp2_read_ns = elapsedNs(read_start);
 

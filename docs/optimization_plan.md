@@ -289,7 +289,8 @@ context only when the decision renormalizes again (an unconditional store
 chained a context's decisions through memory once the registers stayed in
 machine registers): lossless t20 encode 90.4 ms. The TIFF input's
 widening to 16-bit samples now runs on the pool as well (TIFF read 7.3 ->
-5.0 ms at t20); the file read itself (about 3.8 ms) is what remains there.
+5.0 ms at t20); the file read itself is read in ranges on the pool now
+(TIFF read 4.8 -> 4.0 ms, the decode's JP2 read 2.3 -> 1.9 ms).
 An RGB JP2 without metadata is written as its boxes and then the
 codestream, without a copy (JP2 wrap 1.7 -> 0.6 ms). The codestream
 assembly (`markers/write SOD`) reserves its exact size now, 3.7 -> 1.0 ms,

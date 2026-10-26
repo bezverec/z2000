@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Input Files Read In Ranges On The Pool
+
+- `tiff-to-jp2` and `decode-temp-jp2` read their input with
+  `file_read.readWholeFile`: one buffer of the file's size, and a file of
+  4 MB or more read in eight positional ranges on the shared pool (whose
+  threads already start while the file is opened), which spreads the copy
+  out of the page cache and the buffer's page faults over several threads.
+  A unit test reads a file above the threshold, one below it, and checks
+  the size limit.
+- Output byte-identical. Against `909a58e`, t20, 21 and 15 `--timings`
+  runs: JP2 read of the lossless decode 2.32 -> 1.92 ms, TIFF read of the
+  lossless encode 4.8 -> 4.0 ms. An exact-size single read alone changed
+  nothing.
+
 ### Rate Probe Builds Packet Headers Only
 
 - The probe packet stream of a rate-targeted multi-layer encode, which
