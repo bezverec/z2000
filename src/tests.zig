@@ -32790,6 +32790,100 @@ fn makeRgbTwoStripTiffForTest(
     return bytes.toOwnedSlice(allocator);
 }
 
+fn appendTiffValueForTest(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8), big: bool, comptime T: type, value: T) !void {
+    const ordered = if (big) std.mem.nativeToBig(T, value) else std.mem.nativeToLittle(T, value);
+    try bytes.appendSlice(allocator, &std.mem.toBytes(ordered));
+}
+
+fn appendTiffEntryForTest(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8), big: bool, tag: u16, field_type: u16, count: u32, value: u32) !void {
+    try appendTiffValueForTest(allocator, bytes, big, u16, tag);
+    try appendTiffValueForTest(allocator, bytes, big, u16, field_type);
+    try appendTiffValueForTest(allocator, bytes, big, u32, count);
+    if (field_type == 3 and count == 1) {
+        // An inline SHORT sits in the first two bytes of the value field.
+        try appendTiffValueForTest(allocator, bytes, big, u16, @intCast(value));
+        try appendTiffValueForTest(allocator, bytes, big, u16, 0);
+    } else {
+        try appendTiffValueForTest(allocator, bytes, big, u32, value);
+    }
+}
+
+/// An uncompressed chunky RGB TIFF of `width` x `height` at 8 or 16 bits in
+/// strips of `rows_per_strip` rows, whose sample `i` is `sample(i)`.
+fn makeStripedRgbTiffForTest(allocator: std.mem.Allocator, width: u32, height: u32, bit_depth: u16, rows_per_strip: u32, big: bool) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    const strips = (height + rows_per_strip - 1) / rows_per_strip;
+    const bytes_per_sample: u32 = bit_depth / 8;
+    const row_bytes = width * 3 * bytes_per_sample;
+    const bits_offset: u32 = 8 + 2 + 10 * 12 + 4;
+    const offsets_offset = bits_offset + 6;
+    const counts_offset = offsets_offset + 4 * strips;
+    const format_offset = counts_offset + 4 * strips;
+    const data_offset = format_offset + 6;
+
+    try bytes.appendSlice(allocator, if (big) "MM" else "II");
+    try appendTiffValueForTest(allocator, &bytes, big, u16, 42);
+    try appendTiffValueForTest(allocator, &bytes, big, u32, 8);
+    try appendTiffValueForTest(allocator, &bytes, big, u16, 10);
+    try appendTiffEntryForTest(allocator, &bytes, big, 256, 4, 1, width);
+    try appendTiffEntryForTest(allocator, &bytes, big, 257, 4, 1, height);
+    try appendTiffEntryForTest(allocator, &bytes, big, 258, 3, 3, bits_offset);
+    try appendTiffEntryForTest(allocator, &bytes, big, 259, 3, 1, 1);
+    try appendTiffEntryForTest(allocator, &bytes, big, 262, 3, 1, 2);
+    try appendTiffEntryForTest(allocator, &bytes, big, 273, 4, strips, offsets_offset);
+    try appendTiffEntryForTest(allocator, &bytes, big, 277, 3, 1, 3);
+    try appendTiffEntryForTest(allocator, &bytes, big, 278, 4, 1, rows_per_strip);
+    try appendTiffEntryForTest(allocator, &bytes, big, 279, 4, strips, counts_offset);
+    try appendTiffEntryForTest(allocator, &bytes, big, 339, 3, 3, format_offset);
+    try appendTiffValueForTest(allocator, &bytes, big, u32, 0);
+    for (0..3) |_| try appendTiffValueForTest(allocator, &bytes, big, u16, bit_depth);
+    for (0..strips) |strip| {
+        try appendTiffValueForTest(allocator, &bytes, big, u32, data_offset + @as(u32, @intCast(strip)) * rows_per_strip * row_bytes);
+    }
+    for (0..strips) |strip| {
+        const rows = @min(rows_per_strip, height - @as(u32, @intCast(strip)) * rows_per_strip);
+        try appendTiffValueForTest(allocator, &bytes, big, u32, rows * row_bytes);
+    }
+    for (0..3) |_| try appendTiffValueForTest(allocator, &bytes, big, u16, 1);
+    try std.testing.expectEqual(@as(usize, data_offset), bytes.items.len);
+    for (0..@as(usize, width) * height * 3) |index| {
+        const value = stripedTiffSampleForTest(index, bit_depth);
+        if (bit_depth == 8) {
+            try bytes.append(allocator, @intCast(value));
+        } else {
+            try appendTiffValueForTest(allocator, &bytes, big, u16, value);
+        }
+    }
+    return bytes.toOwnedSlice(allocator);
+}
+
+fn stripedTiffSampleForTest(index: usize, bit_depth: u16) u16 {
+    const mixed = (index *% 2654435761) >> 11;
+    return @intCast(mixed & ((@as(usize, 1) << @intCast(bit_depth)) - 1));
+}
+
+test "threaded TIFF sample conversion matches the serial one across strips" {
+    const allocator = std.testing.allocator;
+    // 512 x 700 RGB is above the parallel threshold of 2^20 samples; 37-row
+    // strips end mid-range for every split.
+    for ([_]u16{ 8, 16 }) |bit_depth| {
+        for ([_]bool{ false, true }) |big| {
+            const bytes = try makeStripedRgbTiffForTest(allocator, 512, 700, bit_depth, 37, big);
+            defer allocator.free(bytes);
+            for ([_]usize{ 1, 3, 8, 20 }) |threads| {
+                var decoded = try tiff.parsePageThreaded(allocator, bytes, 8, threads);
+                defer decoded.deinit();
+                const samples = decoded.rgb.samples;
+                try std.testing.expectEqual(@as(usize, 512 * 700 * 3), samples.len);
+                for (samples, 0..) |sample, index| {
+                    try std.testing.expectEqual(stripedTiffSampleForTest(index, bit_depth), sample);
+                }
+            }
+        }
+    }
+}
+
 fn makeTileOnlyRgbTiffForTest(allocator: std.mem.Allocator) ![]u8 {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);

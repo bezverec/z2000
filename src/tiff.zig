@@ -1291,8 +1291,14 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !DecodedImage {
 /// Reads the page whose IFD starts at `ifd_offset`, one of the offsets
 /// `pageOffsets` returns.
 pub fn parsePage(allocator: std.mem.Allocator, bytes: []const u8, ifd_offset: usize) !DecodedImage {
+    return parsePageThreaded(allocator, bytes, ifd_offset, 1);
+}
+
+/// `parsePage`, converting an uncompressed 8- or 16-bit raster's samples on
+/// up to `threads` threads of the shared pool.
+pub fn parsePageThreaded(allocator: std.mem.Allocator, bytes: []const u8, ifd_offset: usize, threads: usize) !DecodedImage {
     const endian = try headerEndian(bytes);
-    return decodedImage(allocator, try parseChunkyAt(allocator, bytes, endian, ifd_offset));
+    return decodedImage(allocator, try parseChunkyAt(allocator, bytes, endian, ifd_offset, threads));
 }
 
 const max_ifds = 65536;
@@ -1494,10 +1500,10 @@ pub fn parseAlpha(allocator: std.mem.Allocator, bytes: []const u8) !AlphaImage {
 
 fn parseChunky(allocator: std.mem.Allocator, bytes: []const u8) !ParsedChunkyImage {
     const endian = try headerEndian(bytes);
-    return parseChunkyAt(allocator, bytes, endian, @as(usize, try readU32(bytes, 4, endian)));
+    return parseChunkyAt(allocator, bytes, endian, @as(usize, try readU32(bytes, 4, endian)), 1);
 }
 
-fn parseChunkyAt(allocator: std.mem.Allocator, bytes: []const u8, endian: Endian, ifd_offset: usize) !ParsedChunkyImage {
+fn parseChunkyAt(allocator: std.mem.Allocator, bytes: []const u8, endian: Endian, ifd_offset: usize, threads: usize) !ParsedChunkyImage {
     if (ifd_offset > bytes.len - 2) return TiffError.InvalidIfd;
 
     const entry_count = try readU16(bytes, ifd_offset, endian);
@@ -1719,6 +1725,11 @@ fn parseChunkyAt(allocator: std.mem.Allocator, bytes: []const u8, endian: Endian
     const packed_raster: []u8 = if (packed_depth) try allocator.alloc(u8, expected_raster_bytes) else &.{};
     defer if (packed_depth) allocator.free(packed_raster);
     var packed_cursor: usize = 0;
+    // A large whole-byte raster is converted in sample ranges on the pool
+    // once every strip has been checked.
+    const parallel = !packed_depth and threads >= 2 and sample_count >= parallel_raster_min_samples;
+    var strips: std.ArrayList(SampleStrip) = .empty;
+    defer strips.deinit(allocator);
 
     var sample_index: usize = 0;
     for (0..offsets_ref.count) |strip| {
@@ -1735,11 +1746,17 @@ fn parseChunkyAt(allocator: std.mem.Allocator, bytes: []const u8, endian: Endian
         }
         if (strip_bytes.len % bytes_per_sample != 0) return TiffError.InvalidTagValue;
 
-        if (bit_depth == 8) {
+        if (parallel) {
+            try strips.append(allocator, .{ .bytes = strip_bytes, .first_sample = sample_index });
+            sample_index += strip_bytes.len / bytes_per_sample;
+        } else if (bit_depth == 8) {
             sample_index = widenU8Samples(samples, sample_index, strip_bytes);
         } else {
             sample_index = try readU16Samples(samples, sample_index, strip_bytes, endian);
         }
+    }
+    if (parallel and sample_index == sample_count) {
+        try convertStripsThreaded(samples, strips.items, @intCast(bytes_per_sample), endian, threads);
     }
 
     if (packed_depth) {
@@ -2005,6 +2022,64 @@ fn unpackRasterPacked(samples: []u16, raster: []const u8, row_samples: usize, bi
 fn maxSampleForDepth(bit_depth: u8) u16 {
     std.debug.assert(bit_depth != 0 and bit_depth <= 16);
     return @intCast((@as(u32, 1) << @as(u5, @intCast(bit_depth))) - 1);
+}
+
+/// One strip of an uncompressed raster and the index of its first sample.
+const SampleStrip = struct {
+    bytes: []const u8,
+    first_sample: usize,
+};
+
+/// Samples `begin..end` of the raster, taken from whichever strips hold them.
+const SampleRangeJob = struct {
+    samples: []u16,
+    strips: []const SampleStrip,
+    bytes_per_sample: u8,
+    endian: Endian,
+    begin: usize,
+    end: usize,
+    result: anyerror!void = {},
+
+    fn run(job: *SampleRangeJob) void {
+        job.result = job.convert();
+    }
+
+    fn convert(job: *SampleRangeJob) !void {
+        const size: usize = job.bytes_per_sample;
+        for (job.strips) |strip| {
+            const strip_end = strip.first_sample + strip.bytes.len / size;
+            const begin = @max(job.begin, strip.first_sample);
+            const end = @min(job.end, strip_end);
+            if (begin >= end) continue;
+            const bytes = strip.bytes[(begin - strip.first_sample) * size .. (end - strip.first_sample) * size];
+            if (size == 1) {
+                _ = widenU8Samples(job.samples, begin, bytes);
+            } else {
+                _ = try readU16Samples(job.samples, begin, bytes, job.endian);
+            }
+        }
+    }
+};
+
+/// Converts every strip's samples into `samples`, split in equal sample
+/// ranges over up to `threads` threads (inline when the pool is busy).
+fn convertStripsThreaded(samples: []u16, strips: []const SampleStrip, bytes_per_sample: u8, endian: Endian, threads: usize) !void {
+    var jobs: [max_raster_workers]SampleRangeJob = undefined;
+    const count = @min(threads, max_raster_workers);
+    for (jobs[0..count], 0..) |*job, index| {
+        job.* = .{
+            .samples = samples,
+            .strips = strips,
+            .bytes_per_sample = bytes_per_sample,
+            .endian = endian,
+            .begin = samples.len * index / count,
+            .end = samples.len * (index + 1) / count,
+        };
+    }
+    if (!worker_pool.runJobs(SampleRangeJob, jobs[0..count], SampleRangeJob.run)) {
+        for (jobs[0..count]) |*job| job.run();
+    }
+    for (jobs[0..count]) |job| try job.result;
 }
 
 fn widenU8Samples(out: []u16, start: usize, bytes: []const u8) usize {

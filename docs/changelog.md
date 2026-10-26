@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### TIFF Input Converted On All Threads
+
+- `tiff-to-jp2` starts the shared workers while the input file is read,
+  as `decode-temp-jp2` does, and an uncompressed 8- or 16-bit raster of at
+  least 2^20 samples is converted to 16-bit samples in equal sample ranges
+  on up to eight of them once every strip has been checked
+  (`tiff.parsePageThreaded`); the ranges may cross strip boundaries. A
+  unit test compares the threaded conversion with the serial one for 8-
+  and 16-bit, little- and big-endian, 37-row strips.
+- Codestreams byte-identical. Against `9cc8dbf`, lossless t20, 15
+  `--timings` runs: TIFF read 7.3 -> 5.0 ms (file read about 3.8 ms, the
+  conversion 3.7 -> about 1.5 ms); wall time on the loaded host within
+  noise (61 rounds, median -0.9%).
+
 ### MQ Encoder Context Store Only On Renormalization
 
 - With the encoder's registers held in machine registers (`noalias`

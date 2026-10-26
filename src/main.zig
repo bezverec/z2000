@@ -697,6 +697,8 @@ fn tiffPagesToJp2(
     page: ?usize,
     conversion: RasterConversion,
 ) !void {
+    // The shared workers start while the file is read.
+    worker_pool.prepare(conversion.options.threads);
     const read_start = monotonicNs();
     const bytes = try tiff.readBytes(io, allocator, input_path);
     defer allocator.free(bytes);
@@ -738,7 +740,7 @@ fn tiffPageToJp2(
     file_read_ns: u64,
 ) !void {
     const parse_start = monotonicNs();
-    var decoded = try tiff.parsePage(allocator, bytes, ifd_offset);
+    var decoded = try tiff.parsePageThreaded(allocator, bytes, ifd_offset, conversion.options.threads);
     defer decoded.deinit();
     try encodeRasterToJp2(io, allocator, decoded, input_path, output, conversion, file_read_ns + elapsedNs(parse_start));
 }

@@ -46,6 +46,16 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, TIFF input converted on all threads
+
+Base `9cc8dbf`, lossless encode t20. The TIFF read stage (7.2 ms) was
+the file read into a fresh buffer (about 3.8 ms) and the 8-to-16-bit
+widening into 25 MB of fresh samples on one thread (about 3.7 ms). With the
+widening in sample ranges on the shared pool, started before the file
+read, the stage takes 5.0 ms (15 `--timings` runs; total 92.9 -> 89.6 ms).
+Wall time on the loaded host: 61 rounds 137.8 -> 136.5 ms, t8 21 rounds
+199.9 -> 198.1 ms, both within noise. Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, MQ context store only on renormalization
 
 Base `cdb611e`. Storing the context on every decision (a select between
