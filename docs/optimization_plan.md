@@ -277,6 +277,15 @@ this path separately from the ordinary unsigned 8/16-bit display decoder.
 
 ### P6. Encode-Side Follow-Up
 
+2026-10-26, Tier-1 passes: the significance pass now visits only the
+columns and rows its stripe's significance words leave open (40.4 of 55.5
+million examined samples were already significant; lossless t1 -7.5 to
+-9%). The refinement pass can do the same with a snapshot of the
+significance words taken at the start of each bitplane. The decoder's
+earlier per-column candidate masks were slower, but they computed
+neighbourhood candidates; skipping by the significance words alone is
+untried there.
+
 Active since 2026-10-26, after the decode campaign. The MQ encoder now
 codes without branching on the decision and the Tier-1 passes hold its
 registers in machine registers (lossless t1 -10.9%, lossy t1 -13.7%). The

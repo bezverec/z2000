@@ -5,6 +5,23 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Significance Pass Skips Significant Samples By Bitmap
+
+- The encoder's significance propagation pass (the common, non-causal
+  form, with MQ or BYPASS coding) no longer tests every sample of a
+  stripe range with significance nearby: it takes the stripe rows'
+  significance words once per 64-column range, visits only the columns
+  that still hold an insignificant sample and, in each, only those rows.
+  On the lossless benchmark 40.4 of the 55.5 million samples the pass
+  examined were already significant. A column's significance bits change
+  only when its own samples are coded, so the masks stay exact and the
+  coded symbols, their order and contexts are unchanged.
+- Codestreams byte-identical. Against `5c20253` on a quiet host:
+  lossless t1 660.9 -> 611.0 ms with `--bypass` (-7.5%), 735.8 -> 669.4 ms
+  without (-9.0%), 11 interleaved rounds; at t20 (21 `--timings` runs)
+  lossless 71.8 -> 66.9 ms, lossy two-layer 74.1 -> 71.8 ms; lossy t1
+  635.9 -> 603.5 ms (5 runs).
+
 ### Encoder Tier-1 On The Shared Pool
 
 - The encoder's block-parallel Tier-1 (one job per worker pulling blocks,

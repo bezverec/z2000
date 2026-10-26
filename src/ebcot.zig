@@ -6363,17 +6363,31 @@ fn emitDirectIsoSignificancePassPlain(
                 x = x_end;
                 continue;
             }
-            while (x < x_end) : (x += 1) {
-                var dy: usize = 0;
-                while (dy < stripe_height) : (dy += 1) {
-                    const y = stripe_y + dy;
-                    const p = nbfIndex(nbs, x, y);
+            // Only samples not yet significant can be candidates (most are,
+            // in the lower bitplanes): visit the range's columns with such a
+            // sample and, in each, those rows. A column's significance bits
+            // change only when its own samples are coded, so masks taken for
+            // the whole range are still exact when a column is reached.
+            const word = x / significant_word_bits;
+            var open_rows: [4]u64 = @splat(0);
+            for (open_rows[0..stripe_height], 0..) |*open, dy| {
+                open.* = ~scratch.significant_words.items[(stripe_y + dy) * scratch.row_words + word];
+            }
+            var columns = (open_rows[0] | open_rows[1] | open_rows[2] | open_rows[3]) & lowBitsMask(x_end - x);
+            while (columns != 0) : (columns &= columns - 1) {
+                const column_bit: u6 = @intCast(@ctz(columns));
+                const column = x + column_bit;
+                var rows: u4 = 0;
+                inline for (0..4) |dy| rows |= @as(u4, @intCast((open_rows[dy] >> column_bit) & 1)) << dy;
+                while (rows != 0) : (rows &= rows - 1) {
+                    const y = stripe_y + @ctz(rows);
+                    const p = nbfIndex(nbs, column, y);
                     const sample_flags = flags[p];
                     if ((sample_flags & (nbf_sig_self | nbf_visit)) != 0) continue;
                     const pattern = sample_flags & nbf_sig8;
                     if (pattern == 0) continue;
                     flags[p] |= nbf_visit;
-                    const coeff = plane[(rect.y + y) * stride + rect.x + x];
+                    const coeff = plane[(rect.y + y) * stride + rect.x + column];
                     const bit = isMagnitudeBitSet(coeff, bitplane);
                     if (raw) {
                         try encoder.writeBit(bit);
@@ -6392,14 +6406,20 @@ fn emitDirectIsoSignificancePassPlain(
                             try encoder.write(mqContextIndex(sign.context), negative != sign.predicted_negative);
                         }
                         symbol_count += 1;
-                        nbfMarkSignificantRows(flags, nbs, x, y, negative);
-                        setSignificantRow(scratch, x, y);
+                        nbfMarkSignificantRows(flags, nbs, column, y, negative);
+                        setSignificantRow(scratch, column, y);
                     }
                 }
             }
+            x = x_end;
         }
     }
     return symbol_count;
+}
+
+/// The low `count` bits set, for `count` in 1..64.
+inline fn lowBitsMask(count: usize) u64 {
+    return if (count >= 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(count)) - 1;
 }
 
 fn emitDirectIsoRefinementPass(

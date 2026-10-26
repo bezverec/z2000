@@ -46,6 +46,25 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, significance pass by bitmap
+
+Base `5c20253`. A count over the lossless t1 encode (`--bypass`): the
+significance pass examined 55.5 million samples, of which 40.4 million were
+already significant and 2.2 million had no significant neighbour (12.9
+million coded); the refinement pass examined 55.5 million and coded 40.4
+million. Visiting only the columns and rows the stripe's significance
+words leave open:
+
+| Profile | Threads | Base | Bitmap visit |
+| --- | ---: | ---: | ---: |
+| lossless `--bypass` (wall, 11 rounds) | 1 | 660.9 ms | 611.0 ms (-7.5%) |
+| lossless, no BYPASS (wall, 11 rounds) | 1 | 735.8 ms | 669.4 ms (-9.0%) |
+| lossless `--bypass` (`--timings`, 21 runs) | 20 | 71.8 ms | 66.9 ms |
+| lossy two-layer (`--timings`, 21 runs) | 20 | 74.1 ms | 71.8 ms |
+| lossy two-layer (`--timings`, 5 runs) | 1 | 635.9 ms | 603.5 ms |
+
+Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, encoder Tier-1 on the shared pool
 
 Base `4efc8df`, lossless encode (`--bypass`). Measured first on a loaded
