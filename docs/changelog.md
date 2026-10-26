@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### BYPASS Bits Written Without A Branch
+
+- The encoder's raw (BYPASS) bit writer sets each bit with a shift of the
+  bit's value instead of branching on it; BYPASS significance and
+  refinement bits are close to random.
+- Codestreams byte-identical. Against `7c0ac10`, lossless `--bypass`:
+  t1 508.1 -> 483.0 ms (-4.9%, 11 interleaved rounds); t20 60.5 -> 60.3 ms
+  (21 `--timings` runs).
+- Tried and dropped the same day: computing the RCT inside the first
+  forward 5/3 level, in row bands that write the planes once. RCT and DWT
+  went from 7.1 to 6.8 ms at t20, but the Tier-1 stage grew by 0.7 ms (t20)
+  to 4 ms (t3), so the encode was no faster.
+
 ### ISO MQ Encoder Codes A Contiguous Copy Of The Block
 
 - The ISO MQ block encoder copies the block's coefficients into scratch

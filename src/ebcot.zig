@@ -2576,7 +2576,8 @@ const RawBitWriter = struct {
 
     fn writeBit(self: *RawBitWriter, bit: bool) !void {
         self.remaining -= 1;
-        if (bit) self.byte |= @as(u8, 1) << @intCast(self.remaining);
+        // No branch on the bit: BYPASS bits are close to random.
+        self.byte |= @as(u8, @intFromBool(bit)) << @intCast(self.remaining);
         if (self.remaining == 0) {
             try self.appendByte(self.byte);
             self.remaining = if (self.byte == 0xff) 7 else 8;

@@ -46,6 +46,17 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, BYPASS bits without a branch
+
+Base `7c0ac10`, lossless `--bypass` encode: t1 508.1 -> 483.0 ms (-4.9%,
+11 interleaved rounds), t20 60.5 -> 60.3 ms (21 `--timings` runs).
+Codestreams byte-identical.
+
+Rejected the same day: the RCT computed inside the first forward 5/3 level
+(`--timings`, t20 / t8 / t3): RCT + DWT 7.1 -> 6.8, 8.6 -> 6.9, 14.1 ->
+11.7 ms, but block coding 44.4 -> 45.1, 73.2 -> 76.0, 157.2 -> 161.2 ms,
+totals 61.7 -> 61.9, 91.9 -> 92.8, 182.2 -> 182.8 ms.
+
 ## 2026-10-26: Intel Core i5-14500, contiguous block copy in the encoder
 
 Base `973374c`. A probe of the t20 lossless encode found the Tier-1 phase
