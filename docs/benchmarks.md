@@ -46,6 +46,19 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, TIFF written during the band pass (rejected)
+
+Base `e3513bf`. The 8-bit RGB decode's last pass (finest wavelet level and
+colour transform in row bands) handed each run of finished bands to the
+TIFF file as it completed, from whichever worker found the write free,
+instead of one write of the whole raster after the decode. Decoded files
+byte-identical, but slower (31 interleaved rounds, medians): lossless t20
+72.1 -> 75.1 ms, t8 96.5 -> 99.0 ms; lossy t20 71.8 -> 73.2 ms, t8 108.5 ->
+112.1 ms. The copy into the page cache competes with the memory-bound band
+pass for bandwidth, and many smaller writes from several threads cost more
+than one large write; the same is expected of writing the JP2 while its
+codestream is assembled.
+
 ## 2026-10-26: Intel Core i5-14500, coarser 5/3 levels inside Tier-1
 
 Base `7dede1f` (rc.6 plus records). A wall/`main` split of the t20
