@@ -46,6 +46,14 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, rate probe with packet headers only
+
+Base `2dec45e`, lossy two-layer encode, t20, 21 `--timings` runs: building
+the PCRD probe stream's packet headers without the codewords takes the
+block coding stage from 59.4 to 56.5 ms (total 83.1 -> 78.1 ms; the host
+was loaded, the stage difference is the steadier figure). Codestreams
+byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, PCRD hulls built once
 
 Base `af93a13`, lossy two-layer encode (`--rates 8,1`), t20. A probe put

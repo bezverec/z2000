@@ -5,6 +5,17 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Rate Probe Builds Packet Headers Only
+
+- The probe packet stream of a rate-targeted multi-layer encode, which
+  only measures each layer's packet header bytes, now builds the headers
+  alone: it no longer copies (and reserves room for) every block's
+  codewords.
+- Codestreams byte-identical (the final layer split depends on the probe's
+  header lengths, so any difference would show). Against `2dec45e`, lossy
+  two-layer t20, 21 `--timings` runs: block coding stage 59.4 -> 56.5 ms,
+  total 83.1 -> 78.1 ms.
+
 ### PCRD Hulls Built Once Per Encode
 
 - A rate-targeted multi-layer encode allocates passes twice over the same

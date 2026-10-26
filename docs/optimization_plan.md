@@ -300,7 +300,9 @@ targets, the PCRD allocation with its probe stream (several ms). Building
 the packet stream on the pool in per-precinct runs was slower than the
 reserved serial build (2026-10-26: the joined copy and the runs' fresh
 pages cost what the threads saved). The coefficient planes are released
-in the background (1.8 ms off the encode's end).
+in the background (1.8 ms off the encode's end). For rate targets the
+two PCRD allocations share their convex hulls and the probe stream builds
+packet headers only (together about 4 ms off the lossy t20 encode).
 
 Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode
 gap, unless profiling finds a shared T1/MQ change. Then revisit bitplane

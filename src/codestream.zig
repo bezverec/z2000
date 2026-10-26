@@ -22160,7 +22160,9 @@ fn appendTemporaryPayload(
 
         var probe_stream: RpclPacketStream = .{};
         defer probe_stream.deinit();
-        try appendRpclShadowStream(allocator, null, planes, bands, blocks, catalogs, levels, options, &probe_stream);
+        // Only the header lengths are needed: the probe leaves out the
+        // codewords.
+        try appendRpclShadowStream(allocator, null, planes, bands, blocks, catalogs, levels, options, &probe_stream, false);
         var header_overhead: [max_quality_layers]u64 = @splat(0);
         // The probe stream is in RPCL order (layer innermost), so packet k
         // belongs to layer k % layers.
@@ -22189,7 +22191,7 @@ fn appendTemporaryPayload(
         }
     }
     const shadow_out: ?*std.ArrayList(u8) = if (options.emit_temporary_payload_sidecar) out else null;
-    try appendRpclShadowStream(allocator, shadow_out, planes, bands, blocks, catalogs, levels, options, rpcl_stream);
+    try appendRpclShadowStream(allocator, shadow_out, planes, bands, blocks, catalogs, levels, options, rpcl_stream, true);
 }
 
 fn appendComponentPayloadsParallel(
@@ -22221,7 +22223,11 @@ fn appendRpclShadowStream(
     levels: u8,
     options: LosslessOptions,
     rpcl_stream: ?*RpclPacketStream,
+    /// False builds the packet headers alone (each packet's length is then
+    /// its header's); `out` must be null.
+    with_bodies: bool,
 ) !void {
+    if (!with_bodies and out != null) return CodestreamError.InvalidCodestream;
     const plan = try makePacketPlan(planes.width, planes.height, levels, options);
     var rpcl_index = try buildRpclBlockIndex(allocator, plan, 3, levels, bands, blocks);
     defer rpcl_index.deinit();
@@ -22235,8 +22241,10 @@ fn appendRpclShadowStream(
     // Room for every block's codewords and a generous header allowance, so
     // the packets are not copied again as the buffer grows.
     var body_bytes: usize = 0;
-    for (catalogs) |catalog| {
-        for (catalog.blocks) |block| body_bytes += block.segment.bytes.len;
+    if (with_bodies) {
+        for (catalogs) |catalog| {
+            for (catalog.blocks) |block| body_bytes += block.segment.bytes.len;
+        }
     }
     try packet_bytes.ensureTotalCapacity(allocator, body_bytes + 16 * (blocks.len * 3 + plan.packets));
     try packet_lengths.ensureTotalCapacity(allocator, plan.packets);
@@ -22279,6 +22287,7 @@ fn appendRpclShadowStream(
                         precinct_index,
                         options.layers,
                         &sequence,
+                        with_bodies,
                     );
                 }
             }
@@ -23264,6 +23273,7 @@ fn appendRpclShadowPacketsForSelection(
     expected_precinct: u64,
     layer_count: u16,
     sequence: *u64,
+    with_bodies: bool,
 ) !void {
     if (selected.len == 0) {
         var layer: u16 = 0;
@@ -23312,6 +23322,7 @@ fn appendRpclShadowPacketsForSelection(
             expected_resolution,
             expected_component,
             expected_precinct,
+            with_bodies,
         );
         try appendShadowPacketLength(allocator, packet_lengths, packet_bytes.items.len - start);
         try appendShadowPacketLength(allocator, packet_header_lengths, written.header_length);
@@ -23462,6 +23473,7 @@ fn appendRpclPacketForBandGroups(
     expected_resolution: u8,
     expected_component: u16,
     expected_precinct: u64,
+    with_bodies: bool,
 ) !t2.WrittenPacket {
     if (packet.resolution != expected_resolution or
         packet.component != expected_component or
@@ -23512,7 +23524,7 @@ fn appendRpclPacketForBandGroups(
     const header_length = out.items.len - header_offset;
     const payload_offset = out.items.len;
 
-    if (packet_included) {
+    if (packet_included and with_bodies) {
         const layer_index: usize = @intCast(packet.layer);
         for (groups, prepared[0..initialized]) |group, prepared_group| {
             for (prepared_group.packet_blocks, group.encoded) |packet_block, encoded| {
