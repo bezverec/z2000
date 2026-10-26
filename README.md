@@ -17,8 +17,8 @@ streams decode against their references ([Part 1 corpus](docs/part1_corpus.md)).
 Neither figure nor that result is a formal ISO conformance certification.
 
 The current prerelease is [`v0.2.0-rc.5`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.5),
-with binaries for Windows x86-64, Linux x86-64, Linux RISC-V 64, and macOS
-arm64.
+with binaries for Windows x86-64, Linux x86-64, and Linux RISC-V 64. It has no
+macOS archive; on macOS, build from source with Zig 0.17.
 
 ## Features
 
