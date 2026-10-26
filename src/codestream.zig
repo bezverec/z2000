@@ -22221,6 +22221,15 @@ fn appendRpclShadowStream(
     defer packet_lengths.deinit(allocator);
     var packet_header_lengths: std.ArrayList(u32) = .empty;
     defer packet_header_lengths.deinit(allocator);
+    // Room for every block's codewords and a generous header allowance, so
+    // the packets are not copied again as the buffer grows.
+    var body_bytes: usize = 0;
+    for (catalogs) |catalog| {
+        for (catalog.blocks) |block| body_bytes += block.segment.bytes.len;
+    }
+    try packet_bytes.ensureTotalCapacity(allocator, body_bytes + 16 * (blocks.len * 3 + plan.packets));
+    try packet_lengths.ensureTotalCapacity(allocator, plan.packets);
+    try packet_header_lengths.ensureTotalCapacity(allocator, plan.packets);
 
     var sequence: u64 = 0;
     var resolution_index: u8 = 0;

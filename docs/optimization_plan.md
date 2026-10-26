@@ -292,7 +292,11 @@ widening to 16-bit samples now runs on the pool as well (TIFF read 7.3 ->
 5.0 ms at t20); the file read itself (about 3.8 ms) is what remains there.
 An RGB JP2 without metadata is written as its boxes and then the
 codestream, without a copy (JP2 wrap 1.7 -> 0.6 ms). The codestream
-assembly (`markers/write SOD`) reserves its exact size now, 3.7 -> 1.0 ms.
+assembly (`markers/write SOD`) reserves its exact size now, 3.7 -> 1.0 ms,
+and so does the packet stream after Tier-1 (lossless t20 84.7 -> 78.7 ms).
+Still serial after the Tier-1 pool: the packet stream (about 2.5 ms; its
+packets are independent per precinct and component) and, for rate
+targets, the PCRD allocation with its probe stream (several ms).
 
 Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode
 gap, unless profiling finds a shared T1/MQ change. Then revisit bitplane

@@ -46,6 +46,22 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, encoder packet stream into a reserved buffer
+
+Base `40039a0`, t20. A probe inside the block-coding stage put its serial
+steps after the Tier-1 pool at 5.6 ms for the packet stream (lossless) and,
+for the two-layer lossy encode, 7.8 ms of rate allocation (with a probe
+packet stream) plus 4.5 ms for the final stream. Reserving the stream's
+buffer up front (all codewords plus a header allowance), 15 `--timings`
+runs:
+
+| Profile | Total | Block coding stage |
+| --- | ---: | ---: |
+| lossless | 84.7 -> 78.7 ms | 64.3 -> 58.8 ms |
+| lossy | 89.1 -> 82.5 ms | 67.0 -> 60.0 ms |
+
+Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, single-tile codestream into a reserved buffer
 
 Base `a790391`, lossless encode t20, 15 `--timings` runs: reserving the

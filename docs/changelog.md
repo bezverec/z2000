@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Encoder Packet Stream Built Into A Reserved Buffer
+
+- After Tier-1 the encoder builds every packet (header and the blocks'
+  codewords) into one buffer on one thread. It now reserves room for all
+  the blocks' codewords and a header allowance up front instead of
+  growing the buffer packet by packet, which copied the 6 MB of packets
+  again on every regrowth. The rate-allocation probe stream of a
+  multi-layer lossy encode benefits the same way.
+- Codestreams byte-identical. Against `40039a0`, t20, 15 `--timings` runs:
+  lossless 84.7 -> 78.7 ms, lossy 89.1 -> 82.5 ms (block coding stage
+  64.3 -> 58.8 and 67.0 -> 60.0 ms; the packet stream alone about 5.6 ->
+  2.5 ms).
+
 ### Single-Tile Codestream Assembled Into A Reserved Buffer
 
 - The single-tile codestream assembler reserves the exact size of its
