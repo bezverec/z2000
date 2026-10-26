@@ -564,9 +564,15 @@ the background while a decode still parses (`prepare`), and sleep on a futex
 between tasks; a task submitted while it is busy is refused and runs on the
 caller's own threads. Starting threads does not hold the pool: a task
 published meanwhile runs on the threads already started, and each thread
-joins only tasks whose announced participant count includes its index. The
-DWT drivers, whose workers meet at barriers between
-lifting phases, keep their own per-transform pools. `deinitInBackground`
+joins only tasks whose announced participant count includes its index, so a
+task with `threads` wakes at most `threads - 1` of them. The 5/3 driver runs
+each lifting phase as one such task (the barrier between phases is the task
+boundary) and spawns its own threads only when the pool is busy; the 9/7
+driver keeps its own per-transform pool. A reversible 8-bit RGB decode
+finishes in row bands: the coarser inverse 5/3 levels of the planes the
+block pool left, then each band's finest level (`inverse53FinestRows`, which
+repeats the horizontal pass of its edge rows) and inverse RCT straight into
+the TIFF raster. `deinitInBackground`
 releases a decode's large intermediates (coefficient planes and the 9/7
 reconstruction, allocated from the thread-safe page-level allocator on
 several threads) on a detached thread, because unmapping pages that many

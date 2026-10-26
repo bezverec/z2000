@@ -843,6 +843,28 @@ fn inverseRctInto(comptime Sample: type, samples: []Sample, planes: RctPlanes, r
     for (jobs[0..band_count]) |job| try job.result;
 }
 
+/// One band of `inverseRctThreadedInto8` (or, with `saturate`, of
+/// `inverseRctSaturatedThreadedInto8`) on the calling thread: `y`, `cb` and
+/// `cr` hold the band's samples and `out` receives its pixels.
+pub fn inverseRctBandInto8(y: []i32, cb: []i32, cr: []i32, out: []u8, saturate: bool) ColorError!void {
+    if (cb.len != y.len or cr.len != y.len or out.len != y.len * 3) return ColorError.InvalidImage;
+    var slices = [3][]i32{ y, cb, cr };
+    const planes = RctPlanes{
+        .allocator = undefined,
+        .width = y.len,
+        .height = 1,
+        .bit_depth = 8,
+        .planes = &slices,
+    };
+    const max_sample = try maxSample(8);
+    const level_shift = try dcLevelShift(8);
+    if (saturate) {
+        inverseRctSaturatedRange(out, planes, 0, y.len, max_sample, level_shift);
+    } else {
+        try inverseRctRange(out, planes, 0, y.len, max_sample, level_shift);
+    }
+}
+
 /// `inverseRctThreaded` writing 8-bit planes' samples straight into `out`
 /// (three bytes per pixel), with the same range check.
 pub fn inverseRctThreadedInto8(planes: RctPlanes, out: []u8, requested_threads: usize) !void {

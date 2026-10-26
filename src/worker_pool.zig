@@ -133,7 +133,8 @@ pub fn run(threads: usize, count: usize, context: *anyopaque, task: *const fn (*
         grow(threads);
         pool.growing.store(false, .release);
     }
-    const participants = pool.started.load(.acquire);
+    // At most `threads - 1` pool threads join (the caller is the last one).
+    const participants: u32 = @intCast(@min(pool.started.load(.acquire), threads - 1));
     if (participants == 0) {
         for (0..count) |index| task(context, index);
         return true;

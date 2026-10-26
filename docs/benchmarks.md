@@ -46,6 +46,31 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, reversible RGB tail in row bands
+
+Base `1528bab`, common lossless stream, t20, 13 `--timings` runs:
+
+| Variant | inverse DWT | inverse MCT stage | Tail |
+| --- | ---: | ---: | ---: |
+| base (full-plane finest level, then RCT) | 2.96 ms | 1.14 ms | 4.10 ms |
+| banded finest level + RCT, per-slot scratch | 1.39 ms | 2.40 ms | 3.79 ms |
+| one scratch allocation for all slots | 1.53 ms | 2.29 ms | 3.82 ms |
+| 5/3 phases on the shared pool | 1.04 ms | 2.35 ms | 3.39 ms |
+| scratch released in the background (kept) | 1.04 ms | 1.81 ms | 2.85 ms |
+| same, 16-row bands | | 2.76 ms | |
+| bands on at most 12 / 8 threads | | 2.18 / 2.16 ms | totals +1.3% / +2.5% |
+
+At two threads the banded finest level costs 6.9 ms and the RCT 4.5 ms of
+CPU over the image; at 20 threads 15.5 and 12.8 ms (hyper-threads,
+E-cores, and the raster's fresh pages), about what the separate passes
+spent. Wall time: 31 interleaved rounds 81.8 -> 80.9 ms (decode total
+64.0 -> 63.6 ms); 21 rounds t20 77.5 -> 78.4 ms, t6 139.1 -> 134.8 ms, t2
+341.7 -> 339.6 ms, lossy t20 87.6 -> 87.9 ms. Output byte-identical.
+
+The 9/7 tail did not gain from more workers (two planes: 7.50 ms on 8,
+8.04 ms on 16; memory-bound); in-place dequantization of two tail planes
+now takes 1.35 ms.
+
 ## 2026-10-26: Intel Core i5-14500, lossy tail: dequantization in place
 
 Base `1322e63`, lossy profile, t20 unless noted. Stage budget before the

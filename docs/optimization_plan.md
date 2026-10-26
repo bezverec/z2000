@@ -224,8 +224,11 @@ remaining Tier-1 time) 4.5-7.5 ms, inverse ICT 2.4 ms, TIFF write 4.6 ms.
 Dequantization now runs in place (2026-10-26: no second 48 MB of planes);
 moving it into the Tier-1 pool per block was slower (the pool workers
 grew by more than the tail shrank). Candidates: the parallel tail 9/7 runs
-on at most eight workers and is memory-bound, and the ICT reads three f32
-planes once more after it.
+on at most eight workers and is memory-bound (16 workers did not help),
+and the ICT reads three f32 planes once more after it; the reversible
+path's answer (2026-10-26: finest level and RCT in row bands, lossless
+tail 4.0 -> 2.85 ms at t20) would carry over with a banded 9/7 finest
+level. Performance work is frozen for 0.2.0-rc.5 after that step.
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse

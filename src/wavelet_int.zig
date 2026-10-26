@@ -1,4 +1,5 @@
 const std = @import("std");
+const worker_pool = @import("worker_pool.zig");
 const simd = @import("simd.zig");
 
 pub const TransformError = error{
@@ -458,6 +459,10 @@ const DwtBandJob = struct {
     end: usize,
     phase: DwtPhase,
 
+    fn runMutable(job: *DwtBandJob) void {
+        job.run();
+    }
+
     fn run(job: *const DwtBandJob) void {
         switch (job.phase) {
             .forward_columns => for (job.planes) |plane| {
@@ -486,12 +491,13 @@ const DwtBandJob = struct {
     }
 };
 
-// Persistent worker pool for the 5/3 DWT, mirroring the 9/7 driver's
-// `Dwt97Pool`. The per-level cascade issues ten short phases (two per level);
-// spawning fresh threads for each one cost more than the transform on the
-// 16-thread host. The pool spawns `worker_count - 1` workers once, then a
-// generation counter releases them per phase and a completion counter forms
-// the barrier. The caller thread runs the final band, so all workers stay busy.
+// Worker pool for the 5/3 DWT, mirroring the 9/7 driver's `Dwt97Pool`. The
+// per-level cascade issues ten short phases (two per level). Each phase runs
+// on the process-wide `worker_pool` when it is free, whose threads already
+// exist; only when it is busy does this pool spawn `worker_count - 1` workers
+// of its own (once per transform), released per phase by a generation counter
+// with a completion counter as the barrier. The caller thread runs the final
+// band, so all workers stay busy.
 const DwtPoolWorker = struct {
     pool: *DwtPool,
     index: usize,
@@ -507,11 +513,17 @@ const DwtPool = struct {
     generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     completed: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    spawn_failed: bool = false,
 
     fn start(pool: *DwtPool, requested_workers: usize) void {
         pool.worker_count = @max(1, @min(requested_workers, max_dwt_workers));
-        if (pool.worker_count == 1) return;
+    }
 
+    /// Spawns this pool's own workers; false when that failed (the caller
+    /// thread then runs every band).
+    fn spawnOwnWorkers(pool: *DwtPool) bool {
+        if (pool.spawn_failed) return false;
+        if (pool.spawned == pool.worker_count - 1) return true;
         while (pool.spawned < pool.worker_count - 1) : (pool.spawned += 1) {
             pool.worker_args[pool.spawned] = .{ .pool = pool, .index = pool.spawned };
             pool.threads[pool.spawned] = std.Thread.spawn(.{}, dwtPoolWorker, .{&pool.worker_args[pool.spawned]}) catch {
@@ -520,16 +532,22 @@ const DwtPool = struct {
                 pool.stopping.store(true, .release);
                 _ = pool.generation.fetchAdd(1, .release);
                 for (pool.threads[0..pool.spawned]) |thread| thread.join();
-                pool.worker_count = 1;
                 pool.spawned = 0;
-                return;
+                pool.spawn_failed = true;
+                return false;
             };
         }
+        return true;
     }
 
     fn dispatch(pool: *DwtPool, active_jobs: usize) void {
         if (pool.worker_count == 1) {
             pool.jobs[0].run();
+            return;
+        }
+        if (pool.spawned == 0 and worker_pool.runJobs(DwtBandJob, pool.jobs[0..active_jobs], DwtBandJob.runMutable)) return;
+        if (!pool.spawnOwnWorkers()) {
+            for (pool.jobs[0..active_jobs]) |*job| job.run();
             return;
         }
 
@@ -694,6 +712,34 @@ pub fn inverse53Parallel(
     levels: u8,
     thread_count: usize,
 ) !void {
+    _ = try inverse53ParallelFrom(allocator, planes, width, height, levels, thread_count, 0);
+}
+
+/// `inverse53Parallel` for every level but the finest (full-resolution) one,
+/// which `inverse53FinestRows` then produces band by band. Returns whether a
+/// finest level remains to be applied.
+pub fn inverse53ParallelAllButFinest(
+    allocator: std.mem.Allocator,
+    planes: [3][]i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    thread_count: usize,
+) !bool {
+    return inverse53ParallelFrom(allocator, planes, width, height, levels, thread_count, 1);
+}
+
+/// Runs the levels from the coarsest down to `last_level` and returns whether
+/// the transform has any level at all.
+fn inverse53ParallelFrom(
+    allocator: std.mem.Allocator,
+    planes: [3][]i32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    thread_count: usize,
+    last_level: u8,
+) !bool {
     for (planes) |plane| {
         if (plane.len == 0) continue;
         if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
@@ -719,16 +765,114 @@ pub fn inverse53Parallel(
         cur_height = lowCount(cur_height);
     }
 
+    if (actual_levels <= last_level) return actual_levels > 0;
     var pool = DwtPool{};
     pool.start(workers);
     defer pool.stop();
 
     var level = actual_levels;
-    while (level > 0) {
+    while (level > last_level) {
         level -= 1;
         const shape = shapes[level];
         runDwtPhase(&pool, planes, width, shape.width, shape.height, scratches, .inverse_rows);
         runDwtPhase(&pool, planes, width, shape.width, shape.height, scratches, .inverse_columns);
+    }
+    return actual_levels > 0;
+}
+
+/// Scratch `inverse53FinestRows` needs for bands of up to `band_rows` rows.
+pub fn finestRowsScratchLen(width: usize, band_rows: usize) usize {
+    // The band's low and high rows (each half the band plus two of
+    // context) and one row of line scratch.
+    return width * (band_rows + 6);
+}
+
+/// Rows `first_row..end_row` of a plane's finest inverse 5/3 level, written
+/// to `out` (`width` samples per row), given the plane after
+/// `inverse53ParallelAllButFinest` (`has_finest` is what that returned). The
+/// plane is only read, so bands can run on several threads; each band
+/// repeats the horizontal pass of the rows at its edges. The arithmetic and
+/// its order (rows, then columns; the same symmetric extension) are those of
+/// the in-place transform, so the result is identical. Reference origin zero.
+pub fn inverse53FinestRows(
+    plane: []const i32,
+    width: usize,
+    height: usize,
+    has_finest: bool,
+    first_row: usize,
+    end_row: usize,
+    out: []i32,
+    scratch: []i32,
+) void {
+    std.debug.assert(first_row < end_row and end_row <= height);
+    std.debug.assert(out.len >= (end_row - first_row) * width);
+    const band_rows = end_row - first_row;
+    std.debug.assert(scratch.len >= finestRowsScratchLen(width, band_rows));
+    if (!has_finest) {
+        @memcpy(out[0 .. band_rows * width], plane[first_row * width .. end_row * width]);
+        return;
+    }
+    const line = scratch[0..width];
+    if (height < 2) {
+        // No column pass: the row is the horizontal inverse alone.
+        @memcpy(out[0..width], plane[0..width]);
+        inverse53Line(out[0..width], line);
+        return;
+    }
+
+    const lows = lowCount(height);
+    const highs = height - lows;
+    // Even output rows `first_even..last_even` (the band's own and the next
+    // even row its last odd row needs) come from low rows `low_first..`;
+    // their updates and the odd rows read high rows `high_first..high_last`.
+    const first_even = first_row & ~@as(usize, 1);
+    const last_even = @min(height - 1, end_row) & ~@as(usize, 1);
+    const low_first = first_even / 2;
+    const low_count = last_even / 2 - low_first + 1;
+    const high_first = if (first_even == 0) 0 else first_even / 2 - 1;
+    const high_last = @min(highs - 1, last_even / 2);
+    const high_count = high_last - high_first + 1;
+    const low_rows = scratch[width..][0 .. low_count * width];
+    const high_rows = scratch[width + low_count * width ..][0 .. high_count * width];
+
+    for (0..low_count) |index| {
+        const row = low_rows[index * width ..][0..width];
+        @memcpy(row, plane[(low_first + index) * width ..][0..width]);
+        inverse53Line(row, line);
+    }
+    for (0..high_count) |index| {
+        const row = high_rows[index * width ..][0..width];
+        @memcpy(row, plane[(lows + high_first + index) * width ..][0..width]);
+        inverse53Line(row, line);
+    }
+
+    // Update step, in place over the low rows: X[2i] = L[i] - (H[i-1] +
+    // H[i] + 2) / 4, mirroring H[-1] to H[0] and a missing last H[i] to
+    // H[i-1].
+    var even = first_even;
+    while (even <= last_even) : (even += 2) {
+        const low_index = even / 2;
+        const left_index = if (even > 0) low_index - 1 else 0;
+        const right_index = if (even + 1 < height) low_index else low_index - 1;
+        const target = low_rows[(low_index - low_first) * width ..][0..width];
+        const left = high_rows[(left_index - high_first) * width ..][0..width];
+        const right = high_rows[(right_index - high_first) * width ..][0..width];
+        for (target, left, right) |*value, l, r| value.* -= floorQuarterBiased(l + r);
+    }
+
+    // Predict step and output: X[2i+1] = H[i] + (X[2i] + X[2i+2]) / 2, with
+    // X[2i+2] mirrored to X[2i] past the last row.
+    for (first_row..end_row) |row| {
+        const target = out[(row - first_row) * width ..][0..width];
+        if (row % 2 == 0) {
+            @memcpy(target, low_rows[(row / 2 - low_first) * width ..][0..width]);
+            continue;
+        }
+        const above = low_rows[((row - 1) / 2 - low_first) * width ..][0..width];
+        const below_row = if (row + 1 < height) row + 1 else row - 1;
+        const below = low_rows[(below_row / 2 - low_first) * width ..][0..width];
+        const high = high_rows[((row - 1) / 2 - high_first) * width ..][0..width];
+        for (target, high, above, below) |*value, h, a, b| value.* = h + floorHalf(a + b);
     }
 }
 

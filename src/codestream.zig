@@ -12887,6 +12887,12 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
         );
     }
 
+    if (overlap_dwt and header.mct != .none and header.bit_depth == 8) {
+        if (rgb8) |raster| {
+            return finishStrictRgb8InBands(allocator, header, strict_planes, &finished, options.threads, strictDecodeSaturates(options, catalog), timings, raster);
+        }
+    }
+
     const wavelet_start = monotonicNs();
     if (overlap_dwt) {
         // Whatever the pool did not finish (the last plane) runs on all
@@ -12949,6 +12955,152 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     else
         color.inverseRctThreaded(allocator, strict_planes, options.threads);
 }
+
+/// Rows per band of `finishStrictRgb8InBands`.
+const rgb8_band_rows = 32;
+
+/// A buffer from the page-level allocator, for `worker_pool.deinitInBackground`.
+fn SmpBuffer(comptime T: type) type {
+    return struct {
+        items: []T,
+
+        pub fn deinit(self: *@This()) void {
+            std.heap.smp_allocator.free(self.items);
+        }
+    };
+}
+
+/// Finishes a reversible 8-bit RGB decode whose unfinished planes the pool
+/// left in coefficient form: all their coarser inverse 5/3 levels at once,
+/// then, in row bands on the pool, their finest level and the inverse RCT
+/// straight into `raster`. A band reads its coefficient rows once instead of
+/// a full-plane finest level followed by a full-plane colour pass; the
+/// results are those of the separate passes (same arithmetic and order).
+fn finishStrictRgb8InBands(
+    allocator: std.mem.Allocator,
+    header: TemporaryHeader,
+    planes: color.RctPlanes,
+    finished: *const [3]std.atomic.Value(bool),
+    threads: u8,
+    saturate: bool,
+    timings: ?*DecodeTimings,
+    raster: *Rgb8Raster,
+) !image.RgbImage {
+    if (planes.planes.len != 3) return CodestreamError.InvalidCodestream;
+    const width = header.width;
+    const height = header.height;
+    const wavelet_start = monotonicNs();
+    const none: []i32 = &.{};
+    var pending = [3][]i32{ none, none, none };
+    for (planes.planes, 0..) |plane, component| {
+        if (!finished[component].load(.acquire)) pending[component] = plane;
+    }
+    const has_finest = try wavelet_int.inverse53ParallelAllButFinest(allocator, pending, width, height, header.levels, threads);
+    if (timings) |t| t.wavelet_ns += elapsedNs(wavelet_start);
+
+    const color_start = monotonicNs();
+    defer if (timings) |t| {
+        t.color_transform_ns += elapsedNs(color_start);
+    };
+    const out = try allocateRgb8Raster(allocator, raster, width, height);
+    errdefer freeRgb8Raster(allocator, raster);
+    // One scratch slot per thread that can run a band, carved from a single
+    // allocation: per-slot buffers cost a mapping and an unmapping each.
+    var pending_count: usize = 0;
+    for (pending) |plane| pending_count += @intFromBool(plane.len != 0);
+    const slot_len = pending_count * rgb8_band_rows * width + wavelet_int.finestRowsScratchLen(width, rgb8_band_rows);
+    const slot_count = @as(usize, @max(threads, 1)) + 1;
+    var bands = StrictRgb8Bands{
+        .planes = .{ planes.planes[0], planes.planes[1], planes.planes[2] },
+        .pending = .{ pending[0].len != 0, pending[1].len != 0, pending[2].len != 0 },
+        .slot_len = slot_len,
+        .scratch = try std.heap.smp_allocator.alloc(i32, try std.math.mul(usize, slot_len, slot_count)),
+        .busy = try std.heap.smp_allocator.alloc(std.atomic.Value(bool), slot_count),
+        .width = width,
+        .height = height,
+        .has_finest = has_finest,
+        .saturate = saturate,
+        .out = out,
+        .results = try std.heap.smp_allocator.alloc(StrictRgb8Bands.BandError!void, (height + rgb8_band_rows - 1) / rgb8_band_rows),
+    };
+    defer bands.deinit();
+    for (bands.busy) |*busy| busy.* = std.atomic.Value(bool).init(false);
+    if (!worker_pool.run(threads, bands.results.len, &bands, StrictRgb8Bands.run)) {
+        for (0..bands.results.len) |index| StrictRgb8Bands.run(&bands, index);
+    }
+    for (bands.results) |result| try result;
+    return rgb8ImageShell(allocator, header);
+}
+
+/// The bands of `finishStrictRgb8InBands`, each on a free scratch slot.
+const StrictRgb8Bands = struct {
+    planes: [3][]i32,
+    pending: [3]bool,
+    width: usize,
+    height: usize,
+    has_finest: bool,
+    saturate: bool,
+    out: []u8,
+    results: []BandError!void,
+    /// Per slot: the band's rows of each unfinished plane, then the
+    /// finest-level scratch.
+    slot_len: usize,
+    scratch: []i32,
+    busy: []std.atomic.Value(bool),
+
+    const BandError = std.mem.Allocator.Error || color.ColorError;
+
+    fn deinit(self: *StrictRgb8Bands) void {
+        // Many threads touched the scratch; unmapping it waits for all of
+        // them, so it goes to a background thread.
+        worker_pool.deinitInBackground(SmpBuffer(i32){ .items = self.scratch });
+        std.heap.smp_allocator.free(self.busy);
+        std.heap.smp_allocator.free(self.results);
+    }
+
+    fn run(context: *anyopaque, index: usize) void {
+        const self: *StrictRgb8Bands = @ptrCast(@alignCast(context));
+        self.results[index] = self.band(index);
+    }
+
+    fn band(self: *StrictRgb8Bands, index: usize) BandError!void {
+        const slot_index = self.claimSlot();
+        defer self.busy[slot_index].store(false, .release);
+        const width = self.width;
+        const band_len = rgb8_band_rows * width;
+        var pending_count: usize = 0;
+        for (self.pending) |is_pending| pending_count += @intFromBool(is_pending);
+        const slot_buffer = self.scratch[slot_index * self.slot_len ..][0..self.slot_len];
+        const first_row = index * rgb8_band_rows;
+        const end_row = @min(self.height, first_row + rgb8_band_rows);
+        const pixels = (end_row - first_row) * width;
+        const scratch = slot_buffer[pending_count * band_len ..];
+        var sources: [3][]i32 = undefined;
+        var next_buffer: usize = 0;
+        for (&sources, 0..) |*source, component| {
+            if (self.pending[component]) {
+                const rows = slot_buffer[next_buffer * band_len ..][0..pixels];
+                next_buffer += 1;
+                wavelet_int.inverse53FinestRows(self.planes[component], width, self.height, self.has_finest, first_row, end_row, rows, scratch);
+                source.* = rows;
+            } else {
+                source.* = self.planes[component][first_row * width ..][0..pixels];
+            }
+        }
+        try color.inverseRctBandInto8(sources[0], sources[1], sources[2], self.out[first_row * width * 3 ..][0 .. pixels * 3], self.saturate);
+    }
+
+    /// More threads than slots can only come from a pool started larger by
+    /// an earlier decode; they wait for a slot.
+    fn claimSlot(self: *StrictRgb8Bands) usize {
+        while (true) {
+            for (self.busy, 0..) |*busy, index| {
+                if (busy.cmpxchgStrong(false, true, .acquire, .monotonic) == null) return index;
+            }
+            std.atomic.spinLoopHint();
+        }
+    }
+};
 
 /// Allocates `raster.bytes` (prefix, three bytes per pixel, suffix) and
 /// returns the pixel part.

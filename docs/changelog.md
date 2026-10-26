@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Reversible RGB Tail In Row Bands
+
+- After the Tier-1 pool, a reversible 8-bit RGB decode now runs the
+  coarser inverse 5/3 levels of the planes the pool left, then, in row
+  bands on the pool, their finest level and the inverse RCT straight into
+  the TIFF raster: a band reads its coefficient rows once instead of a
+  full-plane finest level followed by a full-plane colour pass. The bands
+  repeat the horizontal pass of their edge rows and keep the in-place
+  transform's arithmetic and order, so the samples are identical; a unit
+  test compares the banded finest level with the in-place transform over
+  odd sizes, level counts, and band heights.
+- The 5/3 driver's phases run on the shared worker pool when it is free
+  (its own threads only otherwise), which takes the per-transform thread
+  start and join off the coarse levels, and `worker_pool.run` now wakes at
+  most `threads - 1` pool threads.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream). Against `1528bab` at
+  t20, common lossless stream: inverse DWT 2.97 -> 1.04 ms, inverse RCT
+  (now the banded finest level and RCT) 1.04 -> 1.81 ms, so the tail
+  4.0 -> 2.85 ms (13 `--timings` runs); wall 81.8 -> 80.9 ms (31 rounds).
+
 ### Irreversible Planes Dequantized In Place
 
 - A full irreversible decode on several threads no longer allocates f32

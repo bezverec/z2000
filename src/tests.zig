@@ -13818,6 +13818,44 @@ test "parallel 5/3 DWT matches the serial workspace transform byte-for-byte" {
     }
 }
 
+test "inverse 5/3 finest level in row bands matches the in-place transform" {
+    const allocator = std.testing.allocator;
+    const dims = [_][2]usize{
+        .{ 1, 1 }, .{ 1, 9 }, .{ 9, 1 }, .{ 2, 2 }, .{ 7, 5 }, .{ 33, 17 }, .{ 64, 64 }, .{ 65, 63 }, .{ 130, 97 },
+    };
+    for (dims) |dim| {
+        const width = dim[0];
+        const height = dim[1];
+        for ([_]u8{ 0, 1, 2, 6 }) |levels| {
+            const reference = try allocator.alloc(i32, width * height);
+            defer allocator.free(reference);
+            var seed: u32 = @intCast(width * 31 + height * 977 + levels);
+            for (reference, 0..) |*sample, index| {
+                seed = seed *% 1664525 +% 1013904223;
+                sample.* = @as(i32, @intCast((seed >> 12) & 0x7ff)) - 1024 + @as(i32, @intCast(index % 7));
+            }
+            const banded = try allocator.dupe(i32, reference);
+            defer allocator.free(banded);
+            const none: []i32 = &.{};
+            try wavelet_int.inverse53Parallel(allocator, .{ reference, none, none }, width, height, levels, 3);
+            const has_finest = try wavelet_int.inverse53ParallelAllButFinest(allocator, .{ banded, none, none }, width, height, levels, 3);
+
+            for ([_]usize{ 1, 2, 3, 8, 32 }) |band_rows| {
+                const out = try allocator.alloc(i32, width * height);
+                defer allocator.free(out);
+                const scratch = try allocator.alloc(i32, wavelet_int.finestRowsScratchLen(width, band_rows));
+                defer allocator.free(scratch);
+                var first_row: usize = 0;
+                while (first_row < height) : (first_row += band_rows) {
+                    const end_row = @min(height, first_row + band_rows);
+                    wavelet_int.inverse53FinestRows(banded, width, height, has_finest, first_row, end_row, out[first_row * width ..], scratch);
+                }
+                try std.testing.expectEqualSlices(i32, reference, out);
+            }
+        }
+    }
+}
+
 test "parallel 9/7 DWT matches the serial origin transform bit-for-bit" {
     const allocator = std.testing.allocator;
     // Cover vector-band widths (f32_block_lanes = 32), per-column line tails,
