@@ -13856,6 +13856,66 @@ test "inverse 5/3 finest level in row bands matches the in-place transform" {
     }
 }
 
+test "inverse 9/7 finest level and ICT in row bands match the full-plane passes" {
+    const allocator = std.testing.allocator;
+    const dims = [_][2]usize{
+        .{ 1, 1 }, .{ 1, 9 }, .{ 70, 1 }, .{ 2, 2 }, .{ 7, 5 }, .{ 33, 17 }, .{ 64, 64 }, .{ 65, 63 }, .{ 130, 97 },
+    };
+    const origins = [_][2]u32{ .{ 0, 0 }, .{ 1, 1 }, .{ 3, 2 }, .{ 2, 5 } };
+    for (dims) |dim| {
+        const width = dim[0];
+        const height = dim[1];
+        for (origins) |origin| {
+            for ([_]u8{ 0, 1, 2, 6 }) |levels| {
+                var reference: [3][]f32 = undefined;
+                var banded: [3][]f32 = undefined;
+                var seed: u32 = @intCast(width * 31 + height * 977 + levels + origin[0] * 7 + origin[1] * 13);
+                for (0..3) |c| {
+                    reference[c] = try allocator.alloc(f32, width * height);
+                    for (reference[c], 0..) |*sample, index| {
+                        seed = seed *% 1664525 +% 1013904223;
+                        sample.* = @as(f32, @floatFromInt(@as(i32, @intCast((seed >> 12) & 0x7ff)) - 1024)) * 0.1 + @as(f32, @floatFromInt(index % 7));
+                    }
+                    banded[c] = try allocator.dupe(f32, reference[c]);
+                }
+                defer for (0..3) |c| {
+                    allocator.free(reference[c]);
+                    allocator.free(banded[c]);
+                };
+                // Plane 1 is finished already, as the decode pool leaves it.
+                const none: []f32 = &.{};
+                try wavelet.inverse97Parallel(allocator, reference, width, height, levels, origin[0], origin[1], 3);
+                @memcpy(banded[1], reference[1]);
+                const has_finest = try wavelet.inverse97ParallelAllButFinest(allocator, .{ banded[0], none, banded[2] }, width, height, levels, origin[0], origin[1], 3);
+
+                const planes = color.IctPlanes{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .planes = &reference };
+                const expected = try allocator.alloc(u8, width * height * 3);
+                defer allocator.free(expected);
+                try color.inverseIctThreadedInto8(planes, expected, 2);
+
+                for ([_]usize{ 1, 2, 3, 8, 32 }) |band_rows| {
+                    const out = try allocator.alloc(u8, width * height * 3);
+                    defer allocator.free(out);
+                    const scratch = try allocator.alloc(f32, 2 * wavelet.finest97RowsScratchLen(width, band_rows));
+                    defer allocator.free(scratch);
+                    const plane_scratch = scratch.len / 2;
+                    var first_row: usize = 0;
+                    while (first_row < height) : (first_row += band_rows) {
+                        const end_row = @min(height, first_row + band_rows);
+                        const pixels = (end_row - first_row) * width;
+                        const y = wavelet.inverse97FinestRows(banded[0], width, height, origin[0], origin[1], has_finest, first_row, end_row, scratch[0..plane_scratch]);
+                        const cr = wavelet.inverse97FinestRows(banded[2], width, height, origin[0], origin[1], has_finest, first_row, end_row, scratch[plane_scratch..]);
+                        try std.testing.expectEqualSlices(f32, reference[0][first_row * width ..][0..pixels], y);
+                        try std.testing.expectEqualSlices(f32, reference[2][first_row * width ..][0..pixels], cr);
+                        try color.inverseIctBandInto8(y, banded[1][first_row * width ..][0..pixels], cr, out[first_row * width * 3 ..][0 .. pixels * 3]);
+                    }
+                    try std.testing.expectEqualSlices(u8, expected, out);
+                }
+            }
+        }
+    }
+}
+
 test "parallel 9/7 DWT matches the serial origin transform bit-for-bit" {
     const allocator = std.testing.allocator;
     // Cover vector-band widths (f32_block_lanes = 32), per-column line tails,

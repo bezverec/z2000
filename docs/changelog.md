@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Irreversible RGB Tail In Row Bands
+
+- An irreversible 8-bit RGB decode on several threads now finishes like
+  the reversible one: after the Tier-1 pool, the planes it left are
+  dequantized in place and run through all but the finest inverse 9/7
+  level, then, in row bands on the pool, each band's finest level
+  (`wavelet.inverse97FinestRows`) and inverse ICT
+  (`color.inverseIctBandInto8`) go straight into the TIFF raster instead of
+  a full-plane finest level followed by a full-plane colour pass. A band
+  repeats the horizontal pass of the four rows of context its lifting
+  steps read on either side and keeps the in-place transform's arithmetic,
+  order, origin parity, and edge extension, so the samples are identical;
+  a unit test compares the banded finest level and ICT with the full-plane
+  passes over odd sizes, odd and even origins, level counts, and band
+  heights. The reversible and irreversible band passes share one driver
+  (`writeStrictRgb8Bands`).
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream). Against `fe6fa96` at
+  t20, lossy stream (15 `--timings` runs): inverse DWT 8.50 -> 3.42 ms,
+  inverse MCT (now the banded finest level and ICT) 2.31 -> 4.20 ms, so
+  the tail 10.77 -> 7.61 ms; wall 81.6 -> 79.3 ms at t20 and
+  119.2 -> 117.6 ms at t8 (31 interleaved rounds). One thread is unchanged
+  (it does not take the overlapped path).
+
 ### Single-Row 9/7 Levels On Several Threads
 
 - The threaded 9/7 driver (`forward97Parallel`, `inverse97Parallel`) now

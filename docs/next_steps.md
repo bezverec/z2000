@@ -1022,10 +1022,11 @@ shared worker pool, Tier-1 overlapped with the inverse DWT, the packet
 catalog and the decode tail on all workers) is complete and frozen for
 `v0.2.0-rc.5`: on the i5-14500 z2000 now decodes the 2048x2048 RGB benchmark
 level with Kakadu 8.4.1 at t1 and within 1.03x (lossless) and 1.13x (lossy)
-of it at t20, ahead of OpenJPEG and Grok in both. The open performance
-candidates are a banded 9/7 finest level with the ICT for the lossy tail,
-and encode, now the larger gap to Kakadu (1.7x at t20, 1.5x at t1); see
-`optimization_plan.md`. Reopen broad T1 SWAR/packed-column work only with a
+of it at t20, ahead of OpenJPEG and Grok in both. Since then the lossy tail
+runs its finest 9/7 level and the ICT in row bands as well. The open
+performance candidates are the 9/7 driver on the shared pool (as the 5/3
+one), and encode, now the larger gap to Kakadu (1.7x at t20, 1.5x at t1);
+see `optimization_plan.md`. Reopen broad T1 SWAR/packed-column work only with a
 new layout hypothesis and the normal keep rule.
 
 ## Gate For Every Slice

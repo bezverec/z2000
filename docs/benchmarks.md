@@ -46,6 +46,26 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, irreversible RGB tail in row bands
+
+Base `fe6fa96`, lossy profile (`lossy.jp2`), t20, 15 interleaved
+`--timings` runs:
+
+| Variant | inverse DWT | inverse MCT stage | Tail |
+| --- | ---: | ---: | ---: |
+| base (full-plane inverse 9/7, then ICT) | 8.50 ms | 2.31 ms | 10.77 ms |
+| finest level + ICT in 16-row bands | 3.36 ms | 4.38 ms | 7.68 ms |
+| same, 32-row bands (kept) | 3.42 ms | 4.20 ms | 7.61 ms |
+| same, 64-row bands | 3.49 ms | 4.44 ms | 7.96 ms |
+
+A band repeats the horizontal pass of four context rows on either side
+(8 of 40 rows at 32-row bands); larger bands cut that repetition but
+leave fewer bands to spread over 20 threads. Wall time, 31 interleaved
+rounds: t20 81.6 -> 79.3 ms (-2.9%), t8 119.2 -> 117.6 ms (-1.3%).
+Output byte-identical. The remaining inverse DWT is the coarser 9/7
+levels on the 9/7 driver's own threads, which still start and join per
+transform (the 5/3 driver moved to the shared pool for rc.5).
+
 ## 2026-10-26: Intel Core i5-14500, 0.2.0-rc.5 release checkpoint
 
 Source `5e1c379` (performance frozen for rc.5), ReleaseFast native build,

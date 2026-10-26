@@ -1238,6 +1238,23 @@ pub fn inverseIctThreadedInto8(planes: IctPlanes, out: []u8, requested_threads: 
     return inverseIctInto(u8, out, planes, requested_threads);
 }
 
+/// One band of `inverseIctThreadedInto8` on the calling thread: `y`, `cb` and
+/// `cr` hold the band's samples and `out` receives its pixels.
+pub fn inverseIctBandInto8(y: []const f32, cb: []const f32, cr: []const f32, out: []u8) ColorError!void {
+    if (cb.len != y.len or cr.len != y.len or out.len != y.len * 3) return ColorError.InvalidImage;
+    // The range kernel only reads the planes.
+    var slices = [3][]f32{ @constCast(y), @constCast(cb), @constCast(cr) };
+    const planes = IctPlanes{
+        .allocator = undefined,
+        .width = y.len,
+        .height = 1,
+        .bit_depth = 8,
+        .planes = &slices,
+    };
+    const shift: f32 = @floatFromInt(try dcLevelShift(8));
+    inverseIctRange(out, planes, 0, y.len, shift, try maxSample(8));
+}
+
 pub fn inverseIctThreaded(
     allocator: std.mem.Allocator,
     planes: IctPlanes,

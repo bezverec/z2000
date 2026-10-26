@@ -1060,12 +1060,45 @@ pub fn inverse97Parallel(
     y0: u32,
     thread_count: usize,
 ) !void {
+    _ = try inverse97ParallelFrom(allocator, planes, width, height, levels, x0, y0, thread_count, 0);
+}
+
+/// `inverse97Parallel` for every level but the finest (full-resolution) one,
+/// which `inverse97FinestRows` then produces band by band. Returns whether a
+/// finest level remains to be applied.
+pub fn inverse97ParallelAllButFinest(
+    allocator: std.mem.Allocator,
+    planes: [3][]f32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    x0: u32,
+    y0: u32,
+    thread_count: usize,
+) !bool {
+    return inverse97ParallelFrom(allocator, planes, width, height, levels, x0, y0, thread_count, 1);
+}
+
+/// Runs the levels from the coarsest down to `last_level` and returns whether
+/// the transform has any level at all.
+fn inverse97ParallelFrom(
+    allocator: std.mem.Allocator,
+    planes: [3][]f32,
+    width: usize,
+    height: usize,
+    levels: u8,
+    x0: u32,
+    y0: u32,
+    thread_count: usize,
+    last_level: u8,
+) !bool {
     for (planes) |plane| {
         if (plane.len == 0) continue;
         if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
     }
     var shapes: [32]LevelShape = undefined;
     if (levels > shapes.len) return TransformError.TooManyLevels;
+    if (levels <= last_level) return levels > 0;
     const workers = dwt97WorkerCount(thread_count);
     const max_dim = @max(width, height);
     const pack_len = ((height + 1) / 2) * f32_block_lanes;
@@ -1091,7 +1124,7 @@ pub fn inverse97Parallel(
     }
 
     var level = actual_levels;
-    while (level > 0) {
+    while (level > last_level) {
         level -= 1;
         const shape = shapes[level];
         // An empty region synthesizes to itself (ISO F.3.8).
@@ -1100,6 +1133,97 @@ pub fn inverse97Parallel(
         runDwt97Phase(&pool, planes, width, shape.width, shape.height, shape.x0, shape.y0, scratches, pack_len, max_dim, .inverse_rows);
         runDwt97Phase(&pool, planes, width, shape.width, shape.height, shape.x0, shape.y0, scratches, pack_len, max_dim, .inverse_columns);
     }
+    return actual_levels > 0;
+}
+
+/// Scratch `inverse97FinestRows` needs for bands of up to `band_rows` rows.
+pub fn finest97RowsScratchLen(width: usize, band_rows: usize) usize {
+    // The band's rows with the four rows of context the vertical lifting
+    // reads on each side, and one row of line scratch.
+    return width * (band_rows + 9);
+}
+
+/// Rows `first_row..end_row` of a plane's finest inverse 9/7 level, given the
+/// plane after `inverse97ParallelAllButFinest` (`has_finest` is what that
+/// returned) and the full-resolution origin `x0`, `y0`. Returns the band's
+/// rows (`width` samples each), held in `scratch` or, without a finest
+/// level, in `plane`. The plane is only read, so bands can run on several
+/// threads; each band repeats the horizontal pass of the four rows of
+/// context on either side. The arithmetic and its order (rows, then the
+/// column scaling and four lifting steps, with the same symmetric extension
+/// at the plane's edges) are those of the in-place transform, so the result
+/// is identical.
+pub fn inverse97FinestRows(
+    plane: []const f32,
+    width: usize,
+    height: usize,
+    x0: u32,
+    y0: u32,
+    has_finest: bool,
+    first_row: usize,
+    end_row: usize,
+    scratch: []f32,
+) []const f32 {
+    std.debug.assert(first_row < end_row and end_row <= height);
+    const band_rows = end_row - first_row;
+    std.debug.assert(scratch.len >= finest97RowsScratchLen(width, band_rows));
+    if (!has_finest) return plane[first_row * width .. end_row * width];
+    const line = scratch[0..width];
+    if (height < 2) {
+        // The column pass of a single row is the one-sample rule alone.
+        const row = scratch[width..][0..width];
+        @memcpy(row, plane[0..width]);
+        inverse1DOrigin(row, line, .irreversible_9_7, x0);
+        if ((y0 & 1) == 1) {
+            for (row) |*value| value.* = value.* / 2.0;
+        }
+        return row;
+    }
+
+    // The window holds rows `lo..hi`: the band and the context its four
+    // lifting steps read, clipped to the plane.
+    const lo = first_row -| 4;
+    const hi = @min(height, end_row + 4);
+    const window = scratch[width..][0 .. (hi - lo) * width];
+    const origin_odd = (y0 & 1) == 1;
+    // The plane holds the low-pass rows first: the even rows for an even
+    // origin, the odd ones for an odd origin (`unpackVertical`).
+    const low_parity: usize = @intFromBool(origin_odd);
+    const low_count = if (origin_odd) height / 2 else (height + 1) / 2;
+    for (lo..hi) |index| {
+        const source = if ((index & 1) == low_parity) index / 2 else low_count + index / 2;
+        const row = window[(index - lo) * width ..][0..width];
+        @memcpy(row, plane[source * width ..][0..width]);
+        inverse1DOrigin(row, line, .irreversible_9_7, x0);
+        const scale = if ((index & 1) == low_parity) dwt97_k else dwt97_inv_k;
+        for (row) |*value| value.* *= scale;
+    }
+
+    // `inverse97VerticalBand`'s lifting steps. Step `k` updates the rows of
+    // its parity whose neighbours step `k - 1` produced, so the valid range
+    // shrinks by a row per step on each side that is not the plane's edge.
+    const high_parity = 1 - low_parity;
+    const Step = struct { parity: usize, coefficient: f32 };
+    const steps = [4]Step{
+        .{ .parity = low_parity, .coefficient = -dwt97_delta },
+        .{ .parity = high_parity, .coefficient = -dwt97_gamma },
+        .{ .parity = low_parity, .coefficient = -dwt97_beta },
+        .{ .parity = high_parity, .coefficient = -dwt97_alpha },
+    };
+    for (steps, 1..) |step, k| {
+        const step_lo = if (lo == 0) 0 else lo + k;
+        const step_hi = if (hi == height) height else hi - k;
+        var index = step_lo + ((step_lo & 1) ^ step.parity);
+        while (index < step_hi) : (index += 2) {
+            const left_index = if (index > 0) index - 1 else 1;
+            const right_index = if (index + 1 < height) index + 1 else index - 1;
+            const target = window[(index - lo) * width ..][0..width];
+            const left = window[(left_index - lo) * width ..][0..width];
+            const right = window[(right_index - lo) * width ..][0..width];
+            for (target, left, right) |*value, l, r| value.* = value.* + step.coefficient * (l + r);
+        }
+    }
+    return window[(first_row - lo) * width ..][0 .. band_rows * width];
 }
 
 // Irreversible 9/7 in f64 for components above 24 bits, where f32 synthesis

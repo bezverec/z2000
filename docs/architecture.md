@@ -576,7 +576,9 @@ driver keeps its own per-transform pool. A reversible 8-bit RGB decode
 finishes in row bands: the coarser inverse 5/3 levels of the planes the
 block pool left, then each band's finest level (`inverse53FinestRows`, which
 repeats the horizontal pass of its edge rows) and inverse RCT straight into
-the TIFF raster. `deinitInBackground`
+the TIFF raster. An irreversible one does the same with the coarser 9/7
+levels and `inverse97FinestRows` (four rows of context on either side) and
+the inverse ICT, through the same band driver. `deinitInBackground`
 releases a decode's large intermediates (coefficient planes and the 9/7
 reconstruction, allocated from the thread-safe page-level allocator on
 several threads) on a detached thread, because unmapping pages that many
