@@ -4121,13 +4121,15 @@ const StrictRpclBlockAssembly = struct {
     nominal_bitplanes: u8 = 0,
     encoded_bitplanes: u8 = 0,
     code_block_style: ebcot.CodeBlockStyle = .{},
-    segment_count: u8 = 0,
-    segment_lengths: [ebcot.max_block_segments]u64 = @splat(0),
+    /// Codeword segment lengths, from the walk's arena (the assembly's, or a
+    /// chunked walk's run arena): most blocks have one, and a table of the
+    /// largest possible size made every block about 1 KB.
+    segment_lengths: std.ArrayList(u64) = .empty,
     /// BYPASS only: the last recorded length is a partial codeword segment that
     /// a later quality layer continues.
     open_segment: bool = false,
 
-    fn appendSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock) !void {
+    fn appendSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock, allocator: std.mem.Allocator) !void {
         // ISO B.10.7: a packet signals one length per terminated codeword
         // segment ending inside its contribution, plus one more when the
         // contribution stops short of a termination point. With BYPASS and no
@@ -4137,17 +4139,16 @@ const StrictRpclBlockAssembly = struct {
         // what T1 consumes. Every other style terminates on boundaries the
         // packet structure already respects.
         if (self.code_block_style.bypass and !self.code_block_style.terminate_all) {
-            return self.appendBypassSegmentLengths(decoded);
+            return self.appendBypassSegmentLengths(decoded, allocator);
         }
         var index: u8 = 0;
         while (index < decoded.segment_count) : (index += 1) {
-            if (self.segment_count >= ebcot.max_block_segments) return CodestreamError.InvalidCodestream;
-            self.segment_lengths[self.segment_count] = decoded.segment_lengths[index];
-            self.segment_count += 1;
+            if (self.segment_lengths.items.len >= ebcot.max_block_segments) return CodestreamError.InvalidCodestream;
+            try self.segment_lengths.append(allocator, decoded.segment_lengths[index]);
         }
     }
 
-    fn appendBypassSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock) !void {
+    fn appendBypassSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock, allocator: std.mem.Allocator) !void {
         if (decoded.pass_count == 0) {
             if (decoded.segment_count != 0) return CodestreamError.InvalidCodestream;
             return;
@@ -4171,15 +4172,11 @@ const StrictRpclBlockAssembly = struct {
         var index: u8 = 0;
         while (index < decoded.segment_count) : (index += 1) {
             if (self.open_segment) {
-                self.segment_lengths[self.segment_count - 1] = try std.math.add(
-                    u64,
-                    self.segment_lengths[self.segment_count - 1],
-                    decoded.segment_lengths[index],
-                );
+                const last = &self.segment_lengths.items[self.segment_lengths.items.len - 1];
+                last.* = try std.math.add(u64, last.*, decoded.segment_lengths[index]);
             } else {
-                if (self.segment_count >= ebcot.max_block_segments) return CodestreamError.InvalidCodestream;
-                self.segment_lengths[self.segment_count] = decoded.segment_lengths[index];
-                self.segment_count += 1;
+                if (self.segment_lengths.items.len >= ebcot.max_block_segments) return CodestreamError.InvalidCodestream;
+                try self.segment_lengths.append(allocator, decoded.segment_lengths[index]);
             }
             self.open_segment = index + 1 == decoded.segment_count and !closes_last;
         }
@@ -11455,6 +11452,8 @@ const StrictPayloadTarget = struct {
     /// payload segments, which stay in the packet bytes until the catalog
     /// fill gathers them.
     segment_allocator: ?std.mem.Allocator = null,
+    /// The chunk's own allocator for the blocks' codeword segment lengths.
+    list_allocator: ?std.mem.Allocator = null,
 };
 
 /// Whether a full decode can walk each component's packets in independent
@@ -11498,9 +11497,9 @@ const StrictCatalogChunkJob = struct {
             .persistent_precinct_state = false,
             .stateful_groups = null,
             .payload_target = if (self.single_layer)
-                .{ .borrowed = self.catalog.packet_bytes }
+                .{ .borrowed = self.catalog.packet_bytes, .list_allocator = self.payload_arena.allocator() }
             else
-                .{ .segment_allocator = self.payload_arena.allocator() },
+                .{ .segment_allocator = self.payload_arena.allocator(), .list_allocator = self.payload_arena.allocator() },
         };
         defer state.deinit();
         for (self.entries) |entry_index| {
@@ -11742,7 +11741,7 @@ fn appendStrictPacketAuditBlock(
         block.encoded_bitplanes = inferred_bitplanes;
         block.nominal_bitplanes = @max(block.nominal_bitplanes, block.encoded_bitplanes);
     }
-    try block.appendSegmentLengths(decoded);
+    try block.appendSegmentLengths(decoded, payload_target.list_allocator orelse assembly.payloadAllocator());
     if (block.payload_retained) {
         if (assembly.use_component_payloads) {
             if (previous_payload_length != 0) return CodestreamError.InvalidCodestream;
@@ -12086,11 +12085,11 @@ const StrictCatalogFillJob = struct {
                 .payload_length = payload_length,
                 .payload_retained = source.payload_retained,
             };
-            if (source.segment_count != 0) {
-                const count: usize = source.segment_count;
+            if (source.segment_lengths.items.len != 0) {
+                const count = source.segment_lengths.items.len;
                 if (segment_cursor + count > self.segments.len) return CodestreamError.InvalidCodestream;
                 const lengths = self.segments[segment_cursor..][0..count];
-                @memcpy(lengths, source.segment_lengths[0..count]);
+                @memcpy(lengths, source.segment_lengths.items);
                 dest.segment_lengths = lengths;
                 segment_cursor += count;
             }
@@ -12137,7 +12136,7 @@ fn strictPacketBlockCatalogFromAssembliesCheckedThreaded(
                 try range_starts.append(allocator, payload_total);
                 try range_segments.append(allocator, segment_total);
             }
-            segment_total += block.segment_count;
+            segment_total += block.segment_lengths.items.len;
             const payload_length = strictAssemblyBlockPayloadLength(assembly.*, block);
             const retained_payload_length = strictAssemblyBlockRetainedPayloadLength(assembly.*, block);
             if (block.payload_retained) {
@@ -12613,7 +12612,7 @@ fn collectStrictRpclPacketBlocks(
             block.cumulative_bytes = try std.math.add(u64, block.cumulative_bytes, decoded.byte_length);
             block.payload_length = std.math.add(usize, block.payload_length, payload.len) catch
                 return CodestreamError.InvalidCodestream;
-            try block.appendSegmentLengths(decoded);
+            try block.appendSegmentLengths(decoded, assembly.payloadAllocator());
             if (block.payload_retained) try block.payload.appendSlice(assembly.payloadAllocator(), payload);
             if (block.payload_length != block.cumulative_bytes) return CodestreamError.InvalidCodestream;
             if (block.payload_retained and block.payload.items.len != block.payload_length) {

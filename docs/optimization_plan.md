@@ -213,10 +213,10 @@ multi-layer walk runs in runs as well since 2026-10-25 (lossy header walk
 a per-component pool, block ranges) and the coverage checks (row bands,
 stack bitmaps) shrank as well: the stages before the Tier-1 pool take
 about 2.0 ms lossless and 2.4 ms lossy at t20. Left there: the scan
-(0.4 ms), the walk's setup (geometry 0.2 ms; the assembly blocks still
-carry a 1 KB segment table each, about 0.3 ms to initialize) and the walk
-itself (0.45 ms), the reconstruction setup before the irreversible pool
-(0.2 ms), and the pool start (0.12 ms).
+(0.4 ms), the walk with its setup (0.72-0.75 ms since the walk's block
+records shed their 1 KB segment tables, 2026-10-26; geometry about 0.2 ms
+of it), the reconstruction setup before the irreversible pool (0.2 ms),
+and the pool start (0.12 ms).
 
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse

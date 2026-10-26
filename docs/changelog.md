@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Smaller Walk Block Records
+
+- The header walk's per-block records carried the same 112-entry segment
+  table as the catalog blocks used to; the lengths are now a list in the
+  walk's arena (the assembly's, or a chunked walk's run arena), so a record
+  shrinks from about 1 KB to under 200 bytes and the block tables are
+  quicker to initialize, fill, and read.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream). Against `e9188e8` at
+  t20: header walk 0.87 -> 0.75 ms lossless and 0.93 -> 0.72 ms lossy,
+  packet catalog 1.68 -> 1.39 ms and 2.05 -> 1.79 ms (11 `--timings`
+  runs).
+
 ### Smaller Block Catalog, Coverage Checked In Row Bands
 
 - A catalog block carried a table of the largest possible number of

@@ -46,6 +46,20 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, smaller walk block records
+
+Base `e9188e8`, same host and method, t20, 11 `--timings` runs. The walk's
+block record (`StrictRpclBlockAssembly`) lost its inline 112-entry segment
+table (now an arena list):
+
+| Stage | Lossless before | Lossless after | Lossy before | Lossy after |
+| --- | ---: | ---: | ---: | ---: |
+| header walk | 0.87 ms | 0.75 ms | 0.93 ms | 0.72 ms |
+| finalize | 0.14 ms | 0.12 ms | 0.45 ms | 0.44 ms |
+| packet catalog | 1.68 ms | 1.39 ms | 2.05 ms | 1.79 ms |
+
+Output byte-identical as before.
+
 ## 2026-10-26: Intel Core i5-14500, block catalog and coverage before Tier-1
 
 Base `dce43ba`, same host and method, t20. Timeline marks before the
