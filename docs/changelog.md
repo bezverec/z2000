@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### JP2 Written Without A Copy Of The Codestream
+
+- An RGB `tiff-to-jp2` (and the other raster inputs that reach the same
+  encoder) without EXIF, XMP, or IPTC metadata writes the JP2 boxes before
+  the codestream (`jp2.wrapRgbCodestreamHeader`) and then the codestream
+  itself, instead of copying the codestream into a wrapped file buffer
+  first. With metadata, and for grayscale and alpha inputs, the file is
+  still assembled in memory. A unit test pins the header bytes followed by
+  the codestream to `wrapRgbCodestream`'s file.
+- Output files byte-identical. Against `9ceeb56`, lossless t20, 15
+  `--timings` runs: JP2 wrap 1.7 -> 0.6 ms (the remaining time is the
+  codestream check), total 88.9 -> 87.5 ms.
+
 ### TIFF Input Converted On All Threads
 
 - `tiff-to-jp2` starts the shared workers while the input file is read,

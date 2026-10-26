@@ -2670,6 +2670,28 @@ fn buildMetadataJpeg(allocator: std.mem.Allocator) ![]u8 {
     return bytes.toOwnedSlice(allocator);
 }
 
+test "JP2 header bytes followed by the codestream are the wrapped file" {
+    const allocator = std.testing.allocator;
+    var samples: [7 * 5 * 3]u16 = undefined;
+    for (&samples, 0..) |*sample, index| sample.* = @intCast((index * 37) % 256);
+    var icc = [_]u8{ 1, 2, 3, 4, 5 };
+    for ([_]?[]u8{ null, &icc }) |icc_profile| {
+        const rgb = image.RgbImage{ .allocator = allocator, .width = 7, .height = 5, .bit_depth = 8, .samples = &samples, .icc_profile = icc_profile };
+        const encoded = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 1 });
+        defer allocator.free(encoded);
+        const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, encoded);
+        defer allocator.free(wrapped);
+        const header = try jp2.wrapRgbCodestreamHeader(allocator, rgb, encoded);
+        defer allocator.free(header);
+        try std.testing.expectEqual(wrapped.len, header.len + encoded.len);
+        try std.testing.expectEqualSlices(u8, wrapped[0..header.len], header);
+        try std.testing.expectEqualSlices(u8, wrapped[header.len..], encoded);
+        // The header ends with the contiguous codestream box's own header.
+        try std.testing.expectEqualSlices(u8, "jp2c", header[header.len - 4 ..]);
+        try std.testing.expectEqual(@as(u32, @intCast(encoded.len + 8)), std.mem.readInt(u32, header[header.len - 8 ..][0..4], .big));
+    }
+}
+
 test "JPEG APP1 and bounded APP13 metadata survive JP2 UUID mapping" {
     const allocator = std.testing.allocator;
     const bytes = try buildMetadataJpeg(allocator);

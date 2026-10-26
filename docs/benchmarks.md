@@ -46,6 +46,14 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, JP2 written without a codestream copy
+
+Base `9ceeb56`, lossless encode t20, 15 `--timings` runs: writing the JP2
+boxes and then the 6.2 MB codestream, instead of copying the codestream
+into a wrapped buffer first, takes the JP2 wrap stage from 1.7 to 0.6 ms
+(its codestream check); disk write 2.2 -> 2.0 ms, total 88.9 -> 87.5 ms.
+Output files byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, TIFF input converted on all threads
 
 Base `9cc8dbf`, lossless encode t20. The TIFF read stage (7.2 ms) was

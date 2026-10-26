@@ -301,6 +301,21 @@ pub fn wrapRgbCodestream(
     input: image.RgbImage,
     codestream: []const u8,
 ) ![]u8 {
+    return wrapCodestream(allocator, try rgbWrapProfile(input), codestream);
+}
+
+/// The bytes of `wrapRgbCodestream`'s file that precede the codestream (up
+/// to the contiguous codestream box's header), for a writer that emits them
+/// and then `codestream` itself instead of a copy of both.
+pub fn wrapRgbCodestreamHeader(
+    allocator: std.mem.Allocator,
+    input: image.RgbImage,
+    codestream: []const u8,
+) ![]u8 {
+    return wrapCodestreamHeader(allocator, try rgbWrapProfile(input), codestream);
+}
+
+fn rgbWrapProfile(input: image.RgbImage) !WrapProfile {
     if (input.width == 0 or input.height == 0) return Jp2Error.InvalidBox;
     if (input.width > std.math.maxInt(u32) or input.height > std.math.maxInt(u32)) {
         return Jp2Error.ImageTooLarge;
@@ -310,14 +325,14 @@ pub fn wrapRgbCodestream(
     const expected_samples = try std.math.mul(usize, pixels, 3);
     if (input.samples.len != expected_samples) return Jp2Error.InvalidBox;
 
-    return wrapCodestream(allocator, .{
+    return .{
         .width = @intCast(input.width),
         .height = @intCast(input.height),
         .components = 3,
         .bits_per_component = input.bit_depth,
         .enumerated_color_space = enum_cs_srgb,
         .icc_profile = input.icc_profile,
-    }, codestream);
+    };
 }
 
 /// Wraps an unsigned, non-subsampled one-component codestream in the JP2
@@ -563,6 +578,21 @@ fn wrapCodestream(
     profile: WrapProfile,
     codestream: []const u8,
 ) ![]u8 {
+    const header = try wrapCodestreamHeader(allocator, profile, codestream);
+    defer allocator.free(header);
+    const out = try allocator.alloc(u8, header.len + codestream.len);
+    @memcpy(out[0..header.len], header);
+    @memcpy(out[header.len..], codestream);
+    return out;
+}
+
+/// `wrapCodestream` up to and including the contiguous codestream box's
+/// header; the codestream itself follows it.
+fn wrapCodestreamHeader(
+    allocator: std.mem.Allocator,
+    profile: WrapProfile,
+    codestream: []const u8,
+) ![]u8 {
     try validateCodestreamPayload(allocator, codestream, .{
         .width = profile.width,
         .height = profile.height,
@@ -652,7 +682,8 @@ fn wrapCodestream(
     }
     try appendBox(allocator, &out, .jp2_header, jp2h.items);
 
-    try appendBox(allocator, &out, .contiguous_codestream, codestream);
+    try appendU32Be(allocator, &out, @intCast(8 + codestream.len));
+    try appendU32Be(allocator, &out, @backingInt(BoxType.contiguous_codestream));
     return out.toOwnedSlice(allocator);
 }
 

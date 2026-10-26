@@ -767,6 +767,9 @@ fn encodeRasterToJp2(
     var bit_depth: u8 = 0;
     var components: u16 = 0;
     var wrapped: []u8 = undefined;
+    // The codestream, when `wrapped` holds only the boxes before it.
+    var codestream_tail: ?[]u8 = null;
+    defer if (codestream_tail) |bytes| allocator.free(bytes);
     switch (decoded) {
         .rgb => |rgb| {
             width = rgb.width;
@@ -779,11 +782,19 @@ fn encodeRasterToJp2(
                 try codestream.encodeLosslessWithOptionsProfiled(allocator, rgb, options, &encode_timings)
             else
                 try codestream.encodeLosslessWithOptions(allocator, rgb, options);
-            defer allocator.free(j2k);
+            codestream_tail = j2k;
             command_timings.codestream_ns = elapsedNs(encode_start);
 
             const wrap_start = monotonicNs();
-            wrapped = try jp2.wrapRgbCodestream(allocator, rgb, j2k);
+            if (sourceHasMetadata(decoded)) {
+                wrapped = try jp2.wrapRgbCodestream(allocator, rgb, j2k);
+                allocator.free(j2k);
+                codestream_tail = null;
+            } else {
+                // The boxes before the codestream only: the file is written
+                // in two parts rather than from a copy of the codestream.
+                wrapped = try jp2.wrapRgbCodestreamHeader(allocator, rgb, j2k);
+            }
             command_timings.jp2_wrap_ns = elapsedNs(wrap_start);
         },
         .grayscale => |gray| {
@@ -852,13 +863,20 @@ fn encodeRasterToJp2(
     var metadata_wrapped: ?[]u8 = null;
     defer if (metadata_wrapped) |bytes| allocator.free(bytes);
     const source_metadata = decodedMetadata(decoded);
-    if (source_metadata.exif != null or source_metadata.xmp != null or source_metadata.iptc != null) {
+    if (sourceHasMetadata(decoded)) {
         metadata_wrapped = try jp2.attachMetadata(allocator, wrapped, source_metadata);
     }
     const output_bytes = metadata_wrapped orelse wrapped;
 
     const write_start = monotonicNs();
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = output, .data = output_bytes });
+    if (codestream_tail) |tail| {
+        var file = try std.Io.Dir.cwd().createFile(io, output, .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, output_bytes);
+        try file.writeStreamingAll(io, tail);
+    } else {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = output, .data = output_bytes });
+    }
     command_timings.write_ns = elapsedNs(write_start);
     command_timings.total_ns = command_timings.input_read_ns +
         command_timings.codestream_ns +
@@ -900,6 +918,11 @@ fn encodeRasterToJp2(
     if (show_timings) {
         printRasterToJp2Timings(command_timings, encode_timings, components, input.label());
     }
+}
+
+fn sourceHasMetadata(decoded: tiff.DecodedImage) bool {
+    const metadata = decodedMetadata(decoded);
+    return metadata.exif != null or metadata.xmp != null or metadata.iptc != null;
 }
 
 fn decodedMetadata(decoded: tiff.DecodedImage) jp2.Metadata {

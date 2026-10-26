@@ -920,6 +920,8 @@ Primary public functions:
 - `decodeLosslessGrayWithOptions(allocator, codestream, options)`
 - `decodeLosslessGrayWithOptionsProfiled(allocator, codestream, options, timings)`
 - `wrapRgbCodestream(allocator, input, codestream)`
+- `wrapRgbCodestreamHeader(allocator, input, codestream)` (the file's bytes
+  before the codestream, for writing the codestream without a copy)
 - `wrapGrayCodestream(allocator, input, codestream)`
 - `wrapPlanarCodestream(allocator, planes, icc, codestream)`
 - `wrapPlanarAlphaCodestream(allocator, planes, alpha_mode, icc, codestream)`
