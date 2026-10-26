@@ -5,6 +5,8 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+## 0.2.0-rc.5 — 2026-10-26
+
 ### Reversible RGB Tail In Row Bands
 
 - After the Tier-1 pool, a reversible 8-bit RGB decode now runs the

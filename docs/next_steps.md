@@ -138,6 +138,19 @@ Windows/Linux/macOS builds, portable RISC-V and optional RVV compile/functional
 gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
+`v0.2.0-rc.5` is prepared on 2026-10-26 for `tools/release_local.ps1` in
+the same way as rc.4. It changes no format or CLI behaviour: decode is
+35-37% faster at 20 threads and 24-25% at one than rc.4's (level with
+Kakadu 8.4.1 at one thread on the i5-14500), encode 13-15% faster, and all
+output stays identical; irreversible 9/7 now decodes above 24 bits in f64
+and the wide encoder runs on all threads. Before it, on 2026-10-26, the
+interop scripts passed against Kakadu 8.4.1, OpenJPEG 2.5.4, and Grok
+20.4.19 (`interop_kakadu_styles`, `interop_erterm`,
+`interop_pltless_multitile`, `interop_rate_multitile`, the BMP, PNG, JPEG,
+DNG, and OpenEXR adapter gates, and `wide_encode_interop.py` at 1 to 34
+bits, every reference exact within its own precision limit). The next
+release action after publication is again to collect feedback and decide
+between a final `v0.2.0` and `v0.2.0-rc.6`.
 `v0.2.0-rc.4` was published on 2026-10-24 from commit `5854aee` (build 614)
 and replaces rc.3: rc.3 ended quality layers at undecodable pass lengths, so
 its layered streams misdecode their intermediate layers in every decoder. It
