@@ -46,6 +46,13 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, encoder Tier-1 on the shared pool
+
+Base `4efc8df`, lossless encode (`--bypass`). Measured first on a loaded
+host (no difference visible), then again once the host was quiet:
+t20 total 77.8 -> 75.8 ms, block coding 59.5 -> 56.7 ms (31 `--timings`
+runs); t8 124.0 -> 122.8 ms (21 runs). Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, forward 9/7 on sixteen workers
 
 Base `b50f854`, lossy two-layer encode, t20, 21 `--timings` runs: the

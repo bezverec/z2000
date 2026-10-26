@@ -22848,19 +22848,23 @@ fn buildComponentRpclShadowCatalogsBlocksParallel(
     }
     defer for (jobs) |*job| job.deinit();
 
-    const spawn_count = worker_count - 1;
-    var threads = try allocator.alloc(std.Thread, spawn_count);
-    defer allocator.free(threads);
-    var spawned: usize = 0;
-    while (spawned < spawn_count) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, componentCatalogAllBlockWorker, .{&jobs[spawned]}) catch |err| {
-            for (threads[0..spawned]) |thread| thread.join();
-            return err;
-        };
-    }
+    // The shared pool's threads when it is free (they are already running),
+    // threads of this encode's own otherwise.
+    if (!worker_pool.runJobs(ComponentCatalogAllBlockJob, jobs, componentCatalogAllBlockWorker)) {
+        const spawn_count = worker_count - 1;
+        var threads = try allocator.alloc(std.Thread, spawn_count);
+        defer allocator.free(threads);
+        var spawned: usize = 0;
+        while (spawned < spawn_count) : (spawned += 1) {
+            threads[spawned] = std.Thread.spawn(.{}, componentCatalogAllBlockWorker, .{&jobs[spawned]}) catch |err| {
+                for (threads[0..spawned]) |thread| thread.join();
+                return err;
+            };
+        }
 
-    componentCatalogAllBlockWorker(&jobs[spawn_count]);
-    for (threads[0..spawned]) |thread| thread.join();
+        componentCatalogAllBlockWorker(&jobs[spawn_count]);
+        for (threads[0..spawned]) |thread| thread.join();
+    }
 
     for (jobs) |job| try job.result;
     for (jobs) |*job| job.release();

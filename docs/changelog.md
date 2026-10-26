@@ -5,6 +5,16 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Encoder Tier-1 On The Shared Pool
+
+- The encoder's block-parallel Tier-1 (one job per worker pulling blocks,
+  heaviest first) runs on the shared worker pool when it is free, whose
+  threads are already running, instead of starting and joining its own
+  threads for every encode.
+- Codestreams byte-identical. Against `4efc8df`, lossless (`--bypass`),
+  `--timings` medians on a quiet host: t20 77.8 -> 75.8 ms (block coding
+  59.5 -> 56.7 ms, 31 runs), t8 124.0 -> 122.8 ms (21 runs).
+
 ### Forward 9/7 On Up To Sixteen Workers
 
 - The forward 9/7 driver (`wavelet.forward97Parallel`) takes up to sixteen
