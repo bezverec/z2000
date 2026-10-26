@@ -218,6 +218,15 @@ records shed their 1 KB segment tables, 2026-10-26; geometry about 0.2 ms
 of it), the reconstruction setup before the irreversible pool (0.2 ms),
 and the pool start (0.12 ms).
 
+The lossy tail is the larger one at t20: inverse 9/7 of the planes the
+pool leaves (one or two; plane 1's serial job often does not fit the
+remaining Tier-1 time) 4.5-7.5 ms, inverse ICT 2.4 ms, TIFF write 4.6 ms.
+Dequantization now runs in place (2026-10-26: no second 48 MB of planes);
+moving it into the Tier-1 pool per block was slower (the pool workers
+grew by more than the tail shrank). Candidates: the parallel tail 9/7 runs
+on at most eight workers and is memory-bound, and the ICT reads three f32
+planes once more after it.
+
 After P1 identifies idle boundaries, prototype overlap only where ownership is
 clear: packet parsing/catalog production feeding ready-block T1 work, inverse
 DWT beginning for complete tile/component/resolution dependencies, or

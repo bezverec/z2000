@@ -46,6 +46,25 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, lossy tail: dequantization in place
+
+Base `1322e63`, lossy profile, t20 unless noted. Stage budget before the
+change (11 runs): block payload 47.1, inverse DWT 9.4, inverse ICT 2.4,
+TIFF write 4.6 ms; lossless for comparison: inverse DWT 3.0, RCT 1.2, TIFF
+write 4.1 ms. In the lossy tail, two planes were left to the parallel tail
+(plane 1's serial job did not fit the estimated remaining Tier-1 time):
+dequantization 2.5 ms, inverse 9/7 6.7-7.5 ms; at t8 and t4 one plane,
+dequantization 1.0-1.8 ms, 9/7 3.3-4.8 ms.
+
+| Candidate | Result |
+| --- | --- |
+| Dequantize each block in the Tier-1 pool into the f32 planes as it is written | tail inverse DWT 9.7 -> 4.7 ms, but every pool worker about 7 ms longer (the f32 planes' fresh pages faulted in by 20 threads at once): total +5.7%; with plane 1 never in the pool or accepted only with a 1.5x margin, +6.9% and +8.9%. Rejected |
+| Same, in place in the integer planes | no faults, but the pool still about 3-5 ms longer per worker: wall t20 +0.8%, t8 +0.6%, t4 -0.2% (25 rounds). Rejected |
+| Dequantize in place at the finisher and in the tail, block by block (kept) | total 66.06 -> 63.96 ms (13 runs); 31 interleaved rounds: wall 86.2 -> 85.2 ms, decode total 68.9 -> 67.4 ms; 25 rounds: t8 118.8 -> 116.4 ms, t20 and t4 within noise |
+
+Output byte-identical for both streams at t1/t2/t3/t20, region and
+`--layers 1` decodes, and the 34-bit wide stream.
+
 ## 2026-10-26: Intel Core i5-14500, smaller walk block records
 
 Base `e9188e8`, same host and method, t20, 11 `--timings` runs. The walk's

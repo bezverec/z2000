@@ -590,6 +590,9 @@ runs plane by plane, and a `StrictComponentFinisher` runs a plane's inverse
 DWT (and, for 9/7, its dequantization) on the worker that writes its last
 block while the pool decodes later planes. Results never depend on that
 timing: a plane's transform starts only after all its blocks are written.
+A full 9/7 decode dequantizes in place: the reconstruction reads the
+integer coefficient planes as its f32 planes, and each plane is converted
+block by block (a block's midpoint rule reads its integers first).
 
 Portable Zig `@Vector` code is the SIMD baseline. Lane widths and generated code
 are audited for x86 AVX2/AVX-512, ARM NEON, and RISC-V/RVV behavior, with scalar

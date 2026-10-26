@@ -12828,8 +12828,10 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     // planes come from the thread-safe page-level allocator, and their tens of
     // megabytes are released in the background while the caller goes on
     // (writing the output, typically).
+    // A full decode dequantizes in place: the reconstruction borrows the
+    // coefficient planes instead of allocating (and faulting in) 48 MB more.
     var irreversible: ?IrreversibleReconstruction = if (overlap_97)
-        try IrreversibleReconstruction.init(std.heap.smp_allocator, header, 0, catalog)
+        try IrreversibleReconstruction.initPlanes(std.heap.smp_allocator, header, 0, catalog, false)
     else
         null;
     defer if (irreversible) |reconstruction| worker_pool.deinitInBackground(reconstruction);
@@ -12848,6 +12850,7 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
         options,
         timings,
         finisher,
+        if (irreversible) |*reconstruction| reconstruction else null,
     );
     defer if (options.threads >= 2) worker_pool.deinitInBackground(strict_planes) else strict_planes.deinit();
     if (timings) |t| t.block_payload_ns += elapsedNs(payload_start);
@@ -15231,6 +15234,10 @@ const IrreversibleInversePlaneJob = struct {
     /// non-zero coefficient takes the offset, which is exact only for blocks
     /// decoded through the end of bitplane zero.
     blocks: ?[]const StrictPacketBlock = null,
+    /// `plane` is `quantized` itself, read as f32: dequantization then goes
+    /// block by block (each block's midpoint rule needs its integers before
+    /// they are overwritten) and allocates and faults in no second plane.
+    in_place: bool = false,
     shape: wavelet.ResolutionShape = undefined,
     result: anyerror!void = {},
 };
@@ -15240,6 +15247,7 @@ fn irreversibleInversePlaneWorker(job: *IrreversibleInversePlaneJob) void {
 }
 
 fn irreversibleDequantizePlane(job: *IrreversibleInversePlaneJob) !void {
+    if (job.in_place) return dequantizeBlocksInPlace(job, 0, (job.blocks orelse return CodestreamError.InvalidCodestream).len);
     @memset(job.plane, 0);
     for (job.bands, job.deltas) |band, delta| {
         if (!strictBandRequiredForReduction(band, job.reduction)) continue;
@@ -15277,9 +15285,103 @@ const DequantizeRowsJob = struct {
     }
 };
 
+/// Blocks `begin..end` of an in-place job (`IrreversibleInversePlaneJob.in_place`),
+/// each by `dequantizeBandRegion` and `removeUnearnedMidpointOffsets` in one
+/// pass. The blocks cover the plane exactly (checked before Tier-1), and a
+/// zero coefficient is 0.0 in both readings.
+fn dequantizeBlocksInPlace(job: *const IrreversibleInversePlaneJob, begin: usize, end: usize) !void {
+    const blocks = job.blocks orelse return CodestreamError.InvalidCodestream;
+    if (job.reduction != 0 or job.quantized.len != job.plane.len or
+        @intFromPtr(job.quantized.ptr) != @intFromPtr(job.plane.ptr))
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    const plane: []i32 = @constCast(job.quantized);
+    for (blocks[begin..end]) |block| {
+        if (block.band_index >= job.deltas.len) return CodestreamError.InvalidCodestream;
+        const end_x = try std.math.add(usize, block.rect.x, block.rect.width);
+        const end_y = try std.math.add(usize, block.rect.y, block.rect.height);
+        if (end_x > job.width or end_y > job.height) return CodestreamError.InvalidCodestream;
+        dequantizeBlockInPlace(plane, job.width, block, job.deltas[block.band_index]);
+    }
+}
+
+fn dequantizeBlockInPlace(plane: []i32, width: usize, block: StrictPacketBlock, delta: f64) void {
+    const rule = strictIrreversibleMidpointRule(block);
+    const half_step: f32 = @floatCast(delta * 0.5);
+    const lanes = 8;
+    const QuantVector = @Vector(lanes, i32);
+    const WideVector = @Vector(lanes, f64);
+    const SampleVector = @Vector(lanes, f32);
+    const zero: QuantVector = @splat(0);
+    const unit: @Vector(lanes, u32) = @splat(1);
+    const never: @Vector(lanes, bool) = @splat(false);
+    const half: WideVector = @splat(0.5);
+    const step: WideVector = @splat(delta);
+    const half_steps: SampleVector = @splat(half_step);
+    const no_value: SampleVector = @splat(0);
+    for (block.rect.y..block.rect.y + block.rect.height) |y| {
+        const row = plane[y * width + block.rect.x ..][0..block.rect.width];
+        var col: usize = 0;
+        // The scalar rule below, lane by lane in the same arithmetic.
+        while (col + lanes <= row.len) : (col += lanes) {
+            const q: QuantVector = row[col..][0..lanes].*;
+            const magnitude: WideVector = @floatFromInt(@abs(q));
+            const value = (magnitude + half) * step;
+            const signed: SampleVector = @floatCast(@select(f64, q < zero, -value, value));
+            var sample = @select(f32, q == zero, no_value, signed);
+            if (rule != .all) {
+                const offset = @select(f32, q < zero, -half_steps, half_steps);
+                const take = if (rule == .unit_magnitudes) @select(bool, q != zero, @abs(q) != unit, never) else q != zero;
+                sample = @select(f32, take, sample - offset, sample);
+            }
+            row[col..][0..lanes].* = @bitCast(sample);
+        }
+        while (col < row.len) : (col += 1) {
+            const q = row[col];
+            if (q == 0) continue;
+            const value = (@as(f64, @floatFromInt(@abs(q))) + 0.5) * delta;
+            var sample: f32 = @floatCast(if (q < 0) -value else value);
+            if (rule != .all and !(rule == .unit_magnitudes and @abs(q) == 1)) {
+                sample -= if (q < 0) -half_step else half_step;
+            }
+            row[col] = @bitCast(sample);
+        }
+    }
+}
+
+const DequantizeBlocksJob = struct {
+    job: *const IrreversibleInversePlaneJob,
+    begin: usize,
+    end: usize,
+    result: anyerror!void = {},
+
+    fn run(self: *DequantizeBlocksJob) void {
+        self.result = dequantizeBlocksInPlace(self.job, self.begin, self.end);
+    }
+};
+
 /// The memory-bound start of the dequantization (clearing a fresh plane and
-/// writing every band) split by rows over up to eight workers.
+/// writing every band) split by rows over up to eight workers; an in-place
+/// job is split by blocks instead.
 fn irreversibleDequantizePlaneThreaded(job: *IrreversibleInversePlaneJob, thread_count: u8) !void {
+    if (job.in_place) {
+        const blocks = job.blocks orelse return CodestreamError.InvalidCodestream;
+        const workers = @min(@as(usize, @max(thread_count, 1)), max_dequantize_workers, @max(blocks.len, 1));
+        var parts: [max_dequantize_workers]DequantizeBlocksJob = undefined;
+        const per_part = (blocks.len + workers - 1) / workers;
+        var used: usize = 0;
+        var begin: usize = 0;
+        while (begin < blocks.len) : (begin += per_part) {
+            parts[used] = .{ .job = job, .begin = begin, .end = @min(blocks.len, begin + per_part) };
+            used += 1;
+        }
+        if (used < 2 or !worker_pool.runJobs(DequantizeBlocksJob, parts[0..used], DequantizeBlocksJob.run)) {
+            for (parts[0..used]) |*part| part.run();
+        }
+        for (parts[0..used]) |part| try part.result;
+        return;
+    }
     const workers = @min(@as(usize, @max(thread_count, 1)), max_dequantize_workers, job.height);
     if (workers < 2) return irreversibleDequantizePlane(job);
     var parts: [max_dequantize_workers]DequantizeRowsJob = undefined;
@@ -15359,6 +15461,9 @@ const IrreversibleReconstruction = struct {
     bands: []subband.Band,
     deltas: []f64,
     reconstructed: color.IctPlanes,
+    /// False when the f32 planes are the decode's coefficient planes
+    /// (`borrowPlanes`).
+    owns_planes: bool = true,
     jobs: [3]IrreversibleInversePlaneJob,
 
     fn init(
@@ -15366,6 +15471,18 @@ const IrreversibleReconstruction = struct {
         header: TemporaryHeader,
         resolution_reduction: u8,
         catalog: ?StrictPacketBlockCatalog,
+    ) !IrreversibleReconstruction {
+        return initPlanes(allocator, header, resolution_reduction, catalog, true);
+    }
+
+    /// `init`; with `own_planes` false the f32 planes are left for
+    /// `borrowPlanes` to supply.
+    fn initPlanes(
+        allocator: std.mem.Allocator,
+        header: TemporaryHeader,
+        resolution_reduction: u8,
+        catalog: ?StrictPacketBlockCatalog,
+        own_planes: bool,
     ) !IrreversibleReconstruction {
         const plan = temporaryPacketPlan(header);
         if (plan.resolution_count == 0) return CodestreamError.InvalidCodestream;
@@ -15384,8 +15501,23 @@ const IrreversibleReconstruction = struct {
         );
         errdefer allocator.free(bands);
 
-        var reconstructed = try color.IctPlanes.init(allocator, header.width, header.height, header.bit_depth, 3);
-        errdefer reconstructed.deinit();
+        var reconstructed = if (own_planes)
+            try color.IctPlanes.init(allocator, header.width, header.height, header.bit_depth, 3)
+        else
+            color.IctPlanes{
+                .allocator = allocator,
+                .width = header.width,
+                .height = header.height,
+                .bit_depth = header.bit_depth,
+                .planes = try allocator.alloc([]f32, 3),
+            };
+        errdefer if (own_planes) reconstructed.deinit() else allocator.free(reconstructed.planes);
+        if (!own_planes) {
+            for (reconstructed.planes) |*plane| plane.* = &.{};
+            @memset(reconstructed.component_bit_depths[0..3], header.bit_depth);
+            @memset(reconstructed.component_widths[0..3], header.width);
+            @memset(reconstructed.component_heights[0..3], header.height);
+        }
 
         const delta_count = try std.math.mul(usize, bands.len, 3);
         const deltas = try allocator.alloc(f64, delta_count);
@@ -15417,6 +15549,7 @@ const IrreversibleReconstruction = struct {
             .bands = bands,
             .deltas = deltas,
             .reconstructed = reconstructed,
+            .owns_planes = own_planes,
             .jobs = undefined,
         };
         for (&self.jobs, 0..) |*job, component| {
@@ -15437,8 +15570,19 @@ const IrreversibleReconstruction = struct {
         return self;
     }
 
+    /// Takes the decode's integer coefficient planes as the f32 planes: each
+    /// plane is then dequantized in place (`IrreversibleInversePlaneJob.in_place`).
+    fn borrowPlanes(self: *IrreversibleReconstruction, planes: []const []i32) void {
+        std.debug.assert(!self.owns_planes and planes.len == 3);
+        for (planes, self.reconstructed.planes, &self.jobs) |plane, *view, *job| {
+            view.* = @as([*]f32, @ptrCast(plane.ptr))[0..plane.len];
+            job.plane = view.*;
+            job.in_place = true;
+        }
+    }
+
     pub fn deinit(self: *IrreversibleReconstruction) void {
-        self.reconstructed.deinit();
+        if (self.owns_planes) self.reconstructed.deinit() else self.allocator.free(self.reconstructed.planes);
         self.allocator.free(self.deltas);
         self.allocator.free(self.bands);
     }
@@ -16022,7 +16166,7 @@ fn reconstructStrictComponentCoefficientPlanesFromBlockCatalog(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
 ) !color.RctPlanes {
-    return reconstructStrictComponentCoefficientPlanesFinishing(allocator, header, catalog, options, timings, null);
+    return reconstructStrictComponentCoefficientPlanesFinishing(allocator, header, catalog, options, timings, null, null);
 }
 
 /// The three planes, each given to `finisher` (when set) as soon as its
@@ -16034,6 +16178,7 @@ fn reconstructStrictComponentCoefficientPlanesFinishing(
     options: DecodeOptions,
     timings: ?*DecodeTimings,
     finisher: ?StrictComponentFinisher,
+    in_place: ?*IrreversibleReconstruction,
 ) !color.RctPlanes {
     // Multi-thread decode runs one block-level atomic scheduler over all
     // three components' blocks, heaviest first. The former component-parallel
@@ -16054,6 +16199,7 @@ fn reconstructStrictComponentCoefficientPlanesFinishing(
     while (allocated < 3) : (allocated += 1) {
         plane_slices[allocated] = try plane_allocator.alloc(i32, pixels);
     }
+    if (in_place) |reconstruction| reconstruction.borrowPlanes(plane_slices);
     var fills: [3]StrictComponentFill(i32) = undefined;
     for (&fills, 0..) |*fill, component| {
         fill.* = .{

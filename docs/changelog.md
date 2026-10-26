@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Irreversible Planes Dequantized In Place
+
+- A full irreversible decode on several threads no longer allocates f32
+  planes beside the integer coefficient planes: the reconstruction borrows
+  the coefficient planes and dequantizes each one in place (the in-pool
+  finisher for the planes it takes, the parallel tail for the rest), block
+  by block so that each block's midpoint rule still reads its integers
+  before they are overwritten. That saves 48 MB at 2048x2048 RGB and the
+  page faults of filling it.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream). Against `1322e63`, lossy
+  profile at t20: decode total 68.9 -> 67.4 ms and wall 86.2 -> 85.2 ms
+  (31 interleaved rounds); the tail's dequantization of two planes drops
+  from about 2.5 ms.
+
 ### Smaller Walk Block Records
 
 - The header walk's per-block records carried the same 112-entry segment
