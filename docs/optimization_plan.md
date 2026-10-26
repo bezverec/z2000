@@ -37,6 +37,13 @@ all-thread setting.
 
 ## Current Evidence
 
+- 2026-10-26, rc.6 checkpoint (`benchmarks.md`): at t20 z2000 encodes the
+  2048x2048 RGB benchmark in 82.1 ms lossless and 81.2 ms lossy (Kakadu 70.2
+  and 67.9 ms) and decodes it in 74.4 and 83.6 ms (Kakadu 68.4 and 76.0
+  ms), ahead of OpenJPEG and Grok; at t1 it encodes in 469-483 ms (Kakadu
+  506-507 ms) and decodes in 454-486 ms (Kakadu 581-595 ms). Against rc.5,
+  encode is 32-38% faster and decode 9-22%, all output identical. The t20
+  gap is the stages around Tier-1 that are not overlapped (P6).
 - 2026-10-26, rc.5 checkpoint (`benchmarks.md`): z2000 decodes the
   2048x2048 RGB benchmark in 80.4 ms lossless and 86.6 ms lossy at t20
   (Kakadu 78.1 and 76.9 ms, OpenJPEG 114.8 and 119.7 ms, Grok 20.4.19 120.9

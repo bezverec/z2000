@@ -97,11 +97,14 @@ checked semantics.
 
 ### 4. Performance And Scale
 
-Continue separate 5/3 lossless and 9/7 lossy campaigns. Decode reached Kakadu
-at one thread and came within 1.03x (lossless) and 1.13x (lossy) of it on all
-threads for `v0.2.0-rc.5`, ahead of OpenJPEG and Grok; near-term value is now
-in encode throughput (1.5-1.7x behind Kakadu), the lossy decode tail, and
-carefully measured T1 work. Portable Zig vectors remain the default SIMD abstraction;
+Continue separate 5/3 lossless and 9/7 lossy campaigns. At `v0.2.0-rc.6`
+z2000 encodes as fast as Kakadu 8.4.1 at one thread and decodes 15-22%
+faster, and is ahead of OpenJPEG and Grok everywhere; at 20 threads it
+takes 1.17x Kakadu's time to encode and 1.09x to decode. Tier-1 is already
+faster per symbol than Kakadu's, so the remaining gap is the stages around
+it that are not overlapped (about 18 ms of the encode against about 9 ms);
+a row-pipelined front end that feeds Tier-1 band by band is the next large
+step there, with an uncertain return. Portable Zig vectors remain the default SIMD abstraction;
 AVX2, AVX-512, NEON, and RVV must share scalar-oracle tests. The long-term goal
 is to exceed Grok and then Kakadu without relaxing correctness or safety.
 
