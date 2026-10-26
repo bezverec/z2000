@@ -46,6 +46,28 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, block catalog and coverage before Tier-1
+
+Base `dce43ba`, same host and method, t20. Timeline marks before the
+Tier-1 pool (ms from the start of the catalog, 4-5 runs):
+
+| Mark | Lossless before | Lossless after | Lossy before | Lossy after |
+| --- | ---: | ---: | ---: | ---: |
+| scan done | 0.40-0.59 | 0.40-0.45 | 0.47-0.63 | 0.40-0.62 |
+| header walk done | 1.31-1.61 | 1.30-1.45 | 1.48-1.65 | 1.42-1.86 |
+| catalog done | 1.63-1.91 | 1.46-1.58 | 2.14-2.38 | 1.84-2.43 |
+| coverage checks done | 2.29-2.59 | 1.84-1.98 | 2.83-2.97 | 2.21-2.96 |
+| pool starts | 2.41-2.74 | 1.96-2.09 | 2.99-3.12 | 2.35-3.12 |
+
+Stage medians (11 `--timings` runs): catalog fill 0.28 -> 0.15 ms lossless,
+0.65 -> 0.41 ms lossy. Two intermediate steps were slower: coverage in row
+bands with a heap bitmap per band took 0.73-1.23 ms (each band's fresh
+pages and their unmapping), and the fill in block ranges with the full
+1 KB block entries was 0.28 -> 0.36 ms lossless (the copies fault in the
+same fresh pages from every thread). Wall time is within noise (31 rounds,
+lossy t20 81.9 -> 82.4 ms; lossless t20 81.7 -> 80.8 ms). Output
+byte-identical.
+
 ## 2026-10-25: Intel Core i5-14500, multi-layer header walk in runs
 
 Base `f548d81`, lossy profile (`lossy.jp2`: RPCL, two layers, SOP and PLT,

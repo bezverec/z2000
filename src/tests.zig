@@ -21932,7 +21932,7 @@ test "BYPASS codestream roundtrips losslessly through strict SOD packets" {
             if (!block.metadata_ready) continue;
             if (!block.code_block_style.bypass) continue;
             bypass_blocks += 1;
-            if (block.segment_count > 1) segmented_bypass_blocks += 1;
+            if (block.segment_lengths.len > 1) segmented_bypass_blocks += 1;
             try std.testing.expect(block.payload_length > 0);
             try std.testing.expect(block.cumulative_passes > 0);
         }

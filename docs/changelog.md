@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Smaller Block Catalog, Coverage Checked In Row Bands
+
+- A catalog block carried a table of the largest possible number of
+  codeword segment lengths (112 entries, about 1 KB a block); the lengths
+  now live in one pool per component and each block holds a slice of it.
+  The catalog fill copies about a tenth of the bytes, in block ranges on
+  the pool instead of one job per component.
+- The coverage check before Tier-1 runs in row bands across all planes,
+  each band with a small bitmap on the stack; a fresh 512 KB bitmap per
+  plane cost more in page faults and unmapping than the marking itself.
+  The blocks' own fields are still checked first, in block order.
+- Output is byte-identical (lossless and lossy at t1, t2, t3, t20; region
+  and layer-limited decodes; 34-bit wide stream). Against `dce43ba` at
+  t20: catalog fill 0.28 -> 0.15 ms lossless and 0.65 -> 0.41 ms lossy (11
+  `--timings` runs); coverage checks 0.4-0.6 -> 0.2-0.3 ms (timeline). The
+  stages before the Tier-1 pool now take about 2.0 ms lossless (3.6-4.0 ms
+  before this series) and 2.4 ms lossy (over 5 ms).
+
 ### Multi-Layer Packet Headers Walked In Runs
 
 - The chunked packet-header walk now covers multi-layer streams whose

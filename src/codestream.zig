@@ -3800,8 +3800,11 @@ pub const StrictPacketBlock = struct {
     /// zero, which is exact because the inverse DWT is linear with finite
     /// support.
     region_required: bool = true,
-    segment_count: u8 = 0,
-    segment_lengths: [ebcot.max_block_segments]u64 = @splat(0),
+    /// The block's codeword segment lengths, in its component's
+    /// `StrictPacketBlockCatalog.segment_pools` entry: a table of the
+    /// largest possible size in every block made the catalog about 1 KB a
+    /// block.
+    segment_lengths: []const u64 = &.{},
 };
 
 pub const StrictPacketBlockCatalog = struct {
@@ -3813,6 +3816,8 @@ pub const StrictPacketBlockCatalog = struct {
     component_y0: []u32 = &.{},
     components: [][]StrictPacketBlock = &.{},
     payloads: [][]u8 = &.{},
+    /// Per component: every block's segment lengths, one after the other.
+    segment_pools: [][]u64 = &.{},
     /// The payloads are the decode input's packet bytes, not owned (see
     /// `assembleStrictCatalogEntriesInChunks`); block offsets index them.
     payloads_borrowed: bool = false,
@@ -3832,6 +3837,9 @@ pub const StrictPacketBlockCatalog = struct {
         errdefer allocator.free(components);
         const payloads = try allocator.alloc([]u8, count);
         errdefer allocator.free(payloads);
+        const segment_pools = try allocator.alloc([]u64, count);
+        errdefer allocator.free(segment_pools);
+        for (segment_pools) |*pool| pool.* = &.{};
         @memset(component_widths, 0);
         @memset(component_heights, 0);
         @memset(component_x0, 0);
@@ -3847,6 +3855,7 @@ pub const StrictPacketBlockCatalog = struct {
             .component_y0 = component_y0,
             .components = components,
             .payloads = payloads,
+            .segment_pools = segment_pools,
         };
     }
 
@@ -3859,6 +3868,10 @@ pub const StrictPacketBlockCatalog = struct {
                 if (payload.len > 0) self.allocator.free(payload);
             }
         }
+        for (self.segment_pools) |pool| {
+            if (pool.len > 0) self.allocator.free(pool);
+        }
+        if (self.segment_pools.len > 0) self.allocator.free(self.segment_pools);
         if (self.component_widths.len > 0) self.allocator.free(self.component_widths);
         if (self.component_heights.len > 0) self.allocator.free(self.component_heights);
         if (self.component_x0.len > 0) self.allocator.free(self.component_x0);
@@ -12005,11 +12018,20 @@ fn strictPacketBlockCatalogFromAssembliesChecked(
 
 /// One component's part of the catalog build: the blocks and, for
 /// multi-layer assemblies, the payload bytes copied into place.
+/// Blocks `begin..end` of one component's catalog: their entries and, for
+/// multi-layer assemblies, their payloads copied into place from
+/// `start_offset` (the payloads of the blocks before them).
 const StrictCatalogFillJob = struct {
     assembly: *StrictComponentAssembly,
     dest_blocks: []StrictPacketBlock,
     payloads: []u8,
     payload_total: usize,
+    begin: usize,
+    end: usize,
+    start_offset: usize,
+    end_offset: usize,
+    segments: []u64,
+    segment_start: usize,
     result: anyerror!void = {},
 
     fn run(self: *StrictCatalogFillJob) void {
@@ -12021,11 +12043,12 @@ const StrictCatalogFillJob = struct {
         const dest_blocks = self.dest_blocks;
         const payloads = self.payloads;
         const payload_total = self.payload_total;
-        var payload_offset: usize = 0;
-        if (assembly.use_component_payloads and assembly.borrowed_payloads == null) {
+        var payload_offset: usize = self.start_offset;
+        var segment_cursor: usize = self.segment_start;
+        if (self.begin == 0 and assembly.use_component_payloads and assembly.borrowed_payloads == null) {
             if (payloads.len != payload_total) return CodestreamError.InvalidCodestream;
         }
-        for (assembly.blocks, dest_blocks) |source, *dest| {
+        for (assembly.blocks[self.begin..self.end], dest_blocks[self.begin..self.end]) |source, *dest| {
             const payload_length = strictAssemblyBlockPayloadLength(assembly.*, source);
             const source_payload_offset = if (!source.payload_retained)
                 0
@@ -12062,12 +12085,18 @@ const StrictCatalogFillJob = struct {
                 .payload_offset = source_payload_offset,
                 .payload_length = payload_length,
                 .payload_retained = source.payload_retained,
-                .segment_count = source.segment_count,
-                .segment_lengths = source.segment_lengths,
             };
+            if (source.segment_count != 0) {
+                const count: usize = source.segment_count;
+                if (segment_cursor + count > self.segments.len) return CodestreamError.InvalidCodestream;
+                const lengths = self.segments[segment_cursor..][0..count];
+                @memcpy(lengths, source.segment_lengths[0..count]);
+                dest.segment_lengths = lengths;
+                segment_cursor += count;
+            }
             if (!assembly.use_component_payloads and source.payload_retained) payload_offset += payload_length;
         }
-        if (!assembly.use_component_payloads and payload_offset != payload_total) return CodestreamError.InvalidCodestream;
+        if (!assembly.use_component_payloads and payload_offset != self.end_offset) return CodestreamError.InvalidCodestream;
     }
 };
 
@@ -12080,8 +12109,17 @@ fn strictPacketBlockCatalogFromAssembliesCheckedThreaded(
     var catalog = try StrictPacketBlockCatalog.init(allocator, @intCast(assemblies.len));
     errdefer catalog.deinit();
     var stats = StrictAssemblyStats{};
-    const fills = try allocator.alloc(StrictCatalogFillJob, assemblies.len);
-    defer allocator.free(fills);
+    // Ranges of blocks, a few per thread; each records where its payloads
+    // start, which the walk below adds up anyway.
+    var total_blocks: usize = 0;
+    for (assemblies) |assembly| total_blocks += assembly.blocks.len;
+    const range_blocks = if (threads < 2) std.math.maxInt(usize) else @max(256, total_blocks / threads);
+    var fills: std.ArrayList(StrictCatalogFillJob) = .empty;
+    defer fills.deinit(allocator);
+    var range_starts: std.ArrayList(usize) = .empty;
+    defer range_starts.deinit(allocator);
+    var range_segments: std.ArrayList(usize) = .empty;
+    defer range_segments.deinit(allocator);
 
     for (0..assemblies.len) |component| {
         const assembly = &assemblies[component];
@@ -12091,7 +12129,15 @@ fn strictPacketBlockCatalogFromAssembliesCheckedThreaded(
         catalog.component_x0[component] = assembly.x0;
         catalog.component_y0[component] = assembly.y0;
         var payload_total: usize = 0;
-        for (assembly.blocks) |block| {
+        var segment_total: usize = 0;
+        range_starts.clearRetainingCapacity();
+        range_segments.clearRetainingCapacity();
+        for (assembly.blocks, 0..) |block, block_index| {
+            if (block_index % range_blocks == 0) {
+                try range_starts.append(allocator, payload_total);
+                try range_segments.append(allocator, segment_total);
+            }
+            segment_total += block.segment_count;
             const payload_length = strictAssemblyBlockPayloadLength(assembly.*, block);
             const retained_payload_length = strictAssemblyBlockRetainedPayloadLength(assembly.*, block);
             if (block.payload_retained) {
@@ -12116,6 +12162,7 @@ fn strictPacketBlockCatalogFromAssembliesCheckedThreaded(
         }
 
         catalog.components[component] = try allocator.alloc(StrictPacketBlock, assembly.blocks.len);
+        if (segment_total > 0) catalog.segment_pools[component] = try allocator.alloc(u64, segment_total);
         if (assembly.borrowed_payloads != null) catalog.payloads_borrowed = true;
         if (catalog.payloads_borrowed != (assembly.borrowed_payloads != null)) return CodestreamError.InvalidCodestream;
         catalog.payloads[component] = if (assembly.borrowed_payloads) |borrowed|
@@ -12127,19 +12174,33 @@ fn strictPacketBlockCatalogFromAssembliesCheckedThreaded(
         else
             &.{};
 
-        fills[component] = .{
-            .assembly = assembly,
-            .dest_blocks = catalog.components[component],
-            .payloads = catalog.payloads[component],
-            .payload_total = payload_total,
-        };
+        if (assembly.blocks.len == 0) {
+            try range_starts.append(allocator, 0);
+            try range_segments.append(allocator, 0);
+        }
+        for (range_starts.items, 0..) |start_offset, range| {
+            const begin = @min(assembly.blocks.len, range * range_blocks);
+            const last = range + 1 == range_starts.items.len;
+            try fills.append(allocator, .{
+                .assembly = assembly,
+                .dest_blocks = catalog.components[component],
+                .payloads = catalog.payloads[component],
+                .payload_total = payload_total,
+                .begin = begin,
+                .end = if (last) assembly.blocks.len else begin + range_blocks,
+                .start_offset = start_offset,
+                .end_offset = if (last) payload_total else range_starts.items[range + 1],
+                .segments = catalog.segment_pools[component],
+                .segment_start = range_segments.items[range],
+            });
+        }
     }
-    // Filling each component's blocks and copying its payloads is
-    // independent across components.
-    if (threads < 2 or assemblies.len < 2 or !worker_pool.runJobs(StrictCatalogFillJob, fills, StrictCatalogFillJob.run)) {
-        for (fills) |*fill| fill.run();
+    // The ranges are independent: each fills its own blocks and payload
+    // span. Errors are taken in component and block order.
+    if (threads < 2 or fills.items.len < 2 or !worker_pool.runJobsOn(threads, StrictCatalogFillJob, fills.items, StrictCatalogFillJob.run)) {
+        for (fills.items) |*fill| fill.run();
     }
-    for (fills) |fill| try fill.result;
+    for (fills.items) |fill| try fill.result;
 
     return .{
         .catalog = catalog,
@@ -15865,7 +15926,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
                 block.encoded_bitplanes,
                 block.cumulative_passes,
                 payload,
-                block.segment_lengths[0..block.segment_count],
+                block.segment_lengths,
                 block.rect.width,
                 block.rect.height,
                 block.code_block_style,
@@ -15890,7 +15951,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
                 block.encoded_bitplanes,
                 block.cumulative_passes,
                 payload,
-                block.segment_lengths[0..block.segment_count],
+                block.segment_lengths,
                 block.rect.width,
                 block.rect.height,
                 block.code_block_style,
@@ -16136,9 +16197,22 @@ fn fillStrictComponentsCoefficientsFromBlockCatalog(
         block_count += targets[prepared].blocks.len;
         prepared += 1;
     }
-    // The planes' checks are independent; on several threads they share the
+    // On several threads the coverage of every plane is checked in row bands
+    // first; the rest of each plane's checks are independent and share the
     // pool. Errors are taken in plane order either way.
     const Check = StrictFillCheckJob(Coefficient);
+    if (options.threads >= 2) {
+        const planes = try allocator.alloc(StrictCoveragePlane, checks.len);
+        defer allocator.free(planes);
+        const coverage = try allocator.alloc(anyerror!void, checks.len);
+        defer allocator.free(coverage);
+        for (planes, checks) |*plane, *check| {
+            plane.* = check.coveragePlane();
+            check.coverage_checked = true;
+        }
+        try validateStrictCoverageInBands(allocator, planes, coverage, options.threads);
+        for (coverage) |result| try result;
+    }
     if (options.threads < 2 or checks.len < 2 or !worker_pool.runJobs(Check, checks, Check.run)) {
         for (checks) |*check| check.run();
     }
@@ -16225,17 +16299,32 @@ fn StrictFillCheckJob(comptime Coefficient: type) type {
         required_width: usize,
         required_height: usize,
         reduction: u8,
+        /// Set when `validateStrictCoverageInBands` already checked this
+        /// plane's coverage.
+        coverage_checked: bool = false,
         result: anyerror!void = {},
 
         fn run(self: *@This()) void {
             self.result = self.check();
         }
 
+        fn coveragePlane(self: *const @This()) StrictCoveragePlane {
+            return .{
+                .width = self.target.width,
+                .height = self.target.height,
+                .required_width = self.required_width,
+                .required_height = self.required_height,
+                .blocks = self.target.blocks,
+                .bands = self.target.bands,
+                .reduction = self.reduction,
+            };
+        }
+
         fn check(self: *@This()) !void {
             const target = self.target;
             const partial_plane = self.reduction != 0 or strictBlocksHaveRegionPruning(target.blocks);
             if (partial_plane) @memset(target.plane, 0);
-            try validateStrictBlockCatalogCoverageBits(
+            if (!self.coverage_checked) try validateStrictBlockCatalogCoverageBits(
                 std.heap.smp_allocator,
                 target.width,
                 target.height,
@@ -16309,7 +16398,7 @@ fn decodeStrictComponentBlocksSerial(
                 block.encoded_bitplanes,
                 block.cumulative_passes,
                 payload,
-                block.segment_lengths[0..block.segment_count],
+                block.segment_lengths,
                 block.rect.width,
                 block.rect.height,
                 block.code_block_style,
@@ -16327,7 +16416,7 @@ fn decodeStrictComponentBlocksSerial(
                 block.encoded_bitplanes,
                 block.cumulative_passes,
                 payload,
-                block.segment_lengths[0..block.segment_count],
+                block.segment_lengths,
                 block.rect.width,
                 block.rect.height,
                 block.code_block_style,
@@ -16844,6 +16933,147 @@ fn validateStrictBlockCatalogCoverageBits(
             const expected = if (word + 1 == required_row_words) last_word_mask else full_word;
             if (covered[row_start + word] != expected) return CodestreamError.InvalidCodestream;
         }
+    }
+}
+
+/// One plane's inputs to `validateStrictBlockCatalogCoverageBits`.
+const StrictCoveragePlane = struct {
+    width: usize,
+    height: usize,
+    required_width: usize,
+    required_height: usize,
+    blocks: []const StrictPacketBlock,
+    bands: []const subband.Band,
+    reduction: u8,
+};
+
+/// `validateStrictBlockCatalogCoverageBits` for several planes on up to
+/// `threads` threads, with each plane's rows cut into bands that hold small
+/// bitmaps of their own: a band marks the part of every required block that
+/// reaches its rows (an overlap anywhere fails) and checks its rows of the
+/// required area for gaps. The blocks' own fields (size, band, bounds) are
+/// checked first, in block order, as in the serial check; every other failure
+/// is `InvalidCodestream` there too. `results` receives one verdict per plane.
+fn validateStrictCoverageInBands(
+    allocator: std.mem.Allocator,
+    planes: []const StrictCoveragePlane,
+    results: []anyerror!void,
+    threads: u8,
+) !void {
+    std.debug.assert(results.len == planes.len);
+    var required_storage: std.ArrayList(bool) = .empty;
+    defer required_storage.deinit(allocator);
+    var block_count: usize = 0;
+    for (planes) |plane| block_count += plane.blocks.len;
+    try required_storage.resize(allocator, block_count);
+    var required_start: usize = 0;
+
+    const Job = struct {
+        plane: *const StrictCoveragePlane,
+        required: []const bool,
+        first_row: usize,
+        end_row: usize,
+        failed: bool = false,
+
+        fn run(job: *@This()) void {
+            job.failed = !job.check();
+        }
+
+        /// Bitmap words on the stack: fresh heap pages for every band cost
+        /// more (page faults, unmapping) than the marking itself.
+        const stack_words = 4096;
+
+        fn check(job: *const @This()) bool {
+            const row_words = strictCoverageRowWords(job.plane.width);
+            var stack: [stack_words]u64 = undefined;
+            if (row_words > stack_words) {
+                const covered = std.heap.smp_allocator.alloc(u64, row_words) catch return false;
+                defer std.heap.smp_allocator.free(covered);
+                return job.checkRows(covered, 1);
+            }
+            return job.checkRows(&stack, stack_words / row_words);
+        }
+
+        /// Checks the job's rows `rows_per_pass` at a time in `buffer`.
+        fn checkRows(job: *const @This(), buffer: []u64, rows_per_pass: usize) bool {
+            const plane = job.plane;
+            const row_words = strictCoverageRowWords(plane.width);
+            const full_word = std.math.maxInt(u64);
+            const required_row_words = strictCoverageRowWords(plane.required_width);
+            const last_word_mask = strictCoverageBitRangeMask(0, (plane.required_width - 1) & 63);
+            var first_row = job.first_row;
+            while (first_row < job.end_row) : (first_row += rows_per_pass) {
+                const end_row = @min(job.end_row, first_row + rows_per_pass);
+                const rows = end_row - first_row;
+                const covered = buffer[0 .. rows * row_words];
+                @memset(covered, 0);
+                for (plane.blocks, job.required) |block, required| {
+                    if (!required) continue;
+                    const rect = block.rect;
+                    const top = @max(rect.y, first_row);
+                    const bottom = @min(rect.y + rect.height, end_row);
+                    if (top >= bottom) continue;
+                    const clipped = subband.Rect{ .x = rect.x, .y = top - first_row, .width = rect.width, .height = bottom - top };
+                    markStrictRectCoveredBits(covered, row_words, plane.width, rows, clipped) catch return false;
+                }
+                for (first_row..@min(end_row, plane.required_height)) |y| {
+                    const row_start = (y - first_row) * row_words;
+                    for (0..required_row_words) |word| {
+                        const expected = if (word + 1 == required_row_words) last_word_mask else full_word;
+                        if (covered[row_start + word] != expected) return false;
+                    }
+                }
+            }
+            return true;
+        }
+    };
+    var jobs: std.ArrayList(Job) = .empty;
+    defer jobs.deinit(allocator);
+    const bands_per_plane = @max(1, (@as(usize, threads) + planes.len - 1) / planes.len);
+    for (planes, results) |*plane, *result| {
+        result.* = {};
+        const required = required_storage.items[required_start..][0..plane.blocks.len];
+        required_start += plane.blocks.len;
+        prepareStrictCoveragePlane(plane.*, required) catch |err| {
+            result.* = err;
+            continue;
+        };
+        const band_rows = @max(64, (plane.height + bands_per_plane - 1) / bands_per_plane);
+        var first_row: usize = 0;
+        while (first_row < plane.height) : (first_row += band_rows) {
+            try jobs.append(allocator, .{
+                .plane = plane,
+                .required = required,
+                .first_row = first_row,
+                .end_row = @min(plane.height, first_row + band_rows),
+            });
+        }
+    }
+    if (jobs.items.len < 2 or !worker_pool.runJobsOn(threads, Job, jobs.items, Job.run)) {
+        for (jobs.items) |*job| job.run();
+    }
+    for (jobs.items) |job| {
+        if (!job.failed) continue;
+        const index = (@intFromPtr(job.plane) - @intFromPtr(planes.ptr)) / @sizeOf(StrictCoveragePlane);
+        results[index] = CodestreamError.InvalidCodestream;
+    }
+}
+
+/// The per-block part of the coverage check, in block order: every block
+/// non-empty and in a known band, every required one inside the plane.
+fn prepareStrictCoveragePlane(plane: StrictCoveragePlane, required: []bool) !void {
+    if (plane.width == 0 or plane.height == 0 or plane.required_width == 0 or plane.required_height == 0 or
+        plane.required_width > plane.width or plane.required_height > plane.height)
+    {
+        return CodestreamError.InvalidCodestream;
+    }
+    for (plane.blocks, required) |block, *is_required| {
+        if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
+        is_required.* = try strictBlockRequiredForReduction(block, plane.bands, plane.reduction);
+        if (!is_required.*) continue;
+        const end_x = try std.math.add(usize, block.rect.x, block.rect.width);
+        const end_y = try std.math.add(usize, block.rect.y, block.rect.height);
+        if (end_x > plane.width or end_y > plane.height) return CodestreamError.InvalidCodestream;
     }
 }
 
