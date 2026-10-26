@@ -5,6 +5,27 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### MQ Encoder Without Symbol Branches
+
+- The ISO MQ encoder's `write` codes a decision without branching on it:
+  the conditional exchange picks the upper or lower sub-interval with
+  selects, the context moves on (copied as one word) and A doubles up to
+  0x8000 by a leading-zero count, and only a byte boundary inside that
+  shift branches. Refinement decisions are close to random, so the old
+  MPS/LPS branch mispredicted on a large share of the 40 million
+  refinement symbols of the lossless benchmark.
+- The Tier-1 encoder's significance, refinement and cleanup passes take
+  the MQ encoder as a `noalias` pointer (nothing else in them reaches it),
+  so its registers stay in machine registers across the flag and
+  coefficient stores instead of being reloaded for every symbol.
+- Encoded codestreams are byte-identical (lossless, lossy with two rate
+  layers, four layers, BYPASS, TERMALL, ERTERM with RESET, vertically
+  causal with segmentation symbols, 512x512 tiles with 32x32 blocks; t1
+  and t20). Against `c558dc5`: lossless encode t1 923.7 -> 822.6 ms
+  (-10.9%), lossy t1 825.4 -> 712.6 ms (-13.7%), 9 rounds each; at t20
+  (15 `--timings` runs) lossless 106.6 -> 97.1 ms (block coding
+  77.9 -> 69.6 ms), lossy 142.9 -> 133.5 ms.
+
 ### 9/7 Driver On The Shared Pool
 
 - `forward97Parallel` and `inverse97Parallel` run each lifting phase on the

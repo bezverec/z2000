@@ -6341,7 +6341,7 @@ fn emitDirectIsoSignificancePass(
 fn emitDirectIsoSignificancePassPlain(
     comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
-    encoder: anytype,
+    noalias encoder: anytype,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
@@ -6462,7 +6462,7 @@ fn emitDirectIsoRefinementPass(
 fn emitDirectIsoRefinementPassPlain(
     comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
-    encoder: anytype,
+    noalias encoder: anytype,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
@@ -6572,7 +6572,7 @@ fn emitDirectIsoCleanupPass(
 fn emitDirectIsoCleanupPassPlain(
     comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
-    encoder: *mq_iso.Encoder,
+    noalias encoder: *mq_iso.Encoder,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
@@ -6724,7 +6724,7 @@ fn nbfEmitCleanupSamplePlain(
 inline fn nbfEmitCleanupSamplePlainKnown(
     comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
-    encoder: *mq_iso.Encoder,
+    noalias encoder: *mq_iso.Encoder,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
@@ -6753,7 +6753,7 @@ inline fn nbfEmitCleanupSamplePlainKnown(
 inline fn emitDirectCleanupSampleRangePlainKnown(
     comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
-    encoder: *mq_iso.Encoder,
+    noalias encoder: *mq_iso.Encoder,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,
@@ -6776,7 +6776,7 @@ inline fn emitDirectCleanupSampleRangePlainKnown(
 
 inline fn emitDirectCleanupSignPlain(
     scratch: *DirectBlockScratch,
-    encoder: *mq_iso.Encoder,
+    noalias encoder: *mq_iso.Encoder,
     plane: []const i32,
     stride: usize,
     rect: subband.Rect,

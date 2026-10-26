@@ -277,6 +277,12 @@ this path separately from the ordinary unsigned 8/16-bit display decoder.
 
 ### P6. Encode-Side Follow-Up
 
+Active since 2026-10-26, after the decode campaign. The MQ encoder now
+codes without branching on the decision and the Tier-1 passes hold its
+registers in machine registers (lossless t1 -10.9%, lossy t1 -13.7%). At
+t20 the lossy encode's forward transform (ICT and 9/7, about 20 ms against
+7 ms for the lossless 5/3) is the next stage to examine.
+
 Hold broad encode work until P1-P3 close at least the OpenJPEG common-decode
 gap, unless profiling finds a shared T1/MQ change. Then revisit bitplane
 extraction, scratch clears, catalog materialization, and rate allocation using

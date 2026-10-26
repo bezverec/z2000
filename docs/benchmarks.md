@@ -46,6 +46,33 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, MQ encoder without symbol branches
+
+Base `c558dc5`, the benchmark encode profiles. A sampling profile of the
+lossless t1 encode put a third of the time in the MQ encoder (`write`,
+renormalization, context transitions, byte output) and 17% on the lines
+that read a coefficient's bit, whose samples land after the data-dependent
+branches. Lossless t1, 9 interleaved rounds:
+
+| Variant | Median |
+| --- | ---: |
+| base | 906.4 ms |
+| interval chosen by selects, multi-bit renormalization | 863.6 ms (-4.7%) |
+| also the context transition and the shift without a branch | 843.7 ms (-6.9%) |
+| also the passes' encoder pointer `noalias` (kept) | 813.5 ms (another -3.4%) |
+
+Against the base, kept variant: lossless t1 923.7 -> 822.6 ms (-10.9%),
+lossy t1 825.4 -> 712.6 ms (-13.7%); at t20, 15 `--timings` runs:
+
+| Profile | Total | Block coding | DWT |
+| --- | ---: | ---: | ---: |
+| lossless | 106.6 -> 97.1 ms | 77.9 -> 69.6 ms | 7.1 -> 6.8 ms |
+| lossy | 142.9 -> 133.5 ms | 92.1 -> 83.5 ms | 20.4 -> 20.9 ms |
+
+Wall time at t20 on the loaded host (31 rounds): lossless 130.7 ->
+132.0 ms (minimum 118.5 -> 112.7 ms), lossy 169.4 -> 160.5 ms. The encoded
+codestreams are byte-identical across the profile matrix in the changelog.
+
 ## 2026-10-26: Intel Core i5-14500, 9/7 driver on the shared pool
 
 Base `14cb5dd`, lossy profile, 15 interleaved `--timings` runs (decode):

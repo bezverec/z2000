@@ -42,6 +42,11 @@ const Context = extern struct {
     inline fn takeLps(self: *Context) void {
         self.* = folded_contexts[self.nlps];
     }
+
+    comptime {
+        // `Encoder.write` copies a context as one 64-bit word.
+        std.debug.assert(@sizeOf(Context) == 8);
+    }
 };
 
 const folded_contexts = makeFoldedContexts();
@@ -138,37 +143,35 @@ pub const Encoder = struct {
     pub fn write(self: *Encoder, context_index: usize, bit: bool) !void {
         std.debug.assert(context_index < self.contexts.len);
         const context = &self.contexts.ptr[context_index];
-        const qe = context.qe;
+        const qe: u32 = context.qe;
+        const is_mps = bit == context.mps;
 
+        // CODEMPS and CODELPS (C.2.4, C.2.5) with the conditional exchange:
+        // the coded symbol takes the upper sub-interval (C += Qe, A -= Qe)
+        // when it is the MPS and A - Qe >= Qe, or the LPS and A - Qe < Qe,
+        // and the lower one (A = Qe) otherwise. Both are selected without
+        // a branch on the symbol, which is close to random in refinement.
         const next_a = self.a - qe;
-        if (bit == context.mps and (next_a & 0x8000) != 0) {
-            self.a = next_a;
-            self.c += qe;
+        const upper = is_mps != (next_a < qe);
+        self.c += if (upper) qe else 0;
+        self.a = if (upper) next_a else qe;
+        // An LPS always renormalizes, an MPS when A - Qe drops below 0x8000:
+        // exactly when the new A is below 0x8000. The context moves on and A
+        // doubles up to 0x8000 without a branch either (a shift of zero
+        // otherwise); only a byte boundary inside the shift branches.
+        const renormalizes = self.a < 0x8000;
+        // Contexts are copied as one word so that the choice is a select.
+        const word: *align(@alignOf(Context)) u64 = @ptrCast(context);
+        const moved: *align(@alignOf(Context)) const u64 = @ptrCast(&folded_contexts[if (is_mps) context.nmps else context.nlps]);
+        word.* = if (renormalizes) moved.* else word.*;
+        const shift: u5 = @clz(@as(u16, @intCast(self.a)));
+        if (shift < self.ct) {
+            self.a <<= shift;
+            self.c <<= shift;
+            self.ct -= shift;
             return;
         }
-
-        self.a = next_a;
-        if (bit == context.mps) {
-            if ((self.a & 0x8000) == 0) {
-                if (self.a < qe) {
-                    self.a = qe;
-                } else {
-                    self.c += qe;
-                }
-                context.takeMps();
-                try self.renormalize();
-            } else {
-                self.c += qe;
-            }
-        } else {
-            if (self.a < qe) {
-                self.c += qe;
-            } else {
-                self.a = qe;
-            }
-            context.takeLps();
-            try self.renormalize();
-        }
+        try self.renormalizeBy(shift);
     }
 
     pub fn finish(self: *Encoder) ![]u8 {
@@ -241,13 +244,20 @@ pub const Encoder = struct {
         }
     }
 
-    fn renormalize(self: *Encoder) !void {
-        while ((self.a & 0x8000) == 0) {
-            self.a <<= 1;
-            self.c <<= 1;
-            self.ct -= 1;
-            if (self.ct == 0) try self.byteOut();
+    /// RENORME (C.2.6) for an A that needs `shift` doublings: whole shifts
+    /// up to each byte boundary instead of one doubling at a time.
+    inline fn renormalizeBy(self: *Encoder, shift: u5) !void {
+        var remaining: u8 = shift;
+        while (remaining >= self.ct) {
+            self.a <<= @intCast(self.ct);
+            self.c <<= @intCast(self.ct);
+            remaining -= self.ct;
+            self.ct = 0;
+            try self.byteOut();
         }
+        self.a <<= @intCast(remaining);
+        self.c <<= @intCast(remaining);
+        self.ct -= remaining;
     }
 
     fn setBits(self: *Encoder) void {

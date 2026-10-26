@@ -1024,9 +1024,10 @@ catalog and the decode tail on all workers) is complete and frozen for
 level with Kakadu 8.4.1 at t1 and within 1.03x (lossless) and 1.13x (lossy)
 of it at t20, ahead of OpenJPEG and Grok in both. Since then the lossy tail
 runs its finest 9/7 level and the ICT in row bands as well. The 9/7
-driver runs on the shared pool as the 5/3 one does. The open performance
-candidate is encode, now the larger gap to Kakadu (1.7x at t20, 1.5x at
-t1); see `optimization_plan.md`. Reopen broad T1 SWAR/packed-column work only with a
+driver runs on the shared pool as the 5/3 one does. Encode, the larger gap
+to Kakadu (1.7x at t20, 1.5x at t1 at rc.5), is the active performance
+track: the MQ encoder without symbol branches took 11-14% off the t1
+encodes; see `optimization_plan.md`. Reopen broad T1 SWAR/packed-column work only with a
 new layout hypothesis and the normal keep rule.
 
 ## Gate For Every Slice
