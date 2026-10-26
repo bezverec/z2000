@@ -1025,9 +1025,12 @@ level with Kakadu 8.4.1 at t1 and within 1.03x (lossless) and 1.13x (lossy)
 of it at t20, ahead of OpenJPEG and Grok in both. Since then the lossy tail
 runs its finest 9/7 level and the ICT in row bands as well. The 9/7
 driver runs on the shared pool as the 5/3 one does. Encode, the larger gap
-to Kakadu (1.7x at t20, 1.5x at t1 at rc.5), is the active performance
-track: the MQ encoder without symbol branches took 11-14% off the t1
-encodes; see `optimization_plan.md`. Reopen broad T1 SWAR/packed-column work only with a
+to Kakadu at rc.5 (1.7x at t20, 1.5x at t1), was the active track after it:
+by the 2026-10-26 checkpoint (`d638c08`) the lossless encode is 1.01x
+Kakadu's time at t1 and 1.27x at t20, and the decode, through the same
+branch-free MQ coding and significance-pass bitmaps, 0.78x (lossless) and
+0.85x (lossy) at t1 and level at t20; see `benchmarks.md` and
+`optimization_plan.md`. Reopen broad T1 SWAR/packed-column work only with a
 new layout hypothesis and the normal keep rule.
 
 ## Gate For Every Slice

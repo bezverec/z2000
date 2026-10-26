@@ -46,6 +46,26 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, checkpoint after the Tier-1 pass work
+
+`d638c08` against Kakadu 8.4.1, interleaved wall time on a quiet host
+(21 rounds at t20, 5 at t1). Encode: the benchmark lossless profile
+(`--bypass`, Kakadu `Cmodes=BYPASS`). Decode: both decoders on the same
+z2000 streams.
+
+| Operation | Threads | z2000 | Kakadu | z2000 / Kakadu |
+| --- | ---: | ---: | ---: | ---: |
+| lossless encode | 20 | 81.4 ms | 64.3 ms | 1.27 |
+| lossless encode | 1 | 519.7 ms | 514.1 ms | 1.01 |
+| lossless decode (`z-t20.jp2`) | 20 | 69.7 ms | 69.1 ms | 1.01 |
+| lossless decode | 1 | 462.5 ms | 592.1 ms | 0.78 |
+| lossy decode (`lossy.jp2`) | 20 | 71.6 ms | 69.7 ms | 1.03 |
+| lossy decode | 1 | 483.4 ms | 566.2 ms | 0.85 |
+
+At rc.5 the lossless encode was 1.7x Kakadu's at t20 and 1.5x at t1. The
+encoder's remaining t20 gap is its Tier-1 throughput on hyper-threads and
+E-cores; at t20 the decode is level.
+
 ## 2026-10-26: Intel Core i5-14500, MQ decoder without branches on the decision
 
 Base `f882c74`, quiet host, wall time, 9 interleaved rounds:

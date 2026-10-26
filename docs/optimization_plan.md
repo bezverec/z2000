@@ -277,6 +277,10 @@ this path separately from the ordinary unsigned 8/16-bit display decoder.
 
 ### P6. Encode-Side Follow-Up
 
+Checkpoint 2026-10-26 (`d638c08`, against Kakadu 8.4.1, quiet host):
+lossless encode 1.01x Kakadu's time at t1 and 1.27x at t20 (rc.5: 1.5x and
+1.7x); decode 0.78x (lossless) and 0.85x (lossy) at t1, level at t20.
+
 2026-10-26, Tier-1 passes: the significance pass now visits only the
 columns and rows its stripe's significance words leave open (40.4 of 55.5
 million examined samples were already significant; lossless t1 -7.5 to
