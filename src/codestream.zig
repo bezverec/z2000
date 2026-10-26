@@ -3657,6 +3657,7 @@ const ComponentCatalogAllBlockJob = struct {
     nominal_bitplanes: u8,
     options: LosslessOptions,
     include_bitplane_payload: bool,
+    pending_levels: ?*PendingForwardLevels = null,
     initialized: std.ArrayList(ComponentCatalogBlockInit) = .empty,
     result: anyerror!void = {},
 
@@ -4968,6 +4969,56 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
     job.result = {};
 }
 
+/// The forward 5/3 levels after the first of three planes, left for the
+/// Tier-1 phase: each worker that starts claims a component's levels until
+/// none is left, and a block outside the first level's detail bands waits
+/// for all three. Those levels change only the first level's low-pass
+/// quarter, which no first-level detail block reads.
+const PendingForwardLevels = struct {
+    planes: [3][]i32,
+    width: usize,
+    height: usize,
+    /// Levels `forward53Parallel` already did.
+    first_level: u8,
+    levels: u8,
+    next_component: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    finished: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    done_levels: [3]u8 = @splat(0),
+    failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *PendingForwardLevels, allocator: std.mem.Allocator) void {
+        while (true) {
+            const component = self.next_component.fetchAdd(1, .monotonic);
+            if (component >= self.planes.len) return;
+            if (allocator.alloc(i32, wavelet_int.forward53LevelsScratchLen(self.width, self.height))) |scratch| {
+                defer allocator.free(scratch);
+                self.done_levels[component] = wavelet_int.forward53LevelsFrom(self.planes[component], self.width, self.height, self.first_level, self.levels, scratch);
+            } else |_| {
+                self.failed.store(true, .monotonic);
+            }
+            _ = self.finished.fetchAdd(1, .release);
+        }
+    }
+
+    fn wait(self: *PendingForwardLevels) void {
+        while (self.finished.load(.acquire) < self.planes.len) std.atomic.spinLoopHint();
+    }
+
+    fn check(self: *PendingForwardLevels) !void {
+        if (self.failed.load(.acquire)) return error.OutOfMemory;
+        for (self.done_levels) |done| {
+            if (done != self.levels) return CodestreamError.InvalidCodestream;
+        }
+    }
+};
+
+/// A block of the first decomposition level's detail bands, which the first
+/// forward level leaves final.
+fn isFinestDetailBlock(bands: []const subband.Band, block: subband.CodeBlock) bool {
+    const band = bands[block.band_index];
+    return band.level == 1 and band.kind != .ll;
+}
+
 fn componentCatalogAllBlockWorker(job: *ComponentCatalogAllBlockJob) void {
     inline for (0..3) |component| {
         if (job.blocks.len != job.catalog_blocks[component].len) {
@@ -4980,6 +5031,8 @@ fn componentCatalogAllBlockWorker(job: *ComponentCatalogAllBlockJob) void {
     defer bitplane_scratch.deinit();
     var ebcot_scratch = ebcot.DirectBlockScratch.init(job.allocator);
     defer ebcot_scratch.deinit();
+    // The first workers to start take a component's coarser levels each.
+    if (job.pending_levels) |pending| pending.run(job.allocator);
 
     while (true) {
         const order_index = job.next_block.fetchAdd(1, .monotonic);
@@ -4993,6 +5046,9 @@ fn componentCatalogAllBlockWorker(job: *ComponentCatalogAllBlockJob) void {
         if (block.band_index >= job.bands.len) {
             job.result = CodestreamError.InvalidCodestream;
             return;
+        }
+        if (job.pending_levels) |pending| {
+            if (!isFinestDetailBlock(job.bands, block)) pending.wait();
         }
         const block_nominal_bitplanes = bandNominalBitplanesForTransform(
             job.nominal_bitplanes,
@@ -5104,10 +5160,28 @@ fn encodeLosslessWithOptionsMeasured(
         if (timings) |t| t.color_transform_ns = elapsedNs(color_start);
     }
 
+    // On several block workers the coarser 5/3 levels run inside the Tier-1
+    // phase: the first level's detail blocks, three quarters of the image,
+    // are final after it, and their coding starts while the first workers
+    // transform the rest (see `PendingForwardLevels`).
+    const overlap_coarse_levels = options.transform == .reversible_5_3 and options.threads > 3 and levels >= 2;
+    var pending_levels: PendingForwardLevels = undefined;
     if (options.transform == .reversible_5_3) {
         const wavelet_start = monotonicNs();
-        const dwt_levels = try forwardComponents53(allocator, &planes, options);
-        if (dwt_levels != levels) return CodestreamError.InvalidCodestream;
+        if (overlap_coarse_levels) {
+            const slices = [3][]i32{ planes.planes[0], planes.planes[1], planes.planes[2] };
+            const first_levels = try wavelet_int.forward53Parallel(allocator, slices, planes.width, planes.height, 1, options.threads);
+            pending_levels = .{
+                .planes = slices,
+                .width = planes.width,
+                .height = planes.height,
+                .first_level = first_levels,
+                .levels = levels,
+            };
+        } else {
+            const dwt_levels = try forwardComponents53(allocator, &planes, options);
+            if (dwt_levels != levels) return CodestreamError.InvalidCodestream;
+        }
         if (timings) |t| t.wavelet_ns = elapsedNs(wavelet_start);
     }
 
@@ -5133,7 +5207,8 @@ fn encodeLosslessWithOptionsMeasured(
     var rpcl_stream: RpclPacketStream = .{};
     defer rpcl_stream.deinit();
     const payload_start = monotonicNs();
-    try appendTemporaryPayload(allocator, &tile_payload, planes, levels, encode_options, &rpcl_stream, timings);
+    try appendTemporaryPayload(allocator, &tile_payload, planes, levels, encode_options, &rpcl_stream, timings, if (overlap_coarse_levels) &pending_levels else null);
+    if (overlap_coarse_levels) try pending_levels.check();
     if (timings) |t| t.payload_ns = elapsedNs(payload_start);
     const packets = try makePacketPlan(rgb.width, rgb.height, levels, encode_options);
     if (encode_options.poc_records.len != 0) {
@@ -22098,6 +22173,7 @@ fn appendTemporaryPayload(
     options: LosslessOptions,
     rpcl_stream: ?*RpclPacketStream,
     timings: ?*EncodeTimings,
+    pending_levels: ?*PendingForwardLevels,
 ) !void {
     if (options.emit_temporary_payload_sidecar) {
         try out.appendSlice(allocator, temporary_magic_v8);
@@ -22137,6 +22213,7 @@ fn appendTemporaryPayload(
         options,
         options.emit_temporary_payload_sidecar,
         pass_stats,
+        pending_levels,
     );
     defer {
         for (&catalogs) |*catalog| catalog.deinit();
@@ -22747,8 +22824,16 @@ fn buildComponentRpclShadowCatalogs(
     options: LosslessOptions,
     include_bitplane_payload: bool,
     pass_stats: ?*ebcot.EncodePassStats,
+    pending_levels: ?*PendingForwardLevels,
 ) ![3]ComponentRpclShadowCatalog {
     const block_worker_count = payloadBlockThreadCount(options, blocks.len);
+    // Without block workers to overlap with, the coarser levels run first.
+    if (pending_levels) |pending| {
+        if (block_worker_count <= 1) {
+            pending.run(allocator);
+            try pending.check();
+        }
+    }
     if (block_worker_count > 1 or componentThreadCount(options) < 2) {
         if (block_worker_count > 1) {
             return buildComponentRpclShadowCatalogsBlocksParallel(
@@ -22758,6 +22843,7 @@ fn buildComponentRpclShadowCatalogs(
                 blocks,
                 options,
                 include_bitplane_payload,
+                pending_levels,
                 block_worker_count,
             );
         }
@@ -22798,6 +22884,7 @@ fn buildComponentRpclShadowCatalogsBlocksParallel(
     blocks: []const subband.CodeBlock,
     options: LosslessOptions,
     include_bitplane_payload: bool,
+    pending_levels: ?*PendingForwardLevels,
     worker_count: usize,
 ) ![3]ComponentRpclShadowCatalog {
     var catalog_blocks: [3][]RpclShadowBlock = undefined;
@@ -22821,12 +22908,19 @@ fn buildComponentRpclShadowCatalogsBlocksParallel(
     const block_order = try allocator.alloc(ComponentCatalogBlockRef, block_order_len);
     defer allocator.free(block_order);
     var order_index: usize = 0;
-    for (sorted_blocks) |block_index| {
-        inline for (0..3) |component| {
-            block_order[order_index] = .{ .component = component, .block_index = block_index };
-            order_index += 1;
+    // With coarser levels still pending, the first level's detail blocks
+    // (final already) go first, each group heaviest first.
+    for ([_]bool{ true, false }) |finest_pass| {
+        for (sorted_blocks) |block_index| {
+            if (pending_levels != null and isFinestDetailBlock(bands, blocks[block_index]) != finest_pass) continue;
+            if (pending_levels == null and !finest_pass) continue;
+            inline for (0..3) |component| {
+                block_order[order_index] = .{ .component = component, .block_index = block_index };
+                order_index += 1;
+            }
         }
     }
+    std.debug.assert(order_index == block_order_len);
 
     var jobs = try allocator.alloc(ComponentCatalogAllBlockJob, worker_count);
     defer allocator.free(jobs);
@@ -22844,6 +22938,7 @@ fn buildComponentRpclShadowCatalogsBlocksParallel(
             .nominal_bitplanes = planes.bit_depth,
             .options = options,
             .include_bitplane_payload = include_bitplane_payload,
+            .pending_levels = pending_levels,
         };
     }
     defer for (jobs) |*job| job.deinit();

@@ -13930,6 +13930,41 @@ test "parallel 5/3 DWT matches the serial workspace transform byte-for-byte" {
     }
 }
 
+test "forward 5/3 levels after the first on one thread match the parallel transform" {
+    const allocator = std.testing.allocator;
+    const dims = [_][2]usize{ .{ 2, 2 }, .{ 3, 5 }, .{ 7, 2 }, .{ 33, 17 }, .{ 64, 64 }, .{ 65, 63 }, .{ 130, 97 } };
+    for (dims) |dim| {
+        const width = dim[0];
+        const height = dim[1];
+        for ([_]u8{ 2, 3, 6 }) |levels| {
+            var expected: [3][]i32 = undefined;
+            var staged: [3][]i32 = undefined;
+            var seed: u32 = @intCast(width * 17 + height * 3 + levels);
+            for (0..3) |c| {
+                expected[c] = try allocator.alloc(i32, width * height);
+                for (expected[c]) |*sample| {
+                    seed = seed *% 1664525 +% 1013904223;
+                    sample.* = @as(i32, @intCast(seed >> 21)) - 1024;
+                }
+                staged[c] = try allocator.dupe(i32, expected[c]);
+            }
+            defer for (0..3) |c| {
+                allocator.free(expected[c]);
+                allocator.free(staged[c]);
+            };
+            const expected_levels = try wavelet_int.forward53Parallel(allocator, expected, width, height, levels, 4);
+            const first = try wavelet_int.forward53Parallel(allocator, staged, width, height, 1, 4);
+            const scratch = try allocator.alloc(i32, wavelet_int.forward53LevelsScratchLen(width, height));
+            defer allocator.free(scratch);
+            for (0..3) |c| {
+                const done = wavelet_int.forward53LevelsFrom(staged[c], width, height, first, levels, scratch);
+                try std.testing.expectEqual(expected_levels, done);
+                try std.testing.expectEqualSlices(i32, expected[c], staged[c]);
+            }
+        }
+    }
+}
+
 test "inverse 5/3 finest level in row bands matches the in-place transform" {
     const allocator = std.testing.allocator;
     const dims = [_][2]usize{

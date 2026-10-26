@@ -283,7 +283,11 @@ lossless encode 1.01x Kakadu's time at t1 and 1.27x at t20 (rc.5: 1.5x and
 At t20 the encoder's Tier-1 phase is balanced across the workers (all end
 within 0.2 ms); the rest of the gap is the serial stages around it (TIFF
 read, RCT, DWT before; packet stream, assembly, wrap and write after:
-about 21 ms of 63). The ISO MQ encoder codes a contiguous copy of each
+about 21 ms of 63). By the t1/t20 split about 18 ms of the encode is not
+overlapped against Kakadu's about 9 ms, while z2000's Tier-1 is already
+faster per symbol; the coarser 5/3 levels now run inside the Tier-1 phase
+(t20 -0.7 ms). The larger step left is a row-pipelined front end (TIFF
+read, RCT, and the first level feeding Tier-1 band by band). The ISO MQ encoder codes a contiguous copy of each
 block now (lossless t1 -3.4 to -4%).
 
 2026-10-26, Tier-1 passes: the significance pass now visits only the

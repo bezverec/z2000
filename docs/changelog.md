@@ -5,6 +5,28 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Coarser Forward 5/3 Levels Inside The Tier-1 Phase
+
+- On more than three threads a lossless encode transforms only the first
+  5/3 level before Tier-1. The first level's detail blocks, three quarters
+  of the image and final already, are coded first, while the first workers
+  of the Tier-1 phase each take one component's remaining levels on their
+  own thread (`wavelet_int.forward53LevelsFrom`); a block of a coarser band
+  waits for all three. Those levels touch only the first level's low-pass
+  quarter, which no first-level detail block reads. A unit test compares
+  the levels done this way with `forward53Parallel`.
+- Codestreams byte-identical. Against `7dede1f`, lossless `--bypass`,
+  `--timings` medians: t20 59.1 -> 58.4 ms (31 runs; DWT 5.3 -> 3.8 ms,
+  block coding 41.9 -> 42.7 ms), t16 74.8 -> 74.4, t12 73.7 -> 72.9, t8
+  90.5 -> 89.8, t4 137.4 -> 137.0 ms (21 runs).
+- Measured before it: the Tier-1 phase per-symbol cost is already below
+  Kakadu 8.4.1's (z2000 encodes faster on one thread), so the t20 gap is
+  the stages around Tier-1, about 18 ms not overlapped against Kakadu's
+  about 9 ms by the same t1/t20 split; process start and teardown take
+  16.5 ms outside `main` against 12.5 ms for an empty run. Tried and dropped
+  the same day: a sign-magnitude block copy for the encoder's bitplane tests
+  (lossless t1 +0.5%, lossy +3.0%).
+
 ## 0.2.0-rc.6 — 2026-10-26
 
 ### BYPASS Bits Written Without A Branch

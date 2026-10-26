@@ -697,6 +697,32 @@ pub fn forward53Parallel(
     return done;
 }
 
+/// Forward 5/3 levels from `first_level` (the count `forward53Parallel` did
+/// first) up to `requested_levels` of one `width` x `height` plane, on the
+/// calling thread: the same columns-then-rows steps per level as that driver,
+/// so the result is identical. Returns the level count done in all.
+/// `scratch` holds `forward53LevelsScratchLen(width, height)` samples.
+pub fn forward53LevelsFrom(plane: []i32, width: usize, height: usize, first_level: u8, requested_levels: u8, scratch: []i32) u8 {
+    var cur_width = width;
+    var cur_height = height;
+    var done: u8 = 0;
+    while (done < first_level and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        cur_width = lowCount(cur_width);
+        cur_height = lowCount(cur_height);
+    }
+    while (done < requested_levels and (cur_width > 1 or cur_height > 1)) : (done += 1) {
+        forward53Columns(plane, width, cur_width, cur_height, scratch);
+        for (0..cur_height) |row| forward53Line(rowSlice(plane, width, row, cur_width), scratch[0..cur_width]);
+        cur_width = lowCount(cur_width);
+        cur_height = lowCount(cur_height);
+    }
+    return done;
+}
+
+pub fn forward53LevelsScratchLen(width: usize, height: usize) usize {
+    return @max(width, height) * vertical_lanes;
+}
+
 /// `inverse53Parallel` over one plane.
 pub fn inverse53ParallelPlane(
     allocator: std.mem.Allocator,

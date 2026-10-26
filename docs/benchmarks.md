@@ -46,6 +46,30 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, coarser 5/3 levels inside Tier-1
+
+Base `7dede1f` (rc.6 plus records). A wall/`main` split of the t20
+lossless encode: 78.6 ms wall, 62.1 ms in `main`, 60.5 ms in the stage
+timings; an empty run (`--version`) takes 12.5 ms, so start and teardown
+add about 4 ms for this encode at any thread count (t1 16.0 ms outside
+`main`, t4 14.7, t20 16.5). From the t1 and t20 times, about 18 ms of the
+encode is not overlapped (Kakadu: about 9 ms the same way).
+
+Coarser forward 5/3 levels inside the Tier-1 phase, lossless `--bypass`,
+`--timings` medians (block coding includes the levels now):
+
+| Threads | Runs | Total | DWT | Block coding |
+| ---: | ---: | ---: | ---: | ---: |
+| 20 | 31 | 59.1 -> 58.4 ms | 5.3 -> 3.8 ms | 41.9 -> 42.7 ms |
+| 16 | 21 | 74.8 -> 74.4 ms | 5.6 -> 4.0 ms | 56.5 -> 57.0 ms |
+| 12 | 21 | 73.7 -> 72.9 ms | 5.5 -> 4.1 ms | 56.3 -> 56.8 ms |
+| 8 | 21 | 90.5 -> 89.8 ms | 6.7 -> 5.0 ms | 72.2 -> 73.1 ms |
+| 4 | 21 | 137.4 -> 137.0 ms | 8.7 -> 6.6 ms | 115.5 -> 117.6 ms |
+
+Codestreams byte-identical. Rejected the same day: the encoder's block copy
+in sign-magnitude form (bitplane test by one shift), lossless t1 469.4 ->
+471.7 ms, lossy 491.2 -> 506.1 ms (9 rounds).
+
 ## 2026-10-26: Intel Core i5-14500, 0.2.0-rc.6 release checkpoint
 
 `c207d4c` (the rc.6 code). `tools/bench_compare.ps1 -Runs 8 -Warmup 2
