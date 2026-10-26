@@ -445,7 +445,11 @@ fn inverse53ColumnBand(data: []i32, stride: usize, col_begin: usize, col_end: us
 // the inverse DWT slower at the full 16-thread setting than at eight on the
 // maintained x86 benchmark host (t16 regressed to 17.3 ms from 12.8 ms at t8).
 // T1 still receives the full caller thread count; only the DWT phase is capped.
-const max_dwt_workers = 8;
+const max_inverse_dwt_workers = 8;
+// The forward transform of an encode runs on the shared pool's threads (no
+// per-phase spawn) over the whole image, and keeps gaining up to sixteen
+// workers (2026-10-26: 2048x2048 RGB at t20, 6.8 -> 5.5 ms).
+const max_dwt_workers = 16;
 
 const DwtPhase = enum { forward_columns, forward_rows, inverse_columns, inverse_rows };
 
@@ -649,6 +653,10 @@ fn runDwtPhase(
 }
 
 fn dwtWorkerCount(thread_count: usize) usize {
+    return @max(1, @min(thread_count, max_inverse_dwt_workers));
+}
+
+fn forwardDwtWorkerCount(thread_count: usize) usize {
     return @max(1, @min(thread_count, max_dwt_workers));
 }
 
@@ -663,7 +671,7 @@ pub fn forward53Parallel(
     for (planes) |plane| {
         if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
     }
-    const workers = dwtWorkerCount(thread_count);
+    const workers = forwardDwtWorkerCount(thread_count);
     const max_dim = @max(width, height);
     const scratch_len = try std.math.mul(usize, max_dim, vertical_lanes);
 

@@ -5,6 +5,17 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Forward 5/3 On Up To Sixteen Workers
+
+- The forward 5/3 driver (`wavelet_int.forward53Parallel`) may split its
+  phases over up to sixteen workers; the inverse driver keeps its cap of
+  eight, which the decode measurements still support. The encode's
+  forward transform runs over the whole image on the shared pool's
+  threads, with no per-phase thread start.
+- Codestreams byte-identical, decodes unchanged. Against `200305b`,
+  lossless (`--bypass`) t20, 21 `--timings` runs: DWT 7.0 -> 5.4 ms, total
+  78.2 -> 76.3 ms; t8 unchanged (eight workers either way).
+
 ### Input Files Read In Ranges On The Pool
 
 - `tiff-to-jp2` and `decode-temp-jp2` read their input with

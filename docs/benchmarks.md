@@ -46,6 +46,19 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, forward 5/3 on sixteen workers
+
+Base `200305b`, t20, `--timings` medians. Raising the 5/3 drivers' cap of
+eight workers to twelve and sixteen took the lossless encode's forward DWT
+from 6.8 to 5.9 and 5.5 ms (15 runs) but left the lossless decode no
+faster (total 63.0 -> 63.6 and 63.5 ms), so only the forward driver takes
+sixteen: encode DWT 7.0 -> 5.4 ms, total 78.2 -> 76.3 ms (21 runs).
+Codestreams byte-identical.
+
+Rejected the same day: writing the decoded TIFF in eight positional ranges
+on the pool, as the input is read. NTFS serializes the writes: TIFF write
+4.55 -> 5.01 ms with the file length set first, 4.70 -> 5.68 ms without.
+
 ## 2026-10-26: Intel Core i5-14500, input files read in ranges
 
 Base `909a58e`, t20. Reading the input into one buffer of the file's size
