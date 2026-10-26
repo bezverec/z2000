@@ -292,7 +292,8 @@ widening to 16-bit samples now runs on the pool as well (TIFF read 7.3 ->
 5.0 ms at t20); the file read itself is read in ranges on the pool now
 (TIFF read 4.8 -> 4.0 ms, the decode's JP2 read 2.3 -> 1.9 ms); writing
 the output the same way was slower (NTFS serializes the ranges). The
-forward 5/3 takes up to sixteen workers (encode DWT 7.0 -> 5.4 ms at t20).
+forward 5/3 and 9/7 take up to sixteen workers (encode DWT 7.0 -> 5.4 ms
+lossless, 9.5 -> 8.0 ms lossy at t20).
 An RGB JP2 without metadata is written as its boxes and then the
 codestream, without a copy (JP2 wrap 1.7 -> 0.6 ms). The codestream
 assembly (`markers/write SOD`) reserves its exact size now, 3.7 -> 1.0 ms,

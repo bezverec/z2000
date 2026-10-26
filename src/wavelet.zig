@@ -729,7 +729,10 @@ fn unpackOddEven(data: []f32, scratch: []f32) void {
 // Wide 9/7 bands are memory-heavy and short-lived. More than eight workers
 // adds phase-spawn and SMT contention on the maintained x86 benchmark host;
 // T1 still receives the full caller thread count.
-const max_dwt_workers = 8;
+const max_inverse_dwt_workers = 8;
+// The forward transform of an encode runs on the shared pool's threads (no
+// per-phase spawn) over the whole image, and keeps gaining up to sixteen.
+const max_dwt_workers = 16;
 
 const Dwt97Phase = enum { forward_columns, forward_rows, inverse_columns, inverse_rows };
 
@@ -991,6 +994,10 @@ fn runDwt97Phase(
 }
 
 fn dwt97WorkerCount(thread_count: usize) usize {
+    return @max(1, @min(thread_count, max_inverse_dwt_workers));
+}
+
+fn forwardDwt97WorkerCount(thread_count: usize) usize {
     return @max(1, @min(thread_count, max_dwt_workers));
 }
 
@@ -1021,7 +1028,7 @@ pub fn forward97Parallel(
     for (planes) |plane| {
         if (width == 0 or height == 0 or plane.len != width * height) return TransformError.InvalidDimensions;
     }
-    const workers = dwt97WorkerCount(thread_count);
+    const workers = forwardDwt97WorkerCount(thread_count);
     const max_dim = @max(width, height);
     const pack_len = ((height + 1) / 2) * f32_block_lanes;
     const scratch_len = pack_len + 2 * max_dim;

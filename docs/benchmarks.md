@@ -46,6 +46,12 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, forward 9/7 on sixteen workers
+
+Base `b50f854`, lossy two-layer encode, t20, 21 `--timings` runs: the
+forward 9/7 on up to sixteen workers takes the DWT and quantization stage
+from 9.5 to 8.0 ms, total 80.7 -> 78.5 ms. Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, forward 5/3 on sixteen workers
 
 Base `200305b`, t20, `--timings` medians. Raising the 5/3 drivers' cap of

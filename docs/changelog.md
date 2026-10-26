@@ -5,6 +5,14 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Forward 9/7 On Up To Sixteen Workers
+
+- The forward 9/7 driver (`wavelet.forward97Parallel`) takes up to sixteen
+  workers as the forward 5/3 one does; the inverse 9/7 keeps eight.
+- Codestreams byte-identical. Against `b50f854`, lossy two-layer t20, 21
+  `--timings` runs: DWT and quantization 9.5 -> 8.0 ms, total 80.7 ->
+  78.5 ms.
+
 ### Forward 5/3 On Up To Sixteen Workers
 
 - The forward 5/3 driver (`wavelet_int.forward53Parallel`) may split its
