@@ -46,6 +46,14 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, PCRD hulls built once
+
+Base `af93a13`, lossy two-layer encode (`--rates 8,1`), t20. A probe put
+the two PCRD allocations at about 1.4 ms each, most of it building the
+blocks' convex hulls and sorting their slopes. Building them once: block
+coding stage 59.0 -> 57.7 ms, total 80.3 -> 78.4 ms (21 `--timings`
+runs). Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, encoder planes released in the background
 
 Base `aea5067`, the benchmark lossless profile (with `--bypass`), t20. A

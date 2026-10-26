@@ -22150,7 +22150,13 @@ fn appendTemporaryPayload(
     if (options.rate_count > 0 and options.layers > 1) {
         var pcrd_data = try buildPcrdData(allocator, &catalogs, planes, bands, blocks, options);
         defer pcrd_data.deinit();
-        try applyPcrdTargets(allocator, pcrd_data, &catalogs, blocks.len, options, &.{});
+        // Both allocations below run over the same convex hulls.
+        var hulls = rate_alloc.PcrdHulls.init(allocator, pcrd_data.blocks) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return CodestreamError.InvalidCodestream,
+        };
+        defer hulls.deinit();
+        try applyPcrdTargets(allocator, pcrd_data, &hulls, &catalogs, blocks.len, options, &.{});
 
         var probe_stream: RpclPacketStream = .{};
         defer probe_stream.deinit();
@@ -22166,7 +22172,7 @@ fn appendTemporaryPayload(
             cumulative += value.*;
             value.* = cumulative;
         }
-        try applyPcrdTargets(allocator, pcrd_data, &catalogs, blocks.len, options, header_overhead[0..options.layers]);
+        try applyPcrdTargets(allocator, pcrd_data, &hulls, &catalogs, blocks.len, options, header_overhead[0..options.layers]);
     }
 
     if (options.emit_temporary_payload_sidecar) {
@@ -22673,6 +22679,7 @@ fn buildPcrdData(
 fn applyPcrdTargets(
     allocator: std.mem.Allocator,
     data: PcrdData,
+    hulls: *const rate_alloc.PcrdHulls,
     catalogs: *[3]ComponentRpclShadowCatalog,
     blocks_len: usize,
     options: LosslessOptions,
@@ -22699,7 +22706,7 @@ fn applyPcrdTargets(
 
     const out_passes = try allocator.alloc(u16, total_blocks * layer_count);
     defer allocator.free(out_passes);
-    rate_alloc.allocatePcrdPasses(allocator, data.blocks, targets[0..layer_count], out_passes) catch |err| switch (err) {
+    rate_alloc.allocatePcrdPassesWithHulls(allocator, hulls, data.blocks, targets[0..layer_count], out_passes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return CodestreamError.InvalidCodestream,
     };

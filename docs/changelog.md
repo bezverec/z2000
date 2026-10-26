@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### PCRD Hulls Built Once Per Encode
+
+- A rate-targeted multi-layer encode allocates passes twice over the same
+  blocks (a probe allocation measures the packet headers, then the final
+  one charges them against the targets). Both now run over one set of
+  convex hulls and sorted slope thresholds (`rate_alloc.PcrdHulls`,
+  `allocatePcrdPassesWithHulls`) instead of building and sorting them each
+  time. A unit test compares allocations over shared hulls with separate
+  ones.
+- Codestreams byte-identical. Against `af93a13`, lossy two-layer t20, 21
+  `--timings` runs: block coding stage 59.0 -> 57.7 ms, total 80.3 ->
+  78.4 ms.
+
 ### Encoder Coefficient Planes Released In The Background
 
 - On several threads the single-tile encoder takes its coefficient planes

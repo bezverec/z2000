@@ -21775,6 +21775,36 @@ test "corrupted PLT-less packet header fails with a bounded error" {
     try std.testing.expect(rejected);
 }
 
+test "PCRD allocation over shared hulls matches separate allocations" {
+    const allocator = std.testing.allocator;
+    var pass_bytes: [40][12]u64 = undefined;
+    var pass_distortion: [40][12]f64 = undefined;
+    var blocks: [40]rate_alloc.PcrdBlock = undefined;
+    var seed: u32 = 12345;
+    for (&blocks, 0..) |*block, index| {
+        const passes = 1 + index % 12;
+        var bytes: u64 = 0;
+        for (0..passes) |pass| {
+            seed = seed *% 1664525 +% 1013904223;
+            bytes += (seed >> 24) % 50;
+            pass_bytes[index][pass] = bytes;
+            pass_distortion[index][pass] = @floatFromInt((seed >> 8) % 10000);
+        }
+        block.* = .{ .pass_bytes = pass_bytes[index][0..passes], .pass_distortion = pass_distortion[index][0..passes] };
+    }
+    var hulls = try rate_alloc.PcrdHulls.init(allocator, &blocks);
+    defer hulls.deinit();
+    // Two different ladders over the same hulls, as the encoder's probe and
+    // final allocations do.
+    for ([_][3]u64{ .{ 300, 2000, 1 << 40 }, .{ 50, 900, 1 << 40 } }) |targets| {
+        var separate: [40 * 3]u16 = undefined;
+        var shared: [40 * 3]u16 = undefined;
+        try rate_alloc.allocatePcrdPasses(allocator, &blocks, &targets, &separate);
+        try rate_alloc.allocatePcrdPassesWithHulls(allocator, &hulls, &blocks, &targets, &shared);
+        try std.testing.expectEqualSlices(u16, &separate, &shared);
+    }
+}
+
 test "PCRD allocator prefers high-slope passes and respects layer budgets" {
     const allocator = std.testing.allocator;
 

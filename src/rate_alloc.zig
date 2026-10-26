@@ -118,66 +118,110 @@ pub fn allocatePcrdPasses(
     out_passes: []u16,
 ) !void {
     try validateLayerCount(layer_targets.len);
-    const layer_count = layer_targets.len;
-    if (out_passes.len != blocks.len * layer_count) return RateAllocError.InvalidBlock;
+    if (out_passes.len != blocks.len * layer_targets.len) return RateAllocError.InvalidBlock;
+    var hulls = try PcrdHulls.init(allocator, blocks);
+    defer hulls.deinit();
+    return allocatePcrdPassesWithHulls(allocator, &hulls, blocks, layer_targets, out_passes);
+}
 
-    // Per-block convex hulls stored back to back; hull slopes are strictly
-    // decreasing within one block.
-    var hull_points: std.ArrayList(PcrdHullPoint) = .empty;
-    defer hull_points.deinit(allocator);
-    const hull_offsets = try allocator.alloc(usize, blocks.len + 1);
-    defer allocator.free(hull_offsets);
+/// The blocks' convex hulls and the sorted candidate thresholds of
+/// `allocatePcrdPasses`, built once for several allocations over the same
+/// blocks (a probe allocation and the final one, say).
+pub const PcrdHulls = struct {
+    allocator: std.mem.Allocator,
+    /// Per-block convex hulls stored back to back; hull slopes are strictly
+    /// decreasing within one block.
+    points: []PcrdHullPoint,
+    /// Block `b`'s hull is `points[offsets[b]..offsets[b + 1]]`.
+    offsets: []usize,
+    /// The finite, sorted (descending) set of candidate thresholds.
+    slopes: []f64,
 
-    for (blocks, 0..) |block, block_index| {
-        hull_offsets[block_index] = hull_points.items.len;
-        if (block.pass_bytes.len != block.pass_distortion.len) return RateAllocError.InvalidBlock;
-        if (block.pass_bytes.len > 164) return RateAllocError.InvalidBlock;
+    pub fn init(allocator: std.mem.Allocator, blocks: []const PcrdBlock) !PcrdHulls {
+        var hull_points: std.ArrayList(PcrdHullPoint) = .empty;
+        defer hull_points.deinit(allocator);
+        const hull_offsets = try allocator.alloc(usize, blocks.len + 1);
+        errdefer allocator.free(hull_offsets);
 
-        var cumulative_distortion: f64 = 0;
-        var previous_bytes: u64 = 0;
-        for (block.pass_bytes, block.pass_distortion, 0..) |bytes, distortion, pass_index| {
-            if (bytes < previous_bytes) return RateAllocError.InvalidBlock;
-            previous_bytes = bytes;
-            cumulative_distortion += @max(distortion, 0);
-            if (bytes == 0) continue;
+        for (blocks, 0..) |block, block_index| {
+            hull_offsets[block_index] = hull_points.items.len;
+            if (block.pass_bytes.len != block.pass_distortion.len) return RateAllocError.InvalidBlock;
+            if (block.pass_bytes.len > 164) return RateAllocError.InvalidBlock;
 
-            var candidate = PcrdHullPoint{
-                .passes = @intCast(pass_index + 1),
-                .bytes = bytes,
-                .distortion = cumulative_distortion,
-                .slope = 0,
-            };
-            // Upper convex hull on (bytes, distortion): pop points the
-            // candidate dominates (no byte growth) or whose slope would not
-            // strictly decrease along the hull.
-            while (hull_points.items.len > hull_offsets[block_index]) {
-                const top = hull_points.items[hull_points.items.len - 1];
-                if (candidate.bytes == top.bytes) {
-                    _ = hull_points.pop();
-                    continue;
+            var cumulative_distortion: f64 = 0;
+            var previous_bytes: u64 = 0;
+            for (block.pass_bytes, block.pass_distortion, 0..) |bytes, distortion, pass_index| {
+                if (bytes < previous_bytes) return RateAllocError.InvalidBlock;
+                previous_bytes = bytes;
+                cumulative_distortion += @max(distortion, 0);
+                if (bytes == 0) continue;
+
+                var candidate = PcrdHullPoint{
+                    .passes = @intCast(pass_index + 1),
+                    .bytes = bytes,
+                    .distortion = cumulative_distortion,
+                    .slope = 0,
+                };
+                // Upper convex hull on (bytes, distortion): pop points the
+                // candidate dominates (no byte growth) or whose slope would not
+                // strictly decrease along the hull.
+                while (hull_points.items.len > hull_offsets[block_index]) {
+                    const top = hull_points.items[hull_points.items.len - 1];
+                    if (candidate.bytes == top.bytes) {
+                        _ = hull_points.pop();
+                        continue;
+                    }
+                    const candidate_slope = (candidate.distortion - top.distortion) /
+                        @as(f64, @floatFromInt(candidate.bytes - top.bytes));
+                    if (candidate_slope >= top.slope) {
+                        _ = hull_points.pop();
+                        continue;
+                    }
+                    candidate.slope = candidate_slope;
+                    break;
                 }
-                const candidate_slope = (candidate.distortion - top.distortion) /
-                    @as(f64, @floatFromInt(candidate.bytes - top.bytes));
-                if (candidate_slope >= top.slope) {
-                    _ = hull_points.pop();
-                    continue;
+                if (hull_points.items.len == hull_offsets[block_index]) {
+                    candidate.slope = candidate.distortion / @as(f64, @floatFromInt(candidate.bytes));
                 }
-                candidate.slope = candidate_slope;
-                break;
+                try hull_points.append(allocator, candidate);
             }
-            if (hull_points.items.len == hull_offsets[block_index]) {
-                candidate.slope = candidate.distortion / @as(f64, @floatFromInt(candidate.bytes));
-            }
-            try hull_points.append(allocator, candidate);
         }
-    }
-    hull_offsets[blocks.len] = hull_points.items.len;
+        hull_offsets[blocks.len] = hull_points.items.len;
 
-    // The finite, sorted (descending) set of candidate thresholds.
-    var slopes = try allocator.alloc(f64, hull_points.items.len);
-    defer allocator.free(slopes);
-    for (hull_points.items, 0..) |point, index| slopes[index] = point.slope;
-    std.sort.pdq(f64, slopes, {}, std.sort.desc(f64));
+        const slopes = try allocator.alloc(f64, hull_points.items.len);
+        errdefer allocator.free(slopes);
+        for (hull_points.items, 0..) |point, index| slopes[index] = point.slope;
+        std.sort.pdq(f64, slopes, {}, std.sort.desc(f64));
+        return .{
+            .allocator = allocator,
+            .points = try hull_points.toOwnedSlice(allocator),
+            .offsets = hull_offsets,
+            .slopes = slopes,
+        };
+    }
+
+    pub fn deinit(self: *PcrdHulls) void {
+        self.allocator.free(self.points);
+        self.allocator.free(self.offsets);
+        self.allocator.free(self.slopes);
+        self.* = undefined;
+    }
+};
+
+/// `allocatePcrdPasses` with the hulls `PcrdHulls.init` built over `blocks`.
+pub fn allocatePcrdPassesWithHulls(
+    allocator: std.mem.Allocator,
+    hulls: *const PcrdHulls,
+    blocks: []const PcrdBlock,
+    layer_targets: []const u64,
+    out_passes: []u16,
+) !void {
+    try validateLayerCount(layer_targets.len);
+    const layer_count = layer_targets.len;
+    if (out_passes.len != blocks.len * layer_count or hulls.offsets.len != blocks.len + 1) return RateAllocError.InvalidBlock;
+    const hull_points = hulls.points;
+    const hull_offsets = hulls.offsets;
+    const slopes = hulls.slopes;
 
     // Per-block selection floor (hull index count already committed by
     // earlier layers; 0 = nothing selected yet).
@@ -201,7 +245,7 @@ pub fn allocatePcrdPasses(
         var high: usize = slopes.len;
         while (low < high) {
             const mid = low + (high - low) / 2;
-            const total = pcrdTotalBytes(hull_points.items, hull_offsets, floors, slopes[mid]);
+            const total = pcrdTotalBytes(hull_points, hull_offsets, floors, slopes[mid]);
             if (total <= target) {
                 chosen_slope = slopes[mid];
                 low = mid + 1;
@@ -211,7 +255,7 @@ pub fn allocatePcrdPasses(
         }
 
         for (blocks, 0..) |_, block_index| {
-            const hull = hull_points.items[hull_offsets[block_index]..hull_offsets[block_index + 1]];
+            const hull = hull_points[hull_offsets[block_index]..hull_offsets[block_index + 1]];
             var selected = floors[block_index];
             while (selected < hull.len and hull[selected].slope >= chosen_slope) : (selected += 1) {}
             floors[block_index] = selected;
