@@ -1682,6 +1682,8 @@ pub const DirectBlockScratch = struct {
     nb_flags: std.ArrayList(u16) = .empty,
     nb_stride: usize = 0,
     packed_t1_flags: std.ArrayList(u32) = .empty,
+    /// The block's coefficients, rows back to back (ISO MQ encoder).
+    block_coefficients: std.ArrayList(i32) = .empty,
     encoder: ?mq.Encoder = null,
     iso_encoder: ?mq_iso.Encoder = null,
     raw_writer: ?RawBitWriter = null,
@@ -1704,6 +1706,7 @@ pub const DirectBlockScratch = struct {
         self.segments.deinit(self.allocator);
         self.nb_flags.deinit(self.allocator);
         self.packed_t1_flags.deinit(self.allocator);
+        self.block_coefficients.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -5971,16 +5974,30 @@ pub fn encodeCodeBlockSegmentDirectIsoScratchWithStyleAndDistortions(
 fn encodeCodeBlockSegmentDirectIsoScratchInternal(
     comptime track_distortion: bool,
     scratch: *DirectBlockScratch,
-    plane: []const i32,
-    stride: usize,
-    rect: subband.Rect,
+    source_plane: []const i32,
+    source_stride: usize,
+    source_rect: subband.Rect,
     style: CodeBlockStyle,
     pass_distortions: []f64,
 ) !CodeBlockSegment {
     try validateImplementedStyleAllowBypass(style);
     if (style.terminate_all) return EbcotError.InvalidBlock;
     scratch.reset();
-    try validateBlock(plane, stride, rect);
+    try validateBlock(source_plane, source_stride, source_rect);
+    // The passes read every coefficient once per pass and bitplane; a copy
+    // of the block with rows back to back keeps them on a few pages instead
+    // of one page per row of the plane.
+    const block_area = try blockArea(source_rect);
+    try scratch.block_coefficients.resize(scratch.allocator, block_area);
+    for (0..source_rect.height) |row| {
+        @memcpy(
+            scratch.block_coefficients.items[row * source_rect.width ..][0..source_rect.width],
+            source_plane[(source_rect.y + row) * source_stride + source_rect.x ..][0..source_rect.width],
+        );
+    }
+    const plane: []const i32 = scratch.block_coefficients.items;
+    const stride = source_rect.width;
+    const rect = subband.Rect{ .x = 0, .y = 0, .width = source_rect.width, .height = source_rect.height };
 
     const stats = try blockStats(plane, stride, rect);
     if (stats.bitplanes == 0) {

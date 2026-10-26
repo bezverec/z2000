@@ -280,6 +280,11 @@ this path separately from the ordinary unsigned 8/16-bit display decoder.
 Checkpoint 2026-10-26 (`d638c08`, against Kakadu 8.4.1, quiet host):
 lossless encode 1.01x Kakadu's time at t1 and 1.27x at t20 (rc.5: 1.5x and
 1.7x); decode 0.78x (lossless) and 0.85x (lossy) at t1, level at t20.
+At t20 the encoder's Tier-1 phase is balanced across the workers (all end
+within 0.2 ms); the rest of the gap is the serial stages around it (TIFF
+read, RCT, DWT before; packet stream, assembly, wrap and write after:
+about 21 ms of 63). The ISO MQ encoder codes a contiguous copy of each
+block now (lossless t1 -3.4 to -4%).
 
 2026-10-26, Tier-1 passes: the significance pass now visits only the
 columns and rows its stripe's significance words leave open (40.4 of 55.5

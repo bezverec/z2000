@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### ISO MQ Encoder Codes A Contiguous Copy Of The Block
+
+- The ISO MQ block encoder copies the block's coefficients into scratch
+  with its rows back to back before the passes, which read every
+  coefficient once per pass and bitplane: in the plane each of a 64x64
+  block's rows lies on a page of its own. An earlier contiguous copy was
+  slower (before the MQ and significance-pass changes made the passes
+  cheaper); now it pays for lossless blocks and is neutral for lossy ones.
+- Codestreams byte-identical. Against `973374c`, t1 wall time, quiet host:
+  lossless `--bypass` 519.0 -> 498.3 ms (-4.0%, 9 rounds), lossless
+  without BYPASS 562.2 -> 543.2 ms (-3.4%, 11 rounds), lossy two-layer
+  495.0 -> 498.0 ms (+0.6%, within noise); t20 lossless 62.2 -> 61.2 ms
+  (21 `--timings` runs).
+
 ### MQ Decoder Without Branches On The Decision
 
 - The ISO MQ decoder's `readUnchecked`, which every Tier-1 decode pass

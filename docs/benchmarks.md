@@ -46,6 +46,23 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-26: Intel Core i5-14500, contiguous block copy in the encoder
+
+Base `973374c`. A probe of the t20 lossless encode found the Tier-1 phase
+balanced (all 20 workers finish within 0.2 ms of each other, 41.9 ms), so
+the t20 gap to Kakadu is per-block cost and the serial stages around
+Tier-1 (about 21 ms of the 63 ms in process). Copying each block's
+coefficients into contiguous scratch before its passes:
+
+| Profile | Threads | Rounds | Base | Copy |
+| --- | ---: | ---: | ---: | ---: |
+| lossless `--bypass` (wall) | 1 | 9 | 519.0 ms | 498.3 ms (-4.0%) |
+| lossless (wall) | 1 | 11 | 562.2 ms | 543.2 ms (-3.4%) |
+| lossy two-layer (wall) | 1 | 11 | 495.0 ms | 498.0 ms (+0.6%) |
+| lossless `--bypass` (`--timings`) | 20 | 21 | 62.2 ms | 61.2 ms |
+
+Codestreams byte-identical.
+
 ## 2026-10-26: Intel Core i5-14500, checkpoint after the Tier-1 pass work
 
 `d638c08` against Kakadu 8.4.1, interleaved wall time on a quiet host
