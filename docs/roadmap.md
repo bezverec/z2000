@@ -119,12 +119,48 @@ threaded output, current four-codec interop, documented CLI/API boundaries, and
 reproducible benchmark provenance. The detailed policy is in
 [`versioning.md`](versioning.md).
 
+### 6. HTJ2K (Part 15) For The 0.3.0 Line
+
+[ITU-T T.814 | ISO/IEC 15444-15](https://www.itu.int/rec/T-REC-T.814/en)
+replaces only the Part 1 block coder: the HT coder codes all magnitude
+bit-planes above a chosen one in a single Cleanup pass of 2x2 quads, from
+three loosely coupled byte-streams (raw MagSgn bits, MEL run lengths, and
+context VLC codes for significance and exponent bounds), plus at most one
+SigProp and one MagRef refinement pass, all without arithmetic coding.
+WG1's primer ([N87018](https://ds.jpeg.org/whitepapers/jpeg-htj2k-whitepaper.pdf))
+measures about 10x the Part 1 throughput at professional rates and about 30x
+lossless, for 5-10% larger files and no quality scalability; transcoding
+between HT and Part 1 blocks is lossless in the quantized domain. DWT, MCT,
+quantization, tiles, precincts, packets, progression orders, resolution
+reduction, and regions are unchanged, so z2000's Tier-2, transform, and
+threading stack carries over. HT gives no speed-up for existing Part 1
+archives; it serves new HT content and transcoding.
+
+Order, each step under the normal slice gates:
+
+1. Signalling: a Part 15 CAP fails closed as unsupported (done, 2026-10-27);
+   then parse Ccap15, CPF, and the HT bits of SPcod/SPcoc, accepting the
+   HTONLY, SINGLEHT set first and keeping MIXED and MULTIHT closed.
+2. HT block decoder: Cleanup (MEL, CxtVLC tables of Annex C, U-VLC, MagSgn),
+   SigProp, MagRef, and the Annex B packet rules (HT segments, placeholder
+   passes, Lblock). Evidence: the WG1 HT conformance streams already in the
+   Part 4 checkout (`htj2k_bsets_profile0/1`, 23 sets, and `testfiles_jph`
+   with references), Kakadu 8.4.1 (`Cmodes=HT`) fixtures, and OpenJPEG,
+   Grok, Kakadu, and OpenJPH as decoders.
+3. JPH file format: the `jph ` brand and parametrized (H.273) colour.
+4. HT block encoder: lossless first (one Cleanup pass at bit-plane 0), then
+   quantization-driven lossy, then `--rates` through complexity control
+   (two HT sets generated, at most three passes kept per block).
+5. Later: MIXED and MULTIHT streams and lossless JP2 <-> JPH transcoding,
+   which z2000 can do at the quantized-sample level with both block coders.
+
 ## Path To A General-Purpose Part 1 Codec
 
 The next product target is a general-purpose JPEG 2000 Part 1 codestream and
 JP2 codec, not an attempt to claim the entire JPEG 2000 family at once. Part 1
 defines the core codestream and JP2 file format; JPX/Part 2 and HTJ2K/Part 15
-are separate standards and therefore separate future programs. The target is
+are separate standards and therefore separate programs (HTJ2K is section 6
+above). The target is
 grounded in the [T.800 marker and syntax inventory](https://www.itu.int/dms_pubrec/itu-t/rec/t/T-REC-T.800-201906-S%21%21TOC-HTM-E.htm),
 the [JPEG 2000 standards overview](https://jpeg.org/jpeg2000/index.html), and
 the [Part 4 conformance framework](https://www.iso.org/standard/85636.html).
@@ -452,6 +488,7 @@ formal certification must remain distinct from internal test success.
 - unchecked architecture-specific fast paths.
 
 JPX composition and other Part 2-only box/codestream extensions, arbitrary
-multiple-component transforms, floating-point extensions, HTJ2K/Part 15,
-MJ2, JPM, and JPIP remain outside the Part 1/JP2 1.0 target. Each needs its own
-scope, corpus, interoperability matrix, and release claim after G7.
+multiple-component transforms, floating-point extensions, MJ2, JPM, and JPIP
+remain outside the Part 1/JP2 1.0 target. Each needs its own scope, corpus,
+interoperability matrix, and release claim after G7. HTJ2K/Part 15 is a
+separate program as well, planned for the 0.3.0 line (section 6).

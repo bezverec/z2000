@@ -113,6 +113,26 @@ pub fn validateCap(payload: []const u8) Error!void {
     if (payload.len != expected_len) return Error.InvalidCodestream;
 }
 
+/// Pcap^15 (the fifteenth most significant Pcap bit): the codestream uses the
+/// ISO/IEC 15444-15 high-throughput (HTJ2K) block coder.
+pub const pcap_part15: u32 = 1 << (32 - 15);
+
+/// Whether a CAP payload accepted by `validateCap` declares Part 15.
+pub fn capDeclaresHighThroughput(payload: []const u8) bool {
+    return (readU32Be(payload, 0) & pcap_part15) != 0;
+}
+
+/// Rejects a CAP payload accepted by `validateCap` that declares Part 15. An
+/// HTJ2K codestream continues with syntax Part 1 does not define (the CPF
+/// marker, the HT bits of SPcod and SPcoc), so a Part 1 decoder reports it
+/// as unsupported here rather than as malformed later; without the Rsiz
+/// bit 14 that T.814 A.2 requires, the declaration itself is malformed.
+pub fn rejectHighThroughputCap(rsiz: u16, payload: []const u8) Error!void {
+    if (!capDeclaresHighThroughput(payload)) return;
+    if ((rsiz & rsiz_cap_present) == 0) return Error.InvalidCodestream;
+    return Error.UnsupportedPayload;
+}
+
 /// Validate a PRF payload excluding Lprf. Words use little-word order; the
 /// final word must be nonzero so the representation is canonical. The numeric
 /// value need not be materialized because every current PRF number is outside
@@ -135,6 +155,11 @@ fn readU32Be(bytes: []const u8, offset: usize) u32 {
 
 test "CAP payload count follows Pcap population" {
     try validateCap(&.{ 0x80, 0x00, 0x00, 0x01, 0x12, 0x34, 0xab, 0xcd });
+    try std.testing.expect(!capDeclaresHighThroughput(&.{ 0x80, 0x00, 0x00, 0x01, 0x12, 0x34, 0xab, 0xcd }));
+    try std.testing.expect(capDeclaresHighThroughput(&.{ 0x00, 0x02, 0x00, 0x00, 0x00, 0x03 }));
+    try rejectHighThroughputCap(rsiz_cap_present, &.{ 0x80, 0x00, 0x00, 0x01, 0x12, 0x34, 0xab, 0xcd });
+    try std.testing.expectError(Error.UnsupportedPayload, rejectHighThroughputCap(rsiz_cap_present, &.{ 0x00, 0x02, 0x00, 0x00, 0x00, 0x03 }));
+    try std.testing.expectError(Error.InvalidCodestream, rejectHighThroughputCap(0, &.{ 0x00, 0x02, 0x00, 0x00, 0x00, 0x03 }));
     try std.testing.expectError(Error.InvalidCodestream, validateCap(&.{ 0, 0, 0, 0, 0, 0 }));
     try std.testing.expectError(Error.InvalidCodestream, validateCap(&.{ 0x80, 0, 0, 1, 0, 1 }));
     try std.testing.expectError(Error.InvalidCodestream, validateCap(&.{ 0x80, 0, 0, 0, 0, 1, 0 }));

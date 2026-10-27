@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### HTJ2K Codestreams Fail Closed As Unsupported
+
+- A raw codestream whose CAP declares ISO/IEC 15444-15 (HTJ2K) is now
+  rejected with `UnsupportedPayload` at the CAP. It used to fail as
+  `InvalidCodestream` at the first Part 15 syntax Part 1 does not define:
+  the CPF marker of the WG1 HT conformance streams, or the HT bit of the
+  code-block style in Kakadu's. All 40 WG1 HT codestreams now report
+  `UnsupportedPayload` from `j2k-to-pgx` and `j2k-to-zraw`; JPH files were
+  already refused as an unsupported profile. A 434-byte Kakadu 8.4.1
+  `Cmodes=HT` RGB fixture joins the unit tests and the Part 1 corpus as an
+  expected unsupported entry, and a synthetic CAP plus CPF header joins the
+  profile signalling test. HTJ2K support is planned for the 0.3.0 line
+  (`roadmap.md`, section 6).
+
 ## 0.2.0-rc.7 — 2026-10-27
 
 ### Threaded Reduced Decodes No Longer Fail The Coverage Check

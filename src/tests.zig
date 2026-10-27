@@ -14622,6 +14622,28 @@ test "planar multi-tile decode accepts every progression order" {
     }
 }
 
+test "HTJ2K codestreams fail closed as unsupported" {
+    const allocator = std.testing.allocator;
+    // Kakadu 8.4.1 `Creversible=yes Cmodes=HT` encode of a 32x24 RGB
+    // gradient: its CAP declares Part 15 and its COD the HT block coder
+    // (SPcod bit 6). Every raw-codestream decoder used to report it as
+    // InvalidCodestream, at the HT code-block style or, in the WG1 HT
+    // conformance streams, at the CPF marker; it is valid, only not decoded.
+    const stream = @embedFile("testdata/kakadu-ht-rgb.j2c");
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessNativeWithOptions(allocator, stream, .{}, .{}),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessTemporaryWithOptions(allocator, stream, .{}),
+    );
+    try std.testing.expectError(
+        codestream.CodestreamError.UnsupportedPayload,
+        codestream.decodeLosslessPlanar(allocator, stream),
+    );
+}
+
 test "reduced decode skips a tile that has no samples left" {
     const allocator = std.testing.allocator;
     // 47-wide tiles over a 48-wide image at x0 = 3 leave a one-sample edge

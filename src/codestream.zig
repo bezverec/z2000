@@ -8664,6 +8664,7 @@ fn readStrictCodestreamMetadataForProfile(
             saw_siz = true;
         } else if (marker == @backingInt(Marker.cap)) {
             try profile_signaling.validateCap(segment);
+            try profile_signaling.rejectHighThroughputCap(profile_state.?.rsiz, segment);
         } else if (marker == @backingInt(Marker.prf)) {
             try profile_signaling.validatePrf(segment);
         } else if (marker == @backingInt(Marker.cod)) {
@@ -9665,6 +9666,19 @@ test "strict main-header profile signaling validates CAP PRF and Rsiz" {
     try std.testing.expectError(
         CodestreamError.UnsupportedPayload,
         readStrictCodestreamMetadata(allocator, extended_prf),
+    );
+
+    // A Part 15 (HTJ2K) CAP followed by a CPF marker, as the WG1 HT
+    // conformance streams have it: unsupported at the CAP, not malformed at
+    // the CPF Part 1 does not define.
+    const high_throughput = try strictProfileSignalingFixture(allocator, base, profile_signaling.rsiz_cap_present, &.{
+        0xff, 0x50, 0x00, 0x08, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
+        0xff, 0x59, 0x00, 0x04, 0x00, 0x02,
+    });
+    defer allocator.free(high_throughput);
+    try std.testing.expectError(
+        CodestreamError.UnsupportedPayload,
+        readStrictCodestreamMetadata(allocator, high_throughput),
     );
 }
 

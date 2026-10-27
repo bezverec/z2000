@@ -140,7 +140,7 @@ concise docs, and benchmark provenance green. See `versioning.md`.
 
 The final `v0.2.0` is prepared: its notes are drafted in
 `docs/releases/v0.2.0.md`, and it will be published from `main` (rc.7's
-code) with `tools/release_local.ps1 -Tag v0.2.0 -SkipMacos -CreateDraft`
+code plus the HTJ2K fail-closed error change) with `tools/release_local.ps1 -Tag v0.2.0 -SkipMacos -CreateDraft`
 once rc.7 has been out for a short test period without reported problems.
 The reporter of the rc.6 reduced-decode failure reran their integration on
 2026-10-27 (the official rc.7 Linux CLI and a source-built library behind
@@ -1066,8 +1066,19 @@ correctness slices:
    helpers are not on the production decode path, and the persistent DWT pool
    already has positive benchmark evidence.
 
-After this gate, scope JPX/Part 2, HTJ2K/Part 15, MJ2/JPM, or JPIP as separate
-programs rather than silently broadening the Part 1 claim.
+After this gate, scope JPX/Part 2, MJ2/JPM, or JPIP as separate programs
+rather than silently broadening the Part 1 claim.
+
+### 10. HTJ2K / Part 15 — The 0.3.0 Line
+
+HTJ2K is the planned main program after `v0.2.0` (`roadmap.md`, section 6,
+has the order and the evidence). Done, 2026-10-27: a Part 15 CAP fails
+closed as `UnsupportedPayload` instead of `InvalidCodestream`, pinned by a
+Kakadu `Cmodes=HT` fixture in the unit tests and the corpus. Next: parse
+Ccap15, CPF, and the HT code-block style bits (HTONLY and SINGLEHT first),
+then the HT block decoder against the WG1 HT conformance sets already in
+the Part 4 checkout (`htj2k_bsets_profile0/1`, `testfiles_jph`), then JPH,
+then the HT encoder, lossless first.
 
 ## Parallel Performance Track
 

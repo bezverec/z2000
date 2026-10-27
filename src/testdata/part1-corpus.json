@@ -5265,6 +5265,25 @@
           "max_mse": 0.0
         }
       ]
+    },
+    {
+      "id": "kakadu-htj2k-unsupported",
+      "path": "src/testdata/kakadu-ht-rgb.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "c3af3da00af1a9d09882f94f121883ca82d46eb19986d8eba00f26125d4a3bb3",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "locally generated 32x24 RGB gradient; kdu_compress Creversible=yes Cmodes=HT -num_threads 0",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed"
+      },
+      "oracle": "CAP declares ISO/IEC 15444-15 (Pcap15) and COD the HT block coder; a Part 1 decoder must reject it as unsupported, not as malformed",
+      "features": ["plm-cap-prf", "reversible-53"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload"
     }
   ]
 }
