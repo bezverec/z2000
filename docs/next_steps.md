@@ -141,9 +141,13 @@ concise docs, and benchmark provenance green. See `versioning.md`.
 The final `v0.2.0` is prepared: its notes are drafted in
 `docs/releases/v0.2.0.md`, and it will be published from `main` (rc.7's
 code) with `tools/release_local.ps1 -Tag v0.2.0 -SkipMacos -CreateDraft`
-once rc.7 has been out for a short test period without reported problems,
-in particular once the reporter of the rc.6 reduced-decode failure has
-rerun their integration scenarios. At publication
+once rc.7 has been out for a short test period without reported problems.
+The reporter of the rc.6 reduced-decode failure reran their integration on
+2026-10-27 (the official rc.7 Linux CLI and a source-built library behind
+their image server, six RGB JP2s): all 60 CLI cases at `--reduce` 1 to 5
+on 1, 2, 4, and 20 threads byte-identical to one thread, all 60 rendering
+scenarios on four threads pixel-exact to one thread and to rc.6 on one, and
+no failed request in their timing, concurrency, and memory runs. At publication
 the changelog's unreleased entries move under `0.2.0`, README and
 `versioning.md` point at the release, and `VERSION` then advances to the
 next planned line (`0.3.0`).
@@ -1085,6 +1089,16 @@ branch-free MQ coding and significance-pass bitmaps, 0.78x (lossless) and
 0.85x (lossy) at t1 and level at t20; see `benchmarks.md` and
 `optimization_plan.md`. Reopen broad T1 SWAR/packed-column work only with a
 new layout hypothesis and the normal keep rule.
+
+The same rc.7 integration report (four CPUs, its own RGB `u16` bridge, not
+the RGB8 raster API) shows two weaknesses for the `0.3.0` line. Small
+reduced windows: a 512-square window reduced to 128 takes about 49 ms on
+four threads against Grok's 23 ms on one, and four such windows at once
+74 ms against 28 ms, which points at fixed per-decode cost (whole
+codestream parse, block catalog, coverage checks) rather than Tier-1.
+Peak memory: four concurrent near-full previews peak at about 785 MiB of
+process RSS against Grok's 303 MiB and OpenJPEG's 512 MiB. Both need a
+profile of the per-request path before any change.
 
 ## Gate For Every Slice
 
