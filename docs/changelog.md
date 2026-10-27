@@ -5,6 +5,8 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+## 0.2.0-rc.7 — 2026-10-27
+
 ### Threaded Reduced Decodes No Longer Fail The Coverage Check
 
 - Fixed: every resolution-reduced decode on more than one thread failed with

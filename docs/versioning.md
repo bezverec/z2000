@@ -95,13 +95,14 @@ should prefer a full clone so the default commit count remains meaningful.
 - Keep release tags in the form `vMAJOR.MINOR.PATCH`; the current line is
   `v0.2.0`.
 - Keep prerelease tags in the form `vMAJOR.MINOR.PATCH-rc.N`; the current
-  candidate line began with `v0.2.0-rc.1`, and `v0.2.0-rc.6` is the current
-  candidate; it carries rc.5's formats with faster encode and decode and a
-  threaded 9/7 fix (rc.5 carried rc.4's with faster decode; rc.4 replaced
-  rc.3, which ended quality layers at undecodable pass lengths; rc.3
-  replaced rc.2, which rejected Part 1 profile streams). A final `v0.2.0`
-  follows from the rc.6 commit family if candidate feedback needs no fixes;
-  otherwise the next publication is `v0.2.0-rc.7`.
+  candidate line began with `v0.2.0-rc.1`, and `v0.2.0-rc.7` is the current
+  candidate; it replaces rc.6, which rejected resolution-reduced decodes on
+  more than one thread (rc.6 carried rc.5's formats with faster encode and
+  decode and a threaded 9/7 fix; rc.5 carried rc.4's with faster decode;
+  rc.4 replaced rc.3, which ended quality layers at undecodable pass
+  lengths; rc.3 replaced rc.2, which rejected Part 1 profile streams). A
+  final `v0.2.0` follows from the rc.7 commit family if candidate feedback
+  needs no fixes; otherwise the next publication is `v0.2.0-rc.8`.
 - Do not reset or hand-edit `BUILD`; it is derived from repository history.
 
 The `VERSION` file names the next release line during development. After a
@@ -147,7 +148,7 @@ release; publishing it stays a manual step. `-SkipGates` and
 run from a local commit but cannot be combined with `-CreateDraft`.
 
 ```powershell
-.\tools\release_local.ps1 -Tag v0.2.0-rc.6 -MacosRunId <run id> -CreateDraft
+.\tools\release_local.ps1 -Tag v0.2.0-rc.7 -MacosRunId <run id> -CreateDraft
 ```
 
 The `Release` GitHub Actions workflow remains an optional reproducibility

@@ -139,15 +139,24 @@ gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
 The final `v0.2.0` is prepared: its notes are drafted in
-`docs/releases/v0.2.0.md`, and it will be published from `main` (rc.6's code
-plus the coarser 5/3 levels inside Tier-1, byte-identical output, and the
-fix for threaded reduced decodes, which rc.5 and rc.6 rejected; first
-report from the rc.6 test period, 2026-10-27) with
-`tools/release_local.ps1 -Tag v0.2.0 -SkipMacos -CreateDraft` once rc.6 has
-been out for a short test period without further reported problems. At publication
+`docs/releases/v0.2.0.md`, and it will be published from `main` (rc.7's
+code) with `tools/release_local.ps1 -Tag v0.2.0 -SkipMacos -CreateDraft`
+once rc.7 has been out for a short test period without reported problems,
+in particular once the reporter of the rc.6 reduced-decode failure has
+rerun their integration scenarios. At publication
 the changelog's unreleased entries move under `0.2.0`, README and
 `versioning.md` point at the release, and `VERSION` then advances to the
 next planned line (`0.3.0`).
+
+`v0.2.0-rc.7` is prepared on 2026-10-27 for `tools/release_local.ps1` in
+the same way as rc.6. The rc.6 test period brought one report: every
+resolution-reduced decode on more than one thread failed with
+`InvalidCodestream` once a plane was tall enough for two row bands of the
+block coverage check (rc.5 and rc.6; a 2761x3870 Grok 9/7 RGB JP2). rc.7
+is rc.6 with that fix and the coarser 5/3 levels inside Tier-1
+(byte-identical codestreams); it changes no format or CLI behaviour. Before
+it, on 2026-10-27, the same interop scripts as for rc.6 passed, and
+`wide_encode_interop.py` at 1 to 34 bits gave rc.6's results exactly.
 
 `v0.2.0-rc.6` was published on 2026-10-26 from commit `ea92249` (build 679).
 `tools/release_local.ps1` assembled it like rc.5 (a first run stopped on a
