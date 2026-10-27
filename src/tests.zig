@@ -14658,6 +14658,44 @@ test "reduced decode skips a tile that has no samples left" {
     }
 }
 
+test "threaded reduced decode checks coverage only where rows are required" {
+    const allocator = std.testing.allocator;
+    // The block coverage check splits each plane's rows into bands, one per
+    // thread, and checks every band's share of the rows a reduced decode
+    // needs. A band that started below that area produced a reversed row
+    // range, so every reduced decode on more than one thread failed with
+    // InvalidCodestream once a plane was tall enough for a second band
+    // (v0.2.0-rc.5 and rc.6, reported against a 2761x3870 RGB JP2).
+    const width = 96;
+    const height = 256;
+    var gray_samples: [width * height]u16 = undefined;
+    for (&gray_samples, 0..) |*sample, index| sample.* = @intCast((index * 37 + index / width * 11) & 0xff);
+    const gray = image.GrayImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .samples = &gray_samples };
+    const gray_stream = try codestream.encodeLosslessGrayWithOptions(allocator, gray, .{ .levels = 3, .mct = .none, .tile_part_divisions = null });
+    defer allocator.free(gray_stream);
+
+    var rgb_samples: [width * height * 3]u16 = undefined;
+    for (&rgb_samples, 0..) |*sample, index| sample.* = @intCast((index * 13 + index / (width * 3) * 7) & 0xff);
+    const rgb = image.RgbImage{ .allocator = allocator, .width = width, .height = height, .bit_depth = 8, .samples = &rgb_samples };
+    const rgb_stream = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 3 });
+    defer allocator.free(rgb_stream);
+
+    for ([_]u8{ 1, 2, 3 }) |reduction| {
+        var serial = try codestream.decodeLosslessNativeWithOptions(allocator, gray_stream, .{ .threads = 1, .resolution_reduction = reduction }, .{});
+        defer serial.deinit();
+        var serial_rgb = try codestream.decodeLosslessTemporaryWithOptions(allocator, rgb_stream, .{ .threads = 1, .resolution_reduction = reduction });
+        defer serial_rgb.deinit();
+        for ([_]u8{ 2, 4, 8 }) |threads| {
+            var parallel = try codestream.decodeLosslessNativeWithOptions(allocator, gray_stream, .{ .threads = threads, .resolution_reduction = reduction }, .{});
+            defer parallel.deinit();
+            try std.testing.expectEqualSlices(i64, serial.planes[0].samples, parallel.planes[0].samples);
+            var parallel_rgb = try codestream.decodeLosslessTemporaryWithOptions(allocator, rgb_stream, .{ .threads = threads, .resolution_reduction = reduction });
+            defer parallel_rgb.deinit();
+            try std.testing.expectEqualSlices(u16, serial_rgb.samples, parallel_rgb.samples);
+        }
+    }
+}
+
 test "native decode accepts irreversible 9/7 components" {
     const allocator = std.testing.allocator;
     // The native decoder -- and with it `j2k-to-pgx` and `j2k-to-zraw` -- used

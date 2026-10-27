@@ -5,6 +5,21 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Threaded Reduced Decodes No Longer Fail The Coverage Check
+
+- Fixed: every resolution-reduced decode on more than one thread failed with
+  `InvalidCodestream` once a component plane was tall enough to be checked
+  in more than one row band (in `v0.2.0-rc.5` and `rc.6`; reported with a
+  2761x3870 Grok 9/7 RGB JP2 at `--reduce 1` to `5`). The block coverage
+  check (`validateStrictCoverageInBands`) checks each band's share of the
+  rows a reduced decode needs; a band that started below them produced a
+  reversed row range, an integer overflow in safe builds and a spurious
+  failure in ReleaseFast. Such a band now only marks its blocks, which
+  still catches overlaps. Decoded samples are unchanged for every input
+  that decoded before; the reported file now decodes identically on 1, 2,
+  4, and 20 threads at every reduction. A unit test compares 2-, 4- and
+  8-thread reduced decodes of a 96x256 plane and RGB image with 1-thread.
+
 ### Coarser Forward 5/3 Levels Inside The Tier-1 Phase
 
 - On more than three threads a lossless encode transforms only the first

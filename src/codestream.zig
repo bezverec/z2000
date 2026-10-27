@@ -17534,7 +17534,9 @@ fn validateStrictCoverageInBands(
                     const clipped = subband.Rect{ .x = rect.x, .y = top - first_row, .width = rect.width, .height = bottom - top };
                     markStrictRectCoveredBits(covered, row_words, plane.width, rows, clipped) catch return false;
                 }
-                for (first_row..@min(end_row, plane.required_height)) |y| {
+                // Rows below the required area are only marked: a band can
+                // start there, and then has no rows to check.
+                for (first_row..@max(first_row, @min(end_row, plane.required_height))) |y| {
                     const row_start = (y - first_row) * row_words;
                     for (0..required_row_words) |word| {
                         const expected = if (word + 1 == required_row_words) last_word_mask else full_word;
