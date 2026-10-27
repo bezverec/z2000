@@ -148,8 +148,16 @@ the changelog's unreleased entries move under `0.2.0`, README and
 `versioning.md` point at the release, and `VERSION` then advances to the
 next planned line (`0.3.0`).
 
-`v0.2.0-rc.7` is prepared on 2026-10-27 for `tools/release_local.ps1` in
-the same way as rc.6. The rc.6 test period brought one report: every
+`v0.2.0-rc.7` was published on 2026-10-27 from commit `c6fb074` (build 686).
+`tools/release_local.ps1` assembled it like rc.6, in one clean run: native
+Windows Debug and ReleaseFast suites (655 tests each), the corpus with all
+optional T.803 streams (127 passes, 19 expected rejections, no mismatch),
+and the Linux x86-64 and RISC-V 64 ReleaseFast suites in an `alpine:3.22`
+container. Every binary reports `0.2.0-rc.7+build.686.gc6fb0749` under both
+CLI names, one fixture converts to identical bytes on all three platforms,
+and `SHA256SUMS` covers the Windows, Linux x86-64, and Linux RISC-V
+archives. It has no macOS archive: hosted Actions minutes are still
+exhausted. The rc.6 test period brought one report: every
 resolution-reduced decode on more than one thread failed with
 `InvalidCodestream` once a plane was tall enough for two row bands of the
 block coverage check (rc.5 and rc.6; a 2761x3870 Grok 9/7 RGB JP2). rc.7
