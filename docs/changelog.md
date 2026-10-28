@@ -5,6 +5,25 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### HT Rate Targets (0.3.0 line)
+
+- `--rates` now works with `--ht`. Each block offers an HT set at every
+  cleanup plane from 0 to its top bit-plane, with its SigProp and MagRef
+  passes and the distortion each pass leaves; one slope threshold picks a
+  set and its passes per block for the final rate, and the earlier layers
+  take passes of that set (SINGLEHT, the refinement segment kept whole in
+  one layer). The ratios are of the lossless or fully quantized HT payload,
+  as for Part 1, but the final rate is met too, so `--ht --rates 8` writes
+  an eighth. At equal sizes the 2048x2048 RGB image decodes within 0.1 to
+  0.4 dB of Kakadu's `Cmodes=HT -rate` with the 5/3 transform and at or
+  above it with the 9/7; Kakadu and Grok decode the streams exactly as
+  z2000 does. Coding every set makes the encode about 10x a lossless one.
+- The HT encoder writes SigProp and MagRef passes (T.814 7.4, 7.5), a
+  SigProp stream ending in 0xFF padded with a zero byte so that the
+  refinement segment keeps the codeword segment rules.
+- One tile of the multi-tile encoder codes its blocks on all threads, which
+  only the single-tile planar path and HT rate targets use.
+
 ### 9/7 Quality Setting (0.3.0 line)
 
 - `--qstep STEP` sets the 9/7 base step relative to the sample range, as

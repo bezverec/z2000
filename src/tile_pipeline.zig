@@ -233,6 +233,7 @@ pub const EncodedComponentBlock = struct {
             .payload = self.segment.bytes,
             .segments = if (self.segment.segments) |segments| segments else &.{},
             .bypass = self.bypass,
+            .high_throughput = self.segment.high_throughput,
         };
     }
 };
@@ -1699,7 +1700,8 @@ fn encodeComponentBlockIsoMqInternal(
         owned_segment.deinit(allocator);
     }
     var pass_distortions: []f64 = &.{};
-    if (capture_distortions and !actual_style.terminate_all) {
+    // HT candidate sets carry their own distortions.
+    if (capture_distortions and !actual_style.terminate_all and segment.ht_sets == null) {
         pass_distortions = try allocator.dupe(f64, distortion_scratch[0..segment.pass_count]);
     }
     return .{
@@ -1716,7 +1718,112 @@ pub fn buildEncodedBlockCatalogIsoMq(
     rct_tile: RctTile,
     style: ebcot.CodeBlockStyle,
 ) !EncodedBlockCatalog {
-    return buildEncodedBlockCatalogIsoMqInternal(allocator, scaffold, rct_tile, style, false);
+    return buildEncodedBlockCatalogIsoMqInternal(allocator, scaffold, rct_tile, style, false, 1);
+}
+
+/// One worker of a tile's code-blocks coded on several threads: blocks
+/// taken by index, each stored at its own, so the catalog never depends on
+/// the order.
+const TileBlockWorker = struct {
+    allocator: std.mem.Allocator,
+    jobs: []const ComponentBlock,
+    rct_tile: RctTile,
+    style: ebcot.CodeBlockStyle,
+    capture_distortions: bool,
+    layers: u16,
+    blocks: []EncodedComponentBlock,
+    coded: []bool,
+    next_block: *std.atomic.Value(usize),
+    result: anyerror!void = {},
+
+    fn run(self: *TileBlockWorker) void {
+        var scratch = ebcot.DirectBlockScratch.init(self.allocator);
+        defer scratch.deinit();
+        while (true) {
+            const index = self.next_block.fetchAdd(1, .monotonic);
+            if (index >= self.jobs.len) return;
+            self.blocks[index] = self.code(self.jobs[index], &scratch) catch |err| {
+                self.result = err;
+                // Stop the other workers at their next block.
+                self.next_block.store(self.jobs.len, .monotonic);
+                return;
+            };
+            self.coded[index] = true;
+        }
+    }
+
+    fn code(self: *TileBlockWorker, job: ComponentBlock, scratch: *ebcot.DirectBlockScratch) !EncodedComponentBlock {
+        const view = try job.view(self.rct_tile);
+        var encoded = try encodeComponentBlockIsoMqInternal(self.allocator, view, self.style, self.capture_distortions, scratch);
+        errdefer encoded.deinit(self.allocator);
+        encoded.layers = try computeLayerTruncations(self.allocator, encoded.segment, self.layers);
+        return encoded;
+    }
+};
+
+fn buildEncodedBlockCatalogIsoMqParallel(
+    allocator: std.mem.Allocator,
+    scaffold: PacketScaffold,
+    rct_tile: RctTile,
+    style: ebcot.CodeBlockStyle,
+    capture_distortions: bool,
+    worker_count: usize,
+) !EncodedBlockCatalog {
+    const total_blocks = try scaffold.componentBlockCount();
+    const jobs = try allocator.alloc(ComponentBlock, total_blocks);
+    defer allocator.free(jobs);
+    var iterator = scaffold.componentBlockIterator();
+    var job_count: usize = 0;
+    while (try iterator.next()) |job| {
+        if (job_count == total_blocks) return PacketScaffoldError.InvalidComponentBlock;
+        jobs[job_count] = job;
+        job_count += 1;
+    }
+    if (job_count != total_blocks) return PacketScaffoldError.InvalidComponentBlock;
+
+    const blocks = try allocator.alloc(EncodedComponentBlock, total_blocks);
+    errdefer allocator.free(blocks);
+    const coded = try allocator.alloc(bool, total_blocks);
+    defer allocator.free(coded);
+    @memset(coded, false);
+    errdefer for (blocks, coded) |*block, is_coded| {
+        if (is_coded) block.deinit(allocator);
+    };
+
+    var next_block = std.atomic.Value(usize).init(0);
+    const workers = try allocator.alloc(TileBlockWorker, worker_count);
+    defer allocator.free(workers);
+    for (workers) |*worker| worker.* = .{
+        .allocator = allocator,
+        .jobs = jobs,
+        .rct_tile = rct_tile,
+        .style = style,
+        .capture_distortions = capture_distortions,
+        .layers = scaffold.layers,
+        .blocks = blocks,
+        .coded = coded,
+        .next_block = &next_block,
+    };
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < threads.len) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, TileBlockWorker.run, .{&workers[spawned]}) catch break;
+    }
+    // The calling thread works too, and alone if no thread could start.
+    workers[worker_count - 1].run();
+    for (threads[0..spawned]) |thread| thread.join();
+    for (workers) |worker| try worker.result;
+    for (coded) |is_coded| {
+        if (!is_coded) return PacketScaffoldError.InvalidComponentBlock;
+    }
+    return .{
+        .allocator = allocator,
+        .tile = scaffold.tile,
+        .components = scaffold.components,
+        .component_block_count = scaffold.blocks.len,
+        .blocks = blocks,
+    };
 }
 
 fn buildEncodedBlockCatalogIsoMqInternal(
@@ -1725,9 +1832,13 @@ fn buildEncodedBlockCatalogIsoMqInternal(
     rct_tile: RctTile,
     style: ebcot.CodeBlockStyle,
     capture_distortions: bool,
+    threads: usize,
 ) !EncodedBlockCatalog {
     const block_count = scaffold.blocks.len;
     const total_blocks = try scaffold.componentBlockCount();
+    if (threads > 1 and total_blocks > 1) {
+        return buildEncodedBlockCatalogIsoMqParallel(allocator, scaffold, rct_tile, style, capture_distortions, @min(threads, total_blocks));
+    }
     const blocks = try allocator.alloc(EncodedComponentBlock, total_blocks);
     errdefer allocator.free(blocks);
 
@@ -1762,6 +1873,13 @@ fn buildEncodedBlockCatalogIsoMqInternal(
 
 const PcrdSpan = struct { start: usize, count: usize };
 
+/// Whether rate targets weigh the blocks: across several layers, or for HT
+/// blocks, whose one layer may keep a coarser HT set; a terminate-all
+/// segment keeps its passes.
+fn ratesNeedDistortions(rate_count: u8, layers: u16, style: ebcot.CodeBlockStyle) bool {
+    return rate_count > 0 and (layers > 1 or style.high_throughput) and !style.terminate_all;
+}
+
 /// Computes and stores each block's band-weighted per-pass distortion
 /// reductions while the tile's RCT planes are still alive; the grid-level
 /// global PCRD pass consumes them once every tile has been encoded.
@@ -1786,7 +1904,11 @@ fn storeCatalogPassDistortions(
             table[encoded.job.band.level][@backingInt(encoded.job.band.kind)]
         else
             pcrdBandWeight(encoded.job.band);
-        if (encoded.pass_distortions.len == pass_count) {
+        if (encoded.segment.ht_sets) |sets| {
+            for (sets.sets) |*set| {
+                for (&set.distortion) |*value| value.* *= weight;
+            }
+        } else if (encoded.pass_distortions.len == pass_count) {
             for (encoded.pass_distortions) |*value| value.* *= weight;
         } else {
             const plane = componentPlane(rct_tile, encoded.job.component) orelse return PacketScaffoldError.InvalidComponentBlock;
@@ -1820,8 +1942,9 @@ pub fn applyGridPcrdTargets(
 ) !void {
     if (options.rate_count == 0 or tiles.len == 0) return;
     const layer_count: usize = @intCast(tiles[0].scaffold.layers);
-    if (layer_count <= 1) return;
     if (options.rate_count > layer_count or layer_count > rate_alloc.max_layers) return PacketScaffoldError.InvalidLayer;
+    if (catalogsHoldHighThroughputSets(tiles)) return applyGridHighThroughputTargets(allocator, tiles, options);
+    if (layer_count <= 1) return;
 
     var block_count: usize = 0;
     var total_passes: usize = 0;
@@ -1896,6 +2019,158 @@ pub fn applyGridPcrdTargets(
 
         // The packet stream was built from the proportional pre-allocation;
         // rebuild it from the global truncations.
+        var stream = try buildTileRpclPacketStream(allocator, tile.scaffold, tile.catalog, tile.index, tile.bit_depth);
+        errdefer stream.deinit();
+        try reorderTilePacketStreamFromRpcl(
+            allocator,
+            &stream,
+            tile.scaffold.plan,
+            tile.scaffold.components,
+            tile.scaffold.layers,
+            options.packet_order,
+        );
+        try validateTilePacketStream(allocator, tile.scaffold, tile.catalog, tile.index, stream, tile.bit_depth, options.packet_order);
+        tile.stream.deinit();
+        tile.stream = stream;
+    }
+}
+
+fn catalogsHoldHighThroughputSets(tiles: []const TileRpclEncodeArtifacts) bool {
+    for (tiles) |tile| {
+        for (tile.catalog.blocks) |encoded| {
+            if (encoded.segment.high_throughput) return true;
+        }
+    }
+    return false;
+}
+
+/// `applyGridPcrdTargets` for HT code-blocks, which keep one HT set each
+/// (SINGLEHT). The rates are compression ratios of the lossless HT
+/// payload, every set's cleanup pass at plane 0, as for Part 1; unlike
+/// Part 1, the final layer meets its rate too, so that an HT stream has a
+/// size to aim for. One slope threshold picks, of every block, the set and
+/// the passes of it the final layer keeps, among all its candidate sets;
+/// the earlier layers then take passes of that set as Part 1 layers do.
+fn applyGridHighThroughputTargets(
+    allocator: std.mem.Allocator,
+    tiles: []TileRpclEncodeArtifacts,
+    options: PacketScaffoldOptions,
+) !void {
+    const layer_count: usize = @intCast(tiles[0].scaffold.layers);
+    var block_count: usize = 0;
+    var point_count: usize = 0;
+    var lossless_bytes: u64 = 0;
+    for (tiles) |tile| {
+        if (@as(usize, @intCast(tile.scaffold.layers)) != layer_count) return PacketScaffoldError.InvalidLayer;
+        for (tile.catalog.blocks) |encoded| {
+            block_count += 1;
+            if (encoded.segment.pass_count == 0) continue;
+            const sets = encoded.segment.ht_sets orelse return PacketScaffoldError.InvalidLayer;
+            lossless_bytes = std.math.add(u64, lossless_bytes, sets.sets[0].cleanup_length) catch
+                return PacketScaffoldError.InvalidLayer;
+            for (sets.sets) |set| point_count += set.pass_count;
+        }
+    }
+    if (block_count == 0) return;
+
+    var targets: [rate_alloc.max_layers]u64 = undefined;
+    rate_alloc.layerTargetsFromRates(
+        targets[0..layer_count],
+        lossless_bytes,
+        options.rates[0..options.rate_count],
+    ) catch return PacketScaffoldError.InvalidLayer;
+    if (options.rate_count == layer_count) {
+        targets[layer_count - 1] = @min(lossless_bytes, @as(u64, @intFromFloat(@ceil(@as(f64, @floatFromInt(lossless_bytes)) / options.rates[layer_count - 1]))));
+        for (targets[0 .. layer_count - 1]) |*target| target.* = @min(target.*, targets[layer_count - 1]);
+    }
+
+    // The final layer: a set and pass count per block, tagged 4 * set +
+    // passes.
+    const points = try allocator.alloc(rate_alloc.RatePoint, point_count);
+    defer allocator.free(points);
+    const offsets = try allocator.alloc(usize, block_count + 1);
+    defer allocator.free(offsets);
+    var cursor: usize = 0;
+    var slot: usize = 0;
+    for (tiles) |tile| {
+        for (tile.catalog.blocks) |encoded| {
+            offsets[slot] = cursor;
+            slot += 1;
+            const sets = encoded.segment.ht_sets orelse continue;
+            for (sets.sets, 0..) |set, set_index| {
+                if (set_index > std.math.maxInt(u16) / 4) return PacketScaffoldError.InvalidLayer;
+                for (1..@as(usize, set.pass_count) + 1) |passes| {
+                    points[cursor] = .{
+                        .bytes = set.cumulativeBytes(@intCast(passes)),
+                        .gain = set.distortion[0] - set.distortion[passes],
+                        .tag = @intCast(4 * set_index + passes),
+                    };
+                    cursor += 1;
+                }
+            }
+        }
+    }
+    offsets[block_count] = cursor;
+    const picked = try allocator.alloc(?u16, block_count);
+    defer allocator.free(picked);
+    rate_alloc.selectPointsForTarget(allocator, points[0..cursor], offsets, targets[layer_count - 1], picked) catch
+        return PacketScaffoldError.InvalidLayer;
+
+    // Keep each block's pick, then split it over the layers.
+    const pcrd_blocks = try allocator.alloc(rate_alloc.PcrdBlock, block_count);
+    defer allocator.free(pcrd_blocks);
+    const pass_values = try allocator.alloc(u64, 3 * block_count);
+    defer allocator.free(pass_values);
+    const pass_gains = try allocator.alloc(f64, 3 * block_count);
+    defer allocator.free(pass_gains);
+    slot = 0;
+    for (tiles) |tile| {
+        for (tile.catalog.blocks) |*encoded| {
+            const segment = &encoded.segment;
+            var passes: u2 = 0;
+            if (segment.ht_sets) |sets| {
+                const tag = picked[slot] orelse 0;
+                const set_index: usize = tag / 4;
+                passes = @intCast(tag % 4);
+                try ebcot.selectHighThroughputSet(allocator, segment, set_index, passes);
+                const set = sets.sets[set_index];
+                for (0..passes) |pass| {
+                    pass_values[3 * slot + pass] = set.cumulativeBytes(@intCast(pass + 1));
+                    pass_gains[3 * slot + pass] = set.distortion[pass] - set.distortion[pass + 1];
+                }
+                segment.ht_sets.?.deinit(allocator);
+                segment.ht_sets = null;
+            }
+            pcrd_blocks[slot] = .{
+                .pass_bytes = pass_values[3 * slot ..][0..passes],
+                .pass_distortion = pass_gains[3 * slot ..][0..passes],
+            };
+            slot += 1;
+        }
+    }
+    const out_passes = try allocator.alloc(u16, block_count * layer_count);
+    defer allocator.free(out_passes);
+    rate_alloc.allocatePcrdPasses(allocator, pcrd_blocks, targets[0..layer_count], out_passes) catch
+        return PacketScaffoldError.InvalidLayer;
+
+    slot = 0;
+    for (tiles) |*tile| {
+        for (tile.catalog.blocks) |*encoded| {
+            if (encoded.layers.len != layer_count) return PacketScaffoldError.InvalidLayer;
+            var previous = t2.LayerTruncation{ .cumulative_passes = 0, .cumulative_bytes = 0 };
+            for (encoded.layers, 0..) |*layer, layer_index| {
+                // Layers end where codeword segments do: after the cleanup
+                // pass or the whole refinement segment.
+                layer.* = try normalizedLayerTruncation(
+                    encoded.segment,
+                    out_passes[slot * layer_count + layer_index],
+                    previous,
+                    layer_index == layer_count - 1,
+                );
+                previous = layer.*;
+            }
+            slot += 1;
+        }
         var stream = try buildTileRpclPacketStream(allocator, tile.scaffold, tile.catalog, tile.index, tile.bit_depth);
         errdefer stream.deinit();
         try reorderTilePacketStreamFromRpcl(
@@ -2265,20 +2540,21 @@ fn buildTileRpclEncodeArtifactsFromTransformedTile(
     var scaffold_moved = false;
     errdefer if (!scaffold_moved) scaffold.deinit();
 
-    const capture_distortions = options.rate_count > 0 and scaffold.layers > 1 and !style.terminate_all;
+    const capture_distortions = ratesNeedDistortions(options.rate_count, scaffold.layers, style);
     var catalog = try buildEncodedBlockCatalogIsoMqInternal(
         allocator,
         scaffold,
         rct_tile,
         style,
         capture_distortions,
+        options.threads,
     );
     var catalog_moved = false;
     errdefer if (!catalog_moved) catalog.deinit();
     // Rate targets are applied globally across the whole tile grid after
     // every tile is encoded (applyGridPcrdTargets); store the per-pass
     // distortions now, while the tile's RCT planes are alive.
-    if (options.rate_count > 0 and scaffold.layers > 1) {
+    if (ratesNeedDistortions(options.rate_count, scaffold.layers, style)) {
         try storeCatalogPassDistortions(allocator, rct_tile, &catalog, style, scaffold.band_weights);
     }
     try validateEncodedBlockCatalogCoversTile(allocator, scaffold, catalog);
@@ -2596,12 +2872,15 @@ pub fn buildTileGridRpclEncodeArtifactsIsoMqParallel(
     worker_count: usize,
 ) !TileRpclEncodeGridArtifacts {
     if (worker_count <= 1 or grid.tileCount() <= 1) {
+        // One tile codes its blocks on the workers.
+        var tile_options = options;
+        if (grid.tileCount() == 1) tile_options.threads = @intCast(@min(worker_count, std.math.maxInt(u8)));
         return buildTileGridRpclEncodeArtifactsIsoMq(
             allocator,
             source,
             grid,
             requested_levels,
-            options,
+            tile_options,
             style,
         );
     }
@@ -3839,8 +4118,13 @@ fn initTilePacketReaderBandGroup(
     );
     var reader_moved = false;
     errdefer if (!reader_moved) reader_state.deinit();
-    reader_state.terminate_all = try encodedLayerBlocksUseTerminateAll(encoded);
-    reader_state.bypass = try encodedLayerBlocksUseBypass(encoded);
+    if (encoded.len != 0 and encoded[0].high_throughput) {
+        // HT blocks segment their contributions by HT segments.
+        for (reader_state.states) |*state| state.length_state.high_throughput = true;
+    } else {
+        reader_state.terminate_all = try encodedLayerBlocksUseTerminateAll(encoded);
+        reader_state.bypass = try encodedLayerBlocksUseBypass(encoded);
+    }
 
     encoded_moved = true;
     locations_moved = true;
@@ -4238,10 +4522,17 @@ const WideBlockWorker = struct {
         var actual_style = self.style;
         actual_style.band_kind = job.band.kind;
         if (actual_style.high_throughput) {
-            var encoded = EncodedComponentBlock{
-                .job = job,
-                .segment = try ebcot.encodeCodeBlockSegmentHighThroughputWide(scratch, self.planes[job.component], self.width, job.rect),
-            };
+            const segment = if (ratesNeedDistortions(options.rate_count, self.layers, actual_style)) blk: {
+                const sets_segment = try ebcot.encodeCodeBlockSegmentHighThroughputWideSets(scratch, self.planes[job.component], self.width, job.rect, actual_style.vertical_causal);
+                if (sets_segment.ht_sets) |sets| {
+                    const weight = pcrdBandWeight(job.band);
+                    for (sets.sets) |*set| {
+                        for (&set.distortion) |*value| value.* *= weight;
+                    }
+                }
+                break :blk sets_segment;
+            } else try ebcot.encodeCodeBlockSegmentHighThroughputWide(scratch, self.planes[job.component], self.width, job.rect);
+            var encoded = EncodedComponentBlock{ .job = job, .segment = segment };
             errdefer encoded.deinit(allocator);
             encoded.layers = try computeLayerTruncations(allocator, encoded.segment, self.layers);
             return encoded;
@@ -4260,7 +4551,7 @@ const WideBlockWorker = struct {
         const segment = try ebcot.encodeBlockViewSegmentIsoMq(allocator, view, actual_style);
         var encoded = EncodedComponentBlock{ .job = job, .segment = segment, .bypass = actual_style.bypass };
         errdefer encoded.deinit(allocator);
-        const capture_distortions = options.rate_count > 0 and options.layers > 1 and !self.style.terminate_all;
+        const capture_distortions = ratesNeedDistortions(options.rate_count, options.layers, self.style);
         if (capture_distortions and segment.pass_count > 0) {
             // From the symbols just coded, not a second generation.
             var distortions: [164]f64 = undefined;

@@ -192,22 +192,29 @@ pub const CodeBlockSegment = struct {
     /// Terminated codeword segment table for BYPASS-style multi-segment
     /// payloads; null means one continuous segment.
     segments: ?[]SegmentSpan = null,
-    /// An HT code-block (ITU-T T.814): one cleanup pass coding every
-    /// magnitude bit, `bitplanes` of them, down to bit-plane 0.
+    /// An HT code-block (ITU-T T.814): one HT set, its cleanup pass ending
+    /// at bit-plane `ht_plane` (0 codes every magnitude bit), with up to a
+    /// SigProp and a MagRef pass after it.
     high_throughput: bool = false,
+    ht_plane: u8 = 0,
+    /// A rate-targeted HT code-block's candidate sets, until
+    /// `selectHighThroughputSet` keeps one.
+    ht_sets: ?HighThroughputSets = null,
 
     pub fn deinit(self: *CodeBlockSegment, allocator: std.mem.Allocator) void {
         allocator.free(self.passes);
         allocator.free(self.bytes);
         if (self.segments) |segments| allocator.free(segments);
+        if (self.ht_sets) |*sets| sets.deinit(allocator);
         self.* = undefined;
     }
 
     /// The coded bit-planes the packet header signals, M_b less the missing
     /// MSBs: an HT cleanup pass ends at bit-plane `M_b - 1 - P` (T.814 B.3),
-    /// so a lossless HT block counts one whatever its magnitudes.
+    /// so an HT block counts its cleanup plane and one whatever its
+    /// magnitudes.
     pub fn signalledBitplanes(self: CodeBlockSegment) u8 {
-        return if (self.high_throughput and self.pass_count > 0) 1 else self.bitplanes;
+        return if (self.high_throughput and self.pass_count > 0) self.ht_plane + 1 else self.bitplanes;
     }
 
     pub fn truncationPointForPasses(self: CodeBlockSegment, pass_count: u16) !TruncationPoint {
@@ -216,6 +223,49 @@ pub const CodeBlockSegment = struct {
         return .{
             .cumulative_passes = pass_count,
             .cumulative_bytes = self.passes[pass_count - 1].cumulative_bytes,
+        };
+    }
+};
+
+/// The HT sets a rate-targeted HT code-block could keep: one for each
+/// cleanup plane from 0 to the block's top bit-plane, their bytes back to
+/// back (cleanup, then the refinement segment).
+pub const HighThroughputSets = struct {
+    bytes: []u8,
+    sets: []HighThroughputSet,
+
+    pub fn deinit(self: *HighThroughputSets, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+        allocator.free(self.sets);
+        self.* = undefined;
+    }
+
+    /// Set `index`'s bytes for its first `passes` coding passes.
+    pub fn passBytes(self: HighThroughputSets, index: usize, passes: u2) []const u8 {
+        const set = self.sets[index];
+        return self.bytes[set.offset..][0..set.cumulativeBytes(passes)];
+    }
+};
+
+pub const HighThroughputSet = struct {
+    plane: u8,
+    offset: usize,
+    cleanup_length: usize,
+    sig_prop_length: usize,
+    refinement_length: usize,
+    non_zero_count: u32,
+    /// `ht.Set.passCount`.
+    pass_count: u2,
+    /// The distortion with no pass and after each pass (`ht.Set`), weighted
+    /// for PCRD by the band once the catalog knows it.
+    distortion: [4]f64,
+
+    pub fn cumulativeBytes(self: HighThroughputSet, passes: u2) usize {
+        return switch (passes) {
+            0 => 0,
+            1 => self.cleanup_length,
+            2 => self.cleanup_length + self.sig_prop_length,
+            3 => self.cleanup_length + self.refinement_length,
         };
     }
 };
@@ -6006,9 +6056,11 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
     pass_distortions: []f64,
 ) !CodeBlockSegment {
     if (style.high_throughput) {
-        // One HT cleanup pass has no PCRD truncation points to weigh.
-        if (track_distortion) return EbcotError.InvalidBlock;
         if (scratch.high_throughput == null) scratch.high_throughput = ht.Encoder(i32).init(scratch.allocator);
+        // Rate targets weigh candidate HT sets, not passes of one set.
+        if (track_distortion) {
+            return encodeCodeBlockSegmentHighThroughputSets(i32, &scratch.high_throughput.?, source_plane, source_stride, source_rect, style.vertical_causal);
+        }
         return encodeCodeBlockSegmentHighThroughput(i32, &scratch.high_throughput.?, source_plane, source_stride, source_rect);
     }
     try validateImplementedStyleAllowBypass(style);
@@ -6195,6 +6247,128 @@ pub fn encodeCodeBlockSegmentHighThroughputWide(
 ) !CodeBlockSegment {
     if (scratch.high_throughput == null) scratch.high_throughput = ht.Encoder(i64).init(scratch.allocator);
     return encodeCodeBlockSegmentHighThroughput(i64, &scratch.high_throughput.?, plane, stride, rect);
+}
+
+/// `encodeCodeBlockSegmentHighThroughputSets` for the wide encoder.
+pub fn encodeCodeBlockSegmentHighThroughputWideSets(
+    scratch: *BlockScratch,
+    plane: []const i64,
+    stride: usize,
+    rect: subband.Rect,
+    vertical_causal: bool,
+) !CodeBlockSegment {
+    if (scratch.high_throughput == null) scratch.high_throughput = ht.Encoder(i64).init(scratch.allocator);
+    return encodeCodeBlockSegmentHighThroughputSets(i64, &scratch.high_throughput.?, plane, stride, rect, vertical_causal);
+}
+
+/// A rate-targeted HT code-block: every HT set it could keep, from cleanup
+/// plane 0 up to its top bit-plane, in `ht_sets`, the segment itself being
+/// the lossless set until `selectHighThroughputSet` keeps another.
+pub fn encodeCodeBlockSegmentHighThroughputSets(
+    comptime Coefficient: type,
+    encoder: *ht.Encoder(Coefficient),
+    plane: []const Coefficient,
+    stride: usize,
+    rect: subband.Rect,
+    vertical_causal: bool,
+) !CodeBlockSegment {
+    if (rect.width == 0 or rect.height == 0 or rect.width * rect.height > max_codeblock_area) return EbcotError.InvalidBlock;
+    const origin = std.math.add(usize, std.math.mul(usize, rect.y, stride) catch return EbcotError.InvalidBlock, rect.x) catch
+        return EbcotError.InvalidBlock;
+    if (origin > plane.len) return EbcotError.InvalidBlock;
+    const samples = plane[origin..];
+    const allocator = encoder.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var sets: std.ArrayList(HighThroughputSet) = .empty;
+    defer sets.deinit(allocator);
+    var bitplanes: u8 = 1;
+    var cleanup_plane: u8 = 0;
+    while (cleanup_plane < bitplanes) : (cleanup_plane += 1) {
+        const set = encoder.encodeSet(samples, stride, rect.width, rect.height, cleanup_plane, vertical_causal) catch |err| switch (err) {
+            error.InvalidBlock => return EbcotError.InvalidBlock,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (cleanup_plane == 0) {
+            if (set.cleanup.bitplanes == 0) {
+                return .{ .bitplanes = 0, .non_zero_count = 0, .pass_count = 0, .byte_length = 0, .passes = &.{}, .bytes = &.{}, .high_throughput = true };
+            }
+            bitplanes = set.cleanup.bitplanes;
+        }
+        try sets.append(allocator, .{
+            .plane = cleanup_plane,
+            .offset = bytes.items.len,
+            .cleanup_length = set.cleanup.bytes.len,
+            .sig_prop_length = set.sig_prop_length,
+            .refinement_length = set.refinement.len,
+            .non_zero_count = set.cleanup.non_zero_count,
+            .pass_count = set.passCount(),
+            .distortion = set.distortion,
+        });
+        try bytes.appendSlice(allocator, set.cleanup.bytes);
+        try bytes.appendSlice(allocator, set.refinement);
+    }
+    var segment = CodeBlockSegment{
+        .bitplanes = bitplanes,
+        .non_zero_count = 0,
+        .pass_count = 0,
+        .byte_length = 0,
+        .passes = &.{},
+        .bytes = &.{},
+        .high_throughput = true,
+        .ht_sets = .{ .bytes = try bytes.toOwnedSlice(allocator), .sets = undefined },
+    };
+    segment.ht_sets.?.sets = sets.toOwnedSlice(allocator) catch |err| {
+        allocator.free(segment.ht_sets.?.bytes);
+        return err;
+    };
+    errdefer segment.deinit(allocator);
+    try selectHighThroughputSet(allocator, &segment, 0, 1);
+    return segment;
+}
+
+/// Make `segment` the first `passes` coding passes of its candidate set
+/// `index`, keeping the candidates: the cleanup pass, then the refinement
+/// segment's SigProp and MagRef passes as one codeword segment, which the
+/// layers keep whole.
+pub fn selectHighThroughputSet(allocator: std.mem.Allocator, segment: *CodeBlockSegment, index: usize, passes: u2) !void {
+    const sets = segment.ht_sets orelse return EbcotError.InvalidBlock;
+    if (index >= sets.sets.len or passes > sets.sets[index].pass_count) return EbcotError.InvalidBlock;
+    const set = sets.sets[index];
+    const bytes = try allocator.dupe(u8, sets.passBytes(index, passes));
+    errdefer allocator.free(bytes);
+    const payloads = try allocator.alloc(CodeBlockPassPayload, passes);
+    errdefer allocator.free(payloads);
+    const kinds = [3]PassKind{ .cleanup, .significance, .refinement };
+    for (payloads, 0..) |*payload, pass| {
+        const start = set.cumulativeBytes(@intCast(pass));
+        const end = set.cumulativeBytes(@intCast(pass + 1));
+        payload.* = .{
+            .kind = kinds[pass],
+            .magnitude_bitplane = if (pass == 0) set.plane else set.plane - 1,
+            .symbol_count = set.non_zero_count,
+            .byte_offset = start,
+            .byte_length = end - start,
+            .cumulative_bytes = end,
+        };
+    }
+    var spans: ?[]SegmentSpan = null;
+    if (passes > 1) {
+        const table = try allocator.alloc(SegmentSpan, 2);
+        table[0] = .{ .pass_count = 1, .byte_length = set.cleanup_length };
+        table[1] = .{ .pass_count = passes - 1, .byte_length = set.cumulativeBytes(passes) - set.cleanup_length };
+        spans = table;
+    }
+    allocator.free(segment.passes);
+    allocator.free(segment.bytes);
+    if (segment.segments) |old| allocator.free(old);
+    segment.passes = payloads;
+    segment.bytes = bytes;
+    segment.segments = spans;
+    segment.pass_count = passes;
+    segment.byte_length = bytes.len;
+    segment.non_zero_count = if (passes == 0) 0 else set.non_zero_count;
+    segment.ht_plane = set.plane;
 }
 
 /// An HT code-block (ITU-T T.814) of one cleanup pass at bit-plane 0, which

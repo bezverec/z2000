@@ -18,8 +18,8 @@ Neither figure nor that result is a formal ISO conformance certification.
 On `main` (the 0.3.0 line, not yet released) raw HTJ2K (Part 15)
 codestreams and JPH files decode as well, including all 40 WG1 HT
 conformance streams and 16 of the 20 WG1 JPH files, and `--ht` writes
-lossless and 9/7 lossy HTJ2K codestreams and JPH files (rate targets for
-HT come later, [roadmap](docs/roadmap.md), section 6).
+lossless and lossy HTJ2K codestreams and JPH files, to a quantization
+step or a rate target.
 
 The current prerelease is [`v0.2.0-rc.7`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.7),
 with binaries for Windows x86-64, Linux x86-64, and Linux RISC-V 64. It has no
@@ -489,14 +489,14 @@ than silently changing the codestream profile.
 - **--qstep STEP**: With 9-7, the base quantization step relative to the
   sample range, as Kakadu's `Qstep`: each band's step is STEP divided by its
   synthesis norm. The default is 1/2^depth (1/256 at 8 bits); larger steps
-  give smaller, lossier files. This is the quality setting of `--ht`, which
-  has no `--rates`.
+  give smaller, lossier files.
 - **--guard-bits N**: Number of QCD guard bits.
 - **--layers N**: On encode, number of untargeted quality layers. On decode,
   reconstruct only the leading N layers; zero means all signalled layers.
 - **--rates LIST**: Comma-separated compression-ratio targets, for example
-  **16,8,1**. The list sets the layer count; a final 1 requests a complete
-  final layer.
+  **16,8,1**, relative to the complete (lossless or fully quantized) coded
+  size. The list sets the layer count; Part 1 keeps the final layer
+  complete whatever its rate, `--ht` meets the final rate too.
 
 ### Resolution, Tiles, And Packet Order
 
@@ -541,7 +541,11 @@ Boolean marker and style options also accept a **--no-...** form.
   decoder that reads HTJ2K. With the reversible 5/3 transform the image is
   lossless; with `--transform 9-7` every quantized band is coded whole, so
   the quantization (`--qstep`) alone sets the quality, and the image decodes
-  as the Part 1 stream of the same options does. Not with `--rates`.
+  as the Part 1 stream of the same options does. With `--rates` each block
+  keeps one HT set (a cleanup pass at a coarser bit-plane, and its SigProp
+  and MagRef passes) chosen to meet the target, the last rate included:
+  unlike Part 1, whose final layer is always complete, an HT stream ends at
+  the final rate (`1` for lossless).
 - **--bypass**: Enable selective arithmetic-coding bypass.
 - **--reset-context**: Reset MQ contexts at coding-pass boundaries.
 - **--terminate-all**: Terminate every coding pass.

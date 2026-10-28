@@ -294,19 +294,44 @@ pub fn Decoder(comptime Coefficient: type) type {
     };
 }
 
-/// One code-block coded by `Encoder`: the HT cleanup segment of a block
-/// whose every magnitude bit sits at or above bit-plane 0, so that the
-/// cleanup pass alone is lossless (Z_blk = 1, cleanup plane 0).
+/// One code-block's HT cleanup segment coded by `Encoder`: from `encode`,
+/// down to bit-plane 0, so that the cleanup pass alone is lossless
+/// (Z_blk = 1, cleanup plane 0); in a `Set`, down to its plane.
 pub const Cleanup = struct {
     /// The HT cleanup segment, Lcup bytes; empty for an all-zero block,
     /// which has no coding passes.
     bytes: []const u8,
-    /// Bits of the largest magnitude, 0 for an all-zero block. The packet
-    /// header signals `M_b - 1` missing bit-planes for any other block,
-    /// putting its cleanup pass at bit-plane 0.
+    /// Bits of the largest magnitude, 0 for a block with nothing at or
+    /// above the cleanup plane. The packet header signals `M_b - 1 - p`
+    /// missing bit-planes for the cleanup pass at bit-plane p.
     bitplanes: u8,
     /// The block's significant samples.
     non_zero_count: u32,
+};
+
+/// One HT set coded by `Encoder.encodeSet`: an HT cleanup pass ending at
+/// bit-plane `plane` and, for a plane above 0 and a non-empty cleanup pass,
+/// the SigProp and MagRef passes of bit-plane `plane - 1`.
+pub const Set = struct {
+    plane: u8,
+    cleanup: Cleanup,
+    /// The HT refinement segment, Lref bytes: the SigProp bytes, then the
+    /// MagRef bytes, which the decoder reads backward from the end.
+    refinement: []const u8 = &.{},
+    sig_prop_length: usize = 0,
+    /// The squared error of the decoded magnitudes, in units of the band's
+    /// quantization step: with no pass, then after the cleanup, SigProp,
+    /// and MagRef passes, each decoded as `Decoder` reconstructs (the
+    /// midpoint of what is known).
+    distortion: [4]f64 = @splat(0),
+
+    /// The coding passes worth signalling: those up to the last one that
+    /// codes a byte or lowers the distortion.
+    pub fn passCount(self: Set) u2 {
+        if (self.cleanup.bytes.len == 0) return 0;
+        if (self.refinement.len == 0) return 1;
+        return if (self.refinement.len > self.sig_prop_length) 3 else 2;
+    }
 };
 
 /// The HT cleanup encoder: the decoding procedures of clause 7.3 run
@@ -333,8 +358,13 @@ pub fn Encoder(comptime Coefficient: type) type {
         indices: std.ArrayList(u16) = .empty,
         /// The current quad row's MagSgn bits, pair by pair.
         words: std.ArrayList(u64) = .empty,
+        /// `encodeSet`'s per-sample SigProp and MagRef state.
+        flags: std.ArrayList(u8) = .empty,
+        /// `encodeSet`'s refinement segment: SigProp forward, MagRef backward.
+        refinement: std.ArrayList(u8) = .empty,
 
         const Magnitude = @Int(.unsigned, @bitSizeOf(Coefficient));
+        const Shift = std.math.Log2Int(Magnitude);
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{ .allocator = allocator };
@@ -349,12 +379,57 @@ pub fn Encoder(comptime Coefficient: type) type {
             self.quad_row.deinit(self.allocator);
             self.indices.deinit(self.allocator);
             self.words.deinit(self.allocator);
+            self.flags.deinit(self.allocator);
+            self.refinement.deinit(self.allocator);
             self.* = undefined;
         }
 
         /// Code the `width` x `height` block whose sample (x, y) is
         /// `samples[y * stride + x]`; the bytes are valid until the next call.
         pub fn encode(self: *Self, samples: []const Coefficient, stride: usize, width: usize, height: usize) Error!Cleanup {
+            return self.encodeCleanup(samples, stride, width, height, 0);
+        }
+
+        /// The HT set whose cleanup pass ends at bit-plane `plane`, with a
+        /// SigProp and a MagRef pass for bit-plane `plane - 1` when `plane`
+        /// is not 0 (T.814 Annex B), SigProp with the vertically causal
+        /// context if asked, and the distortion each pass leaves:
+        /// the cleanup bytes as `encode` gives them and the refinement
+        /// segment, both valid until the next call.
+        pub fn encodeSet(self: *Self, samples: []const Coefficient, stride: usize, width: usize, height: usize, plane: u8, vertical_causal: bool) Error!Set {
+            if (plane >= @bitSizeOf(Magnitude)) return Error.InvalidBlock;
+            const cleanup = try self.encodeCleanup(samples, stride, width, height, @intCast(plane));
+            var set = Set{ .plane = plane, .cleanup = cleanup };
+            const area = width * height;
+            try self.flags.resize(self.allocator, 2 * area);
+            const flags = self.flags.items[0..area];
+            set.distortion = cleanupDistortion(samples, stride, width, height, plane, flags);
+            if (plane == 0 or cleanup.bytes.len == 0) return set;
+            const near = self.flags.items[area..][0..area];
+            markSignificantNeighbours(flags, near, width, height, vertical_causal);
+            // SigProp at most two bits a sample, MagRef one, and a stuffing
+            // bit per seven of either.
+            const sig_prop_capacity = area / 4 + area / 28 + 24;
+            const mag_ref_capacity = area / 8 + area / 56 + 16;
+            try self.refinement.resize(self.allocator, sig_prop_capacity + mag_ref_capacity);
+            // SigProp stuffs as MagSgn does (7.1.5).
+            var sig_prop = MagSgnWriter{ .bytes = self.refinement.items[0..sig_prop_capacity] };
+            var mag_ref = MagRefWriter{ .bytes = self.refinement.items[sig_prop_capacity..] };
+            set.distortion[2] = set.distortion[1] - encodeSigProp(Coefficient, samples, stride, width, height, plane, vertical_causal, flags, near, &sig_prop);
+            set.distortion[3] = set.distortion[2] - encodeMagRef(Coefficient, samples, stride, width, height, plane, flags, &mag_ref);
+            sig_prop.finishWithZeros();
+            mag_ref.finish();
+            set.sig_prop_length = sig_prop.position;
+            const length = sig_prop.position + mag_ref.written;
+            if (length > max_refinement_length) return Error.InvalidBlock;
+            // MagRef reads backward from the segment's end.
+            const bytes = self.refinement.items[0..length];
+            std.mem.copyForwards(u8, bytes[sig_prop.position..], mag_ref.bytes[mag_ref.bytes.len - mag_ref.written ..]);
+            set.refinement = bytes;
+            return set;
+        }
+
+        fn encodeCleanup(self: *Self, samples: []const Coefficient, stride: usize, width: usize, height: usize, plane: Shift) Error!Cleanup {
             if (width == 0 or height == 0 or stride < width) return Error.InvalidBlock;
             const last_row = std.math.mul(usize, height - 1, stride) catch return Error.InvalidBlock;
             if (last_row + width > samples.len) return Error.InvalidBlock;
@@ -416,9 +491,9 @@ pub fn Encoder(comptime Coefficient: type) type {
                 // way into the cache meanwhile.
                 if (y + 2 < height) prefetchLine(samples[(y + 2) * stride ..][0..width]);
                 if (y + 3 < height) prefetchLine(samples[(y + 3) * stride ..][0..width]);
-                magnitudes |= analyzeLine(samples[y * stride ..][0..width], top, top_values);
+                magnitudes |= analyzeLine(samples[y * stride ..][0..width], top, top_values, plane);
                 if (y + 1 < height) {
-                    magnitudes |= analyzeLine(samples[(y + 1) * stride ..][0..width], bottom, bottom_values);
+                    magnitudes |= analyzeLine(samples[(y + 1) * stride ..][0..width], bottom, bottom_values, plane);
                 } else {
                     @memset(bottom, 0);
                     @memset(bottom_values, 0);
@@ -455,7 +530,7 @@ pub fn Encoder(comptime Coefficient: type) type {
             bytes[length - 2] = (bytes[length - 2] & 0xf0) | @as(u8, @intCast(suffix_length & 0x0f));
             return .{
                 .bytes = bytes,
-                .bitplanes = @intCast(@bitSizeOf(Magnitude) - @clz(magnitudes)),
+                .bitplanes = @intCast(@bitSizeOf(Magnitude) - @clz(magnitudes) + @as(u8, plane)),
                 .non_zero_count = non_zero_count,
             };
         }
@@ -468,12 +543,13 @@ pub fn Encoder(comptime Coefficient: type) type {
             }
         }
 
-        /// One sample line: each exponent E_n at `exponents[x + 1]` (zero
-        /// where insignificant, and in the padding column and guard after
-        /// the line) and v_n = 2 (mu_n - 1) + s_n at `values[x]` (zero in the
-        /// padding column); returns the magnitudes ORed, whose bit length is
-        /// the largest one's.
-        fn analyzeLine(row: []const Coefficient, exponents: []u8, values: []Magnitude) Magnitude {
+        /// One sample line, its magnitudes shifted down `plane` bits: each
+        /// exponent E_n at `exponents[x + 1]` (zero where insignificant, and
+        /// in the padding column and guard after the line) and
+        /// v_n = 2 (mu_n - 1) + s_n at `values[x]` (zero in the padding
+        /// column); returns the magnitudes ORed, whose bit length is the
+        /// largest one's.
+        fn analyzeLine(row: []const Coefficient, exponents: []u8, values: []Magnitude, plane: Shift) Magnitude {
             const lanes = comptime std.simd.suggestVectorLength(Coefficient) orelse 4;
             const Lanes = @Vector(lanes, Magnitude);
             const zero: Lanes = @splat(0);
@@ -482,7 +558,7 @@ pub fn Encoder(comptime Coefficient: type) type {
             var x: usize = 0;
             while (x + lanes <= row.len) : (x += lanes) {
                 const sample: @Vector(lanes, Coefficient) = row[x..][0..lanes].*;
-                const magnitude: Lanes = @abs(sample);
+                const magnitude = @as(Lanes, @abs(sample)) >> @splat(plane);
                 ored |= magnitude;
                 const significant = magnitude != zero;
                 const below = magnitude -% one;
@@ -495,7 +571,7 @@ pub fn Encoder(comptime Coefficient: type) type {
             var tail: Magnitude = @reduce(.Or, ored);
             while (x < row.len) : (x += 1) {
                 const sample = row[x];
-                const magnitude: Magnitude = @abs(sample);
+                const magnitude = @as(Magnitude, @abs(sample)) >> plane;
                 tail |= magnitude;
                 exponents[x + 1] = if (magnitude == 0) 0 else @intCast(@bitSizeOf(Magnitude) + 1 - @clz(magnitude - 1));
                 values[x] = if (magnitude == 0) 0 else 2 * (magnitude - 1) + @intFromBool(sample < 0);
@@ -506,6 +582,172 @@ pub fn Encoder(comptime Coefficient: type) type {
         }
     };
 }
+
+/// The decoder's reconstruction of magnitude `mu` known down to bit-plane
+/// `lowest`: the bits above it, then the midpoint of the rest.
+inline fn reconstructed(mu: u64, lowest: u8) u64 {
+    if (lowest == 0) return mu;
+    if (lowest >= 64 or (mu >> @intCast(lowest)) == 0) return 0;
+    return ((mu >> @intCast(lowest)) << @intCast(lowest)) | (@as(u64, 1) << @intCast(lowest - 1));
+}
+
+inline fn squaredError(mu: u64, estimate: u64) f64 {
+    const difference: f64 = @floatFromInt(if (mu > estimate) mu - estimate else estimate - mu);
+    return difference * difference;
+}
+
+/// The distortion with no pass and after the cleanup pass ending at
+/// `plane`, marking each sample the cleanup pass makes significant in
+/// `flags` (and clearing the rest) for SigProp and MagRef.
+fn cleanupDistortion(samples: anytype, stride: usize, width: usize, height: usize, plane: u8, flags: []u8) [4]f64 {
+    var none: f64 = 0;
+    var after: f64 = 0;
+    for (0..height) |y| {
+        for (samples[y * stride ..][0..width], flags[y * width ..][0..width]) |sample, *flag| {
+            const mu: u64 = @abs(sample);
+            const significant = plane < 64 and (mu >> @intCast(plane)) != 0;
+            flag.* = if (significant) flag_significant | (if (sample < 0) flag_negative else 0) else 0;
+            none += squaredError(mu, 0);
+            after += squaredError(mu, reconstructed(mu, plane));
+        }
+    }
+    return .{ none, after, after, after };
+}
+
+/// Marks in `near` each sample with a cleanup-significant sample among its
+/// eight neighbours, leaving out the next stripe's under the vertically
+/// causal context: `sigPropNeighbourhood` before SigProp makes any sample
+/// significant.
+fn markSignificantNeighbours(flags: []const u8, near: []u8, width: usize, height: usize, vertical_causal: bool) void {
+    for (0..height) |y| {
+        const row = near[y * width ..][0..width];
+        @memset(row, 0);
+        const first = if (y > 0) y - 1 else y;
+        // The next row unless it starts the next stripe, which the
+        // vertically causal context leaves out.
+        const last = if (y + 1 < height and !(vertical_causal and (y + 1) % 4 == 0)) y + 1 else y;
+        for (first..last + 1) |ny| {
+            const line = flags[ny * width ..][0..width];
+            for (row, 0..) |*out, x| {
+                var any = (if (x > 0) line[x - 1] else 0) | (if (x + 1 < width) line[x + 1] else 0);
+                if (ny != y) any |= line[x];
+                out.* |= any & flag_significant;
+            }
+        }
+    }
+}
+
+/// The HT SigProp pass for bit-plane `plane - 1` (7.4 run backward): in
+/// four-line stripes and four-column groups, a bit for each insignificant
+/// sample next to a significant one, then a sign bit for each sample it
+/// made significant. Returns the distortion it removes. `near` marks the
+/// samples next to a cleanup-significant one; only the others need a look
+/// at the samples this pass made significant.
+fn encodeSigProp(comptime Coefficient: type, samples: []const Coefficient, stride: usize, width: usize, height: usize, plane: u8, vertical_causal: bool, flags: []u8, near: []const u8, writer: *MagSgnWriter) f64 {
+    const bit_plane: u6 = @intCast(plane - 1);
+    var removed: f64 = 0;
+    var stripe: usize = 0;
+    while (stripe < height) : (stripe += 4) {
+        const stripe_end = @min(stripe + 4, height);
+        // Vertically causal context leaves out the next stripe.
+        const below_limit = if (vertical_causal) stripe_end else height;
+        var group: usize = 0;
+        while (group < width) : (group += 4) {
+            const group_end = @min(group + 4, width);
+            var magnitude_bits: u64 = 0;
+            var magnitude_count: u8 = 0;
+            var sign_bits: u64 = 0;
+            var sign_count: u8 = 0;
+            for (group..group_end) |x| {
+                for (stripe..stripe_end) |y| {
+                    const location = y * width + x;
+                    if ((flags[location] & flag_significant) != 0) continue;
+                    if (near[location] == 0 and !sigPropNeighbourhood(flags, width, width, below_limit, x, y)) continue;
+                    const sample = samples[y * stride + x];
+                    const mu: u64 = @abs(sample);
+                    const bit = (mu >> bit_plane) & 1;
+                    magnitude_bits |= bit << @intCast(magnitude_count);
+                    magnitude_count += 1;
+                    if (bit == 1) {
+                        flags[location] |= flag_refinement_bit;
+                        removed += squaredError(mu, 0) - squaredError(mu, reconstructed(mu, plane - 1));
+                        // The signs follow in the same order.
+                        sign_bits |= @as(u64, @intFromBool(sample < 0)) << @intCast(sign_count);
+                        sign_count += 1;
+                    }
+                }
+            }
+            writer.put(magnitude_bits, magnitude_count);
+            writer.put(sign_bits, sign_count);
+        }
+    }
+    return removed;
+}
+
+/// The HT MagRef pass for bit-plane `plane - 1` (7.5 run backward): bit
+/// `plane - 1` of each sample the cleanup pass made significant, in stripe
+/// scan order. Returns the distortion it removes.
+fn encodeMagRef(comptime Coefficient: type, samples: []const Coefficient, stride: usize, width: usize, height: usize, plane: u8, flags: []const u8, writer: *MagRefWriter) f64 {
+    const bit_plane: u6 = @intCast(plane - 1);
+    var removed: f64 = 0;
+    var stripe: usize = 0;
+    while (stripe < height) : (stripe += 4) {
+        const stripe_end = @min(stripe + 4, height);
+        for (0..width) |x| {
+            var bits: u64 = 0;
+            var count: u8 = 0;
+            for (stripe..stripe_end) |y| {
+                if ((flags[y * width + x] & flag_significant) == 0) continue;
+                const mu: u64 = @abs(samples[y * stride + x]);
+                bits |= ((mu >> bit_plane) & 1) << @intCast(count);
+                count += 1;
+                removed += squaredError(mu, reconstructed(mu, plane)) - squaredError(mu, reconstructed(mu, plane - 1));
+            }
+            writer.put(bits, count);
+        }
+    }
+    return removed;
+}
+
+/// MagRef bits least significant first into bytes stored backward from the
+/// end of `bytes` (7.1.6): after a byte above 0x8F, a byte whose seven low
+/// bits are all set takes only those seven, the stream starting as if after
+/// 0xFF; it ends padded with zeros.
+const MagRefWriter = struct {
+    bytes: []u8,
+    written: usize = 0,
+    buffer: u64 = 0,
+    count: u7 = 0,
+    last_above_8f: bool = true,
+
+    fn put(self: *MagRefWriter, value: u64, n: u8) void {
+        self.buffer |= value << @intCast(self.count);
+        self.count += @intCast(n);
+        while (true) {
+            if (self.last_above_8f) {
+                if (self.count < 7) return;
+                if ((self.buffer & 0x7f) == 0x7f) {
+                    self.emit(0x7f, 7);
+                    continue;
+                }
+            }
+            if (self.count < 8) return;
+            self.emit(@truncate(self.buffer), 8);
+        }
+    }
+
+    fn emit(self: *MagRefWriter, byte: u8, width: u4) void {
+        self.written += 1;
+        self.bytes[self.bytes.len - self.written] = byte;
+        self.buffer >>= width;
+        self.count -= width;
+        self.last_above_8f = byte > 0x8f;
+    }
+
+    fn finish(self: *MagRefWriter) void {
+        if (self.count > 0) self.emit(@truncate(self.buffer), @intCast(self.count));
+    }
+};
 
 /// What each quad of a row needs before its codewords, none of which
 /// depends on the quad to its left: significance rho_q, the exponent bound
@@ -905,6 +1147,21 @@ const MagSgnWriter = struct {
         self.buffer >>= width;
         self.count -= width;
         self.last_ff = byte == 0xff;
+    }
+
+    /// The SigProp end: the last bits padded with zeros, which the decoder
+    /// reads past the stream's end anyway, and after a final 0xFF a zero
+    /// byte, since a codeword segment may neither end in 0xFF nor follow it
+    /// with a byte above 0x8F, as the MagRef bytes after it might.
+    fn finishWithZeros(self: *MagSgnWriter) void {
+        while (self.count >= @as(u7, 8) - @intFromBool(self.last_ff)) self.flush();
+        if (self.count > 0 or self.last_ff) {
+            self.bytes[self.position] = @truncate(self.buffer);
+            self.position += 1;
+            self.count = 0;
+            self.buffer = 0;
+            self.last_ff = false;
+        }
     }
 
     fn finish(self: *MagSgnWriter) void {
@@ -1589,6 +1846,80 @@ test "HT encoder output decodes to the coded block" {
     // up to the deepest wide band, 37 magnitude bits.
     try expectEncoderRoundTrip(i32, 31);
     try expectEncoderRoundTrip(i64, 37);
+}
+
+test "HT sets decode to the distortion they report at every plane and pass count" {
+    try expectSetRoundTrip(i32, 20);
+    try expectSetRoundTrip(i64, 37);
+}
+
+fn expectSetRoundTrip(comptime Coefficient: type, max_bits: u7) !void {
+    const allocator = std.testing.allocator;
+    var encoder = Encoder(Coefficient).init(allocator);
+    defer encoder.deinit();
+    var decoder = Decoder(Coefficient).init(allocator);
+    defer decoder.deinit();
+    var prng = std.Random.DefaultPrng.init(0x48545345);
+    const random = prng.random();
+    const shapes = [_][2]usize{ .{ 1, 1 }, .{ 3, 5 }, .{ 7, 9 }, .{ 16, 16 }, .{ 64, 64 }, .{ 33, 17 }, .{ 4, 1024 }, .{ 1024, 4 } };
+    const stride = 1031;
+    // How many decodes ran with each pass count.
+    var decodes: [4]usize = @splat(0);
+    const plane_samples = try allocator.alloc(Coefficient, stride * 1024);
+    defer allocator.free(plane_samples);
+    for (shapes) |shape| {
+        const width = shape[0];
+        const height = shape[1];
+        for (0..12) |round| {
+            const bits: u7 = @intCast(1 + (round * 7 + width) % max_bits);
+            const kept = round % 4;
+            @memset(plane_samples, 0);
+            for (0..height) |y| {
+                for (plane_samples[y * stride ..][0..width]) |*sample| {
+                    if (random.uintLessThan(u8, 4) > kept) continue;
+                    var magnitude = random.int(u64) >> @intCast(64 - bits);
+                    if (random.boolean()) magnitude >>= random.uintLessThan(u6, @intCast(bits));
+                    const value: Coefficient = @intCast(magnitude);
+                    sample.* = if (random.boolean()) -value else value;
+                }
+            }
+            const vertical_causal = round % 3 == 1;
+            for (0..bits) |plane_index| {
+                const plane: u8 = @intCast(plane_index);
+                const set = try encoder.encodeSet(plane_samples, stride, width, height, plane, vertical_causal);
+                const passes = set.passCount();
+                // Both codeword segment prefixes keep the 0xFF rules.
+                try checkSegmentBytes(set.refinement[0..set.sig_prop_length], max_refinement_length);
+                try checkSegmentBytes(set.refinement, max_refinement_length);
+                for (1..@as(usize, passes) + 1) |pass_count| {
+                    const decoded = try decoder.decode(.{
+                        .width = width,
+                        .height = height,
+                        .cleanup = set.cleanup.bytes,
+                        .refinement = set.refinement[0..if (pass_count == 2) set.sig_prop_length else if (pass_count == 3) set.refinement.len else 0],
+                        .passes = @intCast(pass_count),
+                        .cleanup_plane = plane,
+                        .magnitude_bitplanes = @intCast(bits + 1),
+                        .vertical_causal = vertical_causal,
+                    });
+                    var distortion: f64 = 0;
+                    for (0..height) |y| {
+                        for (plane_samples[y * stride ..][0..width], decoded[y * width ..][0..width]) |sample, value| {
+                            const mu: u64 = @abs(sample);
+                            const estimate: u64 = @abs(value);
+                            distortion += squaredError(mu, estimate);
+                            if (value != 0) try std.testing.expectEqual(sample < 0, value < 0);
+                        }
+                    }
+                    decodes[pass_count] += 1;
+                    const reported = set.distortion[pass_count];
+                    try std.testing.expectApproxEqRel(reported, distortion, 1e-9);
+                }
+                if (passes == 0) try std.testing.expectEqual(set.distortion[0], set.distortion[1]);
+            }
+        }
+    }
+    for (decodes[1..]) |count| try std.testing.expect(count > 100);
 }
 
 fn expectEncoderRoundTrip(comptime Coefficient: type, max_bits: u7) !void {

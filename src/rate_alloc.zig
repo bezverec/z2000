@@ -265,6 +265,91 @@ pub fn allocatePcrdPassesWithHulls(
     }
 }
 
+/// One way to code a block: its bytes, the distortion it removes, and a
+/// caller's tag for it.
+pub const RatePoint = struct {
+    bytes: u64,
+    gain: f64,
+    tag: u16,
+};
+
+/// For a single byte budget, the point of every block that a common slope
+/// threshold picks: the largest gain over the block's upper convex hull of
+/// (bytes, gain) points, starting from coding nothing, for the smallest
+/// threshold whose total fits `target`. Unlike `allocatePcrdPasses`, the
+/// points need not be nested truncations of one another. Block `b` offers
+/// `points[offsets[b]..offsets[b + 1]]`, which this sorts by bytes;
+/// `out[b]` is the tag picked, or null for nothing.
+pub fn selectPointsForTarget(
+    allocator: std.mem.Allocator,
+    points: []RatePoint,
+    offsets: []const usize,
+    target: u64,
+    out: []?u16,
+) !void {
+    if (offsets.len != out.len + 1 or offsets[out.len] != points.len) return RateAllocError.InvalidBlock;
+    var hull: std.ArrayList(PcrdHullPoint) = .empty;
+    defer hull.deinit(allocator);
+    const hull_offsets = try allocator.alloc(usize, out.len + 1);
+    defer allocator.free(hull_offsets);
+    for (out, 0..) |_, block| {
+        hull_offsets[block] = hull.items.len;
+        const block_points = points[offsets[block]..offsets[block + 1]];
+        std.sort.pdq(RatePoint, block_points, {}, struct {
+            fn lessThan(_: void, a: RatePoint, b: RatePoint) bool {
+                return a.bytes < b.bytes or (a.bytes == b.bytes and a.gain > b.gain);
+            }
+        }.lessThan);
+        for (block_points) |point| {
+            if (point.bytes == 0 or !(point.gain > 0)) continue;
+            const start = hull_offsets[block];
+            // Ties come larger gain first, so a point without more gain
+            // than the hull's last one is never picked.
+            if (hull.items.len > start and point.gain <= hull.items[hull.items.len - 1].distortion) continue;
+            var slope: f64 = undefined;
+            while (true) {
+                if (hull.items.len == start) {
+                    slope = point.gain / @as(f64, @floatFromInt(point.bytes));
+                    break;
+                }
+                const top = hull.items[hull.items.len - 1];
+                slope = (point.gain - top.distortion) / @as(f64, @floatFromInt(point.bytes - top.bytes));
+                if (slope < top.slope) break;
+                _ = hull.pop();
+            }
+            try hull.append(allocator, .{ .passes = point.tag, .bytes = point.bytes, .distortion = point.gain, .slope = slope });
+        }
+    }
+    hull_offsets[out.len] = hull.items.len;
+
+    const slopes = try allocator.alloc(f64, hull.items.len);
+    defer allocator.free(slopes);
+    for (hull.items, slopes) |point, *slope| slope.* = point.slope;
+    std.sort.pdq(f64, slopes, {}, std.sort.desc(f64));
+    const floors = try allocator.alloc(usize, out.len);
+    defer allocator.free(floors);
+    @memset(floors, 0);
+
+    var chosen_slope = std.math.inf(f64);
+    var low: usize = 0;
+    var high: usize = slopes.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (pcrdTotalBytes(hull.items, hull_offsets, floors, slopes[mid]) <= target) {
+            chosen_slope = slopes[mid];
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    for (out, 0..) |*picked, block| {
+        const block_hull = hull.items[hull_offsets[block]..hull_offsets[block + 1]];
+        var selected: usize = 0;
+        while (selected < block_hull.len and block_hull[selected].slope >= chosen_slope) : (selected += 1) {}
+        picked.* = if (selected == 0) null else block_hull[selected - 1].passes;
+    }
+}
+
 fn pcrdTotalBytes(
     hull_points: []const PcrdHullPoint,
     hull_offsets: []const usize,

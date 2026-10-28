@@ -15192,14 +15192,85 @@ test "9/7 base step scales every band's step size" {
     }
 }
 
+test "HT rate targets keep one HT set per block within the byte target" {
+    const allocator = std.testing.allocator;
+    const texture = htGrayTextureForTest();
+    var rgb_samples: [64 * 48 * 3]u16 = undefined;
+    for (texture, 0..) |sample, index| {
+        const value: u16 = @intCast(sample);
+        rgb_samples[3 * index] = value;
+        rgb_samples[3 * index + 1] = 255 - value;
+        rgb_samples[3 * index + 2] = (value * 7) % 256;
+    }
+    const rgb = image.RgbImage{ .allocator = allocator, .width = 64, .height = 48, .bit_depth = 8, .samples = &rgb_samples };
+    const variants = [_]codestream.LosslessOptions{
+        .{ .levels = 3, .block_width = 16, .block_height = 16 },
+        .{ .levels = 3, .block_width = 16, .block_height = 16, .tile_width = 40, .tile_height = 40, .vertical_causal = true },
+        .{ .levels = 2, .block_width = 16, .block_height = 16, .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict },
+    };
+    for (variants) |base| {
+        var full = base;
+        full.high_throughput = true;
+        const lossless = try codestream.encodeLosslessWithOptions(allocator, rgb, full);
+        defer allocator.free(lossless);
+        var previous_length: usize = std.math.maxInt(usize);
+        for ([_]f64{ 2, 6 }) |rate| {
+            var options = base;
+            options.high_throughput = true;
+            options.rate_count = 2;
+            options.layers = 2;
+            options.rates[0] = rate * 3;
+            options.rates[1] = rate;
+            const stream = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+            defer allocator.free(stream);
+            // SINGLEHT and HTONLY still; under the final rate's share of
+            // the lossless payload, headers aside, and smaller for the
+            // larger ratio.
+            const ccap15 = try expectHighThroughputHeaderForTest(stream);
+            try std.testing.expectEqual(@as(u16, 0), ccap15 & 0xe000);
+            // The targets leave the headers out, which four tiles of three
+            // components make over a kilobyte.
+            const header_slack: f64 = if (base.tile_width < rgb.width) 2000 else 600;
+            try std.testing.expect(@as(f64, @floatFromInt(stream.len)) < @as(f64, @floatFromInt(lossless.len)) / rate + header_slack);
+            try std.testing.expect(stream.len < previous_length);
+            previous_length = stream.len;
+            // Each layer prefix decodes, the full stream closer to the
+            // source than the first layer.
+            var errors: [2]i64 = undefined;
+            for ([_]u16{ 1, 0 }, 0..) |limit, index| {
+                var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, stream, .{ .quality_layer_limit = limit }, .{});
+                defer decoded.deinit();
+                var error_sum: i64 = 0;
+                for (0..3) |component| {
+                    for (decoded.planes[component].samples, 0..) |sample, sample_index| {
+                        error_sum += @intCast(@abs(sample - @as(i64, rgb_samples[3 * sample_index + component])));
+                    }
+                }
+                errors[index] = error_sum;
+            }
+            try std.testing.expect(errors[1] <= errors[0]);
+            try std.testing.expect(errors[1] < 40 * @as(i64, rgb_samples.len));
+        }
+    }
+
+    // The wide encoder picks HT sets too.
+    var gray_samples: [64 * 48]u16 = undefined;
+    for (&gray_samples, texture) |*out, sample| out.* = @intCast(sample);
+    const gray = image.GrayImage{ .allocator = allocator, .width = 64, .height = 48, .bit_depth = 8, .samples = &gray_samples };
+    var gray_options = codestream.LosslessOptions{ .high_throughput = true, .mct = .none, .levels = 3, .rate_count = 1 };
+    gray_options.rates[0] = 4;
+    const gray_stream = try codestream.encodeLosslessGrayWithOptions(allocator, gray, gray_options);
+    defer allocator.free(gray_stream);
+    var gray_decoded = try codestream.decodeLosslessNativeWithOptions(allocator, gray_stream, .{}, .{});
+    defer gray_decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 64 * 48), gray_decoded.planes[0].samples.len);
+}
+
 test "HT encoder refuses what one cleanup pass cannot code" {
     const allocator = std.testing.allocator;
     var samples = [_]u16{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
     const rgb = image.RgbImage{ .allocator = allocator, .width = 2, .height = 2, .bit_depth = 8, .samples = &samples };
-    var rated = codestream.LosslessOptions{ .high_throughput = true, .layers = 2, .rate_count = 1 };
-    rated.rates[0] = 4;
     const refused = [_]codestream.LosslessOptions{
-        rated,
         // The 9/7 transform codes quantized bands, the 5/3 whole ones.
         .{ .high_throughput = true, .transform = .irreversible_9_7, .quantization = .none, .mct = .ict },
         .{ .high_throughput = true, .quantization = .scalar_expounded },

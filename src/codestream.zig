@@ -805,7 +805,7 @@ pub fn encodeLosslessPlanarWithOptions(
         (options.mct == .none or rct_alpha) and options.progression == .rpcl and
         options.poc_records.len == 0 and !options.poc_in_tile_header and
         !options.ppm and !options.ppt and !options.emit_temporary_payload_sidecar and
-        options.t1_backend == .iso_mq and
+        options.t1_backend == .iso_mq and !(options.high_throughput and options.rate_count != 0) and
         (options.tile_part_divisions == null or options.tile_part_divisions == 'R');
     // A tile grid, or a single tile asking for more than the single-tile planar
     // path writes (9/7, another progression order, POC, packed headers, other
@@ -5210,7 +5210,11 @@ fn encodeLosslessWithOptionsMeasured(
     };
     try validateLosslessRequest(grid, options);
 
-    if (!grid.isSingleTile() or (options.poc_records.len != 0 and options.tile_part_divisions != null)) {
+    // HT rate targets pick HT sets in the grid-wide allocation, which a
+    // one-tile grid gets as well.
+    if (!grid.isSingleTile() or (options.poc_records.len != 0 and options.tile_part_divisions != null) or
+        (options.high_throughput and options.rate_count != 0))
+    {
         return encodeLosslessMultiTileMeasured(allocator, rgb, grid, options, 3, null, timings, total_start);
     }
 
@@ -21464,15 +21468,15 @@ fn highThroughputMagnitudeBound(depth: u8, levels: u8, options: LosslessOptions)
     return if (deepest > 31) @max(32, deepest) else bound;
 }
 
-/// The HT encoder's envelope: code-blocks of one cleanup pass, coding the
-/// 5/3 coefficients or the quantized 9/7 ones whole, which leaves no
-/// truncation points for rate targets; no RGN, which needs Ccap15 bit 12;
-/// and of the Part 1 mode flags only the vertically causal context, which
-/// T.814 keeps for SigProp.
+/// The HT encoder's envelope: one HT set per code-block, coding the 5/3
+/// coefficients or the quantized 9/7 ones whole, or under rate targets the
+/// set the allocation picks; no RGN, which needs Ccap15 bit 12; and of the
+/// Part 1 mode flags only the vertically causal context, which T.814 keeps
+/// for SigProp.
 fn validateHighThroughputRequest(options: LosslessOptions) !void {
     if (!options.high_throughput) return;
     const quantized = options.transform == .irreversible_9_7;
-    if ((options.quantization != .none) != quantized or options.rate_count != 0 or
+    if ((options.quantization != .none) != quantized or
         options.roi_regions.len != 0 or options.t1_backend != .iso_mq or options.emit_temporary_payload_sidecar or
         options.bypass or options.reset_context or options.terminate_all or
         options.predictable_termination or options.segmentation_symbols)

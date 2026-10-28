@@ -720,6 +720,8 @@ pub const EncodedLayerBlock = struct {
     payload: []const u8,
     segments: []const SegmentSpan = &.{},
     bypass: bool = false,
+    /// An HT code-block, whose codeword segments end at HT segments.
+    high_throughput: bool = false,
 };
 
 pub const WrittenPacket = struct {

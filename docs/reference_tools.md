@@ -366,6 +366,20 @@ here so they are not rediscovered as new.
   3,350,091, and 673,715 bytes at 52.18, 44.53, 38.19, and 27.55 dB. The
   lossy HT sweep (`--qstep` 0.001 to 0.2 among 125 inputs and option sets)
   decodes in Kakadu and OpenJPEG as the Part 1 stream of the same steps.
+- **HT rate targets** (`--ht --rates`, HT sets with SigProp and MagRef
+  passes): Kakadu and Grok decode all 233 inputs, options, and rate lists
+  of the sweep exactly as z2000 does (5/3; 9/7 within 0.2 dB), and Grok
+  every layer prefix too. Kakadu 8.4.1's `kdu_expand -layers N` decodes
+  every layer of an HT stream whatever N is, its own `Cmodes=HT -rate`
+  streams included (Grok shows their layers at 12.3, 27.8, and 28.2 dB),
+  and its 12-bit TIFF writer puts stray values in now and then (PGM output
+  is stable). OpenJPEG 2.5.4 decodes no multi-layer HT stream, Kakadu's
+  included, and reconstructs a few HT refinement samples 1 off with small
+  blocks or tiles, on Kakadu's streams too (10,661 samples of a tiled
+  `-rate 6` bench stream). Kakadu's `Cmodes=HT -rate` writes SINGLEHT
+  streams (Ccap15 0x0022 for three layers too); at equal sizes z2000's are
+  within 0.1 to 0.4 dB of them with the 5/3 transform and at or above them
+  with the 9/7.
 
 ## Methodological Cautions
 

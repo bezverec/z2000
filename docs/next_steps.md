@@ -1111,9 +1111,19 @@ default step sizes (Kakadu's `Qstep` 1/256 at 8 bits) the 2048x2048 RGB
 image codes to 8.13 MB, as Kakadu's `Cmodes=HT` default does. Done,
 2026-10-28: `--qstep`, the 9/7 base step relative to the sample range
 (Kakadu's `Qstep`), the quality setting of lossy HT; file sizes and PSNR
-follow Kakadu's at the same `Qstep` (`changelog.md`). Next, in order: rate
-targets through complexity control (HT SigProp and MagRef passes, then MULTIHT streams of
-z2000's own making), and encoder and decoder speed alongside.
+follow Kakadu's at the same `Qstep` (`changelog.md`). Done, 2026-10-28:
+`--rates` with `--ht` (SINGLEHT): every HT set a block could keep is coded,
+from cleanup plane 0 to its top bit-plane, each with its SigProp and MagRef
+passes and the distortion each pass leaves; one slope threshold picks a set
+and its passes per block for the final rate, which unlike Part 1 is met too
+(the ratios are of the lossless or fully quantized HT payload), and the
+earlier layers take passes of that set. At the same size the 2048x2048 RGB
+image decodes within 0.1 to 0.4 dB of Kakadu's `Cmodes=HT -rate` (5/3) and
+at or above it (9/7). The encode codes every set, about 10x a lossless one
+(680 ms at one thread, 127 ms at twenty against 63 and 24 lossless); next,
+estimate each block's plane from the rate and code two or three sets around
+it, as Kakadu does. Then MULTIHT streams for quality layers that keep a
+complete final layer, and encoder and decoder speed alongside.
 
 The HT packet headers need one rule T.814 leaves implicit. Kakadu's
 transcodes of multi-layer Part 1 streams keep each packet's coding passes,
