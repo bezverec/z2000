@@ -47,6 +47,10 @@ test "HT block decoder unit tests are linked into the main test binary" {
     _ = ht;
 }
 
+test "JP2 wrapper unit tests are linked into the main test binary" {
+    _ = jp2;
+}
+
 test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
     const allocator = std.testing.allocator;
     var stream: std.ArrayList(u8) = .empty;

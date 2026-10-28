@@ -2797,20 +2797,66 @@ fn validatePacketFrame(
 
 fn packetEphOffsetRejectingSop(payload: []const u8, start: usize, end: usize) !?usize {
     var eph_offset: ?usize = null;
+    // Whole vectors of marker starts first: only an 0xFF before 0x91 (SOP)
+    // or 0x92 (EPH) matters, and coded data has 0xFF bytes often enough
+    // that stopping at each one costs more than the scan.
+    const lanes = 32;
+    const Bytes = @Vector(lanes, u8);
     var cursor = start;
-    while (cursor + 1 < end) {
-        const searchable = payload[cursor .. end - 1];
-        const relative = std.mem.indexOfScalar(u8, searchable, 0xff) orelse break;
-        const offset = cursor + relative;
-        const marker = try readU16Be(payload, offset);
-        if (marker == marker_sop) return Jp2Error.InvalidCodestream;
-        if (marker == marker_eph) {
-            if (eph_offset != null) return Jp2Error.InvalidCodestream;
-            eph_offset = offset;
+    while (cursor + lanes < end) : (cursor += lanes) {
+        const first: Bytes = payload[cursor..][0..lanes].*;
+        const second: Bytes = payload[cursor + 1 ..][0..lanes].*;
+        const candidates = (first == @as(Bytes, @splat(0xff))) &
+            ((second == @as(Bytes, @splat(0x91))) | (second == @as(Bytes, @splat(0x92))));
+        var mask: u32 = @bitCast(candidates);
+        while (mask != 0) : (mask &= mask - 1) {
+            try checkPacketMarker(payload, cursor + @ctz(mask), &eph_offset);
         }
-        cursor = offset + 1;
+    }
+    while (cursor + 1 < end) : (cursor += 1) {
+        if (payload[cursor] == 0xff) try checkPacketMarker(payload, cursor, &eph_offset);
     }
     return eph_offset;
+}
+
+fn checkPacketMarker(payload: []const u8, offset: usize, eph_offset: *?usize) !void {
+    const marker = try readU16Be(payload, offset);
+    if (marker == marker_sop) return Jp2Error.InvalidCodestream;
+    if (marker == marker_eph) {
+        if (eph_offset.* != null) return Jp2Error.InvalidCodestream;
+        eph_offset.* = offset;
+    }
+}
+
+test "packet marker scan finds SOP and EPH as a byte-by-byte search does" {
+    const reference = struct {
+        fn scan(payload: []const u8, start: usize, end: usize) !?usize {
+            var eph_offset: ?usize = null;
+            var cursor = start;
+            while (cursor + 1 < end) : (cursor += 1) {
+                if (payload[cursor] == 0xff) try checkPacketMarker(payload, cursor, &eph_offset);
+            }
+            return eph_offset;
+        }
+    };
+    var prng = std.Random.DefaultPrng.init(0x4a503253);
+    const random = prng.random();
+    var payload: [200]u8 = undefined;
+    for (0..20_000) |_| {
+        for (&payload) |*byte| byte.* = switch (random.uintLessThan(u8, 64)) {
+            0...3 => 0xff,
+            4 => 0x91,
+            5, 6 => 0x92,
+            else => random.int(u8),
+        };
+        const start = random.uintLessThan(usize, 40);
+        const end = start + random.uintLessThan(usize, payload.len - start + 1);
+        if (reference.scan(&payload, start, end)) |expected| {
+            try std.testing.expectEqual(expected, try packetEphOffsetRejectingSop(&payload, start, end));
+        } else |err| {
+            try std.testing.expectError(err, packetEphOffsetRejectingSop(&payload, start, end));
+        }
+    }
 }
 
 fn nextBox(bytes: []const u8, cursor: *usize, allow_length_to_eof: bool) !Box {

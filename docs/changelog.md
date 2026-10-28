@@ -5,6 +5,14 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster JP2 Wrapping (0.3.0 line)
+
+- Wrapping a codestream in JP2 or JPH checks each packet body for SOP and
+  EPH markers a 32-byte vector at a time instead of stopping at every 0xFF
+  byte: wrapping the 10 MB HT codestream of the 2048x2048 RGB image takes
+  0.6 ms instead of 2.1 ms, the Part 1 one about 0.35 ms instead of 0.8. A
+  test checks the scan against the byte-by-byte one on random packets.
+
 ### Faster HT Block Coding (0.3.0 line)
 
 - The HT encoder's MagSgn and VLC writers store a whole 64-bit word per
