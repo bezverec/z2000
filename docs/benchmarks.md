@@ -46,6 +46,37 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-28: Intel Core i5-14500, HT block encoder speed
+
+Base `050fd8c`, `bench-rgb-2048.tif` lossless with `--ht`, ReleaseFast,
+interleaved rounds (15 at t1, 21 at t20), medians of `--timings`:
+
+| Threads | Block payload | Total |
+| --- | --- | --- |
+| 1 | 155.1 -> 80.6 ms | 206.3 -> 131.6 ms |
+| 20 | 17.9 -> 11.3 ms | 35.9 -> 29.4 ms |
+
+Codestreams byte-identical to the base on 130 encodes (six TIFF inputs,
+seven option sets, Part 1 and HT, and the 23 T.803 ZRAW layouts through the
+wide encoder). What helped, in order: the MagSgn, MEL, and VLC writers on
+buffers sized for the block in advance, with a 64-bit accumulator instead
+of byte appends (155 -> 96 ms); a quad pair's VLC bits and its MagSgn bits
+gathered into one word each before the writer (-> 86 ms); branch-free quad
+reads; and the line pair of each quad row analysed up front, exponents and
+MagSgn values in vectors (-> 80 ms). A four-byte MagSgn store when no 0xFF
+can occur did not help (84.6 against 86.2 ms) and was left out. The tile
+pipeline now keeps one block scratch per tile instead of one per block,
+which also helps Part 1 on a tile grid (512x512 tiles, t1 total 617.8 ->
+590.1 ms).
+
+Kakadu 8.4.1 `Cmodes=HT` takes about 35 ms single-threaded and 25 ms at
+twenty threads for the same image (process wall time less the 55 ms a
+trivial launch costs from Git Bash, which z2000's launch costs alike);
+z2000 is at about 130 and 42 ms the same way. The remaining block-coder
+time is the serial per-pair work (contexts, kappa, table lookups, and bit
+packing), spread over many lines; DWT (27 ms at t1) is the next largest
+stage and is shared with Part 1.
+
 ## 2026-10-26: Intel Core i5-14500, TIFF written during the band pass (rejected)
 
 Base `e3513bf`. The 8-bit RGB decode's last pass (finest wavelet level and

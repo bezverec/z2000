@@ -305,6 +305,8 @@ pub const Cleanup = struct {
     /// header signals `M_b - 1` missing bit-planes for any other block,
     /// putting its cleanup pass at bit-plane 0.
     bitplanes: u8,
+    /// The block's significant samples.
+    non_zero_count: u32,
 };
 
 /// The HT cleanup encoder: the decoding procedures of clause 7.3 run
@@ -315,14 +317,18 @@ pub fn Encoder(comptime Coefficient: type) type {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        /// The cleanup segment of the last `encode`.
+        /// The cleanup segment of the last `encode`, MagSgn written in place.
         segment: std.ArrayList(u8) = .empty,
         mel: std.ArrayList(u8) = .empty,
-        /// The VLC bytes from the end of the segment backward.
+        /// The VLC bytes, written from the end of the buffer backward.
         vlc: std.ArrayList(u8) = .empty,
-        /// Significance and exponents of the previous and the current quad
-        /// row's bottom lines, in the guard layout of `quadContext`.
+        /// Exponents of the previous quad row's bottom line and the current
+        /// row's two lines, in the guard layout of `quadContext`.
         lines: std.ArrayList(u8) = .empty,
+        /// The current quad row's MagSgn values, top line then bottom.
+        values: std.ArrayList(Magnitude) = .empty,
+
+        const Magnitude = @Int(.unsigned, @bitSizeOf(Coefficient));
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{ .allocator = allocator };
@@ -333,6 +339,7 @@ pub fn Encoder(comptime Coefficient: type) type {
             self.mel.deinit(self.allocator);
             self.vlc.deinit(self.allocator);
             self.lines.deinit(self.allocator);
+            self.values.deinit(self.allocator);
             self.* = undefined;
         }
 
@@ -342,45 +349,61 @@ pub fn Encoder(comptime Coefficient: type) type {
             if (width == 0 or height == 0 or stride < width) return Error.InvalidBlock;
             const last_row = std.math.mul(usize, height - 1, stride) catch return Error.InvalidBlock;
             if (last_row + width > samples.len) return Error.InvalidBlock;
-            self.segment.clearRetainingCapacity();
-            self.mel.clearRetainingCapacity();
-            self.vlc.clearRetainingCapacity();
-
-            var largest: u64 = 0;
-            for (0..height) |y| {
-                for (samples[y * stride ..][0..width]) |sample| largest = @max(largest, @abs(sample));
-            }
-            if (largest == 0) return .{ .bytes = &.{}, .bitplanes = 0 };
-
-            var mag_sgn = MagSgnWriter{ .bytes = &self.segment, .allocator = self.allocator };
-            var mel = MelWriter{ .bytes = &self.mel, .allocator = self.allocator };
-            var vlc = try VlcWriter.init(&self.vlc, self.allocator);
 
             const quad_width = (width + 1) / 2;
             const quad_height = (height + 1) / 2;
-            const line_length = 2 * quad_width + 2;
-            try self.lines.resize(self.allocator, 4 * line_length);
-            @memset(self.lines.items, 0);
-            var above_significance = self.lines.items[0..line_length];
-            var above_exponents = self.lines.items[line_length..][0..line_length];
-            var below_significance = self.lines.items[2 * line_length ..][0..line_length];
-            var below_exponents = self.lines.items[3 * line_length ..][0..line_length];
+            const quad_count = quad_width * quad_height;
+            // Bounds on each stream: a MagSgn value of at most 64 bits per
+            // sample, at most 20 VLC and 12 MEL bits per quad, and a stuffing
+            // bit per seven.
+            const area = std.math.mul(usize, width, height) catch return Error.InvalidBlock;
+            const mag_sgn_capacity = area * 10 + 16;
+            const mel_capacity = quad_count * 2 + 16;
+            const vlc_capacity = quad_count * 3 + 16;
+            try self.segment.resize(self.allocator, mag_sgn_capacity + mel_capacity + vlc_capacity);
+            try self.mel.resize(self.allocator, mel_capacity);
+            try self.vlc.resize(self.allocator, vlc_capacity);
+            var mag_sgn = MagSgnWriter{ .bytes = self.segment.items[0..mag_sgn_capacity] };
+            var mel = MelWriter{ .bytes = self.mel.items };
+            var vlc = VlcWriter.init(self.vlc.items);
 
+            // The previous quad row's bottom line and the current row's two
+            // lines: exponents E_n in the guard layout of `quadContext`
+            // (column x at x + 1, zero guards, zero where insignificant),
+            // and the MagSgn values v_n.
+            const line_length = 2 * quad_width + 2;
+            try self.lines.resize(self.allocator, 3 * line_length);
+            @memset(self.lines.items, 0);
+            var above = self.lines.items[0..line_length];
+            const top = self.lines.items[line_length..][0..line_length];
+            var bottom = self.lines.items[2 * line_length ..][0..line_length];
+            try self.values.resize(self.allocator, 4 * quad_width);
+            const top_values = self.values.items[0 .. 2 * quad_width];
+            const bottom_values = self.values.items[2 * quad_width ..];
+
+            var magnitudes: Magnitude = 0;
+            var non_zero_count: u32 = 0;
             var qy: usize = 0;
             while (qy < quad_height) : (qy += 1) {
                 const initial = qy == 0;
-                @memset(below_significance, 0);
-                @memset(below_exponents, 0);
+                const table = if (initial) &cxt_vlc_encode_0 else &cxt_vlc_encode_1;
+                const y = 2 * qy;
+                magnitudes |= analyzeLine(samples[y * stride ..][0..width], top, top_values);
+                if (y + 1 < height) {
+                    magnitudes |= analyzeLine(samples[(y + 1) * stride ..][0..width], bottom, bottom_values);
+                } else {
+                    @memset(bottom, 0);
+                    @memset(bottom_values, 0);
+                }
                 var left_rho: u4 = 0;
                 var qx: usize = 0;
                 while (qx < quad_width) : (qx += 2) {
                     const pair = qx + 1 < quad_width;
-                    var quads: [2]QuadSamples = .{ .{}, .{} };
-                    quads[0] = QuadSamples.read(samples, stride, width, height, qx, qy);
-                    if (pair) quads[1] = QuadSamples.read(samples, stride, width, height, qx + 1, qy);
+                    const quads = [2]EncoderQuad{ EncoderQuad.at(top, bottom, qx), if (pair) EncoderQuad.at(top, bottom, qx + 1) else .{} };
+                    non_zero_count += @popCount(quads[0].rho) + @as(u32, @popCount(quads[1].rho));
                     const contexts = [2]u8{
-                        quadContext(initial, left_rho, above_significance, qx),
-                        if (pair) quadContext(initial, quads[0].rho, above_significance, qx + 1) else 0,
+                        encoderQuadContext(initial, left_rho, above, qx),
+                        if (pair) encoderQuadContext(initial, quads[0].rho, above, qx + 1) else 0,
                     };
                     left_rho = if (pair) quads[1].rho else quads[0].rho;
 
@@ -390,105 +413,156 @@ pub fn Encoder(comptime Coefficient: type) type {
                     var bounds: [2]u8 = .{ 0, 0 };
                     var residuals: [2]u8 = .{ 0, 0 };
                     var codes: [2]VlcCode = .{ .{}, .{} };
+                    // The pair's VLC bits, at most 39, go out at once.
+                    var vlc_bits = Bits{};
                     for (0..@as(usize, if (pair) 2 else 1)) |i| {
                         const quad = quads[i];
-                        const kappa = exponentBound(quad.rho, 0, initial, above_exponents, qx + i);
+                        // encodeSigEMB, the inverse of decodeSigEMB (7.3.5).
+                        if (contexts[i] == 0) {
+                            mel.encode(@intFromBool(quad.rho != 0));
+                            if (quad.rho == 0) continue;
+                        }
+                        const kappa = exponentBound(quad.rho, 0, initial, above, qx + i);
                         const bound = @max(quad.largest_exponent, kappa);
+                        var at_bound: u4 = 0;
                         if (quad.rho != 0) {
                             bounds[i] = bound;
                             residuals[i] = bound - kappa;
+                            inline for (0..4) |j| {
+                                if (quad.exponents[j] == bound) at_bound |= 1 << j;
+                            }
                         }
-                        var at_bound: u4 = 0;
-                        inline for (0..4) |j| {
-                            if (quad.exponents[j] == bound and quad.exponents[j] != 0) at_bound |= 1 << j;
-                        }
-                        // encodeSigEMB, the inverse of decodeSigEMB (7.3.5).
-                        if (contexts[i] == 0) {
-                            try mel.encode(@intFromBool(quad.rho != 0));
-                            if (quad.rho == 0) continue;
-                        }
-                        const table = if (initial) &cxt_vlc_encode_0 else &cxt_vlc_encode_1;
                         codes[i] = table[vlcEncodeIndex(contexts[i], quad.rho, @intFromBool(residuals[i] != 0), at_bound)];
                         if (codes[i].len == 0) return Error.InvalidBlock;
-                        try vlc.put(codes[i].codeword, codes[i].len);
+                        vlc_bits.add(codes[i].codeword, codes[i].len);
                     }
-                    try encodeResiduals(&vlc, &mel, initial, residuals);
+                    encodeResiduals(&vlc_bits, &mel, initial, residuals);
+                    vlc.put(vlc_bits.value, vlc_bits.count);
+                    // The pair's MagSgn bits go out together while they fit;
+                    // an insignificant sample adds none.
+                    var mag_sgn_bits = Bits{};
                     for (0..@as(usize, if (pair) 2 else 1)) |i| {
                         const quad = quads[i];
                         if (quad.rho == 0) continue;
                         inline for (0..4) |j| {
-                            if ((quad.rho & (1 << j)) != 0) {
-                                const known: u8 = (codes[i].e_k >> j) & 1;
-                                try mag_sgn.put(quad.values[j], bounds[i] - known);
-                                if ((j & 1) != 0) {
-                                    const column = 2 * (qx + i) + (j >> 1) + 1;
-                                    below_significance[column] = 1;
-                                    below_exponents[column] = quad.exponents[j];
-                                }
+                            const significant = (quad.rho >> j) & 1;
+                            const known: u8 = (codes[i].e_k >> j) & 1;
+                            const n = (bounds[i] - known) & (0 -% @as(u8, significant));
+                            const value: u64 = (if ((j & 1) != 0) bottom_values else top_values)[2 * (qx + i) + (j >> 1)];
+                            if (mag_sgn_bits.count + n > 56) {
+                                mag_sgn.put(mag_sgn_bits.value, mag_sgn_bits.count);
+                                mag_sgn_bits = .{};
+                            }
+                            if (n > 56) {
+                                mag_sgn.put(value, n);
+                            } else {
+                                mag_sgn_bits.add(value & ((@as(u64, 1) << @intCast(n)) - 1), n);
                             }
                         }
                     }
+                    mag_sgn.put(mag_sgn_bits.value, mag_sgn_bits.count);
                 }
-                std.mem.swap([]u8, &above_significance, &below_significance);
-                std.mem.swap([]u8, &above_exponents, &below_exponents);
+                // The next quad row predicts from this one's bottom line.
+                std.mem.swap([]u8, &above, &bottom);
             }
+            if (magnitudes == 0) return .{ .bytes = &.{}, .bitplanes = 0, .non_zero_count = 0 };
 
-            try mag_sgn.finish();
-            try terminateMelVlc(&mel, &vlc);
-            const suffix_length = self.mel.items.len + self.vlc.items.len;
+            mag_sgn.finish();
+            terminateMelVlc(&mel, &vlc);
+            const suffix_length = mel.position + vlc.written;
             if (suffix_length > 4079) return Error.InvalidBlock;
-            try self.segment.appendSlice(self.allocator, self.mel.items);
-            const vlc_start = self.segment.items.len;
-            try self.segment.appendSlice(self.allocator, self.vlc.items);
-            std.mem.reverse(u8, self.segment.items[vlc_start..]);
-            const bytes = self.segment.items;
-            if (bytes.len > max_cleanup_length) return Error.InvalidBlock;
+            const length = mag_sgn.position + suffix_length;
+            if (length > max_cleanup_length) return Error.InvalidBlock;
+            const bytes = self.segment.items[0..length];
+            @memcpy(bytes[mag_sgn.position..][0..mel.position], mel.bytes[0..mel.position]);
+            @memcpy(bytes[mag_sgn.position + mel.position ..], vlc.bytes[vlc.bytes.len - vlc.written ..]);
             // Scup in the last twelve bits (7.1.1).
-            bytes[bytes.len - 1] = @intCast(suffix_length >> 4);
-            bytes[bytes.len - 2] = (bytes[bytes.len - 2] & 0xf0) | @as(u8, @intCast(suffix_length & 0x0f));
-            return .{ .bytes = bytes, .bitplanes = @intCast(64 - @clz(largest)) };
+            bytes[length - 1] = @intCast(suffix_length >> 4);
+            bytes[length - 2] = (bytes[length - 2] & 0xf0) | @as(u8, @intCast(suffix_length & 0x0f));
+            return .{
+                .bytes = bytes,
+                .bitplanes = @intCast(@bitSizeOf(Magnitude) - @clz(magnitudes)),
+                .non_zero_count = non_zero_count,
+            };
         }
 
-        /// One quad's samples: significance rho_q, exponents E_n, and the
-        /// MagSgn values v_n = 2 (mu_n - 1) + s_n (7.3.8).
-        const QuadSamples = struct {
-            rho: u4 = 0,
-            exponents: [4]u8 = @splat(0),
-            values: [4]u64 = @splat(0),
-            largest_exponent: u8 = 0,
-
-            inline fn read(samples: []const Coefficient, stride: usize, width: usize, height: usize, qx: usize, qy: usize) QuadSamples {
-                var quad = QuadSamples{};
-                inline for (0..4) |j| {
-                    const x = 2 * qx + (j >> 1);
-                    const y = 2 * qy + (j & 1);
-                    if (x < width and y < height) {
-                        const sample = samples[y * stride + x];
-                        const magnitude: u64 = @abs(sample);
-                        if (magnitude != 0) {
-                            quad.rho |= 1 << j;
-                            quad.exponents[j] = magnitudeExponent(magnitude);
-                            quad.values[j] = 2 * (magnitude - 1) + @intFromBool(sample < 0);
-                            quad.largest_exponent = @max(quad.largest_exponent, quad.exponents[j]);
-                        }
-                    }
-                }
-                return quad;
+        /// One sample line: each exponent E_n at `exponents[x + 1]` (zero
+        /// where insignificant, and in the padding column and guard after
+        /// the line) and v_n = 2 (mu_n - 1) + s_n at `values[x]` (zero in the
+        /// padding column); returns the magnitudes ORed, whose bit length is
+        /// the largest one's.
+        fn analyzeLine(row: []const Coefficient, exponents: []u8, values: []Magnitude) Magnitude {
+            const lanes = comptime std.simd.suggestVectorLength(Coefficient) orelse 4;
+            const Lanes = @Vector(lanes, Magnitude);
+            const zero: Lanes = @splat(0);
+            const one: Lanes = @splat(1);
+            var ored = zero;
+            var x: usize = 0;
+            while (x + lanes <= row.len) : (x += lanes) {
+                const sample: @Vector(lanes, Coefficient) = row[x..][0..lanes].*;
+                const magnitude: Lanes = @abs(sample);
+                ored |= magnitude;
+                const significant = magnitude != zero;
+                const below = magnitude -% one;
+                const leading: @Vector(lanes, u8) = @clz(below);
+                const exponent = @as(@Vector(lanes, u8), @splat(@bitSizeOf(Magnitude) + 1)) - leading;
+                exponents[x + 1 ..][0..lanes].* = @select(u8, significant, exponent, @as(@Vector(lanes, u8), @splat(0)));
+                const negative = @select(Magnitude, sample < @as(@Vector(lanes, Coefficient), @splat(0)), one, zero);
+                values[x..][0..lanes].* = @select(Magnitude, significant, (below << @splat(1)) | negative, zero);
             }
-        };
+            var tail: Magnitude = @reduce(.Or, ored);
+            while (x < row.len) : (x += 1) {
+                const sample = row[x];
+                const magnitude: Magnitude = @abs(sample);
+                tail |= magnitude;
+                exponents[x + 1] = if (magnitude == 0) 0 else @intCast(@bitSizeOf(Magnitude) + 1 - @clz(magnitude - 1));
+                values[x] = if (magnitude == 0) 0 else 2 * (magnitude - 1) + @intFromBool(sample < 0);
+            }
+            @memset(exponents[row.len + 1 ..], 0);
+            @memset(values[row.len..], 0);
+            return tail;
+        }
     };
+}
+
+/// One quad of the current row: significance rho_q and the exponents E_n of
+/// its samples (in scan order), read from the guard-layout exponent lines.
+const EncoderQuad = struct {
+    rho: u4 = 0,
+    exponents: [4]u8 = @splat(0),
+    largest_exponent: u8 = 0,
+
+    inline fn at(top: []const u8, bottom: []const u8, qx: usize) EncoderQuad {
+        const c = 2 * qx + 1;
+        const exponents = [4]u8{ top[c], bottom[c], top[c + 1], bottom[c + 1] };
+        var quad = EncoderQuad{ .exponents = exponents };
+        inline for (0..4) |j| quad.rho |= @as(u4, @intFromBool(exponents[j] != 0)) << j;
+        quad.largest_exponent = @max(@max(exponents[0], exponents[1]), @max(exponents[2], exponents[3]));
+        return quad;
+    }
+};
+
+/// `quadContext` with the line above as exponents, nonzero where significant.
+inline fn encoderQuadContext(initial: bool, left_rho: u4, above: []const u8, qx: usize) u8 {
+    if (initial) return quadContext(true, left_rho, above, qx);
+    const w: u8 = (left_rho >> 2) & 1;
+    const sw: u8 = (left_rho >> 3) & 1;
+    const c = 2 * qx + 1;
+    return @as(u8, @intFromBool((above[c - 1] | above[c]) != 0)) + 2 * (w | sw) +
+        4 * @as(u8, @intFromBool((above[c + 1] | above[c + 2]) != 0));
 }
 
 /// The U-VLC codes of one quad pair (7.3.6), the inverse of the decoder's
 /// residual decoding: prefixes, then suffixes, then extensions, and in an
 /// initial row where both quads have u_off = 1 a MEL symbol saying whether
 /// both residuals exceed 2.
-fn encodeResiduals(vlc: *VlcWriter, mel: *MelWriter, initial: bool, residuals: [2]u8) Error!void {
+fn encodeResiduals(vlc: *Bits, mel: *MelWriter, initial: bool, residuals: [2]u8) void {
     var first = residuals[0];
     var second = residuals[1];
+    if (first == 0 and second == 0) return;
     if (initial and first != 0 and second != 0) {
         const both_large = first > 2 and second > 2;
-        try mel.encode(@intFromBool(both_large));
+        mel.encode(@intFromBool(both_large));
         if (both_large) {
             first -= 2;
             second -= 2;
@@ -496,21 +570,33 @@ fn encodeResiduals(vlc: *VlcWriter, mel: *MelWriter, initial: bool, residuals: [
             // The second residual is 1 or 2, one bit after a three-bit
             // first prefix.
             const code = UCode.of(first);
-            try vlc.put(code.prefix, code.prefix_len);
-            try vlc.put(second - 1, 1);
-            try vlc.put(code.suffix, code.suffix_len);
-            try vlc.put(code.extension, code.extension_len);
+            vlc.add(code.prefix, code.prefix_len);
+            vlc.add(second - 1, 1);
+            vlc.add(code.suffix, code.suffix_len);
+            vlc.add(code.extension, code.extension_len);
             return;
         }
     }
     const codes = [2]UCode{ UCode.of(first), UCode.of(second) };
-    try vlc.put(codes[0].prefix, codes[0].prefix_len);
-    try vlc.put(codes[1].prefix, codes[1].prefix_len);
-    try vlc.put(codes[0].suffix, codes[0].suffix_len);
-    try vlc.put(codes[1].suffix, codes[1].suffix_len);
-    try vlc.put(codes[0].extension, codes[0].extension_len);
-    try vlc.put(codes[1].extension, codes[1].extension_len);
+    vlc.add(codes[0].prefix, codes[0].prefix_len);
+    vlc.add(codes[1].prefix, codes[1].prefix_len);
+    vlc.add(codes[0].suffix, codes[0].suffix_len);
+    vlc.add(codes[1].suffix, codes[1].suffix_len);
+    vlc.add(codes[0].extension, codes[0].extension_len);
+    vlc.add(codes[1].extension, codes[1].extension_len);
 }
+
+/// Bits gathered least significant first before a writer takes them.
+const Bits = struct {
+    value: u64 = 0,
+    count: u8 = 0,
+
+    /// `bits` has no bits above the `n` it adds; at most 56 in all.
+    inline fn add(self: *Bits, bits: u64, n: u8) void {
+        self.value |= bits << @intCast(self.count);
+        self.count += n;
+    }
+};
 
 /// Table 3: u = 1 is "1", 2 is "01", 3 and 4 are "001" and a one-bit
 /// suffix, 5 and above "000", a five-bit suffix, and from a suffix of 28 a
@@ -546,45 +632,51 @@ const UCode = struct {
 
 /// MagSgn bits least significant first; a byte after 0xFF holds seven
 /// (7.1.2). The stream ends padded with ones, without a final 0xFF, which
-/// the decoder supplies.
+/// the decoder supplies. `bytes` is sized for the block in advance.
 const MagSgnWriter = struct {
-    bytes: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    bytes: []u8,
+    position: usize = 0,
     buffer: u64 = 0,
     count: u7 = 0,
-    width: u4 = 8,
+    last_ff: bool = false,
 
-    fn put(self: *MagSgnWriter, value: u64, n: u8) Error!void {
-        var rest = value;
-        var left = n;
-        while (left > 0) {
-            const take: u6 = @intCast(@min(left, 32));
-            self.buffer |= (rest & ((@as(u64, 1) << take) - 1)) << @intCast(self.count);
-            self.count += take;
-            rest >>= take;
-            left -= take;
-            while (self.count >= self.width) try self.flush();
-        }
+    /// The low `n` bits of `value`.
+    inline fn put(self: *MagSgnWriter, value: u64, n: u8) void {
+        if (n > 56) return self.putWide(value, n);
+        self.buffer |= (value & ((@as(u64, 1) << @intCast(n)) - 1)) << @intCast(self.count);
+        self.count += @intCast(n);
+        while (self.count >= @as(u7, 8) - @intFromBool(self.last_ff)) self.flush();
     }
 
-    fn flush(self: *MagSgnWriter) Error!void {
-        const byte: u8 = @intCast(self.buffer & ((@as(u64, 1) << self.width) - 1));
-        try self.bytes.append(self.allocator, byte);
-        self.buffer >>= self.width;
-        self.count -= self.width;
-        self.width = if (byte == 0xff) 7 else 8;
+    fn putWide(self: *MagSgnWriter, value: u64, n: u8) void {
+        self.put(value & 0xffff_ffff, 32);
+        self.put(value >> 32, n - 32);
     }
 
-    fn finish(self: *MagSgnWriter) Error!void {
+    inline fn flush(self: *MagSgnWriter) void {
+        const width: u4 = if (self.last_ff) 7 else 8;
+        const byte: u8 = @truncate(self.buffer & ((@as(u64, 1) << width) - 1));
+        self.bytes[self.position] = byte;
+        self.position += 1;
+        self.buffer >>= width;
+        self.count -= width;
+        self.last_ff = byte == 0xff;
+    }
+
+    fn finish(self: *MagSgnWriter) void {
         if (self.count > 0) {
-            const full = (@as(u16, 1) << self.width) - 1;
+            const width: u4 = if (self.last_ff) 7 else 8;
+            const full = (@as(u16, 1) << width) - 1;
             const low = (@as(u16, 1) << @intCast(self.count)) - 1;
-            const byte: u8 = @intCast((@as(u16, @intCast(self.buffer)) & low) | (full & ~low));
-            if (byte != 0xff) try self.bytes.append(self.allocator, byte);
+            const byte: u8 = @intCast((@as(u16, @truncate(self.buffer)) & low) | (full & ~low));
+            if (byte != 0xff) {
+                self.bytes[self.position] = byte;
+                self.position += 1;
+            }
             self.count = 0;
             self.buffer = 0;
-        } else if (self.width == 7) {
-            _ = self.bytes.pop();
+        } else if (self.last_ff) {
+            self.position -= 1;
         }
     }
 };
@@ -592,104 +684,118 @@ const MagSgnWriter = struct {
 /// encodeMELSym, the run-length coder that `MelDecoder` inverts (7.3.3),
 /// with its bits most significant first (7.1.3).
 const MelWriter = struct {
-    bytes: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    bytes: []u8,
+    position: usize = 0,
     current: u8 = 0,
     remaining: u4 = 8,
     run: u32 = 0,
     k: u8 = 0,
 
-    fn emit(self: *MelWriter, bit: u1) Error!void {
+    fn emit(self: *MelWriter, bit: u1) void {
         self.current = (self.current << 1) | bit;
         self.remaining -= 1;
-        if (self.remaining == 0) {
-            try self.bytes.append(self.allocator, self.current);
-            self.remaining = if (self.current == 0xff) 7 else 8;
-            self.current = 0;
-        }
+        if (self.remaining == 0) self.flush();
     }
 
-    fn encode(self: *MelWriter, symbol: u1) Error!void {
+    fn flush(self: *MelWriter) void {
+        self.bytes[self.position] = self.current;
+        self.position += 1;
+        self.remaining = if (self.current == 0xff) 7 else 8;
+        self.current = 0;
+    }
+
+    inline fn encode(self: *MelWriter, symbol: u1) void {
         const exponent = MelDecoder.exponents[self.k];
         if (symbol == 0) {
             self.run += 1;
             if (self.run == @as(u32, 1) << @intCast(exponent)) {
-                try self.emit(1);
+                self.emit(1);
                 self.run = 0;
                 self.k = @min(12, self.k + 1);
             }
             return;
         }
-        try self.emit(0);
+        self.emitRun(exponent);
+    }
+
+    fn emitRun(self: *MelWriter, exponent: u8) void {
+        self.emit(0);
         var bit = exponent;
         while (bit > 0) {
             bit -= 1;
-            try self.emit(@intCast((self.run >> @intCast(bit)) & 1));
+            self.emit(@intCast((self.run >> @intCast(bit)) & 1));
         }
         self.run = 0;
         self.k -|= 1;
     }
 };
 
-/// VLC bits least significant first into bytes stored from the segment's
-/// end backward (7.1.4): the first byte is the one whose twelve Scup bits
-/// read as ones, and after a byte above 0x8F a byte whose seven low bits
-/// would all be set takes only those seven.
+/// VLC bits least significant first into bytes stored from the end of
+/// `bytes` backward (7.1.4): the first byte is the one whose twelve Scup
+/// bits read as ones, and after a byte above 0x8F a byte whose seven low
+/// bits are all set takes only those seven.
 const VlcWriter = struct {
-    bytes: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    current: u8,
-    used: u4,
+    bytes: []u8,
+    written: usize,
+    buffer: u64,
+    count: u7,
     last_above_8f: bool,
 
-    fn init(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!VlcWriter {
-        try bytes.append(allocator, 0xff);
-        return .{ .bytes = bytes, .allocator = allocator, .current = 0x0f, .used = 4, .last_above_8f = true };
+    fn init(bytes: []u8) VlcWriter {
+        bytes[bytes.len - 1] = 0xff;
+        return .{ .bytes = bytes, .written = 1, .buffer = 0x0f, .count = 4, .last_above_8f = true };
     }
 
-    fn put(self: *VlcWriter, value: u64, n: u8) Error!void {
-        var rest = value;
-        var left = n;
-        while (left > 0) {
-            const available: u4 = 8 - @as(u4, @intFromBool(self.last_above_8f)) - self.used;
-            const take: u4 = @intCast(@min(available, left));
-            self.current |= @as(u8, @intCast(rest & ((@as(u64, 1) << take) - 1))) << @intCast(self.used);
-            self.used += take;
-            rest >>= take;
-            left -= take;
-            if (take == available) {
-                // Seven bits after a byte above 0x8F: an eighth unless they
-                // are all ones, which the decoder reads as a stuffed byte.
-                if (self.last_above_8f and self.current != 0x7f) {
-                    self.last_above_8f = false;
+    /// `value` has no bits above the `n <= 56` it codes.
+    inline fn put(self: *VlcWriter, value: u64, n: u8) void {
+        self.buffer |= value << @intCast(self.count);
+        self.count += @intCast(n);
+        while (true) {
+            if (self.last_above_8f) {
+                if (self.count < 7) return;
+                // Seven bits after a byte above 0x8F: an eighth unless
+                // they are all ones, which the decoder reads as a stuffed
+                // byte.
+                if ((self.buffer & 0x7f) == 0x7f) {
+                    self.emit(0x7f, 7);
                     continue;
                 }
-                try self.bytes.append(self.allocator, self.current);
-                self.last_above_8f = self.current > 0x8f;
-                self.current = 0;
-                self.used = 0;
             }
+            if (self.count < 8) return;
+            self.emit(@truncate(self.buffer), 8);
         }
+    }
+
+    inline fn emit(self: *VlcWriter, byte: u8, width: u4) void {
+        self.written += 1;
+        self.bytes[self.bytes.len - self.written] = byte;
+        self.buffer >>= width;
+        self.count -= width;
+        self.last_above_8f = byte > 0x8f;
     }
 };
 
 /// The MEL stream's last byte and the VLC stream's first share a byte when
 /// their bits do not overlap (OpenJPH's termination, which every HT decoder
 /// reads, since each stream ignores the other's bits past its own end).
-fn terminateMelVlc(mel: *MelWriter, vlc: *VlcWriter) Error!void {
-    if (mel.run > 0) try mel.emit(1);
+fn terminateMelVlc(mel: *MelWriter, vlc: *VlcWriter) void {
+    if (mel.run > 0) mel.emit(1);
     const mel_bits: u8 = @intCast((@as(u16, mel.current) << mel.remaining) & 0xff);
     const mel_mask: u8 = @intCast((@as(u16, 0xff) << mel.remaining) & 0xff);
-    const vlc_mask: u8 = @intCast(@as(u16, 0xff) >> (8 - @as(u4, vlc.used)));
+    const vlc_bits: u8 = @truncate(vlc.buffer);
+    const vlc_mask: u8 = @intCast(@as(u16, 0xff) >> @intCast(8 - vlc.count));
     if ((mel_mask | vlc_mask) == 0) return;
-    const fused = mel_bits | vlc.current;
-    if ((((fused ^ mel_bits) & mel_mask) | ((fused ^ vlc.current) & vlc_mask)) == 0 and
-        fused != 0xff and vlc.bytes.items.len > 1)
+    const fused = mel_bits | vlc_bits;
+    if ((((fused ^ mel_bits) & mel_mask) | ((fused ^ vlc_bits) & vlc_mask)) == 0 and
+        fused != 0xff and vlc.written > 1)
     {
-        try mel.bytes.append(mel.allocator, fused);
+        mel.bytes[mel.position] = fused;
+        mel.position += 1;
     } else {
-        try mel.bytes.append(mel.allocator, mel_bits);
-        try vlc.bytes.append(vlc.allocator, vlc.current);
+        mel.bytes[mel.position] = mel_bits;
+        mel.position += 1;
+        vlc.written += 1;
+        vlc.bytes[vlc.bytes.len - vlc.written] = vlc_bits;
     }
 }
 
@@ -1206,10 +1312,17 @@ test "CxtVLC encode tables code every quad the cleanup encoder meets" {
 }
 
 test "HT encoder output decodes to the coded block" {
+    // The narrow coefficients of 8- to 16-bit images, then the wide ones
+    // up to the deepest wide band, 37 magnitude bits.
+    try expectEncoderRoundTrip(i32, 31);
+    try expectEncoderRoundTrip(i64, 37);
+}
+
+fn expectEncoderRoundTrip(comptime Coefficient: type, max_bits: u7) !void {
     const allocator = std.testing.allocator;
-    var encoder = Encoder(i64).init(allocator);
+    var encoder = Encoder(Coefficient).init(allocator);
     defer encoder.deinit();
-    var decoder = Decoder(i64).init(allocator);
+    var decoder = Decoder(Coefficient).init(allocator);
     defer decoder.deinit();
     var prng = std.Random.DefaultPrng.init(0x48544a32);
     const random = prng.random();
@@ -1219,15 +1332,15 @@ test "HT encoder output decodes to the coded block" {
     };
     // Rows of the block sit in a wider plane, as code-blocks of a band do.
     const stride = 1031;
-    const plane = try allocator.alloc(i64, stride * 1024);
+    const plane = try allocator.alloc(Coefficient, stride * 1024);
     defer allocator.free(plane);
     for (shapes) |shape| {
         const width = shape[0];
         const height = shape[1];
         for (0..48) |round| {
-            // Magnitudes below 2^1 to 2^37, the deepest wide band, with a
-            // quarter to all of the samples significant.
-            const bits: u7 = @intCast(1 + round % 37);
+            // Magnitudes below 2^1 to 2^max_bits, with a quarter to all of
+            // the samples significant.
+            const bits: u7 = @intCast(1 + round % max_bits);
             const kept = round % 4;
             @memset(plane, 0);
             for (0..height) |y| {
@@ -1235,18 +1348,22 @@ test "HT encoder output decodes to the coded block" {
                     if (random.uintLessThan(u8, 4) > kept) continue;
                     var magnitude = random.int(u64) >> @intCast(64 - bits);
                     if (random.boolean()) magnitude >>= random.uintLessThan(u6, @intCast(bits));
-                    const value: i64 = @intCast(magnitude);
+                    const value: Coefficient = @intCast(magnitude);
                     sample.* = if (random.boolean()) -value else value;
                 }
             }
             const cleanup = try encoder.encode(plane, stride, width, height);
             var expected_bitplanes: u8 = 0;
+            var expected_non_zero: u32 = 0;
             for (0..height) |y| {
                 for (plane[y * stride ..][0..width]) |sample| {
-                    expected_bitplanes = @max(expected_bitplanes, @as(u8, @intCast(64 - @clz(@abs(sample)))));
+                    const magnitude: u64 = @abs(sample);
+                    expected_bitplanes = @max(expected_bitplanes, @as(u8, @intCast(64 - @clz(magnitude))));
+                    expected_non_zero += @intFromBool(magnitude != 0);
                 }
             }
             try std.testing.expectEqual(expected_bitplanes, cleanup.bitplanes);
+            try std.testing.expectEqual(expected_non_zero, cleanup.non_zero_count);
             if (cleanup.bitplanes == 0) {
                 try std.testing.expectEqual(@as(usize, 0), cleanup.bytes.len);
                 continue;
@@ -1260,7 +1377,7 @@ test "HT encoder output decodes to the coded block" {
                 .magnitude_bitplanes = cleanup.bitplanes,
             });
             for (0..height) |y| {
-                try std.testing.expectEqualSlices(i64, plane[y * stride ..][0..width], decoded[y * width ..][0..width]);
+                try std.testing.expectEqualSlices(Coefficient, plane[y * stride ..][0..width], decoded[y * width ..][0..width]);
             }
         }
     }

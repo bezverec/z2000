@@ -6219,10 +6219,7 @@ pub fn encodeCodeBlockSegmentHighThroughput(
     if (cleanup.bitplanes == 0) {
         return .{ .bitplanes = 0, .non_zero_count = 0, .pass_count = 0, .byte_length = 0, .passes = &.{}, .bytes = &.{}, .high_throughput = true };
     }
-    var non_zero_count: u32 = 0;
-    for (0..rect.height) |row| {
-        for (plane[origin + row * stride ..][0..rect.width]) |sample| non_zero_count += @intFromBool(sample != 0);
-    }
+    const non_zero_count = cleanup.non_zero_count;
     const bytes = try allocator.dupe(u8, cleanup.bytes);
     errdefer allocator.free(bytes);
     const passes = try allocator.alloc(CodeBlockPassPayload, 1);

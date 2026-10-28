@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster HT Encoding (0.3.0 line)
+
+- The HT block encoder writes its three byte-streams into buffers sized for
+  the block, gathers a quad pair's VLC and MagSgn bits into one word each,
+  and analyses each quad row's two sample lines up front in vectors; the
+  tile pipeline keeps one block scratch per tile. Single-threaded block
+  coding of the 2048x2048 RGB image went from 155 to 81 ms (total 206 ->
+  132 ms), and at twenty threads from 17.9 to 11.3 ms (total 35.9 -> 29.4
+  ms); Part 1 on a tile grid gains about 4% from the shared scratch. Output
+  is byte-identical (130 encodes compared); `docs/benchmarks.md` has the
+  record. The encoder's round-trip test now covers 32-bit coefficients too.
+
 ### Lossless HT Encoding (0.3.0 line)
 
 - `--ht` (`LosslessOptions.high_throughput`) codes every code-block with the

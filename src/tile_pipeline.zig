@@ -1651,14 +1651,18 @@ pub fn encodeComponentBlockIsoMq(
     view: ComponentBlockView,
     style: ebcot.CodeBlockStyle,
 ) !EncodedComponentBlock {
-    return encodeComponentBlockIsoMqInternal(allocator, view, style, false);
+    var scratch = ebcot.DirectBlockScratch.init(allocator);
+    defer scratch.deinit();
+    return encodeComponentBlockIsoMqInternal(allocator, view, style, false, &scratch);
 }
 
+/// `scratch` is reused from block to block.
 fn encodeComponentBlockIsoMqInternal(
     allocator: std.mem.Allocator,
     view: ComponentBlockView,
     style: ebcot.CodeBlockStyle,
     capture_distortions: bool,
+    scratch: *ebcot.DirectBlockScratch,
 ) !EncodedComponentBlock {
     var actual_style = style;
     actual_style.band_kind = view.job.band.kind;
@@ -1672,11 +1676,9 @@ fn encodeComponentBlockIsoMqInternal(
             actual_style,
         )
     else blk: {
-        var scratch = ebcot.DirectBlockScratch.init(allocator);
-        defer scratch.deinit();
         break :blk if (capture_distortions)
             try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyleAndDistortions(
-                &scratch,
+                scratch,
                 view.plane,
                 view.stride,
                 view.rect,
@@ -1685,7 +1687,7 @@ fn encodeComponentBlockIsoMqInternal(
             )
         else
             try ebcot.encodeCodeBlockSegmentDirectIsoScratchWithStyle(
-                &scratch,
+                scratch,
                 view.plane,
                 view.stride,
                 view.rect,
@@ -1734,10 +1736,12 @@ fn buildEncodedBlockCatalogIsoMqInternal(
         for (blocks[0..initialized]) |*block| block.deinit(allocator);
     }
 
+    var scratch = ebcot.DirectBlockScratch.init(allocator);
+    defer scratch.deinit();
     var iterator = scaffold.componentBlockIterator();
     while (try iterator.next()) |job| {
         const view = try job.view(rct_tile);
-        var encoded = try encodeComponentBlockIsoMqInternal(allocator, view, style, capture_distortions);
+        var encoded = try encodeComponentBlockIsoMqInternal(allocator, view, style, capture_distortions, &scratch);
         var moved = false;
         errdefer if (!moved) encoded.deinit(allocator);
         encoded.layers = try computeLayerTruncations(allocator, encoded.segment, scaffold.layers);
